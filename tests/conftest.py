@@ -322,6 +322,26 @@ def _clear_db_settings_cache():
     clear_db_settings_cache()
 
 
+@pytest.fixture(autouse=True)
+def _restore_process_globals():
+    """Undo the two process-global leaks a test can leave for the next one.
+
+    ``rootcoz.cli.main._state`` is module-global, so one ``--json`` invocation
+    makes every later direct command call in the same worker print JSON. And
+    ``tests/test_audit.py`` raises the ``rootcoz.main`` logger level to capture
+    its log lines without lowering it again. Both only show up depending on
+    which tests share a worker, so reset them here rather than at call sites.
+    """
+    from rootcoz import main as rootcoz_main
+    from rootcoz.cli import main as cli_main
+
+    logger_level = rootcoz_main.logger.level
+    cli_main._state.clear()
+    yield
+    cli_main._state.clear()
+    rootcoz_main.logger.level = logger_level
+
+
 _TEST_SIDECAR_CATALOG = [
     {"provider": provider, "id": model}
     for provider, model in (
@@ -367,9 +387,25 @@ def _mock_sidecar_calls():
     mock_client.prompt = AsyncMock(side_effect=_deny_sidecar)
     mock_client.abort = AsyncMock()
 
+    # The server-keyed session path (a deployment provider key reaching chat)
+    # posts through the raw client instead of ``create_session``. Stub it, or a
+    # machine whose shell exports a provider key takes a different code path and
+    # the suite fails on "'MagicMock' object can't be awaited".
+    fake_session = MagicMock()
+    fake_session.raise_for_status = MagicMock()
+    fake_session.json = MagicMock(return_value={"session_id": "sess-123"})
+    mock_client._client = MagicMock()
+    mock_client._client.post = AsyncMock(return_value=fake_session)
+
+    # Hermeticity: a provider key exported in the developer's shell must not
+    # change which path the app takes. Blank every ambient ``*_API_KEY`` for the
+    # duration of the test; tests that need one set it explicitly.
+    ambient_keys = {name: "" for name in os.environ if name.endswith("_API_KEY")}
+
     deny_ai = AsyncMock(side_effect=_deny_sidecar)
 
     with (
+        patch.dict(os.environ, ambient_keys),
         # --- clients (bound imports + package) ---
         patch("pi_sidecar_client.get_sidecar_client", return_value=mock_client),
         patch("rootcoz.engine.chat.get_sidecar_client", return_value=mock_client),

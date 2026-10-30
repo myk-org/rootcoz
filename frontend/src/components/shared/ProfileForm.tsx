@@ -18,6 +18,7 @@ import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { SectionDivider } from '@/components/shared/SectionDivider'
 import { type TokenValidationResult } from '@/components/shared/TokenField'
+import { CONTROL_CLASS } from '@/lib/controlStyles'
 import { TrackerTokensFields } from '@/components/shared/TrackerTokensFields'
 import { NotificationToggle } from '@/components/shared/NotificationToggle'
 import { useAuth } from '@/lib/auth'
@@ -254,7 +255,8 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
               Username
             </label>
             {readOnlyUsername ? (
-              <div className="flex h-10 items-center rounded-md border border-border-default bg-surface-elevated px-3">
+              // Read-only stand-in for the Input above: same control shape.
+              <div className={`${CONTROL_CLASS} flex items-center px-3`}>
                 <span className="font-mono text-sm text-text-primary">{username}</span>
               </div>
             ) : (

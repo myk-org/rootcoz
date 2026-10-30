@@ -3,13 +3,14 @@ notifications, and session TTL reading Settings instead of raw env."""
 
 import os
 from datetime import UTC, datetime
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi.testclient import TestClient
 
 from rootcoz import main, monitoring, storage, transcripts
 from rootcoz.config import (
+    Settings,
     clear_db_settings_cache,
     get_settings,
     update_db_settings_cache,
@@ -153,6 +154,58 @@ def test_sidecar_settings_metadata_category_and_restart(client):
         "metadata_rules_file",
     ):
         assert by_key[key]["restart_required"] is True, key
+
+
+def test_every_setting_has_a_human_label():
+    """Every Settings field gets a label that is not the machine key (#379)."""
+    for name in Settings.model_fields:
+        label = main._setting_label(name)
+        assert label, name
+        assert label not in {name, name.upper()}, name
+        assert not label.isupper(), name
+
+
+def test_setting_label_overrides_target_real_fields():
+    """An override for a field that no longer exists is dead metadata."""
+    assert set(main._SETTING_LABEL_OVERRIDES) <= set(Settings.model_fields)
+
+
+@pytest.mark.parametrize(
+    ("key", "label"),
+    [
+        ("wait_for_completion", "Wait for completion"),
+        ("audit_max_rows", "Audit max rows"),
+        ("audit_retention_days", "Audit retention (days)"),
+        ("poll_interval_minutes", "Poll interval (minutes)"),
+        ("jenkins_artifacts_max_size_mb", "Jenkins artifacts max size (MB)"),
+        ("enable_github_issues", "Enable GitHub issues"),
+        ("ai_model", "AI model"),
+        ("mcp_sso_rbac_url_id", "MCP SSO RBAC URL ID"),
+    ],
+)
+def test_humanize_setting_key(key, label):
+    assert main._humanize_setting_key(key) == label
+
+
+def test_setting_label_override_wins_over_the_humaniser():
+    assert main._humanize_setting_key("session_ttl_hours") == "Session TTL (hours)"
+    assert main._setting_label("session_ttl_hours") == "Session lifetime (hours)"
+
+
+def test_settings_endpoint_labels_every_entry(client):
+    response = client.get("/api/admin/settings", headers=_admin_headers())
+    assert response.status_code == 200
+    entries = response.json()
+    assert {item["key"] for item in entries} == set(Settings.model_fields)
+    for item in entries:
+        assert item["label"], item["key"]
+        assert item["label"] != item["key"], item["key"]
+    by_key = {item["key"]: item for item in entries}
+    assert by_key["audit_retention_days"]["label"] == "Audit retention (days)"
+    assert by_key["admin_key"]["label"] == "Admin API key"
+    # Labels do not change the machine key or the DB-only row's empty env_var.
+    assert by_key["jira_auth_mode"]["env_var"] == ""
+    assert by_key["admin_key"]["env_var"] == "ADMIN_KEY"
 
 
 def test_jira_atst_setting_registration(client):
@@ -521,6 +574,13 @@ def test_persist_applies_ambient_provider_validation(client, monkeypatch):
         return {"google-vertex-claude": "google-vertex-claude"}
 
     monkeypatch.setattr(main, "_live_provider_spellings", _known)
+    # The deployment-credential rule itself is covered in test_main; here it
+    # only has to reach the persist path, so pin it as satisfied.
+    monkeypatch.setattr(
+        main,
+        "_deployment_authenticated_provider_ids",
+        AsyncMock(return_value=frozenset({"google-vertex-claude"})),
+    )
     monkeypatch.setenv("AMBIENT_AUTH_PROVIDERS", "google-vertex-claud")
     response = client.post(
         "/api/admin/settings/ambient_auth_providers/persist",

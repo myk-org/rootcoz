@@ -1,9 +1,12 @@
 import asyncio
 import contextlib
 import copy
+import csv
 import hashlib
 import hmac
+import io
 import ipaddress
+import itertools
 import json
 import logging
 import logging.handlers
@@ -67,7 +70,6 @@ from rootcoz.ai_client import (
     build_friendly_catalog,
     call_ai_once,
     clear_cursor_auth_cache,
-    force_server_credentials,
     format_chat_ai_user_error,
     is_cursor_provider,
     list_models,
@@ -101,6 +103,8 @@ from rootcoz.comment_enrichment import (
     fetch_jira_ticket_status,
 )
 from rootcoz.config import (
+    DEFAULT_USER_ROLES,
+    JIRA_AUTH_MODES,
     Settings,
     atlassian_cloud_id_error,
     get_settings,
@@ -211,6 +215,7 @@ from rootcoz.models import (
     SetReviewedRequest,
     SetServerProviderModelsRequest,
     SetTrackedInRequest,
+    SetUserDisabledRequest,
     StoreDeploymentProviderKeyRequest,
     UnifiedAnalyzeRequest,
     UnsubscribeRequest,
@@ -219,10 +224,13 @@ from rootcoz.models import (
 )
 from rootcoz.monitoring import (
     _get_app_version,
+    audit_health_check,
     build_health_response,
     dispatch_alert,
     error_tracker,
     get_component_versions,
+    record_audit_auth_suppression,
+    record_audit_write_failure,
     render_prometheus_metrics,
     validate_startup_config,
 )
@@ -343,7 +351,9 @@ _SENSITIVE_SETTINGS: frozenset[str] = frozenset(
 # Everything else is admin-settable via Server Settings (#347); these are
 # process/deployment bootstrap with no Settings field at all, plus
 # ADMIN_KEY — a Settings field, but a server-only bootstrap secret that
-# must never become settable or persistable at runtime (AGENTS.md).
+# must never become settable or persistable at runtime (AGENTS.md), and
+# DB_PATH/DEBUG — needed before the settings store exists. Everything else,
+# ALLOWED_USERS included, is admin-editable in Server Settings: one console.
 _SERVER_ONLY_SETTINGS: frozenset[str] = frozenset(
     {
         "db_path",
@@ -456,6 +466,46 @@ _JIRA_VERIFIED_INVALIDATING_KEYS: frozenset[str] = frozenset(
     }
 )
 
+# Valid log levels shared by the PUT allowlist and the env-persist path
+# (#347): Settings.log_level itself is unconstrained, so both write paths
+# must enforce the same set.
+_VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
+
+
+def _log_level_error(value: object) -> str | None:
+    """Validate a log level; return the error message, or None when valid.
+
+    Case-insensitive (an existing ``LOG_LEVEL=info`` env must keep working)
+    and always stored uppercase, so the saved value is one the picker offers.
+    """
+    if str(value).strip().upper() not in _VALID_LOG_LEVELS:
+        return (
+            "log_level: must be one of "
+            f"{', '.join(_VALID_LOG_LEVELS)} (case-insensitive)"
+        )
+    return None
+
+
+# Enumerated settings (#379): "One console" wants a picker in Server Settings,
+# so the API must describe the choices, not leave a free-text box.
+# ``options`` is a fixed set; ``options_source`` names the set the server only
+# knows at runtime (the UI fetches exporters/providers/users from their own
+# endpoints); ``multiple`` means comma-separated list semantics; and
+# ``allow_custom`` lets the admin type a value the server does not list —
+# an SSO user may legitimately not exist yet.
+_SETTING_CHOICES: dict[str, dict[str, Any]] = {
+    "default_user_role": {"options": list(DEFAULT_USER_ROLES)},
+    "jira_auth_mode": {"options": list(JIRA_AUTH_MODES)},
+    "log_level": {"options": list(_VALID_LOG_LEVELS)},
+    "auto_push_exporters": {"options_source": "exporters", "multiple": True},
+    "ambient_auth_providers": {"options_source": "providers", "multiple": True},
+    "allowed_users": {
+        "options_source": "users",
+        "multiple": True,
+        "allow_custom": True,
+    },
+}
+
 # Category grouping for UI display
 _SETTINGS_CATEGORIES: dict[str, list[str]] = {
     "Jenkins": [
@@ -470,7 +520,6 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
     "AI": [
         "ai_provider",
         "ai_model",
-        "force_server_credentials",
         "ai_call_timeout",
         "max_concurrent_ai_calls",
         "peer_ai_configs",
@@ -538,6 +587,11 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "allowed_users",
         "default_user_role",
         "session_ttl_hours",
+        "login_lockout_enabled",
+        "login_lockout_threshold",
+        "audit_retention_days",
+        "audit_max_rows",
+        "audit_auth_failure_max_per_minute",
     ],
     "Prow": [
         "prow_url",
@@ -593,6 +647,123 @@ for _cat, _fields in _SETTINGS_CATEGORIES.items():
         _FIELD_TO_CATEGORY[_f] = _cat
 
 
+# Server Settings rows show a human label next to the copyable machine key.
+# These read badly when humanised mechanically, so they are named explicitly.
+_SETTING_LABEL_OVERRIDES: dict[str, str] = {
+    "admin_key": "Admin API key",
+    "log_level": "Log level",
+    "ai_provider": "AI provider",
+    "ai_model": "AI model",
+    "ai_call_timeout": "AI call timeout",
+    "max_concurrent_ai_calls": "Max concurrent AI calls",
+    "session_ttl_hours": "Session lifetime (hours)",
+    "jira_atst_token": "Jira service account scoped token",
+    "jira_pat": "JIRA personal access token",
+    "atlassian_oauth_cloud_id": "Atlassian OAuth cloud ID",
+    "prow_url": "Prow Deck URL",
+    "gcs_bucket": "GCS bucket",
+    "tests_repo_url": "Tests repository URL",
+    "allowed_users": "Allowed users (write allow-list)",
+    "default_user_role": "Default role for new users",
+    "trust_proxy_headers": "Trust proxy identity headers",
+    "secure_cookies": "Secure cookies",
+    "require_approval": "Require admin approval",
+    "admin_wait_approve_msg": "Approval wait message",
+    "enable_free_models": "Enable free AI models",
+    "cli_agents": "CLI agents",
+    "acpx_agents": "ACPX agents",
+    "login_lockout_enabled": "Enable login lockout",
+    "login_lockout_threshold": "Failed logins before lockout",
+    "audit_auth_failure_max_per_minute": "Audit rows kept per minute",
+}
+
+# Tokens the humaniser keeps uppercase — "Ai model" is not an English label.
+_LABEL_ACRONYMS: frozenset[str] = frozenset(
+    {
+        "AI",
+        "API",
+        "URL",
+        "URI",
+        "ID",
+        "SSO",
+        "TLS",
+        "SSL",
+        "SMTP",
+        "DNS",
+        "JSON",
+        "CSV",
+        "XML",
+        "YAML",
+        "HTTP",
+        "JIRA",
+        "GITHUB",
+        "GIT",
+        "CI",
+        "DB",
+        "GCS",
+        "AWS",
+        "GCP",
+        "LLM",
+        "MCP",
+        "PR",
+        "RP",
+        "RBAC",
+        "DSN",
+        "VAPID",
+        "OIDC",
+        "SAML",
+        "TTL",
+        "CPU",
+        "GPU",
+        "HTML",
+        "PDF",
+    }
+)
+
+# Brand casing for acronym words that are not written all-caps.
+_LABEL_PROPER_CASE: dict[str, str] = {
+    "GITHUB": "GitHub",
+    "REPORTPORTAL": "ReportPortal",
+}
+
+# A trailing token that is a unit renders as a parenthetical suffix instead of
+# a word: audit_retention_days → "Audit retention (days)".
+_LABEL_UNITS: dict[str, str] = {
+    "DAYS": "days",
+    "HOURS": "hours",
+    "MINUTES": "minutes",
+    "SECONDS": "seconds",
+    "BYTES": "bytes",
+    "PERCENT": "percent",
+    "MB": "MB",
+}
+
+
+def _label_word(word: str) -> str:
+    """Render one key token: an acronym keeps its casing, the rest is lowercased."""
+    upper = word.upper()
+    if upper in _LABEL_PROPER_CASE:
+        return _LABEL_PROPER_CASE[upper]
+    return upper if upper in _LABEL_ACRONYMS else word.lower()
+
+
+def _humanize_setting_key(key: str) -> str:
+    """Mechanical label for a setting key: ``audit_max_rows`` → ``Audit max rows``."""
+    words = [word for word in key.split("_") if word]
+    unit = ""
+    if len(words) > 1 and words[-1].upper() in _LABEL_UNITS:
+        unit = f" ({_LABEL_UNITS[words.pop().upper()]})"
+    labels = [_label_word(word) for word in words]
+    if labels[0] == words[0].lower():  # not an acronym/brand → sentence case
+        labels[0] = labels[0].capitalize()
+    return " ".join(labels) + unit
+
+
+def _setting_label(field_name: str) -> str:
+    """Human label for a Settings field — an override, else the humanised key."""
+    return _SETTING_LABEL_OVERRIDES.get(field_name) or _humanize_setting_key(field_name)
+
+
 def _get_settings_metadata() -> list[dict[str, Any]]:
     """Build metadata for all Settings fields with current values and sources."""
     settings = get_settings()
@@ -643,13 +814,20 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
             default_str = str(default) if default != "" else ""
 
         is_sensitive = field_name in _SENSITIVE_SETTINGS
+        choices = _SETTING_CHOICES.get(field_name, {})
+        # Whether a value exists at all (#379 E2E-J09): the UI cannot tell an
+        # empty secret from a stored one by its masked value, so this flag
+        # comes from the value itself — a boolean, never a hint of its content.
+        is_set = value is not None and str(value).strip() != ""
 
         result.append(
             {
                 "key": field_name,
+                "label": _setting_label(field_name),
                 # jira_auth_mode is DB-only (Server Settings) — no env var
                 "env_var": "" if field_name == "jira_auth_mode" else field_name.upper(),
                 "value": display_value,
+                "is_set": is_set,
                 "default": default_str,
                 "description": description,
                 "type": field_type,
@@ -657,6 +835,12 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
                 "sensitive": is_sensitive,
                 "restart_required": field_name in _RESTART_REQUIRED_SETTINGS,
                 "source": "default",  # Will be overridden by caller
+                # Enumerated-setting contract (#379): every item carries the
+                # four keys so the UI renders a picker without special cases.
+                "options": choices.get("options"),
+                "options_source": choices.get("options_source"),
+                "multiple": bool(choices.get("multiple", False)),
+                "allow_custom": bool(choices.get("allow_custom", False)),
                 # Persistability contract (#347): server-only settings are
                 # env bootstrap the persist/reset/PUT paths always reject,
                 # and derived settings must not be pinned (see
@@ -689,7 +873,7 @@ _PENDING_RETRY_SECONDS = 10
 
 
 async def _periodic_session_cleanup() -> None:
-    """Periodically clean up expired sessions."""
+    """Periodically clean up expired sessions and prune the audit trail."""
     while True:
         await asyncio.sleep(3600)  # Every hour
         try:
@@ -697,6 +881,7 @@ async def _periodic_session_cleanup() -> None:
             if count:
                 logger.info("Periodic cleanup: removed %d expired sessions", count)
             await _cleanup_revoked_ai_sessions()
+            await prune_audit_events_periodically()
         except Exception:
             logger.debug("Periodic session cleanup failed", exc_info=True)
 
@@ -853,6 +1038,120 @@ def notify_chat_changed(job_id: str, username: str = "") -> None:
         event.set()
 
 
+# Payload-carrying SSE broadcast: the notification *is* the payload (audit
+# events, log lines), so each listener owns a queue instead of an Event.
+# Listeners are (owning_loop, subscription) so a write from a non-asyncio thread
+# can wake the correct loop via call_soon_threadsafe.
+_SSE_QUEUE_MAXSIZE = 1000
+
+
+class _PayloadSubscription:
+    """One subscriber's queue plus how many payloads it had to drop.
+
+    ``dropped`` is only touched on the subscriber's own loop, so it needs no
+    lock; the reader drains it with :meth:`take_dropped` once it catches up.
+    """
+
+    def __init__(self) -> None:
+        self.queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=_SSE_QUEUE_MAXSIZE)
+        self.dropped = 0
+
+    def take_dropped(self) -> int:
+        """Return the drops since the last call and reset the counter."""
+        dropped, self.dropped = self.dropped, 0
+        return dropped
+
+
+class _PayloadBroadcast:
+    """One payload broadcast channel: the SSE subscribers of a single stream."""
+
+    def __init__(self) -> None:
+        self._listeners: set[tuple[asyncio.AbstractEventLoop, _PayloadSubscription]] = (
+            set()
+        )
+        self._lock = threading.Lock()
+
+    @property
+    def has_listeners(self) -> bool:
+        """Cheap check so a hot producer skips work when nobody is listening."""
+        return bool(self._listeners)
+
+    def publish(self, payload: Any) -> None:
+        """Push one payload to every subscriber (thread-safe)."""
+        with self._lock:
+            if not self._listeners:
+                return
+            listeners = list(self._listeners)
+
+        def _enqueue(subscription: _PayloadSubscription) -> None:
+            try:
+                subscription.queue.put_nowait(payload)
+            except asyncio.QueueFull:
+                # Counted, not silently forgotten: the reader reports the gap
+                # as its own event so a slow admin sees the stream is missing
+                # payloads instead of trusting a gapped feed.
+                subscription.dropped += 1
+
+        for loop, subscription in listeners:
+            try:
+                loop.call_soon_threadsafe(_enqueue, subscription)
+            except RuntimeError:
+                logger.debug("SSE payload dropped: subscriber loop is closed")
+
+    @asynccontextmanager
+    async def subscribe(self) -> AsyncIterator[_PayloadSubscription]:
+        """Register the calling connection for this channel's payloads."""
+        subscription = _PayloadSubscription()
+        listener = (asyncio.get_running_loop(), subscription)
+        with self._lock:
+            self._listeners.add(listener)
+        try:
+            yield subscription
+        finally:
+            with self._lock:
+                self._listeners.discard(listener)
+
+
+_log_broadcast = _PayloadBroadcast()
+_audit_broadcast = _PayloadBroadcast()
+
+
+def notify_audit_event(event: dict[str, Any]) -> None:
+    """Broadcast one stored audit event to /api/admin/audit/stream listeners."""
+    _audit_broadcast.publish(event)
+
+
+async def _queue_sse_events(
+    request: Request,
+    subscription: _PayloadSubscription,
+    render: Callable[[Any], str | None],
+    gap_event: str = "",
+) -> AsyncIterator[str]:
+    """Yield rendered SSE chunks from a subscription's queue until the client leaves.
+
+    ``render`` returns the wire chunk, or ``None`` to drop a payload the
+    subscription does not want. A quiet queue yields a keepalive comment. When
+    payloads were dropped for a slow subscriber, a ``gap_event`` chunk reports
+    the count before the next payload; an empty ``gap_event`` stays silent.
+    """
+    # Flush a comment immediately: the browser fires EventSource.onopen on the
+    # first bytes, so without this the client shows "connecting" until the first
+    # event or the keepalive window elapses.
+    yield ": connected\n\n"
+    while not await request.is_disconnected():
+        try:
+            payload = await asyncio.wait_for(
+                subscription.queue.get(), timeout=_SSE_KEEPALIVE_SECONDS
+            )
+        except TimeoutError:
+            yield ": keepalive\n\n"
+            continue
+        if gap_event and (dropped := subscription.take_dropped()):
+            yield f"event: {gap_event}\ndata: {json.dumps({'dropped': dropped})}\n\n"
+        if (chunk := render(payload)) is not None:
+            yield chunk
+
+
 # Workspace-preparation phase per job+user, reported to the chat UI while
 # /init runs. In-memory only: init is request-scoped and the chat UI refetches
 # it from GET /api/chat/{job_id} whenever notify_chat_changed fires.
@@ -1007,8 +1306,424 @@ async def _bind_job_id(job_id: str) -> None:
     job_id_var.set(job_id)
 
 
+# --- Audit trail (#379) ---
+
+# Audit detail names that carry an *identifier* (a setting/provider name), not a
+# value. ``is_sensitive_key`` matches the "key" substring in all of them, so
+# they are exempted explicitly — the value they name is never included.
+_AUDIT_SAFE_DETAIL_KEYS: frozenset[str] = frozenset(
+    {
+        "key",
+        "keys",
+        "changed_keys",
+        "redacted_keys",
+        # A yes/no fact about a provider's stored credential, added by the
+        # details matrix (#379) — the credential itself is never recorded.
+        "had_stored_key",
+    }
+)
+
+# The only actions the volume guard throttles (#379): a brute-force run can
+# emit one per attempt, and none of them may push a real event out of the trail.
+_AUDIT_AUTH_FAILURE_ACTIONS: frozenset[str] = frozenset(
+    {"auth.login_failed", "auth.login_blocked"}
+)
+
+
+# Credential-shaped content inside a free-text detail value (#379). Each
+# alternative matches only the secret itself, so the sentence around it survives:
+# a PEM private key block or a known credential prefix.
+_AUDIT_SECRET_RE = re.compile(
+    r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----"
+    r"|(?:sk-|ddsat_|ddapp_|ghp_|github_pat_|xox[baprs]-|AKIA)[A-Za-z0-9_-]+",
+    re.DOTALL,
+)
+# A long bare run is only credential-shaped if it *looks* random (see the
+# predicate below): pytest node ids are dot-separated and identifiers are
+# camelCase, so neither is a single random-looking run.
+_AUDIT_RUN_RE = re.compile(r"[A-Za-z0-9_-]{24,}")
+# A bare lowercase hex string is a digest we record on purpose, not a
+# credential: leave the whole value alone. Only the detail names below qualify —
+# they are the hashes we compute ourselves. Anywhere else a hex token is
+# scrubbed like any other run.
+_AUDIT_HEX_DIGEST_RE = re.compile(r"\A[0-9a-f]{24,}\Z")
+_AUDIT_DIGEST_DETAIL_KEYS: frozenset[str] = frozenset({"sql_hash"})
+# A lowercase letters-and-digits run of this length with no separator is the
+# shape of a hex/base32 blob, the one id-like form that is also credential-like.
+_AUDIT_BARE_BLOB_MIN_LENGTH = 32
+_AUDIT_LOWER_ALNUM_RE = re.compile(r"\A[0-9a-z]+\Z")
+
+# Longest username the login endpoint will consider. Anything longer cannot
+# name an account (usernames are at most 50 characters), so it is refused like
+# a bad credential and only its first 256 characters are recorded.
+_LOGIN_MAX_USERNAME_LENGTH = 256
+
+
+def _looks_like_secret_run(run: str) -> bool:
+    """Is this bare run a random token rather than an identifier or an id?
+
+    A random token almost always changes letter case from one character to the
+    next (``AbCdEf...``); a camelCase/PascalCase identifier changes case only at
+    word boundaries (``testChargeDeclinesWhenCardExpired``: 5 of 32). So a run
+    without digits is credential-shaped when case changes on at least half the
+    letter-to-letter transitions.
+
+    A digit on its own proves nothing: ``uuid4`` job ids, ``test_foo_20240101``
+    style names and ``claude-sonnet-4-5-20250929`` all carry digits and must
+    stay readable in the trail. With digits in it, a run is credential-shaped
+    only when it is *also* credential-like: mixed case, or a bare lowercase
+    hex/base32 blob of 32+ characters. A known credential prefix never reaches
+    this predicate — ``_AUDIT_SECRET_RE`` already matched it.
+    """
+    letters = [char for char in run if char.isalpha()]
+    if any(char.isdigit() for char in run):
+        if any(char.isupper() for char in letters) and any(
+            char.islower() for char in letters
+        ):
+            return True
+        return (
+            len(run) >= _AUDIT_BARE_BLOB_MIN_LENGTH
+            and _AUDIT_LOWER_ALNUM_RE.match(run) is not None
+        )
+    transitions = len(letters) - 1
+    if transitions < 1:
+        return False
+    changes = sum(
+        1
+        for previous, current in itertools.pairwise(letters)
+        if previous.isupper() != current.isupper()
+    )
+    return changes / transitions >= 0.5
+
+
+def _scrub_audit_text(value: str, *, digest: bool = False) -> str:
+    """Replace credential-shaped substrings in one free-text value.
+
+    ``digest`` keeps a whole-value lowercase hex digest. Only
+    :func:`_redact_details` sets it, and only for
+    :data:`_AUDIT_DIGEST_DETAIL_KEYS` — hashes this process computes itself.
+
+    Detail values only: identity is not a detail. A username is what the trail
+    exists to show ("what did user X do", "which name is under attack"), so
+    ``actor``, ``target_id`` and the message are stored verbatim.
+    """
+    if digest and _AUDIT_HEX_DIGEST_RE.match(value):
+        return value
+    scrubbed = _AUDIT_SECRET_RE.sub("[redacted]", value)
+    return _AUDIT_RUN_RE.sub(
+        lambda match: (
+            "[redacted]" if _looks_like_secret_run(match.group()) else match.group()
+        ),
+        scrubbed,
+    )
+
+
+def _redact_audit_value(value: Any, *, digest: bool = False) -> Any:
+    """Scrub one detail value: names for dicts, text for strings, else as-is."""
+    if isinstance(value, dict):
+        return _redact_details(value)
+    if isinstance(value, list):
+        return [_redact_audit_value(item) for item in value]
+    if isinstance(value, str):
+        return _scrub_audit_text(value, digest=digest)
+    return value
+
+
+def _redact_details(details: dict[str, Any] | None) -> dict[str, Any]:
+    """Drop detail entries whose name marks them as secret, scrub the rest.
+
+    Reuses ``is_sensitive_key`` (SENSITIVE_KEYS plus the password/token/secret/
+    key name heuristic), so a newly added credential field is scrubbed from the
+    audit trail without a second list to maintain. Values are never truncated:
+    an entry that survives is stored whole; a secret pasted into free text
+    (no credential-shaped key name) is replaced in place, never the entry.
+    """
+    return {
+        name: _redact_audit_value(value, digest=name in _AUDIT_DIGEST_DETAIL_KEYS)
+        for name, value in (details or {}).items()
+        if name in _AUDIT_SAFE_DETAIL_KEYS or not is_sensitive_key(name)
+    }
+
+
+def _audit_setting_details(key: str) -> dict[str, Any]:
+    """Audit details for a settings event: the key name, never its value.
+
+    A single-key event always carries ``changed``; a sensitive key is also
+    flagged ``redacted`` so a reader knows a value was written without the
+    audit trail naming or carrying it.
+    """
+    return {
+        "key": key,
+        "changed": True,
+        **({"redacted": True} if key in _SENSITIVE_SETTINGS else {}),
+    }
+
+
+def _audit_request_ip(request: Request | None) -> str | None:
+    """Client IP for the audit row — only when a trusted proxy sets it.
+
+    Without ``TRUST_PROXY_HEADERS`` the forwarded header can be forged, so no
+    address is recorded at all rather than a wrong one.
+    """
+    if request is None or not get_settings().trust_proxy_headers:
+        return None
+    forwarded = request.headers.get("x-forwarded-for", "")
+    if forwarded:
+        first = forwarded.split(",")[0].strip()
+        if first:
+            return first
+    return request.client.host if request.client else None
+
+
+async def record_audit(
+    *,
+    action: str,
+    actor: str,
+    message: str,
+    actor_role: str | None = None,
+    is_admin: bool = False,
+    target_type: str | None = None,
+    target_id: str | None = None,
+    outcome: Literal["success", "failure", "denied"] = "success",
+    details: dict[str, Any] | None = None,
+    request: Request | None = None,
+) -> None:
+    """Record one audited action: the ``[AUDIT]`` log line plus a DB row.
+
+    ``message`` is the human-readable half (the pre-existing wording, so log
+    consumers keep matching); ``details`` is the structured half, scrubbed by
+    :func:`_redact_details` so no secret can reach the table.
+
+    ``actor``, ``target_id`` and the log line are stored verbatim (#379): the
+    trail exists to attribute actions to a name, so redacting identity made it
+    useless for its purpose. A username that happens to look like a token is
+    still a username. The login endpoint bounds what it accepts, so an
+    over-long attempt is truncated there, never here.
+
+    Role and admin flag default to the request's authenticated state. Never
+    raises: an audit failure must not fail the action being audited.
+
+    ``auth.login_failed`` / ``auth.login_blocked`` are volume-guarded (#379):
+    once one actor has ``audit_auth_failure_max_per_minute`` rows for those
+    actions in the last minute — or the server as a whole has ten times that,
+    so cycling usernames buys nothing — the row is skipped. The budget is
+    bounded per username N, N×10 server-wide, plus at most N rescued rows per
+    window for attempts against existing accounts, so no flood of junk
+    usernames can starve the evidence for the real target and the window total
+    never exceeds N×11 rows. The budget is checked in the same
+    transaction as the insert, so parallel attempts cannot all pass a stale
+    count. The log line above still fires, a summary line is logged per window,
+    and the drop is counted in health. Every other action is always stored.
+    """
+    # Fully formatted on purpose: the log dedup filter suppresses consecutive
+    # identical ``msg`` values, which a shared "[AUDIT] %s" format would be.
+    logger.info(f"[AUDIT] {message}")
+    resolved_actor = actor or "anonymous"
+    throttle: storage.AuditThrottle | None = None
+    if action in _AUDIT_AUTH_FAILURE_ACTIONS:
+        limit = get_settings().audit_auth_failure_max_per_minute
+        if limit > 0:
+            throttle = storage.AuditThrottle(
+                limit=limit,
+                actions=tuple(sorted(_AUDIT_AUTH_FAILURE_ACTIONS)),
+                since=storage.audit_timestamp(
+                    datetime.now(UTC) - timedelta(seconds=60)
+                ),
+            )
+    resolved_role = actor_role
+    resolved_admin = is_admin
+    if request is not None:
+        resolved_role = resolved_role or getattr(request.state, "role", None)
+        resolved_admin = resolved_admin or bool(
+            getattr(request.state, "is_admin", False)
+        )
+    try:
+        event = await storage.insert_audit_event(
+            action=action,
+            actor=resolved_actor,
+            actor_role=resolved_role,
+            is_admin=resolved_admin,
+            target_type=target_type,
+            target_id=target_id,
+            outcome=outcome,
+            details=_redact_details(details),
+            request_ip=_audit_request_ip(request),
+            throttle=throttle,
+        )
+    except sqlite3.Error, OSError:
+        failures = record_audit_write_failure()
+        logger.exception(
+            "[AUDIT] Failed to persist audit event '%s' by '%s'"
+            " (%d audit write failure(s) this process)",
+            action,
+            resolved_actor,
+            failures,
+        )
+        return
+    if event is None:
+        assert throttle is not None  # only a throttled insert can skip
+        record_audit_auth_suppression(resolved_actor, throttle.limit)
+        return
+    notify_audit_event(event)
+
+
+# Reason code per refusal class: short, stable and never derived from the
+# request body, so an audit row cannot carry what it is meant to protect.
+_AUDIT_REASON_BY_STATUS = {
+    400: "invalid_request",
+    401: "unauthenticated",
+    403: "forbidden",
+    404: "not_found",
+    409: "conflict",
+    422: "invalid_payload",
+    502: "upstream_failure",
+}
+_AUDIT_DENIED_STATUSES = frozenset({401, 403})
+
+
+def _audit_rejection(exc: HTTPException) -> tuple[Literal["failure", "denied"], str]:
+    """``(outcome, reason)`` for a request the handler refused."""
+    return (
+        "denied" if exc.status_code in _AUDIT_DENIED_STATUSES else "failure",
+        _AUDIT_REASON_BY_STATUS.get(exc.status_code, f"http_{exc.status_code}"),
+    )
+
+
+async def _record_refused_attempt(
+    *,
+    action: str,
+    request: Request,
+    message: str,
+    target_type: str | None = None,
+    target_id: str = "",
+    exc: HTTPException,
+    details: dict[str, Any] | None = None,
+    denied: bool = False,
+) -> None:
+    """Audit one attempt the handler refused, so an early exit still leaves a row.
+
+    Called from ``except HTTPException`` on every endpoint that must record one
+    row per attempt: the reason is a fixed code (never request text) and the
+    error detail the client sees is not copied into the trail. ``denied`` marks
+    a handler whose every refusal is an access/shape denial rather than a
+    failed action.
+
+    ``target_type``/``target_id`` are optional: a refusal can happen before
+    there is a target to name (a submission that never produced a job, a bulk
+    write with no single job), and an unnamed target stays NULL rather than
+    being invented.
+    """
+    outcome, reason = _audit_rejection(exc)
+    if denied:
+        outcome = "denied"
+    await record_audit(
+        action=action,
+        actor=getattr(request.state, "username", ""),
+        message=f"{message} ({outcome}: {reason})",
+        target_type=target_type,
+        target_id=target_id or None,
+        outcome=outcome,
+        details={"reason": reason, **(details or {})},
+        request=request,
+    )
+
+
+def _refusal_exception(exc: Exception, *, status_code: int = 400) -> HTTPException:
+    """The ``HTTPException`` a refusal surfaced as.
+
+    The storage layer raises ``ValueError`` for a payload it rejects, which the
+    endpoint already converts to a 4xx (``status_code``); auditing the attempt
+    and answering the client must therefore come from the same exception.
+    """
+    if isinstance(exc, HTTPException):
+        return exc
+    return HTTPException(status_code=status_code, detail=str(exc))
+
+
+async def _record_failed_attempt(
+    *,
+    action: str,
+    request: Request,
+    message: str,
+    target_type: str | None = None,
+    target_id: str = "",
+    reason: str = "internal_error",
+    details: dict[str, Any] | None = None,
+) -> None:
+    """Audit one attempt that failed for a reason with no HTTP status.
+
+    The error twin of :func:`_record_refused_attempt`: an unexpected error
+    (a write that raised, a dependency that broke) still leaves the one row the
+    endpoint promised, and the handler re-raises so the client sees the same
+    error it saw before auditing existed.
+    """
+    await record_audit(
+        action=action,
+        actor=getattr(request.state, "username", ""),
+        message=f"{message} (failure: {reason})",
+        target_type=target_type,
+        target_id=target_id or None,
+        outcome="failure",
+        details={"reason": reason, **(details or {})},
+        request=request,
+    )
+
+
 # Statuses that indicate the analysis is still in progress.
 IN_PROGRESS_STATUSES = ("pending", "running", "waiting")
+
+# Monotonic timestamp of the last audit prune — retention runs at most daily.
+_AUDIT_PRUNE_INTERVAL_SECONDS = 24 * 3600
+_last_audit_prune_at: float = 0.0
+
+
+async def prune_audit_events_periodically() -> int:
+    """Delete expired audit events and enforce ``AUDIT_MAX_ROWS``, at most daily.
+
+    ``audit_retention_days`` = 0 disables age pruning (events kept forever) and
+    ``audit_max_rows`` = 0 disables the size ceiling; with both off nothing is
+    deleted. Returns the number of rows deleted — zero when the interval has
+    not elapsed or both limits are off.
+    """
+    global _last_audit_prune_at
+    settings = get_settings()
+    days = settings.audit_retention_days
+    max_rows = settings.audit_max_rows
+    if days <= 0 and max_rows <= 0:
+        return 0
+    now = _time.monotonic()
+    if _last_audit_prune_at and now - _last_audit_prune_at < (
+        _AUDIT_PRUNE_INTERVAL_SECONDS
+    ):
+        return 0
+    deleted = 0
+    try:
+        if days > 0:
+            cutoff = storage.audit_timestamp(datetime.now(UTC) - timedelta(days=days))
+            expired = await storage.prune_audit_events(cutoff)
+            deleted += expired
+            if expired:
+                logger.info(
+                    "Audit retention: deleted %d audit event(s) older than %d days",
+                    expired,
+                    days,
+                )
+        over_cap = await storage.enforce_audit_row_cap(max_rows)
+        deleted += over_cap
+        if over_cap:
+            logger.info(
+                "Audit size cap: deleted %d oldest audit event(s) beyond"
+                " AUDIT_MAX_ROWS=%d",
+                over_cap,
+                max_rows,
+            )
+    except sqlite3.Error, OSError:
+        logger.warning("Audit pruning failed", exc_info=True)
+        return 0
+    # Stamped only on success: a failed prune must not consume the daily
+    # slot, so the next hourly call retries instead of skipping 24 hours.
+    _last_audit_prune_at = now
+    return deleted
 
 
 _VALID_GROUP_BY = frozenset(
@@ -1265,7 +1980,6 @@ def _validate_decrypted_sensitive_fields(decrypted_params: dict[str, Any]) -> No
 _ANALYSIS_SETTINGS_FIELDS = (
     "ai_provider",
     "ai_model",
-    "force_server_credentials",
     "raw_prompt",
     "issue_prompt",
     "tests_repo_url",
@@ -1348,7 +2062,6 @@ def _reconstruct_from_params(
         "name": params.get("name") or None,
         "ai_provider": params.get("ai_provider", ""),
         "ai_model": params.get("ai_model", ""),
-        "force_server_credentials": params.get("force_server_credentials"),
         "wait_for_completion": params.get("wait_for_completion", True),
         "poll_interval_minutes": params.get("poll_interval_minutes", 2),
         "max_wait_minutes": params.get("max_wait_minutes", 0),
@@ -1398,7 +2111,6 @@ def _reconstruct_from_params(
         "jira_site_url",
         "ai_call_timeout",
         "max_concurrent_ai_calls",
-        "force_server_credentials",
         "jenkins_artifacts_max_size_mb",
         "get_job_artifacts",
         "peer_analysis_max_rounds",
@@ -1880,12 +2592,19 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     await storage.cleanup_expired_sessions()
     await _cleanup_revoked_ai_sessions()
 
+    # Before load_db_settings, so a stale server-only override cannot be
+    # cached (and applied) even once.
+
     # Load DB setting overrides BEFORE config validation so
     # validate_startup_config() sees merged env + DB values.
     from rootcoz.config import load_db_settings
 
     await load_db_settings()
     _apply_log_level_setting()
+
+    # After load_db_settings, so the persisted audit_retention_days applies:
+    # a saved 0 (keep forever) must not be overridden by the env/default value.
+    await prune_audit_events_periodically()
 
     # Keep the transcript recording state in sync everywhere: the env bridge
     # persists the DB value for the next boot, and the sidecar runtime toggle
@@ -2065,6 +2784,66 @@ def _blocked_user_status_response(user_status: str | None) -> JSONResponse | Non
     )
 
 
+async def _record_account_blocked(
+    *, username: str, reason: str, role: str | None, request: Request
+) -> None:
+    """Audit the refusal of an identity whose account is disabled or locked (#379).
+
+    The reason is for the admin reading the trail, never for the caller: every
+    path answers the same generic 401 a bad credential gets. ``auth.login_blocked``
+    is volume-guarded, so a client polling with a stale session cannot flood the
+    trail. A disabled account is reported before the lock, the condition an
+    admin would act on first.
+    """
+    await record_audit(
+        action="auth.login_blocked",
+        actor=username,
+        message=f"Login blocked for '{reason}' user '{username}'",
+        actor_role=role,
+        target_type="user",
+        target_id=username,
+        outcome="denied",
+        details={"reason": reason},
+        request=request,
+    )
+
+
+def _account_block_reason(user: dict[str, Any] | None) -> str | None:
+    """``"disabled"`` / ``"locked"`` for a row that must not log in (#379).
+
+    Only the login path asks this. ``disabled`` is an admin taking the account
+    out of service, so the middleware refuses it on every path too; ``locked``
+    is a credential-guessing guard, and refusing it anywhere but here would let
+    a stranger who knows a username cut off that account's sessions and keys.
+
+    ``None`` for a usable account and for the bootstrap admin, which has no
+    ``users`` row and is therefore unaffected.
+    """
+    if not user:
+        return None
+    if user.get("disabled"):
+        return "disabled"
+    if user.get("locked"):
+        return "locked"
+    return None
+
+
+def _unauthenticated_response(request: Request, path: str) -> Response:
+    """What an unauthenticated request gets: the login page, or the generic 401.
+
+    The single place that decides, so a refused account is byte-identical to a
+    bad credential on every path.
+    """
+    if "text/html" in request.headers.get("accept", "") and not path.startswith(
+        "/api/"
+    ):
+        return RedirectResponse(url="/login", status_code=303)
+    return JSONResponse(
+        status_code=401,
+        content={"detail": "Authentication required. Please log in with your API key."},
+    )
+
+
 class AuthMiddleware(BaseHTTPMiddleware):
     """Authenticate all requests via session cookie, Bearer token, or trusted SSO header.
 
@@ -2169,6 +2948,13 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 # only check when an SSO redirect would otherwise fire.
                 session_token = _read_cookie(request, "rootcoz_session")
                 if session_token and await storage.get_session(session_token):
+                    return await call_next(request)
+                # A blocked identity stays on the login page: sending it to "/"
+                # only bounces it back here, one audit row per hop (#379).
+                # No row here — the refusal was audited where it was decided.
+                if _account_block_reason(
+                    await storage.get_user_by_username(proxy_username)
+                ):
                     return await call_next(request)
                 # SSO user hitting /login — redirect to dashboard
                 response: Response = RedirectResponse(url="/", status_code=303)
@@ -2284,6 +3070,28 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 cookie_username = ""
             username = cookie_username
 
+        # 5. Refuse a disabled account on every path (#379): a key, a session and
+        #    a proxy identity are all only as good as the row they name. A
+        #    locked one is refused at login only — see _account_block_reason.
+        #    The row is loaded once here and reused for the grants below.
+        #    "admin" is reserved, so a bootstrap admin has no row to check.
+        if (
+            has_valid_session
+            and username
+            and username != "admin"
+            and fetched_user is None
+        ):
+            fetched_user = await storage.get_user_by_username(username)
+        if fetched_user and fetched_user.get("disabled"):
+            logger.debug("Refused disabled account '%s' on %s", username, path)
+            await _record_account_blocked(
+                username=username,
+                reason="disabled",
+                role=resolved_role,
+                request=request,
+            )
+            return _unauthenticated_response(request, path)
+
         request.state.username = username
         request.state.is_admin = is_admin
         request.state.role = resolved_role
@@ -2293,11 +3101,8 @@ class AuthMiddleware(BaseHTTPMiddleware):
         if is_admin:
             request.state.can_view_reports = effective_can_view_reports(True)
         elif has_valid_session and username:
-            db_user = fetched_user
-            if db_user is None:
-                db_user = await storage.get_user_by_username(username)
             request.state.can_view_reports = effective_can_view_reports(
-                False, bool(db_user and db_user.get("can_view_reports"))
+                False, bool(fetched_user and fetched_user.get("can_view_reports"))
             )
         else:
             request.state.can_view_reports = False
@@ -2327,15 +3132,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # Require authentication for all non-public, non-optional paths
         if not has_valid_session and not self._is_public_path(path):
-            accept = request.headers.get("accept", "")
-            if "text/html" in accept and not path.startswith("/api/"):
-                return RedirectResponse(url="/login", status_code=303)
-            return JSONResponse(
-                status_code=401,
-                content={
-                    "detail": "Authentication required. Please log in with your API key."
-                },
-            )
+            return _unauthenticated_response(request, path)
 
         # Check pending user status when REQUIRE_APPROVAL is enabled.
         # Admin users and the bootstrap admin always bypass this check.
@@ -2352,12 +3149,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 return blocked
 
         username_token = ai_username.set(username)
-        force_token = force_server_credentials.set(settings.force_server_credentials)
         try:
             response = await call_next(request)
         finally:
             ai_username.reset(username_token)
-            force_server_credentials.reset(force_token)
 
         # Set rootcoz_username cookie from X-Forwarded-User header (SSO)
         if getattr(request.state, "set_proxy_cookie", None):
@@ -2662,11 +3457,6 @@ async def _resolve_ai_config_allow_defer(
     Unsupported providers fail immediately even when model is missing (defer
     only applies to incomplete config, not invalid providers).
     """
-    force_server_credentials.set(
-        body.force_server_credentials
-        if body.force_server_credentials is not None
-        else settings.force_server_credentials
-    )
     provider, model = _resolve_ai_provider_model(
         body.ai_provider, body.ai_model, settings=settings
     )
@@ -2797,7 +3587,6 @@ def _merge_settings(body: BaseAnalysisRequest, settings: Settings) -> Settings:
         "jira_site_url",
         "ai_call_timeout",
         "max_concurrent_ai_calls",
-        "force_server_credentials",
         "enable_jira",
         "jenkins_artifacts_max_size_mb",
         "get_job_artifacts",
@@ -3600,7 +4389,6 @@ def _apply_base_analysis_overrides(
     unified ``/analyze`` endpoint and the file/raw re-analyze path need.
     Mutates *params* in place.
     """
-    params["force_server_credentials"] = merged.force_server_credentials
     params["enable_jira"] = _resolve_enable_jira(body, merged)
     # Jira credentials are Server Settings only — persist the effective
     # (server) values so stored request_params replay exactly what the
@@ -4536,7 +5324,6 @@ async def _process_ci_source_analysis(
     """Background task for CISource plugin analysis (file/raw/prow/jenkins)."""
     job_id_var.set(job_id)
     ai_username.set(username)
-    force_server_credentials.set(merged.force_server_credentials)
 
     auth_header = ""
     repo_manager: RepositoryManager | None = None
@@ -4720,7 +5507,6 @@ async def _process_ci_source_analysis(
         peer_ai_configs = effective.peer_ai_configs
         additional_repos_list = effective.additional_repos
         merged = effective.settings
-        force_server_credentials.set(merged.force_server_credentials)
 
         tests_dir_name = (
             tests_cloned_path.name if tests_cloned_path is not None else None
@@ -5193,6 +5979,17 @@ def _resolve_request_display_name(body: UnifiedAnalyzeRequest) -> str:
     )
 
 
+def _resolve_submitted_job_name(body: UnifiedAnalyzeRequest, display_name: str) -> str:
+    """The job name the caller submitted (#379).
+
+    ``_resolve_request_display_name`` answers what the dashboard shows, which
+    for file/raw is a generic fallback — an audit row has to name the job the
+    caller asked for, so a submitted name wins and the fallback only fills in
+    when the request carried none.
+    """
+    return body.job_name or body.prow_job_name or display_name
+
+
 @app.post("/analyze", status_code=202, response_model=None, operation_id="analyze")
 async def analyze(
     request: Request,
@@ -5206,29 +6003,45 @@ async def analyze(
     All types return 202 with a job_id for async polling.
     Requires operator or admin role.
     """
-    _require_operator(request)
-    _check_allow_list(request)
     base_url = _extract_base_url()
 
-    token = ai_username.set(request.state.username)
-    try:
-        await _resolve_ai_config_allow_defer(body, settings, request)
-        merged = _merge_settings(body, settings)
-        resolved_peers = await _validate_peer_configs(body, merged)
-    finally:
-        ai_username.reset(token)
+    async def _run() -> tuple[
+        str, str, str, str, Callable[[], Coroutine[Any, Any, dict[str, Any]]]
+    ]:
+        # Every preliminary check lives inside the audited scope: a denial, an
+        # AI/peer config error or a settings-merge failure is an attempt too.
+        _require_operator(request)
+        _check_allow_list(request)
+        token = ai_username.set(request.state.username)
+        try:
+            provider, model = await _resolve_ai_config_allow_defer(
+                body, settings, request
+            )
+            merged = _merge_settings(body, settings)
+            resolved_peers = await _validate_peer_configs(body, merged)
+        finally:
+            ai_username.reset(token)
 
-    display_name = _resolve_request_display_name(body)
-    return await _enqueue_ci_source_analysis(
-        body=body,
-        merged=merged,
-        resolved_peers=resolved_peers,
-        display_name=display_name,
-        analysis_type=body.type,
-        base_url=base_url,
-        username=request.state.username,
-        message_prefix="Analysis",
-        is_admin=bool(request.state.is_admin),
+        display_name = _resolve_request_display_name(body)
+        job_name = _resolve_submitted_job_name(body, display_name)
+
+        async def _enqueue() -> dict[str, Any]:
+            return await _enqueue_ci_source_analysis(
+                body=body,
+                merged=merged,
+                resolved_peers=resolved_peers,
+                display_name=display_name,
+                analysis_type=body.type,
+                base_url=base_url,
+                username=request.state.username,
+                message_prefix="Analysis",
+                is_admin=bool(request.state.is_admin),
+            )
+
+        return provider, model, job_name, display_name, _enqueue
+
+    return await _enqueue_audited_analysis(
+        request=request, ingest_only=False, prepare=_run
     )
 
 
@@ -5244,24 +6057,189 @@ async def submit(
     Same source validation and test-result collection as ``POST /analyze``,
     then stops before repository clone and AI. Requires operator or admin.
     """
-    _require_operator(request)
-    _check_allow_list(request)
     base_url = _extract_base_url()
 
-    display_name = _resolve_request_display_name(body)
-    merged = _merge_settings(body, settings)
-    return await _enqueue_ci_source_analysis(
-        body=body,
-        merged=merged,
-        resolved_peers=None,
-        display_name=display_name,
-        analysis_type=body.type,
-        base_url=base_url,
-        username=request.state.username,
-        message_prefix="Submit",
-        is_admin=bool(request.state.is_admin),
-        ingest_only=True,
+    async def _run() -> tuple[
+        str, str, str, str, Callable[[], Coroutine[Any, Any, dict[str, Any]]]
+    ]:
+        # Preliminary checks stay inside the audited scope (see ``analyze``).
+        _require_operator(request)
+        _check_allow_list(request)
+        display_name = _resolve_request_display_name(body)
+        job_name = _resolve_submitted_job_name(body, display_name)
+        merged = _merge_settings(body, settings)
+
+        async def _enqueue() -> dict[str, Any]:
+            return await _enqueue_ci_source_analysis(
+                body=body,
+                merged=merged,
+                resolved_peers=None,
+                display_name=display_name,
+                analysis_type=body.type,
+                base_url=base_url,
+                username=request.state.username,
+                message_prefix="Submit",
+                is_admin=bool(request.state.is_admin),
+                ingest_only=True,
+            )
+
+        return "", "", job_name, display_name, _enqueue
+
+    return await _enqueue_audited_analysis(
+        request=request, ingest_only=True, prepare=_run
     )
+
+
+def _dominant_classification(result_data: dict[str, Any]) -> str | None:
+    """The most common failure classification in a stored result, if any.
+
+    What the previous run concluded, computed from the stored failures the
+    re-analyze path already holds — no extra query, no failure bodies.
+    """
+    counts: Counter[str] = Counter()
+    for failure, _child_job, _child_build in _iter_scoped_failures(result_data):
+        analysis = failure.get("analysis")
+        if isinstance(analysis, dict) and analysis.get("classification"):
+            counts[analysis["classification"]] += 1
+    return counts.most_common(1)[0][0] if counts else None
+
+
+async def _audit_analysis_rerun(
+    *,
+    request: Request,
+    job_id: str,
+    result_data: dict[str, Any],
+    provider: str,
+    model: str,
+    outcome: Literal["success", "failure"],
+    trigger: str = "manual",
+    failure_uuid: str = "",
+    test_name: str = "",
+) -> None:
+    """Record one ``analysis.rerun`` — who re-ran what, with what, and why.
+
+    ``provider``/``model`` are the pair the run was queued with (empty when it
+    defers to the tests repo's ``settings.json``). ``trigger`` names the entry
+    point: ``manual`` for a whole job, ``failure`` for one failure re-analyzed
+    in place, which also records that failure's uuid and test name.
+
+    ``previous_classification`` is the job's dominant classification — what the
+    whole-job rerun may overturn — so it is absent for a single-failure rerun,
+    which leaves every other failure's classification alone.
+    """
+    details: dict[str, Any] = {
+        "provider": provider,
+        "model": model,
+        "trigger": trigger,
+    }
+    subject = f"job {job_id}"
+    if failure_uuid:
+        details["failure_uuid"] = failure_uuid
+        details["test_name"] = test_name
+        subject = f"failure {failure_uuid} of job {job_id}"
+    else:
+        previous_classification = _dominant_classification(result_data)
+        if previous_classification:
+            details["previous_classification"] = previous_classification
+    await record_audit(
+        action="analysis.rerun",
+        actor=request.state.username,
+        message=(
+            f"User '{request.state.username}' re-ran the analysis of {subject}"
+            f" with {provider or '<deferred>'}/{model or '<deferred>'}"
+            f" ({trigger}, {outcome})"
+        ),
+        target_type="job",
+        target_id=job_id,
+        outcome=outcome,
+        details=details,
+        request=request,
+    )
+
+
+async def _enqueue_audited_analysis(
+    *,
+    request: Request,
+    ingest_only: bool,
+    prepare: Callable[
+        [],
+        Coroutine[
+            Any,
+            Any,
+            tuple[
+                str,
+                str,
+                str,
+                str,
+                Callable[[], Coroutine[Any, Any, dict[str, Any]]],
+            ],
+        ],
+    ],
+) -> dict[str, Any]:
+    """Enqueue a CI analysis as exactly one ``analysis.submit`` row.
+
+    Shared by ``POST /analyze`` and ``POST /submit``, which promise the same
+    thing: one row per attempt whatever the outcome. ``prepare`` performs every
+    preliminary check and returns ``(provider, model, job_name, display_name,
+    enqueue)`` with the AI pair actually resolved by
+    ``_resolve_ai_config_allow_defer`` — never the raw request fields, so a
+    server default is recorded as the model that ran. ``job_name`` is the name
+    the caller submitted; ``display_name`` is what the dashboard will show and
+    is recorded only when it says something else. ``ingest_only`` says which
+    endpoint it came from, and the job id is recorded only once the enqueue
+    produced one. The row is written from ``finally`` so a refusal and a crash
+    leave the same evidence as a success, through one call site.
+    """
+    # ``ingest_only`` first: it is the one thing every submission knows. The
+    # provider/model pair joins it only when a real analysis was resolved, so a
+    # row never ships an empty string as a value.
+    details: dict[str, Any] = {"ingest_only": ingest_only}
+    outcome: Literal["success", "failure", "denied"] = "success"
+    queued: dict[str, Any] = {}
+    job_id = ""
+    try:
+        provider, model, job_name, display_name, enqueue = await prepare()
+        details["job_name"] = job_name
+        if display_name != job_name:
+            details["display_name"] = display_name
+        if provider:
+            details["provider"] = provider
+        if model:
+            details["model"] = model
+        queued = await enqueue()
+        job_id = str(queued.get("job_id") or "")
+    except HTTPException as exc:
+        outcome, reason = _audit_rejection(exc)
+        details["reason"] = reason
+        raise
+    except asyncio.CancelledError:
+        # A cancelled request never produced a job, so it is not a success.
+        outcome = "failure"
+        details["reason"] = "cancelled"
+        raise
+    except Exception:
+        outcome = "failure"
+        details["reason"] = "internal_error"
+        raise
+    finally:
+        what = "an ingest-only job" if ingest_only else "an analysis"
+        provider = details.get("provider") or "<deferred>"
+        model = details.get("model") or "<deferred>"
+        await record_audit(
+            action="analysis.submit",
+            actor=request.state.username,
+            message=(
+                f"User '{request.state.username}' submitted {what}"
+                f"{' ' + job_id if job_id else ''} with"
+                f" {provider}/{model} ({outcome})"
+            ),
+            target_type="job",
+            target_id=job_id or None,
+            outcome=outcome,
+            details=details,
+            request=request,
+        )
+    return queued
 
 
 @app.post(
@@ -5344,8 +6322,15 @@ async def analyze_submitted_job(
             status_code=409,
             detail="Job is already being analyzed or is no longer submitted.",
         )
+    rerun = {
+        "request": request,
+        "job_id": job_id,
+        "result_data": result_data,
+        "provider": unified_body.ai_provider or "",
+        "model": unified_body.ai_model or "",
+    }
     try:
-        return await _enqueue_ci_source_analysis(
+        queued = await _enqueue_ci_source_analysis(
             body=unified_body,
             merged=merged,
             resolved_peers=resolved_peers,
@@ -5360,7 +6345,10 @@ async def analyze_submitted_job(
         )
     except Exception:
         await release_submitted_job_analyze_claim(job_id, previous_status)
+        await _audit_analysis_rerun(**rerun, outcome="failure")
         raise
+    await _audit_analysis_rerun(**rerun, outcome="success")
+    return queued
 
 
 def _unified_fields_from_stored_params(
@@ -5469,27 +6457,42 @@ async def re_analyze(
     unified_body.tags = existing_tags
 
     # Validate and merge settings
-    await _resolve_ai_config_allow_defer(unified_body, get_settings(), request)
+    provider, model = await _resolve_ai_config_allow_defer(
+        unified_body, get_settings(), request
+    )
     merged = _merge_settings(unified_body, get_settings())
     resolved_peers = await _validate_peer_configs(unified_body, merged)
 
     # Resolve display name — prefer original name, then plugin fallback
     display_name = unified_body.name or source_cls.default_display_name(unified_body)
 
-    return await _enqueue_ci_source_analysis(
-        body=unified_body,
-        merged=merged,
-        resolved_peers=resolved_peers,
-        display_name=display_name,
-        analysis_type=analysis_type,
-        base_url=base_url,
-        username=request.state.username,
-        tags=unified_body.tags,
-        message_prefix="Re-analysis",
-        reanalyzed_from_job_id=job_id,
-        reanalyzed_from_job_name=origin_job_display_name,
-        is_admin=bool(request.state.is_admin),
-    )
+    rerun = {
+        "request": request,
+        "job_id": job_id,
+        "result_data": result_data,
+        "provider": provider,
+        "model": model,
+    }
+    try:
+        queued = await _enqueue_ci_source_analysis(
+            body=unified_body,
+            merged=merged,
+            resolved_peers=resolved_peers,
+            display_name=display_name,
+            analysis_type=analysis_type,
+            base_url=base_url,
+            username=request.state.username,
+            tags=unified_body.tags,
+            message_prefix="Re-analysis",
+            reanalyzed_from_job_id=job_id,
+            reanalyzed_from_job_name=origin_job_display_name,
+            is_admin=bool(request.state.is_admin),
+        )
+    except Exception:
+        await _audit_analysis_rerun(**rerun, outcome="failure")
+        raise
+    await _audit_analysis_rerun(**rerun, outcome="success")
+    return queued
 
 
 def _iter_scoped_failures(
@@ -5863,12 +6866,6 @@ async def _reanalyze_failure_background(
     """Background task: re-analyze a single failure in-place."""
     job_id_var.set(job_id)
     ai_username.set(username)
-    force_server_credentials.set(
-        (source_params or {}).get(
-            "force_server_credentials",
-            (settings or get_settings()).force_server_credentials,
-        )
-    )
     auth_header = ""
     repo_manager: RepositoryManager | None = None
     repo_path: Path | None = None
@@ -6039,13 +7036,6 @@ async def _reanalyze_failure_background(
             shim_data["ai_call_timeout"] = ai_call_timeout
         if peer_ai_configs is not None:
             shim_data["peer_ai_configs"] = peer_ai_configs
-        if (
-            source_params is not None
-            and source_params.get("force_server_credentials") is not None
-        ):
-            shim_data["force_server_credentials"] = source_params[
-                "force_server_credentials"
-            ]
         # Stored/override concurrency + peer rounds are request-tier
         shim_data["peer_analysis_max_rounds"] = peer_analysis_max_rounds
         shim_data["max_concurrent_ai_calls"] = max_concurrent_ai_calls
@@ -6068,7 +7058,6 @@ async def _reanalyze_failure_background(
             ai_model = effective.ai_model
             peer_ai_configs = effective.peer_ai_configs
             additional_repos_list = effective.additional_repos
-            force_server_credentials.set(effective.settings.force_server_credentials)
             # Request-tier values win; effective mirrors shim for these fields
             peer_analysis_max_rounds = effective.settings.peer_analysis_max_rounds
             if ai_call_timeout is None:
@@ -6354,154 +7343,171 @@ async def re_analyze_failure(
     """
     _check_allow_list(request)
     _require_operator(request)
+    parent_job_id = ""
 
-    # Parse optional body
-    body_data: dict[str, Any] = {}
-    raw_body = await request.body()
-    if raw_body:
+    try:
+        # Parse optional body
+        body_data: dict[str, Any] = {}
+        raw_body = await request.body()
+        if raw_body:
+            try:
+                body_data = await request.json()
+            except Exception as exc:
+                raise HTTPException(
+                    status_code=400, detail=f"Invalid JSON body: {exc}"
+                ) from exc
+            if not isinstance(body_data, dict):
+                raise HTTPException(
+                    status_code=400, detail="Request body must be a JSON object"
+                )
+        overrides = ReAnalyzeFailureRequest(**body_data)
+
+        # Find the failure across all stored results
+        match = await storage.find_failure_by_uuid(failure_uuid)
+        if not match:
+            raise HTTPException(
+                status_code=404, detail=f"Failure {failure_uuid} not found"
+            )
+
+        parent_job_id = match["job_id"]
+        failure_dict = match["failure"]
+
+        # Load the parent job to get AI config
+        stored = await get_result(parent_job_id, strip_sensitive=False)
+        if not stored or not stored.get("result"):
+            raise HTTPException(
+                status_code=404, detail=f"Parent job {parent_job_id} not found"
+            )
+
+        result_data = stored["result"]
+        params = result_data.get("request_params", {})
+
+        if not params:
+            raise HTTPException(
+                status_code=400,
+                detail="Original analysis has no stored request_params; cannot re-analyze",
+            )
+
+        # Decrypt parent settings
         try:
-            body_data = await request.json()
+            decrypted_params = decrypt_sensitive_fields(dict(params))
         except Exception as exc:
             raise HTTPException(
-                status_code=400, detail=f"Invalid JSON body: {exc}"
+                status_code=400,
+                detail=f"Failed to decrypt stored params: {exc}",
             ) from exc
-        if not isinstance(body_data, dict):
-            raise HTTPException(
-                status_code=400, detail="Request body must be a JSON object"
-            )
-    overrides = ReAnalyzeFailureRequest(**body_data)
 
-    # Find the failure across all stored results
-    match = await storage.find_failure_by_uuid(failure_uuid)
-    if not match:
-        raise HTTPException(status_code=404, detail=f"Failure {failure_uuid} not found")
+        _validate_decrypted_sensitive_fields(decrypted_params)
 
-    parent_job_id = match["job_id"]
-    failure_dict = match["failure"]
+        # Resolve settings: parent defaults + overrides from request body
+        ai_provider = decrypted_params.get("ai_provider", "")
+        ai_model = decrypted_params.get("ai_model", "")
+        if overrides.ai_provider is not None:
+            ai_provider = overrides.ai_provider
+        if overrides.ai_model is not None:
+            ai_model = overrides.ai_model
 
-    # Load the parent job to get AI config
-    stored = await get_result(parent_job_id, strip_sensitive=False)
-    if not stored or not stored.get("result"):
-        raise HTTPException(
-            status_code=404, detail=f"Parent job {parent_job_id} not found"
-        )
+        ai_call_timeout = decrypted_params.get("ai_call_timeout")
+        if overrides.ai_call_timeout is not None:
+            ai_call_timeout = overrides.ai_call_timeout
 
-    result_data = stored["result"]
-    params = result_data.get("request_params", {})
+        raw_prompt = decrypted_params.get("raw_prompt", "")
+        if overrides.raw_prompt is not None:
+            raw_prompt = overrides.raw_prompt
 
-    if not params:
-        raise HTTPException(
-            status_code=400,
-            detail="Original analysis has no stored request_params; cannot re-analyze",
-        )
+        peer_ai_configs = decrypted_params.get("peer_ai_configs")
+        if overrides.peer_ai_configs is not None:
+            peer_ai_configs = overrides.peer_ai_configs
 
-    # Decrypt parent settings
-    try:
-        decrypted_params = decrypt_sensitive_fields(dict(params))
-    except Exception as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Failed to decrypt stored params: {exc}",
-        ) from exc
+        peer_analysis_max_rounds = decrypted_params.get("peer_analysis_max_rounds", 3)
+        if overrides.peer_analysis_max_rounds is not None:
+            peer_analysis_max_rounds = overrides.peer_analysis_max_rounds
 
-    _validate_decrypted_sensitive_fields(decrypted_params)
+        tests_repo_url = decrypted_params.get("tests_repo_url", "")
+        tests_repo_ref = decrypted_params.get("tests_repo_ref", "")
+        tests_repo_token = decrypted_params.get("tests_repo_token", "")
+        if overrides.tests_repo_url is not None:
+            tests_repo_url, tests_repo_ref = parse_repo_ref(overrides.tests_repo_url)
 
-    # Resolve settings: parent defaults + overrides from request body
-    ai_provider = decrypted_params.get("ai_provider", "")
-    ai_model = decrypted_params.get("ai_model", "")
-    if overrides.ai_provider is not None:
-        ai_provider = overrides.ai_provider
-    if overrides.ai_model is not None:
-        ai_model = overrides.ai_model
-
-    ai_call_timeout = decrypted_params.get("ai_call_timeout")
-    if overrides.ai_call_timeout is not None:
-        ai_call_timeout = overrides.ai_call_timeout
-
-    raw_prompt = decrypted_params.get("raw_prompt", "")
-    if overrides.raw_prompt is not None:
-        raw_prompt = overrides.raw_prompt
-
-    peer_ai_configs = decrypted_params.get("peer_ai_configs")
-    if overrides.peer_ai_configs is not None:
-        peer_ai_configs = overrides.peer_ai_configs
-
-    peer_analysis_max_rounds = decrypted_params.get("peer_analysis_max_rounds", 3)
-    if overrides.peer_analysis_max_rounds is not None:
-        peer_analysis_max_rounds = overrides.peer_analysis_max_rounds
-
-    tests_repo_url = decrypted_params.get("tests_repo_url", "")
-    tests_repo_ref = decrypted_params.get("tests_repo_ref", "")
-    tests_repo_token = decrypted_params.get("tests_repo_token", "")
-    if overrides.tests_repo_url is not None:
-        tests_repo_url, tests_repo_ref = parse_repo_ref(overrides.tests_repo_url)
-
-    # Defer AI validation when a tests repo can supply .rootcoz/settings.json
-    # (same as submit-time deferred AI). Background applies settings.json after clone.
-    settings = get_settings()
-    token = ai_username.set(request.state.username)
-    try:
-        ai_provider, ai_model = await _resolve_ai_config_allow_defer(
-            BaseAnalysisRequest(
-                ai_provider=ai_provider or None,
-                ai_model=ai_model or None,
-                tests_repo_url=tests_repo_url or None,
-                force_server_credentials=(
-                    overrides.force_server_credentials
-                    if overrides.force_server_credentials is not None
-                    else decrypted_params.get("force_server_credentials")
+        # Defer AI validation when a tests repo can supply .rootcoz/settings.json
+        # (same as submit-time deferred AI). Background applies settings.json after clone.
+        settings = get_settings()
+        token = ai_username.set(request.state.username)
+        try:
+            ai_provider, ai_model = await _resolve_ai_config_allow_defer(
+                BaseAnalysisRequest(
+                    ai_provider=ai_provider or None,
+                    ai_model=ai_model or None,
+                    tests_repo_url=tests_repo_url or None,
                 ),
-            ),
-            settings,
-            request=request,
-        )
-        for peer in peer_ai_configs or []:
-            await _validate_catalog_pair(*_peer_catalog_pair(peer))
-    finally:
-        ai_username.reset(token)
+                settings,
+                request=request,
+            )
+            for peer in peer_ai_configs or []:
+                await _validate_catalog_pair(*_peer_catalog_pair(peer))
+        finally:
+            ai_username.reset(token)
 
-    if "additional_repos" not in decrypted_params:
-        additional_repos_list: list[AdditionalRepo] | None = None
-    else:
-        additional_repos_list_raw = decrypted_params.get("additional_repos")
-        if additional_repos_list_raw is None:
-            additional_repos_list = None
+        if "additional_repos" not in decrypted_params:
+            additional_repos_list: list[AdditionalRepo] | None = None
         else:
+            additional_repos_list_raw = decrypted_params.get("additional_repos")
+            if additional_repos_list_raw is None:
+                additional_repos_list = None
+            else:
+                additional_repos_list = [
+                    AdditionalRepo(**r) if isinstance(r, dict) else r
+                    for r in additional_repos_list_raw
+                ]
+        if overrides.additional_repos is not None:
             additional_repos_list = [
                 AdditionalRepo(**r) if isinstance(r, dict) else r
-                for r in additional_repos_list_raw
+                for r in overrides.additional_repos
             ]
-    if overrides.additional_repos is not None:
-        additional_repos_list = [
-            AdditionalRepo(**r) if isinstance(r, dict) else r
-            for r in overrides.additional_repos
-        ]
 
-    max_concurrent_ai_calls = decrypted_params.get("max_concurrent_ai_calls", 3)
+        max_concurrent_ai_calls = decrypted_params.get("max_concurrent_ai_calls", 3)
 
-    # Immediately patch the failure as "running"
-    already_running = False
+        # Immediately patch the failure as "running"
+        already_running = False
 
-    def _patch_running(result_data: dict[str, Any]) -> None:
-        nonlocal already_running
-        failure = _find_failure_by_uuid_in_result(result_data, failure_uuid)
-        if failure:
-            if failure.get("reanalysis_status") == "running":
-                already_running = True
-                return
-            failure["reanalysis_status"] = "running"
-            failure["reanalyzed_with"] = {
-                "ai_provider": ai_provider,
-                "ai_model": ai_model,
-            }
+        def _patch_running(result_data: dict[str, Any]) -> None:
+            nonlocal already_running
+            failure = _find_failure_by_uuid_in_result(result_data, failure_uuid)
+            if failure:
+                if failure.get("reanalysis_status") == "running":
+                    already_running = True
+                    return
+                failure["reanalysis_status"] = "running"
+                failure["reanalyzed_with"] = {
+                    "ai_provider": ai_provider,
+                    "ai_model": ai_model,
+                }
 
-    await patch_result_json(parent_job_id, _patch_running)
+        await patch_result_json(parent_job_id, _patch_running)
 
-    if already_running:
-        raise HTTPException(
-            status_code=409,
-            detail=f"Failure {failure_uuid} is already being re-analyzed",
+        if already_running:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Failure {failure_uuid} is already being re-analyzed",
+            )
+    except HTTPException as exc:
+        # One row per attempt: a re-analyze that stopped at a guard (unknown
+        # failure, unreadable params, already running) still says who tried.
+        # The row names the same target as the success row — the parent job —
+        # so a filter by job shows both; the failure uuid goes in the details.
+        await _record_refused_attempt(
+            action="analysis.rerun",
+            request=request,
+            message=(
+                f"User '{request.state.username}' re-ran the analysis of"
+                f" failure {failure_uuid}"
+            ),
+            target_type="job",
+            target_id=parent_job_id,
+            exc=exc,
+            details={"trigger": "failure", "failure_uuid": failure_uuid},
         )
+        raise
     notify_job_status_changed(parent_job_id)
 
     # Start background task
@@ -6525,13 +7531,6 @@ async def re_analyze_failure(
             analysis_type=decrypted_params.get("analysis_type", "jenkins"),
             source_params={
                 **decrypted_params,
-                "force_server_credentials": (
-                    overrides.force_server_credentials
-                    if overrides.force_server_credentials is not None
-                    else decrypted_params.get(
-                        "force_server_credentials", settings.force_server_credentials
-                    )
-                ),
             },
             settings=get_settings(),
             child_job_name=match.get("child_job_name", ""),
@@ -6542,6 +7541,17 @@ async def re_analyze_failure(
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
 
+    await _audit_analysis_rerun(
+        request=request,
+        job_id=parent_job_id,
+        result_data=result_data,
+        provider=ai_provider,
+        model=ai_model,
+        outcome="success",
+        trigger="failure",
+        failure_uuid=failure_uuid,
+        test_name=str(failure_dict.get("test_name") or ""),
+    )
     return {
         "status": "accepted",
         "job_id": parent_job_id,
@@ -6805,19 +7815,23 @@ async def add_comment(
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
     """Add a comment to a test failure."""
-    _check_allow_list(request)
-    _require_reviewer(request)
     logger.debug(f"POST /results/{job_id}/comments: test_name={body.test_name}")
-    await _validate_test_name_in_result(
-        job_id, body.test_name, body.child_job_name, body.child_build_number
-    )
-
-    error_signature, error_signature_v2 = await _get_failure_signatures(
-        job_id, body.test_name, body.child_job_name, body.child_build_number
-    )
 
     username = request.state.username
+    message = f"User '{username}' commented on '{body.test_name}' in job {job_id}"
     try:
+        # Authorization is part of the attempt: a denied call still leaves one
+        # row, so these checks live inside the refusal block.
+        _check_allow_list(request)
+        _require_reviewer(request)
+        await _validate_test_name_in_result(
+            job_id, body.test_name, body.child_job_name, body.child_build_number
+        )
+
+        error_signature, error_signature_v2 = await _get_failure_signatures(
+            job_id, body.test_name, body.child_job_name, body.child_build_number
+        )
+
         comment_id = await storage.add_comment(
             job_id=job_id,
             test_name=body.test_name,
@@ -6828,8 +7842,18 @@ async def add_comment(
             error_signature_v2=error_signature_v2,
             username=username,
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except (HTTPException, ValueError) as exc:
+        refusal = _refusal_exception(exc)
+        await _record_refused_attempt(
+            action="comment.add",
+            request=request,
+            message=message,
+            target_type="job",
+            target_id=job_id,
+            exc=refusal,
+            details={"test_name": body.test_name},
+        )
+        raise refusal from None
 
     # Detect @mentions once and reuse for both web-push and SSE notifications
     mentioned = detect_mentions(body.comment)
@@ -6858,6 +7882,15 @@ async def add_comment(
 
     notify_comments_changed(job_id)
 
+    await record_audit(
+        action="comment.add",
+        actor=username,
+        message=message,
+        target_type="job",
+        target_id=job_id,
+        details={"test_name": body.test_name, "comment_id": comment_id},
+        request=request,
+    )
     return {"id": comment_id}
 
 
@@ -6884,11 +7917,13 @@ async def delete_comment_endpoint(
 
     # Fetch comment text before deletion to notify mentioned users
     comment_text = ""
+    comment_test = ""
     try:
         comments = await storage.get_comments_for_job(job_id)
         for c in comments:
             if c.get("id") == comment_id:
                 comment_text = c.get("comment", "")
+                comment_test = c.get("test_name", "")
                 break
     except Exception:
         logger.debug(
@@ -6910,6 +7945,21 @@ async def delete_comment_endpoint(
         )
         raise HTTPException(status_code=404, detail=detail)
 
+    await record_audit(
+        action="comment.delete",
+        actor=username,
+        message=f"User '{username}' deleted comment {comment_id} in job {job_id}",
+        target_type="comment",
+        target_id=str(comment_id),
+        # Which failure the deleted comment belonged to, not only which job.
+        # The lookup can fail (mentions are best-effort), so an unknown test
+        # name is left out rather than recorded as an empty string.
+        details={
+            "job_id": job_id,
+            **({"test_name": comment_test} if comment_test else {}),
+        },
+        request=request,
+    )
     return {"status": "deleted"}
 
 
@@ -6943,28 +7993,33 @@ async def set_reviewed(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     notify_comments_changed(job_id)
+    if not body.reviewed:
+        await record_audit(
+            action="review.delete",
+            actor=username,
+            message=(
+                f"User '{username}' cleared the review of '{body.test_name}'"
+                f" in job {job_id}"
+            ),
+            target_type="job",
+            target_id=job_id,
+            details={
+                "test_name": body.test_name,
+                "child_job_name": body.child_job_name,
+                "child_build_number": body.child_build_number,
+            },
+            request=request,
+        )
     return {
         "status": "ok",
         "reviewed_by": username if body.reviewed else "",
     }
 
 
-@app.post("/results/{job_id}/enrich-comments", operation_id="enrichComments")
-async def enrich_comments(
-    job_id: str,
-    request: Request,
-    settings: Settings = _SETTINGS_DEP,
-    _: None = Depends(_bind_job_id),
-) -> dict[str, Any]:
-    """Fetch live statuses for GitHub PRs and Jira tickets found in comments.
-
-    Read-only: no storage writes, no external mutations. Any authenticated user
-    may call it, since the statuses are rendered beside the comment links a
-    viewer can already read.
-    """
-    _check_allow_list(request)
-    logger.debug(f"POST /results/{job_id}/enrich-comments")
-
+async def _collect_comment_enrichments(
+    job_id: str, settings: Settings
+) -> dict[str, list[dict[str, Any]]]:
+    """Resolve live statuses for every tracker link found in a job's comments."""
     comments = await storage.get_comments_for_job(job_id)
     logger.debug(f"enrich_comments: job_id={job_id}, comments_count={len(comments)}")
 
@@ -7061,6 +8116,60 @@ async def enrich_comments(
 
     logger.debug(
         f"enrich_comments: job_id={job_id}, enrichments_count={len(enrichments)}"
+    )
+    return enrichments
+
+
+@app.post("/results/{job_id}/enrich-comments", operation_id="enrichComments")
+async def enrich_comments(
+    job_id: str,
+    request: Request,
+    settings: Settings = _SETTINGS_DEP,
+    _: None = Depends(_bind_job_id),
+) -> dict[str, Any]:
+    """Fetch live statuses for GitHub PRs and Jira tickets found in comments.
+
+    Read-only: no storage writes, no external mutations. Any authenticated user
+    may call it, since the statuses are rendered beside the comment links a
+    viewer can already read.
+    """
+    logger.debug(f"POST /results/{job_id}/enrich-comments")
+    message = f"User '{request.state.username}' enriched comments in job {job_id}"
+    try:
+        _check_allow_list(request)
+        enrichments = await _collect_comment_enrichments(job_id, settings)
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="comment.enrich",
+            request=request,
+            message=message,
+            target_type="job",
+            target_id=job_id,
+            exc=exc,
+            details={"job_id": job_id},
+        )
+        raise
+    except Exception:
+        await _record_failed_attempt(
+            action="comment.enrich",
+            request=request,
+            message=message,
+            target_type="job",
+            target_id=job_id,
+            details={"job_id": job_id},
+        )
+        raise
+    await record_audit(
+        action="comment.enrich",
+        actor=request.state.username,
+        message=(
+            f"User '{request.state.username}' enriched"
+            f" {len(enrichments)} comment(s) in job {job_id}"
+        ),
+        target_type="job",
+        target_id=job_id,
+        details={"count": len(enrichments), "job_id": job_id},
+        request=request,
     )
     return {"enrichments": enrichments}
 
@@ -7963,6 +9072,16 @@ async def create_github_issue_endpoint(
         "GitHub Issue", job_id, body, result, username, tracked_type="github"
     )
 
+    await record_audit(
+        action="issue.create",
+        actor=username,
+        message=f"User '{username}' created GitHub issue {issue_url} for job {job_id}",
+        target_type="job",
+        target_id=job_id,
+        details={"tracker": "github", "test_name": body.test_name},
+        request=request,
+    )
+
     return {
         "url": issue_url,
         "number": result.get("number", 0),
@@ -8082,6 +9201,16 @@ async def create_jira_bug_endpoint(
         "Jira Bug", job_id, body, result, username, tracked_type="jira"
     )
 
+    await record_audit(
+        action="issue.create",
+        actor=username,
+        message=f"User '{username}' created Jira issue {issue_url} for job {job_id}",
+        target_type="job",
+        target_id=job_id,
+        details={"tracker": "jira", "test_name": body.test_name},
+        request=request,
+    )
+
     return {
         "url": issue_url,
         "key": result.get("key", ""),
@@ -8118,29 +9247,71 @@ async def set_tracked_in_endpoint(
     _require_reviewer(request)
     _check_allow_list(request)
     logger.debug(f"PUT /results/{job_id}/tracked-in: test_name={body.test_name}")
-    result = await get_result(job_id)
-    if not result:
-        raise HTTPException(status_code=404, detail="Job not found")
+    message = (
+        f"User '{request.state.username}' linked '{body.test_name}' in job {job_id}"
+    )
+    try:
+        result = await get_result(job_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="Job not found")
 
-    # Auto-detect type from URL if not provided
-    if not body.url:
-        raise HTTPException(
-            status_code=400,
-            detail="URL is required. Use DELETE to remove links.",
+        # Auto-detect type from URL if not provided
+        if not body.url:
+            raise HTTPException(
+                status_code=400,
+                detail="URL is required. Use DELETE to remove links.",
+            )
+
+        tracked_type = body.type
+        if not tracked_type:
+            tracked_type = _detect_tracker_type(body.url)
+
+        # The upsert keys on (job, test, scope, url): the same url again updates
+        # an existing link, anything else adds one.
+        existing_urls = {
+            link["tracked_in_url"]
+            for link in (
+                await storage.get_tracked_in_for_scope(
+                    job_id, body.child_job_name, body.child_build_number
+                )
+            ).get(body.test_name, [])
+        }
+        changed = "updated" if body.url in existing_urls else "added"
+
+        link_id = await storage.add_tracked_in_link(
+            job_id,
+            body.test_name,
+            body.url,
+            tracked_type,
+            child_job_name=body.child_job_name,
+            child_build_number=body.child_build_number,
+            tracked_by=request.state.username,
         )
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="tracked_in.set",
+            request=request,
+            message=message,
+            target_type="job",
+            target_id=job_id,
+            exc=exc,
+            details={"test_name": body.test_name, "type": body.type},
+        )
+        raise
 
-    tracked_type = body.type
-    if not tracked_type:
-        tracked_type = _detect_tracker_type(body.url)
-
-    link_id = await storage.add_tracked_in_link(
-        job_id,
-        body.test_name,
-        body.url,
-        tracked_type,
-        child_job_name=body.child_job_name,
-        child_build_number=body.child_build_number,
-        tracked_by=request.state.username,
+    await record_audit(
+        action="tracked_in.set",
+        actor=request.state.username,
+        message=message,
+        target_type="job",
+        target_id=job_id,
+        details={
+            "test_name": body.test_name,
+            "type": tracked_type,
+            "link_id": link_id,
+            "changed": changed,
+        },
+        request=request,
     )
     return {
         "status": "ok",
@@ -8182,17 +9353,45 @@ async def delete_tracked_in_endpoint(
     """
     _require_reviewer(request)
     _check_allow_list(request)
+    message = f"User '{request.state.username}' removed a link in job {job_id}"
     link = await storage.get_tracked_in_link(link_id)
-    if not link:
-        raise HTTPException(status_code=404, detail="Link not found")
-    if link.get("job_id") != job_id:
-        raise HTTPException(status_code=404, detail="Link not found")
-    if not request.state.is_admin and link["created_by"] != request.state.username:
-        raise HTTPException(
-            status_code=403,
-            detail="You can only delete your own tracked links",
+    try:
+        if not link:
+            raise HTTPException(status_code=404, detail="Link not found")
+        if link.get("job_id") != job_id:
+            raise HTTPException(status_code=404, detail="Link not found")
+        if not request.state.is_admin and link["created_by"] != request.state.username:
+            raise HTTPException(
+                status_code=403,
+                detail="You can only delete your own tracked links",
+            )
+        await storage.delete_tracked_in_link(link_id)
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="tracked_in.delete",
+            request=request,
+            message=message,
+            target_type="job",
+            target_id=job_id,
+            exc=exc,
+            details={"link_id": link_id},
         )
-    await storage.delete_tracked_in_link(link_id)
+        raise
+
+    await record_audit(
+        action="tracked_in.delete",
+        actor=request.state.username,
+        message=message,
+        target_type="job",
+        target_id=job_id,
+        details={
+            "link_id": link_id,
+            "type": link.get("type", ""),
+            "test_name": link.get("test_name", ""),
+            "changed": "cleared",
+        },
+        request=request,
+    )
     return {"status": "ok", "deleted_id": link_id}
 
 
@@ -8306,46 +9505,76 @@ async def push_to_reportportal(
     # Sanitize control characters to prevent log forging (trusted-proxy
     # mode populates username from X-Forwarded-User with minimal validation)
     safe_username = _sanitize_control_chars(username)
-    logger.info("RP push requested by '%s' for job %s", safe_username, job_id)
-    if not settings.reportportal_enabled:
-        raise HTTPException(
-            status_code=400,
-            detail="Report Portal integration is disabled or not configured",
-        )
-
-    stored = await get_result(job_id)
-    if not stored or not stored.get("result"):
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-
-    result_data = stored["result"]
-
-    await _gate_unreviewed_push(
-        # Same literal _create_exporter matches for the legacy RP endpoint —
-        # resilient to the ReportPortalClient symbol being patched in tests.
-        job_id,
-        result_data,
-        "reportportal",
-        settings,
-    )
-
     try:
-        push_result = await _execute_rp_push(
-            job_id,
-            result_data,
-            settings,
-            child_job_name=child_job_name,
-            child_build_number=child_build_number,
-            pushed_by=safe_username,
-        )
-        if push_result.get("error_type") == INVALID_STORED_FAILURES:
-            errors = push_result.get("errors") or []
-            detail = errors[0] if errors else push_result.get("message", "")
+        logger.info("RP push requested by '%s' for job %s", safe_username, job_id)
+        if not settings.reportportal_enabled:
             raise HTTPException(
-                status_code=422, detail=detail or "Invalid stored failures"
+                status_code=400,
+                detail="Report Portal integration is disabled or not configured",
             )
-        return push_result
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        stored = await get_result(job_id)
+        if not stored or not stored.get("result"):
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+        result_data = stored["result"]
+
+        await _gate_unreviewed_push(job_id, result_data, "reportportal", settings)
+
+        try:
+            push_result = await _execute_rp_push(
+                job_id,
+                result_data,
+                settings,
+                child_job_name=child_job_name,
+                child_build_number=child_build_number,
+                pushed_by=safe_username,
+            )
+            if push_result.get("error_type") == INVALID_STORED_FAILURES:
+                errors = push_result.get("errors") or []
+                detail = errors[0] if errors else push_result.get("message", "")
+                raise HTTPException(
+                    status_code=422, detail=detail or "Invalid stored failures"
+                )
+            outcome: Literal["success", "failure"] = (
+                "failure" if push_result.get("errors") else "success"
+            )
+            await record_audit(
+                action="export.push",
+                actor=safe_username,
+                message=(
+                    f"Exporter push by '{safe_username}' for job {job_id},"
+                    " plugin=reportportal"
+                ),
+                target_type="job",
+                target_id=job_id,
+                outcome=outcome,
+                details={
+                    "plugin": "reportportal",
+                    "pushed": int(push_result.get("pushed") or 0),
+                    "outcome": outcome,
+                },
+                request=request,
+            )
+            return push_result
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException as exc:
+        # One row per attempt: a push that never reached the exporter still
+        # says who tried what and why it stopped.
+        await _record_refused_attempt(
+            action="export.push",
+            request=request,
+            message=(
+                f"Exporter push by '{safe_username}' for job {job_id},"
+                " plugin=reportportal"
+            ),
+            target_type="job",
+            target_id=job_id,
+            exc=exc,
+            details={"plugin": "reportportal"},
+        )
+        raise
 
 
 @app.post(
@@ -8374,64 +9603,101 @@ async def push_to_exporter(
     _check_allow_list(request)
     username = getattr(request.state, "username", "")
     safe_username = _sanitize_control_chars(username)
-    logger.info(
-        "Exporter push requested by '%s' for job %s, plugin=%s",
-        safe_username,
-        job_id,
-        plugin_name,
-    )
-
-    stored = await get_result(job_id)
-    if not stored or not stored.get("result"):
-        raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
-
-    result_data = stored["result"]
-
-    await _gate_unreviewed_push(job_id, result_data, plugin_name, settings)
-
     try:
-        context = await _build_export_context(
-            job_id=job_id,
-            result_data=result_data,
-            settings=settings,
-            child_job_name=child_job_name,
-            child_build_number=child_build_number,
-            pushed_by=safe_username,
-            fetch_history=_exporter_needs_history_classifications([plugin_name]),
-            fetch_tracked_in_links=_exporter_needs_tracked_in_links(
-                [plugin_name], settings
-            ),
-            analysis_timestamp=_stored_analysis_timestamp(stored),
-        )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-    try:
-        exporter = _create_exporter(plugin_name, settings)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except (TimeoutError, OSError, TypeError, RuntimeError) as exc:
-        # Constructor/transport failures are server-side, not bad client input.
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-
-    try:
-        with exporter:
-            result = await exporter.push(context)
-    except Exception as exc:
-        # Guard against unexpected exporter failures leaking as raw 500s.
-        # Expected error modes are already returned inside push() as a
-        # failed ExporterResult; this catches genuinely unforeseen faults.
-        logger.exception(
-            "Exporter '%s' push raised unexpectedly for job %s",
-            plugin_name,
+        logger.info(
+            "Exporter push requested by '%s' for job %s, plugin=%s",
+            safe_username,
             job_id,
+            plugin_name,
         )
-        raise HTTPException(
-            status_code=502,
-            detail=f"Exporter '{plugin_name}' failed unexpectedly",
-        ) from exc
 
-    return {**result.details, "success": result.success, "message": result.message}
+        stored = await get_result(job_id)
+        if not stored or not stored.get("result"):
+            raise HTTPException(status_code=404, detail=f"Job {job_id} not found")
+
+        result_data = stored["result"]
+
+        await _gate_unreviewed_push(job_id, result_data, plugin_name, settings)
+
+        try:
+            context = await _build_export_context(
+                job_id=job_id,
+                result_data=result_data,
+                settings=settings,
+                child_job_name=child_job_name,
+                child_build_number=child_build_number,
+                pushed_by=safe_username,
+                fetch_history=_exporter_needs_history_classifications([plugin_name]),
+                fetch_tracked_in_links=_exporter_needs_tracked_in_links(
+                    [plugin_name], settings
+                ),
+                analysis_timestamp=_stored_analysis_timestamp(stored),
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        try:
+            exporter = _create_exporter(plugin_name, settings)
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except (TimeoutError, OSError, TypeError, RuntimeError) as exc:
+            # Constructor/transport failures are server-side, not client input.
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+        try:
+            with exporter:
+                result = await exporter.push(context)
+        except Exception as exc:
+            # Guard against unexpected exporter failures leaking as raw 500s.
+            # Expected error modes are already returned inside push() as a
+            # failed ExporterResult; this catches genuinely unforeseen faults.
+            logger.exception(
+                "Exporter '%s' push raised unexpectedly for job %s",
+                plugin_name,
+                job_id,
+            )
+            raise HTTPException(
+                status_code=502,
+                detail=f"Exporter '{plugin_name}' failed unexpectedly",
+            ) from exc
+
+        outcome: Literal["success", "failure"] = (
+            "success" if result.success else "failure"
+        )
+        await record_audit(
+            action="export.push",
+            actor=safe_username,
+            message=(
+                f"Exporter push by '{safe_username}' for job {job_id},"
+                f" plugin={plugin_name}"
+            ),
+            target_type="job",
+            target_id=job_id,
+            outcome=outcome,
+            details={
+                "plugin": plugin_name,
+                "pushed": int(result.details.get("pushed") or 0),
+                "outcome": outcome,
+            },
+            request=request,
+        )
+        return {**result.details, "success": result.success, "message": result.message}
+    except HTTPException as exc:
+        # One row per attempt: a push that never reached the exporter still
+        # says who tried what and why it stopped.
+        await _record_refused_attempt(
+            action="export.push",
+            request=request,
+            message=(
+                f"Exporter push by '{safe_username}' for job {job_id},"
+                f" plugin={plugin_name}"
+            ),
+            target_type="job",
+            target_id=job_id,
+            exc=exc,
+            details={"plugin": plugin_name},
+        )
+        raise
 
 
 def _rp_push_error_result(
@@ -9037,38 +10303,72 @@ async def update_tags(
     """Update tags on an existing result. System tags (re-analyze, submitter username) cannot be removed."""
     _require_reviewer(request)
     _check_allow_list(request)
-    body = await _read_json_object(request)
-    raw_tags = body.get("tags")
-    if not isinstance(raw_tags, list) or not all(isinstance(t, str) for t in raw_tags):
-        raise HTTPException(status_code=400, detail="tags must be a list of strings")
+    message = f"User '{request.state.username}' set the tags of job {job_id}"
+    try:
+        # Malformed JSON is an attempt too: read inside the refusal scope so
+        # the 400 leaves one row instead of nothing.
+        body = await _read_json_object(request)
+        raw_tags = body.get("tags")
+        if not isinstance(raw_tags, list) or not all(
+            isinstance(t, str) for t in raw_tags
+        ):
+            raise HTTPException(
+                status_code=400, detail="tags must be a list of strings"
+            )
 
-    # Normalize: strip, lowercase, deduplicate, remove blanks
-    seen: set[str] = set()
-    tags: list[str] = []
-    for t in raw_tags:
-        normalized = t.strip().lower()
-        if normalized and normalized not in seen and normalized not in _SYSTEM_TAGS:
-            seen.add(normalized)
-            tags.append(normalized)
+        # Normalize: strip, lowercase, deduplicate, remove blanks
+        seen: set[str] = set()
+        tags: list[str] = []
+        for t in raw_tags:
+            normalized = t.strip().lower()
+            if normalized and normalized not in seen and normalized not in _SYSTEM_TAGS:
+                seen.add(normalized)
+                tags.append(normalized)
 
-    stored = await get_result(job_id)
-    if not stored or not stored.get("result"):
-        raise HTTPException(status_code=404, detail=f"Result {job_id} not found")
+        stored = await get_result(job_id)
+        if not stored or not stored.get("result"):
+            raise HTTPException(status_code=404, detail=f"Result {job_id} not found")
 
-    result_data = stored["result"]
-    old_tags = result_data.get("tags", [])
+        result_data = stored["result"]
+        old_tags = result_data.get("tags", [])
 
-    # Preserve system tags
-    # re-analyze tag
-    if "re-analyze" in [str(t).lower() for t in old_tags] and "re-analyze" not in tags:
-        tags.append("re-analyze")
-    # Submitter tag
-    submitted_by = (result_data.get("request_params") or {}).get("submitted_by", "")
-    if submitted_by:
-        tags = _ensure_submitter_tag(tags, submitted_by)
+        # Preserve system tags
+        # re-analyze tag
+        if "re-analyze" in [str(t).lower() for t in old_tags] and (
+            "re-analyze" not in tags
+        ):
+            tags.append("re-analyze")
+        # Submitter tag
+        submitted_by = (result_data.get("request_params") or {}).get("submitted_by", "")
+        if submitted_by:
+            tags = _ensure_submitter_tag(tags, submitted_by)
 
-    await patch_result_json(job_id, lambda d: d.update({"tags": tags}))
+        await patch_result_json(job_id, lambda d: d.update({"tags": tags}))
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="job.tags_set",
+            request=request,
+            message=message,
+            target_type="job",
+            target_id=job_id,
+            exc=exc,
+        )
+        raise
     notify_dashboard_changed()
+    await record_audit(
+        action="job.tags_set",
+        actor=request.state.username,
+        message=message,
+        target_type="job",
+        target_id=job_id,
+        # The diff is what an admin can read; the absolute list alone is not.
+        details={
+            "added": [tag for tag in tags if tag not in old_tags],
+            "removed": [tag for tag in old_tags if tag not in tags],
+            "tags": tags,
+        },
+        request=request,
+    )
     return {"job_id": job_id, "tags": tags}
 
 
@@ -9133,6 +10433,24 @@ async def override_classification_endpoint(
             exc_info=True,
         )
 
+    await record_audit(
+        action="classification.override",
+        actor=username,
+        message=(
+            f"User '{username}' overrode classification of '{body.test_name}'"
+            f" in job {job_id} to '{body.classification}'"
+        ),
+        target_type="job",
+        target_id=job_id,
+        details={
+            "test_name": body.test_name,
+            "classification": body.classification,
+            "child_job_name": body.child_job_name,
+            "child_build_number": body.child_build_number,
+        },
+        request=request,
+    )
+
     return {"status": "ok", "classification": body.classification}
 
 
@@ -9150,13 +10468,38 @@ async def override_pattern_endpoint(
         f"PUT /results/{job_id}/override-pattern: test_name={body.test_name}, "
         f"pattern={body.pattern}"
     )
-    await _validate_test_name_in_result(
-        job_id, body.test_name, body.child_job_name, body.child_build_number
-    )
     username = request.state.username
+    message = (
+        f"User '{username}' overrode the pattern of '{body.test_name}'"
+        f" in job {job_id} to '{body.pattern}'"
+    )
+    try:
+        await _validate_test_name_in_result(
+            job_id, body.test_name, body.child_job_name, body.child_build_number
+        )
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="pattern.override",
+            request=request,
+            message=message,
+            target_type="job",
+            target_id=job_id,
+            exc=exc,
+            details={"test_name": body.test_name, "pattern": body.pattern},
+        )
+        raise
 
     parent_job_name = await storage.get_parent_job_name_for_test(
         body.test_name, job_id=job_id
+    )
+
+    # What the pattern axis said before this change, from the same lookup the
+    # classification override uses, so both rows read "from → to".
+    previous_pattern = await storage.get_history_classification(
+        job_id,
+        body.test_name,
+        child_job_name=body.child_job_name,
+        child_build_number=body.child_build_number,
     )
 
     group_tests = await storage.override_pattern(
@@ -9187,6 +10530,21 @@ async def override_pattern_endpoint(
             exc_info=True,
         )
 
+    await record_audit(
+        action="pattern.override",
+        actor=username,
+        message=message,
+        target_type="job",
+        target_id=job_id,
+        # "from" is absent when there was no pattern before, never an empty
+        # string; the pair reads from → to like the classification override.
+        details={
+            "test_name": body.test_name,
+            **({"from": previous_pattern} if previous_pattern else {}),
+            "to": body.pattern,
+        },
+        request=request,
+    )
     return {"status": "ok", "pattern": body.pattern}
 
 
@@ -9253,8 +10611,16 @@ async def bulk_delete_jobs_endpoint(
 
     # Audit log each deletion individually
     actor = request.state.username
+    job_action = "admin.job_delete" if request.state.is_admin else "user.job_delete"
     for job_id in result["deleted"]:
-        logger.info(f"[AUDIT] User '{actor}' deleted job {job_id}")
+        await record_audit(
+            action=job_action,
+            actor=actor,
+            message=f"User '{actor}' deleted job {job_id}",
+            target_type="job",
+            target_id=job_id,
+            request=request,
+        )
 
     return result
 
@@ -9292,7 +10658,14 @@ async def delete_job_endpoint(
 
     notify_active_count_changed()
     notify_dashboard_changed()
-    logger.info(f"[AUDIT] User '{request.state.username}' deleted job {job_id}")
+    await record_audit(
+        action="admin.job_delete" if request.state.is_admin else "user.job_delete",
+        actor=request.state.username,
+        message=f"User '{request.state.username}' deleted job {job_id}",
+        target_type="job",
+        target_id=job_id,
+        request=request,
+    )
     return {"status": "deleted", "job_id": job_id}
 
 
@@ -9376,7 +10749,14 @@ async def abort_analysis(
     notify_dashboard_changed()
     notify_job_status_changed(job_id)
 
-    logger.info(f"[AUDIT] User '{request.state.username}' aborted job {job_id}")
+    await record_audit(
+        action="user.abort_job",
+        actor=request.state.username,
+        message=f"User '{request.state.username}' aborted job {job_id}",
+        target_type="job",
+        target_id=job_id,
+        request=request,
+    )
     return {"status": "aborted", "job_id": job_id}
 
 
@@ -10383,61 +11763,105 @@ async def classify_test(request: Request, body: ClassifyTestRequest) -> dict[str
     # Sidecar body_template leaves "{references}" when the model omits the arg.
     references = _sanitize_sidecar_placeholder(body.references)
     classify_job_id = body.job_id
-
-    if not test_name:
-        raise HTTPException(status_code=400, detail="test_name is required")
-
-    if classification == "KNOWN_BUG" and not str(references).strip():
-        raise HTTPException(
-            status_code=400,
-            detail="KNOWN_BUG requires non-empty references (e.g., Jira tickets or historical bug URLs).",
-        )
-
-    # Detect AI caller: the AI prompt includes source="ai" in the request body.
-    # AI_SYSTEM_USERNAME is a reserved system identity (blocked from registration)
-    # used consistently for all AI-originated actions (auto-review, classification).
-    is_ai_caller = body.source == "ai"
-
-    # Force created_by: AI callers are always attributed to AI_SYSTEM_USERNAME,
-    # regardless of the authenticated session username.
-    # Human callers must have an authenticated username — reject if missing
-    # to prevent misattribution as AI_SYSTEM_USERNAME.
-    if not is_ai_caller and not request.state.username:
-        raise HTTPException(
-            status_code=401, detail="Authentication required to classify tests"
-        )
-    created_by = AI_SYSTEM_USERNAME if is_ai_caller else request.state.username
-
-    # Human classifications are visible immediately.
-    # AI classifications become visible after analysis completes
-    # and calls make_classifications_visible().
-    visible = 0 if is_ai_caller else 1
-
-    # Look up parent job name from failure_history, scoped to this job
-    parent_job_name = await storage.get_parent_job_name_for_test(
-        test_name, job_id=classify_job_id
+    message = (
+        f"User '{request.state.username}' classified '{test_name}' as"
+        f" '{classification}' in job {classify_job_id}"
     )
-    if not parent_job_name and classify_job_id:
-        # Job might not be in failure_history yet (analysis in progress)
-        result = await storage.get_result(classify_job_id)
-        if result and result.get("result"):
-            parent_job_name = result["result"].get("job_name", "")
 
     try:
-        classification_id = await storage.set_test_classification(
-            test_name=test_name,
-            classification=classification,
-            reason=reason,
-            job_name=job_name,
-            parent_job_name=parent_job_name,
-            created_by=created_by,
-            references=references,
-            job_id=classify_job_id,
-            child_build_number=body.child_build_number,
-            visible=visible,
+        if not test_name:
+            raise HTTPException(status_code=400, detail="test_name is required")
+
+        if classification == "KNOWN_BUG" and not str(references).strip():
+            raise HTTPException(
+                status_code=400,
+                detail="KNOWN_BUG requires non-empty references (e.g., Jira tickets or historical bug URLs).",
+            )
+
+        # Detect AI caller: the AI prompt includes source="ai" in the request body.
+        # AI_SYSTEM_USERNAME is a reserved system identity (blocked from registration)
+        # used consistently for all AI-originated actions (auto-review, classification).
+        is_ai_caller = body.source == "ai"
+
+        # Force created_by: AI callers are always attributed to AI_SYSTEM_USERNAME,
+        # regardless of the authenticated session username.
+        # Human callers must have an authenticated username — reject if missing
+        # to prevent misattribution as AI_SYSTEM_USERNAME.
+        if not is_ai_caller and not request.state.username:
+            raise HTTPException(
+                status_code=401, detail="Authentication required to classify tests"
+            )
+        created_by = AI_SYSTEM_USERNAME if is_ai_caller else request.state.username
+
+        # Human classifications are visible immediately.
+        # AI classifications become visible after analysis completes
+        # and calls make_classifications_visible().
+        visible = 0 if is_ai_caller else 1
+
+        # What the pattern axis said before this change, so the audit row can
+        # read "from → to".
+        previous_pattern = ""
+        if not is_ai_caller:
+            previous_pattern = await storage.get_history_classification(
+                classify_job_id,
+                test_name,
+                child_job_name=job_name,
+                child_build_number=body.child_build_number,
+            )
+
+        # Look up parent job name from failure_history, scoped to this job
+        parent_job_name = await storage.get_parent_job_name_for_test(
+            test_name, job_id=classify_job_id
         )
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not parent_job_name and classify_job_id:
+            # Job might not be in failure_history yet (analysis in progress)
+            result = await storage.get_result(classify_job_id)
+            if result and result.get("result"):
+                parent_job_name = result["result"].get("job_name", "")
+
+        try:
+            classification_id = await storage.set_test_classification(
+                test_name=test_name,
+                classification=classification,
+                reason=reason,
+                job_name=job_name,
+                parent_job_name=parent_job_name,
+                created_by=created_by,
+                references=references,
+                job_id=classify_job_id,
+                child_build_number=body.child_build_number,
+                visible=visible,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="classification.override",
+            request=request,
+            message=message,
+            target_type="job",
+            target_id=classify_job_id,
+            exc=exc,
+            details={"test_name": test_name, "to": classification},
+        )
+        raise
+    # A human classification is an override and gets its own row. The AI's own
+    # classifications belong to the analysis that produced them (#379), and one
+    # row per classified test would bury the rest of the trail.
+    if not is_ai_caller:
+        await record_audit(
+            action="classification.override",
+            actor=created_by,
+            message=message,
+            target_type="job",
+            target_id=classify_job_id,
+            details={
+                "test_name": test_name,
+                "from": previous_pattern,
+                "to": classification,
+            },
+            request=request,
+        )
     if classify_job_id:
         notify_comments_changed(classify_job_id)
     return {"id": classification_id}
@@ -10525,19 +11949,12 @@ def _cursor_model_count(models_by_provider: Mapping[str, Sequence[Any]]) -> int:
 
 async def scoped_models_for_request(
     request: Request,
-    force_server: bool | None = None,
 ) -> dict[str, list[dict[str, Any]]]:
     """Discover models using the authenticated caller's credential scope."""
     token = ai_username.set(request.state.username)
-    force_token = force_server_credentials.set(
-        get_settings().force_server_credentials
-        if force_server is None
-        else force_server
-    )
     try:
         return await scoped_models()
     finally:
-        force_server_credentials.reset(force_token)
         ai_username.reset(token)
 
 
@@ -10548,7 +11965,6 @@ async def list_ai_models(
         "",
         description="Filter by an exact Pi-sidecar provider identifier.",
     ),
-    force_server_credentials: bool | None = None,
 ) -> dict[str, Any]:
     """List available AI models for one or all configured providers.
 
@@ -10563,7 +11979,7 @@ async def list_ai_models(
     logger.debug("GET /api/ai-models provider=%s", provider)
     is_admin = bool(getattr(request.state, "is_admin", False))
     try:
-        scoped = await scoped_models_for_request(request, force_server_credentials)
+        scoped = await scoped_models_for_request(request)
         listing_status = model_listing_status.get() or {}
         if provider:
             provider = normalize_provider(provider)
@@ -10648,10 +12064,8 @@ async def refresh_ai_models(request: Request) -> dict[str, Any]:
         # refreshed catalog lists no Cursor models — that outage is what the
         # probe reports (#374). The sidecar registry still names a registered
         # provider whose listing came back empty.
-        cursor_providers = {
-            *build_friendly_catalog(models),
-            *(await registered_provider_ids() or ()),
-        }
+        catalog = build_friendly_catalog(models)
+        cursor_providers = {*catalog, *(await registered_provider_ids() or ())}
         has_cursor = _has_cursor_provider(cursor_providers)
         cursor_status = await probe_cursor_auth(force=True) if has_cursor else None
         # A forced refresh also re-reads every deployment-credential listing
@@ -10671,12 +12085,35 @@ async def refresh_ai_models(request: Request) -> dict[str, Any]:
         }
         if cursor_status is not None:
             payload["provider_status"] = {"cursor": cursor_status}
+        # One action id for every model refresh (#379): ``scope`` says whether
+        # the whole catalog was re-read or a single provider (see
+        # ``refresh_server_provider_models``). Never the model list itself.
+        await record_audit(
+            action="provider.models_refresh",
+            actor=request.state.username,
+            message=(
+                f"Admin '{request.state.username}' refreshed every provider's"
+                f" models ({len(catalog)} providers)"
+            ),
+            details={"scope": "all", "provider_count": len(catalog)},
+            request=request,
+        )
         return strip_sensitive_from_response(payload)
-    except Exception:
+    except Exception as exc:
         logger.exception("Failed to refresh AI models")
-        raise HTTPException(
+        refusal = HTTPException(
             status_code=502, detail="Failed to refresh AI models from sidecar"
         )
+        await _record_refused_attempt(
+            action="provider.models_refresh",
+            request=request,
+            message=(
+                f"Admin '{request.state.username}' refreshed every provider's models"
+            ),
+            exc=refusal,
+            details={"scope": "all"},
+        )
+        raise refusal from exc
 
 
 @app.get("/health", operation_id="healthCheck")
@@ -10743,7 +12180,9 @@ async def prometheus_metrics() -> Response:
 
     return Response(
         content=render_prometheus_metrics(
-            health_up=health_up, active_analyses=active_analyses
+            health_up=health_up,
+            active_analyses=active_analyses,
+            audit_write_failures=audit_health_check()["write_failures"],
         ),
         media_type="text/plain; version=0.0.4; charset=utf-8",
     )
@@ -11163,6 +12602,98 @@ def _check_allow_list(request: Request) -> None:
         )
 
 
+async def _login_authentication_method(request: Request, settings: Settings) -> str:
+    """How the caller of ``POST /api/auth/login`` was authenticated (#379).
+
+    The endpoint's own credential is the API key, but an admin reading the row
+    needs the whole answer: an identity the trusted proxy vouched for (SSO),
+    a caller who already holds a live session, or a key typed by a fresh
+    client. The proxy wins because it is the outermost credential; a live
+    session beats the key because the caller was already logged in.
+    """
+    if settings.trust_proxy_headers:
+        proxy_user = request.headers.get("x-forwarded-user", "").strip()
+        if proxy_user:
+            return "proxy"
+    session_token = _read_cookie(request, "rootcoz_session")
+    if session_token and await storage.get_session(session_token):
+        return "session"
+    return "api_key"
+
+
+async def _login_failure_reason(
+    *,
+    overlong: bool,
+    username: str,
+    settings: Settings,
+    account: dict[str, Any] | None,
+) -> str:
+    """Why a login attempt was refused (#379), from the decisions already made.
+
+    ``bad_key`` means the username names an account and the key did not match
+    it; ``unknown_user`` is reserved for a username that names nothing. Which
+    of the two it is never reaches the caller — both answers are the same 401.
+
+    ``blocked`` is not decided here: a pending/rejected account is refused on
+    its own ``auth.login_blocked`` row, after the key was verified. The extra
+    read below only runs for a key that belongs to no account, so a login that
+    the key resolves never pays for it.
+    """
+    if overlong:
+        return "overlong"
+    if account is not None or (username == "admin" and settings.admin_key):
+        # The key resolved to a real account, or the name is the bootstrap
+        # admin, which exists outside the users table.
+        return "bad_key"
+    known = await storage.get_user_by_username(username) is not None
+    return "bad_key" if known else "unknown_user"
+
+
+async def _lock_after_failed_login(
+    username: str, settings: Settings, request: Request
+) -> dict[str, Any] | None:
+    """Count a failed login and write ``auth.account_locked`` at the threshold.
+
+    Returns the state from :func:`storage.record_failed_login` (``None`` for a
+    username that names no account, which never increments anything). The lock
+    is the security event: one row, with the threshold that fired and how many
+    attempts reached it.
+
+    Lockout is active only when ``login_lockout_enabled`` is true AND the
+    threshold is positive: either one off means no counting and no lock, so a
+    later threshold change cannot lock an account on failures suffered while
+    lockout was off.
+    """
+    threshold = (
+        settings.login_lockout_threshold if settings.login_lockout_enabled else 0
+    )
+    state = await storage.record_failed_login(username, threshold=threshold)
+    if state is not None and state["newly_locked"]:
+        logger.warning(
+            "Account '%s' locked after %d consecutive failed logins (threshold %d)",
+            username,
+            state["failed_attempts"],
+            threshold,
+        )
+        await record_audit(
+            action="auth.account_locked",
+            actor=username,
+            message=(
+                f"Account '{username}' locked after {state['failed_attempts']}"
+                f" consecutive failed logins (threshold {threshold})"
+            ),
+            target_type="user",
+            target_id=username,
+            outcome="failure",
+            details={
+                "threshold": threshold,
+                "failed_attempts": state["failed_attempts"],
+            },
+            request=request,
+        )
+    return state
+
+
 @app.post("/api/auth/login", operation_id="login")
 async def login(request: Request) -> JSONResponse:
     """Authenticate any user with username + API key.
@@ -11175,6 +12706,14 @@ async def login(request: Request) -> JSONResponse:
     username = str(body.get("username", "")).strip().lower()
     api_key = str(body.get("api_key", ""))
 
+    overlong = len(username) > _LOGIN_MAX_USERNAME_LENGTH
+    if overlong:
+        # An over-long name cannot name an account (usernames are at most 50
+        # characters), so it is refused like any bad credential. Keep the
+        # attempt visible in the trail, but bounded, so the row never grows
+        # with the request body.
+        username = f"{username[:_LOGIN_MAX_USERNAME_LENGTH]}…"
+
     if not username or not api_key:
         raise HTTPException(status_code=400, detail="Username and api_key are required")
 
@@ -11185,6 +12724,7 @@ async def login(request: Request) -> JSONResponse:
     can_view_reports = False
     can_use_server_providers = False
     can_use_free_providers = False
+    account: dict[str, Any] | None = None
 
     # Check admin_key — username must be "admin"
     if (
@@ -11201,6 +12741,7 @@ async def login(request: Request) -> JSONResponse:
     else:
         # Check user API key
         user = await storage.get_user_by_key(api_key)
+        account = user
         if user and user["username"] == username:
             authenticated = True
             resolved_role = str(user.get("role", "reviewer"))
@@ -11215,7 +12756,39 @@ async def login(request: Request) -> JSONResponse:
             can_use_free_providers = await storage.can_user_use_free_providers(username)
 
     if not authenticated:
-        logger.info(f"[AUDIT] Failed login attempt for username '{username}'")
+        reason = await _login_failure_reason(
+            overlong=overlong, username=username, settings=settings, account=account
+        )
+        await record_audit(
+            action="auth.login_failed",
+            actor=username or "anonymous",
+            message=f"Failed login attempt for username '{username}' ({reason})",
+            target_type="user",
+            target_id=username,
+            outcome="failure",
+            details={"reason": reason},
+            request=request,
+        )
+        locked = await _lock_after_failed_login(username, settings, request)
+        logger.debug(
+            "Login refused for '%s' (%s) failed_attempts=%s newly_locked=%s",
+            username,
+            reason,
+            locked["failed_attempts"] if locked else 0,
+            bool(locked and locked["newly_locked"]),
+        )
+        raise HTTPException(status_code=401, detail="Invalid username or API key")
+
+    # Lockout and disable state is refused with the same body as a wrong key:
+    # the caller learns "not allowed", never which of the three applied.
+    block_reason = await storage.settle_login_attempt(username)
+    if block_reason is not None:
+        await _record_account_blocked(
+            username=username,
+            reason=block_reason,
+            role=resolved_role,
+            request=request,
+        )
         raise HTTPException(status_code=401, detail="Invalid username or API key")
 
     # Check pending/rejected status before creating a session (non-admin only)
@@ -11223,7 +12796,17 @@ async def login(request: Request) -> JSONResponse:
         user_status = await storage.get_user_status(username)
         blocked = _blocked_user_status_response(user_status)
         if blocked is not None:
-            logger.info(f"[AUDIT] Login blocked for {user_status} user '{username}'")
+            await record_audit(
+                action="auth.login_blocked",
+                actor=username,
+                message=f"Login blocked for {user_status} user '{username}'",
+                actor_role=resolved_role,
+                target_type="user",
+                target_id=username,
+                outcome="denied",
+                details={"status": user_status, "reason": "blocked"},
+                request=request,
+            )
             return blocked
 
     session_token = await storage.create_session(
@@ -11263,7 +12846,17 @@ async def login(request: Request) -> JSONResponse:
         max_age=365 * 24 * 60 * 60,
     )
     response.delete_cookie("jji_username", path="/")
-    logger.info(f"[AUDIT] Login success: user='{username}' is_admin={is_admin}")
+    await record_audit(
+        action="auth.login",
+        actor=username,
+        message=f"Login success: user='{username}' is_admin={is_admin}",
+        actor_role=resolved_role,
+        is_admin=is_admin,
+        target_type="user",
+        target_id=username,
+        details={"method": await _login_authentication_method(request, settings)},
+        request=request,
+    )
     return response
 
 
@@ -11286,6 +12879,15 @@ async def logout(request: Request) -> JSONResponse:
         httponly=True,
         samesite="lax",
         secure=settings.secure_cookies,
+    )
+    await record_audit(
+        action="auth.logout",
+        actor=request.state.username,
+        message=f"Logout: user='{request.state.username or 'anonymous'}'",
+        target_type="user",
+        target_id=request.state.username,
+        details={"session_cleared": bool(session_token)},
+        request=request,
     )
     return response
 
@@ -11355,7 +12957,14 @@ async def rotate_own_key_endpoint(request: Request) -> JSONResponse:
         max_age=storage.current_session_ttl_seconds(),
     )
 
-    logger.info(f"[AUDIT] User '{username}' rotated their own API key")
+    await record_audit(
+        action="user.self_key_rotate",
+        actor=username,
+        message=f"User '{username}' rotated their own API key",
+        target_type="user",
+        target_id=username,
+        request=request,
+    )
     return response
 
 
@@ -11452,7 +13061,15 @@ async def register_user(request: Request) -> JSONResponse:
     )
     response.delete_cookie("jji_username", path="/")
 
-    logger.info(f"[AUDIT] User registered: {username} (status={user_status})")
+    await record_audit(
+        action="auth.register",
+        actor=username,
+        message=f"User registered: {username} (status={user_status})",
+        target_type="user",
+        target_id=username,
+        details={"status": user_status, "role": default_role},
+        request=request,
+    )
     return response
 
 
@@ -11686,49 +13303,115 @@ async def set_user_ai_credential(
     provider: str, body: AiCredentialInput, request: Request
 ) -> JSONResponse:
     """Encrypt and save a key for a sidecar-confirmed provider."""
-    _require_reviewer(request)
-    _check_allow_list(request)
-    username = await _credential_user(request)
-    # Resolve to the sidecar's exact-case id: the gate below accepts any
-    # caller spelling (#347), but verification and storage must use the
-    # canonical id or the sidecar rejects the session and the stored row
-    # drifts from the catalog's spelling.
-    canonical = await _canonical_key_provider_id(provider)
-    if canonical is None:
-        raise HTTPException(
-            status_code=400, detail="Provider does not support session API keys"
-        )
-    provider = canonical
-    key = body.api_key.get_secret_value()
-    if error := _validate_submitted_api_key(key):
-        raise HTTPException(status_code=400, detail=error)
-    from rootcoz.ai_client import verify_ai_key
-
+    username = request.state.username
+    message = f"User '{username}' set their {provider} AI credential"
+    # The model is known before verification, so a failed row names the key's
+    # provider and the model it was checked against (#379) — never the key.
     model = body.model.strip()
-    if not model:
-        raise HTTPException(status_code=400, detail="Select a model to verify the key")
-    outcome = await verify_ai_key(provider, model, key)
-    if outcome == "accepted":
-        try:
+    details: dict[str, Any] = {"provider": provider}
+    if model:
+        details["model"] = model
+    replaced = False
+    try:
+        _require_reviewer(request)
+        _check_allow_list(request)
+        username = await _credential_user(request)
+        # Resolve to the sidecar's exact-case id: the gate below accepts any
+        # caller spelling (#347), but verification and storage must use the
+        # canonical id or the sidecar rejects the session and the stored row
+        # drifts from the catalog's spelling.
+        canonical = await _canonical_key_provider_id(provider)
+        if canonical is None:
+            raise HTTPException(
+                status_code=400, detail="Provider does not support session API keys"
+            )
+        provider = canonical
+        details["provider"] = provider
+        key = body.api_key.get_secret_value()
+        if error := _validate_submitted_api_key(key):
+            raise HTTPException(status_code=400, detail=error)
+        from rootcoz.ai_client import verify_ai_key
+
+        if not model:
+            raise HTTPException(
+                status_code=400, detail="Select a model to verify the key"
+            )
+        outcome = await verify_ai_key(provider, model, key)
+        if outcome == "accepted":
+            # Read before the write, or every save looks like a replace. Only
+            # the exact stored spelling counts: the write below overwrites that
+            # key, while a case variant can be a genuinely different provider.
+            existing = await storage.get_user_ai_credentials(username)
+            replaced = provider in existing
             sessions = await storage.update_user_ai_credential(
                 username,
                 provider,
                 key,
                 registered_providers=await registered_provider_ids(),
             )
-        except storage.UnreadableAiCredentialsError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        await _revoke_ai_sessions(sessions)
-    message = {
+            await _revoke_ai_sessions(sessions)
+    except storage.UnreadableAiCredentialsError as exc:
+        refusal = _refusal_exception(exc, status_code=409)
+        await _record_refused_attempt(
+            action="user.ai_credential_set",
+            request=request,
+            message=message,
+            target_type="provider",
+            target_id=provider,
+            exc=refusal,
+            details={"reason": "unreadable_credentials", **details},
+        )
+        raise refusal from exc
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="user.ai_credential_set",
+            request=request,
+            message=message,
+            target_type="provider",
+            target_id=provider,
+            exc=exc,
+            details=details,
+        )
+        raise
+    except Exception:
+        await _record_failed_attempt(
+            action="user.ai_credential_set",
+            request=request,
+            message=message,
+            target_type="provider",
+            target_id=provider,
+            reason="internal_error",
+            details=details,
+        )
+        raise
+    message_body = {
         "rejected": "Check the key and selected model; existing credential unchanged.",
         "inconclusive": "Try again when the provider is available; existing credential unchanged.",
     }.get(outcome)
+    details["replaced"] = replaced
+    if outcome != "accepted":
+        details["reason"] = outcome
+    await record_audit(
+        action="user.ai_credential_set",
+        actor=username,
+        message=(
+            f"User '{username}' set their {provider} AI credential"
+            f" (outcome={outcome}, model={model})"
+        ),
+        target_type="provider",
+        target_id=provider,
+        outcome="success" if outcome == "accepted" else "failure",
+        # ``model`` is what the key was verified against and ``replaced`` tells
+        # an add from a rotation afterwards (#379) — never the key itself.
+        details=details,
+        request=request,
+    )
     return JSONResponse(
         content=strip_sensitive_from_response(
             {
                 "outcome": outcome,
                 "ok": outcome == "accepted",
-                **({"message": message} if message else {}),
+                **({"message": message_body} if message_body else {}),
             }
         ),
         headers={"Cache-Control": "no-store"},
@@ -11759,6 +13442,15 @@ async def delete_user_ai_credential(provider: str, request: Request) -> JSONResp
     except storage.UnreadableAiCredentialsError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     await _revoke_ai_sessions(sessions)
+    await record_audit(
+        action="user.ai_credential_delete",
+        actor=username,
+        message=f"User '{username}' deleted their {provider} AI credential",
+        target_type="provider",
+        target_id=provider,
+        details={"provider": provider},
+        request=request,
+    )
     return JSONResponse(content={"ok": True}, headers={"Cache-Control": "no-store"})
 
 
@@ -11923,6 +13615,16 @@ async def delete_filter_preset_endpoint(preset_id: int, request: Request) -> Non
 
 # --- User token endpoints ---
 
+# Which stored credential field each submitted token belongs to is the field
+# itself (#379): "the jira token changed" cannot tell an email from a secret,
+# so the audit row names the field. The value is never recorded.
+_TRACKER_TOKEN_FIELDS: tuple[str, ...] = (
+    "github_token",
+    "jira_email",
+    "jira_token",
+    "jira_sa_token",
+)
+
 
 @app.get("/api/user/tokens", operation_id="getUserTokensEndpoint")
 async def get_user_tokens_endpoint(request: Request) -> JSONResponse:
@@ -11957,52 +13659,109 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
     empty string or ``null`` clears that one field, and a string sets it.
     Clearing one field never touches the others.
     """
-    _require_reviewer(request)
-    _check_allow_list(request)
     username = request.state.username
-    if not username:
-        raise HTTPException(status_code=401, detail="Username required")
-    # Verify user exists in DB
-    user = await storage.get_user_by_username(username)
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found. Register first.")
-    body = await _read_json_object(request)
-
-    # Presence-based, so an omitted field keeps its stored value and an empty
-    # one clears it. Stringifying first would store a null as the literal "None".
+    message = f"User '{username}' saved tracker tokens"
+    submitted: list[str] = []
     kwargs: dict[str, str] = {}
-    for field in ("github_token", "jira_email", "jira_token", "jira_sa_token"):
-        if field not in body:
-            continue
-        value = body[field]
-        if value is None:
-            kwargs[field] = ""
-        elif isinstance(value, str):
-            kwargs[field] = value.strip()
-        else:
+    action = "user.tracker_token_set"
+    try:
+        _require_reviewer(request)
+        _check_allow_list(request)
+        if not username:
+            raise HTTPException(status_code=401, detail="Username required")
+        # Verify user exists in DB
+        user = await storage.get_user_by_username(username)
+        if not user:
             raise HTTPException(
-                status_code=400, detail=f"{field} must be a string or null"
+                status_code=404, detail="User not found. Register first."
             )
-        if (
-            field == "jira_sa_token"
-            and kwargs[field]
-            and classify_jira_secret(kwargs[field]) is None
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "jira_sa_token must be an ATOA-prefixed Atlassian OAuth "
-                    "2.0 credential client secret or an ATST-prefixed "
-                    "service-account scoped token — use jira_token for "
-                    "regular credentials"
-                ),
-            )
+        body = await _read_json_object(request)
 
-    if not kwargs:
-        return JSONResponse(content={"ok": True, "saved": False})
+        # Presence-based, so an omitted field keeps its stored value and an
+        # empty one clears it. Stringifying first would store a null as the
+        # literal "None".
+        for field in _TRACKER_TOKEN_FIELDS:
+            if field not in body:
+                continue
+            submitted.append(field)
+            value = body[field]
+            if value is None:
+                kwargs[field] = ""
+            elif isinstance(value, str):
+                kwargs[field] = value.strip()
+            else:
+                raise HTTPException(
+                    status_code=400, detail=f"{field} must be a string or null"
+                )
+            if (
+                field == "jira_sa_token"
+                and kwargs[field]
+                and classify_jira_secret(kwargs[field]) is None
+            ):
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "jira_sa_token must be an ATOA-prefixed Atlassian OAuth "
+                        "2.0 credential client secret or an ATST-prefixed "
+                        "service-account scoped token — use jira_token for "
+                        "regular credentials"
+                    ),
+                )
 
-    await storage.save_user_tokens(username, **kwargs)
+        if not kwargs:
+            return JSONResponse(content={"ok": True, "saved": False})
+        action = (
+            "user.tracker_token_delete"
+            if not any(kwargs.values())
+            else "user.tracker_token_set"
+        )
+
+        # One row per field and only for a field that really changed: the
+        # profile form resubmits every field on each save, so an unchanged
+        # value (or clearing one that was never set) must not write a row. Read
+        # the stored values first — afterwards every submitted value trivially
+        # "matches".
+        stored = await storage.get_user_tokens(username)
+        changed = {
+            field: value for field, value in kwargs.items() if value != stored[field]
+        }
+        await storage.save_user_tokens(username, **kwargs)
+    except HTTPException as exc:
+        # One row for the attempt, never one per submitted field, and never the
+        # value that was rejected.
+        await _record_refused_attempt(
+            action=action,
+            request=request,
+            message=message,
+            target_type="user",
+            target_id=username,
+            exc=exc,
+            details={"fields": submitted},
+        )
+        raise
+    except Exception:
+        await _record_failed_attempt(
+            action=action,
+            request=request,
+            message=message,
+            target_type="user",
+            target_id=username,
+            reason="storage_error",
+            details={"fields": submitted},
+        )
+        raise
     logger.debug(f"Saved tokens for user '{username}': {sorted(kwargs)}")
+    for field, value in changed.items():
+        kind = "set" if value else "delete"
+        await record_audit(
+            action=f"user.tracker_token_{kind}",
+            actor=username,
+            message=f"User '{username}' {kind} {field}",
+            target_type="user",
+            target_id=username,
+            details={"field": field},
+            request=request,
+        )
     return JSONResponse(content={"ok": True, "saved": True})
 
 
@@ -12011,36 +13770,15 @@ async def save_user_tokens_endpoint(request: Request) -> JSONResponse:
 
 _ANSI_RE = re.compile(r"\x1b\[[0-9;]*m")
 
-# --- Live log broadcast for SSE streaming ---
-# Each listener is (owning_loop, queue) so emit() can wake the correct loop
-# from non-asyncio logging threads via call_soon_threadsafe.
-_log_listeners: set[tuple[asyncio.AbstractEventLoop, asyncio.Queue[str]]] = set()
-_log_listeners_lock = threading.Lock()
-
 
 class _SSELogHandler(logging.Handler):
     """Logging handler that broadcasts formatted records to SSE listeners."""
 
     def emit(self, record: logging.LogRecord) -> None:
-        with _log_listeners_lock:
-            if not _log_listeners:
-                return
-            listeners = list(_log_listeners)
+        if not _log_broadcast.has_listeners:
+            return
         try:
-            msg = self.format(record)
-            clean = _ANSI_RE.sub("", msg)
-
-            def _enqueue(q: asyncio.Queue[str], line: str) -> None:
-                try:
-                    q.put_nowait(line)
-                except asyncio.QueueFull:
-                    pass
-
-            for loop, q in listeners:
-                try:
-                    loop.call_soon_threadsafe(_enqueue, q, clean)
-                except Exception:
-                    logger.debug("SSE log enqueue failed for a listener", exc_info=True)
+            _log_broadcast.publish(_ANSI_RE.sub("", self.format(record)))
         except Exception:
             logger.debug("SSE log emit failed", exc_info=True)
 
@@ -12135,47 +13873,467 @@ async def stream_logs(
             return True
         return level_filter in line
 
-    async def event_generator() -> AsyncIterator[str]:
-        # Send initial tail from log file
-        if _LOG_FILE:
-            log_path = Path(_LOG_FILE)
-            if log_path.exists():
-                try:
-                    tail_lines = await asyncio.to_thread(
-                        _read_log_tail, log_path, lines
-                    )
-                    for line in tail_lines:
-                        clean = _ANSI_RE.sub("", line)
-                        if _matches_level(clean):
-                            yield f"event: log\ndata: {clean.replace(chr(10), '  ')}\n\n"
-                except OSError:
-                    pass
+    def _log_chunk(line: str) -> str:
+        return f"event: log\ndata: {line.replace(chr(10), '  ')}\n\n"
 
-        # Stream live logs via broadcast queue
-        queue: asyncio.Queue[Any] = asyncio.Queue(maxsize=1000)
-        loop = asyncio.get_running_loop()
-        listener = (loop, queue)
-        with _log_listeners_lock:
-            _log_listeners.add(listener)
-        try:
-            while True:
-                if await request.is_disconnected():
-                    break
-                try:
-                    line = await asyncio.wait_for(queue.get(), timeout=30)
-                    if _matches_level(line):
-                        yield f"event: log\ndata: {line.replace(chr(10), '  ')}\n\n"
-                except TimeoutError:
-                    yield ": keepalive\n\n"
-        finally:
-            with _log_listeners_lock:
-                _log_listeners.discard(listener)
+    async def event_generator() -> AsyncIterator[str]:
+        # Subscribe before reading the tail: a line logged while the tail is
+        # being read then lands in the queue instead of falling into the gap
+        # between the two sources.
+        async with _log_broadcast.subscribe() as subscription:
+            # De-duplication: an exact-content multiset of the tail lines. A live
+            # line matching one already sent is that same line read twice, so it
+            # is skipped once. Cheap, and a duplicate log line is only ever
+            # suppressed for the tail window.
+            tail_seen: Counter[str] = Counter()
+
+            # Send initial tail from log file
+            if _LOG_FILE:
+                log_path = Path(_LOG_FILE)
+                if log_path.exists():
+                    try:
+                        tail_lines = await asyncio.to_thread(
+                            _read_log_tail, log_path, lines
+                        )
+                        for line in tail_lines:
+                            clean = _ANSI_RE.sub("", line)
+                            tail_seen[clean] += 1
+                            if _matches_level(clean):
+                                yield _log_chunk(clean)
+                    except OSError:
+                        pass
+
+            # Stream live logs via the payload broadcast queue
+            def _render(line: str) -> str | None:
+                if tail_seen[line] > 0:
+                    tail_seen[line] -= 1
+                    return None
+                return _log_chunk(line) if _matches_level(line) else None
+
+            async for chunk in _queue_sse_events(request, subscription, _render):
+                yield chunk
 
     logger.info(
         "GET /api/admin/logs/stream: streaming logs (lines=%s, level=%s)",
         lines,
         level_filter or "ALL",
     )
+    # Recorded once per connection, not per streamed line: the stream is
+    # long-lived, and the initial tail is the same request.
+    username = request.state.username or "anonymous"
+    await record_audit(
+        action="logs.stream",
+        actor=username,
+        message=(
+            f"Admin '{username}' streamed server logs"
+            f" (lines={lines}, level={level_filter or 'ALL'})"
+        ),
+        target_type="logs",
+        details={"lines": lines, "level": level_filter or "ALL"},
+        request=request,
+    )
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# --- Audit trail browsing (#379) ---
+
+
+def _audit_iso_bound(
+    value: str | None, name: str, *, end_of_day: bool = False
+) -> str | None:
+    """Normalize an ISO 8601 query bound to the stored ``created_at`` format.
+
+    A bare ``YYYY-MM-DD`` means a UTC day: ``since`` starts at 00:00:00 UTC and
+    ``until`` (``end_of_day``) runs to the last microsecond of that UTC day. An
+    explicit offset is honoured; a naive timestamp is read as UTC. Either way the
+    value is converted to UTC and rendered by ``storage.audit_timestamp``, the
+    one format the rows are stored in.
+    """
+    if not value:
+        return None
+    raw = value.strip()
+    try:
+        parsed = datetime.fromisoformat(raw)
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=400, detail=f"{name} must be an ISO 8601 timestamp"
+        ) from exc
+    if end_of_day and len(raw) == 10:  # date-only YYYY-MM-DD
+        parsed = parsed.replace(hour=23, minute=59, second=59, microsecond=999999)
+    return storage.audit_timestamp(parsed)
+
+
+# CSV column order for the audit export — the documented header. The hash
+# columns make the export independently verifiable, row by row;
+# ``hash_payload`` is the exact text ``entry_hash`` covers and ``hash_version``
+# says which field list that payload was built from (v1 = the original list,
+# v2 adds ``throttle_rescue``).
+_AUDIT_EXPORT_COLUMNS: tuple[str, ...] = (
+    "id",
+    "created_at",
+    "actor",
+    "actor_role",
+    "is_admin",
+    "action",
+    "target_type",
+    "target_id",
+    "outcome",
+    "request_ip",
+    "details",
+    "hash_version",
+    "prev_hash",
+    "entry_hash",
+    "hash_payload",
+)
+# Free-text columns can be attacker-controlled (a failed login records the
+# typed username), so a spreadsheet would execute a leading formula prefix.
+# ``hash_payload`` is JSON object text, which never starts with one.
+_AUDIT_EXPORT_TEXT_COLUMNS: frozenset[str] = frozenset(
+    {
+        "actor",
+        "action",
+        "target_type",
+        "target_id",
+        "details",
+        "request_ip",
+        "hash_payload",
+    }
+)
+_AUDIT_CSV_FORMULA_PREFIXES = ("=", "+", "-", "@", "\t", "\r")
+# Rows per storage round-trip and the CSV buffer size that triggers a flush:
+# an export streams the whole matched set without holding it in memory.
+_AUDIT_EXPORT_BATCH = 500
+_AUDIT_EXPORT_FLUSH_BYTES = 64 * 1024
+
+
+def _audit_filter_params(
+    actor: Annotated[
+        str | None, Query(description="Exact actor username (case-insensitive)")
+    ] = None,
+    action: Annotated[
+        list[str] | None,
+        Query(description="Action id; repeat the parameter or comma-separate"),
+    ] = None,
+    target_type: Annotated[
+        str | None, Query(description="Target type, e.g. job")
+    ] = None,
+    target_id: Annotated[
+        str | None, Query(description="Target id, e.g. a job id")
+    ] = None,
+    outcome: Annotated[
+        str | None, Query(description="success, failure, or denied")
+    ] = None,
+    q: Annotated[
+        str | None,
+        Query(
+            description=(
+                "Case-insensitive substring search over actor, target_id, "
+                "action and details"
+            )
+        ),
+    ] = None,
+    since: Annotated[
+        str | None,
+        Query(
+            description=(
+                "ISO 8601 lower bound (inclusive). A date-only value means 00:00 "
+                "UTC that day; a naive timestamp is read as UTC."
+            )
+        ),
+    ] = None,
+    until: Annotated[
+        str | None,
+        Query(
+            description=(
+                "ISO 8601 upper bound (inclusive). A date-only value means the "
+                "last microsecond of that UTC day; a naive timestamp is read as UTC."
+            )
+        ),
+    ] = None,
+) -> dict[str, Any]:
+    """Shared list/export filters, normalized for ``storage.list_audit_events``."""
+    actions = [
+        part.strip()
+        for value in action or []
+        for part in value.split(",")
+        if part.strip()
+    ]
+    return {
+        "actor": actor or None,
+        "action": actions or None,
+        "target_type": target_type or None,
+        "target_id": target_id or None,
+        "outcome": outcome or None,
+        "q": q or None,
+        "date_from": _audit_iso_bound(since, "since"),
+        "date_to": _audit_iso_bound(until, "until", end_of_day=True),
+    }
+
+
+def _audit_csv_cell(name: str, value: Any) -> Any:
+    """Neutralize a spreadsheet formula in an attacker-controlled text cell.
+
+    A leading ``=``/``+``/``-``/``@``/tab/CR makes Excel and Sheets treat the
+    cell as a formula, so it is quoted with ``'``. A value that already starts
+    with ``'`` is quoted too, which keeps the escaping invertible: removing one
+    leading apostrophe always recovers the stored value, including one that
+    began with an apostrophe. Numeric and id columns keep their value verbatim
+    — they are not attacker text and must stay castable.
+    """
+    if (
+        name in _AUDIT_EXPORT_TEXT_COLUMNS
+        and isinstance(value, str)
+        and value.startswith((*_AUDIT_CSV_FORMULA_PREFIXES, "'"))
+    ):
+        return f"'{value}"
+    return value
+
+
+def _audit_export_record(event: dict[str, Any]) -> dict[str, Any]:
+    """One CSV row: the export columns, ``details`` as its stored JSON text."""
+    record: dict[str, Any] = {}
+    for name in _AUDIT_EXPORT_COLUMNS:
+        value = event.get(name)
+        if name == "details":
+            value = json.dumps(value or {}, ensure_ascii=False, separators=(",", ":"))
+        elif name == "is_admin":
+            value = int(bool(value))
+        record[name] = _audit_csv_cell(name, "" if value is None else value)
+    return record
+
+
+def _audit_public_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Strip credential fields from an audit event before it leaves the API.
+
+    ``details`` can nest a ``request_params`` blob, which the shared
+    :func:`strip_sensitive_from_response` (a no-op one level up) redacts.
+    """
+    details = event.get("details")
+    if isinstance(details, dict):
+        event = {**event, "details": strip_sensitive_from_response(details)}
+    return strip_sensitive_from_response(event)
+
+
+def _audit_export_event(event: dict[str, Any]) -> dict[str, Any]:
+    """Public event plus ``hash_payload``: the bytes ``entry_hash`` covers.
+
+    Verification is then ``sha256(hash_payload + prev_hash) == entry_hash``,
+    with nothing re-mapped. A row written before details were scrubbed carries
+    its secrets in those bytes, so the raw fields are withheld when read-time
+    redaction changed the details: an unverifiable row beats a leaked
+    credential.
+    """
+    public = _audit_public_event(event)
+    if public["details"] == event["details"]:
+        return public
+    return {
+        name: value
+        for name, value in public.items()
+        if name not in {"details_raw", "hash_payload"}
+    }
+
+
+def _audit_action_label(action: str) -> str:
+    """Human label for an action id: ``auth.login_failed`` → ``Auth Login Failed``."""
+    return action.replace(".", " ").replace("_", " ").title()
+
+
+@app.get("/api/admin/audit", operation_id="listAuditEventsEndpoint")
+async def list_audit_events_endpoint(
+    request: Request,
+    filters: Annotated[dict[str, Any], Depends(_audit_filter_params)],
+    event_id: Annotated[
+        int | None, Query(alias="id", ge=1, description="Return only this event id")
+    ] = None,
+    limit: int = Query(50, ge=1, le=500),
+    offset: int = Query(0, ge=0),
+) -> dict[str, Any]:
+    """List recorded audit events newest-first, with the total match count.
+
+    ``id`` returns just that event, which is what an "this job was deleted"
+    link opens; an unknown id is an empty list, not a 404 — a list endpoint
+    answers "no match" the same way it does for any other filter.
+    """
+    _require_admin(request)
+    result = await storage.list_audit_events(
+        **filters, event_id=event_id, limit=limit, offset=offset
+    )
+    result["events"] = [_audit_public_event(event) for event in result["events"]]
+    logger.debug(
+        "GET /api/admin/audit: returning %d of %d events (limit=%d offset=%d)",
+        len(result["events"]),
+        result["total"],
+        limit,
+        offset,
+    )
+    return strip_sensitive_from_response({**result, "limit": limit, "offset": offset})
+
+
+@app.get("/api/admin/audit/verify", operation_id="verifyAuditChainEndpoint")
+async def verify_audit_chain_endpoint(
+    request: Request,
+    limit: int | None = Query(
+        None, ge=1, description="Verify only the newest N chained events"
+    ),
+) -> dict[str, Any]:
+    """Recompute the audit hash chain and report the first tampered event.
+
+    "``legacy`` counts rows written before the chain existed (NULL hashes): they
+    are reported separately, never counted as broken and never given a
+    fabricated hash. ``truncated``/``truncated_before_id`` mark the boundary
+    left by retention pruning, which is not a break. Each row is verified with
+    its own ``hash_version`` (v1 = the original field list; v2 adds
+    ``throttle_rescue``), so a trail mixing both versions verifies cleanly.
+    """
+    _require_admin(request)
+    result = await storage.verify_audit_chain(limit=limit)
+    logger.info(
+        "Audit chain verification: ok=%s checked=%d legacy=%d first_broken_id=%s",
+        result["ok"],
+        result["checked"],
+        result["legacy"],
+        result["first_broken_id"],
+    )
+    return strip_sensitive_from_response(result)
+
+
+@app.get("/api/admin/audit/export", operation_id="exportAuditEventsEndpoint")
+async def export_audit_events_endpoint(
+    request: Request,
+    filters: Annotated[dict[str, Any], Depends(_audit_filter_params)],
+    format: Literal["json", "csv"] = Query(
+        "json", description="Export format: json or csv"
+    ),
+) -> StreamingResponse:
+    """Export every audit event matching the list filters, streamed in batches.
+
+    The way to retain evidence before retention or the row cap deletes it: the
+    full matched set is streamed, so no page size limits the export and memory
+    stays bounded. CSV columns are ``id, created_at, actor, actor_role,
+    is_admin, action, target_type, target_id, outcome, request_ip, details,
+    hash_version, prev_hash, entry_hash, hash_payload`` — the hash columns let a
+    retained export be verified on its own: ``hash_payload`` is the exact
+    canonical text ``entry_hash`` covers, so ``sha256(hash_payload + prev_hash)``
+    matches with no field re-mapping, and ``hash_version`` names the field list
+    that payload was built from (v1 = the original list, v2 adds
+    ``throttle_rescue``). Each JSON event carries the same ``hash_version`` and
+    ``hash_payload`` plus ``details_raw``, the stored ``details`` text inside it.
+    """
+    _require_admin(request)
+    logger.info(
+        "Admin '%s' exported the audit trail as %s",
+        request.state.username,
+        format,
+    )
+
+    async def _events() -> AsyncIterator[dict[str, Any]]:
+        exported = 0
+        try:
+            async for batch in storage.iter_audit_events(
+                batch_size=_AUDIT_EXPORT_BATCH, **filters
+            ):
+                for event in batch:
+                    exported += 1
+                    yield _audit_export_event(event)
+        finally:
+            # Recorded once the rows have gone out, so the export record can
+            # never land in its own snapshot and ``count`` is exactly what this
+            # response wrote — including a stream the client cut short.
+            await record_audit(
+                action="audit.export",
+                actor=request.state.username,
+                message=(
+                    f"Admin '{request.state.username}' exported the audit trail as"
+                    f" {format} ({exported} events)"
+                ),
+                target_type="audit",
+                details={
+                    "format": format,
+                    "filters": {
+                        name: value for name, value in filters.items() if value
+                    },
+                    "count": exported,
+                },
+                request=request,
+            )
+
+    async def _json_chunks() -> AsyncIterator[str]:
+        yield "["
+        separator = "\n"
+        async for event in _events():
+            yield separator + json.dumps(event, default=str)
+            separator = ",\n"
+        yield "]\n"
+
+    async def _csv_chunks() -> AsyncIterator[str]:
+        buffer = io.StringIO()
+        writer = csv.DictWriter(buffer, fieldnames=list(_AUDIT_EXPORT_COLUMNS))
+        writer.writeheader()
+        async for event in _events():
+            writer.writerow(_audit_export_record(event))
+            if buffer.tell() >= _AUDIT_EXPORT_FLUSH_BYTES:
+                yield buffer.getvalue()
+                buffer.seek(0)
+                buffer.truncate()
+        if buffer.tell():
+            yield buffer.getvalue()
+
+    return StreamingResponse(
+        _json_chunks() if format == "json" else _csv_chunks(),
+        media_type=(
+            "application/json" if format == "json" else "text/csv; charset=utf-8"
+        ),
+        headers={
+            "Content-Disposition": f"attachment; filename=audit-export.{format}",
+            "Cache-Control": "no-store",
+        },
+    )
+
+
+@app.get("/api/admin/audit/actions", operation_id="listAuditActions")
+async def list_audit_actions(request: Request) -> dict[str, Any]:
+    """Distinct recorded actions with count, last activity, and a display label."""
+    _require_admin(request)
+    actions = await storage.distinct_audit_actions()
+    return strip_sensitive_from_response(
+        {
+            "actions": [
+                {**entry, "label": _audit_action_label(entry["action"])}
+                for entry in actions
+            ]
+        }
+    )
+
+
+@app.get("/api/admin/audit/stream", operation_id="streamAuditEvents")
+async def stream_audit_events(request: Request) -> StreamingResponse:
+    """SSE stream of audit events as they are recorded (admin only).
+
+    Each event is sent as ``event: audit:event`` with the same public
+    projection as the list endpoint (credentials in nested ``details`` are
+    stripped). One event at a time, so ``target_label`` is not resolved here:
+    the client keeps the ids it already has. If a slow subscriber's queue
+    overflows, the skipped payloads are not silently lost: ``event: audit-gap``
+    carries ``{"dropped": N}`` before the stream resumes, so the client can
+    refetch the missed range.
+    """
+    _require_admin(request)
+
+    def _render(event: dict[str, Any]) -> str:
+        public = _audit_public_event(event)
+        return f"event: audit:event\ndata: {json.dumps(public, default=str)}\n\n"
+
+    async def event_generator() -> AsyncIterator[str]:
+        async with _audit_broadcast.subscribe() as subscription:
+            async for chunk in _queue_sse_events(
+                request, subscription, _render, gap_event="audit-gap"
+            ):
+                yield chunk
+
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
@@ -12282,6 +14440,18 @@ async def list_session_transcripts(
         items.append(transcript_summary(info, context))
 
     live_recording = await sidecar_transcripts.live_recording_enabled()
+    await record_audit(
+        action="transcript.list",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' listed {len(items)} transcript(s)"
+            + (f" for job {job_id}" if job_id else "")
+        ),
+        target_type="transcript",
+        target_id=job_id or None,
+        details={"count": len(items)},
+        request=request,
+    )
     return strip_sensitive_from_response(
         {
             # Live sidecar state when reachable; the setting value otherwise.
@@ -12312,13 +14482,45 @@ async def download_session_transcript(
     """
     _require_admin(request)
 
+    # Which transcript, and the run it belongs to when the usage rows know it:
+    # without this the row says someone downloaded *a* transcript.
+    details: dict[str, Any] = {"session_id": session_id}
+    usage = (await storage.get_usage_context_for_sessions([session_id])).get(session_id)
+    if usage and usage.get("job_id"):
+        details["job_id"] = usage["job_id"]
+
     path = transcript_path(session_id)
     if path is None:
+        await record_audit(
+            action="transcript.download",
+            actor=request.state.username,
+            message=(
+                f"Admin '{request.state.username}' requested an invalid transcript id"
+            ),
+            target_type="transcript",
+            target_id=session_id,
+            outcome="failure",
+            details=details,
+            request=request,
+        )
         raise HTTPException(
             status_code=400,
             detail="Invalid session id — expected a sidecar session UUID",
         )
     if not path.is_file():
+        await record_audit(
+            action="transcript.download",
+            actor=request.state.username,
+            message=(
+                f"Admin '{request.state.username}' downloaded missing transcript"
+                f" {session_id}"
+            ),
+            target_type="transcript",
+            target_id=session_id,
+            outcome="failure",
+            details=details,
+            request=request,
+        )
         raise HTTPException(status_code=404, detail="Transcript not found")
 
     # Sync generator: Starlette iterates sync generators in a threadpool, so
@@ -12327,6 +14529,16 @@ async def download_session_transcript(
         with path.open("rb") as handle:
             while chunk := handle.read(64 * 1024):
                 yield chunk
+
+    await record_audit(
+        action="transcript.download",
+        actor=request.state.username,
+        message=f"Admin '{request.state.username}' downloaded transcript {session_id}",
+        target_type="transcript",
+        target_id=session_id,
+        details=details,
+        request=request,
+    )
 
     return StreamingResponse(
         file_stream(),
@@ -12372,6 +14584,8 @@ async def admin_create_user_endpoint(
     # must not leave an accidental grant). Response uses effective value.
     stored_can_view_reports = body.can_view_reports
     server_grant = body.can_use_server_providers
+    # An admin-created account is usable immediately, never pending approval.
+    status = "active"
 
     try:
         if role == "admin":
@@ -12383,7 +14597,7 @@ async def admin_create_user_endpoint(
         else:
             _, raw_key = await storage.create_user(
                 username,
-                status="active",
+                status=status,
                 role=role,
                 can_view_reports=stored_can_view_reports,
                 can_use_server_providers=server_grant,
@@ -12394,9 +14608,24 @@ async def admin_create_user_endpoint(
         logger.exception("Failed to create user '%s'", username)
         raise HTTPException(status_code=500, detail="Internal server error") from exc
 
-    logger.info(
-        f"[AUDIT] Admin '{request.state.username}' created {role} user '{username}'"
-        f" (can_view_reports={stored_can_view_reports}, can_use_server_providers={server_grant})"
+    await record_audit(
+        action="admin.user_create",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' created {role} user '{username}'"
+            f" (can_view_reports={stored_can_view_reports}, "
+            f"can_use_server_providers={server_grant})"
+        ),
+        target_type="user",
+        target_id=username,
+        details={
+            "role": role,
+            "can_view_reports": stored_can_view_reports,
+            "can_use_server_providers": server_grant,
+            # Creation is not approval: the row says which one happened.
+            "approval": status,
+        },
+        request=request,
     )
     return JSONResponse(
         content={
@@ -12419,6 +14648,9 @@ async def delete_user_endpoint(request: Request, username: str) -> dict[str, Any
     if username == request.state.username:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
 
+    # Read the account before it is gone: the row has to say what that account
+    # had, or a permission that disappears with it can never be explained.
+    snapshot = await storage.get_user_audit_snapshot(username)
     try:
         deleted = await storage.delete_user(username)
     except ValueError as exc:
@@ -12428,7 +14660,15 @@ async def delete_user_endpoint(request: Request, username: str) -> dict[str, Any
 
     notify_pending_count_changed()
     await _cleanup_revoked_ai_sessions()
-    logger.info(f"[AUDIT] Admin '{request.state.username}' deleted user '{username}'")
+    await record_audit(
+        action="admin.user_delete",
+        actor=request.state.username,
+        message=f"Admin '{request.state.username}' deleted user '{username}'",
+        target_type="user",
+        target_id=username,
+        details=snapshot,
+        request=request,
+    )
     return {"deleted": username}
 
 
@@ -12460,8 +14700,17 @@ async def change_user_role_endpoint(request: Request, username: str) -> JSONResp
     # Promoting a pending user removes them from the pending list.
     notify_pending_count_changed()
 
-    logger.info(
-        f"[AUDIT] Admin '{request.state.username}' changed role of '{username}' to '{new_role}'"
+    await record_audit(
+        action="admin.user_role_change",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' changed role of '{username}'"
+            f" to '{new_role}'"
+        ),
+        target_type="user",
+        target_id=username,
+        details={"role": new_role},
+        request=request,
     )
 
     content: dict[str, Any] = {"username": username, "role": new_role}
@@ -12491,9 +14740,17 @@ async def set_user_can_view_reports_endpoint(
     if not updated:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
 
-    logger.info(
-        f"[AUDIT] Admin '{request.state.username}' set can_view_reports={value}"
-        f" for user '{username}'"
+    await record_audit(
+        action="admin.user_can_view_reports",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' set can_view_reports={value}"
+            f" for user '{username}'"
+        ),
+        target_type="user",
+        target_id=username,
+        details={"value": value},
+        request=request,
     )
     return JSONResponse(
         content={"username": username, "can_view_reports": value},
@@ -12517,11 +14774,17 @@ async def set_user_can_use_server_providers(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     if not updated:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
-    logger.info(
-        "[AUDIT] Admin '%s' set can_use_server_providers=%s for user '%s'",
-        request.state.username,
-        body.can_use_server_providers,
-        username,
+    await record_audit(
+        action="admin.user_can_use_server_providers",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' set can_use_server_providers="
+            f"{body.can_use_server_providers} for user '{username}'"
+        ),
+        target_type="user",
+        target_id=username,
+        details={"value": body.can_use_server_providers},
+        request=request,
     )
     return JSONResponse(
         content={
@@ -12609,25 +14872,35 @@ async def set_free_ai_models_endpoint(
                 "version": storage.free_models_version(current),
             },
         ) from exc
-    logger.info(
-        "[AUDIT] Admin '%s' set free AI models: %d pair(s)",
-        request.state.username,
-        len(stored),
+    free_pairs = [(entry.provider, entry.model) for entry in body.models]
+    await record_audit(
+        action="free_models.set",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' set free AI models:"
+            f" {len(stored)} pair(s)"
+        ),
+        details={"count": len(stored)},
+        request=request,
     )
     # free ⊆ included (#347): a managed provider (stored key or selection)
     # only exposes its selection, so a free pair outside it would vanish
     # from the restricted catalog. Auto-include it — the same normalization
     # the server-providers PUT applies.
     auto_included = await storage.auto_include_free_pairs(
-        [(entry.provider, entry.model) for entry in body.models],
+        free_pairs,
         request.state.username or "admin",
     )
     if auto_included:
-        logger.info(
-            "[AUDIT] Admin '%s' auto-included %d free pair(s) into managed "
-            "provider selections",
-            request.state.username,
-            len(auto_included),
+        await record_audit(
+            action="provider.free_selection_auto_include",
+            actor=request.state.username,
+            message=(
+                f"Admin '{request.state.username}' auto-included"
+                f" {len(auto_included)} free pair(s) into managed provider selections"
+            ),
+            details={"count": len(auto_included)},
+            request=request,
         )
     return {
         "models": stored,
@@ -12691,11 +14964,16 @@ async def _seed_server_provider_selection(provider: str, updated_by: str) -> Non
     )
     if entries:
         await storage.set_server_provider_models(provider, entries, updated_by)
-        logger.info(
-            "[AUDIT] Seeded full-catalog model selection for newly-keyed "
-            "provider '%s' (%d models)",
-            provider,
-            len(entries),
+        await record_audit(
+            action="provider.selection_seed",
+            actor=updated_by,
+            message=(
+                f"Seeded full-catalog model selection for newly-keyed"
+                f" provider '{provider}' ({len(entries)} models)"
+            ),
+            target_type="provider",
+            target_id=provider,
+            details={"provider": provider, "count": len(entries)},
         )
 
 
@@ -13274,9 +15552,15 @@ async def _verify_and_store_server_provider_key(
     request: Request,
     *,
     replacing: bool,
+    promoted: bool = False,
     include_model_count: bool = False,
 ) -> JSONResponse:
     """Shared add/rotate/store path: verify the key with a real turn, then store.
+
+    ``promoted`` is set by ``store-deployment-key``, which hands over the
+    credential the deployment already resolves instead of one an admin typed:
+    the audit action then distinguishes it (``provider.key.promote``) while the
+    target/outcome/details shape stays identical to add/rotate (#379).
 
     ``include_model_count`` adds the captured key-scoped model count to the
     success payload (#378) — reported only when the capture actually produced
@@ -13314,6 +15598,22 @@ async def _verify_and_store_server_provider_key(
             break
     if outcome != "accepted":
         # Mirror the user flow: report the outcome, never store an untested key.
+        if promoted:
+            # A promotion that never stores its credential still happened: the
+            # attempt is the trail entry (the success row is written below).
+            await record_audit(
+                action="provider.key.promote",
+                actor=request.state.username,
+                message=(
+                    f"Admin '{request.state.username}' promoted the deployment"
+                    f" credential for '{provider}' (failure: verification_{outcome})"
+                ),
+                target_type="provider",
+                target_id=provider,
+                outcome="failure",
+                details={"provider": provider, "reason": f"verification_{outcome}"},
+                request=request,
+            )
         message = {
             "rejected": "Check the key and selected model; existing credential unchanged.",
             "inconclusive": "Try again when the provider is available; existing credential unchanged.",
@@ -13367,13 +15667,35 @@ async def _verify_and_store_server_provider_key(
         await _seed_server_provider_selection(
             provider, request.state.username or "admin"
         )
-    logger.info(
-        "[AUDIT] Admin '%s' stored server provider key for '%s' (verified%s)",
-        request.state.username,
-        provider,
-        f", {len(key_models)} key-scoped models"
-        if capture_status == "supported"
-        else "",
+    action = (
+        "provider.key.rotate"
+        if replacing
+        else "provider.key.promote"
+        if promoted
+        else "provider.key.store"
+    )
+    await record_audit(
+        action=action,
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' "
+            + (
+                "promoted the deployment credential"
+                if promoted
+                else "stored server provider key"
+            )
+            + f" for '{provider}' (verified"
+            + (
+                f", {len(key_models)} key-scoped models"
+                if capture_status == "supported"
+                else ""
+            )
+            + ")"
+        ),
+        target_type="provider",
+        target_id=provider,
+        details={"provider": provider, "outcome": "accepted"},
+        request=request,
     )
     return JSONResponse(
         content=strip_sensitive_from_response(
@@ -13657,47 +15979,70 @@ async def store_deployment_provider_key(
     ``verification_model`` is optional: omitted, the credential's own first
     discovered model verifies it, and a ``400`` asks for one when discovery
     exposes none (#378).
-    """
-    _require_admin(request)
-    # Stored first: that answer needs no credential, so it must not hide
-    # behind a "no deployment credential" 404.
-    if await _has_stored_server_key(provider):
-        raise HTTPException(
-            status_code=409,
-            detail=f"Provider '{provider}' already has a stored key; use rotate-key",
-        )
-    from rootcoz.ai_client import deployment_provider_credentials
 
-    credentials = deployment_provider_credentials()
-    # ``None`` is an unreadable manifest (the resolver logged why): it resolves
-    # nothing right now, so it answers like "no credential", never a 500.
-    match = next(
-        (
-            (name, key)
-            for name, key in (credentials or {}).items()
-            if normalize_provider(name) == normalize_provider(provider)
-        ),
-        None,
-    )
-    if match is None:
-        raise HTTPException(
-            status_code=404,
-            detail=f"Provider '{provider}' has no deployment credential to store",
+    Every exit writes exactly one ``provider.key.promote`` row: the shared add
+    path writes ``success`` (or a rejected verification's ``failure``) and the
+    refusals below are audited here from their status code, with a reason code
+    and never the key.
+    """
+    try:
+        _require_admin(request)
+        # Stored first: that answer needs no credential, so it must not hide
+        # behind a "no deployment credential" 404.
+        if await _has_stored_server_key(provider):
+            raise HTTPException(
+                status_code=409,
+                detail=f"Provider '{provider}' already has a stored key; use rotate-key",
+            )
+        from rootcoz.ai_client import deployment_provider_credentials
+
+        credentials = deployment_provider_credentials()
+        # ``None`` is an unreadable manifest (the resolver logged why): it
+        # resolves nothing right now, so it answers like "no credential", never
+        # a 500.
+        match = next(
+            (
+                (name, key)
+                for name, key in (credentials or {}).items()
+                if normalize_provider(name) == normalize_provider(provider)
+            ),
+            None,
         )
-    name, key = match
-    # The resolved credential is handed over as the submitted key, so the add
-    # path does every part of the store exactly once, for both entry points.
-    return await _verify_and_store_server_provider_key(
-        name,
-        ServerProviderKeyInput(
-            provider=name,
-            api_key=SecretStr(key),
-            verification_model=body.verification_model,
-        ),
-        request,
-        replacing=False,
-        include_model_count=True,
-    )
+        if match is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"Provider '{provider}' has no deployment credential to store",
+            )
+        name, key = match
+        # The resolved credential is handed over as the submitted key, so the
+        # add path does every part of the store exactly once, for both entry
+        # points.
+        return await _verify_and_store_server_provider_key(
+            name,
+            ServerProviderKeyInput(
+                provider=name,
+                api_key=SecretStr(key),
+                verification_model=body.verification_model,
+            ),
+            request,
+            replacing=False,
+            promoted=True,
+            include_model_count=True,
+        )
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="provider.key.promote",
+            request=request,
+            message=(
+                f"Promotion of the deployment credential for '{provider}'"
+                f" by '{getattr(request.state, 'username', '')}'"
+            ),
+            target_type="provider",
+            target_id=provider,
+            exc=exc,
+            details={"provider": provider},
+        )
+        raise
 
 
 @app.post(
@@ -13782,13 +16127,18 @@ async def refresh_server_provider_models(
                     f"Provider '{provider}' does not support key-scoped model listing"
                 ),
             )
-        logger.info(
-            "[AUDIT] Admin '%s' refreshed deployment key-scoped models for '%s'"
-            " (%s, %d models)",
-            request.state.username,
-            provider,
-            status,
-            len(models),
+        await record_audit(
+            action="provider.deployment_refresh",
+            actor=request.state.username,
+            message=(
+                f"Admin '{request.state.username}' refreshed deployment"
+                f" key-scoped models for '{provider}' ({status},"
+                f" {len(models)} models)"
+            ),
+            target_type="provider",
+            target_id=provider,
+            details={"provider": provider, "count": len(models)},
+            request=request,
         )
         return JSONResponse(
             content=strip_sensitive_from_response(
@@ -13813,12 +16163,17 @@ async def refresh_server_provider_models(
         keep_on_failure=True,
         generation=generation,
     )
-    logger.info(
-        "[AUDIT] Admin '%s' refreshed key-scoped models for '%s' (%s, %d models)",
-        request.state.username,
-        provider,
-        status,
-        len(models),
+    await record_audit(
+        action="provider.models_refresh",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' refreshed key-scoped models"
+            f" for '{provider}' ({status}, {len(models)} models)"
+        ),
+        target_type="provider",
+        target_id=provider,
+        details={"provider": provider, "count": len(models)},
+        request=request,
     )
     return JSONResponse(
         content=strip_sensitive_from_response(
@@ -13898,12 +16253,25 @@ async def set_server_provider_models_endpoint(
     await storage.set_server_provider_models(
         provider, entries, request.state.username or "admin"
     )
-    logger.info(
-        "[AUDIT] Admin '%s' set server provider models for '%s': %d included, %d free",
-        request.state.username,
-        provider,
-        sum(1 for e in entries if e["included"]),
-        sum(1 for e in entries if e["free"]),
+    await record_audit(
+        action="provider.models_set",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' set server provider models"
+            f" for '{provider}': {sum(1 for e in entries if e['included'])} included,"
+            f" {sum(1 for e in entries if e['free'])} free"
+        ),
+        target_type="provider",
+        target_id=provider,
+        details={
+            "provider": provider,
+            "included": sum(1 for e in entries if e["included"]),
+            "free": sum(1 for e in entries if e["free"]),
+            # How many models the selection was judged against: "0 included
+            # of 23" is legible, "0 included" alone is not.
+            "total": len(entries),
+        },
+        request=request,
     )
     return JSONResponse(
         content=strip_sensitive_from_response(
@@ -13930,26 +16298,32 @@ async def delete_server_provider_endpoint(
     has_key = provider.lower() in {
         row["provider"].lower() for row in await storage.list_server_ai_providers()
     }
-    current = await storage.list_server_provider_models()
-    has_selection = any(row["provider"].lower() == provider.lower() for row in current)
-    # Free pairs alone configure a provider too (#347 r4): deletion removes
+    # A free pair alone configures a provider too (#347 r4): deletion removes
     # them, so the existence check must see them or a free-pairs-only
     # provider 404s while its free pairs survive untouched.
-    has_free = any(
-        row["provider"].lower() == provider.lower()
-        for row in await storage.list_free_ai_models()
-    )
-    if not has_key and not has_selection and not has_free:
+    if provider.lower() not in await storage.list_configured_server_providers():
         raise HTTPException(
             status_code=404, detail=f"Provider '{provider}' is not configured"
         )
     affected = await storage.delete_server_ai_provider(provider)
-    logger.info(
-        "[AUDIT] Admin '%s' deleted server provider '%s' (selected=%d, free=%d)",
-        request.state.username,
-        provider,
-        len(affected["selected_models"]),
-        len(affected["free_models"]),
+    await record_audit(
+        action="provider.remove",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' deleted server provider '{provider}'"
+            f" (selected={len(affected['selected_models'])}"
+            f", free={len(affected['free_models'])})"
+        ),
+        target_type="provider",
+        target_id=provider,
+        details={
+            "provider": provider,
+            # A removal that discarded a key is not the same event as one that
+            # removed a selection only.
+            "had_stored_key": has_key,
+            "models": len(affected["selected_models"]),
+        },
+        request=request,
     )
     return JSONResponse(
         content=strip_sensitive_from_response({"ok": True, "warnings": affected}),
@@ -13958,11 +16332,27 @@ async def delete_server_provider_endpoint(
 
 
 @app.get("/api/admin/users", operation_id="listUsersEndpoint")
-async def list_users_endpoint(request: Request) -> dict[str, Any]:
-    """List all users (admin and regular)."""
+async def list_users_endpoint(
+    request: Request,
+    limit: int | None = Query(
+        None, ge=1, le=500, description="Page size (omit for every user)"
+    ),
+    offset: int = Query(0, ge=0, description="Pagination offset"),
+    q: str = Query(
+        "", description="Case-insensitive substring search over the username"
+    ),
+) -> dict[str, Any]:
+    """List all users (admin and regular), optionally paged and searched."""
     _require_admin(request)
-    users = await storage.list_users()
-    return {"users": users}
+    users, total = await storage.list_users_page(limit=limit, offset=offset, q=q)
+    return {
+        "users": users,
+        "total": total,
+        # An omitted limit means everything was returned, and then offset was
+        # not applied either — report what the server did, not what was asked.
+        "limit": total if limit is None else limit,
+        "offset": 0 if limit is None else offset,
+    }
 
 
 @app.get("/api/admin/users/pending", operation_id="listPendingUsersEndpoint")
@@ -13990,11 +16380,17 @@ async def approve_user(
         )
     effective_grant = await storage.can_user_use_server_providers(username)
     notify_pending_count_changed()
-    logger.info(
-        "[AUDIT] Admin '%s' approved user '%s' (can_use_server_providers=%s)",
-        request.state.username,
-        username,
-        effective_grant,
+    await record_audit(
+        action="admin.user_approve",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' approved user '{username}'"
+            f" (can_use_server_providers={effective_grant})"
+        ),
+        target_type="user",
+        target_id=username,
+        details={"can_use_server_providers": effective_grant},
+        request=request,
     )
     return {
         "username": username,
@@ -14008,9 +16404,10 @@ async def approve_user(
 async def reject_user(username: str, request: Request) -> dict[str, Any]:
     """Reject a pending user registration."""
     _require_admin(request)
-    status = await storage.get_user_status(username)
-    if status is None:
+    snapshot = await storage.get_user_audit_snapshot(username)
+    if snapshot is None:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    status = snapshot["status"]
     if status != "pending":
         raise HTTPException(
             status_code=400,
@@ -14018,7 +16415,16 @@ async def reject_user(username: str, request: Request) -> dict[str, Any]:
         )
     await storage.set_user_status(username, "rejected")
     notify_pending_count_changed()
-    logger.info(f"[AUDIT] Admin '{request.state.username}' rejected user '{username}'")
+    await record_audit(
+        action="admin.user_reject",
+        actor=request.state.username,
+        message=f"Admin '{request.state.username}' rejected user '{username}'",
+        target_type="user",
+        target_id=username,
+        # What the rejected account was asking for.
+        details={"requested_role": snapshot["role"]},
+        request=request,
+    )
     return {
         "username": username,
         "status": "rejected",
@@ -14063,13 +16469,126 @@ async def rotate_key_endpoint(request: Request, username: str) -> JSONResponse:
             status = 404 if "not found" in detail.lower() else 400
             raise HTTPException(status_code=status, detail=detail) from exc
 
-    logger.info(
-        f"[AUDIT] Admin '{request.state.username}' rotated key for '{username}'"
+    await record_audit(
+        action="admin.user_key_rotate",
+        actor=request.state.username,
+        message=f"Admin '{request.state.username}' rotated key for '{username}'",
+        target_type="user",
+        target_id=username,
+        # Rotation is not a silent session kill: both stores delete every
+        # session of the account, and the row says so.
+        details={"sessions_invalidated": True},
+        request=request,
     )
     return JSONResponse(
         content={"username": username, "new_api_key": new_key},
         headers={"Cache-Control": "no-store"},
     )
+
+
+@app.post("/api/admin/users/{username}/unlock", operation_id="unlockUserEndpoint")
+async def unlock_user_endpoint(username: str, request: Request) -> dict[str, Any]:
+    """Clear an account lock and its consecutive-failure counter (#379 §I.3)."""
+    _require_admin(request)
+    prior = await storage.unlock_user(username)
+    if prior is None:
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    logger.info(
+        "Admin '%s' unlocked user '%s' (was_locked_at=%s failed_attempts=%d)",
+        request.state.username,
+        username,
+        prior["locked_at"],
+        prior["failed_login_count"],
+    )
+    await record_audit(
+        action="admin.user_unlock",
+        actor=request.state.username,
+        message=f"Admin '{request.state.username}' unlocked user '{username}'",
+        target_type="user",
+        target_id=username,
+        details={
+            "was_locked_at": prior["locked_at"],
+            "failed_attempts": prior["failed_login_count"],
+        },
+        request=request,
+    )
+    return {
+        "username": username,
+        "locked": False,
+        "failed_login_count": 0,
+        "was_locked_at": prior["locked_at"],
+    }
+
+
+#: Detail answered for each refused disable (#379). A refusal is the caller's
+#: own mistake, so it is a 400, and the admin surface is the thing protected.
+_DISABLE_REFUSAL_DETAIL: dict[str, str] = {
+    "self": "You cannot disable your own account",
+    "last_admin": "Cannot disable the last enabled admin",
+}
+
+
+@app.put("/api/admin/users/{username}/disabled", operation_id="setUserDisabledEndpoint")
+async def set_user_disabled_endpoint(
+    username: str, request: Request, body: SetUserDisabledRequest
+) -> dict[str, Any]:
+    """Disable or re-enable an account without deleting it (#379 §I.2).
+
+    Refused inside storage, in one transaction, when the target is the caller
+    or the last enabled admin: either would end the caller's own sessions or
+    lock the admin surface until ``ADMIN_KEY`` intervenes. Re-enabling is
+    always allowed.
+    """
+    _require_admin(request)
+    actor = request.state.username
+    prior = await storage.set_user_disabled(username, body.disabled, requester=actor)
+    if prior is None:
+        raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    if prior["refused"] is not None:
+        await record_audit(
+            action="admin.user_disabled",
+            actor=actor,
+            message=(
+                f"Admin '{actor}' refused to disable user '{username}'"
+                f" ({prior['refused']})"
+            ),
+            target_type="user",
+            target_id=username,
+            outcome="denied",
+            details={"reason": prior["refused"], "role": prior["role"]},
+            request=request,
+        )
+        raise HTTPException(
+            status_code=400, detail=_DISABLE_REFUSAL_DETAIL[prior["refused"]]
+        )
+    state = "disabled" if body.disabled else "enabled"
+    logger.info(
+        "Admin '%s' %s user '%s' (was_disabled=%s sessions_invalidated=%s)",
+        actor,
+        state,
+        username,
+        prior["disabled"],
+        prior["sessions_invalidated"],
+    )
+    await record_audit(
+        action="admin.user_disabled" if body.disabled else "admin.user_enabled",
+        actor=actor,
+        message=f"Admin '{actor}' {state} user '{username}'",
+        target_type="user",
+        target_id=username,
+        details={
+            "role": prior["role"],
+            "disabled": prior["disabled"],
+            "sessions_invalidated": prior["sessions_invalidated"],
+        },
+        request=request,
+    )
+    return {
+        "username": username,
+        "disabled": body.disabled,
+        "role": prior["role"],
+        "sessions_invalidated": prior["sessions_invalidated"],
+    }
 
 
 # --- SSE for settings changes ---
@@ -14173,19 +16692,6 @@ async def get_admin_settings(
     return JSONResponse(content=metadata)
 
 
-# Valid log levels shared by the PUT allowlist and the env-persist path
-# (#347): Settings.log_level itself is unconstrained, so both write paths
-# must enforce the same set.
-_VALID_LOG_LEVELS = ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL")
-
-
-def _log_level_error(value: object) -> str | None:
-    """Validate a log level; return the error message, or None when valid."""
-    if str(value).strip().upper() not in _VALID_LOG_LEVELS:
-        return "log_level: must be one of DEBUG, INFO, WARNING, ERROR, CRITICAL"
-    return None
-
-
 def _settings_dotenv_values() -> dict[str, str]:
     """The dotenv values Settings merges (DotEnvSettingsSource), by field.
 
@@ -14248,8 +16754,73 @@ def _known_providers_hint(known: set[str]) -> str:
     return ", ".join(sorted(known))
 
 
+async def _deployment_authenticated_provider_ids(
+    ids: list[str],
+) -> frozenset[str] | None:
+    """Normalized provider IDs the deployment itself can authenticate.
+
+    An ambient provider never consumes a per-session key, so something else
+    must hold its credential. Two sources answer that, both the runtime's:
+
+    1. :func:`deployment_provider_credentials` — the same lookup sessions and
+       key-scoped listings use: an ambient ``<PROVIDER>_API_KEY`` variable or
+       a manifest ``$VAR``/``${VAR}`` ``apiKey``.
+    2. The sidecar's own auth status for the provider
+       (``authStatus.configured``), which is how a provider authenticated
+       from the deployment environment — ADC, OAuth, a CLI/ACPX login —
+       reports itself. A provider the sidecar does not register answers
+       ``404`` and stays unauthenticated.
+
+    ``None`` means the deployment could not be inspected — cold catalog,
+    unreadable manifest, unreachable sidecar, an answer without
+    ``authStatus`` — and must never be read as "no provider is authenticated".
+    """
+    from pi_sidecar_client import get_sidecar_client
+
+    from rootcoz.ai_client import deployment_provider_credentials
+
+    credentials = deployment_provider_credentials()
+    if credentials is None:
+        return None
+    authenticated = {normalize_provider(name) for name in credentials}
+    for provider in ids:
+        if normalize_provider(provider) in authenticated:
+            continue
+        try:
+            status = await get_sidecar_client().get_model_provider_status(provider)
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                # Not registered on the sidecar: nothing authenticates it.
+                continue
+            logger.warning(
+                "Provider status unavailable for provider=%s (HTTP %d) — "
+                "accepting AMBIENT_AUTH_PROVIDERS without validating it",
+                provider,
+                exc.response.status_code,
+            )
+            return None
+        except httpx.HTTPError, ValueError, KeyError, TypeError, RuntimeError:
+            logger.warning(
+                "Provider status unavailable for provider=%s — accepting "
+                "AMBIENT_AUTH_PROVIDERS without validating it",
+                provider,
+            )
+            return None
+        auth_status = status.get("authStatus") if isinstance(status, dict) else None
+        if not isinstance(auth_status, dict) or "configured" not in auth_status:
+            logger.warning(
+                "Sidecar reported no auth status for provider=%s — accepting "
+                "AMBIENT_AUTH_PROVIDERS without validating it",
+                provider,
+            )
+            return None
+        if auth_status["configured"] is True:
+            authenticated.add(normalize_provider(provider))
+    return frozenset(authenticated)
+
+
 async def _normalize_ambient_auth_providers(value: str) -> tuple[list[str], str | None]:
-    """Canonical AMBIENT_AUTH_PROVIDERS IDs, plus a rejection when unknown.
+    """Canonical AMBIENT_AUTH_PROVIDERS IDs, plus a rejection when unbacked.
 
     Shared by every write path (PUT, settings import, persist-from-env): the
     returned IDs are stored, and an accepted ID is replaced with the spelling
@@ -14258,11 +16829,20 @@ async def _normalize_ambient_auth_providers(value: str) -> tuple[list[str], str 
     exclusion cannot match. An empty known set means a cold catalog *and* no
     key-capable answer from discovery — far more likely a transient sidecar
     gap than a real "no providers exist" — so the value is accepted unchanged
-    rather than failing a save.
+    rather than failing a save, as is a value whose deployment credentials
+    cannot be resolved right now (#379 E2E-J08).
     """
     ids = parse_ambient_auth_provider_ids(value)
+    if not ids:
+        # Nothing declared ambient: no catalog or credential lookup is needed.
+        return ids, None
     spellings = await _live_provider_spellings()
     if not spellings:
+        logger.warning(
+            "No provider catalog — accepting AMBIENT_AUTH_PROVIDERS=%r "
+            "without validating the provider IDs",
+            value,
+        )
         return ids, None
     # Currently stored ambient IDs stay valid: ``supported_key_providers()``
     # excludes them from its own answer, so an unchanged re-save must not fail.
@@ -14277,7 +16857,103 @@ async def _normalize_ambient_auth_providers(value: str) -> tuple[list[str], str 
             "Unknown provider id(s) in AMBIENT_AUTH_PROVIDERS: "
             f"{', '.join(unknown)} (known: {_known_providers_hint(known)})"
         )
+    authenticated = await _deployment_authenticated_provider_ids(ids)
+    if authenticated is None:
+        logger.warning(
+            "Deployment credentials unknown — accepting "
+            "AMBIENT_AUTH_PROVIDERS=%r without checking that the deployment "
+            "authenticates its providers",
+            value,
+        )
+    elif unbacked := [
+        provider
+        for provider in ids
+        if normalize_provider(provider) not in authenticated
+    ]:
+        return ids, (
+            "AMBIENT_AUTH_PROVIDERS: no deployment credential for "
+            f"{', '.join(unbacked)} — a provider declared ambient must be "
+            "one the deployment authenticates itself (an ambient "
+            '<PROVIDER>_API_KEY variable, a manifest "$VAR" apiKey, or a '
+            "credential the sidecar reports as configured)"
+        )
     return [spellings.get(provider.lower(), provider) for provider in ids], None
+
+
+def _exporter_plugin_names() -> list[str]:
+    """Machine names of the registered exporter plugins.
+
+    Read through the registry (not ``_available_exporters``) so a configured
+    but currently-disabled plugin is still a valid value: an admin may save
+    the target before enabling its credentials. Empty means no plugin has
+    been loaded yet, which must never be read as "no exporter exists".
+    """
+    return list(_EXPORTER_CLASSES)
+
+
+def _normalize_auto_push_exporters(value: str) -> tuple[list[str], str | None]:
+    """Canonical exporter plugin names, plus a rejection when unknown.
+
+    Case-insensitive against the plugin registry, and an accepted name is
+    replaced with the registry's spelling — the auto-push consumer matches
+    plugin names exactly, so a differently-cased spelling would be silently
+    dropped. Fails open on an empty registry (cold start): an admin must not
+    be blocked from saving because no plugin loaded yet.
+    """
+    names = [part.strip() for part in value.split(",") if part.strip()]
+    spellings = {name.lower(): name for name in _exporter_plugin_names()}
+    if not spellings:
+        logger.warning(
+            "Exporter registry is empty — accepting auto_push_exporters=%r "
+            "without validating the plugin names",
+            value,
+        )
+        return names, None
+    if unknown := [name for name in names if name.lower() not in spellings]:
+        return names, (
+            "auto_push_exporters: unknown exporter plugin(s): "
+            f"{', '.join(unknown)} "
+            f"(known: {', '.join(sorted(spellings.values()))})"
+        )
+    return [spellings[name.lower()] for name in names], None
+
+
+def _normalize_allowed_users(value: str) -> tuple[list[str], str | None]:
+    """Comma-separated usernames, stripped and in order, plus a shape error.
+
+    Only the shape is validated: a username the store does not know is
+    legitimate (SSO and trusted-proxy deployments provision the account on
+    first login), so membership is never checked here.
+    """
+    names = [part.strip() for part in value.split(",") if part.strip()]
+    if any(any(ch.isspace() for ch in name) for name in names):
+        return names, (
+            "allowed_users: must be comma-separated usernames — "
+            "one username per entry, no spaces inside a name"
+        )
+    return names, None
+
+
+async def _normalize_enumerated_value(key: str, value: str) -> tuple[str, str | None]:
+    """Canonical value for an enumerated setting, plus a rejection when invalid.
+
+    Shared by every write path (PUT, settings import, persist-from-env) so the
+    stored value is always one the picker offers and no path can save a value
+    the server would then silently ignore. Keys without an enumerated rule
+    (the pydantic-validated ones) pass through untouched.
+    """
+    if key == "log_level":
+        return str(value).strip().upper(), _log_level_error(value)
+    if key == "auto_push_exporters":
+        names, error = _normalize_auto_push_exporters(value)
+        return ", ".join(names), error
+    if key == "allowed_users":
+        names, error = _normalize_allowed_users(value)
+        return ", ".join(names), error
+    if key == "ambient_auth_providers":
+        ids, error = await _normalize_ambient_auth_providers(value)
+        return ", ".join(ids), error
+    return value, None
 
 
 async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[str]:
@@ -14334,8 +17010,14 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
         # Skip validation for None/empty — those reset to default
         if value is None or value == "":
             continue
-        if key == "log_level" and (message := _log_level_error(value)):
-            errors.append(message)
+        # Enumerated settings (#379): one rule per kind, shared with every
+        # other write path, and the canonical form is what gets stored.
+        if key in _SETTING_CHOICES:
+            canonical, enum_error = await _normalize_enumerated_value(key, str(value))
+            if enum_error:
+                errors.append(enum_error)
+            else:
+                settings_updates[key] = canonical
         if key in ("prow_url", "gcs_bucket", "default_user_role"):
             continue
         # Sidecar listener overrides persist under /data and every restart
@@ -14417,20 +17099,6 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
                     f"{key}: {ctx_err if ctx_err else err.get('msg', str(err))}"
                 )
 
-    # AMBIENT_AUTH_PROVIDERS is consumed as raw provider IDs by
-    # supported_key_providers(): a typo is stored silently and never excludes
-    # anything (the provider it was meant to exclude keeps offering key UI),
-    # while a real ID typed there silently disables a provider's key UI.
-    # :func:`_normalize_ambient_auth_providers` checks every ID against the
-    # providers that actually exist and returns the canonical form to store —
-    # padding, duplicates and a non-registered spelling never persist.
-    if settings_updates.get("ambient_auth_providers") is not None:
-        ids, ambient_error = await _normalize_ambient_auth_providers(
-            str(settings_updates["ambient_auth_providers"])
-        )
-        if ambient_error:
-            errors.append(ambient_error)
-        settings_updates["ambient_auth_providers"] = ", ".join(ids)
     return errors
 
 
@@ -14452,14 +17120,30 @@ async def update_admin_settings(request: Request) -> JSONResponse:
 
     username = request.state.username or "admin"
     warnings = await _save_settings_to_db(settings_updates, username)
+    changed_keys = list(settings_updates.keys())
 
     logger.info(
         "Admin settings updated: keys=%s, by=%s",
-        list(settings_updates.keys()),
+        changed_keys,
         username,
     )
+    await record_audit(
+        action="settings.update",
+        actor=username,
+        message=f"Admin settings updated: keys={changed_keys}, by={username}",
+        target_type="setting",
+        details={
+            "changed_keys": changed_keys,
+            "redacted_keys": [
+                key for key in changed_keys if key in _SENSITIVE_SETTINGS
+            ],
+            # Kept for consumers of the original shape.
+            "keys": changed_keys,
+        },
+        request=request,
+    )
 
-    content: dict[str, Any] = {"updated": list(settings_updates.keys())}
+    content: dict[str, Any] = {"updated": changed_keys}
     if warnings:
         content["warnings"] = warnings
     return JSONResponse(
@@ -14646,6 +17330,20 @@ async def export_server_settings(
         include_sensitive,
         request.state.username,
     )
+    # The count is what is left after the export's own filtering, and
+    # ``include_sensitive`` is the difference between a shareable file and
+    # plaintext secrets — both belong in the trail. Never the values.
+    await record_audit(
+        action="admin.settings_export",
+        actor=request.state.username,
+        message=(
+            f"Admin '{request.state.username}' exported {len(settings)} server"
+            f" settings (include_sensitive={include_sensitive})"
+        ),
+        target_type="settings",
+        details={"include_sensitive": include_sensitive, "keys": len(settings)},
+        request=request,
+    )
     return JSONResponse(content=content, headers={"Cache-Control": "no-store"})
 
 
@@ -14724,6 +17422,27 @@ async def import_server_settings(request: Request) -> JSONResponse:
         len(applied),
         len(unchanged),
         username,
+    )
+    # Key names only — ``applied`` carries the old/new values of every change,
+    # which must not be copied into the audit trail.
+    changed_keys = list(applied)
+    await record_audit(
+        action="settings.import",
+        actor=username,
+        message=(
+            f"Admin settings imported: applied={len(applied)},"
+            f" unchanged={len(unchanged)}, by={username}"
+        ),
+        target_type="setting",
+        details={
+            "changed_keys": changed_keys,
+            "redacted_keys": [
+                key for key in changed_keys if key in _SENSITIVE_SETTINGS
+            ],
+            # Kept for consumers of the original shape.
+            "keys": changed_keys,
+        },
+        request=request,
     )
     return JSONResponse(content=content)
 
@@ -14895,11 +17614,15 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
             status_code=400,
             detail=f"Setting '{key}' has no env value set",
         )
-    # log_level has no Settings constraint — apply the shared PUT allowlist
-    # so an invalid level cannot survive the persist path either.
-    if key == "log_level" and (message := _log_level_error(env_value)) is not None:
+    # Enumerated settings get the shared canonicalisation and validation
+    # (#379) so persist-from-env cannot store a value the PUT/import paths
+    # would reject — or a spelling the picker does not offer. A no-op for
+    # every other key.
+    env_value, enum_error = await _normalize_enumerated_value(key, env_value)
+    if enum_error:
         raise HTTPException(
-            status_code=400, detail=f"Invalid env value for '{key}': {message}"
+            status_code=400,
+            detail=f"Invalid env value for '{key}': {enum_error}",
         )
     # Same validation the PUT path applies to admin-typed values
     try:
@@ -14908,24 +17631,18 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
         raise HTTPException(
             status_code=400, detail=f"Invalid env value for '{key}'"
         ) from exc
-    # AMBIENT_AUTH_PROVIDERS needs the shared provider-ID validation and
-    # canonicalisation too (#378): the per-field model check accepts any
-    # string, so an env typo the PUT/import paths reject would otherwise be
-    # persisted as a DB override, and a non-registered spelling would survive.
-    if key == "ambient_auth_providers":
-        ids, ambient_error = await _normalize_ambient_auth_providers(env_value)
-        if ambient_error:
-            raise HTTPException(
-                status_code=400,
-                detail=f"Invalid env value for '{key}': {ambient_error}",
-            )
-        env_value = ", ".join(ids)
 
     username = request.state.username or "admin"
     await _save_settings_to_db({key: env_value}, username)
 
-    logger.info(
-        "[AUDIT] Admin setting persisted from env: key=%s, by=%s", key, username
+    await record_audit(
+        action="admin.setting_persist",
+        actor=username,
+        message=f"Admin setting persisted from env: key={key}, by={username}",
+        target_type="setting",
+        target_id=key,
+        details=_audit_setting_details(key),
+        request=request,
     )
     return JSONResponse(content={"key": key, "source": "db"})
 
@@ -14990,6 +17707,15 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
     _broadcast_settings_change()
 
     logger.info("Admin setting reset: key=%s, by=%s", key, request.state.username)
+    await record_audit(
+        action="settings.reset",
+        actor=request.state.username or "admin",
+        message=f"Admin setting reset: key={key}, by={request.state.username}",
+        target_type="setting",
+        target_id=key,
+        details=_audit_setting_details(key),
+        request=request,
+    )
 
     return JSONResponse(content=content)
 
@@ -15554,18 +18280,43 @@ async def set_job_metadata_endpoint(
     """Set or update metadata for a job."""
     _require_admin(request)
     logger.debug(f"PUT /api/jobs/{job_name}/metadata")
-    current = await storage.get_job_metadata(job_name) or {}
-    return await storage.set_job_metadata(
-        job_name,
-        team=body.team if "team" in body.model_fields_set else current.get("team"),
-        tier=body.tier if "tier" in body.model_fields_set else current.get("tier"),
-        version=body.version
-        if "version" in body.model_fields_set
-        else current.get("version"),
-        labels=body.labels
-        if "labels" in body.model_fields_set
-        else current.get("labels", []),
+    message = f"Admin '{request.state.username}' set metadata for job '{job_name}'"
+    try:
+        current = await storage.get_job_metadata(job_name) or {}
+        saved = await storage.set_job_metadata(
+            job_name,
+            team=body.team if "team" in body.model_fields_set else current.get("team"),
+            tier=body.tier if "tier" in body.model_fields_set else current.get("tier"),
+            version=body.version
+            if "version" in body.model_fields_set
+            else current.get("version"),
+            labels=body.labels
+            if "labels" in body.model_fields_set
+            else current.get("labels", []),
+        )
+    except Exception:
+        # A storage failure still leaves the one row the contract promises;
+        # the client keeps getting the same 500 from the re-raised error.
+        await _record_failed_attempt(
+            action="job.metadata_set",
+            request=request,
+            message=message,
+            target_type="job",
+            target_id=job_name,
+        )
+        raise
+    await record_audit(
+        action="job.metadata_set",
+        actor=request.state.username,
+        message=message,
+        target_type="job",
+        target_id=job_name,
+        # Which fields this write touched: a replace and a single-field edit
+        # must be distinguishable afterwards.
+        details={"keys": sorted(body.model_fields_set)},
+        request=request,
     )
+    return saved
 
 
 @app.delete(
@@ -15577,9 +18328,43 @@ async def delete_job_metadata_endpoint(
     """Delete metadata for a job."""
     _require_admin(request)
     logger.debug(f"DELETE /api/jobs/{job_name}/metadata")
-    deleted = await storage.delete_job_metadata(job_name)
-    if not deleted:
-        raise HTTPException(status_code=404, detail=f"No metadata for job '{job_name}'")
+    message = (
+        f"Admin '{request.state.username}' deleted the metadata of job '{job_name}'"
+    )
+    try:
+        # Read before deleting: the point of a delete row is what was lost.
+        current = await storage.get_job_metadata(job_name) or {}
+        cleared = {
+            key: value
+            for key, value in current.items()
+            if key != "job_name" and value not in (None, "", [])
+        }
+        deleted = await storage.delete_job_metadata(job_name)
+        if not deleted:
+            raise HTTPException(
+                status_code=404, detail=f"No metadata for job '{job_name}'"
+            )
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="job.metadata_delete",
+            request=request,
+            message=message,
+            target_type="job",
+            target_id=job_name,
+            exc=exc,
+        )
+        raise
+    await record_audit(
+        action="job.metadata_delete",
+        actor=request.state.username,
+        message=message,
+        target_type="job",
+        target_id=job_name,
+        # Deliberately ``{"cleared": {}}`` when the stored row held nothing:
+        # the row still says a delete happened and that nothing was lost.
+        details={"cleared": cleared},
+        request=request,
+    )
     return {"status": "deleted", "job_name": job_name}
 
 
@@ -15596,11 +18381,41 @@ async def bulk_set_job_metadata(
     """
     _require_admin(request)
     logger.debug(f"PUT /api/jobs/metadata/bulk: {len(body.items)} items")
+    message = (
+        f"Admin '{request.state.username}' bulk-imported metadata for"
+        f" {len(body.items)} job(s)"
+    )
     try:
         items = [item.model_dump() for item in body.items]
-        return await storage.bulk_set_metadata(items)
+        saved = await storage.bulk_set_metadata(items)
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from None
+        refusal = _refusal_exception(exc, status_code=422)
+        await _record_refused_attempt(
+            action="job.metadata_set",
+            request=request,
+            message=message,
+            target_type="metadata",
+            exc=refusal,
+            details={"bulk": True, "count": len(body.items)},
+        )
+        raise refusal from None
+    await record_audit(
+        action="job.metadata_set",
+        actor=request.state.username,
+        message=message,
+        target_type="metadata",
+        details={
+            "bulk": True,
+            "count": saved["updated"],
+            # ``job_name`` is the identity, not a field the import set.
+            "keys": sorted(
+                {field for item in body.items for field in item.model_fields_set}
+                - {"job_name"}
+            ),
+        },
+        request=request,
+    )
+    return saved
 
 
 @app.get("/api/jobs/metadata/rules", operation_id="listMetadataRules")
@@ -16202,6 +19017,57 @@ async def preview_feedback(
         ai_username.reset(token)
 
 
+def _feedback_github_refusal(exc: Exception) -> HTTPException:
+    """The refusal a failed GitHub call answers with.
+
+    401 means the token is bad; 403 means it is valid but either lacks the repo
+    scope or is rate limited. A classic PAT authenticates fine without `repo`,
+    so identity checks cannot tell these apart. Reporting both as "invalid or
+    expired" made a scope problem look like a lost key. Neither is a gateway
+    failure: 502 stays reserved for an unreachable GitHub API.
+
+    Rate limiting is classified up front, before any status branch, so a new
+    rate-limit status cannot fall through to the generic 502. GitHub uses 403
+    for the primary limit and 429 for the secondary limit; 429 is
+    definitionally a rate limit, while 403 needs header/body evidence.
+    """
+    if isinstance(exc, httpx.HTTPStatusError):
+        response = exc.response
+        if response.status_code == 429 or (
+            response.status_code == 403
+            and (
+                response.headers.get("x-ratelimit-remaining") == "0"
+                or "rate limit" in response.text.lower()
+            )
+        ):
+            # A new token cannot fix a spent quota, so never point at the token.
+            return HTTPException(
+                status_code=429,
+                detail="GitHub API rate limit reached. Try again later.",
+            )
+        if response.status_code == 401:
+            return HTTPException(
+                status_code=403,
+                detail="GitHub token is invalid or expired. "
+                "Generate a new token in Profile Settings.",
+            )
+        if response.status_code == 403:
+            # Reaching here means no rate-limit signal, so it is a real scope
+            # failure and the token is the thing to fix.
+            return HTTPException(
+                status_code=403,
+                detail="GitHub token is missing the 'repo' scope. "
+                "Regenerate it in Profile Settings with repo access.",
+            )
+        return HTTPException(
+            status_code=502, detail=f"GitHub API error: {response.status_code}"
+        )
+    if isinstance(exc, httpx.RequestError):
+        return HTTPException(status_code=502, detail=f"GitHub API unreachable: {exc}")
+    logger.exception("Failed to create feedback issue")
+    return HTTPException(status_code=500, detail="Failed to create feedback issue")
+
+
 @app.post(
     "/api/feedback/create",
     status_code=201,
@@ -16218,92 +19084,68 @@ async def create_feedback(
     """
     _check_allow_list(request)
     settings = get_settings()
-    if not settings.feedback_enabled:
-        raise HTTPException(
-            status_code=503, detail="Feedback submission is disabled on this server"
-        )
-
-    username = request.state.username
-    user_tokens = await storage.get_user_tokens(username)
-    github_token = user_tokens.get("github_token", "")
-
-    # Bootstrap admin (ADMIN_KEY auth) has no DB entry, so get_user_tokens
-    # returns empty. Fall back to the server-level token for this special user
-    # only — regular users must configure their own GitHub token.
-    if not github_token and username == "admin" and settings.github_token:
-        github_token = settings.github_token.get_secret_value()
-
-    if not github_token:
-        raise HTTPException(
-            status_code=400,
-            detail="GitHub token is required. Set up your token in Profile Settings.",
-        )
-
+    message = f"User '{request.state.username}' created a feedback issue"
     try:
-        # Attribution comes from the signed provenance the preview embedded in
-        # its body — never from the request (which carries no provider/model)
-        # and never re-resolved here, so a settings change between preview and
-        # create cannot miscredit the model that wrote the body.
-        return await create_feedback_from_preview(
-            title=body.title,
-            body=body.body,
-            labels=body.labels,
-            github_token=github_token,
-        )
-    except httpx.HTTPStatusError as exc:
-        # 401 means the token is bad; 403 means it is valid but either lacks
-        # the repo scope or is rate limited. A classic PAT authenticates fine
-        # without `repo`, so identity checks cannot tell these apart. Reporting
-        # both as "invalid or expired" made a scope problem look like a lost
-        # key. Neither is a gateway failure: 502 stays reserved for an
-        # unreachable GitHub API.
-        #
-        # Rate limiting is classified up front, before any status branch, so a
-        # new rate-limit status cannot fall through to the generic 502. GitHub
-        # uses 403 for the primary limit and 429 for the secondary limit; 429
-        # is definitionally a rate limit, while 403 needs header/body evidence.
-        response = exc.response
-        if response.status_code == 429 or (
-            response.status_code == 403
-            and (
-                response.headers.get("x-ratelimit-remaining") == "0"
-                or "rate limit" in response.text.lower()
+        if not settings.feedback_enabled:
+            raise HTTPException(
+                status_code=503, detail="Feedback submission is disabled on this server"
             )
-        ):
-            # A new token cannot fix a spent quota, so never point at the token.
+
+        username = request.state.username
+        user_tokens = await storage.get_user_tokens(username)
+        github_token = user_tokens.get("github_token", "")
+
+        # Bootstrap admin (ADMIN_KEY auth) has no DB entry, so get_user_tokens
+        # returns empty. Fall back to the server-level token for this special user
+        # only — regular users must configure their own GitHub token.
+        if not github_token and username == "admin" and settings.github_token:
+            github_token = settings.github_token.get_secret_value()
+
+        if not github_token:
             raise HTTPException(
-                status_code=429,
-                detail="GitHub API rate limit reached. Try again later.",
-            ) from exc
-        if exc.response.status_code == 401:
-            raise HTTPException(
-                status_code=403,
-                detail="GitHub token is invalid or expired. "
-                "Generate a new token in Profile Settings.",
-            ) from exc
-        if exc.response.status_code == 403:
-            # Reaching here means no rate-limit signal, so it is a real scope
-            # failure and the token is the thing to fix.
-            raise HTTPException(
-                status_code=403,
-                detail="GitHub token is missing the 'repo' scope. "
-                "Regenerate it in Profile Settings with repo access.",
-            ) from exc
-        raise HTTPException(
-            status_code=502,
-            detail=f"GitHub API error: {exc.response.status_code}",
-        ) from exc
-    except httpx.RequestError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"GitHub API unreachable: {exc}",
-        ) from exc
-    except Exception as exc:  # non-fatal feedback submission
-        logger.exception("Failed to create feedback issue")
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to create feedback issue",
-        ) from exc
+                status_code=400,
+                detail="GitHub token is required. Set up your token in Profile Settings.",
+            )
+
+        try:
+            # Attribution comes from the signed provenance the preview embedded in
+            # its body — never from the request (which carries no provider/model)
+            # and never re-resolved here, so a settings change between preview and
+            # create cannot miscredit the model that wrote the body.
+            issue = await create_feedback_from_preview(
+                title=body.title,
+                body=body.body,
+                labels=body.labels,
+                github_token=github_token,
+            )
+        except Exception as exc:  # GitHub API failure or anything else
+            raise _feedback_github_refusal(exc) from exc
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="feedback.create",
+            request=request,
+            message=message,
+            target_type="feedback",
+            exc=exc,
+            details={"kind": "github_issue"},
+        )
+        raise
+
+    # The kind and the issue the run produced — never the body the user wrote.
+    await record_audit(
+        action="feedback.create",
+        actor=request.state.username,
+        message=f"{message} (#{issue.issue_number})",
+        target_type="feedback",
+        target_id=str(issue.issue_number),
+        details={
+            "kind": "github_issue",
+            "issue_number": issue.issue_number,
+            "issue_url": issue.issue_url,
+        },
+        request=request,
+    )
+    return issue
 
 
 # -- Chat helpers --
@@ -16323,15 +19165,6 @@ def _build_ci_workspace_params(
     }
 
 
-def _require_explicit_chat_source(source: str, force_server: bool) -> None:
-    """Reject a server-only model when chat explicitly selected user credentials."""
-    if source == "server" and not force_server:
-        raise HTTPException(
-            status_code=422,
-            detail="This model requires server credentials; select Server and Start again",
-        )
-
-
 async def _validate_chat_selection(
     body: ChatInitRequest, username: str
 ) -> tuple[str, str]:
@@ -16340,18 +19173,12 @@ async def _validate_chat_selection(
         body.ai_provider,
         body.ai_model,
         username=username,
-        force_server=body.force_server_credentials,
     )
     if not provider or not model:
         raise HTTPException(status_code=422, detail="Select an AI provider and model")
     from rootcoz.ai_client import _selected_credential_source
 
     source = _selected_credential_source.get()
-    if body.force_server_credentials and source != "server":
-        raise HTTPException(
-            status_code=422, detail="Server credential selection unavailable"
-        )
-    _require_explicit_chat_source(source, body.force_server_credentials)
     if source == "server":
         token = ai_username.set(username)
         try:
@@ -16449,7 +19276,7 @@ async def _available_chat_session(
 
 async def _current_chat_choice(
     job_id: str, username: str
-) -> tuple[dict[str, Any], bool]:
+) -> tuple[dict[str, Any], str]:
     """Load the selected session and its persisted credential source."""
     active = await storage.get_latest_chat_session(job_id, username)
     if not active:
@@ -16466,7 +19293,7 @@ async def _current_chat_choice(
         raise HTTPException(
             status_code=409, detail="Chat session unavailable; start a new chat"
         )
-    return active, source == "server"
+    return active, source
 
 
 async def _check_chat_session_choice(
@@ -16474,22 +19301,22 @@ async def _check_chat_session_choice(
     username: str,
     provider: str,
     model: str,
-    force_server: bool | None,
+    source: str | None,
     *,
     allow_empty: bool = False,
-) -> tuple[str, bool]:
+) -> tuple[str, str]:
     """Pin chat turns to the last Start's owner, model and credential source."""
     if allow_empty and not await _available_chat_session(job_id, username):
-        return "", False
-    active, selected_force = await _current_chat_choice(job_id, username)
+        return "", ""
+    active, active_source = await _current_chat_choice(job_id, username)
     if (provider, model) != (active["ai_provider"], active["ai_model"]) or (
-        force_server is not None and force_server != selected_force
+        source is not None and source != active_source
     ):
         raise HTTPException(
             status_code=409,
             detail="Clear chat and Start a new session to change model or credentials",
         )
-    return active["session_id"], selected_force
+    return active["session_id"], active_source
 
 
 # Sentinel for "the user SELECTED a Jira credential but it is unusable"
@@ -16742,12 +19569,15 @@ async def _init_chat_under_barrier(
         result_data = stored["result"]
         params = result_data.get("request_params", {})
         ai_provider, ai_model = await _validate_chat_selection(body, username)
+        from rootcoz.ai_client import _selected_credential_source
+
+        credential_source = _selected_credential_source.get()
         existing_session_id, _ = await _check_chat_session_choice(
             job_id,
             username,
             ai_provider,
             ai_model,
-            body.force_server_credentials,
+            credential_source,
             allow_empty=True,
         )
         workspace = ensure_chat_workspace(job_id, username=username)
@@ -16819,14 +19649,13 @@ async def _init_chat_under_barrier(
         custom_tools.extend(graph_http_tools(workspace, job_id))
         credential_generation = (
             None
-            if body.force_server_credentials
+            if credential_source == "server"
             else await storage.get_user_ai_credential_generation(username, ai_provider)
         )
-        from rootcoz.ai_client import _selected_credential_source, chat_session_source
+        from rootcoz.ai_client import chat_session_source
 
         token = ai_username.set(username)
-        force_token = force_server_credentials.set(body.force_server_credentials)
-        source_token = chat_session_source.set(_selected_credential_source.get())
+        source_token = chat_session_source.set(credential_source)
         set_chat_prep_phase(job_id, username, "starting_session")
         try:
             session_id = await init_chat_session(
@@ -16843,7 +19672,6 @@ async def _init_chat_under_barrier(
         finally:
             chat_session_source.reset(source_token)
             ai_username.reset(token)
-            force_server_credentials.reset(force_token)
         if job_id in _chat_jobs_deleting and session_id:
             await _discard_unsaved_ai_session(session_id, username, ai_provider)
         _raise_if_chat_job_deleted(job_id)
@@ -17162,7 +19990,6 @@ async def _normalize_and_validate_ai_params(
     ai_model: str | None,
     *,
     username: str,
-    force_server: bool,
 ) -> tuple[str | None, str | None]:
     """Normalize and validate AI provider/model from request body.
 
@@ -17185,11 +20012,9 @@ async def _normalize_and_validate_ai_params(
 
         _selected_credential_source.set("")
         user_token = ai_username.set(username)
-        force_token = force_server_credentials.set(force_server)
         try:
             return await _validate_catalog_pair(provider, model)
         finally:
-            force_server_credentials.reset(force_token)
             ai_username.reset(user_token)
     return provider, model
 
@@ -17274,14 +20099,11 @@ async def send_chat_message(
             raise HTTPException(
                 status_code=422, detail="Select both provider and model"
             )
-        session, selected_force = await _current_chat_choice(
-            job_id, request.state.username
-        )
+        session, _ = await _current_chat_choice(job_id, request.state.username)
         ai_provider, ai_model = await _normalize_and_validate_ai_params(
             body.ai_provider or session["ai_provider"],
             body.ai_model or session["ai_model"],
             username=request.state.username,
-            force_server=selected_force,
         )
         if ai_provider is None or ai_model is None:
             raise HTTPException(
@@ -17289,13 +20111,13 @@ async def send_chat_message(
             )
         from rootcoz.ai_client import _selected_credential_source
 
-        _require_explicit_chat_source(_selected_credential_source.get(), selected_force)
+        credential_source = _selected_credential_source.get()
         await _check_chat_session_choice(
             job_id,
             request.state.username,
             ai_provider,
             ai_model,
-            body.force_server_credentials,
+            credential_source,
         )
         user_msg_id, assistant_msg_id = await storage.add_chat_message_pair(
             job_id=job_id,
@@ -17319,7 +20141,7 @@ async def send_chat_message(
         ai_model_override=ai_model,
         username=request.state.username,
         is_admin=bool(getattr(request.state, "is_admin", False)),
-        force_server=selected_force,
+        credential_source=credential_source,
     )
 
     return {
@@ -17344,7 +20166,7 @@ async def _process_chat_message(
     ai_model_override: str | None,
     username: str,
     is_admin: bool = False,
-    force_server: bool | None = None,
+    credential_source: str | None = None,
 ) -> None:
     """Background task: process a single chat message with AI."""
     ai_username.set(username)
@@ -17392,17 +20214,21 @@ async def _process_chat_message(
                         ai_provider, ai_model = ai_provider_override, ai_model_override
                         if not ai_provider or not ai_model:
                             raise ValueError("Chat selection missing")
-                        session_id, selected_force = await _check_chat_session_choice(
-                            job_id, username, ai_provider, ai_model, force_server
+                        (
+                            session_id,
+                            credential_source,
+                        ) = await _check_chat_session_choice(
+                            job_id,
+                            username,
+                            ai_provider,
+                            ai_model,
+                            credential_source,
                         )
-                        force_server_credentials.set(selected_force)
-                        source_token = chat_session_source.set(
-                            "server" if selected_force else "user"
-                        )
+                        source_token = chat_session_source.set(credential_source)
 
                         credential_generation = (
                             None
-                            if selected_force
+                            if credential_source == "server"
                             else await storage.get_user_ai_credential_generation(
                                 username, ai_provider
                             )
@@ -17594,7 +20420,7 @@ async def _process_chat_message(
                         return
 
                     if (
-                        selected_force
+                        credential_source == "server"
                         and not await storage.can_user_use_server_providers(username)
                     ):
                         logger.info(
@@ -17630,7 +20456,7 @@ async def _process_chat_message(
                         ai_model=ai_model,
                         session_id=new_session_id or "",
                         credential_generation=credential_generation,
-                        server_source=selected_force,
+                        server_source=credential_source == "server",
                     )
                     if not saved:
                         await _discard_unsaved_chat_response(
@@ -17724,7 +20550,19 @@ async def clear_chat_history(job_id: str, request: Request) -> dict[str, Any]:
 @app.get("/api/admin/db/schema", operation_id="adminDbSchema")
 async def admin_db_schema(request: Request) -> dict[str, Any]:
     """Get database schema — tables, columns, types, row counts. Admin only."""
-    _require_admin(request)
+    username = getattr(request.state, "username", "")
+    try:
+        _require_admin(request)
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="admin.db_schema",
+            request=request,
+            message=f"Admin '{username}' read the DB schema",
+            target_type="database",
+            target_id="schema",
+            exc=exc,
+        )
+        raise
 
     conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
@@ -17749,6 +20587,16 @@ async def admin_db_schema(request: Request) -> dict[str, Any]:
                 f"SELECT COUNT(*) as c FROM [{table_name}]"
             ).fetchone()["c"]
             tables.append({"name": table_name, "columns": columns, "row_count": count})
+        await record_audit(
+            action="admin.db_schema",
+            actor=username,
+            message=(f"Admin '{username}' read the DB schema ({len(tables)} tables)"),
+            target_type="database",
+            target_id="schema",
+            outcome="success",
+            details={"tables": len(tables)},
+            request=request,
+        )
         return {"tables": tables}
     finally:
         conn.close()
@@ -17757,33 +20605,46 @@ async def admin_db_schema(request: Request) -> dict[str, Any]:
 @app.post("/api/admin/db/query", operation_id="adminDbQuery")
 async def admin_db_query(request: Request) -> dict[str, Any]:
     """Execute a read-only SQL query. Admin only."""
-    _require_admin(request)
+    username = getattr(request.state, "username", "")
+    try:
+        _require_admin(request)
+        body = await request.json()
+        if not await _ai_admin_role_current(request.state.username):
+            logger.info("Admin DB query denied after role change for %s", username)
+            raise HTTPException(status_code=403, detail="Admin access required")
+        sql = body.get("sql", "").strip()
+        if not sql:
+            raise HTTPException(status_code=400, detail="Empty query")
 
-    body = await request.json()
-    if not await _ai_admin_role_current(request.state.username):
-        logger.info(
-            "Admin DB query denied after role change for %s", request.state.username
+        first_word = sql.split()[0].upper() if sql.split() else ""
+        if first_word in (
+            "INSERT",
+            "UPDATE",
+            "DELETE",
+            "DROP",
+            "ALTER",
+            "CREATE",
+            "REPLACE",
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail=f"Write operations not allowed (got {first_word})",
+            )
+    except HTTPException as exc:
+        # A refused query form, or a caller who lost the role, is an attempt
+        # too: the trail records that and never the statement itself.
+        await _record_refused_attempt(
+            action="admin.db_query",
+            request=request,
+            message=f"Admin '{username}' ran an admin chat DB query",
+            target_type="database",
+            target_id="query",
+            exc=exc,
+            denied=True,
         )
-        raise HTTPException(status_code=403, detail="Admin access required")
-    sql = body.get("sql", "").strip()
-    if not sql:
-        raise HTTPException(status_code=400, detail="Empty query")
+        raise
 
-    first_word = sql.split()[0].upper() if sql.split() else ""
-    if first_word in (
-        "INSERT",
-        "UPDATE",
-        "DELETE",
-        "DROP",
-        "ALTER",
-        "CREATE",
-        "REPLACE",
-    ):
-        raise HTTPException(
-            status_code=400,
-            detail=f"Write operations not allowed (got {first_word})",
-        )
-
+    sql_hash = hashlib.sha256(sql.encode()).hexdigest()
     conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True)
     conn.row_factory = sqlite3.Row
     try:
@@ -17791,8 +20652,46 @@ async def admin_db_query(request: Request) -> dict[str, Any]:
         rows = cursor.fetchall()
         columns = [desc[0] for desc in cursor.description] if cursor.description else []
         results = [dict(row) for row in rows]
-        return {"columns": columns, "rows": results, "count": len(results)}
-    except sqlite3.OperationalError as e:
+        await record_audit(
+            action="admin.db_query",
+            actor=username,
+            message=(
+                f"Admin '{username}' ran an admin chat DB query ({len(results)} rows)"
+            ),
+            target_type="database",
+            outcome="success",
+            # Only a hash of the SQL: the statement itself can carry row data
+            # (a WHERE literal, an INSERT value) and the rows are never stored.
+            details={
+                "sql_hash": sql_hash,
+                "rows": len(results),
+            },
+            request=request,
+        )
+        # A row can carry a credential column (``github_token``, a key): mask the
+        # sensitive names in every row before the payload leaves the API, and
+        # let the shared response filter redact a ``request_params``-shaped one.
+        # The audit row above keeps the row *count* only, never the rows.
+        return strip_sensitive_from_response(
+            {
+                "columns": columns,
+                "rows": [mask_sensitive_fields(row) for row in results],
+                "count": len(results),
+            }
+        )
+    except sqlite3.Error as e:
+        # Any sqlite3 error, not only an operational one: a malformed statement
+        # (``SELECT ?`` raises ``ProgrammingError``) is an attempt too, so it
+        # leaves a failure row and the same 400 the client expects.
+        await record_audit(
+            action="admin.db_query",
+            actor=username,
+            message=f"Admin '{username}' admin chat DB query failed",
+            target_type="database",
+            outcome="failure",
+            details={"sql_hash": sql_hash},
+            request=request,
+        )
         raise HTTPException(status_code=400, detail=f"SQL Error: {e}")
     finally:
         conn.close()
@@ -17852,12 +20751,15 @@ async def init_admin_chat(
     session_id: str | None = ""
     async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
         ai_provider, ai_model = await _validate_chat_selection(body, username)
+        from rootcoz.ai_client import _selected_credential_source
+
+        credential_source = _selected_credential_source.get()
         session_id, _ = await _check_chat_session_choice(
             ADMIN_CHAT_JOB_ID,
             username,
             ai_provider,
             ai_model,
-            body.force_server_credentials,
+            credential_source,
             allow_empty=True,
         )
         workspace = ensure_chat_workspace(ADMIN_CHAT_JOB_ID, username=username)
@@ -17877,19 +20779,15 @@ async def init_admin_chat(
 
             credential_generation = (
                 None
-                if body.force_server_credentials
+                if credential_source == "server"
                 else await storage.get_user_ai_credential_generation(
                     username, ai_provider
                 )
             )
-            from rootcoz.ai_client import (
-                _selected_credential_source,
-                chat_session_source,
-            )
+            from rootcoz.ai_client import chat_session_source
 
             token = ai_username.set(username)
-            force_token = force_server_credentials.set(body.force_server_credentials)
-            source_token = chat_session_source.set(_selected_credential_source.get())
+            source_token = chat_session_source.set(credential_source)
             try:
                 session_id = await init_admin_chat_session(
                     ai_provider=ai_provider,
@@ -17899,7 +20797,6 @@ async def init_admin_chat(
                 )
             finally:
                 chat_session_source.reset(source_token)
-                force_server_credentials.reset(force_token)
                 ai_username.reset(token)
             if session_id:
                 saved = await storage.add_chat_message(
@@ -18010,14 +20907,13 @@ async def send_admin_chat_message(
             raise HTTPException(
                 status_code=422, detail="Select both provider and model"
             )
-        session, selected_force = await _current_chat_choice(
+        session, _ = await _current_chat_choice(
             ADMIN_CHAT_JOB_ID, request.state.username
         )
         ai_provider, ai_model = await _normalize_and_validate_ai_params(
             body.ai_provider or session["ai_provider"],
             body.ai_model or session["ai_model"],
             username=request.state.username,
-            force_server=selected_force,
         )
         if ai_provider is None or ai_model is None:
             raise HTTPException(
@@ -18025,13 +20921,13 @@ async def send_admin_chat_message(
             )
         from rootcoz.ai_client import _selected_credential_source
 
-        _require_explicit_chat_source(_selected_credential_source.get(), selected_force)
+        credential_source = _selected_credential_source.get()
         await _check_chat_session_choice(
             ADMIN_CHAT_JOB_ID,
             request.state.username,
             ai_provider,
             ai_model,
-            body.force_server_credentials,
+            credential_source,
         )
         user_msg_id, assistant_msg_id = await storage.add_chat_message_pair(
             job_id=ADMIN_CHAT_JOB_ID,
@@ -18052,7 +20948,7 @@ async def send_admin_chat_message(
         ai_provider_override=ai_provider,
         ai_model_override=ai_model,
         username=request.state.username,
-        force_server=selected_force,
+        credential_source=credential_source,
     )
 
     return {
@@ -18075,7 +20971,7 @@ async def _process_admin_chat_message(
     ai_provider_override: str | None,
     ai_model_override: str | None,
     username: str,
-    force_server: bool | None = None,
+    credential_source: str | None = None,
 ) -> None:
     """Background task: process a single admin chat message with AI."""
     from rootcoz.ai_client import chat_session_source
@@ -18090,23 +20986,23 @@ async def _process_admin_chat_message(
     async with _hold_chat_lock(f"{ADMIN_CHAT_JOB_ID}:{username}"):
         _admin_settings = get_settings()
         user_token = ai_username.set(username)
-        force_token = force_server_credentials.set(False)
         source_token = None
         try:
             ai_provider, ai_model = ai_provider_override, ai_model_override
             if not ai_provider or not ai_model:
                 raise ValueError("Chat selection missing")
-            session_id, selected_force = await _check_chat_session_choice(
-                ADMIN_CHAT_JOB_ID, username, ai_provider, ai_model, force_server
+            session_id, credential_source = await _check_chat_session_choice(
+                ADMIN_CHAT_JOB_ID,
+                username,
+                ai_provider,
+                ai_model,
+                credential_source,
             )
-            force_server_credentials.set(selected_force)
-            source_token = chat_session_source.set(
-                "server" if selected_force else "user"
-            )
+            source_token = chat_session_source.set(credential_source)
 
             credential_generation = (
                 None
-                if selected_force
+                if credential_source == "server"
                 else await storage.get_user_ai_credential_generation(
                     username, ai_provider
                 )
@@ -18231,8 +21127,9 @@ async def _process_admin_chat_message(
                 )
                 return
 
-            if selected_force and not await storage.can_user_use_server_providers(
-                username
+            if (
+                credential_source == "server"
+                and not await storage.can_user_use_server_providers(username)
             ):
                 logger.info(
                     "Admin chat: server grant revoked before completion for user=%s",
@@ -18266,7 +21163,7 @@ async def _process_admin_chat_message(
                 ai_model=ai_model,
                 session_id=new_session_id or "",
                 credential_generation=credential_generation,
-                server_source=selected_force,
+                server_source=credential_source == "server",
             )
             if not saved:
                 await _discard_unsaved_chat_response(
@@ -18305,7 +21202,6 @@ async def _process_admin_chat_message(
         finally:
             if source_token is not None:
                 chat_session_source.reset(source_token)
-            force_server_credentials.reset(force_token)
             ai_username.reset(user_token)
             _cleanup_chat_state(f"{ADMIN_CHAT_JOB_ID}:{username}")
             # Do NOT revoke auth_header — it's embedded in custom tool HTTP headers

@@ -64,9 +64,7 @@ async def test_repeated_start_reuses_session_without_duplicate_welcome(
     request = SimpleNamespace(
         state=SimpleNamespace(username="alice", is_admin=True, role="admin")
     )
-    body = ChatInitRequest(
-        ai_provider="openai", ai_model="m", force_server_credentials=source == "server"
-    )
+    body = ChatInitRequest(ai_provider="openai", ai_model="m")
 
     async def start():
         if admin:

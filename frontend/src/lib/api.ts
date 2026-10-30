@@ -40,14 +40,19 @@ class ApiError extends Error {
   }
 }
 
-async function request<T>(path: string, options?: RequestInit): Promise<T> {
-  const res = await fetch(path, {
+/** Headers every API call sends, merged over any call-specific ones. */
+function requestInit(options?: RequestInit): RequestInit {
+  return {
     ...options,
     headers: {
       'Content-Type': 'application/json',
       ...options?.headers,
     },
-  })
+  }
+}
+
+async function request<T>(path: string, options?: RequestInit): Promise<T> {
+  const res = await fetch(path, requestInit(options))
 
   if (!res.ok) {
     let body: unknown
@@ -97,6 +102,16 @@ export interface TestIntegrationResult {
 
 export const api = {
   get: <T>(path: string, options?: RequestInit) => request<T>(path, options),
+
+  /**
+   * Status-only GET through the same fetch path. It reports the HTTP status
+   * instead of throwing on it, so a session probe can tell a 401 from a 200.
+   * A network failure still rejects — that is not proof of anything.
+   */
+  status: async (path: string): Promise<number> => {
+    const res = await fetch(path, requestInit({ credentials: 'include' }))
+    return res.status
+  },
 
   /** GET returning raw text (e.g. JSONL transcript downloads). */
   getText: async (path: string): Promise<string> => {

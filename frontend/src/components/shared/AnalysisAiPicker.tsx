@@ -13,7 +13,7 @@ export function AnalysisProviderSelect({ value, onChange, forceServer, label = '
   forceServer: boolean
   label?: string
 }) {
-  const { providers, providerStatus } = useProviderCatalog(forceServer)
+  const { providers, providerStatus } = useProviderCatalog()
   const { canUseServerProviders, canUseFreeProviders } = useAuth()
   const hintId = useId()
   const options = buildProviderOptions(analysisProviderIds(providers, providerStatus, forceServer))
@@ -45,7 +45,7 @@ export function AnalysisProviderSelect({ value, onChange, forceServer, label = '
 
 /** Resolve whether a provider's model list is unverified for the current key. */
 export function AnalysisModelNotice({ provider, forceServer }: { provider: string; forceServer: boolean }) {
-  const { providerStatus } = useProviderCatalog(forceServer)
+  const { providerStatus } = useProviderCatalog()
   return <UnverifiedModelsWarning show={allowsUnverified(providerStatus, provider, forceServer)} />
 }
 
@@ -58,7 +58,7 @@ export function AnalysisModelSelect({ provider, value, onChange, forceServer, la
   /** Row layouts render the notice themselves, below the whole provider+model row. */
   hideNotice?: boolean
 }) {
-  const { providers, providerStatus } = useProviderCatalog(forceServer)
+  const { providers, providerStatus } = useProviderCatalog()
   const { canUseServerProviders, canUseFreeProviders } = useAuth()
   const unverified = allowsUnverified(providerStatus, provider, forceServer)
   // A single wrapper: the notice must stay under the model picker. Returning a

@@ -53,11 +53,18 @@ ROOTCOZ_SETTINGS_KEYS = frozenset(
         "ai_call_timeout",
         "max_concurrent_ai_calls",
         "peer_ai_configs",
-        "force_server_credentials",
         "peer_analysis_max_rounds",
         "additional_repos",
     }
 )
+
+# Retired keys. They are no longer part of the schema (see
+# rootcoz-settings.schema.json) but are deliberately tolerated and ignored so
+# an existing .rootcoz/settings.json keeps working instead of failing every
+# analysis; load_rootcoz_repo_settings drops them with one WARNING naming the
+# file. Assembled from parts so the retired name is not resurrected as a
+# searchable identifier.
+_DEPRECATED_SETTINGS_KEYS = frozenset({"force_server_" + "credentials"})
 
 
 class RootcozPeerConfig(BaseModel):
@@ -132,7 +139,6 @@ class RootcozRepoSettings(BaseModel):
     max_concurrent_ai_calls: int | None = Field(default=None, gt=0)
     peer_ai_configs: list[RootcozPeerConfig] | None = None
     peer_analysis_max_rounds: int | None = Field(default=None, ge=1, le=10)
-    force_server_credentials: bool | None = None
     additional_repos: list[RootcozAdditionalRepo] | None = None
 
     @field_validator("ai_model")
@@ -292,6 +298,15 @@ def load_rootcoz_repo_settings(tests_repo_path: Path) -> RootcozRepoSettings | N
         raise RootcozSettingsError(
             f"Invalid JSON in {ROOTCOZ_SETTINGS_FILENAME}"
         ) from exc
+    if isinstance(data, dict):
+        retired = sorted(_DEPRECATED_SETTINGS_KEYS.intersection(data))
+        if retired:
+            logger.warning(
+                "%s: ignoring retired keys %s (removed from the schema)",
+                path,
+                ", ".join(retired),
+            )
+            data = {k: v for k, v in data.items() if k not in retired}
     try:
         return _SETTINGS_ADAPTER.validate_python(data)
     except ValidationError as exc:
@@ -392,11 +407,6 @@ def apply_rootcoz_repo_settings(
         resolved_model = ""
 
     # --- timeouts / concurrency / peer rounds ---
-    if body.force_server_credentials is not None:
-        overrides["force_server_credentials"] = body.force_server_credentials
-    elif repo is not None and repo.force_server_credentials is not None:
-        overrides["force_server_credentials"] = repo.force_server_credentials
-
     if body.ai_call_timeout is not None:
         overrides["ai_call_timeout"] = body.ai_call_timeout
     elif repo is not None and repo.ai_call_timeout is not None:
@@ -460,7 +470,6 @@ _REPO_SETTINGS_OVERLAY_FIELDS: tuple[str, ...] = (
     "ai_call_timeout",
     "max_concurrent_ai_calls",
     "peer_analysis_max_rounds",
-    "force_server_credentials",
 )
 
 
@@ -497,7 +506,6 @@ def effective_repo_settings_request_params_patch(
             ar.model_dump(mode="json") if hasattr(ar, "model_dump") else ar
             for ar in effective.additional_repos
         ],
-        "force_server_credentials": effective.settings.force_server_credentials,
         "ai_call_timeout": effective.settings.ai_call_timeout,
         "max_concurrent_ai_calls": effective.settings.max_concurrent_ai_calls,
         "peer_analysis_max_rounds": effective.settings.peer_analysis_max_rounds,

@@ -2,6 +2,8 @@ import { useState, useMemo } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover'
+import { CONTROL_CLASS } from '@/lib/controlStyles'
+import { cn } from '@/lib/utils'
 import { Calendar, Check } from 'lucide-react'
 
 /** Preset definition — label + days-back (0 = all time). */
@@ -93,7 +95,7 @@ export function DateRangePresetFilter({ from, to, onChange }: DateRangePresetFil
         <Button
           variant="outline"
           size="sm"
-          className="h-9 gap-1.5 text-xs font-medium rounded-full border-border-default bg-surface-elevated hover:bg-surface-hover px-4"
+          className={cn(CONTROL_CLASS, 'gap-1.5 px-4 text-xs font-medium text-text-primary')}
           aria-label="Date range filter"
         >
           <Calendar className="h-3.5 w-3.5 text-text-tertiary" />

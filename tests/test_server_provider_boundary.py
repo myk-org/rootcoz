@@ -40,12 +40,6 @@ async def test_user_key_pair_works_without_server_grant(tmp_path, monkeypatch):
         await real_call_ai_once("hi", ai_provider="openai", ai_model="shared")
         expected_key = "private-key"  # pragma: allowlist secret
         assert sidecar.await_args.kwargs["api_key"] == expected_key
-        force = ai_client.force_server_credentials.set(True)
-        try:
-            with pytest.raises(ValueError, match="Server provider"):
-                await real_call_ai_once("hi", ai_provider="openai", ai_model="shared")
-        finally:
-            ai_client.force_server_credentials.reset(force)
         assert sidecar.await_count == 1
     finally:
         ai_client.ai_username.reset(token)

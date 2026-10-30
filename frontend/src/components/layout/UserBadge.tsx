@@ -1,17 +1,18 @@
 import { useNavigate } from 'react-router-dom'
 import { useAuth } from '@/lib/auth'
+import { useSignOut } from '@/lib/useSignOut'
 import { RoleBadge } from '@/components/shared/RoleBadge'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { LogOut, Settings, Shield } from 'lucide-react'
 
 export function UserBadge() {
-  const { username, role, logout } = useAuth()
+  const { username, role } = useAuth()
   const navigate = useNavigate()
+  const signOut = useSignOut()
   if (!username) return null
 
   async function handleLogout() {
-    await logout()
-    navigate('/login')
+    await signOut()
   }
 
   return (

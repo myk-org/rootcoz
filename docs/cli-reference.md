@@ -95,7 +95,6 @@ Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries
 | `--jira-max-results` | Jira search tuning. |
 | `--github-token` | GitHub API token. `GITHUB_TOKEN`. |
 | `--ai-call-timeout` | AI timeout in minutes. |
-| `--force-server-credentials` / `--no-force-server-credentials` | Use server-managed AI credentials instead of your own key. |
 | `--raw-prompt` | Extra instructions appended to the AI prompt. |
 | `--issue-prompt` | Custom issue-generation prompt, overriding `.rootcoz/ROOTCOZ_ISSUE_PROMPT.md`. |
 | `--peers` | Peer models as `"provider:model,provider:model"`. |
@@ -244,10 +243,17 @@ See [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analy
 | `token-usage` | `--period` (`today`, `week`, `month`, `all`), `--start-date`, `--end-date`, `--provider`, `--model`, `--call-type`, `--group-by` (`provider`, `model`, `call_type`, `day`, `week`, `month`, `job`), `--job-id`, `--format` (`table`, `json`, `csv`) | AI token usage and cost. No filters prints the summary dashboard. |
 | `transcripts list` | `--job` (filter to one run), `--format` (`table`, `json`) | Recorded AI session transcripts (redacted JSONL) with per-session context. Admin only. |
 | `transcripts show SESSION_ID` | `--output`/`-o` FILE | Download one transcript JSONL. Admin only. |
-| `users list` | — | All users, roles, and grants. |
+| `audit list` | `--actor`, `--action` (repeatable), `--target-type`, `--target-id`, `--outcome`, `--q`, `--since`, `--until`, `--limit` (50, max 500), `--offset` | Recorded audit events, newest first. Prints time, actor, action, target, and outcome, then the match count. `--actor` is case-insensitive and exact; `--q` searches event details; `--since`/`--until` take ISO 8601 timestamps (a date-only value means a UTC day, a timestamp without an offset is read as UTC). Admin only. |
+| `audit actions` | — | Every recorded action id with its event count, last-seen timestamp, and display label. Admin only. |
+| `audit verify` | `--limit` (verify only the newest N events) | Recompute the tamper-evidence hash chain. Prints `Audit chain OK: N event(s) verified`, or the first broken event id and exits `1`. Rows written before the chain existed are reported as skipped, not broken, and a chain whose head was removed by retention pruning is reported as truncated (still exit `0` — a pruned boundary is not a break). `--json` prints the full result and still exits `1` on a broken chain. Admin only. |
+| `audit export` | `--format` (`json`, `csv`), `--output`/`-o` (file, or `-` for stdout), plus the `audit list` filters | Stream the whole matching set to a file or stdout — uncapped, unlike `audit list`. This is how evidence is retained before retention pruning deletes it, which is why both hash columns travel with it. CSV columns: `id, created_at, actor, actor_role, is_admin, action, target_type, target_id, outcome, request_ip, details, hash_version, prev_hash, entry_hash, hash_payload`; `sha256(hash_payload + prev_hash) == entry_hash` verifies a row offline, and a text cell starting with `'`, `=`, `+`, `-`, `@`, a tab or a CR carries one leading `'` escape (remove exactly one to recover the stored value). A row with no `hash_payload` is not verifiable — never treat it as verified. Admin only. |
+| `users list` | `--limit` (1–500), `--offset`, `--query` (case-insensitive username substring) | Users, roles, grants and account state. The table always ends with `Showing 1–25 of 137 user(s)`, so a page never looks like the whole list; without `--limit` every user is returned. |
 | `users create USERNAME` | `--role` (required), `--can-view-reports`/`--no-can-view-reports`, `--can-use-server-providers`/`--no-can-use-server-providers` | Create a user; the API key is shown once. |
 | `users delete USERNAME` | `--force`/`-f` | Delete a user without the confirmation prompt. |
 | `users rotate-key USERNAME` | — | Issue a new key for a user. |
+| `users unlock USERNAME` | — | Clear a lockout (and its consecutive-failure counter). Records `admin.user_unlock`. |
+| `users disable USERNAME` | — | Disable an account without deleting it. Records `admin.user_disabled`. |
+| `users enable USERNAME` | — | Re-enable a previously disabled account. Records `admin.user_enabled`. |
 | `users change-role USERNAME ROLE` | — | Change role. Promoting to `admin` issues a key. |
 | `users set-can-view-reports USERNAME VALUE` | — | Grant or revoke report access. `VALUE` accepts `true`/`false`, `1`/`0`, `yes`/`no`, `on`/`off`. |
 | `users set-can-use-server-providers USERNAME VALUE` | — | Grant or revoke server AI credentials. |
@@ -278,6 +284,8 @@ See [Managing Users and Server Settings](manage-users-and-server-settings.html) 
 
 - `rootcoz results show JOB_ID --fields "result.summary,result.failures.test_name,result.failures.classification"` returns only what a report needs, which keeps large results cheap to poll.
 - `rootcoz results full JOB_ID --json` returns the complete picture in one call — failures with review state and effective classifications joined server-side, a precomputed summary, a paginated `tests` page, comments, and tracked-in links. Its `--status`/`--child-job`/`--child-build`/`--offset`/`--limit` flags page the `tests` section.
+- `rootcoz admin audit list --since 2026-04-01T00:00:00Z --action admin.job_delete --action user.job_delete --json` reads back who deleted what this month, in one call.
+- `rootcoz admin audit export --format csv --output audit-q2.csv --since 2026-04-01 --until 2026-06-30` snapshots a quarter of evidence before retention prunes it, and `rootcoz admin audit verify` proves the stored chain has not been edited.
 - `rootcoz admin token-usage --group-by model --format csv > usage.csv` is the only command with a first-class CSV mode; everything else uses `--json`.
 - `rootcoz --server staging` switches servers without editing any file, and `rootcoz config servers` shows which name maps to which URL.
 - `rootcoz analyze --source file -f results.xml` works with no Jenkins or Prow access at all.

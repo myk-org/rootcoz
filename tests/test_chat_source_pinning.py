@@ -121,13 +121,11 @@ async def test_direct_server_chat_call_does_not_return_reply_after_grant_revoked
     monkeypatch.setattr(ai_client, "_call_with_safe_error", revoke)
     user = ai_client.ai_username.set("alice")
     source = ai_client.chat_session_source.set("server")
-    force = ai_client.force_server_credentials.set(True)
     try:
         result = await real_call_ai("hi", ai_provider="openai", ai_model="m")
         assert not result.success
         assert "SECRET REPLY" not in result.text
     finally:
-        ai_client.force_server_credentials.reset(force)
         ai_client.chat_session_source.reset(source)
         ai_client.ai_username.reset(user)
 
@@ -154,7 +152,7 @@ async def test_stale_selection_does_not_reject_pinned_server_session(
     stale = ai_client._selected_credential_source.set("user")
     try:
         assert await main._check_chat_session_choice(
-            "job", "alice", "openai", "m", True
-        ) == ("sid", True)
+            "job", "alice", "openai", "m", "server"
+        ) == ("sid", "server")
     finally:
         ai_client._selected_credential_source.reset(stale)

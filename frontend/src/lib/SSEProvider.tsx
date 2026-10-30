@@ -1,5 +1,7 @@
-import { useEffect, useSyncExternalStore, type ReactNode } from 'react'
+import { useEffect, useState, useSyncExternalStore, type ReactNode } from 'react'
 import { useAuth } from '@/lib/auth'
+import { api } from '@/lib/api'
+import { CustomMessageBanner } from '@/components/shared/CustomMessageBanner'
 import {
   SSEContext,
   getSSEManagerSnapshot,
@@ -29,6 +31,7 @@ interface ChannelMessage {
     | 'topics-update'
     | 'topics-request'
     | 'tab-down'
+    | 'session-expired'
   tabId?: string
   /** Full SSE event name (for sse-event). */
   name?: string
@@ -50,14 +53,88 @@ const RECONNECT_DEBOUNCE_MS = 150
 const LEADER_HEARTBEAT_MS = 5_000
 const LEADER_TIMEOUT_MS = 12_000
 const MAX_RECONNECT_DELAY_MS = 30_000
+/** Consecutive 401s, with no successful open in between, mean the session died. */
+const EXPIRY_FAILURE_LIMIT = 3
+
+/**
+ * Generic EventSource errors carry no HTTP status — a network blip and an
+ * expired session look identical. Ask the server who the session still is.
+ */
+async function probeSession(): Promise<number | null> {
+  try {
+    return await api.status('/api/auth/me')
+  } catch {
+    // A failed probe is a network problem, never proof of expiry.
+    return null
+  }
+}
+
+/**
+ * Watches the stream's connect attempts. The server answers an expired session
+ * with 401 on every reconnect, so an unbroken run of 401s is the signal — once
+ * tripped the manager stops reconnecting until the manager is recreated (page
+ * reload or a new login). Anything else (200, network error) is transient: the
+ * retries continue and the user is not asked to sign in again.
+ */
+function createSessionGuard(onExpired: () => void) {
+  let failures = 0
+  let expired = false
+  /** Bumped by every successful open — a probe started before it is stale. */
+  let generation = 0
+  return {
+    get expired() {
+      return expired
+    },
+    /** The stream opened — the session is alive and the run is broken. */
+    connected() {
+      failures = 0
+      generation += 1
+    },
+    /** Another tab proved the session is dead — same once-only trip, no probe. */
+    markExpired() {
+      if (expired) return
+      expired = true
+      onExpired()
+    },
+    /**
+     * Probe the session after a failed attempt; true once it counts as expired.
+     * `strikes` is how many consecutive 401s it takes: one where the browser
+     * will never retry the stream itself, three on the leader's reconnect path.
+     */
+    async failed(strikes = EXPIRY_FAILURE_LIMIT): Promise<boolean> {
+      if (expired) return true
+      const startedAt = generation
+      const status = await probeSession()
+      if (expired) return true
+      // A stream opened while this probe was in flight: its verdict belongs to
+      // a connection that is gone, so it counts neither as a failure nor a hit.
+      if (startedAt !== generation) return false
+      if (status !== 401) {
+        failures = 0
+        return false
+      }
+      failures += 1
+      if (failures < strikes) return false
+      failures = 0
+      expired = true
+      onExpired()
+      return true
+    },
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Manager implementation (navigator.locks-based leader election)
 // ---------------------------------------------------------------------------
 
-function createSSEManager(): SSEManager & { destroy(): void } {
+function createSSEManager(onExpired: () => void): SSEManager & { destroy(): void } {
   const subscriptions = new Map<number, Subscription>()
   let destroyed = false
+  // A probe can outlive the manager (logout, new login): its 401 verdict then
+  // describes a session this tab no longer has, so it must not raise the banner.
+  const guard = createSessionGuard(() => {
+    if (!destroyed) handleSessionExpired()
+  })
 
   // ---- Leader state ----
   let isLeader = false
@@ -65,6 +142,8 @@ function createSSEManager(): SSEManager & { destroy(): void } {
   let reconnectDebounceTimer: ReturnType<typeof setTimeout> | null = null
   let reconnectBackoffTimer: ReturnType<typeof setTimeout> | null = null
   let reconnectDelay = 1000
+  /** Abandoned connections outlive their replacement — this tells them apart. */
+  let connectSeq = 0
   /** Currently active event listeners on the EventSource (for cleanup). */
   let activeListeners: Array<{ name: string; handler: (e: Event) => void }> = []
   /** Leader heartbeat interval (leader sends heartbeat to followers). */
@@ -82,7 +161,7 @@ function createSSEManager(): SSEManager & { destroy(): void } {
 
   // ---- BroadcastChannel ----
   const hasBroadcast = typeof BroadcastChannel !== 'undefined'
-  const channel = hasBroadcast ? new BroadcastChannel(CHANNEL_NAME) : null
+  let channel: BroadcastChannel | null = hasBroadcast ? new BroadcastChannel(CHANNEL_NAME) : null
 
   // ---- Helpers ----
 
@@ -143,7 +222,7 @@ function createSSEManager(): SSEManager & { destroy(): void } {
   }
 
   function connectEventSource() {
-    if (destroyed) return
+    if (destroyed || guard.expired) return
     const topics = getCombinedTopics()
 
     // Close existing
@@ -154,7 +233,12 @@ function createSSEManager(): SSEManager & { destroy(): void } {
     if (topics.length === 0) return
 
     const url = buildEventSourceUrl(topics)
-    eventSource = new EventSource(url)
+    // The callbacks below belong to this instance, not to whatever the mutable
+    // `eventSource` points at when they fire: an abandoned connection can still
+    // report an error after a reconnect replaced it.
+    const es = new EventSource(url)
+    const seq = ++connectSeq
+    eventSource = es
 
     // Build listeners for all subscribed topic:event combinations
     const listenerNames = new Set<string>()
@@ -171,7 +255,7 @@ function createSSEManager(): SSEManager & { destroy(): void } {
         // Relay to follower tabs
         channel?.postMessage({ type: 'sse-event', name: fullName, data })
       }
-      eventSource.addEventListener(fullName, handler)
+      es.addEventListener(fullName, handler)
       activeListeners.push({ name: fullName, handler })
     }
 
@@ -186,42 +270,52 @@ function createSSEManager(): SSEManager & { destroy(): void } {
               // Don't dispatch locally — this is a remote-only event
               channel?.postMessage({ type: 'sse-event', name: fullName, data })
             }
-            eventSource.addEventListener(fullName, handler)
+            es.addEventListener(fullName, handler)
             activeListeners.push({ name: fullName, handler })
           }
         }
       }
     }
 
-    eventSource.onopen = () => {
+    es.onopen = () => {
+      // A late open from a replaced connection must not reset the backoff or
+      // announce a reconnect for a stream that is no longer the current one.
+      if (seq !== connectSeq) return
       reconnectDelay = 1000
+      guard.connected()
       notifyReconnect()
       channel?.postMessage({ type: 'sse-open' })
     }
 
-    eventSource.onerror = () => {
+    es.onerror = () => {
+      // A replaced connection's failure must not touch the live stream, its
+      // listeners or the reconnect timers.
+      if (seq !== connectSeq) return
       // Close immediately and reconnect manually with backoff.
       // This prevents the browser's built-in auto-reconnect from opening
       // duplicate connections that exhaust the per-domain connection pool.
-      const es = eventSource
       removeEventSourceListeners()
-      es?.close()
+      es.close()
       eventSource = null
 
-      if (!destroyed && isLeader) {
+      // An expired session keeps answering 401 — stop retrying it. Anything
+      // else (network blip, server restart) is transient: reconnect.
+      void guard.failed().then((expired) => {
+        // `eventSource` set again = a reconnect already happened while probing.
+        if (expired || destroyed || !isLeader || eventSource) return
         if (reconnectBackoffTimer) clearTimeout(reconnectBackoffTimer)
         reconnectBackoffTimer = setTimeout(() => {
           reconnectBackoffTimer = null
           if (!destroyed && isLeader) connectEventSource()
         }, reconnectDelay)
         reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY_MS)
-      }
+      })
     }
   }
 
   /** Schedule a debounced reconnection. */
   function scheduleReconnect() {
-    if (destroyed) return
+    if (destroyed || guard.expired) return
     if (reconnectDebounceTimer) clearTimeout(reconnectDebounceTimer)
     reconnectDebounceTimer = setTimeout(() => {
       reconnectDebounceTimer = null
@@ -283,6 +377,33 @@ function createSSEManager(): SSEManager & { destroy(): void } {
     if (heartbeatWatchdog) { clearTimeout(heartbeatWatchdog); heartbeatWatchdog = null }
   }
 
+  /**
+   * The session is dead. The leader hands off — it stops serving, tells the
+   * other tabs and releases the lock so one of them can take over — and this
+   * tab shows the banner. The guard runs this at most once per manager.
+   */
+  function handleSessionExpired() {
+    stopHeartbeat()
+    stopWatchdog()
+    // A dead tab must never advertise or take leadership of the dead session:
+    // drop the flag now and stop any queued lock request from promoting it.
+    const wasLeader = isLeader
+    isLeader = false
+    tabTopics.clear()
+    tabEventNames.clear()
+    if (lockAbort) { lockAbort.abort(); lockAbort = null }
+    if (wasLeader) {
+      if (reconnectDebounceTimer) { clearTimeout(reconnectDebounceTimer); reconnectDebounceTimer = null }
+      if (reconnectBackoffTimer) { clearTimeout(reconnectBackoffTimer); reconnectBackoffTimer = null }
+      removeEventSourceListeners()
+      eventSource?.close()
+      eventSource = null
+      channel?.postMessage({ type: 'session-expired' })
+      if (lockReleaseResolve) { lockReleaseResolve(); lockReleaseResolve = null }
+    }
+    onExpired()
+  }
+
   function becomeLeader() {
     if (destroyed || isLeader) return
     isLeader = true
@@ -319,8 +440,8 @@ function createSSEManager(): SSEManager & { destroy(): void } {
         LOCK_NAME,
         { signal: lockAbort.signal },
         () => {
-          // We acquired the lock — we are the leader
-          if (destroyed) return Promise.resolve()
+          // We acquired the lock — but a dead tab must not take the stream.
+          if (destroyed || guard.expired) return Promise.resolve()
           becomeLeader()
           // Return a promise that never resolves — we hold the lock until
           // this tab closes or destroy() is called. When the tab closes,
@@ -358,13 +479,16 @@ function createSSEManager(): SSEManager & { destroy(): void } {
   }
 
   // ---- Channel message handler ----
+  // A messageerror means one broadcast was dropped, not that the channel is
+  // gone (and BroadcastChannel fires no close event at all): the tab keeps
+  // listening. A silent leader is caught by the heartbeat watchdog instead.
   if (channel) {
     channel.onmessage = (msg: MessageEvent<ChannelMessage>) => {
       const m = msg.data
 
       switch (m.type) {
         case 'who-is-leader':
-          if (isLeader) channel.postMessage({ type: 'leader', tabId: TAB_ID })
+          if (isLeader) channel?.postMessage({ type: 'leader', tabId: TAB_ID })
           break
 
         case 'leader': {
@@ -409,6 +533,12 @@ function createSSEManager(): SSEManager & { destroy(): void } {
             tabEventNames.delete(m.tabId)
             scheduleReconnect()
           }
+          break
+
+        case 'session-expired':
+          // The leader's session died. Show the same banner here, and mark the
+          // guard so this tab never promotes itself into the dead session.
+          guard.markExpired()
           break
 
         case 'leader-down':
@@ -466,7 +596,9 @@ function createSSEManager(): SSEManager & { destroy(): void } {
     if (lockReleaseResolve) { lockReleaseResolve(); lockReleaseResolve = null }
     // Abort any pending lock request
     if (lockAbort) { lockAbort.abort(); lockAbort = null }
+    // The only deliberate path that gives up the channel — this tab closes it.
     channel?.close()
+    channel = null
   }
 
   return { subscribe, unsubscribe, destroy }
@@ -476,15 +608,34 @@ function createSSEManager(): SSEManager & { destroy(): void } {
 // Fallback manager (no BroadcastChannel — e.g., JSDOM tests)
 // ---------------------------------------------------------------------------
 
-function createFallbackManager(): SSEManager & { destroy(): void } {
+function createFallbackManager(onExpired: () => void): SSEManager & { destroy(): void } {
   const subscriptions = new Map<number, Subscription>()
+  let destroyed = false
+  // A probe can outlive the manager (logout, new login): its 401 verdict then
+  // describes a session this tab no longer has, so it must not raise the banner.
+  const guard = createSessionGuard(() => {
+    if (!destroyed) onExpired()
+  })
   let eventSource: EventSource | null = null
   let activeListeners: Array<{ name: string; handler: (e: Event) => void }> = []
   let debounceTimer: ReturnType<typeof setTimeout> | null = null
-  let destroyed = false
+  let backoffTimer: ReturnType<typeof setTimeout> | null = null
+  let reconnectDelay = 1000
+  /** Abandoned connections outlive their replacement — this tells them apart. */
+  let connectSeq = 0
+
+  /** At most one reconnect is pending: whichever timer is armed, both are cleared. */
+  function cancelPendingReconnect() {
+    if (debounceTimer) clearTimeout(debounceTimer)
+    if (backoffTimer) clearTimeout(backoffTimer)
+    debounceTimer = null
+    backoffTimer = null
+  }
 
   function connectEventSource() {
-    if (destroyed) return
+    if (destroyed || guard.expired) return
+    // A new attempt supersedes any timer still waiting to open one.
+    cancelPendingReconnect()
 
     // Cleanup old
     for (const { name, handler } of activeListeners) {
@@ -500,7 +651,11 @@ function createFallbackManager(): SSEManager & { destroy(): void } {
     if (topics.size === 0) return
 
     const url = `/api/stream?topics=${encodeURIComponent([...topics].sort().join(','))}`
-    eventSource = new EventSource(url)
+    // Bound to this attempt: an abandoned connection may report errors (or a
+    // late open) after a reconnect replaced it.
+    const es = new EventSource(url)
+    const seq = ++connectSeq
+    eventSource = es
 
     // Register listeners
     const listenerNames = new Set<string>()
@@ -521,19 +676,49 @@ function createFallbackManager(): SSEManager & { destroy(): void } {
           }
         }
       }
-      eventSource.addEventListener(fullName, handler)
+      es.addEventListener(fullName, handler)
       activeListeners.push({ name: fullName, handler })
     }
 
-    eventSource.onopen = () => {
+    es.onopen = () => {
+      // A late open from a replaced connection must not reset the backoff or
+      // tell subscribers they reconnected to a stream that is gone.
+      if (seq !== connectSeq) return
+      reconnectDelay = 1000
+      guard.connected()
       for (const sub of subscriptions.values()) sub.onReconnect?.()
     }
-    eventSource.onerror = () => { /* auto-reconnects */ }
+    es.onerror = () => {
+      // A replaced connection's failure must not touch the live stream, its
+      // listeners or the reconnect timers.
+      if (seq !== connectSeq) return
+      // EventSource treats a 401 as fatal: it fires onerror once and closes for
+      // good, so this tab probes the session and decides whether to retry.
+      for (const { name, handler } of activeListeners) es.removeEventListener(name, handler)
+      activeListeners = []
+      es.close()
+      eventSource = null
+      // One 401 is enough here — the browser will never retry it.
+      void guard.failed(1).then((expired) => {
+        if (expired || destroyed || eventSource) return
+        // Back off like the leader path does: a down server must not be probed
+        // on every 150ms tick by every open tab. A pending debounce would open
+        // the stream this backoff was meant to delay, so it is dropped.
+        cancelPendingReconnect()
+        backoffTimer = setTimeout(() => {
+          backoffTimer = null
+          if (!destroyed) connectEventSource()
+        }, reconnectDelay)
+        reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY_MS)
+      })
+    }
   }
 
   function scheduleReconnect() {
-    if (destroyed) return
-    if (debounceTimer) clearTimeout(debounceTimer)
+    if (destroyed || guard.expired) return
+    // The debounce replaces a pending backoff too — the subscription change is
+    // the newer reason to reconnect. The delay itself is only reset by an open.
+    cancelPendingReconnect()
     debounceTimer = setTimeout(() => {
       debounceTimer = null
       connectEventSource()
@@ -551,7 +736,7 @@ function createFallbackManager(): SSEManager & { destroy(): void } {
     },
     destroy() {
       destroyed = true
-      if (debounceTimer) clearTimeout(debounceTimer)
+      cancelPendingReconnect()
       for (const { name, handler } of activeListeners) {
         eventSource?.removeEventListener(name, handler)
       }
@@ -566,6 +751,12 @@ function createFallbackManager(): SSEManager & { destroy(): void } {
 
 export function SSEProvider({ children }: { children: ReactNode }) {
   const { authenticated } = useAuth()
+  // Surfaced to the user as a re-login prompt; nothing is redirected or cleared.
+  // Tied to the auth state it was reported for, so a login/logout starts clean.
+  const [expiry, setExpiry] = useState({ authenticated, expired: false })
+  if (expiry.authenticated !== authenticated) {
+    setExpiry({ authenticated, expired: false })
+  }
 
   // Create/destroy the manager based on authentication state.
   // When the user logs out, the manager is destroyed so a logged-out
@@ -575,9 +766,11 @@ export function SSEProvider({ children }: { children: ReactNode }) {
   // so publishing it never cascades a synchronous render from the effect.
   useEffect(() => {
     if (!authenticated) return
+    // New credentials — the fresh manager gets a new budget of attempts.
+    const onExpired = () => setExpiry({ authenticated, expired: true })
     const manager = typeof BroadcastChannel !== 'undefined'
-      ? createSSEManager()
-      : createFallbackManager()
+      ? createSSEManager(onExpired)
+      : createFallbackManager(onExpired)
     setCurrentSSEManager(manager)
     return () => {
       setCurrentSSEManager(null)
@@ -589,5 +782,15 @@ export function SSEProvider({ children }: { children: ReactNode }) {
 
   const value = authenticated ? manager : null
 
-  return <SSEContext.Provider value={value}>{children}</SSEContext.Provider>
+  return (
+    <SSEContext.Provider value={value}>
+      {expiry.expired && (
+        <CustomMessageBanner
+          className="fixed inset-x-0 top-0 z-50 rounded-none text-center"
+          message="Your session expired — live updates are paused. Reload the page and sign in again to resume them."
+        />
+      )}
+      {children}
+    </SSEContext.Provider>
+  )
 }

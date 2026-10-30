@@ -1,6 +1,9 @@
 """HTTP client for the rootcoz REST API."""
 
+import contextlib
+import os
 import re
+import sys
 from typing import Any
 from urllib.parse import quote
 
@@ -20,6 +23,16 @@ class RootCozError(Exception):
         if detail:
             msg += f": {detail}"
         super().__init__(msg)
+
+
+def _copy_stream(response: httpx.Response, sink: Any) -> int:
+    """Write a streamed response body to *sink*; return bytes written."""
+    written = 0
+    for chunk in response.iter_bytes():
+        sink.write(chunk)
+        written += len(chunk)
+    sink.flush()
+    return written
 
 
 class RootCozClient:
@@ -184,9 +197,23 @@ class RootCozClient:
 
     # -- Admin ----------------------------------------------------------------
 
-    def admin_list_users(self) -> dict[str, Any]:
-        """List all users. GET /api/admin/users"""
-        return self._request("GET", "/api/admin/users")
+    def admin_list_users(
+        self,
+        *,
+        limit: int | None = None,
+        offset: int | None = None,
+        q: str = "",
+    ) -> dict[str, Any]:
+        """List users, optionally paged (limit/offset) and searched (q).
+
+        GET /api/admin/users. Empty arguments are dropped, so an unpaged call
+        still asks for every user.
+        """
+        return self._request(
+            "GET",
+            "/api/admin/users",
+            params={"limit": limit, "offset": offset, "q": q},
+        )
 
     def admin_create_user(
         self,
@@ -331,6 +358,19 @@ class RootCozClient:
         """Rotate an admin user's API key. POST /api/admin/users/{username}/rotate-key"""
         return self._request("POST", f"/api/admin/users/{username}/rotate-key")
 
+    def admin_unlock_user(self, username: str) -> dict[str, Any]:
+        """Clear an account lock and its failure counter.
+
+        POST /api/admin/users/{username}/unlock
+        """
+        return self._request("POST", f"/api/admin/users/{username}/unlock")
+
+    def admin_set_user_disabled(self, username: str, disabled: bool) -> dict[str, Any]:
+        """Disable or re-enable an account. PUT /api/admin/users/{username}/disabled"""
+        return self._request(
+            "PUT", f"/api/admin/users/{username}/disabled", json={"disabled": disabled}
+        )
+
     def admin_change_role(self, username: str, role: str) -> dict[str, Any]:
         """Change a user's role. PUT /api/admin/users/{username}/role"""
         return self._request(
@@ -338,6 +378,122 @@ class RootCozClient:
             f"/api/admin/users/{username}/role",
             json={"role": role},
         )
+
+    def admin_list_audit(
+        self,
+        *,
+        actor: str = "",
+        action: list[str] | None = None,
+        target_type: str = "",
+        target_id: str = "",
+        outcome: str = "",
+        q: str = "",
+        since: str = "",
+        until: str = "",
+        event_id: int | None = None,
+        limit: int | None = None,
+        offset: int | None = None,
+    ) -> dict[str, Any]:
+        """List recorded audit events newest-first. GET /api/admin/audit
+
+        ``action`` accepts several ids; each is sent as a repeated query
+        parameter. Empty filters are dropped by ``_request``; ``event_id`` is
+        sent as ``id`` and narrows the answer to that one event.
+        """
+        return self._request(
+            "GET",
+            "/api/admin/audit",
+            params={
+                **self._audit_filters(
+                    actor=actor,
+                    action=action,
+                    target_type=target_type,
+                    target_id=target_id,
+                    outcome=outcome,
+                    q=q,
+                    since=since,
+                    until=until,
+                ),
+                "id": event_id,
+                "limit": limit,
+                "offset": offset,
+            },
+        )
+
+    @staticmethod
+    def _audit_filters(
+        *,
+        actor: str,
+        action: list[str] | None,
+        target_type: str,
+        target_id: str,
+        outcome: str,
+        q: str,
+        since: str,
+        until: str,
+    ) -> dict[str, Any]:
+        """The list and export endpoints take the same filters — send them alike."""
+        return {
+            "actor": actor,
+            "action": action,
+            "target_type": target_type,
+            "target_id": target_id,
+            "outcome": outcome,
+            "q": q,
+            "since": since,
+            "until": until,
+        }
+
+    def admin_export_audit(
+        self,
+        *,
+        fmt: str = "json",
+        output: str = "-",
+        actor: str = "",
+        action: list[str] | None = None,
+        target_type: str = "",
+        target_id: str = "",
+        outcome: str = "",
+        q: str = "",
+        since: str = "",
+        until: str = "",
+    ) -> int:
+        """Export the matching audit events to *output* (``-`` = stdout).
+
+        GET /api/admin/audit/export — streams the full matched set, so no page
+        limit caps the export. This is how evidence is retained before
+        retention or the row cap deletes it. Returns bytes written.
+        """
+        return self._stream_to_file(
+            "/api/admin/audit/export",
+            output,
+            params={
+                "format": fmt,
+                **self._audit_filters(
+                    actor=actor,
+                    action=action,
+                    target_type=target_type,
+                    target_id=target_id,
+                    outcome=outcome,
+                    q=q,
+                    since=since,
+                    until=until,
+                ),
+            },
+        )
+
+    def admin_verify_audit(self, limit: int | None = None) -> dict[str, Any]:
+        """Recompute the audit hash chain. GET /api/admin/audit/verify
+
+        Returns ``{checked, legacy, ok, first_broken_id, truncated,
+        truncated_before_id}``; ``limit`` verifies only the newest N chained
+        events.
+        """
+        return self._request("GET", "/api/admin/audit/verify", params={"limit": limit})
+
+    def admin_audit_actions(self) -> dict[str, Any]:
+        """Distinct recorded actions with counts and labels. GET /api/admin/audit/actions"""
+        return self._request("GET", "/api/admin/audit/actions")
 
     def admin_list_transcripts(self, job_id: str = "") -> dict[str, Any]:
         """List session transcripts with business context.
@@ -375,14 +531,25 @@ class RootCozClient:
         return response.text
 
     def admin_download_transcript_to_file(self, session_id: str, path: str) -> int:
-        """Stream one transcript JSONL to a file. Admin only.
+        """Stream one transcript JSONL to a file. Admin only."""
+        return self._stream_to_file(
+            f"/api/admin/transcripts/{quote(session_id, safe='')}", path
+        )
+
+    def _stream_to_file(
+        self, url: str, path: str, params: dict[str, Any] | None = None
+    ) -> int:
+        """Stream one GET response to *path* (``-`` = stdout); bytes written.
 
         Consumes the server's streamed chunks instead of buffering the whole
-        download in memory. Returns the number of bytes written.
+        download in memory. A file target is written to ``<path>.part`` and only
+        renamed into place once the stream completed, so an interrupted export
+        never leaves a truncated file that looks like a valid one.
         """
-        url = f"/api/admin/transcripts/{quote(session_id, safe='')}"
+        if params:
+            params = {k: v for k, v in params.items() if v is not None and v != ""}
         try:
-            with self._client.stream("GET", url) as response:
+            with self._client.stream("GET", url, params=params) as response:
                 if response.status_code != 200:
                     response.read()
                     detail = ""
@@ -392,15 +559,27 @@ class RootCozClient:
                         detail = response.text
                     raise RootCozError(status_code=response.status_code, detail=detail)
                 written = 0
-                try:
-                    with open(path, "wb") as handle:
-                        for chunk in response.iter_bytes():
-                            handle.write(chunk)
-                            written += len(chunk)
-                except OSError as exc:
-                    raise RootCozError(
-                        status_code=0, detail=f"Cannot write {path}: {exc}"
-                    ) from exc
+                if path == "-":
+                    try:
+                        written = _copy_stream(response, sys.stdout.buffer)
+                    except OSError as exc:
+                        raise RootCozError(
+                            status_code=0, detail=f"Cannot write {path}: {exc}"
+                        ) from exc
+                else:
+                    partial = f"{path}.part"
+                    try:
+                        with open(partial, "wb") as handle:
+                            written = _copy_stream(response, handle)
+                        os.replace(partial, path)
+                    except BaseException as exc:
+                        with contextlib.suppress(OSError):
+                            os.unlink(partial)
+                        if isinstance(exc, OSError):
+                            raise RootCozError(
+                                status_code=0, detail=f"Cannot write {path}: {exc}"
+                            ) from exc
+                        raise
             return written
         except httpx.TimeoutException as exc:
             raise RootCozError(
@@ -1626,17 +1805,12 @@ class RootCozClient:
         job_id: str,
         ai_provider: str,
         ai_model: str,
-        force_server_credentials: bool = False,
     ) -> dict[str, Any]:
-        """Start chat with an explicit provider/model and credential choice."""
+        """Start chat with an explicit provider/model."""
         return self._request(
             "POST",
             f"/api/chat/{job_id}/init",
-            json={
-                "ai_provider": ai_provider,
-                "ai_model": ai_model,
-                "force_server_credentials": force_server_credentials,
-            },
+            json={"ai_provider": ai_provider, "ai_model": ai_model},
         )
 
     def get_chat_history(
@@ -1654,7 +1828,6 @@ class RootCozClient:
         message: str,
         ai_provider: str = "",
         ai_model: str = "",
-        force_server_credentials: bool | None = None,
     ) -> dict[str, Any]:
         """Send a chat message and queue AI processing. POST /api/chat/{job_id}"""
         body: dict[str, Any] = {"message": message}
@@ -1662,8 +1835,6 @@ class RootCozClient:
             body["ai_provider"] = ai_provider
         if ai_model:
             body["ai_model"] = ai_model
-        if force_server_credentials is not None:
-            body["force_server_credentials"] = force_server_credentials
         return self._request(
             "POST", f"/api/chat/{job_id}", json=body, accept_statuses=(202,)
         )
@@ -1689,17 +1860,12 @@ class RootCozClient:
         self,
         ai_provider: str,
         ai_model: str,
-        force_server_credentials: bool = False,
     ) -> dict[str, Any]:
-        """Start admin chat with an explicit credential choice."""
+        """Start admin chat with an explicit provider/model."""
         return self._request(
             "POST",
             "/api/admin/chat/init",
-            json={
-                "ai_provider": ai_provider,
-                "ai_model": ai_model,
-                "force_server_credentials": force_server_credentials,
-            },
+            json={"ai_provider": ai_provider, "ai_model": ai_model},
         )
 
     def get_admin_chat_history(
@@ -1716,7 +1882,6 @@ class RootCozClient:
         message: str,
         ai_provider: str = "",
         ai_model: str = "",
-        force_server_credentials: bool | None = None,
     ) -> dict[str, Any]:
         """Send admin chat message. POST /api/admin/chat"""
         body: dict[str, Any] = {"message": message}
@@ -1724,8 +1889,6 @@ class RootCozClient:
             body["ai_provider"] = ai_provider
         if ai_model:
             body["ai_model"] = ai_model
-        if force_server_credentials is not None:
-            body["force_server_credentials"] = force_server_credentials
         return self._request(
             "POST", "/api/admin/chat", json=body, accept_statuses=(202,)
         )

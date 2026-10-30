@@ -51,7 +51,6 @@ export function NewAnalysisPage() {
   // AI configuration
   const [aiProvider, setAiProvider] = useState('')
   const [aiModel, setAiModel] = useState('')
-  const [forceServerCredentials, setForceServerCredentials] = useState<boolean | undefined>(undefined)
   const [aiCallTimeout, setAiCallTimeout] = useState<number | undefined>(undefined)
   const [rawPrompt, setRawPrompt] = useState('')
 
@@ -97,7 +96,6 @@ export function NewAnalysisPage() {
       if (cancelled || resolved) return
       if (defaults.ai_provider) setAiProvider(normalizeProvider(defaults.ai_provider))
       if (defaults.ai_model) setAiModel(defaults.ai_model)
-      setForceServerCredentials(defaults.force_server_credentials)
       setAiCallTimeout(defaults.ai_call_timeout)
       setTestsRepoUrl(defaults.tests_repo_url)
       if (defaults.tests_repo_ref) setTestsRepoRef(defaults.tests_repo_ref)
@@ -147,8 +145,7 @@ export function NewAnalysisPage() {
 
   const fileInputRef = useRef<HTMLInputElement>(null)
 
-  const effectiveForceServer = forceServerCredentials === true && canUseServerProviders
-  const { providers, providerStatus } = useProviderCatalog(effectiveForceServer)
+  const { providers, providerStatus } = useProviderCatalog()
 
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
@@ -161,7 +158,7 @@ export function NewAnalysisPage() {
       : rawXml.trim() !== ''
 
   const deferAiToTestsRepo = !!testsRepoUrl.trim() && !aiProvider && !aiModel
-  const aiUnavailable = isAnalysisFormAiUnavailable(providers, providerStatus, { ai_provider: aiProvider, ai_model: aiModel }, peerConfigs, enablePeers, effectiveForceServer, canUseServerProviders, canUseFreeProviders, deferAiToTestsRepo)
+  const aiUnavailable = isAnalysisFormAiUnavailable(providers, providerStatus, { ai_provider: aiProvider, ai_model: aiModel }, peerConfigs, enablePeers, false, canUseServerProviders, canUseFreeProviders, deferAiToTestsRepo)
 
   const handleFileUpload = useCallback((file: File) => {
     setError('')
@@ -196,7 +193,6 @@ export function NewAnalysisPage() {
     try {
       const commonFields: Record<string, unknown> = {
         // Always include user-entered fields
-        ...(forceServerCredentials !== undefined && { force_server_credentials: effectiveForceServer }),
         ...(aiProvider && { ai_provider: aiProvider }),
         ...(aiModel && { ai_model: aiModel }),
         ...(aiCallTimeout !== undefined && { ai_call_timeout: aiCallTimeout }),
@@ -276,8 +272,6 @@ export function NewAnalysisPage() {
     buildNumber,
     aiProvider,
     aiModel,
-    forceServerCredentials,
-    effectiveForceServer,
     aiUnavailable,
     tags,
     waitForCompletion,
@@ -560,7 +554,7 @@ export function NewAnalysisPage() {
             <div className="grid grid-cols-2 gap-3">
               <div className="space-y-1.5">
                 <FieldLabel>AI Provider</FieldLabel>
-                <AnalysisProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel('') }} forceServer={effectiveForceServer} />
+                <AnalysisProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel('') }} forceServer={false} />
               </div>
               <div className="space-y-1.5">
                 <FieldLabel>AI Call Timeout</FieldLabel>
@@ -575,11 +569,7 @@ export function NewAnalysisPage() {
             </div>
             <div className="space-y-1.5">
               <FieldLabel>AI Model</FieldLabel>
-              <AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={effectiveForceServer} />
-            </div>
-            <div className="flex items-center justify-between">
-              <span className="text-sm text-text-secondary">Use server credentials</span>
-              <Toggle checked={effectiveForceServer} onChange={setForceServerCredentials} label="Use server credentials" disabled={!canUseServerProviders} />
+              <AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={false} />
             </div>
             {!canUseServerProviders && !canUseFreeProviders && <CredentialAccessNotice className="mt-2" />}
             <div className="space-y-1.5">
@@ -612,7 +602,7 @@ export function NewAnalysisPage() {
                 setPeerConfigs={setPeerConfigs}
                 maxRounds={maxRounds}
                 setMaxRounds={setMaxRounds}
-                forceServer={effectiveForceServer}
+                forceServer={false}
               />
             )}
           </Section>

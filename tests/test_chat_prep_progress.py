@@ -81,9 +81,7 @@ async def test_history_reports_phase_while_init_runs_and_clears_after(
     gate = asyncio.Event()
     cloning_started = asyncio.Event()
     await _setup_job(monkeypatch, tmp_path, gate=gate, cloning_started=cloning_started)
-    body = ChatInitRequest(
-        ai_provider="openai", ai_model="chosen", force_server_credentials=False
-    )
+    body = ChatInitRequest(ai_provider="openai", ai_model="chosen")
 
     init = asyncio.create_task(main.init_chat("job", _request(), body))
     # Blocked inside clone_chat_repos: history must still answer with the phase.
@@ -115,9 +113,7 @@ async def test_phase_cleared_when_init_fails(monkeypatch, tmp_path):
         await main.init_chat(
             "job",
             _request(),
-            ChatInitRequest(
-                ai_provider="openai", ai_model="chosen", force_server_credentials=False
-            ),
+            ChatInitRequest(ai_provider="openai", ai_model="chosen"),
         )
     history = await main.get_chat_history("job", _request(), limit=200, offset=0)
     assert history["preparing"] is None

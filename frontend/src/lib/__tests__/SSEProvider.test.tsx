@@ -1,0 +1,824 @@
+import { act, render, screen } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { SSEProvider } from '@/lib/SSEProvider'
+import { useSSE } from '@/lib/useSSE'
+
+vi.mock('@/lib/auth', () => ({ useAuth: () => ({ authenticated: auth.authenticated }) }))
+
+/** The probe must go through the api wrapper, so the wrapper is what gets mocked. */
+const { probeStatus } = vi.hoisted(() => ({ probeStatus: vi.fn() }))
+vi.mock('@/lib/api', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('@/lib/api')>()
+  return { ...actual, api: { ...actual.api, status: (...args: unknown[]) => probeStatus(...args) } }
+})
+
+const EXPIRED_TEXT = /session expired/i
+
+/** Auth state the mocked useAuth reports — toggled to log out and back in. */
+const auth = vi.hoisted(() => ({ authenticated: true }))
+
+class MockEventSource {
+  static instances: MockEventSource[] = []
+  url: string
+  closed = false
+  onopen: (() => void) | null = null
+  onerror: (() => void) | null = null
+  /** Handlers still registered per event name — a removed one is gone for good. */
+  listeners = new Map<string, Set<(e: Event) => void>>()
+  constructor(url: string) {
+    this.url = url
+    MockEventSource.instances.push(this)
+  }
+  addEventListener(name: string, handler: (e: Event) => void) {
+    const handlers = this.listeners.get(name) ?? new Set()
+    handlers.add(handler)
+    this.listeners.set(name, handlers)
+  }
+  removeEventListener(name: string, handler: (e: Event) => void) {
+    this.listeners.get(name)?.delete(handler)
+  }
+  close() {
+    this.closed = true
+  }
+  /** Deliver an event the way a live stream would. */
+  emit(name: string, data: string) {
+    for (const handler of this.listeners.get(name) ?? []) handler({ data } as MessageEvent)
+  }
+  open() {
+    this.onopen?.()
+  }
+  fail() {
+    this.onerror?.()
+  }
+}
+
+/** The manager only opens a stream once something subscribes. */
+function Subscriber() {
+  useSSE('navbar', { 'active-count': () => {} })
+  return <div>page content</div>
+}
+
+/** A subscription whose topic can change, like a page navigating to another job. */
+function TopicSubscriber({ topic }: { topic: string }) {
+  useSSE(topic, { 'active-count': () => {} })
+  return <div>page content</div>
+}
+
+/** Reports reconnects, like a page that refetches when the stream comes back. */
+function ReconnectSubscriber({ onReconnect }: { onReconnect: () => void }) {
+  useSSE('navbar', { 'active-count': () => {} }, { onReconnect })
+  return <div>page content</div>
+}
+
+const fetchMock = vi.fn()
+
+/** The guard asks /api/auth/me whether the session survived; the answer decides. */
+function probe(status: number | 'network') {
+  probeStatus.mockImplementation(() =>
+    status === 'network'
+      ? Promise.reject(new TypeError('Failed to fetch'))
+      : Promise.resolve(status),
+  )
+}
+
+/** Probes that stay in flight until the test says how the server answered. */
+function deferredProbes() {
+  const resolvers: Array<(status: number) => void> = []
+  probeStatus.mockImplementation(
+    () =>
+      new Promise<number>((resolve) =>
+        resolvers.push((status) => resolve(status)),
+      ),
+  )
+  return {
+    async resolveAll(status: number) {
+      const pending = resolvers.splice(0)
+      await act(async () => {
+        for (const resolve of pending) resolve(status)
+        await Promise.resolve()
+      })
+    },
+  }
+}
+
+describe('SSEProvider session expiry', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    MockEventSource.instances = []
+    fetchMock.mockReset()
+    probeStatus.mockReset()
+    vi.stubGlobal('EventSource', MockEventSource)
+    vi.stubGlobal('fetch', fetchMock)
+    // No BroadcastChannel → the manager every non-multiplexed environment gets.
+    vi.stubGlobal('BroadcastChannel', undefined)
+    auth.authenticated = true
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  async function renderAndConnect() {
+    render(
+      <SSEProvider>
+        <Subscriber />
+      </SSEProvider>,
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
+    expect(MockEventSource.instances).toHaveLength(1)
+    return MockEventSource.instances[0]
+  }
+
+  /** A generic error carries no status, so the guard probes the session first. */
+  async function fail(source: MockEventSource, times = 1) {
+    await act(async () => {
+      for (let i = 0; i < times; i += 1) source.fail()
+    })
+  }
+
+  it('reports the expiry on the first 401 probe, since a 401 is never retried', async () => {
+    const source = await renderAndConnect()
+    probe(401)
+
+    await fail(source)
+
+    expect(probeStatus).toHaveBeenCalledWith('/api/auth/me')
+    // The probe goes through the api wrapper — never a bare fetch of its own.
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(screen.getByText(EXPIRED_TEXT)).toBeInTheDocument()
+    expect(source.closed).toBe(true)
+
+    // No reconnect: the 401 loop must stop rather than hammer the server.
+    await fail(source, 3)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000)
+    })
+    expect(MockEventSource.instances).toHaveLength(1)
+    expect(screen.getAllByText(EXPIRED_TEXT)).toHaveLength(1)
+    // Nothing is left armed — a dead session never retries.
+    expect(vi.getTimerCount()).toBe(0)
+  })
+
+  it('treats a 200 probe as transient and reconnects', async () => {
+    const source = await renderAndConnect()
+    probe(200)
+
+    await fail(source)
+
+    expect(screen.queryByText(EXPIRED_TEXT)).not.toBeInTheDocument()
+    // The browser will not retry a closed stream — the manager does it itself.
+    expect(source.closed).toBe(true)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+    })
+    expect(MockEventSource.instances).toHaveLength(2)
+    expect(MockEventSource.instances[1].closed).toBe(false)
+  })
+
+  it('treats a rejected probe as transient and reconnects', async () => {
+    const source = await renderAndConnect()
+    probe('network')
+
+    await fail(source)
+
+    expect(probeStatus).toHaveBeenCalledWith('/api/auth/me')
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(screen.queryByText(EXPIRED_TEXT)).not.toBeInTheDocument()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000)
+    })
+    expect(MockEventSource.instances).toHaveLength(2)
+  })
+
+  /** The next attempt lands exactly after `ms` — not on the 150ms debounce tick. */
+  async function expectReconnectAfter(ms: number) {
+    const before = MockEventSource.instances.length
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms - 1)
+    })
+    expect(MockEventSource.instances).toHaveLength(before)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1)
+    })
+    expect(MockEventSource.instances).toHaveLength(before + 1)
+    return MockEventSource.instances[before]
+  }
+
+  it('backs off exponentially while the server stays unreachable', async () => {
+    let source = await renderAndConnect()
+    probe('network')
+
+    await fail(source)
+    source = await expectReconnectAfter(1_000)
+    await fail(source)
+    source = await expectReconnectAfter(2_000)
+    await fail(source)
+    await expectReconnectAfter(4_000)
+  })
+
+  it('resets the backoff after a successful open', async () => {
+    let source = await renderAndConnect()
+    probe('network')
+
+    await fail(source)
+    source = await expectReconnectAfter(1_000)
+    await fail(source)
+    source = await expectReconnectAfter(2_000)
+
+    // A healthy stream proves the server is back — the next failure starts over.
+    act(() => {
+      source.open()
+    })
+    await fail(source)
+    await expectReconnectAfter(1_000)
+  })
+
+  it('ignores an error from the stream a reconnect replaced', async () => {
+    const { rerender } = render(
+      <SSEProvider>
+        <TopicSubscriber topic="navbar" />
+      </SSEProvider>,
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
+    const stale = MockEventSource.instances[0]
+
+    // A topic change replaces the stream; the old connection is abandoned.
+    rerender(
+      <SSEProvider>
+        <TopicSubscriber topic="results:abc123" />
+      </SSEProvider>,
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150)
+    })
+    expect(MockEventSource.instances).toHaveLength(2)
+    const live = MockEventSource.instances[1]
+
+    await fail(stale)
+
+    // The abandoned connection's failure is its own: the live stream keeps its
+    // listeners, is never closed, and no probe or reconnect is started.
+    expect(probeStatus).not.toHaveBeenCalled()
+    expect(stale.closed).toBe(true)
+    expect(live.closed).toBe(false)
+    expect(live.listeners.get('results:abc123:active-count')?.size).toBe(1)
+    expect(vi.getTimerCount()).toBe(0)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000)
+    })
+    expect(MockEventSource.instances).toHaveLength(2)
+    expect(live.closed).toBe(false)
+  })
+
+  it('ignores a late open from the stream a reconnect replaced', async () => {
+    const onReconnect = vi.fn()
+    render(
+      <SSEProvider>
+        <ReconnectSubscriber onReconnect={onReconnect} />
+      </SSEProvider>,
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
+    const stale = MockEventSource.instances[0]
+    probe('network')
+
+    // Two failures take the backoff to 2000ms for the next attempt.
+    await fail(stale)
+    const second = await expectReconnectAfter(1_000)
+    await fail(second)
+
+    act(() => {
+      stale.open()
+    })
+
+    // The replaced connection's open proves nothing: the backoff keeps its
+    // 2000ms and no subscriber is told it reconnected.
+    await expectReconnectAfter(2_000)
+    expect(onReconnect).not.toHaveBeenCalled()
+  })
+
+  it('reconnects once when a subscription changes during a scheduled backoff', async () => {
+    const { rerender } = render(
+      <SSEProvider>
+        <TopicSubscriber topic="navbar" />
+      </SSEProvider>,
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
+    expect(MockEventSource.instances).toHaveLength(1)
+
+    probe('network')
+    await fail(MockEventSource.instances[0])
+
+    // A topic change during the backoff: the debounce is the one reconnect left.
+    rerender(
+      <SSEProvider>
+        <TopicSubscriber topic="results:abc123" />
+      </SSEProvider>,
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(150)
+    })
+    expect(MockEventSource.instances).toHaveLength(2)
+    const reconnected = MockEventSource.instances[1]
+    expect(reconnected.closed).toBe(false)
+    expect(reconnected.url).toContain('results%3Aabc123')
+
+    // The stale backoff would fire by now and swap the stream a second time.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000)
+    })
+    expect(MockEventSource.instances).toHaveLength(2)
+    expect(reconnected.closed).toBe(false)
+  })
+
+  it('clears a pending backoff when the provider unmounts', async () => {
+    const { unmount } = render(
+      <SSEProvider>
+        <Subscriber />
+      </SSEProvider>,
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
+    probe('network')
+    await fail(MockEventSource.instances[0])
+
+    unmount()
+
+    // No timer is left behind, so nothing reconnects for an unmounted tab.
+    expect(vi.getTimerCount()).toBe(0)
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000)
+    })
+    expect(MockEventSource.instances).toHaveLength(1)
+  })
+
+  it('ignores a 401 probe from the manager a logout destroyed', async () => {
+    const probes = deferredProbes()
+    const { rerender } = render(
+      <SSEProvider>
+        <Subscriber />
+      </SSEProvider>,
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
+    await fail(MockEventSource.instances[0])
+
+    // Log out — the manager is destroyed with the probe still in flight — and
+    // back in, which builds a fresh manager for a fresh session.
+    auth.authenticated = false
+    rerender(
+      <SSEProvider>
+        <Subscriber />
+      </SSEProvider>,
+    )
+    auth.authenticated = true
+    rerender(
+      <SSEProvider>
+        <Subscriber />
+      </SSEProvider>,
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200)
+    })
+    const afterLogin = MockEventSource.instances.length
+
+    await probes.resolveAll(401)
+
+    // The dead manager's verdict belongs to a session nobody is in any more.
+    expect(screen.queryByText(EXPIRED_TEXT)).not.toBeInTheDocument()
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000)
+    })
+    expect(screen.queryByText(EXPIRED_TEXT)).not.toBeInTheDocument()
+    expect(MockEventSource.instances).toHaveLength(afterLogin)
+  })
+})
+
+/**
+ * Two tabs share one stream through a BroadcastChannel. The mock delivers in a
+ * later task, like the real API — delivering inside postMessage would reorder
+ * the leader election.
+ */
+class MockBroadcastChannel {
+  static instances: MockBroadcastChannel[] = []
+  onmessage: ((e: MessageEvent) => void) | null = null
+  onclose: (() => void) | null = null
+  onmessageerror: (() => void) | null = null
+  closed = false
+  /** Everything this tab posted, for asserting on the protocol. */
+  sent: unknown[] = []
+  constructor() {
+    MockBroadcastChannel.instances.push(this)
+  }
+  postMessage(data: unknown) {
+    this.sent.push(data)
+    queueMicrotask(() => {
+      for (const other of MockBroadcastChannel.instances) {
+        if (other !== this && !other.closed) other.onmessage?.({ data } as MessageEvent)
+      }
+    })
+  }
+  close() {
+    this.closed = true
+    this.onclose?.()
+  }
+}
+
+function openStreams() {
+  return MockEventSource.instances.filter((source) => !source.closed)
+}
+
+describe('SSEProvider follower promotion', () => {
+  beforeEach(() => {
+    vi.useFakeTimers()
+    MockEventSource.instances = []
+    MockBroadcastChannel.instances = []
+    fetchMock.mockReset()
+    probeStatus.mockReset()
+    vi.stubGlobal('EventSource', MockEventSource)
+    vi.stubGlobal('BroadcastChannel', MockBroadcastChannel)
+    vi.stubGlobal('fetch', fetchMock)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+
+  function renderTab() {
+    return render(
+      <SSEProvider>
+        <Subscriber />
+      </SSEProvider>,
+    )
+  }
+
+  /** Past the 150–250ms election window. */
+  async function settle(ms = 400) {
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(ms)
+    })
+  }
+
+  function channel() {
+    return MockBroadcastChannel.instances[0]
+  }
+
+  function hear(message: unknown) {
+    act(() => {
+      channel().onmessage?.({ data: message } as MessageEvent)
+    })
+  }
+
+  function posted(type: string) {
+    return channel().sent.filter((m) => (m as { type?: string }).type === type)
+  }
+
+  it('promotes a follower after the leader goes silent for too long', async () => {
+    renderTab()
+    await settle()
+    expect(openStreams()).toHaveLength(1)
+
+    // Another tab claims leadership: this one follows, so it drops its own stream.
+    hear({ type: 'leader', tabId: '0' })
+    await settle()
+    expect(openStreams()).toHaveLength(0)
+
+    // Past the heartbeat timeout the follower assumes the leader is gone.
+    await settle(13_000)
+
+    const streams = openStreams()
+    expect(streams).toHaveLength(1)
+    expect(streams[0].url).toContain('/api/stream?topics=')
+  })
+
+  it('hands the expired session off from the leader exactly once', async () => {
+    renderTab()
+    await settle()
+    const source = openStreams()[0]
+    expect(source).toBeDefined()
+    probe(401)
+    const heartbeats = posted('leader').length
+
+    await act(async () => {
+      for (let i = 0; i < 3; i += 1) source.fail()
+    })
+
+    // One handoff on the channel, and this tab shows the banner too.
+    expect(posted('session-expired')).toHaveLength(1)
+    expect(screen.getByText(EXPIRED_TEXT)).toBeInTheDocument()
+    expect(openStreams()).toHaveLength(0)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60_000)
+    })
+    // A dead leader stops claiming to be alive, and never re-handsoffs.
+    expect(posted('leader')).toHaveLength(heartbeats)
+    expect(posted('session-expired')).toHaveLength(1)
+    expect(openStreams()).toHaveLength(0)
+  })
+
+  it('treats a channel message error as one dropped broadcast, not a lost channel', async () => {
+    const onEvent = vi.fn()
+    function Listener() {
+      useSSE('navbar', { 'active-count': onEvent })
+      return <div>listener</div>
+    }
+
+    render(
+      <SSEProvider>
+        <Listener />
+      </SSEProvider>,
+    )
+    await settle()
+    hear({ type: 'leader', tabId: '0' })
+    await settle()
+    expect(openStreams()).toHaveLength(0)
+    const updates = posted('topics-update').length
+
+    act(() => {
+      channel().onmessageerror?.()
+    })
+    await settle()
+
+    // No takeover on a single dropped message…
+    expect(openStreams()).toHaveLength(0)
+    // …and the tab is not muted: it still sends and still receives.
+    hear({ type: 'topics-request' })
+    expect(posted('topics-update')).toHaveLength(updates + 1)
+    hear({ type: 'sse-event', name: 'navbar:active-count', data: '{"count":7}' })
+    expect(onEvent).toHaveBeenCalledWith('{"count":7}')
+  })
+
+  it('never advertises leadership once the session expired', async () => {
+    renderTab()
+    await settle()
+    const source = openStreams()[0]
+    probe(401)
+
+    await act(async () => {
+      for (let i = 0; i < 3; i += 1) source.fail()
+    })
+    expect(screen.getByText(EXPIRED_TEXT)).toBeInTheDocument()
+
+    const heartbeats = posted('leader').length
+    hear({ type: 'who-is-leader' })
+    // A dead tab answers nothing, so a new tab will not cancel its election.
+    expect(posted('leader')).toHaveLength(heartbeats)
+  })
+
+  it('does not expire when a successful open breaks the 401 run', async () => {
+    renderTab()
+    await settle()
+    probe(401)
+
+    for (let round = 0; round < 3; round += 1) {
+      const source = MockEventSource.instances[MockEventSource.instances.length - 1]
+      await act(async () => {
+        source.fail()
+        source.fail()
+      })
+      act(() => {
+        source.open()
+      })
+      // Let the scheduled reconnect replace the closed stream.
+      await settle(2_000)
+    }
+
+    expect(screen.queryByText(EXPIRED_TEXT)).not.toBeInTheDocument()
+    expect(openStreams()).toHaveLength(1)
+  })
+
+  it('discards 401 probes that were in flight when the stream reopened', async () => {
+    renderTab()
+    await settle()
+    const source = openStreams()[0]
+    const probes = deferredProbes()
+
+    // Three probes in flight, then a successful open — they were measuring a
+    // connection that no longer exists, so their 401s count for nothing.
+    await act(async () => {
+      source.fail()
+      source.fail()
+      source.fail()
+    })
+    act(() => {
+      source.open()
+    })
+    await probes.resolveAll(401)
+
+    expect(screen.queryByText(EXPIRED_TEXT)).not.toBeInTheDocument()
+    // And the retries keep going instead of the tab going quiet.
+    const before = MockEventSource.instances.length
+    await settle(5_000)
+    expect(MockEventSource.instances.length).toBeGreaterThan(before)
+  })
+
+  it('shows the banner on a follower that hears of the expiry and opens no stream', async () => {
+    renderTab()
+    await settle()
+    hear({ type: 'leader', tabId: '0' })
+    await settle()
+    expect(openStreams()).toHaveLength(0)
+
+    hear({ type: 'session-expired' })
+    expect(screen.getByText(EXPIRED_TEXT)).toBeInTheDocument()
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120_000)
+    })
+    // No promotion into the dead session, and no second banner.
+    expect(openStreams()).toHaveLength(0)
+    expect(screen.getAllByText(EXPIRED_TEXT)).toHaveLength(1)
+  })
+
+  it('keeps heartbeating and relaying events to a follower on a healthy session', async () => {
+    const onEvent = vi.fn()
+    function Listener() {
+      useSSE('navbar', { 'active-count': onEvent })
+      return <div>listener</div>
+    }
+
+    render(
+      <SSEProvider>
+        <Listener />
+      </SSEProvider>,
+    )
+    await settle()
+    expect(posted('leader')).toHaveLength(1)
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000)
+    })
+    expect(posted('leader').length).toBeGreaterThan(1)
+    expect(posted('session-expired')).toHaveLength(0)
+
+    // The other tab keeps leadership; this one gets its events off the channel.
+    hear({ type: 'leader', tabId: '0' })
+    await settle()
+    hear({ type: 'sse-event', name: 'navbar:active-count', data: '{"count":3}' })
+    expect(onEvent).toHaveBeenCalledWith('{"count":3}')
+  })
+
+  it('ignores an error from the stream a leader reconnect replaced', async () => {
+    const { rerender } = render(
+      <SSEProvider>
+        <TopicSubscriber topic="navbar" />
+      </SSEProvider>,
+    )
+    await settle()
+    expect(openStreams()).toHaveLength(1)
+    const stale = openStreams()[0]
+
+    // A topic change replaces the leader's stream; the old one is abandoned.
+    rerender(
+      <SSEProvider>
+        <TopicSubscriber topic="results:abc123" />
+      </SSEProvider>,
+    )
+    await settle(200)
+    expect(openStreams()).toHaveLength(1)
+    const live = openStreams()[0]
+    expect(live).not.toBe(stale)
+
+    probe(401)
+    await act(async () => {
+      stale.fail()
+    })
+
+    // The abandoned connection must not be mistaken for the live one: no probe,
+    // no closed stream, no removed listeners, no extra reconnect.
+    expect(probeStatus).not.toHaveBeenCalled()
+    expect(live.closed).toBe(false)
+    expect(live.listeners.get('results:abc123:active-count')?.size).toBe(1)
+    const opened = MockEventSource.instances.length
+    await settle(5_000)
+    expect(MockEventSource.instances).toHaveLength(opened)
+    expect(live.closed).toBe(false)
+  })
+
+  it('ignores a late open from the stream a leader reconnect replaced', async () => {
+    render(
+      <SSEProvider>
+        <TopicSubscriber topic="navbar" />
+      </SSEProvider>,
+    )
+    await settle()
+    const stale = openStreams()[0]
+    probe('network')
+
+    // A failure backs off into a replacement; the abandoned stream is still
+    // holding callbacks that the browser may fire late.
+    await act(async () => {
+      stale.fail()
+    })
+    await settle(1_000)
+    const live = openStreams()[0]
+    expect(live).not.toBe(stale)
+    const opens = posted('sse-open').length
+
+    act(() => {
+      stale.open()
+    })
+
+    // The replaced connection's open announces nothing to followers and resets
+    // no backoff: the next attempt keeps the doubled 2000ms delay.
+    expect(posted('sse-open')).toHaveLength(opens)
+    await act(async () => {
+      live.fail()
+    })
+    await settle(1_500)
+    expect(openStreams()).toHaveLength(0)
+  })
+})
+
+/**
+ * jsdom has no navigator.locks, so the tests above elect through the channel.
+ * This one hands the test the moment a queued lock request would be granted.
+ */
+class MockLocks {
+  requests: Array<{ rejected: boolean; grant: () => void }> = []
+  request = (
+    _name: string,
+    options: { signal?: AbortSignal },
+    callback: () => Promise<void>,
+  ) =>
+    new Promise<void>((resolve, reject) => {
+      const entry = {
+        rejected: false,
+        grant: () => {
+          void callback().then(resolve, reject)
+        },
+      }
+      options.signal?.addEventListener('abort', () => {
+        entry.rejected = true
+        reject(new DOMException('Aborted', 'AbortError'))
+      })
+      this.requests.push(entry)
+    })
+}
+
+describe('SSEProvider leader lock', () => {
+  let locks: MockLocks
+
+  beforeEach(() => {
+    vi.useFakeTimers()
+    MockEventSource.instances = []
+    MockBroadcastChannel.instances = []
+    fetchMock.mockReset()
+    probeStatus.mockReset()
+    locks = new MockLocks()
+    Object.defineProperty(navigator, 'locks', { value: locks, configurable: true })
+    vi.stubGlobal('EventSource', MockEventSource)
+    vi.stubGlobal('BroadcastChannel', MockBroadcastChannel)
+    vi.stubGlobal('fetch', fetchMock)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+    delete (navigator as { locks?: unknown }).locks
+  })
+
+  it('never lets an expired follower take the lock it is queued for', async () => {
+    render(
+      <SSEProvider>
+        <Subscriber />
+      </SSEProvider>,
+    )
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400)
+    })
+    // The lock is held by another tab: this one waits, no stream yet.
+    expect(locks.requests).toHaveLength(1)
+    expect(openStreams()).toHaveLength(0)
+
+    act(() => {
+      MockBroadcastChannel.instances[0].onmessage?.({ data: { type: 'session-expired' } } as MessageEvent)
+    })
+    expect(screen.getByText(EXPIRED_TEXT)).toBeInTheDocument()
+    // The queued request is cancelled instead of waiting to promote a dead tab.
+    expect(locks.requests[0].rejected).toBe(true)
+
+    // Even if the browser grants it late, a dead tab must not lead.
+    act(() => {
+      locks.requests[0].grant()
+    })
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400)
+    })
+    const sent = MockBroadcastChannel.instances[0].sent
+    expect(sent.filter((m) => (m as { type?: string }).type === 'leader')).toHaveLength(0)
+    expect(openStreams()).toHaveLength(0)
+  })
+})

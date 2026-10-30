@@ -532,8 +532,8 @@ export function DashboardPage() {
   return (
     <TooltipProvider delayDuration={200}>
       <div className="space-y-6">
-        {/* Filters — single wrapping row */}
-        <div className="flex flex-wrap gap-3 items-center">
+        {/* Filters — single wrapping row (filters only) */}
+        <div data-testid="dashboard-filters" className="flex flex-wrap gap-3 items-center">
           <FilterPresetsMenu
             page="dashboard"
             searchParams={searchParams}
@@ -568,63 +568,6 @@ export function DashboardPage() {
           <ReviewStatusFilter value={reviewStatus} onChange={setReviewStatus} />
           <AnalysisStateFilterControl value={analysisState} onChange={setAnalysisState} />
           <DateRangePresetFilter from={dateFrom} to={dateTo} onChange={setDateRange} />
-          <Select value={String(perPage)} onValueChange={(v) => setPerPage(Number(v))}>
-            <SelectTrigger aria-label="Rows per page" className="w-full sm:w-20">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="10">10</SelectItem>
-              <SelectItem value="20">20</SelectItem>
-              <SelectItem value="50">50</SelectItem>
-            </SelectContent>
-          </Select>
-          <div className="flex items-center gap-1 border border-border-default rounded-md">
-            <button
-              type="button"
-              onClick={() => setViewMode('flat')}
-              className={`p-1.5 rounded-l-md transition-colors ${viewMode === 'flat' ? 'bg-signal-blue text-white' : 'text-text-tertiary hover:text-text-secondary'}`}
-              aria-label="Flat list view"
-            >
-              <List className="h-4 w-4" />
-            </button>
-            <button
-              type="button"
-              onClick={() => setViewMode('grouped')}
-              className={`p-1.5 rounded-r-md transition-colors ${viewMode === 'grouped' ? 'bg-signal-blue text-white' : 'text-text-tertiary hover:text-text-secondary'}`}
-              aria-label="Grouped by job view"
-            >
-              <ListTree className="h-4 w-4" />
-            </button>
-          </div>
-          {viewMode === 'grouped' && (
-            <ExpandCollapseButtons
-              onExpandAll={() => {
-                const MAX_INSTANT = 50
-                const names = grouped.map(g => g.jobName)
-                if (names.length <= MAX_INSTANT) {
-                  setExpandedGroups(new Set(names))
-                  return
-                }
-                // Cancel any in-progress expansion
-                cancelAnimationFrame(expandRafRef.current)
-                const BATCH = 30
-                let idx = 0
-                const expandBatch = () => {
-                  const batch = names.slice(0, idx + BATCH)
-                  idx += BATCH
-                  setExpandedGroups(new Set(batch))
-                  if (idx < names.length) {
-                    expandRafRef.current = requestAnimationFrame(expandBatch)
-                  }
-                }
-                expandBatch()
-              }}
-              onCollapseAll={() => {
-                cancelAnimationFrame(expandRafRef.current)
-                setExpandedGroups(new Set())
-              }}
-            />
-          )}
         </div>
 
         {/* Tag filter chips — only shown when labels exist */}
@@ -636,8 +579,8 @@ export function DashboardPage() {
         />
         <MetadataClearButton hasFilters={hasMetadataFilters} onClearAll={clearMetadataFilters} />
 
-        {/* Summary row: count + View Issues */}
-        <div className="flex items-center gap-3">
+        {/* Summary row: count + View Issues, results presentation controls on the right */}
+        <div data-testid="dashboard-summary" className="flex flex-wrap items-center gap-3">
           <p className="text-sm text-text-tertiary">
             {totalJobs} analysis {totalJobs === 1 ? 'run' : 'runs'}
           </p>
@@ -655,6 +598,65 @@ export function DashboardPage() {
             </TooltipTrigger>
             <TooltipContent>View GitHub issues</TooltipContent>
           </Tooltip>
+          <div className="ml-auto flex items-center gap-2">
+            {viewMode === 'grouped' && (
+              <ExpandCollapseButtons
+                onExpandAll={() => {
+                  const MAX_INSTANT = 50
+                  const names = grouped.map(g => g.jobName)
+                  if (names.length <= MAX_INSTANT) {
+                    setExpandedGroups(new Set(names))
+                    return
+                  }
+                  // Cancel any in-progress expansion
+                  cancelAnimationFrame(expandRafRef.current)
+                  const BATCH = 30
+                  let idx = 0
+                  const expandBatch = () => {
+                    const batch = names.slice(0, idx + BATCH)
+                    idx += BATCH
+                    setExpandedGroups(new Set(batch))
+                    if (idx < names.length) {
+                      expandRafRef.current = requestAnimationFrame(expandBatch)
+                    }
+                  }
+                  expandBatch()
+                }}
+                onCollapseAll={() => {
+                  cancelAnimationFrame(expandRafRef.current)
+                  setExpandedGroups(new Set())
+                }}
+              />
+            )}
+            <div className="flex items-center gap-1 border border-border-default rounded-md">
+              <button
+                type="button"
+                onClick={() => setViewMode('flat')}
+                className={`p-1.5 rounded-l-md transition-colors ${viewMode === 'flat' ? 'bg-signal-blue text-white' : 'text-text-tertiary hover:text-text-secondary'}`}
+                aria-label="Flat list view"
+              >
+                <List className="h-4 w-4" />
+              </button>
+              <button
+                type="button"
+                onClick={() => setViewMode('grouped')}
+                className={`p-1.5 rounded-r-md transition-colors ${viewMode === 'grouped' ? 'bg-signal-blue text-white' : 'text-text-tertiary hover:text-text-secondary'}`}
+                aria-label="Grouped by job view"
+              >
+                <ListTree className="h-4 w-4" />
+              </button>
+            </div>
+            <Select value={String(perPage)} onValueChange={(v) => setPerPage(Number(v))}>
+              <SelectTrigger aria-label="Rows per page" className="w-full sm:w-20">
+                <SelectValue />
+              </SelectTrigger>
+              <SelectContent>
+                <SelectItem value="10">10</SelectItem>
+                <SelectItem value="20">20</SelectItem>
+                <SelectItem value="50">50</SelectItem>
+              </SelectContent>
+            </Select>
+          </div>
         </div>
 
         {/* Bulk result message */}

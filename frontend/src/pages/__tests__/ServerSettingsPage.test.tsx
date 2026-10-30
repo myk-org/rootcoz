@@ -1,5 +1,7 @@
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react'
-import { MemoryRouter } from 'react-router-dom'
+import { StrictMode } from 'react'
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { MemoryRouter, RouterProvider, createMemoryRouter } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { api, ApiError } from '@/lib/api'
 import { ServerSettingsPage } from '../ServerSettingsPage'
@@ -17,11 +19,22 @@ vi.mock('@/lib/api', () => ({
   },
 }))
 vi.mock('@/lib/useSSE', () => ({ useSSE: vi.fn() }))
-vi.mock('@/lib/auth', () => ({ useAuth: () => ({ isAdmin: true, username: 'admin' }) }))
+vi.mock('@/lib/auth', () => ({
+  useAuth: () => ({
+    isAdmin: true,
+    username: 'admin',
+    canUseServerProviders: false,
+    canUseFreeProviders: false,
+  }),
+}))
 vi.mock('@/hooks/useProviderModels', () => ({
   useProviderModels: () => ({ models: [], refresh: vi.fn(), refreshing: false }),
 }))
-vi.mock('@/lib/useProviderOptions', () => ({ useCursorAuthStatus: () => null }))
+vi.mock('@/lib/useProviderOptions', () => ({
+  useCursorAuthStatus: () => null,
+  // No catalog: the peer editor renders its empty pickers.
+  useProviderCatalog: () => ({ providers: {}, providerStatus: {} }),
+}))
 vi.mock('@/components/shared/ServerProvidersCard', () => ({ ServerProvidersCard: () => null }))
 vi.mock('@/components/shared/CursorAuthBanner', () => ({ CursorAuthBanner: () => null }))
 vi.mock('@/components/shared/ProviderSelect', () => ({ ProviderSelect: () => null }))
@@ -30,11 +43,10 @@ vi.mock('@/components/shared/ModelCombobox', () => ({
     <div data-testid="model-combobox" className={className} />
   ),
 }))
-vi.mock('@/components/shared/PeerConfigList', () => ({ PeerConfigList: () => null }))
-vi.mock('@/components/shared/AdditionalReposList', () => ({ AdditionalReposList: () => null }))
 
 interface TestSetting {
   key: string
+  label: string
   env_var: string
   value: string
   default: string
@@ -42,11 +54,15 @@ interface TestSetting {
   type: 'string' | 'boolean' | 'integer'
   category: string
   sensitive: boolean
+  is_set?: boolean
   restart_required: boolean
   source: 'default' | 'env' | 'db'
   updated_by: string
   updated_at: string
-  options?: string[]
+  options?: string[] | null
+  options_source?: 'exporters' | 'providers' | 'users' | null
+  multiple?: boolean
+  allow_custom?: boolean
   jira_verified_method?: string
   persistable?: boolean
   derived?: boolean
@@ -55,6 +71,7 @@ interface TestSetting {
 function mk(key: string, category: string, value = '', extra: Partial<TestSetting> = {}): TestSetting {
   return {
     key,
+    label: key.replace(/_/g, ' '),
     env_var: key.toUpperCase(),
     value,
     default: '',
@@ -114,17 +131,63 @@ const post = vi.mocked(api.post)
 const testIntegration = vi.mocked(api.testIntegration)
 const persistSetting = vi.mocked(api.persistSetting)
 
-function renderPage() {
+function renderPage(entry = '/admin/settings') {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[entry]}>
       <ServerSettingsPage />
     </MemoryRouter>,
   )
 }
 
+/** A router the test can navigate, like following an audit row's link. */
+function renderRouted(entry = '/admin/settings') {
+  const router = createMemoryRouter([{ path: '/admin/settings', element: <ServerSettingsPage /> }], {
+    initialEntries: [entry],
+  })
+  return { router, ...render(<RouterProvider router={router} />) }
+}
+
+/**
+ * A row is found by its key: the env var lives in the label tooltip, never in
+ * row text (E2E-F27), so `screen.getByText('JIRA_PAT')` is no longer the way.
+ */
+const row = (key: string) => document.querySelector(`[data-setting-key="${key}"]`) as HTMLElement | null
+const shown = (key: string) => row(key) !== null
+const waitForRow = (key: string) => waitFor(() => expect(shown(key)).toBe(true))
+
+// jsdom has no layout, so scrolling a row into view is a no-op that must still
+// be callable — and observable, to prove the link actually lands on the row.
+const scrollIntoView = vi.fn()
+HTMLElement.prototype.scrollIntoView = scrollIntoView
+
+// Every enumerated setting (single or multi) is the same searchable picker, so
+// it opens and picks the same way — no radix Select is left on this page.
+const singlePicker = (name: string) => screen.getByRole('combobox', { name: `Select ${name}` })
+
+function pickSingle(name: string, optionName: string) {
+  fireEvent.click(singlePicker(name))
+  // mouseDown is what the menu listens for (it keeps focus in the search field).
+  fireEvent.mouseDown(screen.getByRole('option', { name: optionName }))
+}
+
+const jiraAuthSelect = () => singlePicker('Jira auth method')
+const chooseJiraMethod = (label: string) => pickSingle('Jira auth method', label)
+
+/** Open a searchable multi-select (it opens on click, like a real click). */
+function openPicker(envVar: string) {
+  fireEvent.click(screen.getByRole('combobox', { name: `Add ${envVar}` }))
+}
+
+const searchBox = (envVar: string) =>
+  screen.getByRole('combobox', { name: `Search ${envVar}` })
+
+const optionNames = () =>
+  screen.getAllByRole('option').map((option) => option.textContent)
+
 beforeEach(() => {
   vi.clearAllMocks()
   localStorage.clear()
+  scrollIntoView.mockClear()
   get.mockResolvedValue(baseSettings() as never)
   put.mockResolvedValue({} as never)
   testIntegration.mockResolvedValue({ ok: true, message: 'ok' } as never)
@@ -134,7 +197,7 @@ beforeEach(() => {
 describe('ServerSettingsPage tabs and search', () => {
   it('renders categories as tabs in the specified order and switches content', async () => {
     renderPage()
-    await screen.findByText('PUBLIC_BASE_URL')
+    await waitForRow('public_base_url')
 
     const tabs = screen.getAllByRole('tab')
     expect(tabs.map((t) => t.textContent)).toEqual([
@@ -143,33 +206,119 @@ describe('ServerSettingsPage tabs and search', () => {
     ])
 
     // Default (Server) tab shows only Server settings
-    expect(screen.queryByText('JENKINS_URL')).not.toBeInTheDocument()
+    expect(shown('jenkins_url')).toBe(false)
 
     fireEvent.click(screen.getByRole('tab', { name: 'Jira' }))
-    expect(await screen.findByText('JIRA_PROJECT_KEY')).toBeInTheDocument()
-    expect(screen.queryByText('PUBLIC_BASE_URL')).not.toBeInTheDocument()
+    await waitForRow('jira_project_key')
+    expect(shown('public_base_url')).toBe(false)
 
     // Active tab persists to localStorage
     expect(localStorage.getItem('rootcoz_settings_tab')).toBe('Jira')
   })
 
+  it('opens, scrolls to and marks the setting named by ?highlight=', async () => {
+    // The admin's remembered tab is Server; the linked setting lives elsewhere.
+    localStorage.setItem('rootcoz_settings_tab', 'Server')
+    renderPage('/admin/settings?highlight=admin_key')
+
+    const row = await waitFor(() => {
+      const found = document.querySelector('[data-setting-key="admin_key"]')
+      expect(found).not.toBeNull()
+      return found as HTMLElement
+    })
+    expect(row.className).toContain('bg-signal-blue/10')
+    expect(scrollIntoView).toHaveBeenCalled()
+    // Following an audit link must not rewrite the admin's own tab preference.
+    expect(localStorage.getItem('rootcoz_settings_tab')).toBe('Server')
+  })
+
+  it('clears a search that hides the linked row before marking it', async () => {
+    // The admin is searching; the audit link names a row that search excludes.
+    const { router } = renderRouted()
+    await waitForRow('public_base_url')
+    const search = screen.getByLabelText('Search settings')
+    fireEvent.change(search, { target: { value: 'jenkins_url' } })
+    await waitFor(() => expect(screen.getByText('Search results')).toBeInTheDocument())
+    expect(shown('admin_key')).toBe(false)
+
+    await act(async () => {
+      await router.navigate('/admin/settings?highlight=admin_key')
+    })
+
+    // The search is gone, so the row exists again — and the mark lands on it.
+    await waitFor(() => expect(search).toHaveValue(''))
+    const row = await waitFor(() => {
+      const found = document.querySelector('[data-setting-key="admin_key"]')
+      expect(found).not.toBeNull()
+      return found as HTMLElement
+    })
+    expect(row.className).toContain('bg-signal-blue/10')
+    expect(scrollIntoView).toHaveBeenCalled()
+    expect(screen.queryByText('Search results')).toBeNull()
+  })
+
   it('switches to a flat search results view when searching', async () => {
     renderPage()
-    await screen.findByText('PUBLIC_BASE_URL')
+    await waitForRow('public_base_url')
 
     fireEvent.change(screen.getByLabelText('Search settings'), { target: { value: 'jenkins_url' } })
     await waitFor(() => expect(screen.queryByRole('tab')).toBeNull())
 
     expect(screen.getByText('Search results')).toBeInTheDocument()
-    expect(screen.getByText('JENKINS_URL')).toBeInTheDocument()
-    expect(screen.queryByText('JIRA_PROJECT_KEY')).not.toBeInTheDocument()
+    expect(shown('jenkins_url')).toBe(true)
+    expect(shown('jira_project_key')).toBe(false)
+  })
+
+  it('matches every whitespace-separated word of the query', async () => {
+    get.mockResolvedValue([
+      // Real shape: the words of the key are one token apart and the
+      // description carries the rest.
+      mk('audit_retention_days', 'Auth & Security', '90', {
+        type: 'integer',
+        description: 'How many days of audit events to keep on this server.',
+      }),
+      mk('jenkins_url', 'Jenkins', 'https://jenkins.example.com'),
+    ] as never)
+    renderPage()
+    await waitForRow('jenkins_url')
+    const search = screen.getByLabelText('Search settings')
+
+    // Two tokens of the key — the raw substring 'audit retention' is not present.
+    fireEvent.change(search, { target: { value: '  audit   retention ' } })
+    await waitFor(() => expect(screen.getByText('Search results')).toBeInTheDocument())
+    expect(shown('audit_retention_days')).toBe(true)
+    expect(shown('jenkins_url')).toBe(false)
+
+    // Tokens from the key and the description match together too.
+    fireEvent.change(search, { target: { value: 'retention days' } })
+    await waitFor(() => expect(screen.getByText('Search results')).toBeInTheDocument())
+    expect(shown('audit_retention_days')).toBe(true)
+
+    // 'data' appears in no searchable field of this setting, so AND semantics
+    // must keep it out — this is the documented behaviour, not a miss.
+    fireEvent.change(search, { target: { value: 'data retention' } })
+    expect(await screen.findByText('No settings match your search.')).toBeInTheDocument()
+
+    // Single token is unchanged.
+    fireEvent.change(search, { target: { value: 'audit' } })
+    await waitFor(() => expect(shown('audit_retention_days')).toBe(true))
+
+    // The category is searchable too — this setting lives under "Auth & Security".
+    fireEvent.change(search, { target: { value: 'audit security' } })
+    await waitFor(() => expect(shown('audit_retention_days')).toBe(true))
+    expect(shown('jenkins_url')).toBe(false)
+
+    // Whitespace-only is still no query at all.
+    fireEvent.change(search, { target: { value: '   ' } })
+    await waitFor(() => expect(shown('jenkins_url')).toBe(true))
+    expect(shown('audit_retention_days')).toBe(true)
   })
 })
 
 describe('ServerSettingsPage silent refetch on save', () => {
   it('keeps content mounted after a save (no loading skeleton re-appears)', async () => {
     renderPage()
-    await screen.findByText('PUBLIC_BASE_URL')
+    await waitForRow('public_base_url')
     expect(get).toHaveBeenCalledTimes(1)
 
     // Toggle a boolean on the Server tab → immediate save + silent refetch
@@ -178,7 +327,7 @@ describe('ServerSettingsPage silent refetch on save', () => {
     await waitFor(() => expect(get).toHaveBeenCalledTimes(2))
 
     // Content stayed mounted: rows still present, no skeleton
-    expect(screen.getByText('PUBLIC_BASE_URL')).toBeInTheDocument()
+    expect(shown('public_base_url')).toBe(true)
     expect(document.querySelector('.animate-pulse')).toBeNull()
     expect(screen.getByRole('tab', { name: 'Server' })).toBeInTheDocument()
   })
@@ -208,7 +357,7 @@ describe('ServerSettingsPage Jira auth method selection', () => {
   async function openJiraTab() {
     renderPage()
     fireEvent.click(await screen.findByRole('tab', { name: 'Jira' }))
-    await screen.findByText('JIRA_PROJECT_KEY')
+    await waitForRow('jira_project_key')
   }
 
   it('shows the derived oauth API base under the oauth method (#352)', async () => {
@@ -253,42 +402,42 @@ describe('ServerSettingsPage Jira auth method selection', () => {
     mockJiraModeSettings('basic')
     await openJiraTab()
 
-    expect(screen.getByRole('checkbox', { name: 'Email + API token' })).toBeChecked()
-    expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).not.toBeChecked()
-    expect(screen.getByRole('checkbox', { name: 'Atlassian OAuth (client secret / cloud ID)' })).not.toBeChecked()
+    expect(jiraAuthSelect()).toHaveTextContent('Email + API token')
+    expect(jiraAuthSelect()).not.toHaveTextContent('PAT (Bearer)')
+    expect(jiraAuthSelect()).not.toHaveTextContent('Atlassian OAuth (client secret / cloud ID)')
 
     // Basic's four fields render (the SSL toggle renders as a switch)
-    expect(screen.getByText('JIRA_EMAIL')).toBeInTheDocument()
-    expect(screen.getByText('JIRA_API_TOKEN')).toBeInTheDocument()
-    expect(screen.getByText('JIRA_CLOUD_URL')).toBeInTheDocument()
+    expect(shown('jira_email')).toBe(true)
+    expect(shown('jira_api_token')).toBe(true)
+    expect(shown('jira_cloud_url')).toBe(true)
     expect(screen.getByRole('switch', { name: 'Toggle JIRA_CLOUD_SSL_VERIFY' })).toBeInTheDocument()
 
     // Other methods' fields are hidden
-    expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
-    expect(screen.queryByText('JIRA_SERVER_URL')).not.toBeInTheDocument()
-    expect(screen.queryByText('JIRA_SERVER_SSL_VERIFY')).not.toBeInTheDocument()
-    expect(screen.queryByText('JIRA_OAUTH_CLIENT_SECRET')).not.toBeInTheDocument()
-    expect(screen.queryByText('ATLASSIAN_OAUTH_CLOUD_ID')).not.toBeInTheDocument()
-    expect(screen.queryByText('ATLASSIAN_OAUTH_CLIENT_ID')).not.toBeInTheDocument()
+    expect(shown('jira_pat')).toBe(false)
+    expect(shown('jira_server_url')).toBe(false)
+    expect(shown('jira_server_ssl_verify')).toBe(false)
+    expect(shown('jira_oauth_client_secret')).toBe(false)
+    expect(shown('atlassian_oauth_cloud_id')).toBe(false)
+    expect(shown('atlassian_oauth_client_id')).toBe(false)
     expect(screen.queryByRole('switch', { name: 'Toggle JIRA_OAUTH_SSL_VERIFY' })).not.toBeInTheDocument()
 
     // The shared settings stay visible regardless of method
-    expect(screen.getByText('JIRA_PROJECT_KEY')).toBeInTheDocument()
-    expect(screen.getByText('JIRA_MAX_RESULTS')).toBeInTheDocument()
-    expect(screen.getByText('JIRA_SITE_URL')).toBeInTheDocument()
+    expect(shown('jira_project_key')).toBe(true)
+    expect(shown('jira_max_results')).toBe(true)
+    expect(shown('jira_site_url')).toBe(true)
     expect(screen.getByRole('switch', { name: 'Toggle ENABLE_JIRA' })).toBeInTheDocument()
     expect(screen.getByRole('switch', { name: 'Toggle ENABLE_JIRA_ISSUES' })).toBeInTheDocument()
 
     // The removed legacy settings no longer exist anywhere
-    expect(screen.queryByText('JIRA_URL')).not.toBeInTheDocument()
-    expect(screen.queryByText('JIRA_SSL_VERIFY')).not.toBeInTheDocument()
+    expect(shown('jira_url')).toBe(false)
+    expect(shown('jira_ssl_verify')).toBe(false)
   })
 
   it('asks for confirmation when switching away from an active method; cancel keeps the old one', async () => {
     mockJiraModeSettings('basic')
     await openJiraTab()
 
-    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    chooseJiraMethod('PAT (Bearer)')
     const dialog = await screen.findByRole('alertdialog')
     expect(dialog).toHaveTextContent('Switch from Email + API token to PAT (Bearer)?')
     expect(put).not.toHaveBeenCalled()
@@ -296,24 +445,24 @@ describe('ServerSettingsPage Jira auth method selection', () => {
     fireEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }))
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
     expect(put).not.toHaveBeenCalled()
-    expect(screen.getByRole('checkbox', { name: 'Email + API token' })).toBeChecked()
-    expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).not.toBeChecked()
+    expect(jiraAuthSelect()).toHaveTextContent('Email + API token')
+    expect(jiraAuthSelect()).not.toHaveTextContent('PAT (Bearer)')
   })
 
   it('confirm applies the switch: saves jira_auth_mode and unchecks the other method', async () => {
     mockJiraModeSettings('basic')
     await openJiraTab()
 
-    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    chooseJiraMethod('PAT (Bearer)')
     fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Switch' }))
 
     await waitFor(() =>
       expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: 'pat' } }),
     )
-    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked())
-    expect(screen.getByRole('checkbox', { name: 'Email + API token' })).not.toBeChecked()
-    expect(screen.getByText('JIRA_PAT')).toBeInTheDocument()
-    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
+    await waitFor(() => expect(jiraAuthSelect()).toHaveTextContent('PAT (Bearer)'))
+    expect(jiraAuthSelect()).not.toHaveTextContent('Email + API token')
+    expect(shown('jira_pat')).toBe(true)
+    expect(shown('jira_email')).toBe(false)
   })
 
   it('selecting a method when none is active applies without confirmation', async () => {
@@ -323,33 +472,33 @@ describe('ServerSettingsPage Jira auth method selection', () => {
 
     // No method selected: no method credential fields render, but
     // method-independent rows do
-    expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
-    expect(screen.queryByText('JIRA_SERVER_URL')).not.toBeInTheDocument()
-    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
-    expect(screen.queryByText('JIRA_CLOUD_URL')).not.toBeInTheDocument()
-    expect(screen.queryByText('JIRA_OAUTH_CLIENT_SECRET')).not.toBeInTheDocument()
-    expect(screen.queryByText('ATLASSIAN_OAUTH_CLOUD_ID')).not.toBeInTheDocument()
-    expect(screen.queryByText('ATLASSIAN_OAUTH_CLIENT_ID')).not.toBeInTheDocument()
+    expect(shown('jira_pat')).toBe(false)
+    expect(shown('jira_server_url')).toBe(false)
+    expect(shown('jira_email')).toBe(false)
+    expect(shown('jira_cloud_url')).toBe(false)
+    expect(shown('jira_oauth_client_secret')).toBe(false)
+    expect(shown('atlassian_oauth_cloud_id')).toBe(false)
+    expect(shown('atlassian_oauth_client_id')).toBe(false)
     expect(screen.queryByRole('switch', { name: 'Toggle JIRA_OAUTH_SSL_VERIFY' })).not.toBeInTheDocument()
-    expect(screen.getByText('JIRA_PROJECT_KEY')).toBeInTheDocument()
-    expect(screen.getByText('JIRA_SITE_URL')).toBeInTheDocument()
+    expect(shown('jira_project_key')).toBe(true)
+    expect(shown('jira_site_url')).toBe(true)
 
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Atlassian OAuth (client secret / cloud ID)' }))
+    chooseJiraMethod('Atlassian OAuth (client secret / cloud ID)')
     expect(screen.queryByRole('alertdialog')).toBeNull()
 
     await waitFor(() =>
       expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: 'oauth' } }),
     )
     await waitFor(() =>
-      expect(screen.getByRole('checkbox', { name: 'Atlassian OAuth (client secret / cloud ID)' })).toBeChecked(),
+      expect(jiraAuthSelect()).toHaveTextContent('Atlassian OAuth (client secret / cloud ID)'),
     )
-    expect(screen.getByRole('checkbox', { name: 'Email + API token' })).not.toBeChecked()
-    expect(screen.getByText('JIRA_OAUTH_CLIENT_SECRET')).toBeInTheDocument()
-    expect(screen.getByText('ATLASSIAN_OAUTH_CLOUD_ID')).toBeInTheDocument()
-    expect(screen.getByText('ATLASSIAN_OAUTH_CLIENT_ID')).toBeInTheDocument()
+    expect(jiraAuthSelect()).not.toHaveTextContent('Email + API token')
+    expect(shown('jira_oauth_client_secret')).toBe(true)
+    expect(shown('atlassian_oauth_cloud_id')).toBe(true)
+    expect(shown('atlassian_oauth_client_id')).toBe(true)
     expect(screen.getByRole('switch', { name: 'Toggle JIRA_OAUTH_SSL_VERIFY' })).toBeInTheDocument()
-    expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
-    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
+    expect(shown('jira_pat')).toBe(false)
+    expect(shown('jira_email')).toBe(false)
 
     // Shared fields carry a hint that they are shared with the atst method
     expect(
@@ -358,7 +507,7 @@ describe('ServerSettingsPage Jira auth method selection', () => {
       ),
     ).toHaveLength(2)
     // Non-shared rows (e.g. the oauth client secret) do not carry the hint
-    expect(screen.getByText('JIRA_OAUTH_CLIENT_SECRET').closest('div.py-3')).not.toHaveTextContent(/Shared with the/)
+    expect(row('jira_oauth_client_secret')).not.toHaveTextContent(/Shared with the/)
   })
 
   it('selecting the atst method shows its fields and hides the other methods\' credentials', async () => {
@@ -366,17 +515,17 @@ describe('ServerSettingsPage Jira auth method selection', () => {
     await openJiraTab()
     expect(screen.queryByRole('alertdialog')).toBeNull()
 
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Atlassian service account token (ATST, Bearer)' }))
+    chooseJiraMethod('Atlassian service account token (ATST, Bearer)')
 
     await waitFor(() =>
       expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: 'atst' } }),
     )
     await waitFor(() =>
-      expect(screen.getByRole('checkbox', { name: 'Atlassian service account token (ATST, Bearer)' })).toBeChecked(),
+      expect(jiraAuthSelect()).toHaveTextContent('Atlassian service account token (ATST, Bearer)'),
     )
-    expect(screen.getByText('JIRA_ATST_TOKEN')).toBeInTheDocument()
+    expect(shown('jira_atst_token')).toBe(true)
     // Shared locator/TLS fields stay visible for atst (same gateway as oauth)
-    expect(screen.getByText('ATLASSIAN_OAUTH_CLOUD_ID')).toBeInTheDocument()
+    expect(shown('atlassian_oauth_cloud_id')).toBe(true)
     expect(screen.getByRole('switch', { name: 'Toggle JIRA_OAUTH_SSL_VERIFY' })).toBeInTheDocument()
     // Shared fields carry a hint that they are shared with the oauth method
     expect(
@@ -385,12 +534,12 @@ describe('ServerSettingsPage Jira auth method selection', () => {
       ),
     ).toHaveLength(2)
     // Non-shared rows (e.g. the ATST token) do not carry the hint
-    expect(screen.getByText('JIRA_ATST_TOKEN').closest('div.py-3')).not.toHaveTextContent(/Shared with the/)
+    expect(row('jira_atst_token')).not.toHaveTextContent(/Shared with the/)
     // Other methods' credentials are hidden
-    expect(screen.queryByText('JIRA_OAUTH_CLIENT_SECRET')).not.toBeInTheDocument()
-    expect(screen.queryByText('ATLASSIAN_OAUTH_CLIENT_ID')).not.toBeInTheDocument()
-    expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
-    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
+    expect(shown('jira_oauth_client_secret')).toBe(false)
+    expect(shown('atlassian_oauth_client_id')).toBe(false)
+    expect(shown('jira_pat')).toBe(false)
+    expect(shown('jira_email')).toBe(false)
   })
 
   it('switching away from a selected-but-unverified method applies immediately without confirmation', async () => {
@@ -398,13 +547,13 @@ describe('ServerSettingsPage Jira auth method selection', () => {
     mockJiraModeSettings('basic', '')
     await openJiraTab()
 
-    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    chooseJiraMethod('PAT (Bearer)')
     expect(screen.queryByRole('alertdialog')).toBeNull()
 
     await waitFor(() =>
       expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: 'pat' } }),
     )
-    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked())
+    await waitFor(() => expect(jiraAuthSelect()).toHaveTextContent('PAT (Bearer)'))
   })
 
   // ---- Refinement 6: the switch auto-runs the Jira test for the new method ----
@@ -414,7 +563,7 @@ describe('ServerSettingsPage Jira auth method selection', () => {
     testIntegration.mockResolvedValue({ ok: true, message: 'Jira connection verified' } as never)
     await openJiraTab()
 
-    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    chooseJiraMethod('PAT (Bearer)')
     fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Switch' }))
 
     await waitFor(() =>
@@ -426,7 +575,7 @@ describe('ServerSettingsPage Jira auth method selection', () => {
     expect(banner).toHaveTextContent('Connection successful')
     expect(banner).toHaveTextContent('Jira connection verified')
     // The switch is never auto-reverted on the admin's behalf
-    expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked()
+    expect(jiraAuthSelect()).toHaveTextContent('PAT (Bearer)')
   })
 
   it('auto-runs the Jira test after switching to an unconfigured method and surfaces the missing-fields error', async () => {
@@ -437,7 +586,7 @@ describe('ServerSettingsPage Jira auth method selection', () => {
     } as never)
     await openJiraTab()
 
-    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    chooseJiraMethod('PAT (Bearer)')
     fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Switch' }))
 
     await waitFor(() =>
@@ -448,21 +597,21 @@ describe('ServerSettingsPage Jira auth method selection', () => {
     expect(banner).toHaveTextContent('Connection failed')
     expect(banner).toHaveTextContent("requires jira_pat")
     // The failed auto-test surfaces the error but keeps the selection
-    expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked()
+    expect(jiraAuthSelect()).toHaveTextContent('PAT (Bearer)')
   })
 
   it('does not run any test when switching to none (disabling Jira)', async () => {
     mockJiraModeSettings('basic')
     await openJiraTab()
 
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Email + API token' }))
+    chooseJiraMethod('None — Jira disabled')
     fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Disable' }))
 
     await waitFor(() =>
       expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: '' } }),
     )
     await waitFor(() =>
-      expect(screen.getByRole('checkbox', { name: 'Email + API token' })).not.toBeChecked(),
+      expect(jiraAuthSelect()).not.toHaveTextContent('Email + API token'),
     )
     expect(testIntegration).not.toHaveBeenCalled()
   })
@@ -473,7 +622,7 @@ describe('ServerSettingsPage Jira auth method selection', () => {
     testIntegration.mockResolvedValue({ ok: true, message: 'ok' } as never)
     await openJiraTab()
 
-    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    chooseJiraMethod('PAT (Bearer)')
     fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Switch' }))
 
     await waitFor(() => expect(testIntegration).toHaveBeenCalledTimes(1))
@@ -495,7 +644,7 @@ describe('ServerSettingsPage Jira auth method selection', () => {
     await waitFor(() => expect(get).toHaveBeenCalledTimes(2)) // silent metadata refetch
 
     // Now that basic is verified, switching away is confirmed, not silent
-    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    chooseJiraMethod('PAT (Bearer)')
     const dialog = await screen.findByRole('alertdialog')
     expect(dialog).toHaveTextContent('Switch from Email + API token to PAT (Bearer)?')
     expect(put).not.toHaveBeenCalled()
@@ -528,13 +677,13 @@ describe('ServerSettingsPage Jira auth method selection', () => {
 
     // Switch basic → pat while the stale fetch is pending (unverified in UI
     // state, so no confirmation dialog). The switch's own refetch resolves first.
-    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    chooseJiraMethod('PAT (Bearer)')
     await waitFor(() =>
       expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: 'pat' } }),
     )
-    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked())
-    expect(screen.getByText('JIRA_PAT')).toBeInTheDocument()
-    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
+    await waitFor(() => expect(jiraAuthSelect()).toHaveTextContent('PAT (Bearer)'))
+    expect(shown('jira_pat')).toBe(true)
+    expect(shown('jira_email')).toBe(false)
 
     // The stale response (old method basic, now verified) arrives LAST —
     // it must be dropped: final state still reflects the pat switch.
@@ -544,37 +693,37 @@ describe('ServerSettingsPage Jira auth method selection', () => {
     resolveStale(stale)
     await waitFor(() => expect(get).toHaveBeenCalledTimes(3))
 
-    expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked()
-    expect(screen.getByRole('checkbox', { name: 'Email + API token' })).not.toBeChecked()
-    expect(screen.getByText('JIRA_PAT')).toBeInTheDocument()
-    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
+    expect(jiraAuthSelect()).toHaveTextContent('PAT (Bearer)')
+    expect(jiraAuthSelect()).not.toHaveTextContent('Email + API token')
+    expect(shown('jira_pat')).toBe(true)
+    expect(shown('jira_email')).toBe(false)
   })
 
-  it('unchecking a selected-but-unverified method disables Jira immediately (no method fields render while unset)', async () => {
+  it('choosing none disables Jira immediately when the method was never verified (no method fields render while unset)', async () => {
     mockJiraModeSettings('basic', '')
     await openJiraTab()
 
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Email + API token' }))
+    chooseJiraMethod('None — Jira disabled')
     expect(screen.queryByRole('alertdialog')).toBeNull()
     await waitFor(() =>
       expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: '' } }),
     )
     await waitFor(() =>
-      expect(screen.getByRole('checkbox', { name: 'Email + API token' })).not.toBeChecked(),
+      expect(jiraAuthSelect()).not.toHaveTextContent('Email + API token'),
     )
-    expect(screen.getByText(/No method selected — Jira is disabled/)).toBeInTheDocument()
-    expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
-    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
-    expect(screen.queryByText('JIRA_OAUTH_CLIENT_SECRET')).not.toBeInTheDocument()
+    expect(jiraAuthSelect()).toHaveTextContent('None — Jira disabled')
+    expect(shown('jira_pat')).toBe(false)
+    expect(shown('jira_email')).toBe(false)
+    expect(shown('jira_oauth_client_secret')).toBe(false)
     // Method-independent rows stay visible
-    expect(screen.getByText('JIRA_PROJECT_KEY')).toBeInTheDocument()
+    expect(shown('jira_project_key')).toBe(true)
   })
 
-  it('unchecking a verified method asks for confirmation and disables Jira on confirm', async () => {
+  it('choosing none for a verified method asks for confirmation and disables Jira on confirm', async () => {
     mockJiraModeSettings('basic') // basic selected and test-verified
     await openJiraTab()
 
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Email + API token' }))
+    chooseJiraMethod('None — Jira disabled')
     const dialog = await screen.findByRole('alertdialog')
     expect(dialog).toHaveTextContent(/disables Jira until another method is selected/)
     expect(put).not.toHaveBeenCalled()
@@ -584,21 +733,21 @@ describe('ServerSettingsPage Jira auth method selection', () => {
       expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: '' } }),
     )
     await waitFor(() =>
-      expect(screen.getByRole('checkbox', { name: 'Email + API token' })).not.toBeChecked(),
+      expect(jiraAuthSelect()).not.toHaveTextContent('Email + API token'),
     )
-    expect(screen.getByText(/No method selected — Jira is disabled/)).toBeInTheDocument()
+    expect(jiraAuthSelect()).toHaveTextContent('None — Jira disabled')
   })
 
   it('cancelling the disable confirmation keeps the method selected', async () => {
     mockJiraModeSettings('basic')
     await openJiraTab()
 
-    fireEvent.click(screen.getByRole('checkbox', { name: 'Email + API token' }))
+    chooseJiraMethod('None — Jira disabled')
     fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Cancel' }))
 
     await waitFor(() => expect(screen.queryByRole('alertdialog')).toBeNull())
     expect(put).not.toHaveBeenCalled()
-    expect(screen.getByRole('checkbox', { name: 'Email + API token' })).toBeChecked()
+    expect(jiraAuthSelect()).toHaveTextContent('Email + API token')
   })
 
   it('surfaces a backend save-validation error in the Jira section and keeps the selection', async () => {
@@ -609,29 +758,29 @@ describe('ServerSettingsPage Jira auth method selection', () => {
     put.mockRejectedValueOnce(err as never)
 
     await openJiraTab()
-    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    chooseJiraMethod('PAT (Bearer)')
     fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Switch' }))
 
     const alerts = await screen.findAllByRole('alert')
     expect(alerts.some((a) => a.textContent?.includes("requires jira_pat"))).toBe(true)
     // The failed switch is not applied
-    expect(screen.getByRole('checkbox', { name: 'Email + API token' })).toBeChecked()
-    expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).not.toBeChecked()
+    expect(jiraAuthSelect()).toHaveTextContent('Email + API token')
+    expect(jiraAuthSelect()).not.toHaveTextContent('PAT (Bearer)')
   })
 
   it('shows the disabled hint when no method is selected', async () => {
     mockJiraModeSettings('')
     await openJiraTab()
-    expect(screen.getByText(/No method selected — Jira is disabled/)).toBeInTheDocument()
+    expect(jiraAuthSelect()).toHaveTextContent('None — Jira disabled')
     // The hint never checks a box — only the persisted setting does
-    expect(screen.getByRole('checkbox', { name: 'Email + API token' })).not.toBeChecked()
+    expect(jiraAuthSelect()).not.toHaveTextContent('Email + API token')
   })
 
   it('hides the disabled hint when a method is explicitly selected', async () => {
     mockJiraModeSettings('pat')
     await openJiraTab()
-    expect(screen.queryByText(/No method selected/)).not.toBeInTheDocument()
-    expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked()
+    expect(jiraAuthSelect()).not.toHaveTextContent('None — Jira disabled')
+    expect(jiraAuthSelect()).toHaveTextContent('PAT (Bearer)')
   })
 
   it('surfaces the backend error when testing with no method selected', async () => {
@@ -652,7 +801,7 @@ describe('ServerSettingsPage Jira auth method selection', () => {
 describe('ServerSettingsPage test connection buttons', () => {
   it('renders test buttons only for the six integrable categories', async () => {
     renderPage()
-    await screen.findByText('PUBLIC_BASE_URL')
+    await waitForRow('public_base_url')
 
     for (const tab of ['Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Datadog', 'Prow']) {
       fireEvent.click(screen.getByRole('tab', { name: tab }))
@@ -744,7 +893,7 @@ describe('ServerSettingsPage active server providers', () => {
   async function openAiTab() {
     renderPage()
     fireEvent.click(await screen.findByRole('tab', { name: 'AI' }))
-    await screen.findByText('ACTIVE_SERVER_PROVIDERS')
+    await waitForRow('active_server_providers')
   }
 
   function restricted(value: string, extra: Partial<TestSetting> = {}): TestSetting[] {
@@ -768,15 +917,23 @@ describe('ServerSettingsPage active server providers', () => {
     expect(screen.queryByRole('button', { name: 'Cancel' })).not.toBeInTheDocument()
   })
 
-  it('never renders the backend-only ambient auth setting', async () => {
-    get.mockResolvedValue([
-      ...baseSettings(),
-      mk('ambient_auth_providers', 'AI', 'vertex-claude'),
-    ] as never)
+  it('renders the ambient auth provider multiselect, which admins now own (#379)', async () => {
+    get.mockImplementation(async (url: unknown) => {
+      const settings = [
+        ...baseSettings(),
+        mk('ambient_auth_providers', 'AI', 'vertex-claude', {
+          options: null,
+          options_source: 'providers',
+          multiple: true,
+        }),
+      ]
+      if (String(url) === '/api/ai-models') return { providers: { 'vertex-claude': [] } } as never
+      return settings as never
+    })
 
     await openAiTab()
-    expect(screen.queryByText('AMBIENT_AUTH_PROVIDERS')).not.toBeInTheDocument()
-    expect(screen.queryByText(/ambient_auth_providers/i)).not.toBeInTheDocument()
+    expect(shown('ambient_auth_providers')).toBe(true)
+    expect(screen.getByRole('button', { name: 'Remove vertex-claude' })).toBeInTheDocument()
   })
 
   it('renders the stored restriction as the checked subset', async () => {
@@ -1056,7 +1213,7 @@ describe('ServerSettingsPage save refetch gating', () => {
     await waitFor(() =>
       expect(screen.queryByRole('button', { name: /saving/i })).toBeNull(),
     )
-    expect(screen.getByText('JENKINS_USER')).toBeInTheDocument()
+    expect(shown('jenkins_user')).toBe(true)
   })
 })
 
@@ -1080,15 +1237,17 @@ describe('ServerSettingsPage revealed value cache (#343)', () => {
     return revealed
   }
 
-  async function openTab(name: string, marker: string) {
+  // The marker is the key of a row that only that tab renders (the env var is
+  // a tooltip now, E2E-F27).
+  async function openTab(name: string, markerKey: string) {
     renderPage()
     fireEvent.click(await screen.findByRole('tab', { name }))
-    await screen.findByText(marker)
+    await waitForRow(markerKey)
   }
 
   it('clears the cached reveal on save — row shows the fresh value without a remount, and a new reveal shows the new value', async () => {
     const revealed = mockGet({ revealed: { jenkins_password: 'decrypted-old' } })
-    await openTab('Jenkins', 'JENKINS_PASSWORD')
+    await openTab('Jenkins', 'jenkins_password')
 
     // Reveal → row shows the decrypted value
     fireEvent.click(screen.getByRole('button', { name: 'Reveal value' }))
@@ -1134,7 +1293,7 @@ describe('ServerSettingsPage revealed value cache (#343)', () => {
       if (key) return new Promise<TestSetting[]>((r) => { resolveReveal = r })
       return baseSettings()
     })
-    await openTab('Jenkins', 'JENKINS_PASSWORD')
+    await openTab('Jenkins', 'jenkins_password')
 
     // Start the reveal — its response is deferred
     fireEvent.click(screen.getByRole('button', { name: 'Reveal value' }))
@@ -1169,7 +1328,7 @@ describe('ServerSettingsPage revealed value cache (#343)', () => {
     const pw = settings.find((s) => s.key === 'jenkins_password')!
     pw.source = 'db'
     mockGet({ revealed: { jenkins_password: 'decrypted-old' }, base: settings }) // pragma: allowlist secret
-    await openTab('Jenkins', 'JENKINS_PASSWORD')
+    await openTab('Jenkins', 'jenkins_password')
 
     fireEvent.click(screen.getByRole('button', { name: 'Reveal value' }))
     await waitFor(() =>
@@ -1198,7 +1357,7 @@ describe('ServerSettingsPage revealed value cache (#343)', () => {
     const base = baseSettings()
     base.find((s) => s.key === 'jira_auth_mode')!.value = 'basic'
     mockGet({ revealed: { jira_api_token: 'decrypted-jira' }, base })
-    await openTab('Jira', 'JIRA_API_TOKEN')
+    await openTab('Jira', 'jira_api_token')
 
     fireEvent.click(screen.getByRole('button', { name: 'Reveal value' }))
     await waitFor(() =>
@@ -1221,20 +1380,118 @@ describe('ServerSettingsPage revealed value cache (#343)', () => {
   })
 })
 
+// E2E-F31 — an empty secret must not pretend to hold a value.
+describe('ServerSettingsPage empty secret (#379)', () => {
+  const SECRET = 'https://hooks.example.com/services/secret' // pragma: allowlist secret
+  const editSlack = () => screen.getByRole('button', { name: 'Edit SLACK_WEBHOOK_URL' })
+
+  async function slackRow() {
+    fireEvent.click(await screen.findByRole('tab', { name: 'Notifications' }))
+    const found = await waitFor(() => {
+      const element = row('slack_webhook_url')
+      expect(element).not.toBeNull()
+      return element as HTMLElement
+    })
+    return found
+  }
+
+  it('renders nothing stored as empty — no dots, no reveal control', async () => {
+    get.mockResolvedValue([
+      mk('slack_webhook_url', 'Notifications', '', { sensitive: true, is_set: false }),
+    ] as never)
+    renderPage()
+
+    const slack = await slackRow()
+    expect(within(slack).getByRole('button', { name: 'Edit SLACK_WEBHOOK_URL' })).toHaveTextContent(
+      '(empty)',
+    )
+    expect(within(slack).queryByRole('button', { name: 'Reveal value' })).toBeNull()
+    expect(slack).not.toHaveTextContent('••••••••')
+  })
+
+  it('shows dots and a working reveal when a value is stored', async () => {
+    const settings = [
+      mk('slack_webhook_url', 'Notifications', '••••••••', { sensitive: true, is_set: true }),
+    ]
+    get.mockImplementation(async (url: unknown) => {
+      if (typeof url === 'string' && url.includes('reveal_key=')) {
+        return [mk('slack_webhook_url', 'Notifications', SECRET, { sensitive: true, is_set: true })] as never
+      }
+      return settings as never
+    })
+    renderPage()
+
+    const slack = await slackRow()
+    expect(editSlack().textContent).toBe('••••••••')
+    fireEvent.click(within(slack).getByRole('button', { name: 'Reveal value' }))
+    await waitFor(() => expect(editSlack().textContent).toBe(SECRET))
+  })
+
+  it('switches to dots and an eye after saving, and back to empty on reset', async () => {
+    const settings = [
+      mk('slack_webhook_url', 'Notifications', '', { sensitive: true, is_set: false, source: 'db' }),
+    ]
+    // A stored secret is masked on the next read, like the real API.
+    get.mockImplementation(async (url: unknown) => {
+      if (typeof url === 'string' && url.includes('reveal_key=')) {
+        return settings.map(s => ({ ...s, value: s.is_set ? SECRET : '' })) as never
+      }
+      return settings as never
+    })
+    put.mockImplementation(async (_url: string, body?: unknown) => {
+      const updates = (body as { settings?: Record<string, string> }).settings ?? {}
+      for (const [key, value] of Object.entries(updates)) {
+        Object.assign(settings.find(s => s.key === key)!, {
+          value: value ? '••••••••' : '',
+          is_set: Boolean(value),
+          source: 'db',
+        })
+      }
+      return {} as never
+    })
+    vi.mocked(api.delete).mockImplementation(async () => {
+      Object.assign(settings[0], { value: '', is_set: false, source: 'db' })
+      return {} as never
+    })
+    renderPage()
+
+    await slackRow()
+    expect(editSlack()).toHaveTextContent('(empty)')
+    expect(screen.queryByRole('button', { name: 'Reveal value' })).toBeNull()
+
+    fireEvent.click(editSlack())
+    fireEvent.change(screen.getByLabelText('Edit SLACK_WEBHOOK_URL'), { target: { value: SECRET } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() => expect(editSlack().textContent).toBe('••••••••'))
+    expect(screen.getByRole('button', { name: 'Reveal value' })).toBeInTheDocument()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reveal value' }))
+    await waitFor(() => expect(editSlack().textContent).toBe(SECRET))
+
+    // Reset → nothing stored again, so the empty treatment comes back.
+    fireEvent.click(editSlack())
+    fireEvent.click(screen.getByRole('button', { name: 'Reset to default' }))
+    await waitFor(() => expect(api.delete).toHaveBeenCalledWith('/api/admin/settings/slack_webhook_url'))
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    await waitFor(() => expect(editSlack().textContent).toBe('(empty)'))
+    expect(screen.queryByRole('button', { name: 'Reveal value' })).toBeNull()
+  })
+})
+
 describe('ServerSettingsPage Jira field visibility', () => {
   it('finds auth-method-hidden Jira fields in search results', async () => {
     mockJiraModeSettings('basic')
     renderPage()
-    await screen.findByText('PUBLIC_BASE_URL')
+    await waitForRow('public_base_url')
 
     // jira_pat is hidden while Email+token is the selected method
     fireEvent.click(screen.getByRole('tab', { name: 'Jira' }))
-    expect(await screen.findByText('JIRA_PROJECT_KEY')).toBeInTheDocument()
-    expect(screen.queryByText('JIRA_PAT')).not.toBeInTheDocument()
+    await waitForRow('jira_project_key')
+    expect(shown('jira_pat')).toBe(false)
 
     // Search shows every matching Jira field regardless of method hiding
     fireEvent.change(screen.getByLabelText('Search settings'), { target: { value: 'jira_pat' } })
-    expect(await screen.findByText('JIRA_PAT')).toBeInTheDocument()
+    await waitForRow('jira_pat')
     // Header count matches the visible rows
     expect(screen.getByText('(1 setting)')).toBeInTheDocument()
   })
@@ -1243,7 +1500,7 @@ describe('ServerSettingsPage Jira field visibility', () => {
     mockJiraModeSettings('basic')
     renderPage()
     fireEvent.click(await screen.findByRole('tab', { name: 'Jira' }))
-    await screen.findByText('JIRA_PROJECT_KEY')
+    await waitForRow('jira_project_key')
 
     // Open an edit on a basic-method field
     fireEvent.click(screen.getByRole('button', { name: 'Edit JIRA_EMAIL' }))
@@ -1251,19 +1508,19 @@ describe('ServerSettingsPage Jira field visibility', () => {
     expect(testButton).toBeDisabled()
 
     // Switching to PAT hides JIRA_EMAIL — the edit is canceled, not stranded
-    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    chooseJiraMethod('PAT (Bearer)')
     fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Switch' }))
     await waitFor(() => expect(testButton).toBeEnabled())
     expect(screen.queryByLabelText('Edit JIRA_EMAIL')).not.toBeInTheDocument()
-    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
-    expect(screen.getByText('JIRA_PAT')).toBeInTheDocument()
+    expect(shown('jira_email')).toBe(false)
+    expect(shown('jira_pat')).toBe(true)
   })
 
   it('keeps an open editor and its draft when switching to a method that still shows the field', async () => {
     mockJiraModeSettings('basic')
     renderPage()
     fireEvent.click(await screen.findByRole('tab', { name: 'Jira' }))
-    await screen.findByText('JIRA_EMAIL')
+    await waitForRow('jira_email')
 
     // Draft an edit on a method-independent field (visible under every method)
     fireEvent.click(screen.getByRole('button', { name: 'Edit JIRA_SITE_URL' }))
@@ -1272,17 +1529,17 @@ describe('ServerSettingsPage Jira field visibility', () => {
     })
 
     // Switch basic → PAT (verified method: confirmation dialog, then save)
-    fireEvent.click(screen.getByRole('checkbox', { name: 'PAT (Bearer)' }))
+    chooseJiraMethod('PAT (Bearer)')
     fireEvent.click(within(await screen.findByRole('alertdialog')).getByRole('button', { name: 'Switch' }))
     await waitFor(() =>
       expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { jira_auth_mode: 'pat' } }),
     )
-    await waitFor(() => expect(screen.getByRole('checkbox', { name: 'PAT (Bearer)' })).toBeChecked())
+    await waitFor(() => expect(jiraAuthSelect()).toHaveTextContent('PAT (Bearer)'))
 
     // jira_site_url stays visible under PAT: the editor survives the switch with its draft
     expect(screen.getByLabelText('Edit JIRA_SITE_URL')).toHaveValue('https://draft.example.com')
-    expect(screen.getByText('JIRA_PAT')).toBeInTheDocument()
-    expect(screen.queryByText('JIRA_EMAIL')).not.toBeInTheDocument()
+    expect(shown('jira_pat')).toBe(true)
+    expect(shown('jira_email')).toBe(false)
   })
 })
 
@@ -1316,35 +1573,35 @@ describe('ServerSettingsPage env parity (#347)', () => {
   it('renders the Sidecar and Notifications categories as tabs with their rows', async () => {
     get.mockResolvedValue(paritySettings() as never)
     renderPage()
-    await screen.findByText('PUBLIC_BASE_URL')
+    await waitForRow('public_base_url')
 
     const tabs = screen.getAllByRole('tab').map((t) => t.textContent)
     expect(tabs).toContain('Sidecar')
     expect(tabs).toContain('Notifications')
 
     fireEvent.click(screen.getByRole('tab', { name: 'Sidecar' }))
-    expect(await screen.findByText('SIDECAR_HOST')).toBeInTheDocument()
-    expect(screen.getByText('SIDECAR_PORT')).toBeInTheDocument()
-    expect(screen.getByText('PI_SIDECAR_LOG_LEVEL')).toBeInTheDocument()
+    await waitForRow('sidecar_host')
+    expect(shown('sidecar_port')).toBe(true)
+    expect(shown('pi_sidecar_log_level')).toBe(true)
 
     fireEvent.click(screen.getByRole('tab', { name: 'Notifications' }))
-    expect(await screen.findByText('SMTP_HOST')).toBeInTheDocument()
-    expect(screen.getByText('ALERT_EMAIL_TO')).toBeInTheDocument()
+    await waitForRow('smtp_host')
+    expect(shown('alert_email_to')).toBe(true)
   })
 
   it('shows restart badges on every restart-tagged setting row', async () => {
     get.mockResolvedValue(paritySettings() as never)
     renderPage()
-    await screen.findByText('PUBLIC_BASE_URL')
+    await waitForRow('public_base_url')
 
     // Sidecar tab: all 8 sidecar settings are restart-tagged
     fireEvent.click(screen.getByRole('tab', { name: 'Sidecar' }))
-    await screen.findByText('SIDECAR_HOST')
+    await waitForRow('sidecar_host')
     expect(screen.getAllByLabelText('Restart required')).toHaveLength(8)
 
     // Auth & Security: default_user_role carries the badge too
     fireEvent.click(screen.getByRole('tab', { name: 'Auth & Security' }))
-    await screen.findByText('DEFAULT_USER_ROLE')
+    await waitForRow('default_user_role')
     expect(screen.getAllByLabelText('Restart required')).toHaveLength(1)
   })
 
@@ -1352,7 +1609,7 @@ describe('ServerSettingsPage env parity (#347)', () => {
     get.mockResolvedValue(paritySettings() as never)
     renderPage()
     fireEvent.click(await screen.findByRole('tab', { name: 'Notifications' }))
-    await screen.findByText('SMTP_HOST')
+    await waitForRow('smtp_host')
 
     expect(screen.getAllByText('••••••••').length).toBeGreaterThanOrEqual(2)
     expect(screen.getAllByRole('button', { name: 'Reveal value' }).length).toBeGreaterThanOrEqual(2)
@@ -1369,6 +1626,40 @@ describe('ServerSettingsPage env parity (#347)', () => {
     await waitFor(() =>
       expect(put).toHaveBeenCalledWith('/api/admin/settings', {
         settings: { session_ttl_hours: '48' },
+      }),
+    )
+  })
+
+  it('saves the lockout threshold as typed, with the 0-disables hint', async () => {
+    get.mockResolvedValue([
+      mk('login_lockout_threshold', 'Auth & Security', '5', {
+        type: 'integer',
+        description: 'Consecutive failed logins that lock an account on this server.',
+      }),
+    ] as never)
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Auth & Security' }))
+    await waitForRow('login_lockout_threshold')
+    expect(
+      screen.getByText('Failed logins before the account locks. 0 disables lockout.'),
+    ).toBeInTheDocument()
+
+    // 0 means "lockout off" — a real value, saved exactly as typed (no clamping)
+    fireEvent.click(screen.getByRole('button', { name: 'Edit LOGIN_LOCKOUT_THRESHOLD' }))
+    fireEvent.change(screen.getByLabelText('Edit LOGIN_LOCKOUT_THRESHOLD'), { target: { value: '0' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: { login_lockout_threshold: '0' },
+      }),
+    )
+
+    fireEvent.click(await screen.findByRole('button', { name: 'Edit LOGIN_LOCKOUT_THRESHOLD' }))
+    fireEvent.change(screen.getByLabelText('Edit LOGIN_LOCKOUT_THRESHOLD'), { target: { value: '7' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: { login_lockout_threshold: '7' },
       }),
     )
   })
@@ -1397,8 +1688,144 @@ describe('ServerSettingsPage env parity (#347)', () => {
   it('no longer renders the standalone Free AI models card in the AI tab', async () => {
     renderPage()
     fireEvent.click(await screen.findByRole('tab', { name: 'AI' }))
-    await screen.findByText('ACTIVE_SERVER_PROVIDERS')
+    await waitForRow('active_server_providers')
     expect(screen.queryByText(/Free AI models/)).not.toBeInTheDocument()
+  })
+})
+
+// E2E-F34 — lockout is a switch plus a number, not a magic threshold of 0.
+describe('ServerSettingsPage login lockout toggle (#379 E2E-F34)', () => {
+  function lockoutSettings(enabled = 'true') {
+    const settings = [
+      mk('login_lockout_enabled', 'Auth & Security', enabled, {
+        type: 'boolean',
+        label: 'Enable login lockout',
+      }),
+      mk('login_lockout_threshold', 'Auth & Security', '5', {
+        type: 'integer',
+        label: 'Failed logins before lockout',
+      }),
+    ]
+    get.mockImplementation(async () => settings as never)
+    put.mockImplementation(async (_url: string, body?: unknown) => {
+      const updates = (body as { settings?: Record<string, string> }).settings ?? {}
+      for (const [key, value] of Object.entries(updates)) {
+        const setting = settings.find((s) => s.key === key)
+        if (setting) Object.assign(setting, { value, source: 'db' })
+      }
+      return {} as never
+    })
+    return settings
+  }
+
+  const lockoutToggle = () => screen.getByRole('switch', { name: 'Toggle LOGIN_LOCKOUT_ENABLED' })
+  const thresholdEdit = () => screen.getByRole('button', { name: 'Edit LOGIN_LOCKOUT_THRESHOLD' })
+
+  async function openLockout() {
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Auth & Security' }))
+    await waitForRow('login_lockout_threshold')
+  }
+
+  it('renders the switch with the stored value and keeps the threshold editable while it is on', async () => {
+    lockoutSettings('true')
+    await openLockout()
+
+    // Booleans are switches on this page — this one included.
+    expect(lockoutToggle()).toBeChecked()
+    expect(thresholdEdit()).toBeEnabled()
+    expect(screen.queryByText(/Lockout is disabled/)).toBeNull()
+  })
+
+  it('turning lockout off disables the threshold input with the reason, and turning it on re-enables it without losing the number', async () => {
+    lockoutSettings('true')
+    await openLockout()
+
+    // Draft a number first: the toggle must disable the input, not drop the draft.
+    fireEvent.click(thresholdEdit())
+    const input = screen.getByLabelText('Edit LOGIN_LOCKOUT_THRESHOLD')
+    fireEvent.change(input, { target: { value: '7' } })
+
+    fireEvent.click(lockoutToggle())
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: { login_lockout_enabled: 'false' },
+      }),
+    )
+    await waitFor(() => expect(input).toBeDisabled())
+    expect(input).toHaveValue(7)
+    expect(screen.getByRole('button', { name: 'Save' })).toBeDisabled()
+    expect(screen.getByText(/Lockout is disabled/)).toBeInTheDocument()
+
+    fireEvent.click(lockoutToggle())
+    await waitFor(() =>
+      expect(put).toHaveBeenLastCalledWith('/api/admin/settings', {
+        settings: { login_lockout_enabled: 'true' },
+      }),
+    )
+    await waitFor(() => expect(input).toBeEnabled())
+    // The number the admin typed is still there — nothing was reset to 0.
+    expect(input).toHaveValue(7)
+    expect(screen.queryByText(/Lockout is disabled/)).toBeNull()
+  })
+
+  it('keeps the stored threshold visible and uneditable while lockout is off', async () => {
+    lockoutSettings('false')
+    await openLockout()
+
+    expect(lockoutToggle()).not.toBeChecked()
+    expect(thresholdEdit()).toBeDisabled()
+    expect(thresholdEdit()).toHaveTextContent('5')
+    expect(screen.getByText(/Lockout is disabled/)).toBeInTheDocument()
+  })
+
+  it('never seeds the threshold row from itself: an absent switch leaves it editable', async () => {
+    // Older servers omit login_lockout_enabled — no switch, no lock-out gate.
+    get.mockResolvedValue([
+      mk('login_lockout_threshold', 'Auth & Security', '5', { type: 'integer' }),
+    ] as never)
+    await openLockout()
+
+    expect(screen.queryByRole('switch')).toBeNull()
+    expect(thresholdEdit()).toBeEnabled()
+  })
+})
+
+// E2E-F33 — no setting appears twice: one control, carrying its own affordances.
+describe('ServerSettingsPage one control per setting (#379 E2E-F33)', () => {
+  it('edits jira_auth_mode through the card selector only, with its label, source, reset and history in the card', async () => {
+    const settings = baseSettings()
+    Object.assign(settings.find((s) => s.key === 'jira_auth_mode')!, {
+      value: 'pat',
+      label: 'Jira auth method',
+      is_set: true,
+      source: 'db',
+      updated_by: 'admin',
+      updated_at: '2025-01-01 00:00:00',
+    })
+    get.mockResolvedValue(settings as never)
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Jira' }))
+    await waitForRow('jira_project_key')
+
+    // The selector is the single editor: no row, no "Managed via …" echo.
+    expect(screen.getByRole('combobox', { name: 'Select Jira auth method' })).toHaveTextContent(
+      'PAT (Bearer)',
+    )
+    expect(row('jira_auth_mode')).toBeNull()
+    expect(screen.queryByText(/Managed via/)).toBeNull()
+
+    // Everything the row used to carry now lives in the card.
+    expect(screen.getByText('Jira auth method')).toBeInTheDocument()
+    // ... including the env var, as a tooltip on the card header's label.
+    expect(await envVarTooltip('Jira auth method')).toBe('JIRA_AUTH_MODE')
+    expect(screen.getByText('db')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Show history' })).toBeInTheDocument()
+
+    const del = vi.mocked(api.delete)
+    del.mockResolvedValue({} as never)
+    fireEvent.click(screen.getByRole('button', { name: 'Reset Jira auth method' }))
+    await waitFor(() => expect(del).toHaveBeenCalledWith('/api/admin/settings/jira_auth_mode'))
   })
 })
 
@@ -1415,14 +1842,14 @@ describe('ServerSettingsPage save env setting to DB', () => {
   async function renderJenkinsRows() {
     renderPage()
     fireEvent.change(await screen.findByLabelText('Search settings'), { target: { value: 'jenkins_' } })
-    await screen.findByText('JENKINS_USER')
+    await waitForRow('jenkins_user')
   }
 
   it('renders Save to DB only on env-sourced rows', async () => {
     get.mockResolvedValue(envSettings() as never)
     await renderJenkinsRows()
 
-    expect(screen.getByText('JENKINS_URL')).toBeInTheDocument()
+    expect(shown('jenkins_url')).toBe(true)
     expect(screen.getAllByRole('button', { name: 'Save to DB' })).toHaveLength(1)
   })
 
@@ -1439,13 +1866,13 @@ describe('ServerSettingsPage save env setting to DB', () => {
 
     // Server tab: db_path and debug are env-sourced but server-only
     fireEvent.click(await screen.findByRole('tab', { name: 'Server' }))
-    await screen.findByText('DB_PATH')
-    expect(screen.getByText('DEBUG')).toBeInTheDocument()
+    await waitForRow('db_path')
+    expect(shown('debug')).toBe(true)
     expect(screen.queryByRole('button', { name: 'Save to DB' })).not.toBeInTheDocument()
 
     // Auth & Security tab: admin_key likewise
     fireEvent.click(screen.getByRole('tab', { name: 'Auth & Security' }))
-    await screen.findByText('ADMIN_KEY')
+    await waitForRow('admin_key')
     expect(screen.queryByRole('button', { name: 'Save to DB' })).not.toBeInTheDocument()
   })
 
@@ -1461,7 +1888,7 @@ describe('ServerSettingsPage save env setting to DB', () => {
     renderPage()
 
     fireEvent.click(await screen.findByRole('tab', { name: 'Sidecar' }))
-    await screen.findByText('SIDECAR_URL')
+    await waitForRow('sidecar_url')
     expect(screen.queryByRole('button', { name: 'Save to DB' })).not.toBeInTheDocument()
   })
 
@@ -1516,7 +1943,7 @@ describe('ServerSettingsPage export and import settings', () => {
 
   it('exports DB settings as a JSON download without secrets by default', async () => {
     renderPage()
-    await screen.findByText('PUBLIC_BASE_URL')
+    await waitForRow('public_base_url')
     get.mockResolvedValueOnce(exportDoc as never)
 
     // Export opens the dialog; the secrets choice lives inside it.
@@ -1533,7 +1960,7 @@ describe('ServerSettingsPage export and import settings', () => {
 
   it('warns about plaintext when secrets are included in the export dialog', async () => {
     renderPage()
-    await screen.findByText('PUBLIC_BASE_URL')
+    await waitForRow('public_base_url')
     get.mockResolvedValueOnce(exportDoc as never)
 
     fireEvent.click(screen.getByRole('button', { name: /Export settings/ }))
@@ -1550,7 +1977,7 @@ describe('ServerSettingsPage export and import settings', () => {
 
   it('keeps the toolbar free of orphaned controls: no global expand/collapse, no secrets checkbox', async () => {
     renderPage()
-    await screen.findByText('PUBLIC_BASE_URL')
+    await waitForRow('public_base_url')
 
     expect(screen.queryByRole('button', { name: 'Expand all categories' })).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Collapse all categories' })).not.toBeInTheDocument()
@@ -1564,7 +1991,7 @@ describe('ServerSettingsPage export and import settings', () => {
       restart_required: ['log_level'],
     } as never)
     renderPage()
-    await screen.findByText('PUBLIC_BASE_URL')
+    await waitForRow('public_base_url')
 
     const input = document.querySelector('input[type="file"]')!
     fireEvent.change(input, {
@@ -1587,7 +2014,7 @@ describe('ServerSettingsPage export and import settings', () => {
     err.body = { detail: 'Invalid settings: jenkins_timeout: must be an integer' }
     post.mockRejectedValueOnce(err as never)
     renderPage()
-    await screen.findByText('PUBLIC_BASE_URL')
+    await waitForRow('public_base_url')
 
     const input = document.querySelector('input[type="file"]')!
     fireEvent.change(input, {
@@ -1608,7 +2035,7 @@ describe('ServerSettingsPage export and import settings', () => {
     post.mockRejectedValueOnce(err as never)
     post.mockResolvedValueOnce({ applied: {}, unchanged: [], restart_required: [] } as never)
     renderPage()
-    await screen.findByText('PUBLIC_BASE_URL')
+    await waitForRow('public_base_url')
 
     const input = document.querySelector('input[type="file"]')!
     fireEvent.change(input, {
@@ -1642,7 +2069,7 @@ describe('ServerSettingsPage export and import settings', () => {
 
     // Reveal a sensitive value, then open its editor with a stale draft
     fireEvent.click(await screen.findByRole('tab', { name: 'Jenkins' }))
-    await screen.findByText('JENKINS_PASSWORD')
+    await waitForRow('jenkins_password')
     fireEvent.click(screen.getByRole('button', { name: 'Reveal value' }))
     await waitFor(() =>
       expect(screen.getByRole('button', { name: 'Edit JENKINS_PASSWORD' }).textContent).toBe('decrypted-old'),
@@ -1675,7 +2102,7 @@ describe('ServerSettingsPage export and import settings', () => {
 
     // Open an editor on a setting the import document will not contain
     fireEvent.click(await screen.findByRole('tab', { name: 'Jenkins' }))
-    await screen.findByText('JENKINS_USER')
+    await waitForRow('jenkins_user')
     fireEvent.click(screen.getByRole('button', { name: 'Edit JENKINS_USER' }))
     fireEvent.change(screen.getByLabelText('Edit JENKINS_USER'), {
       target: { value: 'unsaved-draft' },
@@ -1696,7 +2123,7 @@ describe('ServerSettingsPage export and import settings', () => {
 
   it('rejects a non-JSON file before any request', async () => {
     renderPage()
-    await screen.findByText('PUBLIC_BASE_URL')
+    await waitForRow('public_base_url')
 
     const input = document.querySelector('input[type="file"]')!
     fireEvent.change(input, {
@@ -1704,5 +2131,590 @@ describe('ServerSettingsPage export and import settings', () => {
     })
     expect(await screen.findByRole('alert')).toHaveTextContent('not a valid JSON file')
     expect(post).not.toHaveBeenCalled()
+  })
+})
+
+// #379: every enumerated setting is a picker, so an admin never has to guess a
+// value the server already knows — and the choices it fetches at runtime must
+// neither block the page nor drop a value it does not list.
+describe('ServerSettingsPage enumerated setting pickers', () => {
+  const EXPORTERS = [
+    { name: 'reportportal', display_name: 'Report Portal', enabled: true },
+    { name: 'elastic', display_name: 'Elastic', enabled: true },
+    { name: 'slack', display_name: 'Slack', enabled: false },
+  ]
+  const CATALOG = { providers: { claude: [], gemini: [], 'vertex-claude': [] } }
+  const USERS = { users: [{ username: 'alice' }, { username: 'bob' }] }
+
+  function enumSettings(overrides: Record<string, Partial<TestSetting>> = {}): TestSetting[] {
+    const settings = baseSettings()
+    settings.push(
+      mk('default_user_role', 'Auth & Security', 'reviewer', {
+        options: ['viewer', 'reviewer', 'operator'],
+      }),
+      mk('log_level', 'Server', 'INFO', {
+        options: ['DEBUG', 'INFO', 'WARNING', 'ERROR', 'CRITICAL'],
+        restart_required: true,
+      }),
+      mk('auto_push_exporters', 'Server', '', {
+        options: null,
+        options_source: 'exporters',
+        multiple: true,
+      }),
+      mk('ambient_auth_providers', 'AI', '', {
+        options: null,
+        options_source: 'providers',
+        multiple: true,
+      }),
+      mk('allowed_users', 'Auth & Security', '', {
+        options: null,
+        options_source: 'users',
+        multiple: true,
+        allow_custom: true,
+      }),
+    )
+    for (const [key, props] of Object.entries(overrides)) {
+      Object.assign(settings.find((s) => s.key === key)!, props)
+    }
+    return settings
+  }
+
+  /** Serve the settings plus the endpoints the dynamic lists come from. */
+  function mockEnumSettings(
+    overrides: Record<string, Partial<TestSetting>> = {},
+    failed: string[] = [],
+  ) {
+    const settings = enumSettings(overrides)
+    get.mockImplementation(async (url: unknown) => {
+      const path = String(url)
+      if (path === '/api/exporters') {
+        if (failed.includes('exporters')) throw new Error('exporters unavailable')
+        return EXPORTERS as never
+      }
+      if (path === '/api/ai-models') {
+        if (failed.includes('providers')) throw new Error('catalog unavailable')
+        return CATALOG as never
+      }
+      if (path === '/api/admin/users') {
+        if (failed.includes('users')) throw new Error('users unavailable')
+        return USERS as never
+      }
+      return settings as never
+    })
+    // Persist what the page saves, so a refetch shows the saved value.
+    put.mockImplementation(async (_url: string, body?: unknown) => {
+      const updates = (body as { settings?: Record<string, string> }).settings ?? {}
+      for (const [key, value] of Object.entries(updates)) {
+        const setting = settings.find((s) => s.key === key)
+        if (setting) Object.assign(setting, { value, source: 'db' })
+      }
+      return {} as never
+    })
+  }
+
+  it('renders the static settings as searchable pickers pre-selected with the stored value and saves the choice', async () => {
+    mockEnumSettings()
+    renderPage()
+
+    // One control for every enumerated setting (E2E-F23): the same picker the
+    // dynamic lists use, searchable even with three choices.
+    const logLevel = await screen.findByRole('combobox', { name: 'Select LOG_LEVEL' })
+    expect(logLevel).toHaveTextContent('INFO')
+    fireEvent.click(logLevel)
+    fireEvent.change(searchBox('LOG_LEVEL'), { target: { value: 'deb' } })
+    expect(optionNames()).toEqual(['DEBUG'])
+    fireEvent.keyDown(searchBox('LOG_LEVEL'), { key: 'Enter' })
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { log_level: 'DEBUG' } }),
+    )
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Select LOG_LEVEL' })).toHaveTextContent('DEBUG'),
+    )
+
+    fireEvent.click(screen.getByRole('tab', { name: 'Auth & Security' }))
+    const role = await screen.findByRole('combobox', { name: 'Select DEFAULT_USER_ROLE' })
+    expect(role).toHaveTextContent('reviewer')
+    pickSingle('DEFAULT_USER_ROLE', 'operator')
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: { default_user_role: 'operator' },
+      }),
+    )
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Select DEFAULT_USER_ROLE' })).toHaveTextContent(
+        'operator',
+      ),
+    )
+  })
+
+  it('cancels a single pick with Escape without saving', async () => {
+    mockEnumSettings()
+    renderPage()
+
+    fireEvent.click(await screen.findByRole('combobox', { name: 'Select LOG_LEVEL' }))
+    fireEvent.change(searchBox('LOG_LEVEL'), { target: { value: 'error' } })
+    expect(optionNames()).toEqual(['ERROR'])
+    fireEvent.keyDown(searchBox('LOG_LEVEL'), { key: 'Escape' })
+
+    await waitFor(() => expect(screen.queryByRole('listbox')).toBeNull())
+    expect(put).not.toHaveBeenCalled()
+    expect(screen.getByRole('combobox', { name: 'Select LOG_LEVEL' })).toHaveTextContent('INFO')
+  })
+
+  it('searches exporters by subsequence, ranks prefix matches first, and saves the picks in order', async () => {
+    mockEnumSettings()
+    renderPage()
+    await waitForRow('auto_push_exporters')
+
+    openPicker('AUTO_PUSH_EXPORTERS')
+    const search = searchBox('AUTO_PUSH_EXPORTERS')
+    // Case-insensitive subsequence: r-p-t finds reportportal.
+    fireEvent.change(search, { target: { value: 'RPT' } })
+    expect(optionNames()).toEqual(['reportportal'])
+    // Prefix matches come first, then matches that start later in the word.
+    fireEvent.change(search, { target: { value: 'e' } })
+    expect(optionNames()).toEqual(['elastic', 'reportportal'])
+
+    fireEvent.change(search, { target: { value: 'report' } })
+    fireEvent.keyDown(search, { key: 'Enter' })
+    await waitFor(() =>
+      expect(put).toHaveBeenLastCalledWith('/api/admin/settings', {
+        settings: { auto_push_exporters: 'reportportal' },
+      }),
+    )
+    // multiple: the menu stays open with a cleared query so the next pick starts fresh.
+    expect(searchBox('AUTO_PUSH_EXPORTERS')).toHaveValue('')
+    expect(screen.getByRole('listbox')).toBeInTheDocument()
+
+    fireEvent.change(searchBox('AUTO_PUSH_EXPORTERS'), { target: { value: 'elas' } })
+    fireEvent.keyDown(searchBox('AUTO_PUSH_EXPORTERS'), { key: 'Enter' })
+    await waitFor(() =>
+      expect(put).toHaveBeenLastCalledWith('/api/admin/settings', {
+        settings: { auto_push_exporters: 'reportportal,elastic' },
+      }),
+    )
+    expect(screen.getByRole('button', { name: 'Remove reportportal' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Remove elastic' })).toBeInTheDocument()
+  })
+
+  it('shows an unconfigured exporter disabled with its hint and closes on Escape', async () => {
+    mockEnumSettings()
+    renderPage()
+    await waitForRow('auto_push_exporters')
+
+    openPicker('AUTO_PUSH_EXPORTERS')
+    const slack = screen.getByRole('option', { name: /slack/ })
+    expect(slack).toHaveAttribute('aria-disabled', 'true')
+    expect(within(slack).getByText('not configured')).toBeInTheDocument()
+    // An exporter that would never run cannot be picked
+    fireEvent.mouseDown(slack)
+    expect(put).not.toHaveBeenCalled()
+
+    fireEvent.keyDown(searchBox('AUTO_PUSH_EXPORTERS'), { key: 'Escape' })
+    await waitFor(() => expect(screen.queryByRole('listbox')).toBeNull())
+  })
+
+  it('lists the provider catalog for the ambient auth multiselect and saves the selection', async () => {
+    mockEnumSettings()
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'AI' }))
+    await waitForRow('ambient_auth_providers')
+
+    openPicker('AMBIENT_AUTH_PROVIDERS')
+    fireEvent.change(searchBox('AMBIENT_AUTH_PROVIDERS'), { target: { value: 'cla' } })
+    fireEvent.keyDown(searchBox('AMBIENT_AUTH_PROVIDERS'), { key: 'Enter' })
+    await waitFor(() =>
+      expect(put).toHaveBeenLastCalledWith('/api/admin/settings', {
+        settings: { ambient_auth_providers: 'claude' },
+      }),
+    )
+
+    // Down/Up move the highlight; Enter takes it.
+    fireEvent.change(searchBox('AMBIENT_AUTH_PROVIDERS'), { target: { value: 'gem' } })
+    fireEvent.keyDown(searchBox('AMBIENT_AUTH_PROVIDERS'), { key: 'Enter' })
+    await waitFor(() =>
+      expect(put).toHaveBeenLastCalledWith('/api/admin/settings', {
+        settings: { ambient_auth_providers: 'claude,gemini' },
+      }),
+    )
+    expect(screen.getByRole('button', { name: 'Remove claude' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Remove gemini' })).toBeInTheDocument()
+  })
+
+  it('suggests existing users for the allow-list and adds an unknown name the server does not list', async () => {
+    mockEnumSettings()
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Auth & Security' }))
+    await waitForRow('allowed_users')
+
+    openPicker('ALLOWED_USERS')
+    const search = () => searchBox('ALLOWED_USERS')
+    fireEvent.change(search(), { target: { value: 'ali' } })
+    fireEvent.keyDown(search(), { key: 'Enter' })
+    await waitFor(() =>
+      expect(put).toHaveBeenLastCalledWith('/api/admin/settings', {
+        settings: { allowed_users: 'alice' },
+      }),
+    )
+
+    // An SSO user provisioned later is not in the table yet: free entry.
+    fireEvent.change(search(), { target: { value: 'carol' } })
+    const custom = screen.getByRole('option', { name: 'Add "carol"' })
+    fireEvent.mouseDown(custom)
+    await waitFor(() =>
+      expect(put).toHaveBeenLastCalledWith('/api/admin/settings', {
+        settings: { allowed_users: 'alice,carol' },
+      }),
+    )
+    expect(screen.getByRole('button', { name: 'Remove carol' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Remove alice' })).toBeInTheDocument()
+  })
+
+  it('says the choices are loading while the list is still in flight', async () => {
+    const settings = enumSettings()
+    get.mockImplementation(async (url: unknown) => {
+      if (String(url) === '/api/exporters') return new Promise(() => {}) as never
+      return settings as never
+    })
+    renderPage()
+    await waitForRow('auto_push_exporters')
+
+    openPicker('AUTO_PUSH_EXPORTERS')
+    expect(
+      within(screen.getByRole('listbox')).getByText('Loading choices…'),
+    ).toBeInTheDocument()
+  })
+
+  it('shows a stored value the list does not offer and lets the admin remove it', async () => {
+    mockEnumSettings({
+      log_level: { value: 'TRACE' },
+      auto_push_exporters: { value: 'legacyplugin', source: 'db' },
+    })
+    renderPage()
+
+    // Not offered by the server, but never silently dropped from the control.
+    expect(await screen.findByRole('combobox', { name: 'Select LOG_LEVEL' })).toHaveTextContent(
+      'TRACE',
+    )
+    const remove = await screen.findByRole('button', { name: 'Remove legacyplugin' })
+    fireEvent.click(remove)
+    await waitFor(() =>
+      expect(put).toHaveBeenLastCalledWith('/api/admin/settings', {
+        settings: { auto_push_exporters: '' },
+      }),
+    )
+  })
+
+  it('falls back to a plain input with a note when the list cannot be fetched, and still saves', async () => {
+    mockEnumSettings({}, ['exporters'])
+    renderPage()
+
+    const input = await screen.findByRole('textbox', { name: 'Edit AUTO_PUSH_EXPORTERS' })
+    expect(screen.getByText(/Could not load the choices from the server/)).toBeInTheDocument()
+    expect(screen.queryByRole('combobox', { name: 'Add AUTO_PUSH_EXPORTERS' })).toBeNull()
+
+    fireEvent.change(input, { target: { value: 'reportportal' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenLastCalledWith('/api/admin/settings', {
+        settings: { auto_push_exporters: 'reportportal' },
+      }),
+    )
+  })
+
+  it('resolves dynamic choices under StrictMode double-mount (live-only regression)', async () => {
+    // React StrictMode mounts, unmounts and remounts in development. The
+    // options hook used to keep its "alive" flag false after that remount, so
+    // every resolved fetch was discarded and the control stayed on
+    // "Loading choices…" forever — a bug jsdom without StrictMode never saw.
+    mockEnumSettings()
+    render(
+      <StrictMode>
+        <MemoryRouter initialEntries={['/admin/settings']}>
+          <ServerSettingsPage />
+        </MemoryRouter>
+      </StrictMode>,
+    )
+
+    await screen.findByRole('combobox', { name: 'Add AUTO_PUSH_EXPORTERS' })
+    await waitFor(() =>
+      expect(screen.getByRole('combobox', { name: 'Add AUTO_PUSH_EXPORTERS' })).not.toHaveTextContent(
+        /Loading choices/i,
+      ),
+    )
+  })
+})
+
+// ---------------------------------------------------------------------------
+// E2E-F27 — rows are named for humans; E2E-F28..F30 — inline editors
+// ---------------------------------------------------------------------------
+
+/** The env var of a row, revealed by hovering its label (the only affordance). */
+async function envVarTooltip(label: string): Promise<string> {
+  await userEvent.setup().hover(screen.getByText(label))
+  return (await screen.findByRole('tooltip')).textContent ?? ''
+}
+
+/** No row prints its env var: the line slot and its reserved height are gone. */
+const expectNoEnvVarLine = () => {
+  expect(document.querySelector('[data-setting-env-var-line]')).toBeNull()
+  expect(document.querySelector('[data-setting-env-var]')).toBeNull()
+}
+
+/** The two structured editors live in the AI category. */
+function structuredSettings(extra: Partial<Record<'additional_repos' | 'peer_ai_configs', string>> = {}) {
+  return [
+    mk('additional_repos', 'AI', extra.additional_repos ?? '', { label: 'Additional repositories' }),
+    mk('peer_ai_configs', 'AI', extra.peer_ai_configs ?? '', { label: 'Peer AI configurations' }),
+    mk('peer_analysis_max_rounds', 'AI', '3', { type: 'integer', label: 'Peer analysis max rounds' }),
+  ]
+}
+
+async function openAiTab() {
+  renderPage()
+  fireEvent.click(await screen.findByRole('tab', { name: 'AI' }))
+}
+
+describe('ServerSettingsPage human labels (E2E-F27)', () => {
+  it('titles a row with its label and hides the env var in the label tooltip', async () => {
+    get.mockResolvedValue([
+      mk('wait_for_completion', 'Server', 'true', { type: 'boolean', label: 'Wait for completion' }),
+    ] as never)
+    renderPage()
+
+    const settingsRow = await waitFor(() => {
+      const found = row('wait_for_completion')
+      expect(found).not.toBeNull()
+      return found as HTMLElement
+    })
+    // The title is the human name — the machine key is never the title.
+    expect(settingsRow.querySelector('[data-setting-title]')?.textContent).toBe('Wait for completion')
+    // No permanent second line: the env var is not body text on the row.
+    expectNoEnvVarLine()
+    expect(settingsRow.textContent).not.toContain('WAIT_FOR_COMPLETION')
+
+    // Discoverable in the label's tooltip, monospaced and selectable (copyable).
+    await userEvent.setup().hover(screen.getByText('Wait for completion'))
+    const tooltip = await screen.findByRole('tooltip')
+    const envVar = tooltip.querySelector('[data-setting-env-var]')
+    expect(envVar?.textContent).toBe('WAIT_FOR_COMPLETION')
+    expect(envVar?.className).toContain('font-mono')
+    expect(envVar?.className).toContain('select-text')
+  })
+
+  it('renders no placeholder line for a row without an env var, so all rows stay one height', async () => {
+    // A server that ships a setting without an env var (no deployment default).
+    get.mockResolvedValue([
+      mk('session_ttl_hours', 'Server', '24', { type: 'integer', env_var: '', label: 'Session lifetime' }),
+      mk('wait_for_completion', 'Server', 'true', { type: 'boolean', label: 'Wait for completion' }),
+    ] as never)
+    renderPage()
+
+    const without = await waitFor(() => {
+      const found = row('session_ttl_hours')
+      expect(found).not.toBeNull()
+      return found as HTMLElement
+    })
+    // Neither row reserves a line — no fixed-height slot, no placeholder.
+    expectNoEnvVarLine()
+    expect(without.textContent).not.toContain('SESSION_TTL_HOURS')
+  })
+
+  it('gives an env-var-less row no tooltip at all', async () => {
+    // jira_auth_mode ships without an env var: nothing to reveal, no dead hover.
+    get.mockResolvedValue([
+      mk('jira_auth_mode', 'Jira', 'pat', { env_var: '', label: 'Jira auth method' }),
+      mk('jira_project_key', 'Jira', 'RC', { env_var: '', label: 'Jira project key' }),
+    ] as never)
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Jira' }))
+
+    await userEvent.setup().hover(await screen.findByText('Jira project key'))
+    await new Promise((resolve) => setTimeout(resolve, 300))
+    expect(screen.queryByRole('tooltip')).not.toBeInTheDocument()
+  })
+
+  it('gives jira_auth_mode no row of its own: label and env var live in the Jira card', async () => {
+    get.mockResolvedValue([
+      mk('jira_auth_mode', 'Jira', 'pat', { label: 'Jira auth method' }),
+    ] as never)
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Jira' }))
+
+    // The selector is the only editor, and the row list is empty beneath it.
+    expect(await screen.findByRole('combobox', { name: 'Select Jira auth method' })).toBeInTheDocument()
+    expect(row('jira_auth_mode')).toBeNull()
+    // The card header reuses the same tooltip affordance, not a second copy.
+    expect(await envVarTooltip('Jira auth method')).toBe('JIRA_AUTH_MODE')
+  })
+
+  it('finds a row by its env var as well as by its label', async () => {
+    get.mockResolvedValue([
+      mk('ai_call_timeout', 'AI', '600', { type: 'integer', label: 'AI call timeout' }),
+      mk('jenkins_url', 'Jenkins', 'https://jenkins.example.com', { label: 'Jenkins URL' }),
+    ] as never)
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'AI' }))
+    const search = await screen.findByLabelText('Search settings')
+
+    // The env var is no longer visible, so search must find it (any case).
+    fireEvent.change(search, { target: { value: 'ai_call_timeout' } })
+    await waitFor(() => expect(shown('ai_call_timeout')).toBe(true))
+    expect(shown('jenkins_url')).toBe(false)
+
+    fireEvent.change(search, { target: { value: 'AI_CALL_TIMEOUT' } })
+    await waitFor(() => expect(shown('ai_call_timeout')).toBe(true))
+
+    // The label still matches.
+    fireEvent.change(search, { target: { value: 'call timeout' } })
+    await waitFor(() => expect(shown('ai_call_timeout')).toBe(true))
+    fireEvent.change(search, { target: { value: 'jenkins' } })
+    await waitFor(() => expect(shown('jenkins_url')).toBe(true))
+    expect(shown('ai_call_timeout')).toBe(false)
+  })
+})
+
+describe('ServerSettingsPage inline editors (E2E-F28..F30)', () => {
+  it('shows the repositories editor inline, with nothing to save while it is empty', async () => {
+    get.mockResolvedValue(structuredSettings() as never)
+    await openAiTab()
+
+    const repos = await waitFor(() => {
+      const found = row('additional_repos')
+      expect(found).not.toBeNull()
+      return found as HTMLElement
+    })
+    // No link hides the editor any more.
+    expect(within(repos).queryByRole('button', { name: /Configure repositories/i })).toBeNull()
+    expect(within(repos).getByRole('button', { name: /Add Repository/i })).toBeInTheDocument()
+    // Empty means there is nothing to save.
+    expect(within(repos).queryByRole('button', { name: 'Save' })).toBeNull()
+    expect(within(repos).queryByRole('button', { name: 'Cancel' })).toBeNull()
+  })
+
+  it('shows Save/Cancel after the first add and Cancel returns to the empty state', async () => {
+    get.mockResolvedValue(structuredSettings() as never)
+    await openAiTab()
+
+    const repos = (await waitFor(() => row('additional_repos'))) as HTMLElement
+    fireEvent.click(within(repos).getByRole('button', { name: /Add Repository/i }))
+
+    expect(within(repos).getByPlaceholderText('Name')).toBeInTheDocument()
+    expect(within(repos).getByRole('button', { name: 'Save' })).toBeInTheDocument()
+    expect(within(repos).getByRole('button', { name: 'Cancel' })).toBeInTheDocument()
+
+    fireEvent.click(within(repos).getByRole('button', { name: 'Cancel' }))
+    expect(within(repos).queryByPlaceholderText('Name')).toBeNull()
+    expect(within(repos).queryByRole('button', { name: 'Save' })).toBeNull()
+    expect(within(repos).queryByRole('button', { name: 'Cancel' })).toBeNull()
+    expect(within(repos).getByRole('button', { name: /Add Repository/i })).toBeInTheDocument()
+  })
+
+  it('posts the unchanged additional_repos payload and hides Save/Cancel again', async () => {
+    // A stored repo with a ref: the parser/serialiser round trip must not
+    // change a byte of what the server already holds.
+    get.mockResolvedValue(
+      structuredSettings({ additional_repos: 'grafana:https://github.com/acme/grafana:main' }) as never,
+    )
+    await openAiTab()
+
+    const repos = (await waitFor(() => row('additional_repos'))) as HTMLElement
+    // A stored value is a clean state too.
+    expect(within(repos).queryByRole('button', { name: 'Save' })).toBeNull()
+
+    fireEvent.click(within(repos).getByRole('button', { name: /Add Repository/i }))
+    fireEvent.click(within(repos).getByRole('button', { name: 'Save' }))
+
+    await waitFor(() =>
+      expect(put).toHaveBeenLastCalledWith('/api/admin/settings', {
+        settings: { additional_repos: 'grafana:https://github.com/acme/grafana:main' },
+      }),
+    )
+    await waitFor(() => expect(within(repos).queryByRole('button', { name: 'Save' })).toBeNull())
+    expect(within(repos).queryByRole('button', { name: 'Cancel' })).toBeNull()
+  })
+
+  it('shows the peer editor inline, with nothing to save while it is empty', async () => {
+    get.mockResolvedValue(structuredSettings() as never)
+    await openAiTab()
+
+    const peers = await waitFor(() => {
+      const found = row('peer_ai_configs')
+      expect(found).not.toBeNull()
+      return found as HTMLElement
+    })
+    expect(within(peers).queryByRole('button', { name: /Configure peers/i })).toBeNull()
+    expect(within(peers).getByRole('button', { name: /Add peer configuration/i })).toBeInTheDocument()
+    expect(within(peers).queryByRole('button', { name: 'Save' })).toBeNull()
+    expect(within(peers).queryByRole('button', { name: 'Cancel' })).toBeNull()
+  })
+
+  it('shows Save/Cancel after the first peer add and Cancel restores the stored peers', async () => {
+    get.mockResolvedValue(
+      structuredSettings({ peer_ai_configs: 'gemini:gemini-2.5-pro,cursor:claude-4-sonnet' }) as never,
+    )
+    await openAiTab()
+
+    const peers = (await waitFor(() => row('peer_ai_configs'))) as HTMLElement
+    expect(within(peers).getByText('Peer 2')).toBeInTheDocument()
+
+    fireEvent.click(within(peers).getByRole('button', { name: /Add peer configuration/i }))
+    expect(within(peers).getByText('Peer 3')).toBeInTheDocument()
+    expect(within(peers).getByRole('button', { name: 'Save' })).toBeInTheDocument()
+    expect(within(peers).getByRole('button', { name: 'Cancel' })).toBeInTheDocument()
+
+    fireEvent.click(within(peers).getByRole('button', { name: 'Cancel' }))
+    expect(within(peers).queryByText('Peer 3')).toBeNull()
+    expect(within(peers).getByText('Peer 2')).toBeInTheDocument()
+    expect(within(peers).queryByRole('button', { name: 'Save' })).toBeNull()
+    expect(within(peers).queryByRole('button', { name: 'Cancel' })).toBeNull()
+  })
+
+  it('posts the peer configs alone — rounds save through their own row (E2E-F33)', async () => {
+    get.mockResolvedValue(
+      structuredSettings({ peer_ai_configs: 'gemini:gemini-2.5-pro,cursor:claude-4-sonnet' }) as never,
+    )
+    await openAiTab()
+
+    const peers = (await waitFor(() => row('peer_ai_configs'))) as HTMLElement
+    fireEvent.click(within(peers).getByRole('button', { name: /Add peer configuration/i }))
+    fireEvent.click(within(peers).getByRole('button', { name: 'Save' }))
+
+    // Same comma-separated shape as before the change: the still-empty added
+    // peer is dropped, and the card no longer carries the rounds setting.
+    await waitFor(() =>
+      expect(put).toHaveBeenLastCalledWith('/api/admin/settings', {
+        settings: { peer_ai_configs: 'gemini:gemini-2.5-pro,cursor:claude-4-sonnet' },
+      }),
+    )
+    await waitFor(() => expect(within(peers).queryByRole('button', { name: 'Save' })).toBeNull())
+  })
+
+  it('edits max rounds on its own row and no longer inside the peers card', async () => {
+    get.mockResolvedValue(
+      structuredSettings({ peer_ai_configs: 'gemini:gemini-2.5-pro' }) as never,
+    )
+    await openAiTab()
+
+    const peers = (await waitFor(() => row('peer_ai_configs'))) as HTMLElement
+    // The rounds input moved out of the card: one control per setting.
+    expect(within(peers).queryByText('Max Rounds')).toBeNull()
+    expect(screen.queryByText(/Managed via Peer AI Configs/)).toBeNull()
+
+    // The row itself is the editor, like every other numeric setting.
+    const rounds = (await waitFor(() => row('peer_analysis_max_rounds'))) as HTMLElement
+    expect(within(rounds).getByRole('button', { name: 'Edit PEER_ANALYSIS_MAX_ROUNDS' })).toHaveTextContent(
+      '3',
+    )
+    fireEvent.click(within(rounds).getByRole('button', { name: 'Edit PEER_ANALYSIS_MAX_ROUNDS' }))
+    fireEvent.change(within(rounds).getByLabelText('Edit PEER_ANALYSIS_MAX_ROUNDS'), {
+      target: { value: '6' },
+    })
+    fireEvent.click(within(rounds).getByRole('button', { name: 'Save' }))
+    await waitFor(() =>
+      expect(put).toHaveBeenLastCalledWith('/api/admin/settings', {
+        settings: { peer_analysis_max_rounds: '6' },
+      }),
+    )
   })
 })

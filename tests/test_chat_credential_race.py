@@ -121,7 +121,7 @@ async def test_admin_chat_demotion_during_ai_discards_reply(tmp_path, monkeypatc
             ai_provider_override="p",
             ai_model_override="m",
             username="alice",
-            force_server=True,
+            credential_source="server",
         )
     )
     try:
@@ -139,18 +139,16 @@ async def test_admin_chat_demotion_during_ai_discards_reply(tmp_path, monkeypatc
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("force_server", [False, True])
+@pytest.mark.parametrize("credential_source", ["user", "server"])
 async def test_admin_chat_demotion_after_role_check_cannot_commit_reply(
-    tmp_path, monkeypatch, force_server
+    tmp_path, monkeypatch, credential_source
 ):
     from rootcoz.engine import chat
 
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "commit-role.db")
     await storage.init_db()
     await storage.create_admin_user("alice", can_use_server_providers=True)
-    await storage.save_ai_session_source(
-        "sid", "alice", "p", "server" if force_server else "user"
-    )
+    await storage.save_ai_session_source("sid", "alice", "p", credential_source)
     await storage.add_chat_message(
         main.ADMIN_CHAT_JOB_ID,
         "assistant",
@@ -190,7 +188,7 @@ async def test_admin_chat_demotion_after_role_check_cannot_commit_reply(
             ai_provider_override="p",
             ai_model_override="m",
             username="alice",
-            force_server=force_server,
+            credential_source=credential_source,
         )
     )
     try:
@@ -343,7 +341,7 @@ async def test_admin_chat_demotion_while_preparing_tools_stops_ai(
             ai_provider_override="p",
             ai_model_override="m",
             username="alice",
-            force_server=True,
+            credential_source="server",
         )
     )
     try:
@@ -718,7 +716,7 @@ async def test_revoked_server_grant_mid_call_does_not_publish_reply(
         ai_provider_override="p",
         ai_model_override="m",
         username=username,
-        force_server=True,
+        credential_source="server",
     )
     msg = (await storage.get_chat_messages(job_id, username=username))[-1]
     if admin:
@@ -804,7 +802,7 @@ async def test_credential_rotation_preserves_server_reply_in_flight(
         ai_provider_override="p",
         ai_model_override="m",
         username="alice",
-        force_server=True,
+        credential_source="server",
     )
     msg = (await storage.get_chat_messages("job", username="alice"))[-1]
     assert (msg["status"], msg["content"], msg["session_id"]) == (
@@ -1109,15 +1107,11 @@ async def test_initial_chat_handler_revokes_session_rotated_before_insert(
         monkeypatch.setattr(
             main,
             "get_settings",
-            lambda: SimpleNamespace(
-                ai_provider="p", ai_model="m", force_server_credentials=False
-            ),
+            lambda: SimpleNamespace(ai_provider="p", ai_model="m"),
         )
         result = await main.init_admin_chat(
             SimpleNamespace(state=SimpleNamespace(username="alice", is_admin=True)),
-            ChatInitRequest(
-                ai_provider="p", ai_model="m", force_server_credentials=False
-            ),
+            ChatInitRequest(ai_provider="p", ai_model="m"),
         )
         job_id = main.ADMIN_CHAT_JOB_ID
     else:
@@ -1147,9 +1141,7 @@ async def test_initial_chat_handler_revokes_session_rotated_before_insert(
         result = await main._init_chat_under_barrier(
             job_id,
             "alice",
-            ChatInitRequest(
-                ai_provider="p", ai_model="m", force_server_credentials=False
-            ),
+            ChatInitRequest(ai_provider="p", ai_model="m"),
         )
 
     assert result["session_id"] == ""

@@ -7,6 +7,7 @@ import { ThemeToggle } from '@/components/shared/ThemeToggle'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { useAuth } from '@/lib/auth'
 import { cn } from '@/lib/utils'
+import { TEXT_BUTTON_CLASS } from '@/lib/controlStyles'
 
 interface HeaderProps {
   mobileOpen: boolean
@@ -62,7 +63,7 @@ export function Header({ mobileOpen, onMobileToggle }: HeaderProps) {
                   href="https://myk-org.github.io/rootcoz/"
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium text-text-tertiary transition-colors duration-150 hover:bg-surface-hover hover:text-text-secondary"
+                  className={TEXT_BUTTON_CLASS}
                 >
                   <BookOpen className="h-4 w-4 shrink-0" />
                   Guide
@@ -75,7 +76,7 @@ export function Header({ mobileOpen, onMobileToggle }: HeaderProps) {
                 <button
                   type="button"
                   onClick={() => setFeedbackOpen(true)}
-                  className="flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium text-text-tertiary transition-colors duration-150 hover:bg-surface-hover hover:text-text-secondary"
+                  className={TEXT_BUTTON_CLASS}
                 >
                   <MessageSquarePlus className="h-4 w-4 shrink-0" />
                   Feedback

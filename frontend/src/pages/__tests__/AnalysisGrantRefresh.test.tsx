@@ -20,7 +20,7 @@ let granted = false
 const serverModel = { id: 'sonnet', name: 'Sonnet', provider: 'claude', credential_sources: ['server'] }
 const userModel = { id: 'gpt', name: 'GPT', provider: 'openai', credential_sources: ['user'] }
 const defaults = {
-  ai_provider: 'claude', ai_model: 'sonnet', force_server_credentials: true,
+  ai_provider: 'claude', ai_model: 'sonnet',
   ai_call_timeout: 10, tests_repo_url: '', additional_repos: [], peer_ai_configs: [],
   peer_analysis_max_rounds: 3, jira_enabled: false, jira_url: '', jira_project_key: '',
   get_job_artifacts: false, jenkins_artifacts_max_size_mb: 50, wait_for_completion: false,
@@ -58,19 +58,19 @@ it('updates a mounted new-analysis picker and submit after grant and revoke with
   await user.click(await screen.findByRole('button', { name: 'AI Configuration' }))
   await user.click(screen.getByRole('button', { name: 'Paste XML' }))
   await user.type(screen.getByPlaceholderText('Paste JUnit XML content...'), '<testsuite/>')
+  // The server default pair is server-only: without the grant it is unusable.
   expect(screen.getByRole('button', { name: 'Submit Analysis' })).toBeDisabled()
-  expect(screen.getByRole('switch', { name: 'Use server credentials' })).toBeDisabled()
+  expect(screen.getByText(/Server credentials are restricted/)).toBeInTheDocument()
   granted = true
   act(() => window.dispatchEvent(new Event('focus')))
-  await waitFor(() => expect(screen.getByRole('switch', { name: 'Use server credentials' })).toHaveAttribute('aria-checked', 'true'))
   await waitFor(() => expect(screen.getByRole('button', { name: 'Submit Analysis' })).toBeEnabled())
-  expect(get).toHaveBeenCalledWith('/api/ai-models?force_server_credentials=true')
-  const unforcedCalls = get.mock.calls.filter(([path]) => path === '/api/ai-models?force_server_credentials=false').length
+  // No switch overrides the user's own credentials: the grant alone decides.
+  expect(screen.queryByRole('switch', { name: 'Use server credentials' })).not.toBeInTheDocument()
+  const catalogCalls = get.mock.calls.filter(([path]) => path === '/api/ai-models').length
   granted = false
   act(() => window.dispatchEvent(new Event('focus')))
   await waitFor(() => expect(screen.getByRole('button', { name: 'Submit Analysis' })).toBeDisabled())
-  expect(screen.getByRole('switch', { name: 'Use server credentials' })).toBeDisabled()
-  await waitFor(() => expect(get.mock.calls.filter(([path]) => path === '/api/ai-models?force_server_credentials=false').length).toBeGreaterThan(unforcedCalls))
+  await waitFor(() => expect(get.mock.calls.filter(([path]) => path === '/api/ai-models').length).toBeGreaterThan(catalogCalls))
   await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
   expect(await screen.findByRole('option', { name: /Claude · Server$/ })).toHaveAttribute('data-disabled')
   expect(post).not.toHaveBeenCalled()
@@ -79,7 +79,7 @@ it('updates a mounted new-analysis picker and submit after grant and revoke with
 it('ignores an older granted /me after a newer revocation on mounted analysis forms', async () => {
   setup()
   granted = true
-  const result = { request_params: { ai_provider: 'claude', ai_model: 'sonnet', force_server_credentials: true } } as unknown as AnalysisResult
+  const result = { request_params: { ai_provider: 'claude', ai_model: 'sonnet' } } as unknown as AnalysisResult
   const { container, rerender } = render(page(result, false))
   const newForm = container.querySelector('section')!
   const user = userEvent.setup()
@@ -118,7 +118,7 @@ it('ignores an older granted /me after a newer revocation on mounted analysis fo
 it('keeps both active analysis forms enabled on focus network failure, then revokes on 401 and recovers', async () => {
   setup()
   granted = true
-  const result = { request_params: { ai_provider: 'claude', ai_model: 'sonnet', force_server_credentials: true } } as unknown as AnalysisResult
+  const result = { request_params: { ai_provider: 'claude', ai_model: 'sonnet' } } as unknown as AnalysisResult
   const { container, rerender } = render(page(result, false))
   const newForm = within(container.querySelector('section')!)
   const user = userEvent.setup()
@@ -162,7 +162,7 @@ it('keeps both active analysis forms enabled on focus network failure, then revo
 it('updates mounted re-analysis primary and peer eligibility on visibility grant changes', async () => {
   setup()
   granted = true
-  const result = { request_params: { ai_provider: 'claude', ai_model: 'sonnet', force_server_credentials: true, peer_ai_configs: [{ ai_provider: 'claude', ai_model: 'sonnet' }] } } as unknown as AnalysisResult
+  const result = { request_params: { ai_provider: 'claude', ai_model: 'sonnet', peer_ai_configs: [{ ai_provider: 'claude', ai_model: 'sonnet' }] } } as unknown as AnalysisResult
   render(<AuthProvider><MemoryRouter><ReAnalyzeDialog open onOpenChange={() => {}} result={result} jobId="job" /></MemoryRouter></AuthProvider>)
   await waitFor(() => expect(screen.getByRole('button', { name: 'Re-Analyze' })).toBeEnabled())
   granted = false
@@ -170,7 +170,6 @@ it('updates mounted re-analysis primary and peer eligibility on visibility grant
   await waitFor(() => expect(screen.getByRole('button', { name: 'Re-Analyze' })).toBeDisabled())
   await userEvent.setup().click(screen.getByRole('combobox', { name: 'Peer 1 model' }))
   expect(screen.getByRole('option', { name: /sonnet.*Server/i })).toHaveAttribute('aria-disabled', 'true')
-  expect(screen.getByRole('switch', { name: 'Use server credentials' })).toBeDisabled()
   granted = true
   act(() => window.dispatchEvent(new Event('focus')))
   await waitFor(() => expect(screen.getByRole('button', { name: 'Re-Analyze' })).toBeEnabled())

@@ -138,7 +138,6 @@ This clones the tests repository plus both extra repositories into the analysis 
        { "ai_provider": "gemini", "ai_model": "gemini-2.5-pro" }
      ],
      "peer_analysis_max_rounds": 2,
-     "force_server_credentials": true,
      "additional_repos": [
        { "name": "api", "url": "https://github.com/org/api", "ref": "main" }
      ]
@@ -153,8 +152,9 @@ This clones the tests repository plus both extra repositories into the analysis 
    | `max_concurrent_ai_calls` | integer > 0 | Parallel AI calls |
    | `peer_ai_configs` | array of `{ai_provider, ai_model}` | Peer reviewers |
    | `peer_analysis_max_rounds` | integer 1–10 | Debate round limit |
-   | `force_server_credentials` | boolean | Use server keys instead of personal keys |
    | `additional_repos` | array of `{name, url, ref}` | Repositories to clone alongside the tests repo |
+
+   **Which AI credentials are used is decided by permission, not by a repository option.** A user holding `can_use_server_providers` may run an analysis or chat with the server's credentials or with their own key; a user without it must use their own. Admins always count as permitted. There is no setting that forces server credentials over a user's own key.
 
    Resolution order for every one of these keys is **request → `.rootcoz/settings.json` → server settings**. Because the file is read from a repository you do not control, loading it is deliberately strict:
 
