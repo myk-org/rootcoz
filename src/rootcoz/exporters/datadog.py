@@ -42,6 +42,7 @@ from __future__ import annotations
 import hashlib
 import re
 import time
+import uuid
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
@@ -83,12 +84,6 @@ DATADOG_SITES: tuple[str, ...] = (
 _SITE_HOSTNAME_RE = re.compile(
     r"^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)+$"
 )
-
-#: Datadog's v2 intake rejects events whose ``timestamp`` is older than its
-#: ~18-hour window, so a manual push after a day of human review would drop
-#: every event.  17 hours keeps a safety margin below that window: older
-#: stored timestamps fall back to push time.
-_MAX_EVENT_AGE_SECONDS = 17 * 3600
 
 #: ISO 8601 rendering the v2 intake expects (UTC, second precision).
 _TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
@@ -552,7 +547,14 @@ class DatadogExporter(Exporter):
         return f"https://{_EVENT_INTAKE_HOST.format(site=self._site)}{_EVENTS_PATH}"
 
     def _build_tags(
-        self, context: ExportContext, test_name: str, classification: str | None
+        self,
+        context: ExportContext,
+        test_name: str,
+        classification: str | None,
+        *,
+        failure_id: str = "",
+        push_id: str = "",
+        analysis_timestamp: int | None = None,
     ) -> list[str]:
         """Build the tag list for one event.
 
@@ -565,6 +567,12 @@ class DatadogExporter(Exporter):
         ``test_name`` is still the key for the per-test lookups below. The
         failure-pattern tag uses it to read the same
         ``history_classifications`` entry the message body prints.
+
+        ``failure_id`` is the stored failure's own id, so it repeats on every
+        re-push of the same analysis and a dashboard can count unique failures.
+        ``push_id`` is unique per push run, so repeated events can be filtered
+        to one push. ``analysis_timestamp`` keeps the analysis time searchable
+        now that the event's own timestamp is the push time.
         """
         tags: list[str] = []
         if self._service:
@@ -577,6 +585,12 @@ class DatadogExporter(Exporter):
             f"build_number:{sanitize_tag_value(context.build_number)}",
             f"rootcoz.analysis_id:{sanitize_tag_value(context.job_id)}",
         ]
+        if failure_id:
+            tags.append(f"rootcoz.failure_id:{sanitize_tag_value(failure_id)}")
+        if push_id:
+            tags.append(f"rootcoz.push_id:{sanitize_tag_value(push_id)}")
+        if analysis_timestamp:
+            tags.append(f"rootcoz.analysis_timestamp:{int(analysis_timestamp)}")
         if classification:
             tags.append(f"tfa.classification:{sanitize_tag_value(classification)}")
         # The previous classification for this test is what the message calls
@@ -601,13 +615,19 @@ class DatadogExporter(Exporter):
         return tags
 
     def _build_event(
-        self, context: ExportContext, failure: dict[str, Any]
+        self,
+        context: ExportContext,
+        failure: dict[str, Any],
+        *,
+        push_id: str = "",
     ) -> dict[str, Any]:
         """Build the Datadog event payload for one failed test.
 
         Args:
             context: Export context with job metadata.
             failure: Stored failure dict (``test_name`` + ``analysis``).
+            push_id: Identifier of this push run, shared by every event it
+                emits so a re-push can be told apart from the original.
 
         Returns:
             Datadog v2 event intake payload.
@@ -690,9 +710,12 @@ class DatadogExporter(Exporter):
         message = f"{_MARKDOWN_OPEN}{_truncate(message, body_limit)}{_MARKDOWN_CLOSE}"
 
         now = int(time.time())
-        timestamp = context.analysis_timestamp or now
-        if now - timestamp > _MAX_EVENT_AGE_SECONDS:
-            timestamp = now
+        # The event carries the push time, not the analysis time: Datadog cannot
+        # update or delete an event, so a re-push creates a second event, and an
+        # analysis-time timestamp puts it outside the recent-events window where
+        # the reviewer looks for it. The analysis time still travels as a tag so
+        # the original analysis stays identifiable.
+        timestamp = now
 
         # Free-form custom attributes. ``rootcoz.scope`` is always present;
         # ``test.name`` only for a real test, so a console-only analysis never
@@ -702,6 +725,13 @@ class DatadogExporter(Exporter):
         custom: dict[str, Any] = {
             "rootcoz": {"scope": _SCOPE_CONSOLE if console_only else _SCOPE_TEST}
         }
+        failure_id = str(failure.get("id", "") or "")
+        if failure_id:
+            # Stable across re-pushes of the same analysis: the dashboard can
+            # count unique failures and ignore the duplicates a re-push makes.
+            custom["rootcoz"]["failure_id"] = failure_id
+        if push_id:
+            custom["rootcoz"]["push_id"] = push_id
         if not console_only:
             custom["test"] = {"name": test_name}
 
@@ -717,7 +747,12 @@ class DatadogExporter(Exporter):
                     ),
                     "aggregation_key": _aggregation_key(context.job_id, test_name),
                     "tags": self._build_tags(
-                        context, test_name, classification or None
+                        context,
+                        test_name,
+                        classification or None,
+                        failure_id=failure_id,
+                        push_id=push_id,
+                        analysis_timestamp=context.analysis_timestamp,
                     ),
                     "attributes": {
                         "status": _ALERT_STATUS_ERROR,
@@ -752,8 +787,12 @@ class DatadogExporter(Exporter):
         consecutive_failures = 0
         abort_message: str | None = None
         headers = _auth_headers(self._api_key, self._app_key)
+        # One id for this run: Datadog events are immutable, so a re-push can
+        # only be told apart from the original by a per-run identifier.
+        push_id = str(uuid.uuid4())
         logger.info(
-            "Datadog push: emitting up to %d event(s) for job=%s to site=%s",
+            "Datadog push %s: emitting up to %d event(s) for job=%s to site=%s",
+            push_id,
             len(failures),
             context.job_id,
             self._site,
@@ -769,7 +808,7 @@ class DatadogExporter(Exporter):
                         break
                     continue
                 test_name = failure.get("test_name", "") or "(unnamed test)"
-                event = self._build_event(context, failure)
+                event = self._build_event(context, failure, push_id=push_id)
                 try:
                     response = await client.post(
                         self._events_url, json=event, headers=headers

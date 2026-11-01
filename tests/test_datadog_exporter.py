@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import hashlib
 from datetime import UTC, datetime
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Self
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -246,7 +246,7 @@ class TestV2Envelope:
             event = _exporter()._build_event(
                 _context(analysis_timestamp=1_999_000), _failure()
             )
-        assert _attributes(event)["timestamp"] == _iso(1_999_000)
+        assert _attributes(event)["timestamp"] == _iso(2_000_000)
 
 
 class TestBuildEvent:
@@ -269,6 +269,7 @@ class TestBuildEvent:
             "job_name:e2e-suite",
             "build_number:42",
             "rootcoz.analysis_id:job-123",
+            "rootcoz.analysis_timestamp:1735689600",
             "tfa.classification:PRODUCT_BUG",
             "pushed_by:alice",
         ]
@@ -1345,32 +1346,121 @@ class TestSettings:
         assert payload["datadog_site"] == "datadoghq.eu"
 
 
-class TestTimestampClamp:
-    """Datadog rejects v2 events older than its ~18h intake window."""
+class TestEventTimestampIsPushTime:
+    """The event carries the push time; the analysis time travels as a tag.
 
-    def test_fresh_analysis_timestamp_preserved(self):
+    Datadog cannot update or delete an event, so a re-push always creates a new
+    one. Stamping it with the original analysis time hid that new event outside
+    the recent view a reviewer actually looks at, so the analysis time became
+    searchable metadata instead of the event's own clock.
+    """
+
+    def test_timestamp_is_push_time_not_analysis_time(self):
+        analysis = 1_000_000 - 5 * 3600
         with patch("rootcoz.exporters.datadog.time.time", return_value=1_000_000.0):
             event = _exporter()._build_event(
-                _context(analysis_timestamp=1_000_000 - 60), _failure()
-            )
-        assert _attributes(event)["timestamp"] == _iso(1_000_000 - 60)
-
-    def test_stale_timestamp_clamped_to_push_time(self):
-        """A manual push a day later must not emit a rejected timestamp."""
-        stale = 1_000_000 - 18 * 3600
-        with patch("rootcoz.exporters.datadog.time.time", return_value=1_000_000.0):
-            event = _exporter()._build_event(
-                _context(analysis_timestamp=stale), _failure()
+                _context(analysis_timestamp=analysis), _failure()
             )
         assert _attributes(event)["timestamp"] == _iso(1_000_000)
 
-    def test_boundary_exactly_17h_still_used(self):
-        boundary = 1_000_000 - 17 * 3600
+    def test_old_analysis_still_identifiable(self):
+        """A day-old analysis must not lose its own time when it is pushed."""
+        analysis = 1_000_000 - 30 * 3600
         with patch("rootcoz.exporters.datadog.time.time", return_value=1_000_000.0):
             event = _exporter()._build_event(
-                _context(analysis_timestamp=boundary), _failure()
+                _context(analysis_timestamp=analysis), _failure()
             )
-        assert _attributes(event)["timestamp"] == _iso(boundary)
+        assert f"rootcoz.analysis_timestamp:{analysis}" in _attributes(event)["tags"]
+
+    def test_no_analysis_timestamp_sends_no_tag(self):
+        event = _exporter()._build_event(_context(analysis_timestamp=None), _failure())
+        assert not [
+            tag
+            for tag in _attributes(event)["tags"]
+            if tag.startswith("rootcoz.analysis_timestamp:")
+        ]
+
+
+class TestFailureAndPushIdentity:
+    """A re-push duplicates events (Datadog cannot update), so identity must
+    let a dashboard count unique failures and filter one push run."""
+
+    def test_failure_id_tag_is_the_stored_failure_id(self):
+        event = _exporter()._build_event(
+            _context(), _failure() | {"id": "d6499ad2-4bff-4761-86d8-cdf3a72ac43f"}
+        )
+        tags = _attributes(event)["tags"]
+        assert "rootcoz.failure_id:d6499ad2-4bff-4761-86d8-cdf3a72ac43f" in tags
+
+    def test_failure_id_repeats_across_pushes(self):
+        """Same failure, two pushes: the id must not change."""
+        failure = _failure() | {"id": "stable-id-1"}
+        first = _exporter()._build_event(_context(), failure, push_id="push-a")
+        second = _exporter()._build_event(_context(), failure, push_id="push-b")
+        for event in (first, second):
+            assert "rootcoz.failure_id:stable-id-1" in _attributes(event)["tags"]
+
+    def test_push_id_differs_between_pushes(self):
+        failure = _failure() | {"id": "stable-id-1"}
+        first = _exporter()._build_event(_context(), failure, push_id="push-a")
+        second = _exporter()._build_event(_context(), failure, push_id="push-b")
+        assert "rootcoz.push_id:push-a" in _attributes(first)["tags"]
+        assert "rootcoz.push_id:push-b" in _attributes(second)["tags"]
+
+    @pytest.mark.asyncio
+    async def test_one_push_run_shares_one_push_id(self):
+        """Every event of a run carries the same id, and a second run differs."""
+        exporter = _exporter()
+        seen: list[dict[str, object]] = []
+
+        class _Response:
+            status_code = 202
+
+            def raise_for_status(self) -> None:
+                return None
+
+        class _Client:
+            def __init__(self, *args: object, **kwargs: object) -> None:
+                pass
+
+            async def __aenter__(self) -> Self:
+                return self
+
+            async def __aexit__(self, *args: object) -> bool:
+                return False
+
+            async def post(self, url: str, json: dict, headers: dict) -> _Response:
+                seen.append(json)
+                return _Response()
+
+        context = _context(
+            failures=[_failure() | {"id": "f1"}, _failure("t2") | {"id": "f2"}]
+        )
+        with patch("rootcoz.exporters.datadog.httpx.AsyncClient", _Client):
+            await exporter.push(context)
+            first_run = list(seen)
+            seen.clear()
+            await exporter.push(context)
+            second_run = list(seen)
+
+        def push_ids(events: list[dict]) -> set[str]:
+            ids = set()
+            for event in events:
+                for tag in event["data"]["attributes"]["tags"]:
+                    if tag.startswith("rootcoz.push_id:"):
+                        ids.add(tag)
+            return ids
+
+        assert len(push_ids(first_run)) == 1, push_ids(first_run)
+        assert len(push_ids(second_run)) == 1, push_ids(second_run)
+        assert push_ids(first_run) != push_ids(second_run)
+
+    def test_no_ids_no_tags(self):
+        """A failure stored without an id must not emit an empty tag."""
+        event = _exporter()._build_event(_context(), _failure())
+        tags = _attributes(event)["tags"]
+        assert not [tag for tag in tags if tag.startswith("rootcoz.failure_id:")]
+        assert not [tag for tag in tags if tag.startswith("rootcoz.push_id:")]
 
 
 class TestAggregationKeyClamp:
