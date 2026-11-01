@@ -5,7 +5,7 @@ import { api, ApiError } from '@/lib/api'
 import { GreenwaveButton } from '../GreenwaveButton'
 import { useReportDispatch } from '@/pages/report/reportState'
 import { ReportProvider } from '../ReportContext'
-import type { ExporterInfo } from '@/types'
+import type { ExporterInfo, FailureAnalysis } from '@/types'
 
 /* ------------------------------------------------------------------ */
 /*  Mocks / helpers                                                    */
@@ -18,9 +18,28 @@ const EXPORTERS: ExporterInfo[] = [
   { name: 'greenwave', display_name: 'Greenwave', enabled: true },
 ]
 
-function Injector({ exporters, greenwaveWaivers }: {
+function makeFailure(classification: string, testName: string): FailureAnalysis {
+  return {
+    id: `f-${testName}`,
+    test_name: testName,
+    error: 'err',
+    analysis: {
+      classification,
+      pattern: '',
+      affected_tests: [testName],
+      details: '',
+      artifacts_evidence: '',
+    },
+    error_signature: `sig-${testName}`,
+  } as FailureAnalysis
+}
+
+const FAILURES = [makeFailure('PRODUCT BUG', 'test-a'), makeFailure('CODE ISSUE', 'test-b')]
+
+function Injector({ exporters, greenwaveWaivers, failures }: {
   exporters: ExporterInfo[]
   greenwaveWaivers: boolean
+  failures?: FailureAnalysis[]
 }) {
   const dispatch = useReportDispatch()
   useEffect(() => {
@@ -28,7 +47,7 @@ function Injector({ exporters, greenwaveWaivers }: {
     dispatch({ type: 'SET_GREENWAVE_WAIVERS_ENABLED', payload: greenwaveWaivers })
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
   return (
-    <GreenwaveButton jobId="job-1" hasFailures />
+    <GreenwaveButton jobId="job-1" jobName="my-job" buildNumber={42} failures={failures ?? FAILURES} />
   )
 }
 
@@ -44,10 +63,20 @@ function renderButton(opts: { exporters?: ExporterInfo[]; greenwaveWaivers?: boo
 }
 
 async function openConfirmDialog() {
-  fireEvent.click(screen.getByRole('button', { name: /push to greenwave/i }))
+  fireEvent.click(screen.getByRole('button', { name: 'Push to Greenwave' }))
   await waitFor(() => {
-    expect(screen.getByRole('button', { name: 'Push' })).toBeDefined()
+    expect(screen.getByLabelText(/waiver comment/i)).toBeDefined()
   })
+}
+
+/** Two buttons carry the label while the dialog is open (the page-level ghost
+ *  button behind the overlay and the form's submit) — the form's is last. */
+function formPushButton(): HTMLButtonElement {
+  return screen.getAllByRole('button', { name: 'Push to Greenwave' }).at(-1) as HTMLButtonElement
+}
+
+function approve() {
+  fireEvent.click(screen.getByRole('checkbox'))
 }
 
 beforeEach(() => {
@@ -75,13 +104,22 @@ describe('GreenwaveButton', () => {
     expect(screen.getByRole('button', { name: /push to greenwave/i })).toBeDefined()
   })
 
-  it('blocks submit and shows an inline error when waivers are on and the identifier is blank', async () => {
+  it('is disabled with a hint when there are no failures to push', () => {
+    render(
+      <ReportProvider>
+        <Injector exporters={EXPORTERS} greenwaveWaivers={false} failures={[]} />
+      </ReportProvider>,
+    )
+    expect(screen.getByRole('button', { name: 'Push to Greenwave' })).toHaveProperty('disabled', true)
+  })
+
+  it('blocks submit and shows an inline reason when waivers are on and the identifier is blank', async () => {
     renderButton({ greenwaveWaivers: true })
     await openConfirmDialog()
+    approve()
 
-    fireEvent.click(screen.getByRole('button', { name: 'Push' }))
-
-    expect(await screen.findByRole('alert')).toHaveTextContent('Subject identifier is required')
+    expect(formPushButton()).toHaveProperty('disabled', true)
+    expect(screen.getByText('Subject identifier is required when waivers are enabled.')).toBeDefined()
     expect(postSpy).not.toHaveBeenCalled()
   })
 
@@ -91,7 +129,8 @@ describe('GreenwaveButton', () => {
 
     fireEvent.change(screen.getByLabelText(/subject identifier/i), { target: { value: 'my-package-1.0' } })
     fireEvent.change(screen.getByLabelText(/waiver comment/i), { target: { value: 'known flake' } })
-    fireEvent.click(screen.getByRole('button', { name: 'Push' }))
+    approve()
+    fireEvent.click(formPushButton())
 
     await waitFor(() => {
       expect(postSpy).toHaveBeenCalledWith(
@@ -103,19 +142,22 @@ describe('GreenwaveButton', () => {
   it('does not require the identifier in results-only mode', async () => {
     renderButton({ greenwaveWaivers: false })
     await openConfirmDialog()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Push' }))
+    approve()
+    fireEvent.click(formPushButton())
 
     await waitFor(() => {
-      expect(postSpy).toHaveBeenCalledWith('/results/job-1/push/greenwave')
+      // Results-only mode sends no subject_identifier; the seeded comment is sent
+      expect(postSpy).toHaveBeenCalledWith(
+        expect.stringContaining('/results/job-1/push/greenwave?waiver_comment=rootcoz%3A'),
+      )
     })
   })
 
   it('renders success counts on a successful push', async () => {
     renderButton()
     await openConfirmDialog()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Push' }))
+    approve()
+    fireEvent.click(formPushButton())
 
     await waitFor(() => {
       expect(screen.getByText(/Pushed 2 results to Greenwave/)).toBeDefined()
@@ -130,8 +172,8 @@ describe('GreenwaveButton', () => {
     postSpy.mockResolvedValue({ success: false, message: 'no matching outcome', pushed: 0, errors: [] } as never)
     renderButton()
     await openConfirmDialog()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Push' }))
+    approve()
+    fireEvent.click(formPushButton())
 
     await waitFor(() => {
       expect(screen.getByText(/No results could be pushed — no failure matched GREENWAVE_OUTCOME_MAP/)).toBeDefined()
@@ -145,8 +187,8 @@ describe('GreenwaveButton', () => {
     )
     renderButton({ greenwaveWaivers: false })
     await openConfirmDialog()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Push' }))
+    approve()
+    fireEvent.click(formPushButton())
 
     await waitFor(() => {
       expect(screen.getByText(/Failed to push to Greenwave/)).toBeDefined()
@@ -160,8 +202,8 @@ describe('GreenwaveButton', () => {
     } as never)
     renderButton()
     await openConfirmDialog()
-
-    fireEvent.click(screen.getByRole('button', { name: 'Push' }))
+    approve()
+    fireEvent.click(formPushButton())
 
     await waitFor(() => {
       expect(screen.getByText(/Some results could not be pushed/)).toBeDefined()

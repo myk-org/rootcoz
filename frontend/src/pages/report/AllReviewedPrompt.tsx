@@ -1,11 +1,20 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { api } from '@/lib/api'
 import { collectAllTestKeys, unreviewedKeyCount } from '@/lib/failureKeys'
 import { collectPushScopes, pushScopeQuery } from '@/lib/pushScopes'
-import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog'
+import { Button } from '@/components/ui/button'
 import { useAuth } from '@/lib/auth'
-import { useReportState } from '@/pages/report/reportState'
+import { exporterEnabled, useReportState } from '@/pages/report/reportState'
 import { pushRejectionDetail } from '@/lib/pushGate'
+import { GreenwavePushForm } from './GreenwavePushForm'
 
 interface AllReviewedPromptProps {
   jobId: string
@@ -38,11 +47,17 @@ function pushFailureDetail(res: unknown): string | null {
 }
 
 export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
-  const { result, reviews, reportportalAvailable, datadogAvailable } = useReportState()
+  const { result, reviews, reportportalAvailable, datadogAvailable, exporters } =
+    useReportState()
   const { isOperator } = useAuth()
   const [dialogOpen, setDialogOpen] = useState(false)
   const [pushing, setPushing] = useState(false)
   const [pushError, setPushError] = useState<string | null>(null)
+  // Report Portal / Datadog decision, so collapsing their block never
+  // dismisses the Greenwave offer sitting in the same prompt.
+  const [eventPushStatus, setEventPushStatus] = useState<
+    'pushed' | 'failed' | 'skipped' | null
+  >(null)
   // Push combinations (`exporter + scope query`) that already succeeded in
   // the current dialog session — a retry must only re-push the failed ones,
   // because Datadog events are created per POST.
@@ -51,6 +66,13 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
   // late completion from an old job must not write state (same guard the
   // page uses for test-result generations).
   const pushRunRef = useRef(0)
+
+  const greenwaveEnabled = exporterEnabled(exporters, 'greenwave')
+  // The Greenwave section pushes the root result only, so it is not offered
+  // for a pipeline whose failures all live in child jobs.
+  const hasRootFailures = (result?.failures ?? []).length > 0
+  const greenwaveOffered = greenwaveEnabled && hasRootFailures
+  const eventExportersOffered = reportportalAvailable || datadogAvailable
 
   const allKeys = useMemo(
     () =>
@@ -81,6 +103,8 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
   rpRef.current = reportportalAvailable
   const datadogRef = useRef(datadogAvailable)
   datadogRef.current = datadogAvailable
+  const greenwaveRef = useRef(greenwaveEnabled)
+  greenwaveRef.current = greenwaveEnabled
   const isOperatorRef = useRef(isOperator)
   isOperatorRef.current = isOperator
 
@@ -93,7 +117,12 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
         const currentReviews = reviewsRef.current
         const currentKeys = allKeysRef.current
         if (!isOperatorRef.current) return
-        if ((!rpRef.current && !datadogRef.current) || currentKeys.length === 0) return
+        if (
+          (!rpRef.current && !datadogRef.current && !greenwaveRef.current) ||
+          currentKeys.length === 0
+        ) {
+          return
+        }
         const allNowReviewed = unreviewedKeyCount(currentKeys, currentReviews) === 0
         if (allNowReviewed) {
           // Fresh dialog session — previous push outcomes no longer apply
@@ -111,29 +140,35 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
     setDialogOpen(false)
     setPushing(false)
     setPushError(null)
+    setEventPushStatus(null)
     succeededRef.current = new Set()
     pushRunRef.current++
   }, [jobId])
 
-  const handleOpenChange = (open: boolean) => {
+  const handleOpenChange = useCallback((open: boolean) => {
     setDialogOpen(open)
     // A closed dialog must not resurrect a stale error on reopen
-    if (!open) setPushError(null)
-  }
+    if (!open) {
+      setPushError(null)
+      setEventPushStatus(null)
+    }
+  }, [])
 
+  /**
+   * Push to Report Portal and/or Datadog: one push per scope (parent + each
+   * child job with failures) per available exporter. Child scopes carry
+   * child_job_name + child_build_number query params, same as the push
+   * buttons. Combos that already succeeded on an earlier attempt of this
+   * dialog session are skipped so a retry never duplicates events.
+   */
   const handleConfirm = async () => {
     const runId = ++pushRunRef.current
     setPushing(true)
     setPushError(null)
     try {
-      // One push per scope (parent + each child job with failures) per
-      // available exporter — child scopes carry child_job_name +
-      // child_build_number query params, same as the push buttons.
-      // Combos that already succeeded on an earlier attempt of this
-      // dialog session are skipped so a retry never duplicates events.
-      const exporters: Array<'reportportal' | 'datadog'> = []
-      if (rpRef.current) exporters.push('reportportal')
-      if (datadogRef.current) exporters.push('datadog')
+      const targets: Array<'reportportal' | 'datadog'> = []
+      if (rpRef.current) targets.push('reportportal')
+      if (datadogRef.current) targets.push('datadog')
 
       const pushes: Array<{ key: string; label: string; promise: Promise<unknown> }> = []
       for (const scope of scopes) {
@@ -141,7 +176,7 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
         const label = scope.childJobName
           ? `${scope.childJobName} #${scope.childBuildNumber}`
           : 'parent job'
-        for (const exporter of exporters) {
+        for (const exporter of targets) {
           const key = `${exporter}${qs}`
           if (succeededRef.current.has(key)) continue
           const path =
@@ -167,16 +202,26 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
       if (failures.length > 0) {
         // Keep the dialog open so the user sees what failed
         setPushError(failures.join('; '))
+        setEventPushStatus('failed')
       } else {
-        setDialogOpen(false)
+        setEventPushStatus('pushed')
+        // Only close when there is no Greenwave offer left to answer; the
+        // prompt exists to offer both, so one decision must not discard it.
+        if (!greenwaveOffered) setDialogOpen(false)
       }
     } finally {
       if (runId === pushRunRef.current) setPushing(false)
     }
   }
 
+  const handleSkip = () => {
+    setPushError(null)
+    setEventPushStatus('skipped')
+    if (!greenwaveOffered) setDialogOpen(false)
+  }
+
   // Push endpoints are operator-only — never prompt other roles
-  if (!isOperator || (!reportportalAvailable && !datadogAvailable)) return null
+  if (!isOperator || (!eventExportersOffered && !greenwaveEnabled)) return null
 
   const pushTargets =
     reportportalAvailable && datadogAvailable
@@ -186,16 +231,88 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
         : 'Datadog'
 
   return (
-    <ConfirmDialog
-      open={dialogOpen}
-      onOpenChange={handleOpenChange}
-      title="All failures reviewed"
-      description={`All failures reviewed. Update ${pushTargets}?`}
-      confirmLabel="Yes"
-      cancelLabel="No"
-      onConfirm={handleConfirm}
-      loading={pushing}
-      error={pushError}
-    />
+    <Dialog open={dialogOpen} onOpenChange={handleOpenChange}>
+      <DialogContent className="sm:max-w-[560px] bg-surface-card border-border-default">
+        <DialogHeader>
+          <DialogTitle>All failures reviewed</DialogTitle>
+          <DialogDescription>
+            Every failure in this result has been reviewed.
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-6">
+          {eventExportersOffered && (
+            <div className="space-y-3">
+              <p className="text-sm text-text-primary">
+                All failures reviewed. Update {pushTargets}?
+              </p>
+              {eventPushStatus === null ? (
+                <div className="flex gap-2">
+                  <Button onClick={handleConfirm} disabled={pushing}>
+                    {pushing ? 'Loading...' : 'Yes'}
+                  </Button>
+                  <Button variant="outline" onClick={handleSkip} disabled={pushing}>
+                    No
+                  </Button>
+                </div>
+              ) : (
+                <p className="text-xs text-text-tertiary" role="status">
+                  {eventPushStatus === 'pushed' && `${pushTargets} updated.`}
+                  {eventPushStatus === 'failed' && `${pushTargets} push failed.`}
+                  {eventPushStatus === 'skipped' && `${pushTargets} update skipped.`}
+                </p>
+              )}
+              {pushError && (
+                <p className="text-xs text-signal-red" role="alert">
+                  {pushError}
+                </p>
+              )}
+            </div>
+          )}
+
+          {greenwaveEnabled && result && (
+            <div className="space-y-3">
+              <p className="text-sm text-text-primary">
+                Push the reviewed failures to Greenwave
+              </p>
+              {greenwaveOffered ? (
+                <>
+                  <p className="text-xs text-text-tertiary">
+                    Review and approve the text below before pushing — it states exactly
+                    which systems receive the write.
+                  </p>
+                  {(result.child_job_analyses ?? []).length > 0 && (
+                    <p className="text-xs text-text-tertiary">
+                      This pushes the root result only. Failures of child jobs are pushed
+                      from each child's own row, with their own text.
+                    </p>
+                  )}
+                  <GreenwavePushForm
+                    jobId={jobId}
+                    jobName={result.job_name}
+                    buildNumber={result.build_number}
+                    failures={result.failures ?? []}
+                    onPushed={() => setDialogOpen(false)}
+                  />
+                </>
+              ) : (
+                <p className="text-xs text-text-tertiary">
+                  The root result has no failures of its own. Failures of child jobs are
+                  pushed from each child's own row, with their own text.
+                </p>
+              )}
+            </div>
+          )}
+        </div>
+
+        {(greenwaveEnabled || eventExportersOffered) && (
+          <DialogFooter>
+            <Button variant="outline" onClick={() => handleOpenChange(false)}>
+              Close
+            </Button>
+          </DialogFooter>
+        )}
+      </DialogContent>
+    </Dialog>
   )
 }

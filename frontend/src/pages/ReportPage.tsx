@@ -511,7 +511,12 @@ function ReportContent() {
               <DatadogButton jobId={result.job_id} jobName={result.job_name ?? result.job_id} buildNumber={resolveBuildDisplayId(result) ?? result.build_number} hasFailures={(result.failures ?? []).length > 0} />
             )}
             {isOperator && exporterEnabled(state.exporters, 'greenwave') && (result.child_job_analyses ?? []).length === 0 && (
-              <GreenwaveButton jobId={result.job_id} hasFailures={(result.failures ?? []).length > 0} />
+              <GreenwaveButton
+                jobId={result.job_id}
+                jobName={result.job_name ?? result.job_id}
+                buildNumber={result.build_number}
+                failures={result.failures ?? []}
+              />
             )}
             {!isViewer && (
               <Button variant="ghost" size="sm" className="gap-1.5 text-xs" asChild>

@@ -132,9 +132,11 @@ export function ChildJobSection({ child, jobId, depth = 0, activeHash, parentHas
         {isOperator && exporterEnabled(state.exporters, 'greenwave') && (
           <GreenwaveButton
             jobId={jobId}
+            jobName={child.job_name}
+            buildNumber={child.build_number}
             childJobName={child.job_name}
             childBuildNumber={child.build_number}
-            hasFailures={failures.length > 0}
+            failures={failures}
           />
         )}
         {childBuildUrl && (
