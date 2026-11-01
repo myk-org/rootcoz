@@ -13,7 +13,7 @@ import stat
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from typing import Any
@@ -277,29 +277,66 @@ def _file_digest(source: Path, info: os.stat_result, deadline: float | None) -> 
     return value
 
 
-def _sources(repo: Path, deadline: float | None = None) -> dict[str, str]:
-    """Git-visible files only; hash actual content, including ignored-file changes in the listing."""
-    listing = _bounded(
+def _iter_listed_paths(repo: Path, deadline: float | None) -> Iterator[Path]:
+    """Yield git-visible paths as they stream, never holding the whole listing.
+
+    ``git ls-files`` for a large clone is hundreds of kilobytes of NUL-separated
+    paths; buffering it whole was the last unbounded allocation in the scan. The
+    stream is split as it arrives, so only the current path is resident.
+    """
+    timeout = min(MAX_SECONDS, _remaining(deadline)) if deadline else MAX_SECONDS
+    process = subprocess.Popen(
         ["git", "ls-files", "-co", "--exclude-standard", "-z"],
         cwd=repo,
-        # A listing is not a query reply: 27k paths exceed MAX_OUTPUT, and
-        # capping it made every large repository fail as "limit".
-        max_output=None,
-        timeout=min(MAX_SECONDS, _remaining(deadline)) if deadline else MAX_SECONDS,
+        env={**os.environ, "DO_NOT_TRACK": "1"},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
+    deadline_at = time.monotonic() + timeout
+    pending = b""
+    try:
+        assert process.stdout is not None
+        while True:
+            if time.monotonic() >= deadline_at or (
+                deadline is not None and time.monotonic() >= deadline
+            ):
+                raise TimeoutError("source scan timed out")
+            chunk = os.read(process.stdout.fileno(), 65536)
+            if not chunk:
+                break
+            pending += chunk
+            *complete, pending = pending.split(b"\0")
+            for raw in complete:
+                if not raw:
+                    continue
+                try:
+                    yield _relative(os.fsdecode(raw))
+                except ValueError:
+                    continue
+        if pending:
+            try:
+                yield _relative(os.fsdecode(pending))
+            except ValueError:
+                pass
+        if process.wait() != 0:
+            raise subprocess.CalledProcessError(process.returncode, "git ls-files")
+    finally:
+        if process.poll() is None:
+            process.kill()
+        if process.stdout is not None:
+            process.stdout.close()
+
+
+def _sources(repo: Path, deadline: float | None = None) -> dict[str, str]:
+    """Git-visible files only; hash actual content, including ignored-file changes in the listing."""
     result: dict[str, str] = {}
     started = time.monotonic()
-    for raw in listing.split(b"\0"):
+    for relative in _iter_listed_paths(repo, deadline):
         if time.monotonic() - started > MAX_SECONDS or (
-            deadline and time.monotonic() >= deadline
+            deadline is not None and time.monotonic() >= deadline
         ):
             raise TimeoutError("source scan timed out")
-        if not raw:
-            continue
-        try:
-            relative = _relative(os.fsdecode(raw))
-        except ValueError:
-            continue
         source = _safe_file(repo, relative)
         if source is None:
             continue
