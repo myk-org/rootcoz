@@ -44,7 +44,10 @@ _lock = threading.RLock()
 _server: ThreadingHTTPServer | None = None
 _thread: threading.Thread | None = None
 # workspace -> (token, {public repo name: resolved clone root}, job_id, write lease)
-_sessions: dict[Path, tuple[str, dict[str, Path], str | None, threading.Lock]] = {}
+_SessionKey = tuple[Path, str | None]
+_sessions: dict[
+    _SessionKey, tuple[str, dict[str, Path], str | None, threading.Lock]
+] = {}
 _leases: weakref.WeakValueDictionary[Path, threading.Lock] = (
     weakref.WeakValueDictionary()
 )
@@ -79,8 +82,8 @@ class _Handler(BaseHTTPRequestHandler):
         with _lock:
             session = next(
                 (
-                    (workspace, *entry, entry)
-                    for workspace, entry in _sessions.items()
+                    (key, *entry, entry)
+                    for key, entry in _sessions.items()
                     if hmac.compare_digest(bearer, f"Bearer {entry[0]}")
                 ),
                 None,
@@ -125,8 +128,8 @@ class _Handler(BaseHTTPRequestHandler):
             if (
                 root is None
                 or not root.is_dir()
-                or (session[0] / body["repo"]).is_symlink()
-                or (session[0] / body["repo"]).resolve() != root
+                or (session[0][0] / body["repo"]).is_symlink()
+                or (session[0][0] / body["repo"]).resolve() != root
             ):
                 raise ValueError
             # Never let a path parameter escape the registered clone. Graft also
@@ -152,7 +155,7 @@ class _Handler(BaseHTTPRequestHandler):
                 if field in params:
                     params[field] = int(params[field])
             result = graft.query_repo(
-                session[0],
+                session[0][0],
                 body["repo"],
                 name.removeprefix("graft_"),
                 params,
@@ -396,12 +399,13 @@ def register_workspace(
                     _server.server_close()
                     _server, _thread = None, None
                     return []
-            existing = _sessions.get(workspace)
-            if existing is not None and existing[1:3] == (roots, job_id):
+            key: _SessionKey = (workspace, job_id)
+            existing = _sessions.get(key)
+            if existing is not None and existing[1] == roots:
                 entry = existing
             else:
                 entry = (secrets.token_urlsafe(32), roots, job_id, lease)
-                _sessions[workspace] = entry
+                _sessions[key] = entry
             return build_graph_tools(
                 f"http://127.0.0.1:{_server.server_port}", entry[0], list(roots)
             )
@@ -418,7 +422,8 @@ def unregister_workspace(workspace: Path) -> None:
     if lease is None:
         return
     with lease, _lock:
-        _sessions.pop(workspace, None)
+        for key in [key for key in _sessions if key[0] == workspace]:
+            _sessions.pop(key, None)
         if not _sessions and _server is not None:
             server, thread = _server, _thread
             _server, _thread = None, None

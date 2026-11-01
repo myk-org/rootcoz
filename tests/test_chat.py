@@ -1306,7 +1306,9 @@ class TestChatCleanup:
         repo = workspace / "repo"
         repo.mkdir(parents=True)
         register_workspace(workspace, {"repo": repo}, job_id="job")
-        assert workspace.resolve() in _sessions
+        # The registry is keyed by (workspace, job) so concurrent sessions on
+        # one workspace keep their own credentials.
+        assert any(key[0] == workspace.resolve() for key in _sessions)
         graph = _root(workspace)
         graph.mkdir()
         (graph / "snapshot").write_text("source")

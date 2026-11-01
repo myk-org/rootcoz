@@ -187,13 +187,18 @@ def test_estimate_is_job_scoped_and_counts_each_successful_retrieval(
         for job, estimate in zip(("job-a", "job-b"), expected, strict=True):
             _await_estimate(job, estimate * (2 if job == "job-a" else 1))
         first_ws, first_url, first_bearer = workspaces[0]
+        # A second job registering the same workspace must not revoke the first:
+        # concurrent sessions on one workspace each keep their own token, which
+        # is what stopped the later registration from breaking the earlier
+        # session's graph access.
         register_workspace(first_ws, {"source": first_ws / "source"}, job_id="job-b")
+        assert post((first_ws, first_url, first_bearer), "different")["status"] == "ok"
+        unregister_workspace(first_ws)
         try:
-            post((first_ws, first_url, first_bearer), "different")
-            assert False, "old job token must be revoked"
+            post((first_ws, first_url, first_bearer), "after-unregister")
+            assert False, "unregister must revoke every token for the workspace"
         except HTTPError as error:
             assert error.code == 401
-        unregister_workspace(first_ws)
         assert post(workspaces[1], "ok")["status"] == "ok"
         _await_estimate("job-b", expected[1] * 2)
     finally:
@@ -397,19 +402,17 @@ def test_revoked_query_cannot_credit_old_job(tmp_path: Path, monkeypatch) -> Non
         with ThreadPoolExecutor(max_workers=2) as pool:
             pending = pool.submit(post, tools[0], "old")
             assert entered.wait(2)
-            replacement = register_workspace(ws, {"repo": repo}, job_id="new")
+            # Revocation is unregister, not "another job registered the same
+            # workspace": per-job keys exist so a second session cannot evict the
+            # first one's credentials. The in-flight query must still not credit
+            # a workspace whose registration is gone.
+            unregister_workspace(ws)
             release.set()
-            assert (
-                replacement[0]["http"]["headers"]["Authorization"]
-                != tools[0]["http"]["headers"]["Authorization"]
-            )
             assert pending.result(timeout=3)["status"] == "ok"
             assert (
                 asyncio.run(storage.get_result("old"))["graft_estimated_tokens_saved"]
                 == 0
             )
-            assert post(replacement[0], "new")["status"] == "ok"
-            _await_estimate("new", None)
     finally:
         release.set()
         unregister_workspace(ws)

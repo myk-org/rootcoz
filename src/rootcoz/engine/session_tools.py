@@ -36,7 +36,7 @@ class SessionTools:
 #: One in-flight indexing task per workspace. Analysis calls the AI once per
 #: failure group (and peer sessions do the same concurrently), so a second
 #: caller waits for the build instead of skipping it and seeing no graph.
-_GRAPH_INDEX_TASKS: dict[str, asyncio.Task[None]] = {}
+_GRAPH_INDEX_TASKS: dict[str, asyncio.Task[dict[str, object] | None]] = {}
 
 
 def graph_workspace_for(repos: dict[str, Path] | None) -> Path | None:
@@ -51,7 +51,9 @@ def graph_workspace_for(repos: dict[str, Path] | None) -> Path | None:
     return next(iter(repos.values())).parent
 
 
-async def index_workspace_graph(workspace: Path, job_id: str = "") -> None:
+async def index_workspace_graph(
+    workspace: Path, job_id: str = "", repos: dict[str, Path] | None = None
+) -> None:
     """Index a workspace's clones once, waiting for an in-flight build.
 
     Only missing or stale graphs are built, and any failure is a warning: the
@@ -64,23 +66,37 @@ async def index_workspace_graph(workspace: Path, job_id: str = "") -> None:
         # across messages, so new clones, cleaned graphs and expired budget
         # markers have to be picked up on the next message.
         task = asyncio.create_task(
-            _index_workspace_graph_once(Path(workspace), job_id=job_id)
+            _index_workspace_graph_once(Path(workspace), repos=repos)
         )
         _GRAPH_INDEX_TASKS[key] = task
-    await asyncio.shield(task)
+    # The outcome is logged here, per caller: a session that joined an existing
+    # task still needs its own attributable record, and the job id must be the
+    # caller's, not the one that happened to start the build.
+    outcomes = await asyncio.shield(task)
+    if outcomes:
+        from rootcoz.engine.graft import log_index_outcomes
+
+        log_index_outcomes(outcomes, job_id=job_id)
 
 
-async def _index_workspace_graph_once(workspace: Path, *, job_id: str = "") -> None:
+async def _index_workspace_graph_once(
+    workspace: Path, *, repos: dict[str, Path] | None = None
+) -> dict[str, object] | None:
     from rootcoz.engine.graft import (
         index_repositories,
-        log_index_outcomes,
         roots_needing_index,
     )
     from rootcoz.engine.graft_http import cloned_graph_roots
 
     logger.info("graph indexing: considering %s", workspace)
     try:
-        roots = await asyncio.to_thread(cloned_graph_roots, workspace)
+        # A caller that already knows which clones are stale passes them, so the
+        # workspace is not re-enumerated and re-hashed here.
+        roots = (
+            dict(repos)
+            if repos
+            else await asyncio.to_thread(cloned_graph_roots, workspace)
+        )
         if not roots:
             # Say it out loud: a silent skip looks exactly like "the graph
             # worked and the model chose not to use it".
@@ -88,7 +104,7 @@ async def _index_workspace_graph_once(workspace: Path, *, job_id: str = "") -> N
                 "graph indexing: no Git clones under %s — session runs without a map",
                 workspace,
             )
-            return
+            return None
         pending = await asyncio.to_thread(roots_needing_index, workspace, roots)
         if not pending:
             withheld = await asyncio.to_thread(_budget_withheld, workspace, roots)
@@ -102,23 +118,23 @@ async def _index_workspace_graph_once(workspace: Path, *, job_id: str = "") -> N
                     workspace,
                     ", ".join(sorted(withheld)),
                 )
-                return
+                return None
             logger.info(
                 "graph indexing: graphs already current for %s (%d repo(s))",
                 workspace,
                 len(roots),
             )
-            return
+            return None
         logger.info(
             "graph indexing: building %d of %d repo(s): %s",
             len(pending),
             len(roots),
             ", ".join(sorted(pending)),
         )
-        outcomes = await asyncio.to_thread(index_repositories, workspace, pending)
-        log_index_outcomes(outcomes, job_id=job_id)
+        return await asyncio.to_thread(index_repositories, workspace, pending)
     except Exception:
         logger.warning("Graph indexing skipped for %s", workspace, exc_info=True)
+        return None
 
 
 async def build_session_tools(

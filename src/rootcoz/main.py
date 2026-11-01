@@ -19297,7 +19297,7 @@ async def _index_chat_repositories(
     """
     from rootcoz.engine.session_tools import index_workspace_graph
 
-    await index_workspace_graph(workspace, job_id=job_id)
+    await index_workspace_graph(workspace, job_id=job_id, repos=repos)
 
 
 async def _init_chat_under_barrier(

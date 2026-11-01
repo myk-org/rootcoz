@@ -670,36 +670,26 @@ def test_query_lock_wait_is_bounded(tmp_path, monkeypatch):
 
 
 def test_index_outcome_logs_are_sanitized():
-    import logging
+    """The rendered line names the job and never leaks a path, and is returned.
 
-    records: list[str] = []
-
-    class _Collect(logging.Handler):
-        def emit(self, record: logging.LogRecord) -> None:
-            records.append(record.getMessage())
-
-    handler = _Collect()
-    graft.logger.addHandler(handler)
-    try:
-        graft.log_index_outcomes(
-            job_id="job-abc",
-            outcomes={
-                "code": {"status": "indexed", "files": 1},
-                "/private/token": {"status": "failed", "reason": "/secret/path"},
-                "limited": {"status": "failed", "reason": "_Limit", "truncated": True},
-            },
-        )
-    finally:
-        graft.logger.removeHandler(handler)
-
-    # One aggregated line: simple_logger's duplicate filter collapses repeated
-    # format strings, so per-repo lines hid every outcome but the first.
-    text = "\n".join(records)
-    assert "job=job-abc" in text
-    assert "code:indexed:none" in text
-    assert "invalid:failed:error" in text
-    assert "limited:failed:limit" in text
-    assert "/private" not in text and "/secret" not in text
+    Asserting on the return value keeps this independent of logging plumbing
+    (propagate=False plus a duplicate filter made handler-based assertions
+    order-dependent).
+    """
+    line = graft.log_index_outcomes(
+        job_id="job-abc",
+        outcomes={
+            "code": {"status": "indexed", "files": 1},
+            "/private/token": {"status": "failed", "reason": "/secret/path"},
+            "limited": {"status": "failed", "reason": "_Limit", "truncated": True},
+        },
+    )
+    assert line is not None
+    assert "job=job-abc" in line
+    assert "code:indexed:none" in line
+    assert "invalid:failed:error" in line
+    assert "limited:failed:limit" in line
+    assert "/private" not in line and "/secret" not in line
 
 
 def test_query_deadline_covers_scans(tmp_path, monkeypatch):

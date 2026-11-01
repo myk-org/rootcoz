@@ -624,7 +624,7 @@ def index_repositories(
     return results
 
 
-def log_index_outcomes(outcomes: dict[str, Any], *, job_id: str = "") -> None:
+def log_index_outcomes(outcomes: dict[str, Any], *, job_id: str = "") -> str | None:
     """Log only safe repository scope and known result categories, never paths or output.
 
     One aggregated line per run, carrying the job id. Two reasons, both learned
@@ -662,13 +662,14 @@ def log_index_outcomes(outcomes: dict[str, Any], *, job_id: str = "") -> None:
         if result.get("truncated"):
             reason = "limit"
         parts.append(f"{scope}:{status}:{reason}")
-    if parts:
-        logger.info(
-            "graft_index job=%s %d repo(s): %s",
-            job_id or "-",
-            len(parts),
-            " ".join(parts),
-        )
+    if not parts:
+        return None
+    # The rendered line is returned as well as logged: tests assert on the value
+    # instead of attaching handlers to a logger whose plumbing (propagate=False,
+    # duplicate filter) made those assertions order-dependent.
+    line = f"graft_index job={job_id or '-'} {len(parts)} repo(s): {' '.join(parts)}"
+    logger.info(line)
+    return line
 
 
 #: A trailing line reference after a path: ``path:12`` or ``path:L10-L20``.
