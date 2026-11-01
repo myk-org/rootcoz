@@ -125,19 +125,32 @@ def _bounded(
     )
     output = bytearray()
     deadline = time.monotonic() + timeout
+
+    def _check_limits() -> None:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("subprocess timed out")
+        if (
+            disk is not None
+            and _disk_size(disk, deadline, limit=None) > max_workspace_graph_bytes()
+        ):
+            raise _Limit("workspace graph budget")
+
     try:
+        if discard_output:
+            # Nothing to read: stdout is DEVNULL, so process.stdout is None and
+            # the selector loop below cannot run (that assert used to fire on
+            # every build). Poll the child instead.
+            while process.poll() is None:
+                _check_limits()
+                time.sleep(0.05)
+            if process.wait() != 0:
+                raise subprocess.CalledProcessError(process.returncode, argv)
+            return b""
         with selectors.DefaultSelector() as selector:
             assert process.stdout is not None
             selector.register(process.stdout, selectors.EVENT_READ)
             while selector.get_map() or process.poll() is None:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("subprocess timed out")
-                if (
-                    disk is not None
-                    and _disk_size(disk, deadline, limit=None)
-                    > max_workspace_graph_bytes()
-                ):
-                    raise _Limit("workspace graph budget")
+                _check_limits()
                 for key, _ in selector.select(
                     timeout=min(0.1, max(0.001, deadline - time.monotonic()))
                 ):

@@ -864,3 +864,34 @@ def test_workspace_budget_is_a_hard_bound(tmp_path, monkeypatch):
     assert skipped, outcomes
     assert all(outcomes[name]["reason"] == "workspace graph budget" for name in skipped)
     assert graft._workspace_graph_size(graft._root(workspace)) <= 1000
+
+
+def test_discard_output_does_not_need_a_pipe(monkeypatch, tmp_path):
+    """The build path discards stdout; ``process.stdout`` is then None.
+
+    Regression guard: the selector loop asserted a readable pipe, so every Trail
+    build raised AssertionError and indexing silently produced no graph. Fakes
+    that replace ``_run`` never entered ``_bounded``, so only a fake *Popen* that
+    reports ``stdout is None`` reproduces it.
+    """
+
+    class _FakeProc:
+        def __init__(self, returncode: int) -> None:
+            self.stdout = None
+            self.returncode = returncode
+
+        def poll(self) -> int:
+            return self.returncode
+
+        def wait(self) -> int:
+            return self.returncode
+
+    monkeypatch.setattr(graft.subprocess, "Popen", lambda *a, **k: _FakeProc(0))
+    assert (
+        graft._bounded(["trail", "build"], cwd=tmp_path, timeout=5, discard_output=True)
+        == b""
+    )
+
+    monkeypatch.setattr(graft.subprocess, "Popen", lambda *a, **k: _FakeProc(3))
+    with pytest.raises(subprocess.CalledProcessError):
+        graft._bounded(["trail", "build"], cwd=tmp_path, timeout=5, discard_output=True)
