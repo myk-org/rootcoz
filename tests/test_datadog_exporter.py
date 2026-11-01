@@ -589,6 +589,36 @@ class TestHistoryClassificationsAndReviewers:
         event = self._event(history_classifications={"test_other": "CODE ISSUE"})
         assert "Failure pattern" not in event["message"]
 
+    def test_failure_pattern_tag_mirrors_the_message_line(self):
+        """The pattern is filterable in Datadog, in the style reviewers asked for.
+
+        The message line alone cannot be searched, so the same value travels as
+        a tag: lowercase, spaces folded to underscores.
+        """
+        event = self._event(history_classifications={"test_login_flow": "CODE ISSUE"})
+        assert "**Failure pattern:** CODE ISSUE" in event["message"]  # unchanged
+        assert "tfa.failure_pattern:code_issue" in event["tags"]
+        # Sits right after the classification tag, matching the message order.
+        tags = event["tags"]
+        assert tags.index("tfa.classification:PRODUCT_BUG") < tags.index(
+            "tfa.failure_pattern:code_issue"
+        )
+
+    def test_failure_pattern_tag_is_lowercased_with_underscores(self):
+        for raw, expected in [
+            ("NEW", "new"),
+            ("Intermittent Failure", "intermittent_failure"),
+            ("known-issue", "known_issue"),
+        ]:
+            event = self._event(history_classifications={"test_login_flow": raw})
+            assert f"tfa.failure_pattern:{expected}" in event["tags"], raw
+
+    def test_no_failure_pattern_tag_without_history(self):
+        event = self._event(history_classifications={"test_other": "CODE ISSUE"})
+        assert not [
+            tag for tag in event["tags"] if tag.startswith("tfa.failure_pattern:")
+        ]
+
     def test_history_classification_absent_when_dict_empty(self):
         event = self._event()
         assert "Failure pattern" not in event["message"]

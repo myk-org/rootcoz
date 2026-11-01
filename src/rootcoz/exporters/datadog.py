@@ -562,7 +562,9 @@ class DatadogExporter(Exporter):
         The test name is deliberately not a tag: a tag cannot hold brackets
         or spaces, so a sanitized value could never match the verbatim
         ``test.name`` custom attribute.
-        ``test_name`` is still the key for the per-test lookups below.
+        ``test_name`` is still the key for the per-test lookups below. The
+        failure-pattern tag uses it to read the same
+        ``history_classifications`` entry the message body prints.
         """
         tags: list[str] = []
         if self._service:
@@ -577,6 +579,17 @@ class DatadogExporter(Exporter):
         ]
         if classification:
             tags.append(f"tfa.classification:{sanitize_tag_value(classification)}")
+        # The previous classification for this test is what the message calls
+        # the failure pattern (NEW, FLAKY, INTERMITTENT, ...). Exposed as a
+        # tag so it is filterable in Datadog: the message line alone cannot be
+        # searched. Lowercased, with spaces/punctuation folded to underscores,
+        # matching how tfa.classification is normally written.
+        pattern = context.history_classifications.get(test_name, "")
+        if pattern:
+            # Hyphens fold too, so "known-issue" and "known issue" are one
+            # facet value rather than two.
+            pattern_tag = sanitize_tag_value(pattern).lower().replace("-", "_")
+            tags.append(f"tfa.failure_pattern:{pattern_tag}")
         if context.child_job_name:
             tags.append(f"child_job_name:{sanitize_tag_value(context.child_job_name)}")
         tags.append(
