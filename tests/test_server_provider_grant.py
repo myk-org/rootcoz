@@ -57,7 +57,12 @@ async def test_managed_users_default_denied_even_when_admin(tmp_path, monkeypatc
     with pytest.raises(ValueError, match="Cannot revoke"):
         await storage.set_user_can_use_server_providers("alice", False)
     assert await storage.can_user_use_server_providers("alice")
-    assert (await storage.list_users())[0]["can_use_server_providers"] is True
+    # By identity, not position: list_users() orders created_at DESC, and two
+    # inserts a second apart legitimately swap order under a slow CI worker.
+    alice_row = next(
+        user for user in await storage.list_users() if user["username"] == "alice"
+    )
+    assert alice_row["can_use_server_providers"] is True
     assert not await storage.set_user_can_use_server_providers("missing", True)
     await storage.track_user("sso-new")
     assert not await storage.can_user_use_server_providers("sso-new")
