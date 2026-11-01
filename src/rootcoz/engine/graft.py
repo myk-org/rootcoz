@@ -624,12 +624,15 @@ def index_repositories(
     return results
 
 
-def log_index_outcomes(outcomes: dict[str, Any]) -> None:
+def log_index_outcomes(outcomes: dict[str, Any], *, job_id: str = "") -> None:
     """Log only safe repository scope and known result categories, never paths or output.
 
-    One aggregated line: simple_logger's duplicate filter collapses repeated
-    format strings, so per-repo lines would show up as a single "repeated N
-    times" entry and hide the other repositories' outcomes.
+    One aggregated line per run, carrying the job id. Two reasons, both learned
+    the hard way: per-repo lines share one format string, so simple_logger's
+    duplicate filter collapses them into a single "repeated N times" entry; and
+    this runs inside the indexing thread pool, where the ``[job_id=…]`` context
+    is not propagated, so without the id the outcome cannot be attributed to a
+    run at all. The id also makes each line distinct, which defeats the filter.
     """
     parts: list[str] = []
     for name, result in outcomes.items():
@@ -660,7 +663,12 @@ def log_index_outcomes(outcomes: dict[str, Any]) -> None:
             reason = "limit"
         parts.append(f"{scope}:{status}:{reason}")
     if parts:
-        logger.info("graft_index %d repo(s): %s", len(parts), " ".join(parts))
+        logger.info(
+            "graft_index job=%s %d repo(s): %s",
+            job_id or "-",
+            len(parts),
+            " ".join(parts),
+        )
 
 
 #: A trailing line reference after a path: ``path:12`` or ``path:L10-L20``.

@@ -39,7 +39,7 @@ def stubbed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     indexed: list[Path] = []
     installed: list[tuple[Path, list[dict]]] = []
 
-    async def fake_index(workspace: Path) -> None:
+    async def fake_index(workspace: Path, job_id: str = "") -> None:
         indexed.append(workspace)
 
     async def fake_install(workspace: Path, tools: list[dict]) -> None:
@@ -194,7 +194,7 @@ async def test_skill_is_installed_where_the_session_runs(
     session_cwd = tmp_path / "artifacts"
     session_cwd.mkdir()
 
-    async def fake_index(workspace: Path) -> None:
+    async def fake_index(workspace: Path, job_id: str = "") -> None:
         return None
 
     monkeypatch.setattr(session_tools, "index_workspace_graph", fake_index)
@@ -217,3 +217,43 @@ async def test_skill_is_installed_where_the_session_runs(
         job_id="job-1",
     )
     assert installed == [session_cwd]
+
+
+@pytest.mark.asyncio
+async def test_indexing_logs_the_job_on_its_outcome_line(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The outcome line must be attributable, and distinct per run.
+
+    It is emitted from the indexing thread pool, where the [job_id=...] context is
+    not propagated; and identical format strings were collapsed by simple_logger's
+    duplicate filter, so only the first run in a process ever appeared.
+    """
+    records: list[str] = []
+    monkeypatch.setattr(
+        session_tools,
+        "install_http_tools_mcp_best_effort_async",
+        AsyncMock(),
+    )
+    monkeypatch.setattr(
+        "rootcoz.engine.graft_http.cloned_graph_roots",
+        lambda workspace: {"repo": tmp_path / "repo"},
+    )
+    monkeypatch.setattr(
+        "rootcoz.engine.graft.roots_needing_index",
+        lambda workspace, roots: dict(roots),
+    )
+    monkeypatch.setattr(
+        "rootcoz.engine.graft.index_repositories",
+        lambda workspace, roots: {"repo": {"status": "indexed"}},
+    )
+    monkeypatch.setattr(
+        "rootcoz.engine.graft.log_index_outcomes",
+        lambda outcomes, *, job_id="": records.append(f"{job_id}:{sorted(outcomes)}"),
+    )
+
+    session_tools._GRAPH_INDEX_TASKS.clear()
+    await session_tools.index_workspace_graph(tmp_path, job_id="job-1")
+    await session_tools.index_workspace_graph(tmp_path, job_id="job-2")
+
+    assert records == ["job-1:['repo']", "job-2:['repo']"]

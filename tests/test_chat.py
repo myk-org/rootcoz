@@ -1501,7 +1501,9 @@ async def test_index_chat_repositories_discovers_and_logs_off_loop(
 
     monkeypatch.setattr(graft_http, "cloned_graph_roots", discover)
     monkeypatch.setattr(graft, "index_repositories", index)
-    monkeypatch.setattr(graft, "log_index_outcomes", seen.append)
+    monkeypatch.setattr(
+        graft, "log_index_outcomes", lambda outcomes, **_: seen.append(outcomes)
+    )
     await main_mod._index_chat_repositories(tmp_path)
     assert seen == [
         (tmp_path, original_discover(tmp_path)),

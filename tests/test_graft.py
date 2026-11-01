@@ -682,11 +682,12 @@ def test_index_outcome_logs_are_sanitized():
     graft.logger.addHandler(handler)
     try:
         graft.log_index_outcomes(
-            {
+            job_id="job-abc",
+            outcomes={
                 "code": {"status": "indexed", "files": 1},
                 "/private/token": {"status": "failed", "reason": "/secret/path"},
                 "limited": {"status": "failed", "reason": "_Limit", "truncated": True},
-            }
+            },
         )
     finally:
         graft.logger.removeHandler(handler)
@@ -694,6 +695,7 @@ def test_index_outcome_logs_are_sanitized():
     # One aggregated line: simple_logger's duplicate filter collapses repeated
     # format strings, so per-repo lines hid every outcome but the first.
     text = "\n".join(records)
+    assert "job=job-abc" in text
     assert "code:indexed:none" in text
     assert "invalid:failed:error" in text
     assert "limited:failed:limit" in text

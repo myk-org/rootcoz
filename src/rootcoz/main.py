@@ -19286,7 +19286,7 @@ async def get_chat_history(
 
 
 async def _index_chat_repositories(
-    workspace: Path, repos: dict[str, Path] | None = None
+    workspace: Path, repos: dict[str, Path] | None = None, job_id: str = ""
 ) -> None:
     """Index cloned chat roots through the one guarded entry point.
 
@@ -19297,7 +19297,7 @@ async def _index_chat_repositories(
     """
     from rootcoz.engine.session_tools import index_workspace_graph
 
-    await index_workspace_graph(workspace)
+    await index_workspace_graph(workspace, job_id=job_id)
 
 
 async def _init_chat_under_barrier(
@@ -19368,7 +19368,7 @@ async def _init_chat_under_barrier(
     repos_available = bool(await asyncio.to_thread(cloned_graph_roots, workspace))
     if repos_available:
         set_chat_prep_phase(job_id, username, "indexing")
-        await _index_chat_repositories(workspace)
+        await _index_chat_repositories(workspace, job_id=job_id)
     _raise_if_chat_job_deleted(job_id)
     set_chat_prep_phase(job_id, username, "fetching_build_data")
     ci_build_data_available = await setup_ci_build_workspace(
@@ -20061,7 +20061,9 @@ async def _process_chat_message(
                             roots_needing_index, workspace, cloned_roots
                         )
                         if stale_roots:
-                            await _index_chat_repositories(workspace, stale_roots)
+                            await _index_chat_repositories(
+                                workspace, stale_roots, job_id=job_id
+                            )
 
                         settings = get_settings()
 

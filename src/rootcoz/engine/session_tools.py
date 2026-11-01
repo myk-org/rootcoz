@@ -51,7 +51,7 @@ def graph_workspace_for(repos: dict[str, Path] | None) -> Path | None:
     return next(iter(repos.values())).parent
 
 
-async def index_workspace_graph(workspace: Path) -> None:
+async def index_workspace_graph(workspace: Path, job_id: str = "") -> None:
     """Index a workspace's clones once, waiting for an in-flight build.
 
     Only missing or stale graphs are built, and any failure is a warning: the
@@ -63,12 +63,14 @@ async def index_workspace_graph(workspace: Path) -> None:
         # A finished task must not be cached forever: a chat workspace is reused
         # across messages, so new clones, cleaned graphs and expired budget
         # markers have to be picked up on the next message.
-        task = asyncio.create_task(_index_workspace_graph_once(Path(workspace)))
+        task = asyncio.create_task(
+            _index_workspace_graph_once(Path(workspace), job_id=job_id)
+        )
         _GRAPH_INDEX_TASKS[key] = task
     await asyncio.shield(task)
 
 
-async def _index_workspace_graph_once(workspace: Path) -> None:
+async def _index_workspace_graph_once(workspace: Path, *, job_id: str = "") -> None:
     from rootcoz.engine.graft import (
         index_repositories,
         log_index_outcomes,
@@ -114,7 +116,7 @@ async def _index_workspace_graph_once(workspace: Path) -> None:
             ", ".join(sorted(pending)),
         )
         outcomes = await asyncio.to_thread(index_repositories, workspace, pending)
-        log_index_outcomes(outcomes)
+        log_index_outcomes(outcomes, job_id=job_id)
     except Exception:
         logger.warning("Graph indexing skipped for %s", workspace, exc_info=True)
 
@@ -147,7 +149,7 @@ async def build_session_tools(
     graph_root: Path | None = None
     if graph:
         graph_root = graph_workspace_for(repos) or Path(workspace)
-        await index_workspace_graph(graph_root)
+        await index_workspace_graph(graph_root, job_id=job_id)
         from rootcoz.engine.graft_http import graph_http_tools
 
         graph_tools = graph_http_tools(graph_root, job_id)
