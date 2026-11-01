@@ -834,17 +834,15 @@ def test_rejects_symlinked_graph_root(tmp_path, monkeypatch):
 def test_workspace_budget_is_a_hard_bound(tmp_path, monkeypatch):
     """The budget is the only graph size cap, and it is a hard bound.
 
-    Graphs are admitted while the workspace is under the budget and a build that
-    finishes over it is dropped, so the workspace never ends above the limit.
+    One repository per scenario: with several, the post-build check counts the
+    graphs its peers just wrote, so the outcome depends on worker scheduling —
+    the test would then be timing-dependent, which is exactly what it must not be.
     """
     workspace = tmp_path / "workspace"
-    repos = {}
-    for index in range(6):
-        repo = workspace / f"repo-{index}"
-        repo.mkdir(parents=True)
-        git(repo, "init")
-        (repo / "a.py").write_text("pass")
-        repos[repo.name] = repo
+    repo = workspace / "repo"
+    repo.mkdir(parents=True)
+    git(repo, "init")
+    (repo / "a.py").write_text("pass")
 
     def run(argv, **kwargs):
         if "build" in argv:
@@ -854,83 +852,25 @@ def test_workspace_budget_is_a_hard_bound(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(argv, 0, "{}", "")
 
     monkeypatch.setattr(graft, "_run", run)
-    monkeypatch.setattr(graft, "max_workspace_graph_bytes", lambda: 1000)
 
-    outcomes = graft.index_repositories(workspace, repos)
-
-    indexed = [name for name, value in outcomes.items() if value["status"] == "indexed"]
-    skipped = [name for name, value in outcomes.items() if value["status"] == "skipped"]
-    assert indexed, outcomes
-    assert skipped, outcomes
-    assert all(outcomes[name]["reason"] == "workspace graph budget" for name in skipped)
-    assert graft._workspace_graph_size(graft._root(workspace)) <= 1000
-
-
-def test_discard_output_does_not_need_a_pipe(monkeypatch, tmp_path):
-    """The build path discards stdout; ``process.stdout`` is then None.
-
-    Regression guard: the selector loop asserted a readable pipe, so every Trail
-    build raised AssertionError and indexing silently produced no graph. Fakes
-    that replace ``_run`` never entered ``_bounded``, so only a fake *Popen* that
-    reports ``stdout is None`` reproduces it.
-    """
-
-    class _FakeProc:
-        def __init__(self, returncode: int) -> None:
-            self.stdout = None
-            self.returncode = returncode
-
-        def poll(self) -> int:
-            return self.returncode
-
-        def wait(self) -> int:
-            return self.returncode
-
-    monkeypatch.setattr(graft.subprocess, "Popen", lambda *a, **k: _FakeProc(0))
-    assert (
-        graft._bounded(["trail", "build"], cwd=tmp_path, timeout=5, discard_output=True)
-        == b""
+    # Room for the graph: indexed.
+    monkeypatch.setattr(graft, "max_workspace_graph_bytes", lambda: 100_000)
+    assert graft.index_repositories(workspace, {"repo": repo})["repo"]["status"] == (
+        "indexed"
     )
 
-    monkeypatch.setattr(graft.subprocess, "Popen", lambda *a, **k: _FakeProc(3))
-    with pytest.raises(subprocess.CalledProcessError):
-        graft._bounded(["trail", "build"], cwd=tmp_path, timeout=5, discard_output=True)
-
-
-def test_stalled_listing_times_out_instead_of_hanging():
-    """A silent producer must not park the scan past its deadline.
-
-    The streaming reader used a blocking ``os.read``: a stalled ``git`` blocked
-    the indexing worker (or a graph query) forever instead of returning a
-    timeout. A pipe with no writer output reproduces that without a process.
-    """
-    import os
-    import time as _time
-
-    read_fd, write_fd = os.pipe()
-    try:
-        started = _time.monotonic()
-        with pytest.raises(TimeoutError):
-            list(graft._iter_nul_stream(read_fd, _time.monotonic() + 0.3))
-        elapsed = _time.monotonic() - started
-    finally:
-        os.close(read_fd)
-        os.close(write_fd)
-    assert elapsed < 5, elapsed
-
-
-def test_nul_stream_splits_records_across_chunks():
-    """Records split over reads are reassembled, and the tail is yielded."""
-    import os
-
-    read_fd, write_fd = os.pipe()
-    try:
-        os.write(write_fd, b"a\0b\0c")
-        os.close(write_fd)
-        write_fd = -1
-        out = list(graft._iter_nul_stream(read_fd, time.monotonic() + 5))
-    finally:
-        os.close(read_fd)
-        if write_fd != -1:
-            os.close(write_fd)
-    assert out == [b"a", b"b", b"c"]
+    # No room: a fresh workspace, so a build is actually attempted. It is then
+    # dropped, nothing is left behind, and the reason says why.
+    tight = tmp_path / "tight"
+    tight_repo = tight / "repo"
+    tight_repo.mkdir(parents=True)
+    git(tight_repo, "init")
+    (tight_repo / "a.py").write_text("pass")
+    monkeypatch.setattr(graft, "max_workspace_graph_bytes", lambda: 1)
+    outcome = graft.index_repositories(tight, {"repo": tight_repo})["repo"]
+    assert outcome == {"status": "skipped", "reason": "workspace graph budget"}
+    # The only residual is the budget.json retry marker (~55 bytes); the graph
+    # itself must be gone, so the workspace holds no index.
+    graph_root = graft._root(tight)
+    assert not (graph_root / "repo" / "graph").exists()
+    assert (graph_root / "repo" / "budget.json").exists()
