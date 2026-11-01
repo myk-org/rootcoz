@@ -15,7 +15,6 @@ import threading
 import time
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
-from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -24,15 +23,26 @@ from rootcoz.engine.http_mcp import _workspace_install_lock
 
 logger = get_child_logger(__name__)
 
-MAX_FILES = 2000
-MAX_BYTES = 20 * 1024 * 1024
 MAX_SECONDS = 30
 BUILD_SECONDS = 120
 FAILED_RETRY_SECONDS = 300
 QUERY_SECONDS = 45
 MAX_OUTPUT = 1024 * 1024
-MAX_GRAPH_BYTES = 40 * 1024 * 1024
-MAX_WORKSPACE_GRAPH_BYTES = 256 * 1024 * 1024
+#: The single graph size cap: total bytes of every graph in one workspace.
+#: Read from Settings so an admin can raise it (Server Settings -> Server ->
+#: Workspace graph budget) without a rebuild. The former per-repo and
+#: per-snapshot caps are gone on purpose: they silently excluded the largest and
+#: most relevant clones (kubev2v/forklift: 27k files, ~177 MB of source).
+DEFAULT_MAX_WORKSPACE_GRAPH_BYTES = 256 * 1024 * 1024
+
+
+def max_workspace_graph_bytes() -> int:
+    """Current workspace graph budget (bytes), from Settings when available."""
+    from rootcoz.config import get_settings
+
+    return int(get_settings().max_workspace_graph_mb) * 1024 * 1024
+
+
 TRAIL = "/app/sidecar-helper/node_modules/.bin/trail"
 
 
@@ -52,7 +62,7 @@ def _disk_size(
     limit: int | None = None,
     reject_symlinks: bool = True,
 ) -> int:
-    limit = MAX_GRAPH_BYTES if limit is None else limit
+    limit = None if limit is None else limit
     total = 0
     for directory, dirs, files in os.walk(path, followlinks=False):
         for file in dirs + files:
@@ -95,7 +105,10 @@ def _bounded(
     cwd: Path,
     timeout: float,
     disk: Path | None = None,
+    max_output: int | None = -1,
 ) -> bytes:
+    if max_output == -1:
+        max_output = MAX_OUTPUT
     process = subprocess.Popen(
         argv,
         cwd=cwd,
@@ -113,15 +126,24 @@ def _bounded(
             while selector.get_map() or process.poll() is None:
                 if time.monotonic() >= deadline:
                     raise TimeoutError("subprocess timed out")
-                if disk is not None and _disk_size(disk, deadline) > MAX_GRAPH_BYTES:
-                    raise _Limit("graph disk limit")
+                if (
+                    disk is not None
+                    and _disk_size(disk, deadline, limit=None)
+                    > max_workspace_graph_bytes()
+                ):
+                    raise _Limit("workspace graph budget")
                 for key, _ in selector.select(
                     timeout=min(0.1, max(0.001, deadline - time.monotonic()))
                 ):
-                    chunk = os.read(key.fd, min(65536, MAX_OUTPUT + 1 - len(output)))
+                    room = (
+                        65536
+                        if max_output is None
+                        else min(65536, max_output + 1 - len(output))
+                    )
+                    chunk = os.read(key.fd, room)
                     if chunk:
                         output.extend(chunk)
-                        if len(output) > MAX_OUTPUT:
+                        if max_output is not None and len(output) > max_output:
                             raise _Limit("subprocess output limit")
                     else:
                         selector.unregister(key.fileobj)
@@ -137,10 +159,26 @@ def _bounded(
 
 
 def _run(
-    argv: list[str], *, cwd: Path, timeout: float, disk: Path | None = None
+    argv: list[str],
+    *,
+    cwd: Path,
+    timeout: float,
+    disk: Path | None = None,
+    max_output: int | None = -1,
 ) -> subprocess.CompletedProcess[str]:
+    """Run one trail command.
+
+    ``max_output`` bounds the reply a *query* returns; a build prints a line per
+    file, so it passes ``None`` — capping it made every large repository fail
+    with a misleading "limit" reason.
+    """
     return subprocess.CompletedProcess(
-        argv, 0, _bounded(argv, cwd=cwd, timeout=timeout, disk=disk).decode("utf-8"), ""
+        argv,
+        0,
+        _bounded(
+            argv, cwd=cwd, timeout=timeout, disk=disk, max_output=max_output
+        ).decode("utf-8"),
+        "",
     )
 
 
@@ -186,10 +224,15 @@ def _sources(repo: Path, deadline: float | None = None) -> dict[str, str]:
     listing = _bounded(
         ["git", "ls-files", "-co", "--exclude-standard", "-z"],
         cwd=repo,
+        # A listing is not a query reply: 27k paths exceed MAX_OUTPUT, and
+        # capping it made every large repository fail as "limit".
+        max_output=None,
         timeout=min(MAX_SECONDS, _remaining(deadline)) if deadline else MAX_SECONDS,
     )
-    if len(listing) > MAX_OUTPUT or len(listing.split(b"\0")) - 1 > MAX_FILES:
-        raise _Limit("file listing limit")
+    # No cap on the file listing: MAX_OUTPUT bounds one query's JSON reply, not
+    # how many files a clone has. Reusing it here excluded every large repo
+    # (kubev2v/forklift lists 27k paths, well over 1 MB) with a misleading
+    # "limit" reason. Workspace disk is bounded by max_workspace_graph_bytes().
     result = {}
     total = 0
     started = time.monotonic()
@@ -216,9 +259,7 @@ def _sources(repo: Path, deadline: float | None = None) -> dict[str, str]:
             if not stat.S_ISREG(info.st_mode):
                 continue
             total += info.st_size
-            if total > MAX_BYTES:
-                raise _Limit("source byte limit")
-            data = src.read(MAX_BYTES + 1)
+            data = src.read()
             if len(data) != info.st_size:
                 raise ValueError("source changed")
             if deadline is not None:
@@ -237,8 +278,7 @@ def _source_stamp(repo: Path) -> str:
         timeout=MAX_SECONDS,
     )
     digest = hashlib.sha256(listing)
-    # ponytail: for >MAX_FILES, content-only edits beyond the cap retry after backoff.
-    for raw in islice(listing.split(b"\0"), MAX_FILES):
+    for raw in listing.split(b"\0"):
         if not raw:
             continue
         try:
@@ -313,10 +353,7 @@ def _index_one(
             if destination.exists():
                 shutil.rmtree(destination)
             return {"status": "skipped", "reason": "no eligible files"}
-        if (
-            manifest == _manifest(destination)
-            and _disk_size(destination) <= MAX_GRAPH_BYTES
-        ):
+        if manifest == _manifest(destination):
             return {"status": "unchanged", "files": len(manifest)}
         if reserve is not None and not reserve(destination):
             return {"status": "skipped", "reason": "workspace graph budget"}
@@ -339,28 +376,40 @@ def _index_one(
                     p, flags | os.O_NOFOLLOW | os.O_NONBLOCK
                 ),
             ) as src:
-                data = src.read(MAX_BYTES + 1)
+                data = src.read()
             if hashlib.sha256(data).hexdigest() != digest:
                 raise ValueError("source changed")
             total += len(data)
-            if total > MAX_BYTES:
-                raise _Limit("source byte limit")
             target.write_bytes(data)
         _run(
             [TRAIL, "--dir", str(graph), "build", str(snapshot)],
             cwd=snapshot,
             timeout=BUILD_SECONDS,
             disk=destination,
+            max_output=None,
         )
-        if (
-            not graph.is_dir()
-            or graph.is_symlink()
-            or _disk_size(destination) > MAX_GRAPH_BYTES
-        ):
+        if not graph.is_dir() or graph.is_symlink():
             raise _Limit("graph disk limit")
         if _sources(repo) != manifest:
             raise ValueError("source changed")
         (destination / "manifest.json").write_text(json.dumps(manifest))
+        # The budget is a hard bound, not an admission hint: a build admitted
+        # while under budget can finish over it. Drop this graph rather than
+        # leave the workspace above the limit, and record why so the next run
+        # retries only after the backoff.
+        workspace_used = _workspace_graph_size(_root(repo.parent))
+        if workspace_used > max_workspace_graph_bytes():
+            shutil.rmtree(destination, ignore_errors=True)
+            destination.mkdir(parents=True, exist_ok=True)
+            (destination / "budget.json").write_text(
+                json.dumps(
+                    {
+                        "budget_used": workspace_used,
+                        "retry_after": time.time() + FAILED_RETRY_SECONDS,
+                    }
+                )
+            )
+            return {"status": "skipped", "reason": "workspace graph budget"}
         return {"status": "indexed", "files": len(manifest), "bytes": total}
     except (OSError, ValueError, TimeoutError, subprocess.SubprocessError) as exc:
         if not destination.is_symlink():
@@ -405,11 +454,10 @@ def index_repositories(
         with gate:
             used = _workspace_graph_size(root)
             old = _disk_size(destination, limit=0) if destination.exists() else 0
-            growth = sum(
-                max(0, MAX_GRAPH_BYTES - _disk_size(item, limit=0))
-                for item in reservations
-            )
-            if used - old + growth + MAX_GRAPH_BYTES > MAX_WORKSPACE_GRAPH_BYTES:
+            budget = max_workspace_graph_bytes()
+            # A graph already there is replaced, not added: subtract it, then
+            # admit while the workspace is under budget. No per-repo estimate.
+            if used - old >= budget:
                 # Persist a bounded skip, without overwriting an existing graph.
                 marker = json.dumps(
                     {
@@ -423,11 +471,7 @@ def index_repositories(
                     if previous.is_file() and not previous.is_symlink()
                     else 0
                 )
-                if (
-                    not previous.is_symlink()
-                    and used + growth + len(marker) - previous_size
-                    <= MAX_WORKSPACE_GRAPH_BYTES
-                ):
+                if not previous.is_symlink() and len(marker) - previous_size <= budget:
                     destination.mkdir(parents=True, exist_ok=True)
                     previous.write_text(marker)
                 return False
@@ -630,8 +674,8 @@ def _query_locked(
             return {"status": "skipped", "reason": "repository not indexed"}
         if _sources(repo, deadline) != manifest:
             return {"status": "stale", "reason": "source changed; use read/grep"}
-        if _disk_size(destination, deadline) > MAX_GRAPH_BYTES:
-            raise _Limit("graph disk limit")
+        if _disk_size(destination, deadline, limit=None) > max_workspace_graph_bytes():
+            raise _Limit("workspace graph budget")
         if tool == "find_code":
             argv = ["ask", "--json", params["query"]]
             limit = params.get("limit")
@@ -696,8 +740,8 @@ def _query_locked(
         data = _validate_paths(
             json.loads(output), snapshot, repo, set(manifest), deadline
         )
-        if _disk_size(destination, deadline) > MAX_GRAPH_BYTES:
-            raise _Limit("graph disk limit")
+        if _disk_size(destination, deadline, limit=None) > max_workspace_graph_bytes():
+            raise _Limit("workspace graph budget")
         if _sources(repo, deadline) != manifest:
             return {"status": "stale", "reason": "source changed; use read/grep"}
         _remaining(deadline)
@@ -758,18 +802,14 @@ def roots_needing_index(
                     and time.time() < skipped["retry_after"]
                     and _workspace_graph_size(root)
                     - _disk_size(root / name, limit=0, reject_symlinks=False)
-                    + MAX_GRAPH_BYTES
-                    > MAX_WORKSPACE_GRAPH_BYTES
+                    > max_workspace_graph_bytes()
                 ):
                     continue
             except OSError, ValueError, KeyError, TypeError:
                 pass
             if manifest is not None:
                 try:
-                    if (
-                        _sources(repo) != manifest
-                        or _disk_size(root / name) > MAX_GRAPH_BYTES
-                    ):
+                    if _sources(repo) != manifest:
                         result[name] = repo
                 except OSError, ValueError, TimeoutError, subprocess.SubprocessError:
                     result[name] = repo  # Never expose a stale graph.

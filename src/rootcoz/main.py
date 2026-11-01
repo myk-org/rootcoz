@@ -613,6 +613,10 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "node_binary",
         "pi_sidecar_transcripts_dir",
     ],
+    # Last on purpose: a rarely-touched disk budget should not lead the page.
+    "Workspace": [
+        "max_workspace_graph_mb",
+    ],
 }
 
 # Reverse lookup: field -> category
@@ -647,6 +651,7 @@ _SETTING_LABEL_OVERRIDES: dict[str, str] = {
     "enable_free_models": "Enable free AI models",
     "cli_agents": "CLI agents",
     "acpx_agents": "ACPX agents",
+    "max_workspace_graph_mb": "Workspace graph budget (MB)",
     "login_lockout_enabled": "Enable login lockout",
     "login_lockout_threshold": "Failed logins before lockout",
     "audit_auth_failure_max_per_minute": "Audit rows kept per minute",

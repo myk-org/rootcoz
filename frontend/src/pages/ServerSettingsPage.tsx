@@ -106,7 +106,7 @@ interface SettingsImportResult {
 // Category display order for the tab layout (mirrors backend _SETTINGS_CATEGORIES).
 const CATEGORY_ORDER = [
   'Server', 'AI', 'Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Prow',
-  'Auth & Security', 'Web Push', 'Notifications', 'Sidecar',
+  'Auth & Security', 'Web Push', 'Notifications', 'Sidecar', 'Workspace',
 ]
 
 // Categories with a test-connection endpoint (category -> integration id).
