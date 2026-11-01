@@ -277,12 +277,49 @@ def _file_digest(source: Path, info: os.stat_result, deadline: float | None) -> 
     return value
 
 
+def _iter_nul_stream(
+    fd: int, deadline_at: float, *, deadline: float | None = None
+) -> Iterator[bytes]:
+    """Yield NUL-separated records from *fd*, waiting no longer than the deadline.
+
+    The descriptor is switched to non-blocking and awaited with ``select``, so a
+    producer that stops writing cannot park the caller inside ``os.read`` past
+    its timeout — which is exactly what a blocking read did: a stalled ``git``
+    left an indexing worker (or a graph query) hanging instead of timing out.
+    """
+    os.set_blocking(fd, False)
+    pending = b""
+    with selectors.DefaultSelector() as selector:
+        selector.register(fd, selectors.EVENT_READ)
+        while True:
+            now = time.monotonic()
+            if now >= deadline_at or (deadline is not None and now >= deadline):
+                raise TimeoutError("source scan timed out")
+            wait = min(0.1, max(0.001, min(deadline_at, deadline or deadline_at) - now))
+            if not selector.select(timeout=wait):
+                continue
+            try:
+                chunk = os.read(fd, 65536)
+            except BlockingIOError:
+                continue
+            if not chunk:
+                break
+            pending += chunk
+            *complete, pending = pending.split(b"\0")
+            for raw in complete:
+                if raw:
+                    yield raw
+    if pending:
+        yield pending
+
+
 def _iter_listed_paths(repo: Path, deadline: float | None) -> Iterator[Path]:
     """Yield git-visible paths as they stream, never holding the whole listing.
 
     ``git ls-files`` for a large clone is hundreds of kilobytes of NUL-separated
     paths; buffering it whole was the last unbounded allocation in the scan. The
-    stream is split as it arrives, so only the current path is resident.
+    stream is split as it arrives, so only the current path is resident, and the
+    wait is bounded (see ``_iter_nul_stream``).
     """
     timeout = min(MAX_SECONDS, _remaining(deadline)) if deadline else MAX_SECONDS
     process = subprocess.Popen(
@@ -293,32 +330,17 @@ def _iter_listed_paths(repo: Path, deadline: float | None) -> Iterator[Path]:
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
-    deadline_at = time.monotonic() + timeout
-    pending = b""
     try:
         assert process.stdout is not None
-        while True:
-            if time.monotonic() >= deadline_at or (
-                deadline is not None and time.monotonic() >= deadline
-            ):
-                raise TimeoutError("source scan timed out")
-            chunk = os.read(process.stdout.fileno(), 65536)
-            if not chunk:
-                break
-            pending += chunk
-            *complete, pending = pending.split(b"\0")
-            for raw in complete:
-                if not raw:
-                    continue
-                try:
-                    yield _relative(os.fsdecode(raw))
-                except ValueError:
-                    continue
-        if pending:
+        for raw in _iter_nul_stream(
+            process.stdout.fileno(),
+            time.monotonic() + timeout,
+            deadline=deadline,
+        ):
             try:
-                yield _relative(os.fsdecode(pending))
+                yield _relative(os.fsdecode(raw))
             except ValueError:
-                pass
+                continue
         if process.wait() != 0:
             raise subprocess.CalledProcessError(process.returncode, "git ls-files")
     finally:

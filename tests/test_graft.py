@@ -895,3 +895,42 @@ def test_discard_output_does_not_need_a_pipe(monkeypatch, tmp_path):
     monkeypatch.setattr(graft.subprocess, "Popen", lambda *a, **k: _FakeProc(3))
     with pytest.raises(subprocess.CalledProcessError):
         graft._bounded(["trail", "build"], cwd=tmp_path, timeout=5, discard_output=True)
+
+
+def test_stalled_listing_times_out_instead_of_hanging():
+    """A silent producer must not park the scan past its deadline.
+
+    The streaming reader used a blocking ``os.read``: a stalled ``git`` blocked
+    the indexing worker (or a graph query) forever instead of returning a
+    timeout. A pipe with no writer output reproduces that without a process.
+    """
+    import os
+    import time as _time
+
+    read_fd, write_fd = os.pipe()
+    try:
+        started = _time.monotonic()
+        with pytest.raises(TimeoutError):
+            list(graft._iter_nul_stream(read_fd, _time.monotonic() + 0.3))
+        elapsed = _time.monotonic() - started
+    finally:
+        os.close(read_fd)
+        os.close(write_fd)
+    assert elapsed < 5, elapsed
+
+
+def test_nul_stream_splits_records_across_chunks():
+    """Records split over reads are reassembled, and the tail is yielded."""
+    import os
+
+    read_fd, write_fd = os.pipe()
+    try:
+        os.write(write_fd, b"a\0b\0c")
+        os.close(write_fd)
+        write_fd = -1
+        out = list(graft._iter_nul_stream(read_fd, time.monotonic() + 5))
+    finally:
+        os.close(read_fd)
+        if write_fd != -1:
+            os.close(write_fd)
+    assert out == [b"a", b"b", b"c"]
