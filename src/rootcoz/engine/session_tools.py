@@ -59,7 +59,10 @@ async def index_workspace_graph(workspace: Path) -> None:
     """
     key = str(Path(workspace).resolve())
     task = _GRAPH_INDEX_TASKS.get(key)
-    if task is None:
+    if task is None or task.done():
+        # A finished task must not be cached forever: a chat workspace is reused
+        # across messages, so new clones, cleaned graphs and expired budget
+        # markers have to be picked up on the next message.
         task = asyncio.create_task(_index_workspace_graph_once(Path(workspace)))
         _GRAPH_INDEX_TASKS[key] = task
     await asyncio.shield(task)
@@ -86,6 +89,18 @@ async def _index_workspace_graph_once(workspace: Path) -> None:
             return
         pending = await asyncio.to_thread(roots_needing_index, workspace, roots)
         if not pending:
+            withheld = await asyncio.to_thread(_budget_withheld, workspace, roots)
+            if withheld:
+                # "already current" was a lie: these are deliberately withheld by
+                # a live budget marker, and no usable graph exists for them.
+                logger.warning(
+                    "graph indexing: %d repo(s) withheld by the workspace graph"
+                    " budget in %s: %s",
+                    len(withheld),
+                    workspace,
+                    ", ".join(sorted(withheld)),
+                )
+                return
             logger.info(
                 "graph indexing: graphs already current for %s (%d repo(s))",
                 workspace,
@@ -189,3 +204,24 @@ def graph_prompt_hint(tools: SessionTools) -> str:
     if any(tool.get("name", "").startswith("graft_") for tool in tools.custom):
         return GRAPH_PROMPT_HINT
     return ""
+
+
+def _budget_withheld(workspace: Path, roots: dict[str, Path]) -> list[str]:
+    """Repos whose graph is withheld by a live ``budget.json`` marker."""
+    import json
+    import time
+
+    from rootcoz.engine.graft import _root
+
+    graph_root = _root(Path(workspace))
+    withheld: list[str] = []
+    for name in roots:
+        marker = graph_root / name / "budget.json"
+        try:
+            payload = json.loads(marker.read_text())
+        except OSError, ValueError:
+            continue
+        retry_after = payload.get("retry_after") if isinstance(payload, dict) else None
+        if isinstance(retry_after, (int, float)) and time.time() < retry_after:
+            withheld.append(name)
+    return withheld

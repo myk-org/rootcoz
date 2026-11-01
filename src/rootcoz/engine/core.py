@@ -2023,9 +2023,6 @@ async def run_single_ai_analysis(
             "Failure to read console output is a violation of your instructions."
         )
 
-    # The clones live side by side under one workspace; that is the directory
-    # the code graph indexes, whichever dir the AI itself runs in.
-
     # Ensure a workspace dir for failure-details / cross-reference files
     workspace_dir = repo_path or console_dir
     if workspace_dir is None:
@@ -2678,9 +2675,6 @@ async def run_orchestrated_analysis(
         workspace_dir = temp_dir
 
     try:
-        # Where the clones live, for the code graph: the AI's cwd may be a
-        # per-run directory rather than the workspace holding them.
-
         # Copy built-in agents to workspace
         copy_builtin_agents_to_workspace(workspace_dir)
 

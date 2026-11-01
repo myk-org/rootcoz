@@ -9,6 +9,7 @@ a workspace with no graph is simply left alone.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 from pathlib import Path
@@ -139,10 +140,19 @@ async def test_indexing_happens_once_per_workspace(
     monkeypatch.setattr("rootcoz.engine.graft.log_index_outcomes", lambda outcome: None)
 
     session_tools._GRAPH_INDEX_TASKS.clear()
-    await session_tools.index_workspace_graph(tmp_path)
-    await session_tools.index_workspace_graph(tmp_path)
 
+    # Concurrent callers (one AI call per failure group, peers alongside) share a
+    # single build.
+    await asyncio.gather(
+        session_tools.index_workspace_graph(tmp_path),
+        session_tools.index_workspace_graph(tmp_path),
+    )
     assert len(calls) == 1, calls
+
+    # A finished build is not cached forever: a reused chat workspace must pick up
+    # new clones, cleaned graphs and expired budget markers.
+    await session_tools.index_workspace_graph(tmp_path)
+    assert len(calls) == 2, calls
 
 
 @pytest.mark.asyncio

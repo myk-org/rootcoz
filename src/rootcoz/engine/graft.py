@@ -28,16 +28,19 @@ BUILD_SECONDS = 120
 FAILED_RETRY_SECONDS = 300
 QUERY_SECONDS = 45
 MAX_OUTPUT = 1024 * 1024
-#: The single graph size cap: total bytes of every graph in one workspace.
-#: Read from Settings so an admin can raise it (Server Settings -> Server ->
-#: Workspace graph budget) without a rebuild. The former per-repo and
-#: per-snapshot caps are gone on purpose: they silently excluded the largest and
-#: most relevant clones (kubev2v/forklift: 27k files, ~177 MB of source).
-DEFAULT_MAX_WORKSPACE_GRAPH_BYTES = 256 * 1024 * 1024
 
 
 def max_workspace_graph_bytes() -> int:
-    """Current workspace graph budget (bytes), from Settings when available."""
+    """Current workspace graph budget in bytes.
+
+    The single graph size cap: the graphs plus the source snapshots they are
+    built from, for every clone in one workspace. It lives in Settings
+    (Server Settings -> Workspace -> "Workspace graph budget (MB)", last tab)
+    with a 1 GB default, because kubev2v/forklift alone occupies ~608 MB
+    (557 MB snapshot + 48 MB graph). The former per-repo and per-snapshot caps
+    are gone on purpose: they silently excluded the largest, most relevant
+    clones.
+    """
     from rootcoz.config import get_settings
 
     return int(get_settings().max_workspace_graph_mb) * 1024 * 1024
@@ -106,6 +109,7 @@ def _bounded(
     timeout: float,
     disk: Path | None = None,
     max_output: int | None = -1,
+    discard_output: bool = False,
 ) -> bytes:
     if max_output == -1:
         max_output = MAX_OUTPUT
@@ -113,7 +117,9 @@ def _bounded(
         argv,
         cwd=cwd,
         env={**os.environ, "DO_NOT_TRACK": "1"},
-        stdout=subprocess.PIPE,
+        # A build narrates one line per file; nobody reads it, so it is discarded
+        # rather than buffered (27k lines for a large clone).
+        stdout=subprocess.DEVNULL if discard_output else subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
@@ -165,6 +171,7 @@ def _run(
     timeout: float,
     disk: Path | None = None,
     max_output: int | None = -1,
+    discard_output: bool = False,
 ) -> subprocess.CompletedProcess[str]:
     """Run one trail command.
 
@@ -176,7 +183,12 @@ def _run(
         argv,
         0,
         _bounded(
-            argv, cwd=cwd, timeout=timeout, disk=disk, max_output=max_output
+            argv,
+            cwd=cwd,
+            timeout=timeout,
+            disk=disk,
+            max_output=max_output,
+            discard_output=discard_output,
         ).decode("utf-8"),
         "",
     )
@@ -219,6 +231,39 @@ def _remaining(deadline: float) -> float:
     return remaining
 
 
+#: (path, mtime_ns, size) -> sha256. A query re-reads the manifest twice; without
+#: this cache every query hashed the entire clone twice, which for a 557 MB
+#: forklift snapshot is the whole query budget. Only changed files are re-hashed.
+_HASH_CACHE: dict[tuple[str, int, int], str] = {}
+_HASH_CACHE_LIMIT = 200_000
+
+
+def _file_digest(source: Path, info: os.stat_result, deadline: float | None) -> str:
+    """Hash one file in chunks, never loading it whole into memory."""
+    key = (str(source), info.st_mtime_ns, info.st_size)
+    cached = _HASH_CACHE.get(key)
+    if cached is not None:
+        return cached
+    digest = hashlib.sha256()
+    with open(
+        source,
+        "rb",
+        opener=lambda p, flags: os.open(p, flags | os.O_NOFOLLOW | os.O_NONBLOCK),
+    ) as src:
+        while True:
+            if deadline is not None:
+                _remaining(deadline)
+            chunk = src.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    value = digest.hexdigest()
+    if len(_HASH_CACHE) >= _HASH_CACHE_LIMIT:
+        _HASH_CACHE.clear()
+    _HASH_CACHE[key] = value
+    return value
+
+
 def _sources(repo: Path, deadline: float | None = None) -> dict[str, str]:
     """Git-visible files only; hash actual content, including ignored-file changes in the listing."""
     listing = _bounded(
@@ -229,12 +274,7 @@ def _sources(repo: Path, deadline: float | None = None) -> dict[str, str]:
         max_output=None,
         timeout=min(MAX_SECONDS, _remaining(deadline)) if deadline else MAX_SECONDS,
     )
-    # No cap on the file listing: MAX_OUTPUT bounds one query's JSON reply, not
-    # how many files a clone has. Reusing it here excluded every large repo
-    # (kubev2v/forklift lists 27k paths, well over 1 MB) with a misleading
-    # "limit" reason. Workspace disk is bounded by max_workspace_graph_bytes().
-    result = {}
-    total = 0
+    result: dict[str, str] = {}
     started = time.monotonic()
     for raw in listing.split(b"\0"):
         if time.monotonic() - started > MAX_SECONDS or (
@@ -258,13 +298,7 @@ def _sources(repo: Path, deadline: float | None = None) -> dict[str, str]:
             info = os.fstat(src.fileno())
             if not stat.S_ISREG(info.st_mode):
                 continue
-            total += info.st_size
-            data = src.read()
-            if len(data) != info.st_size:
-                raise ValueError("source changed")
-            if deadline is not None:
-                _remaining(deadline)
-            result[str(relative)] = hashlib.sha256(data).hexdigest()
+        result[str(relative)] = _file_digest(source, info, deadline)
     if deadline is not None:
         _remaining(deadline)
     return result
@@ -369,24 +403,34 @@ def _index_one(
                 raise ValueError("source changed")
             target = snapshot / path
             target.parent.mkdir(parents=True, exist_ok=True)
-            with open(
-                source,
-                "rb",
-                opener=lambda p, flags: os.open(
-                    p, flags | os.O_NOFOLLOW | os.O_NONBLOCK
-                ),
-            ) as src:
-                data = src.read()
-            if hashlib.sha256(data).hexdigest() != digest:
+            digest_hasher = hashlib.sha256()
+            with (
+                open(
+                    source,
+                    "rb",
+                    opener=lambda p, flags: os.open(
+                        p, flags | os.O_NOFOLLOW | os.O_NONBLOCK
+                    ),
+                ) as src,
+                open(target, "wb") as dst,
+            ):
+                # Streamed, not read whole: a single large tracked binary used to
+                # be loaded into memory here, four repositories at a time.
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    digest_hasher.update(chunk)
+                    dst.write(chunk)
+                    total += len(chunk)
+            if digest_hasher.hexdigest() != digest:
                 raise ValueError("source changed")
-            total += len(data)
-            target.write_bytes(data)
         _run(
             [TRAIL, "--dir", str(graph), "build", str(snapshot)],
             cwd=snapshot,
             timeout=BUILD_SECONDS,
             disk=destination,
-            max_output=None,
+            discard_output=True,
         )
         if not graph.is_dir() or graph.is_symlink():
             raise _Limit("graph disk limit")
@@ -397,7 +441,8 @@ def _index_one(
         # while under budget can finish over it. Drop this graph rather than
         # leave the workspace above the limit, and record why so the next run
         # retries only after the backoff.
-        workspace_used = _workspace_graph_size(_root(repo.parent))
+        with _workspace_install_lock(_root(repo.parent)):
+            workspace_used = _workspace_graph_size(_root(repo.parent))
         if workspace_used > max_workspace_graph_bytes():
             shutil.rmtree(destination, ignore_errors=True)
             destination.mkdir(parents=True, exist_ok=True)
@@ -455,9 +500,16 @@ def index_repositories(
             used = _workspace_graph_size(root)
             old = _disk_size(destination, limit=0) if destination.exists() else 0
             budget = max_workspace_graph_bytes()
-            # A graph already there is replaced, not added: subtract it, then
-            # admit while the workspace is under budget. No per-repo estimate.
-            if used - old >= budget:
+            # A graph already there is replaced, not added: subtract it. Charge
+            # the peers that are mid-build too — their partial snapshots already
+            # occupy disk, and ignoring them let four workers overshoot the
+            # budget and then drop graphs that would have fitted.
+            inflight = sum(
+                _disk_size(item, limit=0, reject_symlinks=False)
+                for item in reservations
+                if item.exists() and not item.is_symlink()
+            )
+            if used - old + inflight >= budget:
                 # Persist a bounded skip, without overwriting an existing graph.
                 marker = json.dumps(
                     {
@@ -797,13 +849,12 @@ def roots_needing_index(
                     if not budget.is_symlink() and not budget.parent.is_symlink()
                     else None
                 )
-                if (
-                    isinstance(skipped, dict)
-                    and time.time() < skipped["retry_after"]
-                    and _workspace_graph_size(root)
-                    - _disk_size(root / name, limit=0, reject_symlinks=False)
-                    > max_workspace_graph_bytes()
-                ):
+                if isinstance(skipped, dict) and time.time() < skipped["retry_after"]:
+                    # Respect the marker while it is live. It used to apply only
+                    # when the *other* graphs already exceeded the budget, so a
+                    # repo that itself pushed the workspace over was re-queued on
+                    # every pass and rebuilt (full snapshot + 120s build) only to
+                    # be dropped again.
                     continue
             except OSError, ValueError, KeyError, TypeError:
                 pass

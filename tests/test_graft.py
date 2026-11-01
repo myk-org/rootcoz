@@ -57,7 +57,7 @@ def test_index_only_git_visible_files_and_external_graph(tmp_path, monkeypatch):
     git(repo, "add", "tracked.py", ".gitignore")
     calls = []
 
-    def fake_run(argv, *, cwd, timeout, disk=None, max_output=-1):
+    def fake_run(argv, *, cwd, timeout, disk=None, max_output=-1, discard_output=False):
         calls.append((argv, cwd, timeout))
         if "build" in argv:
             (graft._root(workspace) / "code" / "graph").mkdir()
