@@ -615,6 +615,7 @@
 </tbody>
 </table></div>
 <p>Every <code>Greenwave</code> setting is editable here and applies immediately — none are server-only or restart-required. The per-push <code>subject_identifier</code> and <code>waiver_comment</code> are not settings at all: they are request parameters passed on each push via the CLI or API.</p>
+<p>The <code>Greenwave</code> category also has a <code>Test connection</code> button, grouped with the ones for Jenkins, Jira, GitHub, Report Portal, and Prow. It checks the exporter's own prerequisites — the ResultsDB URL and token, plus the waiver URL, token, and product version when <code>GREENWAVE_PUSH_WAIVERS</code> is on — and then makes one authenticated <code>GET {GREENWAVE_URL}/results?limit=1</code> honouring <code>GREENWAVE_VERIFY_SSL</code>. A failure message therefore means one of two things: a prerequisite is missing (the message names it), or the authenticated ResultsDB request itself failed (the message carries the connection error). The endpoint always answers HTTP 200, so a red result is a test outcome, not a broken request.</p>
 <ol>
 <li><strong>Understand masked and restart-required settings.</strong></li>
 </ol>

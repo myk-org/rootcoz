@@ -8874,6 +8874,7 @@ def _build_capabilities(settings: Settings) -> dict[str, Any]:
         "datadog": settings.datadog_enabled,
         "exporters": _available_exporters(settings),
         "reportportal_project": settings.reportportal_project or "",
+        "greenwave_waivers": settings.greenwave_push_waivers,
         "feedback_enabled": settings.feedback_enabled
         and bool(settings.ai_provider)
         and bool(settings.ai_model),
@@ -18384,6 +18385,42 @@ async def _test_datadog_connection(settings: Settings) -> dict[str, Any]:
         site=site,
     )
 
+async def _test_greenwave_connection(settings: Settings) -> dict[str, Any]:
+    """Authenticated ResultsDB ping against the effective Greenwave settings."""
+    if not settings.greenwave_enabled:
+        return _test_result(
+            False,
+            "Greenwave is not configured (missing GREENWAVE_URL or "
+            "GREENWAVE_API_TOKEN)",
+        )
+    try:
+        # The exporter's own prerequisite check — single source of truth for
+        # the ResultsDB settings and the waiver settings when waivers are on.
+        GreenwaveExporter(settings=settings)
+    except ExporterPrerequisiteError as exc:
+        return _test_result(False, str(exc))
+    api_token = settings.greenwave_api_token
+    assert api_token is not None  # guaranteed by greenwave_enabled above
+    url = str(settings.greenwave_url).rstrip("/")
+    try:
+        await _integration_test_get_json(
+            f"{url}/results",
+            params={"limit": 1},
+            headers={"Authorization": f"Bearer {api_token.get_secret_value()}"},
+            verify=settings.greenwave_verify_ssl,
+        )
+    except _IntegrationTestError as exc:
+        return _test_result(False, f"ResultsDB connection failed: {exc}")
+    message = (
+        f"ResultsDB at {redact_urls_in_text(url)} is reachable and "
+        f"authenticated (subject_type: {settings.greenwave_subject_type})"
+    )
+    details: dict[str, Any] = {"subject_type": settings.greenwave_subject_type}
+    if settings.greenwave_push_waivers:
+        assert not GreenwaveExporter.missing_waiver_settings(settings)
+        details["waivers"] = "Greenwave waiver prerequisites are satisfied"
+    return _test_result(True, message, **details)
+
 
 async def _test_prow_connection(settings: Settings) -> dict[str, Any]:
     """Prow deck reachability plus GCS bucket listability check.
@@ -18432,6 +18469,7 @@ _INTEGRATION_TESTERS: dict[str, Callable[[Settings], Awaitable[dict[str, Any]]]]
     "github": _test_github_connection,
     "reportportal": _test_reportportal_connection,
     "datadog": _test_datadog_connection,
+    "greenwave": _test_greenwave_connection,
     "prow": _test_prow_connection,
 }
 

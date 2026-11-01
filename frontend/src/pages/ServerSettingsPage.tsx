@@ -105,7 +105,7 @@ interface SettingsImportResult {
 
 // Category display order for the tab layout (mirrors backend _SETTINGS_CATEGORIES).
 const CATEGORY_ORDER = [
-  'Server', 'AI', 'Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Datadog', 'Prow',
+  'Server', 'AI', 'Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Datadog', 'Greenwave', 'Prow',
   'Auth & Security', 'Web Push', 'Notifications', 'Sidecar', 'Workspace',
 ]
 
@@ -116,6 +116,7 @@ const TEST_INTEGRATIONS: Record<string, string> = {
   GitHub: 'github',
   'Report Portal': 'reportportal',
   Datadog: 'datadog',
+  Greenwave: 'greenwave',
   Prow: 'prow',
 }
 

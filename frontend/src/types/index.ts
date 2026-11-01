@@ -451,8 +451,11 @@ export interface ResultResponse {
     /** Available exporter plugins (`GET /api/exporters` entries, job-scoped). */
     exporters?: ExporterInfo[]
     feedback_enabled?: boolean
+    greenwave_waivers?: boolean
   }
 }
+
+// -- Exporters ------------------------------------------------------
 
 /** Entry of `GET /api/exporters` — also embedded in result `capabilities.exporters`. */
 export interface ExporterInfo {
@@ -462,6 +465,19 @@ export interface ExporterInfo {
   /** Escape hatch for the unreviewed-failure push gate. Absent on older
    *  servers — read as false so the gate stays on (matches backend default). */
   allow_unreviewed_push?: boolean
+}
+
+/** Generic POST /results/{job_id}/push/{plugin} response. */
+export interface ExporterPushResult {
+  success: boolean
+  message: string
+  pushed?: number
+  skipped?: number
+  waived?: number
+  unmatched?: string[]
+  errors?: string[]
+  launch_id?: number | null
+  details?: Record<string, unknown>
 }
 
 // -- Report Portal --------------------------------------------------

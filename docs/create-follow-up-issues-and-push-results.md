@@ -134,7 +134,9 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    Waiver submission is a separate layer on top: it needs `GREENWAVE_PUSH_WAIVERS=true` plus `GREENWAVE_WAIVER_URL`, `GREENWAVE_WAIVER_TOKEN`, and `GREENWAVE_PRODUCT_VERSION`, and each push must pass an explicit `--subject-identifier` — the artifact or build Greenwave gates on. Without one, the push is refused with HTTP 422 rather than writing a waiver against a guessed subject. Waivers are only submitted for failures reviewed by a human; failures reviewed only by `rootcoz-ai` are skipped unless `GREENWAVE_ALLOW_AI_WAIVERS=true`.
 
-   Push from the CLI (per-server defaults for `--subject-identifier` and `--waiver-comment` can live in your CLI config file):
+   You can also push from the report page: click `Push to Greenwave` in the report header. The button appears only when the server advertises the Greenwave exporter as enabled (via the `capabilities.exporters` list in the job result), and it is disabled when the job has no failures. The dialog takes a `Subject identifier` — the build or artifact NVR the results and waivers apply to — and an optional `Waiver comment`. The identifier is mandatory when the server has waivers enabled (the job result reports this as `capabilities.greenwave_waivers`), because the server rejects a waiver push without one with HTTP 422; a results-only push falls back to the job name when no identifier is given. Waivers are only filed when the server has `GREENWAVE_PUSH_WAIVERS` on — otherwise the push submits results only. The result dialog reports the pushed, waived, and skipped counts, and lists any per-failure errors.
+
+   Push from the CLI (a per-server default for `--waiver-comment` can live in your CLI config file; `--subject-identifier` deliberately has none, because a stored default could waive the wrong build):
 
    ```bash
    rootcoz exporters

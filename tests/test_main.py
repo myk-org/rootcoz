@@ -12406,6 +12406,105 @@ class TestIntegrationConnectionEndpoints:
         assert data["ok"] is False
         assert "not listable" in data["message"]
 
+    def test_greenwave_success(self, test_client) -> None:
+        """Greenwave test pings ResultsDB with the token and waiver detail."""
+        settings = Settings(
+            greenwave_url="https://resultsdb.example.com",
+            greenwave_api_token=SecretStr("not-a-real-token"),
+            greenwave_push_waivers=True,
+            greenwave_waiver_url="https://waiverdb.example.com",
+            greenwave_waiver_token=SecretStr("not-a-real-waiver-token"),
+            greenwave_product_version="el9",
+        )
+        get_json = AsyncMock(return_value={"results": []})
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            patch("rootcoz.main._integration_test_get_json", get_json),
+        ):
+            response = test_client.post("/api/admin/settings/test/greenwave")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert "resultsdb.example.com" in data["message"]
+        assert data["details"]["subject_type"] == "koji_build"
+        assert "satisfied" in data["details"]["waivers"]
+        assert "not-a-real-token" not in json.dumps(data)
+        get_json.assert_awaited_once_with(
+            "https://resultsdb.example.com/results",
+            params={"limit": 1},
+            headers={"Authorization": "Bearer not-a-real-token"},
+            verify=True,
+        )
+
+    def test_greenwave_missing_token_makes_no_http_call(self, test_client) -> None:
+        """An unconfigured Greenwave fails fast without any HTTP request."""
+        settings = Settings(greenwave_url="https://resultsdb.example.com")
+        get_json = AsyncMock(return_value={"results": []})
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            patch("rootcoz.main._integration_test_get_json", get_json),
+        ):
+            response = test_client.post("/api/admin/settings/test/greenwave")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "not configured" in data["message"]
+        get_json.assert_not_called()
+
+    def test_greenwave_missing_waiver_settings(self, test_client) -> None:
+        """Waivers enabled but waiver settings missing names the gaps."""
+        settings = Settings(
+            greenwave_url="https://resultsdb.example.com",
+            greenwave_api_token=SecretStr("not-a-real-token"),
+            greenwave_push_waivers=True,
+        )
+        get_json = AsyncMock(return_value={"results": []})
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            patch("rootcoz.main._integration_test_get_json", get_json),
+        ):
+            response = test_client.post("/api/admin/settings/test/greenwave")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        for name in (
+            "GREENWAVE_WAIVER_URL",
+            "GREENWAVE_WAIVER_TOKEN",
+            "GREENWAVE_PRODUCT_VERSION",
+        ):
+            assert name in data["message"]
+        get_json.assert_not_called()
+
+    def test_greenwave_connection_failure(self, test_client) -> None:
+        """A ResultsDB failure yields ok:false, not a 500."""
+        settings = Settings(
+            greenwave_url="https://resultsdb.example.com",
+            greenwave_api_token=SecretStr("not-a-real-token"),
+        )
+        from rootcoz.main import _IntegrationTestError
+
+        get_json = AsyncMock(side_effect=_IntegrationTestError("HTTP 403"))
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            patch("rootcoz.main._integration_test_get_json", get_json),
+        ):
+            response = test_client.post("/api/admin/settings/test/greenwave")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "ResultsDB connection failed" in data["message"]
+
+    @pytest.mark.parametrize("push_waivers", [True, False])
+    def test_capabilities_include_greenwave_waivers(self, push_waivers: bool) -> None:
+        """capabilities.greenwave_waivers mirrors GREENWAVE_PUSH_WAIVERS."""
+        from rootcoz import main as main_module
+
+        caps = main_module._build_capabilities(
+            Settings(greenwave_push_waivers=push_waivers)
+        )
+        assert caps["greenwave_waivers"] is push_waivers
+        assert "exporters" in caps
+
 
 class TestSubmitterAutoTag:
     """Tests for auto-tagging analyses with the submitter username."""

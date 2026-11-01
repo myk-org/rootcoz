@@ -141,6 +141,8 @@ That creates an active operator who can submit analyses, and one server setting 
 
    Every `Greenwave` setting is editable here and applies immediately — none are server-only or restart-required. The per-push `subject_identifier` and `waiver_comment` are not settings at all: they are request parameters passed on each push via the CLI or API.
 
+   The `Greenwave` category also has a `Test connection` button, grouped with the ones for Jenkins, Jira, GitHub, Report Portal, and Prow. It checks the exporter's own prerequisites — the ResultsDB URL and token, plus the waiver URL, token, and product version when `GREENWAVE_PUSH_WAIVERS` is on — and then makes one authenticated `GET {GREENWAVE_URL}/results?limit=1` honouring `GREENWAVE_VERIFY_SSL`. A failure message therefore means one of two things: a prerequisite is missing (the message names it), or the authenticated ResultsDB request itself failed (the message carries the connection error). The endpoint always answers HTTP 200, so a red result is a test outcome, not a broken request.
+
 10. **Understand masked and restart-required settings.**
 
    Some settings hold credentials and are never sent to the browser in cleartext. They display as `••••••••` until you use the reveal button, which asks the server for that one value on demand. Change history entries for those settings are masked too, and saving stores them encrypted.
