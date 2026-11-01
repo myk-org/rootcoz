@@ -371,6 +371,16 @@ class Settings(BaseSettings):
 
     # Additional repositories for AI analysis context
     additional_repos: str = ""  # "name:url,name:url" format
+    max_workspace_graph_mb: int = Field(
+        default=1024,
+        ge=16,
+        le=1_048_576,
+        description=(
+            "Disk budget, in MB, for the code-graph indexes of one analysis"
+            " workspace (all cloned repositories together). The only graph size"
+            " cap: raise it for very large repositories."
+        ),
+    )
     max_concurrent_repo_clones: int = Field(
         default=10,
         gt=0,

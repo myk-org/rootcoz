@@ -138,8 +138,8 @@ COPY --chown=appuser:0 --from=sidecar-builder /sidecar/dist /app/sidecar-helper/
 COPY --chown=appuser:0 --from=sidecar-builder /sidecar/node_modules /app/sidecar-helper/node_modules
 COPY --chown=appuser:0 --from=sidecar-builder /sidecar/package.json /app/sidecar-helper/package.json
 COPY --chown=appuser:0 third_party/graft-LICENSE /app/third_party/graft-LICENSE
-# npm creates the graft bin link in /sidecar/node_modules/.bin, copied above.
-RUN test -x /app/sidecar-helper/node_modules/.bin/graft
+# npm creates the trail bin link in /sidecar/node_modules/.bin, copied above.
+RUN test -x /app/sidecar-helper/node_modules/.bin/trail
 
 # Copy entrypoint script
 COPY --chown=appuser:0 entrypoint.sh /app/entrypoint.sh

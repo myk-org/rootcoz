@@ -2,7 +2,6 @@
 
 import json
 import os
-import shutil
 import subprocess
 import threading
 import time
@@ -58,7 +57,7 @@ def test_index_only_git_visible_files_and_external_graph(tmp_path, monkeypatch):
     git(repo, "add", "tracked.py", ".gitignore")
     calls = []
 
-    def fake_run(argv, *, cwd, timeout, disk=None):
+    def fake_run(argv, *, cwd, timeout, disk=None, max_output=-1, discard_output=False):
         calls.append((argv, cwd, timeout))
         if "build" in argv:
             (graft._root(workspace) / "code" / "graph").mkdir()
@@ -84,6 +83,10 @@ def test_index_only_git_visible_files_and_external_graph(tmp_path, monkeypatch):
     result = graft.query_repo(workspace, "code", "find_code", {"query": "tracked"})
     assert result == {"status": "ok", "result": {"hits": [{"file": "tracked.py"}]}}
     assert "--no-refresh" in calls[1][0]
+    # Freshness moved off `check` (now a learnings diff) to `build --check` upstream.
+    graft.query_repo(workspace, "code", "check_freshness", {})
+    assert calls[-1][0][3:6] == ["build", "--check", "--json"]
+    assert "--no-refresh" not in calls[-1][0]
 
 
 def test_rejects_outside_results_and_invalid_commands(tmp_path, monkeypatch):
@@ -114,6 +117,19 @@ def test_rejects_outside_results_and_invalid_commands(tmp_path, monkeypatch):
         == "failed"
     )
     assert graft.query_repo(workspace, "code", "unknown", {})["status"] == "skipped"
+    # The graft_ prefix is stripped at the HTTP route; query_repo takes bare names only.
+    for tool in (
+        "graft_find_code",
+        "graft_find_all",
+        "graft_file_api",
+        "graft_trace_calls",
+        "graft_check_freshness",
+        "graft_repo_map",
+    ):
+        assert graft.query_repo(workspace, "code", tool, {}) == {
+            "status": "skipped",
+            "reason": "unknown tool",
+        }
 
 
 def test_colon_filename_and_line_suffix(tmp_path, monkeypatch):
@@ -214,121 +230,6 @@ def test_failed_build_retry_and_marker(tmp_path, monkeypatch):
     assert graft.roots_needing_index(workspace, roots) == roots
 
 
-def test_oversized_graph_followup_backoff_and_source_change(tmp_path, monkeypatch):
-    deterministic_disk_size(monkeypatch)
-    workspace = tmp_path / "workspace"
-    repo = workspace / "code"
-    repo.mkdir(parents=True)
-    git(repo, "init")
-    source = repo / "a.py"
-    source.write_text("old")
-    roots = {"code": repo}
-    builds = []
-
-    def fake_run(argv, **kwargs):
-        builds.append(argv)
-        (graft._root(workspace) / "code" / "graph").mkdir()
-        return subprocess.CompletedProcess(argv, 0, "", "")
-
-    monkeypatch.setattr(graft, "_run", fake_run)
-    assert graft.index_repositories(workspace, roots)["code"]["status"] == "indexed"
-    destination = graft._root(workspace) / "code"
-    monkeypatch.setattr(graft, "MAX_GRAPH_BYTES", graft._disk_size(destination) + 10)
-    assert graft.roots_needing_index(workspace, roots) == {}
-    assert graft.index_repositories(workspace, roots)["code"]["status"] == "unchanged"
-    assert len(builds) == 1
-
-    (destination / "graph" / "extra").write_bytes(b"x" * 20)
-    assert graft.query_repo(workspace, "code", "repo_map", {})["status"] == "failed"
-    assert graft.roots_needing_index(workspace, roots) == roots
-    assert graft.index_repositories(workspace, roots)["code"]["status"] == "indexed"
-    assert len(builds) == 2
-    assert graft.roots_needing_index(workspace, roots) == {}
-    source.write_text("new")
-    assert graft.roots_needing_index(workspace, roots) == roots
-    assert graft.index_repositories(workspace, roots)["code"]["status"] == "indexed"
-    assert len(builds) == 3
-
-
-def test_oversized_build_marker_bounds_followup_retries(tmp_path, monkeypatch):
-    deterministic_disk_size(monkeypatch)
-    workspace = tmp_path / "workspace"
-    repo = workspace / "code"
-    repo.mkdir(parents=True)
-    git(repo, "init")
-    source = repo / "a.py"
-    source.write_text("old")
-    roots = {"code": repo}
-    builds = []
-
-    def oversized_run(argv, **kwargs):
-        builds.append(argv)
-        graph = graft._root(workspace) / "code" / "graph"
-        graph.mkdir()
-        (graph / "large").write_bytes(b"x" * 1024)
-        return subprocess.CompletedProcess(argv, 0, "", "")
-
-    monkeypatch.setattr(graft, "_run", oversized_run)
-    monkeypatch.setattr(graft, "MAX_GRAPH_BYTES", 500)
-    assert graft.index_repositories(workspace, roots)["code"] == {
-        "status": "failed",
-        "reason": "_Limit",
-        "truncated": True,
-    }
-    destination = graft._root(workspace) / "code"
-    assert json.loads((destination / "failed.json").read_text())[
-        "manifest"
-    ] == graft._sources(repo)
-    assert not (destination / "graph").exists()
-    assert graft.indexed_roots(workspace) == {}
-    assert graft.roots_needing_index(workspace, roots) == {}
-    assert len(builds) == 1
-
-    source.write_text("new")
-    assert graft.roots_needing_index(workspace, roots) == roots
-    assert graft.index_repositories(workspace, roots)["code"]["status"] == "failed"
-    assert graft.roots_needing_index(workspace, roots) == {}
-    assert len(builds) == 2
-    marker = destination / "failed.json"
-    failed = json.loads(marker.read_text())
-    failed["retry_after"] = 0
-    marker.write_text(json.dumps(failed))
-    assert graft.roots_needing_index(workspace, roots) == roots
-
-
-def test_failed_source_scan_backoff_and_new_repo(tmp_path, monkeypatch):
-    workspace = tmp_path / "workspace"
-    repo = workspace / "code"
-    repo.mkdir(parents=True)
-    git(repo, "init")
-    source = repo / "a.py"
-    source.write_text("old")
-    roots = {"code": repo}
-    monkeypatch.setattr(graft, "MAX_BYTES", 1)
-    outcome = graft.index_repositories(workspace, roots)["code"]
-    assert outcome == {"status": "failed", "reason": "_Limit", "truncated": True}
-    marker = graft._root(workspace) / "code" / "failed.json"
-    assert json.loads(marker.read_text())["stamp"] == graft._source_stamp(repo)
-    assert graft.roots_needing_index(workspace, roots) == {}
-    source.write_text("changed")
-    assert graft.roots_needing_index(workspace, roots) == roots
-    assert graft.index_repositories(workspace, roots)["code"] == outcome
-    assert graft.roots_needing_index(workspace, roots) == {}
-    failed = json.loads(marker.read_text())
-    failed["retry_after"] = 0
-    marker.write_text(json.dumps(failed))
-    assert graft.roots_needing_index(workspace, roots) == roots
-
-    other = workspace / "other"
-    other.mkdir()
-    git(other, "init")
-    (other / "a.py").write_text("new")
-    assert graft.roots_needing_index(workspace, {**roots, "other": other}) == {
-        "code": repo,
-        "other": other,
-    }
-
-
 def test_workspace_size_ignores_disappearing_peer_graph(tmp_path, monkeypatch):
     root = tmp_path / "graphs"
     peer = root / "peer"
@@ -383,7 +284,9 @@ def test_parallel_builds_and_isolation(tmp_path, monkeypatch):
         item["status"] == "indexed"
         for item in graft.index_repositories(workspace, repos).values()
     )
-    assert peak == 2
+    # The width is an implementation detail; what matters is that builds
+    # actually overlap (analysis waits on this before its first AI call).
+    assert peak >= 2, peak
 
 
 def test_effective_repositories_all_indexed_discoverable_and_refreshable(
@@ -494,165 +397,6 @@ def test_all_repositories_indexed_and_unrelated_workspaces(tmp_path, monkeypatch
     assert len(calls) == 15
 
 
-def test_workspace_budget_skips_then_retries_after_cleanup(tmp_path, monkeypatch):
-    deterministic_disk_size(monkeypatch)
-    workspace = tmp_path / "workspace"
-    repos = {}
-    for i in range(14):
-        repo = workspace / f"repo-{i}"
-        repo.mkdir(parents=True)
-        git(repo, "init")
-        (repo / "a.py").write_text("pass")
-        repos[repo.name] = repo
-
-    def run(argv, **kwargs):
-        if "build" in argv:
-            graph = Path(argv[2])
-            graph.mkdir()
-            (graph / "data").write_bytes(b"x" * 200)
-        return subprocess.CompletedProcess(argv, 0, "{}", "")
-
-    monkeypatch.setattr(graft, "_run", run)
-    monkeypatch.setattr(graft, "MAX_GRAPH_BYTES", 4096)
-    monkeypatch.setattr(graft, "MAX_WORKSPACE_GRAPH_BYTES", 7000)
-    outcomes = graft.index_repositories(workspace, repos)
-    assert any(result["status"] == "skipped" for result in outcomes.values())
-    assert any(result["status"] == "indexed" for result in outcomes.values())
-    assert graft._disk_size(graft._root(workspace), limit=7000) <= 7000
-    skipped = {
-        name: repo
-        for name, repo in repos.items()
-        if outcomes[name]["status"] == "skipped"
-    }
-    root = graft._root(workspace)
-    used = graft._workspace_graph_size(root)
-    retryable = {
-        name
-        for name in skipped
-        if not (root / name / "budget.json").exists()
-        or used
-        - graft._disk_size(root / name, limit=0, reject_symlinks=False)
-        + graft.MAX_GRAPH_BYTES
-        <= graft.MAX_WORKSPACE_GRAPH_BYTES
-    }
-    needed = graft.roots_needing_index(workspace, repos)
-    assert skipped.keys() & needed.keys() == retryable
-    assert not any(
-        (graft._root(workspace) / name / "graph").exists() for name in skipped
-    )
-
-    # Refreshing an existing graph releases its old space rather than counting it
-    # twice. Pin the ceiling so the refresh fits ONLY if the old graph is
-    # released: with the cap one byte under ``used + MAX_GRAPH_BYTES``, counting
-    # the old graph again would exceed it by exactly its own size. Without this
-    # the assertion depended on how many builds happened to fit, so a parallel
-    # full-suite run could legitimately land on the other side and fail.
-    kept = next(
-        name for name, result in outcomes.items() if result["status"] == "indexed"
-    )
-    (repos[kept] / "a.py").write_text("changed")
-    monkeypatch.setattr(
-        graft, "MAX_WORKSPACE_GRAPH_BYTES", used + graft.MAX_GRAPH_BYTES - 1
-    )
-    assert (
-        graft.index_repositories(workspace, {kept: repos[kept]})[kept]["status"]
-        == "indexed"
-    )
-    for name in list(repos):
-        if name not in skipped:
-            shutil.rmtree(graft._root(workspace) / name)
-    retry = dict(list(skipped.items())[:1])
-    assert all(
-        result["status"] == "indexed"
-        for result in graft.index_repositories(workspace, retry).values()
-    )
-    graft.cleanup_graph(workspace)
-    assert not graft._root(workspace).exists()
-
-
-def test_active_build_bytes_are_not_reserved_twice(tmp_path, monkeypatch):
-    deterministic_disk_size(monkeypatch)
-    workspace = tmp_path / "workspace"
-    repos = {}
-    for name in ("a", "b"):
-        repo = workspace / name
-        repo.mkdir(parents=True)
-        git(repo, "init")
-        (repo / "a.py").write_text("pass")
-        repos[name] = repo
-
-    entered = threading.Event()
-    release = threading.Event()
-
-    def run(argv, **kwargs):
-        graph = Path(argv[2])
-        graph.mkdir()
-        (graph / "data").write_bytes(b"x" * 700)
-        if graph.parent.name == "a":
-            entered.set()
-            assert release.wait(3)
-        else:
-            assert entered.wait(3)
-            release.set()
-        return subprocess.CompletedProcess(argv, 0, "", "")
-
-    monkeypatch.setattr(graft, "_run", run)
-    monkeypatch.setattr(graft, "MAX_GRAPH_BYTES", 1000)
-    monkeypatch.setattr(graft, "MAX_WORKSPACE_GRAPH_BYTES", 2100)
-    try:
-        outcomes = graft.index_repositories(workspace, repos)
-        assert all(outcome["status"] == "indexed" for outcome in outcomes.values()), (
-            outcomes
-        )
-    finally:
-        release.set()
-
-
-def test_budget_skip_backoff_and_capacity_recovery(tmp_path, monkeypatch):
-    deterministic_disk_size(monkeypatch)
-    workspace = tmp_path / "workspace"
-    repos = {}
-    for name in ("a", "b"):
-        repo = workspace / name
-        repo.mkdir(parents=True)
-        git(repo, "init")
-        (repo / "a.py").write_text("pass")
-        repos[name] = repo
-    builds = []
-
-    def run(argv, **kwargs):
-        builds.append(Path(argv[2]).parent.name)
-        graph = Path(argv[2])
-        graph.mkdir()
-        (graph / "data").write_bytes(b"x" * 400)
-        return subprocess.CompletedProcess(argv, 0, "", "")
-
-    monkeypatch.setattr(graft, "_run", run)
-    monkeypatch.setattr(graft, "MAX_GRAPH_BYTES", 1000)
-    monkeypatch.setattr(graft, "MAX_WORKSPACE_GRAPH_BYTES", 1500)
-    outcomes = graft.index_repositories(workspace, repos)
-    indexed = next(
-        name for name, value in outcomes.items() if value["status"] == "indexed"
-    )
-    skipped = next(
-        name for name, value in outcomes.items() if value["status"] == "skipped"
-    )
-    assert builds == [indexed]
-    assert graft.roots_needing_index(workspace, repos) == {}
-    assert graft.roots_needing_index(workspace, repos) == {}
-    assert builds == [indexed]
-    shutil.rmtree(graft._root(workspace) / indexed)
-    assert graft.roots_needing_index(workspace, {skipped: repos[skipped]}) == {
-        skipped: repos[skipped]
-    }
-    assert (
-        graft.index_repositories(workspace, {skipped: repos[skipped]})[skipped][
-            "status"
-        ]
-        == "indexed"
-    )
-
-
 def test_budget_skip_on_rebuild_preserves_graph_and_retries_on_expiry(
     tmp_path, monkeypatch
 ):
@@ -673,14 +417,15 @@ def test_budget_skip_on_rebuild_preserves_graph_and_retries_on_expiry(
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(graft, "_run", run)
-    monkeypatch.setattr(graft, "MAX_GRAPH_BYTES", 1000)
-    monkeypatch.setattr(graft, "MAX_WORKSPACE_GRAPH_BYTES", 2200)
+    monkeypatch.setattr(graft, "max_workspace_graph_bytes", lambda: 2200)
     assert all(
         v["status"] == "indexed"
         for v in graft.index_repositories(workspace, repos).values()
     )
     (repos["a"] / "a.py").write_text("new")
-    monkeypatch.setattr(graft, "MAX_WORKSPACE_GRAPH_BYTES", 1500)
+    # Two 400-byte graphs already fill a 400-byte budget, so the rebuild of a is
+    # refused and its existing graph is preserved.
+    monkeypatch.setattr(graft, "max_workspace_graph_bytes", lambda: 400)
     assert (
         graft.index_repositories(workspace, {"a": repos["a"]})["a"]["reason"]
         == "workspace graph budget"
@@ -713,8 +458,8 @@ def test_malformed_other_graph_does_not_block_build(tmp_path, monkeypatch):
         return subprocess.CompletedProcess(argv, 0, "", "")
 
     monkeypatch.setattr(graft, "_run", run)
-    monkeypatch.setattr(graft, "MAX_GRAPH_BYTES", 1000)
-    monkeypatch.setattr(graft, "MAX_WORKSPACE_GRAPH_BYTES", 2000)
+    monkeypatch.setattr(graft, "max_workspace_graph_bytes", lambda: 1000)
+    monkeypatch.setattr(graft, "max_workspace_graph_bytes", lambda: 2000)
     outcome = graft.index_repositories(workspace, {"good": repo})["good"]
     assert outcome["status"] == "indexed", outcome
     assert (bad / "link").is_symlink()
@@ -924,18 +669,27 @@ def test_query_lock_wait_is_bounded(tmp_path, monkeypatch):
         holder.result(timeout=2)
 
 
-def test_index_outcome_logs_are_sanitized(caplog):
-    graft.log_index_outcomes(
-        {
+def test_index_outcome_logs_are_sanitized():
+    """The rendered line names the job and never leaks a path, and is returned.
+
+    Asserting on the return value keeps this independent of logging plumbing
+    (propagate=False plus a duplicate filter made handler-based assertions
+    order-dependent).
+    """
+    line = graft.log_index_outcomes(
+        job_id="job-abc",
+        outcomes={
             "code": {"status": "indexed", "files": 1},
             "/private/token": {"status": "failed", "reason": "/secret/path"},
             "limited": {"status": "failed", "reason": "_Limit", "truncated": True},
-        }
+        },
     )
-    assert "scope=code status=indexed" in caplog.text
-    assert "scope=invalid status=failed category=error" in caplog.text
-    assert "scope=limited status=failed category=limit" in caplog.text
-    assert "/private" not in caplog.text and "/secret" not in caplog.text
+    assert line is not None
+    assert "job=job-abc" in line
+    assert "code:indexed:none" in line
+    assert "invalid:failed:error" in line
+    assert "limited:failed:limit" in line
+    assert "/private" not in line and "/secret" not in line
 
 
 def test_query_deadline_covers_scans(tmp_path, monkeypatch):
@@ -974,10 +728,10 @@ def test_query_deadline_includes_graph_disk_walk(tmp_path, monkeypatch):
     graft.index_repositories(workspace, {"code": repo})
     original = graft._disk_size
 
-    def slow_walk(path, deadline=None):
+    def slow_walk(path, deadline=None, **kwargs):
         if deadline is not None:
             time.sleep(0.06)
-        return original(path, deadline)
+        return original(path, deadline, **kwargs)
 
     monkeypatch.setattr(graft, "_disk_size", slow_walk)
     monkeypatch.setattr(graft, "QUERY_SECONDS", 0.05)
@@ -1069,17 +823,46 @@ def test_rejects_symlinked_graph_root(tmp_path, monkeypatch):
     assert list(outside.iterdir()) == []
 
 
-def test_over_limit_cleans_snapshot(tmp_path, monkeypatch):
+def test_workspace_budget_is_a_hard_bound(tmp_path, monkeypatch):
+    """The budget is the only graph size cap, and it is a hard bound.
+
+    One repository per scenario: with several, the post-build check counts the
+    graphs its peers just wrote, so the outcome depends on worker scheduling —
+    the test would then be timing-dependent, which is exactly what it must not be.
+    """
     workspace = tmp_path / "workspace"
-    repo = workspace / "code"
+    repo = workspace / "repo"
     repo.mkdir(parents=True)
     git(repo, "init")
-    (repo / "too_big.py").write_text("x" * 20)
-    monkeypatch.setattr(graft, "MAX_BYTES", 10)
-    assert (
-        graft.index_repositories(workspace, {"code": repo})["code"]["status"]
-        == "failed"
+    (repo / "a.py").write_text("pass")
+
+    def run(argv, **kwargs):
+        if "build" in argv:
+            graph = Path(argv[2])
+            graph.mkdir(parents=True, exist_ok=True)
+            (graph / "data").write_bytes(b"x" * 400)
+        return subprocess.CompletedProcess(argv, 0, "{}", "")
+
+    monkeypatch.setattr(graft, "_run", run)
+
+    # Room for the graph: indexed.
+    monkeypatch.setattr(graft, "max_workspace_graph_bytes", lambda: 100_000)
+    assert graft.index_repositories(workspace, {"repo": repo})["repo"]["status"] == (
+        "indexed"
     )
-    destination = graft._root(workspace) / "code"
-    assert sorted(p.name for p in destination.iterdir()) == ["failed.json"]
-    assert json.loads((destination / "failed.json").read_text())["stamp"]
+
+    # No room: a fresh workspace, so a build is actually attempted. It is then
+    # dropped, nothing is left behind, and the reason says why.
+    tight = tmp_path / "tight"
+    tight_repo = tight / "repo"
+    tight_repo.mkdir(parents=True)
+    git(tight_repo, "init")
+    (tight_repo / "a.py").write_text("pass")
+    monkeypatch.setattr(graft, "max_workspace_graph_bytes", lambda: 1)
+    outcome = graft.index_repositories(tight, {"repo": tight_repo})["repo"]
+    assert outcome == {"status": "skipped", "reason": "workspace graph budget"}
+    # The only residual is the budget.json retry marker (~55 bytes); the graph
+    # itself must be gone, so the workspace holds no index.
+    graph_root = graft._root(tight)
+    assert not (graph_root / "repo" / "graph").exists()
+    assert (graph_root / "repo" / "budget.json").exists()

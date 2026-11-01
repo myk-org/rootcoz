@@ -1643,10 +1643,15 @@ async def test_corrupt_ciphertext_never_becomes_an_api_key(
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "corrupt.db")
     await storage.init_db()
     await storage.set_server_ai_credential("google", SECRET, "admin")
-    # Corrupt the stored ciphertext (bit rot / rotated encryption key).
+    # Corrupt the stored ciphertext (bit rot / rotated encryption key) by
+    # flipping a payload character. Appending text is not corruption: a Fernet
+    # token is base64, and CPython 3.14.2 ignores bytes after the padding, so
+    # "token || 'corrupted'" still decrypts there while 3.14.10 rejects it. The
+    # test must fail the HMAC on every interpreter, so it edits the body.
     async with storage._connect_db() as db:
         await db.execute(
-            "UPDATE server_ai_providers SET api_key_enc = api_key_enc || 'corrupted'"
+            "UPDATE server_ai_providers SET api_key_enc ="
+            " substr(api_key_enc, 1, 20) || 'X' || substr(api_key_enc, 22)"
         )
         await db.commit()
 

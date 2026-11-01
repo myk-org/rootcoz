@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import selectors
 import shutil
 import signal
@@ -12,24 +13,40 @@ import stat
 import subprocess
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from concurrent.futures import ThreadPoolExecutor
-from itertools import islice
 from pathlib import Path
 from typing import Any
 
+from rootcoz import get_child_logger
 from rootcoz.engine.http_mcp import _workspace_install_lock
 
-MAX_FILES = 2000
-MAX_BYTES = 20 * 1024 * 1024
+logger = get_child_logger(__name__)
+
 MAX_SECONDS = 30
 BUILD_SECONDS = 120
 FAILED_RETRY_SECONDS = 300
 QUERY_SECONDS = 45
 MAX_OUTPUT = 1024 * 1024
-MAX_GRAPH_BYTES = 40 * 1024 * 1024
-MAX_WORKSPACE_GRAPH_BYTES = 256 * 1024 * 1024
-GRAFT = "/app/sidecar-helper/node_modules/.bin/graft"
+
+
+def max_workspace_graph_bytes() -> int:
+    """Current workspace graph budget in bytes.
+
+    The single graph size cap: the graphs plus the source snapshots they are
+    built from, for every clone in one workspace. It lives in Settings
+    (Server Settings -> Workspace -> "Workspace graph budget (MB)", last tab)
+    with a 1 GB default, because kubev2v/forklift alone occupies ~608 MB
+    (557 MB snapshot + 48 MB graph). The former per-repo and per-snapshot caps
+    are gone on purpose: they silently excluded the largest, most relevant
+    clones.
+    """
+    from rootcoz.config import get_settings
+
+    return int(get_settings().max_workspace_graph_mb) * 1024 * 1024
+
+
+TRAIL = "/app/sidecar-helper/node_modules/.bin/trail"
 
 
 class _Limit(ValueError):
@@ -48,7 +65,7 @@ def _disk_size(
     limit: int | None = None,
     reject_symlinks: bool = True,
 ) -> int:
-    limit = MAX_GRAPH_BYTES if limit is None else limit
+    limit = None if limit is None else limit
     total = 0
     for directory, dirs, files in os.walk(path, followlinks=False):
         for file in dirs + files:
@@ -91,33 +108,61 @@ def _bounded(
     cwd: Path,
     timeout: float,
     disk: Path | None = None,
+    max_output: int | None = -1,
+    discard_output: bool = False,
 ) -> bytes:
+    if max_output == -1:
+        max_output = MAX_OUTPUT
     process = subprocess.Popen(
         argv,
         cwd=cwd,
         env={**os.environ, "DO_NOT_TRACK": "1"},
-        stdout=subprocess.PIPE,
+        # A build narrates one line per file; nobody reads it, so it is discarded
+        # rather than buffered (27k lines for a large clone).
+        stdout=subprocess.DEVNULL if discard_output else subprocess.PIPE,
         stderr=subprocess.DEVNULL,
         start_new_session=True,
     )
     output = bytearray()
     deadline = time.monotonic() + timeout
+
+    def _check_limits() -> None:
+        if time.monotonic() >= deadline:
+            raise TimeoutError("subprocess timed out")
+        if (
+            disk is not None
+            and _disk_size(disk, deadline, limit=None) > max_workspace_graph_bytes()
+        ):
+            raise _Limit("workspace graph budget")
+
     try:
+        if discard_output:
+            # Nothing to read: stdout is DEVNULL, so process.stdout is None and
+            # the selector loop below cannot run (that assert used to fire on
+            # every build). Poll the child instead.
+            while process.poll() is None:
+                _check_limits()
+                time.sleep(0.05)
+            if process.wait() != 0:
+                raise subprocess.CalledProcessError(process.returncode, argv)
+            return b""
         with selectors.DefaultSelector() as selector:
             assert process.stdout is not None
             selector.register(process.stdout, selectors.EVENT_READ)
             while selector.get_map() or process.poll() is None:
-                if time.monotonic() >= deadline:
-                    raise TimeoutError("subprocess timed out")
-                if disk is not None and _disk_size(disk, deadline) > MAX_GRAPH_BYTES:
-                    raise _Limit("graph disk limit")
+                _check_limits()
                 for key, _ in selector.select(
                     timeout=min(0.1, max(0.001, deadline - time.monotonic()))
                 ):
-                    chunk = os.read(key.fd, min(65536, MAX_OUTPUT + 1 - len(output)))
+                    room = (
+                        65536
+                        if max_output is None
+                        else min(65536, max_output + 1 - len(output))
+                    )
+                    chunk = os.read(key.fd, room)
                     if chunk:
                         output.extend(chunk)
-                        if len(output) > MAX_OUTPUT:
+                        if max_output is not None and len(output) > max_output:
                             raise _Limit("subprocess output limit")
                     else:
                         selector.unregister(key.fileobj)
@@ -133,10 +178,32 @@ def _bounded(
 
 
 def _run(
-    argv: list[str], *, cwd: Path, timeout: float, disk: Path | None = None
+    argv: list[str],
+    *,
+    cwd: Path,
+    timeout: float,
+    disk: Path | None = None,
+    max_output: int | None = -1,
+    discard_output: bool = False,
 ) -> subprocess.CompletedProcess[str]:
+    """Run one trail command.
+
+    ``max_output`` bounds the reply a *query* returns; a build prints a line per
+    file, so it passes ``None`` — capping it made every large repository fail
+    with a misleading "limit" reason.
+    """
     return subprocess.CompletedProcess(
-        argv, 0, _bounded(argv, cwd=cwd, timeout=timeout, disk=disk).decode("utf-8"), ""
+        argv,
+        0,
+        _bounded(
+            argv,
+            cwd=cwd,
+            timeout=timeout,
+            disk=disk,
+            max_output=max_output,
+            discard_output=discard_output,
+        ).decode("utf-8"),
+        "",
     )
 
 
@@ -177,29 +244,121 @@ def _remaining(deadline: float) -> float:
     return remaining
 
 
-def _sources(repo: Path, deadline: float | None = None) -> dict[str, str]:
-    """Git-visible files only; hash actual content, including ignored-file changes in the listing."""
-    listing = _bounded(
+#: (path, mtime_ns, size) -> sha256. A query re-reads the manifest twice; without
+#: this cache every query hashed the entire clone twice, which for a 557 MB
+#: forklift snapshot is the whole query budget. Only changed files are re-hashed.
+_HASH_CACHE: dict[tuple[str, int, int], str] = {}
+_HASH_CACHE_LIMIT = 200_000
+
+
+def _file_digest(source: Path, info: os.stat_result, deadline: float | None) -> str:
+    """Hash one file in chunks, never loading it whole into memory."""
+    key = (str(source), info.st_mtime_ns, info.st_size)
+    cached = _HASH_CACHE.get(key)
+    if cached is not None:
+        return cached
+    digest = hashlib.sha256()
+    with open(
+        source,
+        "rb",
+        opener=lambda p, flags: os.open(p, flags | os.O_NOFOLLOW | os.O_NONBLOCK),
+    ) as src:
+        while True:
+            if deadline is not None:
+                _remaining(deadline)
+            chunk = src.read(1024 * 1024)
+            if not chunk:
+                break
+            digest.update(chunk)
+    value = digest.hexdigest()
+    if len(_HASH_CACHE) >= _HASH_CACHE_LIMIT:
+        _HASH_CACHE.clear()
+    _HASH_CACHE[key] = value
+    return value
+
+
+def _iter_nul_stream(
+    fd: int, deadline_at: float, *, deadline: float | None = None
+) -> Iterator[bytes]:
+    """Yield NUL-separated records from *fd*, waiting no longer than the deadline.
+
+    The descriptor is switched to non-blocking and awaited with ``select``, so a
+    producer that stops writing cannot park the caller inside ``os.read`` past
+    its timeout — which is exactly what a blocking read did: a stalled ``git``
+    left an indexing worker (or a graph query) hanging instead of timing out.
+    """
+    os.set_blocking(fd, False)
+    pending = b""
+    with selectors.DefaultSelector() as selector:
+        selector.register(fd, selectors.EVENT_READ)
+        while True:
+            now = time.monotonic()
+            if now >= deadline_at or (deadline is not None and now >= deadline):
+                raise TimeoutError("source scan timed out")
+            wait = min(0.1, max(0.001, min(deadline_at, deadline or deadline_at) - now))
+            if not selector.select(timeout=wait):
+                continue
+            try:
+                chunk = os.read(fd, 65536)
+            except BlockingIOError:
+                continue
+            if not chunk:
+                break
+            pending += chunk
+            *complete, pending = pending.split(b"\0")
+            for raw in complete:
+                if raw:
+                    yield raw
+    if pending:
+        yield pending
+
+
+def _iter_listed_paths(repo: Path, deadline: float | None) -> Iterator[Path]:
+    """Yield git-visible paths as they stream, never holding the whole listing.
+
+    ``git ls-files`` for a large clone is hundreds of kilobytes of NUL-separated
+    paths; buffering it whole was the last unbounded allocation in the scan. The
+    stream is split as it arrives, so only the current path is resident, and the
+    wait is bounded (see ``_iter_nul_stream``).
+    """
+    timeout = min(MAX_SECONDS, _remaining(deadline)) if deadline else MAX_SECONDS
+    process = subprocess.Popen(
         ["git", "ls-files", "-co", "--exclude-standard", "-z"],
         cwd=repo,
-        timeout=min(MAX_SECONDS, _remaining(deadline)) if deadline else MAX_SECONDS,
+        env={**os.environ, "DO_NOT_TRACK": "1"},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.DEVNULL,
+        start_new_session=True,
     )
-    if len(listing) > MAX_OUTPUT or len(listing.split(b"\0")) - 1 > MAX_FILES:
-        raise _Limit("file listing limit")
-    result = {}
-    total = 0
+    try:
+        assert process.stdout is not None
+        for raw in _iter_nul_stream(
+            process.stdout.fileno(),
+            time.monotonic() + timeout,
+            deadline=deadline,
+        ):
+            try:
+                yield _relative(os.fsdecode(raw))
+            except ValueError:
+                continue
+        if process.wait() != 0:
+            raise subprocess.CalledProcessError(process.returncode, "git ls-files")
+    finally:
+        if process.poll() is None:
+            process.kill()
+        if process.stdout is not None:
+            process.stdout.close()
+
+
+def _sources(repo: Path, deadline: float | None = None) -> dict[str, str]:
+    """Git-visible files only; hash actual content, including ignored-file changes in the listing."""
+    result: dict[str, str] = {}
     started = time.monotonic()
-    for raw in listing.split(b"\0"):
+    for relative in _iter_listed_paths(repo, deadline):
         if time.monotonic() - started > MAX_SECONDS or (
-            deadline and time.monotonic() >= deadline
+            deadline is not None and time.monotonic() >= deadline
         ):
             raise TimeoutError("source scan timed out")
-        if not raw:
-            continue
-        try:
-            relative = _relative(os.fsdecode(raw))
-        except ValueError:
-            continue
         source = _safe_file(repo, relative)
         if source is None:
             continue
@@ -211,15 +370,7 @@ def _sources(repo: Path, deadline: float | None = None) -> dict[str, str]:
             info = os.fstat(src.fileno())
             if not stat.S_ISREG(info.st_mode):
                 continue
-            total += info.st_size
-            if total > MAX_BYTES:
-                raise _Limit("source byte limit")
-            data = src.read(MAX_BYTES + 1)
-            if len(data) != info.st_size:
-                raise ValueError("source changed")
-            if deadline is not None:
-                _remaining(deadline)
-            result[str(relative)] = hashlib.sha256(data).hexdigest()
+        result[str(relative)] = _file_digest(source, info, deadline)
     if deadline is not None:
         _remaining(deadline)
     return result
@@ -233,8 +384,7 @@ def _source_stamp(repo: Path) -> str:
         timeout=MAX_SECONDS,
     )
     digest = hashlib.sha256(listing)
-    # ponytail: for >MAX_FILES, content-only edits beyond the cap retry after backoff.
-    for raw in islice(listing.split(b"\0"), MAX_FILES):
+    for raw in listing.split(b"\0"):
         if not raw:
             continue
         try:
@@ -309,10 +459,7 @@ def _index_one(
             if destination.exists():
                 shutil.rmtree(destination)
             return {"status": "skipped", "reason": "no eligible files"}
-        if (
-            manifest == _manifest(destination)
-            and _disk_size(destination) <= MAX_GRAPH_BYTES
-        ):
+        if manifest == _manifest(destination):
             return {"status": "unchanged", "files": len(manifest)}
         if reserve is not None and not reserve(destination):
             return {"status": "skipped", "reason": "workspace graph budget"}
@@ -328,35 +475,58 @@ def _index_one(
                 raise ValueError("source changed")
             target = snapshot / path
             target.parent.mkdir(parents=True, exist_ok=True)
-            with open(
-                source,
-                "rb",
-                opener=lambda p, flags: os.open(
-                    p, flags | os.O_NOFOLLOW | os.O_NONBLOCK
-                ),
-            ) as src:
-                data = src.read(MAX_BYTES + 1)
-            if hashlib.sha256(data).hexdigest() != digest:
+            digest_hasher = hashlib.sha256()
+            with (
+                open(
+                    source,
+                    "rb",
+                    opener=lambda p, flags: os.open(
+                        p, flags | os.O_NOFOLLOW | os.O_NONBLOCK
+                    ),
+                ) as src,
+                open(target, "wb") as dst,
+            ):
+                # Streamed, not read whole: a single large tracked binary used to
+                # be loaded into memory here, four repositories at a time.
+                while True:
+                    chunk = src.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    digest_hasher.update(chunk)
+                    dst.write(chunk)
+                    total += len(chunk)
+            if digest_hasher.hexdigest() != digest:
                 raise ValueError("source changed")
-            total += len(data)
-            if total > MAX_BYTES:
-                raise _Limit("source byte limit")
-            target.write_bytes(data)
         _run(
-            [GRAFT, "--dir", str(graph), "build", str(snapshot)],
+            [TRAIL, "--dir", str(graph), "build", str(snapshot)],
             cwd=snapshot,
             timeout=BUILD_SECONDS,
             disk=destination,
+            discard_output=True,
         )
-        if (
-            not graph.is_dir()
-            or graph.is_symlink()
-            or _disk_size(destination) > MAX_GRAPH_BYTES
-        ):
+        if not graph.is_dir() or graph.is_symlink():
             raise _Limit("graph disk limit")
         if _sources(repo) != manifest:
             raise ValueError("source changed")
         (destination / "manifest.json").write_text(json.dumps(manifest))
+        # The budget is a hard bound, not an admission hint: a build admitted
+        # while under budget can finish over it. Drop this graph rather than
+        # leave the workspace above the limit, and record why so the next run
+        # retries only after the backoff.
+        with _workspace_install_lock(_root(repo.parent)):
+            workspace_used = _workspace_graph_size(_root(repo.parent))
+        if workspace_used > max_workspace_graph_bytes():
+            shutil.rmtree(destination, ignore_errors=True)
+            destination.mkdir(parents=True, exist_ok=True)
+            (destination / "budget.json").write_text(
+                json.dumps(
+                    {
+                        "budget_used": workspace_used,
+                        "retry_after": time.time() + FAILED_RETRY_SECONDS,
+                    }
+                )
+            )
+            return {"status": "skipped", "reason": "workspace graph budget"}
         return {"status": "indexed", "files": len(manifest), "bytes": total}
     except (OSError, ValueError, TimeoutError, subprocess.SubprocessError) as exc:
         if not destination.is_symlink():
@@ -401,11 +571,17 @@ def index_repositories(
         with gate:
             used = _workspace_graph_size(root)
             old = _disk_size(destination, limit=0) if destination.exists() else 0
-            growth = sum(
-                max(0, MAX_GRAPH_BYTES - _disk_size(item, limit=0))
+            budget = max_workspace_graph_bytes()
+            # A graph already there is replaced, not added: subtract it. Charge
+            # the peers that are mid-build too — their partial snapshots already
+            # occupy disk, and ignoring them let four workers overshoot the
+            # budget and then drop graphs that would have fitted.
+            inflight = sum(
+                _disk_size(item, limit=0, reject_symlinks=False)
                 for item in reservations
+                if item.exists() and not item.is_symlink()
             )
-            if used - old + growth + MAX_GRAPH_BYTES > MAX_WORKSPACE_GRAPH_BYTES:
+            if used - old + inflight >= budget:
                 # Persist a bounded skip, without overwriting an existing graph.
                 marker = json.dumps(
                     {
@@ -419,11 +595,7 @@ def index_repositories(
                     if previous.is_file() and not previous.is_symlink()
                     else 0
                 )
-                if (
-                    not previous.is_symlink()
-                    and used + growth + len(marker) - previous_size
-                    <= MAX_WORKSPACE_GRAPH_BYTES
-                ):
+                if not previous.is_symlink() and len(marker) - previous_size <= budget:
                     destination.mkdir(parents=True, exist_ok=True)
                     previous.write_text(marker)
                 return False
@@ -434,7 +606,9 @@ def index_repositories(
         with gate:
             reservations.discard(destination)
 
-    with _workspace_install_lock(workspace), ThreadPoolExecutor(max_workers=2) as pool:
+    # Analysis waits for this before its first AI call, so the width matters:
+    # two at a time turned five clones into a ~6 minute pause per job.
+    with _workspace_install_lock(workspace), ThreadPoolExecutor(max_workers=4) as pool:
         futures = {
             name: pool.submit(
                 _index_one, workspace, root, name, cloned_repos[name], reserve, release
@@ -450,11 +624,17 @@ def index_repositories(
     return results
 
 
-def log_index_outcomes(outcomes: dict[str, Any]) -> None:
-    """Log only safe repository scope and known result categories, never paths or output."""
-    import logging
+def log_index_outcomes(outcomes: dict[str, Any], *, job_id: str = "") -> str | None:
+    """Log only safe repository scope and known result categories, never paths or output.
 
-    logger = logging.getLogger(__name__)
+    One aggregated line per run, carrying the job id. Two reasons, both learned
+    the hard way: per-repo lines share one format string, so simple_logger's
+    duplicate filter collapses them into a single "repeated N times" entry; and
+    this runs inside the indexing thread pool, where the ``[job_id=…]`` context
+    is not propagated, so without the id the outcome cannot be attributed to a
+    run at all. The id also makes each line distinct, which defeats the filter.
+    """
+    parts: list[str] = []
     for name, result in outcomes.items():
         # Only log the name when it matches the safe clone naming convention.
         scope = (
@@ -481,7 +661,35 @@ def log_index_outcomes(outcomes: dict[str, Any]) -> None:
             reason = "error" if status == "failed" else "none"
         if result.get("truncated"):
             reason = "limit"
-        logger.info("graft_index scope=%s status=%s category=%s", scope, status, reason)
+        parts.append(f"{scope}:{status}:{reason}")
+    if not parts:
+        return None
+    # The rendered line is returned as well as logged: tests assert on the value
+    # instead of attaching handlers to a logger whose plumbing (propagate=False,
+    # duplicate filter) made those assertions order-dependent.
+    line = f"graft_index job={job_id or '-'} {len(parts)} repo(s): {' '.join(parts)}"
+    logger.info(line)
+    return line
+
+
+#: A trailing line reference after a path: ``path:12`` or ``path:L10-L20``.
+#: Both forms are real upstream output (``ask``/``grep`` emit ranges since the
+#: code map gained spans), so the validator accepts and preserves either.
+_POINTER_SUFFIX_RE = re.compile(r"^(?:\d+|L\d+(?:-L\d+)?)$")
+
+
+def _is_allowed_location(relative: str, allowed: set[str]) -> bool:
+    """Whether a repo-relative location is indexed content.
+
+    Files must be in the snapshot manifest. Directories are allowed when they
+    contain indexed files: ``map`` groups its output by directory (``dirs[].
+    path`` can be ``simple_logger/tests``, which is not itself a manifest
+    entry), and rejecting those made ``repo_map`` fail outright.
+    """
+    if relative in allowed:
+        return True
+    prefix = relative.rstrip("/") + "/"
+    return any(path.startswith(prefix) for path in allowed)
 
 
 def _validate_paths(
@@ -514,9 +722,9 @@ def _validate_paths(
                     raise ValueError("invalid pointer")
                 text, sep, suffix = item, "", ""
                 if not item.startswith("/") and item not in allowed:
-                    prefix, separator, line = item.rpartition(":")
-                    if separator and prefix in allowed and line.isdecimal():
-                        text, sep, suffix = prefix, separator, line
+                    prefix, _, line = item.rpartition(":")
+                    if prefix and _POINTER_SUFFIX_RE.match(line):
+                        text, sep, suffix = prefix, ":", line
                 candidate = Path(text)
                 if candidate.is_absolute():
                     try:
@@ -524,7 +732,11 @@ def _validate_paths(
                     except ValueError:
                         raise ValueError("invalid pointer") from None
                 relative = _relative(str(candidate))
-                if str(relative) not in allowed or _safe_file(repo, relative) is None:
+                if not _is_allowed_location(str(relative), allowed):
+                    raise ValueError("invalid pointer")
+                # A file must still be a regular file under the clone; a
+                # directory location has no file to check.
+                if str(relative) in allowed and _safe_file(repo, relative) is None:
                     raise ValueError("invalid pointer")
                 out[key] = str(relative) + sep + suffix
             else:
@@ -559,15 +771,8 @@ def query_repo(
         "trace_calls",
         "check_freshness",
         "repo_map",
-        "graft_find_code",
-        "graft_find_all",
-        "graft_file_api",
-        "graft_trace_calls",
-        "graft_check_freshness",
-        "graft_repo_map",
     ):
         return {"status": "skipped", "reason": "unknown tool"}
-    tool = tool.removeprefix("graft_")
     repo = workspace / scope
     root = _root(workspace)
     destination = root / scope
@@ -602,8 +807,8 @@ def _query_locked(
             return {"status": "skipped", "reason": "repository not indexed"}
         if _sources(repo, deadline) != manifest:
             return {"status": "stale", "reason": "source changed; use read/grep"}
-        if _disk_size(destination, deadline) > MAX_GRAPH_BYTES:
-            raise _Limit("graph disk limit")
+        if _disk_size(destination, deadline, limit=None) > max_workspace_graph_bytes():
+            raise _Limit("workspace graph budget")
         if tool == "find_code":
             argv = ["ask", "--json", params["query"]]
             limit = params.get("limit")
@@ -630,7 +835,8 @@ def _query_locked(
                 raise ValueError("invalid traversal")
             argv += ["--direction", direction, "--depth", str(depth)]
         elif tool == "check_freshness":
-            argv = ["check", "--json"]
+            # trail-code moved freshness off `check` (now a learnings diff) to this.
+            argv = ["build", "--check", "--json"]
         else:
             limit = params.get("max_dirs", 16)
             if type(limit) is not int or not 1 <= limit <= 30:
@@ -651,7 +857,7 @@ def _query_locked(
                 raise ValueError("invalid query")
         output = _run(
             [
-                GRAFT,
+                TRAIL,
                 "--dir",
                 str(graph),
                 *argv,
@@ -667,8 +873,8 @@ def _query_locked(
         data = _validate_paths(
             json.loads(output), snapshot, repo, set(manifest), deadline
         )
-        if _disk_size(destination, deadline) > MAX_GRAPH_BYTES:
-            raise _Limit("graph disk limit")
+        if _disk_size(destination, deadline, limit=None) > max_workspace_graph_bytes():
+            raise _Limit("workspace graph budget")
         if _sources(repo, deadline) != manifest:
             return {"status": "stale", "reason": "source changed; use read/grep"}
         _remaining(deadline)
@@ -724,23 +930,18 @@ def roots_needing_index(
                     if not budget.is_symlink() and not budget.parent.is_symlink()
                     else None
                 )
-                if (
-                    isinstance(skipped, dict)
-                    and time.time() < skipped["retry_after"]
-                    and _workspace_graph_size(root)
-                    - _disk_size(root / name, limit=0, reject_symlinks=False)
-                    + MAX_GRAPH_BYTES
-                    > MAX_WORKSPACE_GRAPH_BYTES
-                ):
+                if isinstance(skipped, dict) and time.time() < skipped["retry_after"]:
+                    # Respect the marker while it is live. It used to apply only
+                    # when the *other* graphs already exceeded the budget, so a
+                    # repo that itself pushed the workspace over was re-queued on
+                    # every pass and rebuilt (full snapshot + 120s build) only to
+                    # be dropped again.
                     continue
             except OSError, ValueError, KeyError, TypeError:
                 pass
             if manifest is not None:
                 try:
-                    if (
-                        _sources(repo) != manifest
-                        or _disk_size(root / name) > MAX_GRAPH_BYTES
-                    ):
+                    if _sources(repo) != manifest:
                         result[name] = repo
                 except OSError, ValueError, TimeoutError, subprocess.SubprocessError:
                     result[name] = repo  # Never expose a stale graph.

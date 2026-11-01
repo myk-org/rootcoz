@@ -1306,7 +1306,9 @@ class TestChatCleanup:
         repo = workspace / "repo"
         repo.mkdir(parents=True)
         register_workspace(workspace, {"repo": repo}, job_id="job")
-        assert workspace.resolve() in _sessions
+        # The registry is keyed by (workspace, job) so concurrent sessions on
+        # one workspace keep their own credentials.
+        assert any(key[0] == workspace.resolve() for key in _sessions)
         graph = _root(workspace)
         graph.mkdir()
         (graph / "snapshot").write_text("source")
@@ -1501,7 +1503,9 @@ async def test_index_chat_repositories_discovers_and_logs_off_loop(
 
     monkeypatch.setattr(graft_http, "cloned_graph_roots", discover)
     monkeypatch.setattr(graft, "index_repositories", index)
-    monkeypatch.setattr(graft, "log_index_outcomes", seen.append)
+    monkeypatch.setattr(
+        graft, "log_index_outcomes", lambda outcomes, **_: seen.append(outcomes)
+    )
     await main_mod._index_chat_repositories(tmp_path)
     assert seen == [
         (tmp_path, original_discover(tmp_path)),
@@ -1675,13 +1679,9 @@ async def test_followup_indexes_only_new_or_missing_graph(
     elif graph_state == "missing":
         (graft._root(workspace) / "repo" / "manifest.json").unlink()
 
-    indexes = []
+    # The single builder always asks for indexing and decides inside whether a
+    # build is needed, so the observable is the build itself, not the call.
 
-    async def fake_index(path, repos=None):
-        indexes.append((path, repos))
-        graft.index_repositories(path, repos or {})
-
-    monkeypatch.setattr(main_mod, "_index_chat_repositories", fake_index)
     monkeypatch.setattr(
         "rootcoz.engine.chat.ensure_chat_workspace", lambda *a, **k: workspace
     )
@@ -1692,9 +1692,10 @@ async def test_followup_indexes_only_new_or_missing_graph(
         "rootcoz.engine.chat.chat_with_ai", AsyncMock(return_value=(True, "ok", "sess"))
     )
     monkeypatch.setattr(
-        "rootcoz.engine.chat.install_http_tools_mcp_best_effort_async", AsyncMock()
+        "rootcoz.engine.session_tools.install_http_tools_mcp_best_effort_async",
+        AsyncMock(),
     )
-    monkeypatch.setattr("rootcoz.engine.chat.graph_http_tools", lambda *a: [])
+    monkeypatch.setattr("rootcoz.engine.graft_http.graph_http_tools", lambda *a: [])
     monkeypatch.setattr(
         "rootcoz.sources.chat_workspace.setup_ci_build_workspace",
         AsyncMock(return_value=False),
@@ -1733,12 +1734,15 @@ async def test_followup_indexes_only_new_or_missing_graph(
         ai_model_override="sonnet-4",
         username="alice",
     )
-    assert len(indexes) == expected_indexes
-    if indexes:
-        assert set(indexes[0][1]) == ({"other"} if graph_state == "new" else {"repo"})
+    # One build for the initial graph; a follow-up adds exactly one more when
+    # the graph is new, changed or missing, and none when it is current.
     assert len(builds) == (1 if graph_state == "indexed" else 2)
+    if graph_state == "new":
+        assert "other" in builds[-1][-1]
     if graph_state == "indexed":
-        assert scans == [repo]
+        # The freshness check hashes the repo to prove it is current; what
+        # matters is that no rebuild was triggered (asserted on builds above).
+        assert repo in scans
     if graph_state == "changed":
         assert (
             graft._root(workspace) / "repo" / "snapshot" / "a.py"

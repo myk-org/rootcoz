@@ -213,6 +213,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
     | `PUBLIC_BASE_URL` | unset | string | no | no | yes |
     | `ADDITIONAL_REPOS` | empty | string | no | no | yes |
     | `MAX_CONCURRENT_REPO_CLONES` | `10` | integer > 0 | no | no | yes |
+   | `MAX_WORKSPACE_GRAPH_MB` | `1024` | integer 16–1048576 | no | no | yes |
     | `WAIT_FOR_COMPLETION` | `true` | boolean | no | no | yes |
     | `POLL_INTERVAL_MINUTES` | `2` | integer > 0 | no | no | yes |
     | `MAX_WAIT_MINUTES` | `0` | integer ≥ 0 | no | no | yes |
@@ -220,6 +221,9 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
     | `LOG_LEVEL` | empty (`INFO`) | string | no | **yes** | yes (restart) |
     | `ENABLE_AUTO_REVIEW` | `true` | boolean | no | no | yes |
     | `AUTO_PUSH_EXPORTERS` | empty | string | no | no | yes |
+
+   `MAX_WORKSPACE_GRAPH_MB` is the **only** size limit on the code-graph indexes and lives on its own **Workspace** tab (last on the page, because it is rarely touched). It caps the total bytes of all graphs in one analysis workspace; a graph that would push the workspace over the budget is dropped and retried after a backoff, so the workspace never ends above the limit. The budget covers the graphs **and** the source snapshots they are built from: `kubev2v/forklift` alone indexes 27,257 files in ~28s and occupies ~608 MB (a 557 MB source snapshot plus a 48 MB graph), which is why the default is 1 GB. The former per-repository (40 MB) and per-snapshot (2,000 files / 20 MB) caps were removed deliberately: they silently excluded the largest and most relevant clones — `kubev2v/forklift` alone is 27,257 tracked files occupying ~608 MB of workspace. Raise this value for very large repositories. Run the analysis from the container and the indexer (`trail`) ships with it; a host install must provide it itself.
+
 
     `ADDITIONAL_REPOS` uses `name:url,name:url`, with an optional `:ref` and `@token` suffix per entry; names must be unique. `MAX_WAIT_MINUTES=0` means wait indefinitely. `PUBLIC_BASE_URL` is the only origin RootCoz will build absolute links from — request `Host` and `X-Forwarded-*` headers are never trusted, which is what blocks host-header injection in result and tracker links.
 
@@ -343,6 +347,7 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `PUBLIC_BASE_URL` | `public_base_url` | Server | runtime |
 | `ADDITIONAL_REPOS` | `additional_repos` | Server | runtime |
 | `MAX_CONCURRENT_REPO_CLONES` | `max_concurrent_repo_clones` | Server | runtime |
+| `MAX_WORKSPACE_GRAPH_MB` | `max_workspace_graph_mb` | Workspace | runtime |
 | `WAIT_FOR_COMPLETION` | `wait_for_completion` | Server | runtime |
 | `POLL_INTERVAL_MINUTES` | `poll_interval_minutes` | Server | runtime |
 | `MAX_WAIT_MINUTES` | `max_wait_minutes` | Server | runtime |
