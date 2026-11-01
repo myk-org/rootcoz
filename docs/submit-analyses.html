@@ -409,8 +409,9 @@
 </table></div>
 <p>Two consequences worth knowing before you submit. A run with fifty failing tests that share three distinct errors makes three AI calls, not fifty. And if every group fails, the job is marked <code>failed</code> rather than quietly reporting partial results.</p>
 <blockquote>
-<p><strong>Note:</strong> Analysis sessions run with a restricted tool set (<code>read</code>, <code>ls</code>, <code>find</code>, <code>grep</code>). The AI can read the cloned workspace but cannot run shell commands.</p>
+<p><strong>Note:</strong> Analysis sessions run with a restricted builtin tool set (<code>read</code>, <code>ls</code>, <code>find</code>, <code>grep</code>). The AI can read the cloned workspace but cannot run shell commands.</p>
 </blockquote>
+<p>Alongside those builtins the AI gets the read-only <strong>code graph</strong> of the cloned repos — <code>graft_repo_map</code>, <code>graft_find_code</code>, <code>graft_find_all</code>, <code>graft_file_api</code>, <code>graft_trace_calls</code>, <code>graft_check_freshness</code> — the same six tools chat sessions use. They answer "where is this symbol, who calls it, what changed" from an index instead of reading file after file, which is what keeps a long analysis from spending its budget on rediscovery. The tools are custom tools, not builtins: nothing writable or executable is added, the index is built from a bounded snapshot of each clone, and when a graph is stale, partial or missing the AI falls back to <code>read</code>/<code>grep</code> instead of failing.</p>
 <ol>
 <li><strong>Check the result.</strong></li>
 </ol>

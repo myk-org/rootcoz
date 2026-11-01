@@ -79,7 +79,9 @@ This queues a JUnit XML analysis from the terminal and prints the job ID to poll
 
    Two consequences worth knowing before you submit. A run with fifty failing tests that share three distinct errors makes three AI calls, not fifty. And if every group fails, the job is marked `failed` rather than quietly reporting partial results.
 
-   > **Note:** Analysis sessions run with a restricted tool set (`read`, `ls`, `find`, `grep`). The AI can read the cloned workspace but cannot run shell commands.
+   > **Note:** Analysis sessions run with a restricted builtin tool set (`read`, `ls`, `find`, `grep`). The AI can read the cloned workspace but cannot run shell commands.
+
+   Alongside those builtins the AI gets the read-only **code graph** of the cloned repos — `graft_repo_map`, `graft_find_code`, `graft_find_all`, `graft_file_api`, `graft_trace_calls`, `graft_check_freshness` — the same six tools chat sessions use. They answer "where is this symbol, who calls it, what changed" from an index instead of reading file after file, which is what keeps a long analysis from spending its budget on rediscovery. The tools are custom tools, not builtins: nothing writable or executable is added, the index is built from a bounded snapshot of each clone, and when a graph is stale, partial or missing the AI falls back to `read`/`grep` instead of failing.
 
 6. **Check the result.**
 

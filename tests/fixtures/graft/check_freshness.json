@@ -1,0 +1,50 @@
+{
+  "context": {
+    "ok": false,
+    "missing": true,
+    "contentDrift": [],
+    "removed": [],
+    "coverage": [],
+    "indexDrift": []
+  },
+  "graph": {
+    "ok": true,
+    "missing": false,
+    "added": [],
+    "removed": [],
+    "changed": [],
+    "stale": [],
+    "pending": 28,
+    "pendingIds": [
+      "simple_logger/__init__.py",
+      "simple_logger/logger.py",
+      "simple_logger/logger.py#DuplicateFilter",
+      "simple_logger/logger.py#DuplicateFilter.filter",
+      "simple_logger/logger.py#DuplicateFilter.redact",
+      "simple_logger/logger.py#RedactingFilter",
+      "simple_logger/logger.py#RedactingFilter.__init__",
+      "simple_logger/logger.py#RedactingFilter.filter",
+      "simple_logger/logger.py#RedactingFilter.redact",
+      "simple_logger/logger.py#SimpleLogger",
+      "simple_logger/logger.py#SimpleLogger.__init__",
+      "simple_logger/logger.py#SimpleLogger.hash",
+      "simple_logger/logger.py#SimpleLogger.step",
+      "simple_logger/logger.py#SimpleLogger.success",
+      "simple_logger/logger.py#WrapperLogFormatter",
+      "simple_logger/logger.py#WrapperLogFormatter.formatTime",
+      "simple_logger/logger.py#get_logger",
+      "simple_logger/tests/__init__.py",
+      "simple_logger/tests/test_logger.py",
+      "simple_logger/tests/test_logger.py#basic_logger",
+      "simple_logger/tests/test_logger.py#logger_with_mask",
+      "simple_logger/tests/test_logger.py#logger_with_mask_and_pattarns",
+      "simple_logger/tests/test_logger.py#test_disable_console_logging",
+      "simple_logger/tests/test_logger.py#test_duplicate_filter_with_percent_placeholders",
+      "simple_logger/tests/test_logger.py#test_existing_logger",
+      "simple_logger/tests/test_logger.py#test_levels",
+      "simple_logger/tests/test_logger.py#test_mask_sensitive",
+      "simple_logger/tests/test_logger.py#tmp_log_file"
+    ],
+    "nodes": 28
+  }
+}

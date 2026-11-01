@@ -1,0 +1,29 @@
+{
+  "query": "/tmp/trail-outside/.ws2.rootcoz-graft/psl/snapshot",
+  "mode": "lexical",
+  "hits": [
+    {
+      "kind": "symbol",
+      "title": "get_logger · function",
+      "pointer": "simple_logger/logger.py:L87-L168",
+      "snippet": "def get_logger( name: str, level: int | str = logging.INFO, filename: str | None = None, console: bool = True, file_max_bytes: int = 104857600, file_backup_count: int = 20, mask_sensitive: bool = False, duplicate_filter: bool = True, mask_sensitive_patterns: list[str] | None = None, force_color: bool | None = None, ) -> logging.Logger",
+      "score": 0.5
+    },
+    {
+      "kind": "symbol",
+      "title": "tmp_log_file · function",
+      "pointer": "simple_logger/tests/test_logger.py:L9-L10",
+      "snippet": "def tmp_log_file(tmp_path_factory)",
+      "score": 0.4237739705690308
+    },
+    {
+      "kind": "symbol",
+      "title": "basic_logger · function",
+      "pointer": "simple_logger/tests/test_logger.py:L14-L15",
+      "snippet": "def basic_logger(tmp_log_file)",
+      "score": 0.16915030477241522
+    }
+  ],
+  "coverage": 0,
+  "coverageStrong": 0
+}

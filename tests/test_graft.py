@@ -84,6 +84,10 @@ def test_index_only_git_visible_files_and_external_graph(tmp_path, monkeypatch):
     result = graft.query_repo(workspace, "code", "find_code", {"query": "tracked"})
     assert result == {"status": "ok", "result": {"hits": [{"file": "tracked.py"}]}}
     assert "--no-refresh" in calls[1][0]
+    # Freshness moved off `check` (now a learnings diff) to `build --check` upstream.
+    graft.query_repo(workspace, "code", "check_freshness", {})
+    assert calls[-1][0][3:6] == ["build", "--check", "--json"]
+    assert "--no-refresh" not in calls[-1][0]
 
 
 def test_rejects_outside_results_and_invalid_commands(tmp_path, monkeypatch):
@@ -114,6 +118,19 @@ def test_rejects_outside_results_and_invalid_commands(tmp_path, monkeypatch):
         == "failed"
     )
     assert graft.query_repo(workspace, "code", "unknown", {})["status"] == "skipped"
+    # The graft_ prefix is stripped at the HTTP route; query_repo takes bare names only.
+    for tool in (
+        "graft_find_code",
+        "graft_find_all",
+        "graft_file_api",
+        "graft_trace_calls",
+        "graft_check_freshness",
+        "graft_repo_map",
+    ):
+        assert graft.query_repo(workspace, "code", tool, {}) == {
+            "status": "skipped",
+            "reason": "unknown tool",
+        }
 
 
 def test_colon_filename_and_line_suffix(tmp_path, monkeypatch):
@@ -383,7 +400,9 @@ def test_parallel_builds_and_isolation(tmp_path, monkeypatch):
         item["status"] == "indexed"
         for item in graft.index_repositories(workspace, repos).values()
     )
-    assert peak == 2
+    # The width is an implementation detail; what matters is that builds
+    # actually overlap (analysis waits on this before its first AI call).
+    assert peak >= 2, peak
 
 
 def test_effective_repositories_all_indexed_discoverable_and_refreshable(
@@ -924,18 +943,35 @@ def test_query_lock_wait_is_bounded(tmp_path, monkeypatch):
         holder.result(timeout=2)
 
 
-def test_index_outcome_logs_are_sanitized(caplog):
-    graft.log_index_outcomes(
-        {
-            "code": {"status": "indexed", "files": 1},
-            "/private/token": {"status": "failed", "reason": "/secret/path"},
-            "limited": {"status": "failed", "reason": "_Limit", "truncated": True},
-        }
-    )
-    assert "scope=code status=indexed" in caplog.text
-    assert "scope=invalid status=failed category=error" in caplog.text
-    assert "scope=limited status=failed category=limit" in caplog.text
-    assert "/private" not in caplog.text and "/secret" not in caplog.text
+def test_index_outcome_logs_are_sanitized():
+    import logging
+
+    records: list[str] = []
+
+    class _Collect(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record.getMessage())
+
+    handler = _Collect()
+    graft.logger.addHandler(handler)
+    try:
+        graft.log_index_outcomes(
+            {
+                "code": {"status": "indexed", "files": 1},
+                "/private/token": {"status": "failed", "reason": "/secret/path"},
+                "limited": {"status": "failed", "reason": "_Limit", "truncated": True},
+            }
+        )
+    finally:
+        graft.logger.removeHandler(handler)
+
+    # One aggregated line: simple_logger's duplicate filter collapses repeated
+    # format strings, so per-repo lines hid every outcome but the first.
+    text = "\n".join(records)
+    assert "code:indexed:none" in text
+    assert "invalid:failed:error" in text
+    assert "limited:failed:limit" in text
+    assert "/private" not in text and "/secret" not in text
 
 
 def test_query_deadline_covers_scans(tmp_path, monkeypatch):

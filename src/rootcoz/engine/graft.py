@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import selectors
 import shutil
 import signal
@@ -18,7 +19,10 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
+from rootcoz import get_child_logger
 from rootcoz.engine.http_mcp import _workspace_install_lock
+
+logger = get_child_logger(__name__)
 
 MAX_FILES = 2000
 MAX_BYTES = 20 * 1024 * 1024
@@ -29,7 +33,7 @@ QUERY_SECONDS = 45
 MAX_OUTPUT = 1024 * 1024
 MAX_GRAPH_BYTES = 40 * 1024 * 1024
 MAX_WORKSPACE_GRAPH_BYTES = 256 * 1024 * 1024
-GRAFT = "/app/sidecar-helper/node_modules/.bin/graft"
+TRAIL = "/app/sidecar-helper/node_modules/.bin/trail"
 
 
 class _Limit(ValueError):
@@ -343,7 +347,7 @@ def _index_one(
                 raise _Limit("source byte limit")
             target.write_bytes(data)
         _run(
-            [GRAFT, "--dir", str(graph), "build", str(snapshot)],
+            [TRAIL, "--dir", str(graph), "build", str(snapshot)],
             cwd=snapshot,
             timeout=BUILD_SECONDS,
             disk=destination,
@@ -434,7 +438,9 @@ def index_repositories(
         with gate:
             reservations.discard(destination)
 
-    with _workspace_install_lock(workspace), ThreadPoolExecutor(max_workers=2) as pool:
+    # Analysis waits for this before its first AI call, so the width matters:
+    # two at a time turned five clones into a ~6 minute pause per job.
+    with _workspace_install_lock(workspace), ThreadPoolExecutor(max_workers=4) as pool:
         futures = {
             name: pool.submit(
                 _index_one, workspace, root, name, cloned_repos[name], reserve, release
@@ -451,10 +457,13 @@ def index_repositories(
 
 
 def log_index_outcomes(outcomes: dict[str, Any]) -> None:
-    """Log only safe repository scope and known result categories, never paths or output."""
-    import logging
+    """Log only safe repository scope and known result categories, never paths or output.
 
-    logger = logging.getLogger(__name__)
+    One aggregated line: simple_logger's duplicate filter collapses repeated
+    format strings, so per-repo lines would show up as a single "repeated N
+    times" entry and hide the other repositories' outcomes.
+    """
+    parts: list[str] = []
     for name, result in outcomes.items():
         # Only log the name when it matches the safe clone naming convention.
         scope = (
@@ -481,7 +490,29 @@ def log_index_outcomes(outcomes: dict[str, Any]) -> None:
             reason = "error" if status == "failed" else "none"
         if result.get("truncated"):
             reason = "limit"
-        logger.info("graft_index scope=%s status=%s category=%s", scope, status, reason)
+        parts.append(f"{scope}:{status}:{reason}")
+    if parts:
+        logger.info("graft_index %d repo(s): %s", len(parts), " ".join(parts))
+
+
+#: A trailing line reference after a path: ``path:12`` or ``path:L10-L20``.
+#: Both forms are real upstream output (``ask``/``grep`` emit ranges since the
+#: code map gained spans), so the validator accepts and preserves either.
+_POINTER_SUFFIX_RE = re.compile(r"^(?:\d+|L\d+(?:-L\d+)?)$")
+
+
+def _is_allowed_location(relative: str, allowed: set[str]) -> bool:
+    """Whether a repo-relative location is indexed content.
+
+    Files must be in the snapshot manifest. Directories are allowed when they
+    contain indexed files: ``map`` groups its output by directory (``dirs[].
+    path`` can be ``simple_logger/tests``, which is not itself a manifest
+    entry), and rejecting those made ``repo_map`` fail outright.
+    """
+    if relative in allowed:
+        return True
+    prefix = relative.rstrip("/") + "/"
+    return any(path.startswith(prefix) for path in allowed)
 
 
 def _validate_paths(
@@ -514,9 +545,9 @@ def _validate_paths(
                     raise ValueError("invalid pointer")
                 text, sep, suffix = item, "", ""
                 if not item.startswith("/") and item not in allowed:
-                    prefix, separator, line = item.rpartition(":")
-                    if separator and prefix in allowed and line.isdecimal():
-                        text, sep, suffix = prefix, separator, line
+                    prefix, _, line = item.rpartition(":")
+                    if prefix and _POINTER_SUFFIX_RE.match(line):
+                        text, sep, suffix = prefix, ":", line
                 candidate = Path(text)
                 if candidate.is_absolute():
                     try:
@@ -524,7 +555,11 @@ def _validate_paths(
                     except ValueError:
                         raise ValueError("invalid pointer") from None
                 relative = _relative(str(candidate))
-                if str(relative) not in allowed or _safe_file(repo, relative) is None:
+                if not _is_allowed_location(str(relative), allowed):
+                    raise ValueError("invalid pointer")
+                # A file must still be a regular file under the clone; a
+                # directory location has no file to check.
+                if str(relative) in allowed and _safe_file(repo, relative) is None:
                     raise ValueError("invalid pointer")
                 out[key] = str(relative) + sep + suffix
             else:
@@ -559,15 +594,8 @@ def query_repo(
         "trace_calls",
         "check_freshness",
         "repo_map",
-        "graft_find_code",
-        "graft_find_all",
-        "graft_file_api",
-        "graft_trace_calls",
-        "graft_check_freshness",
-        "graft_repo_map",
     ):
         return {"status": "skipped", "reason": "unknown tool"}
-    tool = tool.removeprefix("graft_")
     repo = workspace / scope
     root = _root(workspace)
     destination = root / scope
@@ -630,7 +658,8 @@ def _query_locked(
                 raise ValueError("invalid traversal")
             argv += ["--direction", direction, "--depth", str(depth)]
         elif tool == "check_freshness":
-            argv = ["check", "--json"]
+            # trail-code moved freshness off `check` (now a learnings diff) to this.
+            argv = ["build", "--check", "--json"]
         else:
             limit = params.get("max_dirs", 16)
             if type(limit) is not int or not 1 <= limit <= 30:
@@ -651,7 +680,7 @@ def _query_locked(
                 raise ValueError("invalid query")
         output = _run(
             [
-                GRAFT,
+                TRAIL,
                 "--dir",
                 str(graph),
                 *argv,

@@ -545,7 +545,8 @@ def test_analysis_does_not_index_unusable_graphs() -> None:
     ):
         assert "index_repositories" not in inspect.getsource(analysis)
         assert "copy_rootcoz_pi_resources" in inspect.getsource(analysis)
-    assert "index_repositories" in inspect.getsource(main._index_chat_repositories)
+    # Indexing now has one guarded entry point for every session kind.
+    assert "index_workspace_graph" in inspect.getsource(main._index_chat_repositories)
     assert "_index_chat_repositories" in inspect.getsource(
         main._init_chat_under_barrier
     )

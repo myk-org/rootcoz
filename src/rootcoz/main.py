@@ -63,6 +63,7 @@ from starlette.middleware.gzip import GZipMiddleware
 from rootcoz import storage
 from rootcoz import transcripts as sidecar_transcripts
 from rootcoz.ai_client import (
+    CHAT_BUILTIN_TOOLS,
     _cached_catalog_provider_ids,
     _get_model_catalog,
     _setup_usage_recorder,
@@ -19282,13 +19283,16 @@ async def get_chat_history(
 async def _index_chat_repositories(
     workspace: Path, repos: dict[str, Path] | None = None
 ) -> None:
-    """Index cloned chat roots off the event loop and record outcomes."""
-    from rootcoz.engine.graft import index_repositories, log_index_outcomes
-    from rootcoz.engine.graft_http import cloned_graph_roots
+    """Index cloned chat roots through the one guarded entry point.
 
-    if repos is None:
-        repos = await asyncio.to_thread(cloned_graph_roots, workspace)
-    log_index_outcomes(await asyncio.to_thread(index_repositories, workspace, repos))
+    Chat used to build graphs here directly, so a later session build scanned
+    the workspace a second time. Both now go through
+    ``session_tools.index_workspace_graph``, which builds once per workspace and
+    makes concurrent callers wait instead of repeating the work.
+    """
+    from rootcoz.engine.session_tools import index_workspace_graph
+
+    await index_workspace_graph(workspace)
 
 
 async def _init_chat_under_barrier(
@@ -19393,9 +19397,15 @@ async def _init_chat_under_barrier(
             )
 
         _raise_if_chat_job_deleted(job_id)
-        from rootcoz.engine.chat import graph_http_tools
+        from rootcoz.engine.session_tools import build_session_tools
 
-        custom_tools.extend(graph_http_tools(workspace, job_id))
+        session = await build_session_tools(
+            builtin=list(CHAT_BUILTIN_TOOLS),
+            custom_base=custom_tools,
+            workspace=workspace,
+            job_id=job_id,
+        )
+        custom_tools = session.custom
         credential_generation = (
             None
             if credential_source == "server"
@@ -19925,7 +19935,6 @@ async def _process_chat_message(
         chat_with_ai,
         clone_chat_repos,
         ensure_chat_workspace,
-        install_http_tools_mcp_best_effort_async,
     )
     from rootcoz.sources.chat_workspace import setup_ci_build_workspace
 
@@ -20082,12 +20091,15 @@ async def _process_chat_message(
                                 username,
                             )
 
-                        from rootcoz.engine.chat import graph_http_tools
+                        from rootcoz.engine.session_tools import build_session_tools
 
-                        custom_tools.extend(graph_http_tools(workspace, job_id))
-                        await install_http_tools_mcp_best_effort_async(
-                            workspace, custom_tools
+                        session = await build_session_tools(
+                            builtin=list(CHAT_BUILTIN_TOOLS),
+                            custom_base=custom_tools,
+                            workspace=workspace,
+                            job_id=job_id,
                         )
+                        custom_tools = session.custom
 
                         abort_key = f"{job_id}:{username}"
                         abort_signal = _get_chat_abort_signal(abort_key)

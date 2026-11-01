@@ -445,17 +445,6 @@ def build_analysis_history_tools(
     ]
 
 
-def graph_http_tools(workspace: Path | None, job_id: str) -> list[dict[str, Any]]:
-    """Use only previously indexed clones in this AI session's own workspace."""
-    if workspace is None:
-        return []
-    from rootcoz.engine.graft import indexed_roots
-    from rootcoz.engine.graft_http import register_workspace
-
-    roots = indexed_roots(workspace)
-    return register_workspace(workspace, roots, job_id=job_id) if roots else []
-
-
 def analysis_http_tools(
     *,
     server_url: str,

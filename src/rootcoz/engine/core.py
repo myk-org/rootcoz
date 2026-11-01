@@ -33,8 +33,8 @@ from rootcoz.config import Settings, get_settings, parse_additional_repos
 from rootcoz.engine.chat import analysis_http_tools
 from rootcoz.engine.http_mcp import (
     cleanup_http_tools_mcp,
-    install_http_tools_mcp_best_effort_async,
 )
+from rootcoz.engine.session_tools import build_session_tools
 from rootcoz.logging_context import get_log_file
 from rootcoz.models import (
     AdditionalRepo,
@@ -1753,6 +1753,7 @@ async def _call_ai_with_retry(
     auth_header: str,
     call_type: str = "primary",
     system_prompt: str = "",
+    repos: dict[str, Path] | None = None,
 ) -> AIResult:
     """Call AI with retry on empty response and record usage.
 
@@ -1775,12 +1776,24 @@ async def _call_ai_with_retry(
     Returns:
         The AIResult from the AI call.
     """
-    custom_tools = analysis_http_tools(
-        server_url=server_url,
+    tools = await build_session_tools(
+        builtin=list(ANALYSIS_BUILTIN_TOOLS),
+        custom_base=analysis_http_tools(
+            server_url=server_url,
+            job_id=job_id,
+            auth_header=auth_header,
+        ),
+        workspace=workspace_dir,
         job_id=job_id,
-        auth_header=auth_header,
+        repos=repos,
     )
-    await install_http_tools_mcp_best_effort_async(workspace_dir, custom_tools)
+    custom_tools = tools.custom
+    if custom_tools:
+        # A tool nobody advertises is a tool nobody calls: the first live run
+        # had all six graph tools and made zero queries.
+        from rootcoz.engine.session_tools import graph_prompt_hint
+
+        prompt += graph_prompt_hint(tools)
 
     call_kwargs: dict[str, Any] = {
         "ai_provider": ai_provider,
@@ -2010,6 +2023,9 @@ async def run_single_ai_analysis(
             "Failure to read console output is a violation of your instructions."
         )
 
+    # The clones live side by side under one workspace; that is the directory
+    # the code graph indexes, whichever dir the AI itself runs in.
+
     # Ensure a workspace dir for failure-details / cross-reference files
     workspace_dir = repo_path or console_dir
     if workspace_dir is None:
@@ -2080,6 +2096,7 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
                 ai_provider=ai_provider,
                 ai_model=ai_model,
                 workspace_dir=workspace_dir,
+                repos=additional_repos,
                 ai_call_timeout=ai_call_timeout,
                 server_url=server_url,
                 job_id=job_id,
@@ -2661,6 +2678,9 @@ async def run_orchestrated_analysis(
         workspace_dir = temp_dir
 
     try:
+        # Where the clones live, for the code graph: the AI's cwd may be a
+        # per-run directory rather than the workspace holding them.
+
         # Copy built-in agents to workspace
         copy_builtin_agents_to_workspace(workspace_dir)
 
@@ -2691,6 +2711,7 @@ async def run_orchestrated_analysis(
                 ai_provider=ai_provider,
                 ai_model=ai_model,
                 workspace_dir=workspace_dir,
+                repos=additional_repos,
                 ai_call_timeout=ai_call_timeout,
                 server_url="",  # routing doesn't need history
                 job_id=job_id,
@@ -2821,6 +2842,7 @@ async def run_orchestrated_analysis(
                 ai_provider=ai_provider,
                 ai_model=ai_model,
                 workspace_dir=workspace_dir,
+                repos=additional_repos,
                 ai_call_timeout=ai_call_timeout,
                 server_url="",  # cross-failure doesn't need history
                 job_id=job_id,

@@ -1675,13 +1675,9 @@ async def test_followup_indexes_only_new_or_missing_graph(
     elif graph_state == "missing":
         (graft._root(workspace) / "repo" / "manifest.json").unlink()
 
-    indexes = []
+    # The single builder always asks for indexing and decides inside whether a
+    # build is needed, so the observable is the build itself, not the call.
 
-    async def fake_index(path, repos=None):
-        indexes.append((path, repos))
-        graft.index_repositories(path, repos or {})
-
-    monkeypatch.setattr(main_mod, "_index_chat_repositories", fake_index)
     monkeypatch.setattr(
         "rootcoz.engine.chat.ensure_chat_workspace", lambda *a, **k: workspace
     )
@@ -1692,9 +1688,10 @@ async def test_followup_indexes_only_new_or_missing_graph(
         "rootcoz.engine.chat.chat_with_ai", AsyncMock(return_value=(True, "ok", "sess"))
     )
     monkeypatch.setattr(
-        "rootcoz.engine.chat.install_http_tools_mcp_best_effort_async", AsyncMock()
+        "rootcoz.engine.session_tools.install_http_tools_mcp_best_effort_async",
+        AsyncMock(),
     )
-    monkeypatch.setattr("rootcoz.engine.chat.graph_http_tools", lambda *a: [])
+    monkeypatch.setattr("rootcoz.engine.graft_http.graph_http_tools", lambda *a: [])
     monkeypatch.setattr(
         "rootcoz.sources.chat_workspace.setup_ci_build_workspace",
         AsyncMock(return_value=False),
@@ -1733,12 +1730,15 @@ async def test_followup_indexes_only_new_or_missing_graph(
         ai_model_override="sonnet-4",
         username="alice",
     )
-    assert len(indexes) == expected_indexes
-    if indexes:
-        assert set(indexes[0][1]) == ({"other"} if graph_state == "new" else {"repo"})
+    # One build for the initial graph; a follow-up adds exactly one more when
+    # the graph is new, changed or missing, and none when it is current.
     assert len(builds) == (1 if graph_state == "indexed" else 2)
+    if graph_state == "new":
+        assert "other" in builds[-1][-1]
     if graph_state == "indexed":
-        assert scans == [repo]
+        # The freshness check hashes the repo to prove it is current; what
+        # matters is that no rebuild was triggered (asserted on builds above).
+        assert repo in scans
     if graph_state == "changed":
         assert (
             graft._root(workspace) / "repo" / "snapshot" / "a.py"

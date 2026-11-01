@@ -35,7 +35,6 @@ from rootcoz.engine.core import (
 )
 from rootcoz.engine.http_mcp import (
     cleanup_http_tools_mcp,
-    install_http_tools_mcp_best_effort_async,
 )
 from rootcoz.models import (
     AiConfigEntry,
@@ -565,12 +564,29 @@ async def analyze_failure_group_with_peers(
         peer_workspace = Path(tempfile.mkdtemp(prefix="rootcoz-peer-"))
         ephemeral_dirs.append(peer_workspace)
     failure_summary = _build_failure_summary(failures, error_signature, peer_workspace)
-    peer_custom_tools = analysis_http_tools(
-        server_url=server_url,
+    # Peer sessions read the same clones, so they get the same read-only code
+    # graph as the primary session, through the one builder every session kind
+    # uses (#384).
+    from rootcoz.engine.session_tools import build_session_tools
+
+    peer_tools = await build_session_tools(
+        builtin=list(ANALYSIS_BUILTIN_TOOLS),
+        custom_base=analysis_http_tools(
+            server_url=server_url,
+            job_id=job_id,
+            auth_header=auth_header,
+        ),
+        workspace=peer_workspace,
         job_id=job_id,
-        auth_header=auth_header,
+        repos=additional_repos,
     )
-    await install_http_tools_mcp_best_effort_async(peer_workspace, peer_custom_tools)
+    peer_custom_tools = peer_tools.custom
+    if peer_custom_tools:
+        from rootcoz.engine.session_tools import graph_prompt_hint
+
+        peer_prompt_hint = graph_prompt_hint(peer_tools)
+    else:
+        peer_prompt_hint = ""
     _, _, _, resources_section, _ = build_prompt_sections(
         custom_prompt,
         artifacts_context,
@@ -656,13 +672,18 @@ async def analyze_failure_group_with_peers(
                     for peer_idx, resp in prev_round_by_idx.items()
                     if peer_idx != idx
                 ]
-                peer_prompts[idx] = _build_peer_review_prompt(
-                    failure_summary=failure_summary,
-                    orchestrator_analysis=orchestrator_analysis_text,
-                    custom_prompt=custom_prompt,
-                    resources_section=resources_section,
-                    other_peer_responses=other_responses if other_responses else None,
-                    other_groups_file=other_groups_file,
+                peer_prompts[idx] = (
+                    _build_peer_review_prompt(
+                        failure_summary=failure_summary,
+                        orchestrator_analysis=orchestrator_analysis_text,
+                        custom_prompt=custom_prompt,
+                        resources_section=resources_section,
+                        other_peer_responses=(
+                            other_responses if other_responses else None
+                        ),
+                        other_groups_file=other_groups_file,
+                    )
+                    + peer_prompt_hint
                 )
 
             async def _call_peer(
