@@ -213,12 +213,33 @@ class TestV2Envelope:
         # No severity either — classification and severity are unrelated.
         assert "alert_type" not in attributes
 
-    def test_no_percent_wrapper(self):
-        """The v1 ``%%%`` markdown wrapper is gone — v2 takes free-form text."""
+    def test_markdown_is_wrapped_for_rendering(self):
+        """v2 renders Markdown only inside ``%%%`` — links were plain text without it.
+
+        The newlines are part of the contract: ``%%%`` glued to the body does
+        not open a Markdown block, which is exactly the regression a reviewer
+        saw in a live event (literal ``[label](url)`` instead of a link).
+        """
         for failure in (_failure(), _console_failure()):
             message = _message(_exporter()._build_event(_context(), failure))
-            assert "%%%" not in message, message
-            assert message.startswith("### ")
+            assert message.startswith("%%%\n"), message[:40]
+            assert message.endswith("\n%%%"), message[-40:]
+            # The body keeps its own markdown inside the wrapper.
+            assert "### " in message
+            assert "[analysis job-123]" in message or "### " in message
+
+    def test_truncation_never_eats_the_closing_marker(self):
+        """A body at Datadog's cap must still close the Markdown block."""
+        long_details = "x" * 5000
+        context = _context()
+        exporter = _exporter()
+        failure = _failure()
+        failure["analysis"] = {**failure.get("analysis", {}), "details": long_details}
+        message = _message(exporter._build_event(context, failure))
+        assert len(message) <= 4000
+        assert message.startswith("%%%\n")
+        assert message.endswith("\n%%%"), "closing marker was truncated away"
+        assert "… [truncated]" in message
 
     def test_timestamp_is_iso_8601(self):
         with patch("rootcoz.exporters.datadog.time.time", return_value=2_000_000.0):
@@ -526,8 +547,11 @@ class TestFieldLimits:
     def test_long_message_capped_at_4000(self):
         event = _exporter()._build_event(_context(), _failure(details="d" * 5000))
         message = _message(event)
+        # The cap covers the whole field, Markdown markers included.
         assert len(message) == 4000
-        assert message.endswith("… [truncated]")
+        assert message.startswith("%%%\n")
+        assert message.endswith("\n%%%")
+        assert "… [truncated]" in message
         # The head of the diagnosis survives.
         assert "### test_login_flow" in message
 
@@ -535,7 +559,9 @@ class TestFieldLimits:
         event = _exporter()._build_event(
             _context(), _console_failure() | {"analysis": {"details": "d" * 5000}}
         )
-        assert len(_message(event)) == 4000
+        message = _message(event)
+        assert len(message) == 4000
+        assert message.endswith("\n%%%")
 
 
 class TestHistoryClassificationsAndReviewers:

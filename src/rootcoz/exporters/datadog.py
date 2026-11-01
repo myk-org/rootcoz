@@ -106,6 +106,13 @@ _MESSAGE_MAX = 4000
 #: truncated title or message is never silent.
 _TRUNCATION_MARKER = "… [truncated]"
 
+#: Datadog renders Markdown in a v2 ``message`` only inside these markers, with
+#: the newlines exactly as written (datadogpy#614) — v2 did **not** drop the v1
+#: requirement. Without them the body shows literal ``**bold**`` and literal
+#: ``[label](url)`` text instead of a link.
+_MARKDOWN_OPEN = "%%%\n"
+_MARKDOWN_CLOSE = "\n%%%"
+
 #: v2 ``category`` is a required enum of ``change`` | ``alert``.  There is no
 #: generic "event" category, and a failed test is an alert.
 _EVENT_CATEGORY = "alert"
@@ -664,6 +671,10 @@ class DatadogExporter(Exporter):
         if details:
             lines += ["", "**AI diagnosis:**", "", details]
         message = "\n".join(lines)
+        # Wrap, then cap the body: truncating the wrapped string could cut the
+        # closing marker and turn the whole event back into plain text.
+        body_limit = _MESSAGE_MAX - len(_MARKDOWN_OPEN) - len(_MARKDOWN_CLOSE)
+        message = f"{_MARKDOWN_OPEN}{_truncate(message, body_limit)}{_MARKDOWN_CLOSE}"
 
         now = int(time.time())
         timestamp = context.analysis_timestamp or now
@@ -686,7 +697,7 @@ class DatadogExporter(Exporter):
                 "type": "event",
                 "attributes": {
                     "title": _truncate(title, _TITLE_MAX),
-                    "message": _truncate(message, _MESSAGE_MAX),
+                    "message": message,
                     "category": _EVENT_CATEGORY,
                     "timestamp": datetime.fromtimestamp(timestamp, UTC).strftime(
                         _TIMESTAMP_FORMAT
