@@ -323,11 +323,13 @@ class ReportPortalConfig(NamedTuple):
 def _greenwave_allow_ai_waivers_description() -> str:
     """Settings-UI description for ``greenwave_allow_ai_waivers``.
 
-    Imports the canonical identity lazily (``config`` is imported before
-    ``storage`` at application startup) so the description can never drift
-    from ``AI_SYSTEM_USERNAME``.
+    Reads the canonical identity from ``rootcoz.identity`` — a
+    dependency-free leaf module — because this runs while the ``Settings``
+    class body is being built, i.e. before ``rootcoz.storage`` has finished
+    importing (``storage`` -> ``comment_enrichment`` -> ``jira`` -> ``config``).
+    Importing ``rootcoz.storage`` here would close that cycle.
     """
-    from rootcoz.storage import AI_SYSTEM_USERNAME
+    from rootcoz.identity import AI_SYSTEM_USERNAME
 
     return (
         f"Allow auto-reviewed failures ({AI_SYSTEM_USERNAME}) to generate "

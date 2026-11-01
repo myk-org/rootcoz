@@ -12678,8 +12678,8 @@ class TestSubmitterAutoTag:
         assert "re-analyze" in new_result["tags"]  # system tag preserved
 
 
-class TestSanitizeControlChars:
-    """Tests for _sanitize_control_chars."""
+class TestStripControlChars:
+    """Tests for rootcoz.utils.strip_control_chars."""
 
     @pytest.mark.parametrize(
         "input_val, expected",
@@ -12704,8 +12704,8 @@ class TestSanitizeControlChars:
             "mixed_control",
         ],
     )
-    def test_sanitize_control_chars(self, input_val: str, expected: str) -> None:
-        from rootcoz.main import strip_control_chars
+    def test_strip_control_chars(self, input_val: str, expected: str) -> None:
+        from rootcoz.utils import strip_control_chars
 
         assert strip_control_chars(input_val) == expected
 
