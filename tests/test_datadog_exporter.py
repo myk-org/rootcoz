@@ -1276,6 +1276,23 @@ class TestSeriesScoreboard:
             assert _scope_id(entry["tags"]).startswith("rootcoz.scope_id:")
             assert entry["tags"][5] == category[0]
 
+    async def test_scope_id_is_the_full_sha256_of_the_scope_pair(self):
+        """The identity is the whole digest, not a truncation that can collide.
+
+        Computed from the documented input shape here rather than asserted as a
+        literal, so the test also pins the pair separator and ordering.
+        """
+        context = _context(
+            child_job_name="child job",
+            child_build_number=7,
+            failures=[_failure()],
+        )
+        _result, posts = await self._push(context)
+        expected = hashlib.sha256(b"child job\x007").hexdigest()
+        assert _scope_id(_series_posts(posts)[0]["json"]["series"][0]["tags"]) == (
+            f"rootcoz.scope_id:{expected}"
+        )
+
     async def test_unscoped_series_carry_no_scope_tags(self):
         _result, posts = await self._push(_context(failures=[_failure()]))
         joined = " ".join(

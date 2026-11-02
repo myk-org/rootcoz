@@ -25,12 +25,12 @@ tests in each category, zeros included: Datadog keeps the last value of a
 series it no longer receives, so a skipped category would leave the previous
 build's count in place and the dashboard would add both up. Their tag values
 are lowercase and identical to the event tags. A child-scoped push is its own
-series identity (parent job/build, the child scope, and a ``rootcoz.scope_id``
-hash of the pair — the readable ``child_job_name`` tag is lossy, so
-``linux/py311`` and ``linux_py311`` would otherwise share one series), so it
-never overwrites the parent build's scoreboard. The per-push ids stay on the
-events only — a tag that changes on every push double-counts the previous
-push *and* bills as a new custom metric.
+series identity (parent job/build, the child scope, and a full-SHA-256
+``rootcoz.scope_id`` hash of the pair — the readable ``child_job_name`` tag is
+lossy, so ``linux/py311`` and ``linux_py311`` would otherwise share one
+series), so it never overwrites the parent build's scoreboard. The per-push
+ids stay on the events only — a tag that changes on every push double-counts
+the previous push *and* bills as a new custom metric.
 
 Events carry a stable ``aggregation_key`` per analysis/test pair, a tag
 taxonomy (``service``, ``env``, ``tfa.stage``, ``tfa.classification``,
@@ -552,7 +552,9 @@ def _identity_tags(context: ExportContext) -> list[str]:
     resolves them as separate scopes. The pair therefore gets a hashed
     identity of its own (``rootcoz.scope_id``), stable across pushes of the
     same scope and collision-free across scopes; the readable tags stay for
-    filtering.
+    filtering. The hash is the full (64 hex chars) SHA-256 digest of the pair
+    — Datadog accepts far longer tag values, and shortening an identity whose
+    only purpose is uniqueness would just reintroduce the collision.
     """
     tags = [
         f"job_name:{sanitize_tag_value(context.job_name)}",
@@ -563,7 +565,7 @@ def _identity_tags(context: ExportContext) -> list[str]:
         child_build_number = int(context.child_build_number or 0)
         tags.append(f"child_build_number:{child_build_number}")
         scope = f"{context.child_job_name}\x00{child_build_number}"
-        digest = hashlib.sha256(scope.encode("utf-8")).hexdigest()[:16]
+        digest = hashlib.sha256(scope.encode("utf-8")).hexdigest()
         tags.append(f"rootcoz.scope_id:{digest}")
     return tags
 
@@ -605,10 +607,10 @@ class DatadogExporter(Exporter):
     Every push also sends one gauge series per failure category (zeros
     included) to the v2 series API, so the dashboard scoreboard has a current
     value for every category instead of a stale last one. A child-scoped push
-    tags its series with the child scope (plus a ``rootcoz.scope_id`` hash, so
-    two children whose names sanitize to the same tag value never share a
-    series), so it writes its own series rather than overwriting the parent
-    build's.
+    tags its series with the child scope (plus a full-SHA-256
+    ``rootcoz.scope_id`` hash, so two children whose names sanitize to the same
+    tag value never share a series), so it writes its own series rather than
+    overwriting the parent build's.
 
     Args:
         api_key: Datadog API key (32 hex chars, ``DD-API-KEY`` header).
@@ -926,11 +928,11 @@ class DatadogExporter(Exporter):
         are bounded.
 
         The metric tags are the job/build identity (plus the child scope and
-        its ``rootcoz.scope_id`` hash when the push is scoped, so a child never
-        overwrites the parent build's series and two children with identically
-        sanitized names never share one) plus the one category tag — never the
-        per-push ids, which would double-count and bill as a new custom metric
-        on every push.
+        its full-SHA-256 ``rootcoz.scope_id`` hash when the push is scoped, so
+        a child never overwrites the parent build's series and two children
+        with identically sanitized names never share one) plus the one category
+        tag — never the per-push ids, which would double-count and bill as a
+        new custom metric on every push.
 
         Args:
             context: Export context; ``failures`` is already scope-resolved.
