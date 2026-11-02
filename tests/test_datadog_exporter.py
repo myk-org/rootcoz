@@ -89,6 +89,12 @@ def _series_posts(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [post for post in posts if "series" in post["json"]]
 
 
+def _scope_id(tags: list[str]) -> str:
+    """The ``rootcoz.scope_id`` tag of one series (exactly one, by design)."""
+    (scope_id,) = [tag for tag in tags if tag.startswith("rootcoz.scope_id:")]
+    return scope_id
+
+
 def _series_values(payload: dict[str, Any], tag_prefix: str) -> dict[str, int]:
     """Map ``category -> gauge value`` for one metric family of a push."""
     return {
@@ -1261,13 +1267,14 @@ class TestSeriesScoreboard:
                 if tag.startswith(("tfa.classification:", "tfa.failure_pattern:"))
             ]
             assert len(category) == 1, entry
-            assert entry["tags"] == [
+            assert entry["tags"][:4] == [
                 "job_name:e2e-suite",
                 "build_number:42",
                 "child_job_name:child_job",
                 "child_build_number:7",
-                category[0],
             ]
+            assert _scope_id(entry["tags"]).startswith("rootcoz.scope_id:")
+            assert entry["tags"][5] == category[0]
 
     async def test_unscoped_series_carry_no_scope_tags(self):
         _result, posts = await self._push(_context(failures=[_failure()]))
@@ -1278,6 +1285,44 @@ class TestSeriesScoreboard:
         )
         assert "child_job_name:" not in joined
         assert "child_build_number:" not in joined
+        assert "rootcoz.scope_id:" not in joined
+
+    async def test_colliding_child_names_get_different_scope_ids(self):
+        """A lossy readable tag must not merge two distinct scopes into one series.
+
+        ``linux/py311`` and ``linux_py311`` both sanitize to ``linux_py311``;
+        same parent build and same child build number would otherwise be one
+        gauge series written by two different server-side scopes.
+        """
+        scope_ids = []
+        for child_job_name in ("linux/py311", "linux_py311"):
+            _result, posts = await self._push(
+                _context(
+                    child_job_name=child_job_name,
+                    child_build_number=3,
+                    failures=[_failure()],
+                )
+            )
+            tags = _series_posts(posts)[0]["json"]["series"][0]["tags"]
+            assert "child_job_name:linux_py311" in tags
+            scope_ids.append(_scope_id(tags))
+        assert scope_ids[0] != scope_ids[1]
+
+    async def test_scope_id_is_stable_across_pushes(self):
+        """The scope identity is derived from the scope, never from the push."""
+        scope_ids = []
+        for _ in range(2):
+            _result, posts = await self._push(
+                _context(
+                    child_job_name="child job",
+                    child_build_number=7,
+                    failures=[_failure()],
+                )
+            )
+            scope_ids.append(
+                _scope_id(_series_posts(posts)[0]["json"]["series"][0]["tags"])
+            )
+        assert scope_ids[0] == scope_ids[1]
 
     async def test_scoped_event_and_metric_scope_tags_are_the_same_string(self):
         """One helper renders the identity, so both sides carry the same scope."""
@@ -1301,6 +1346,13 @@ class TestSeriesScoreboard:
         ):
             assert tag in event_tags
             assert tag in metric_tags
+        event_scope_ids = [
+            tag for tag in event_tags if tag.startswith("rootcoz.scope_id:")
+        ]
+        assert len(event_scope_ids) == 1
+        assert {
+            tag for tag in metric_tags if tag.startswith("rootcoz.scope_id:")
+        } == set(event_scope_ids)
 
     async def test_timestamp_matches_the_event_timestamp(self):
         context = _context(failures=[_failure()])

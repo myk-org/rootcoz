@@ -25,8 +25,10 @@ tests in each category, zeros included: Datadog keeps the last value of a
 series it no longer receives, so a skipped category would leave the previous
 build's count in place and the dashboard would add both up. Their tag values
 are lowercase and identical to the event tags. A child-scoped push is its own
-series identity (parent job/build plus the child scope), so it never
-overwrites the parent build's scoreboard. The per-push ids stay on the
+series identity (parent job/build, the child scope, and a ``rootcoz.scope_id``
+hash of the pair — the readable ``child_job_name`` tag is lossy, so
+``linux/py311`` and ``linux_py311`` would otherwise share one series), so it
+never overwrites the parent build's scoreboard. The per-push ids stay on the
 events only — a tag that changes on every push double-counts the previous
 push *and* bills as a new custom metric.
 
@@ -542,6 +544,15 @@ def _identity_tags(context: ExportContext) -> list[str]:
     adds the pushed scope on top, so the scope is part of the series identity:
     a child push writes its own scoreboard series instead of overwriting the
     parent build's, and two different children never mix their counts.
+
+    The readable ``child_job_name`` tag is lossy by construction — Datadog's
+    tag charset has no escape character, so ``linux/py311`` and
+    ``linux_py311`` both sanitize to ``linux_py311``. A gauge is keyed on its
+    tags, so those two children would share one series even though the server
+    resolves them as separate scopes. The pair therefore gets a hashed
+    identity of its own (``rootcoz.scope_id``), stable across pushes of the
+    same scope and collision-free across scopes; the readable tags stay for
+    filtering.
     """
     tags = [
         f"job_name:{sanitize_tag_value(context.job_name)}",
@@ -549,7 +560,11 @@ def _identity_tags(context: ExportContext) -> list[str]:
     ]
     if context.child_job_name:
         tags.append(f"child_job_name:{sanitize_tag_value(context.child_job_name)}")
-        tags.append(f"child_build_number:{int(context.child_build_number or 0)}")
+        child_build_number = int(context.child_build_number or 0)
+        tags.append(f"child_build_number:{child_build_number}")
+        scope = f"{context.child_job_name}\x00{child_build_number}"
+        digest = hashlib.sha256(scope.encode("utf-8")).hexdigest()[:16]
+        tags.append(f"rootcoz.scope_id:{digest}")
     return tags
 
 
@@ -570,7 +585,12 @@ def _failure_analysis(failure: dict[str, Any]) -> dict[str, Any]:
 def _series_entry(
     *, metric: str, context: ExportContext, timestamp: int, value: int, tag: str
 ) -> dict[str, Any]:
-    """One gauge series: the job/build (and push scope) identity plus one tag."""
+    """One gauge series: the job/build (and push scope) identity plus one tag.
+
+    The identity includes ``rootcoz.scope_id`` for a child-scoped push, so two
+    children whose names sanitize to the same tag value still get their own
+    series.
+    """
     return {
         "metric": metric,
         "type": _SERIES_GAUGE,
@@ -585,8 +605,10 @@ class DatadogExporter(Exporter):
     Every push also sends one gauge series per failure category (zeros
     included) to the v2 series API, so the dashboard scoreboard has a current
     value for every category instead of a stale last one. A child-scoped push
-    tags its series with the child scope, so it writes its own series rather
-    than overwriting the parent build's.
+    tags its series with the child scope (plus a ``rootcoz.scope_id`` hash, so
+    two children whose names sanitize to the same tag value never share a
+    series), so it writes its own series rather than overwriting the parent
+    build's.
 
     Args:
         api_key: Datadog API key (32 hex chars, ``DD-API-KEY`` header).
@@ -903,10 +925,12 @@ class DatadogExporter(Exporter):
         carrying the raw lowercase value in their tag — only the metric series
         are bounded.
 
-        The metric tags are the job/build identity (plus the child scope when
-        the push is scoped, so a child never overwrites the parent build's
-        series) plus the one category tag — never the per-push ids, which
-        would double-count and bill as a new custom metric on every push.
+        The metric tags are the job/build identity (plus the child scope and
+        its ``rootcoz.scope_id`` hash when the push is scoped, so a child never
+        overwrites the parent build's series and two children with identically
+        sanitized names never share one) plus the one category tag — never the
+        per-push ids, which would double-count and bill as a new custom metric
+        on every push.
 
         Args:
             context: Export context; ``failures`` is already scope-resolved.
