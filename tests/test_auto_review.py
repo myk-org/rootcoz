@@ -154,6 +154,49 @@ class TestAutoPushScopes:
         }
         assert _auto_push_scopes(result_data) == []
 
+    def test_unscopable_failure_child_reported(self):
+        """Failure-bearing children that cannot be scoped are reported.
+
+        The scoped export context requires a strictly positive integer
+        build number — a child without one cannot be pushed, so the
+        traversal must surface it instead of silently dropping its
+        failures.
+        """
+        from rootcoz.main import _unscopable_failure_children
+
+        result_data = {
+            "failures": [{"test_name": "a"}],
+            "child_job_analyses": [
+                {
+                    "job_name": "zero-build",
+                    "build_number": 0,
+                    "failures": [{"test_name": "b"}],
+                }
+            ],
+        }
+        assert _auto_push_scopes(result_data) == [(None, None)]
+        unscopable = _unscopable_failure_children(result_data)
+        assert len(unscopable) == 1
+        assert "zero-build" in unscopable[0]
+        assert "build_number=0" in unscopable[0]
+
+    def test_build0_child_without_failures_not_reported(self):
+        """A child with no failures cannot be pushed anyway — not a blocker."""
+        from rootcoz.main import _unscopable_failure_children
+
+        result_data = {
+            "failures": [{"test_name": "a"}],
+            "child_job_analyses": [
+                {
+                    "job_name": "no-failures",
+                    "build_number": 0,
+                    "failures": [],
+                }
+            ],
+        }
+        assert _auto_push_scopes(result_data) == [(None, None)]
+        assert _unscopable_failure_children(result_data) == []
+
 
 class TestNormalizeForSignature:
     """Tests for normalize_for_signature()."""
@@ -1619,3 +1662,131 @@ class TestAutoPushAiReviewGate:
 
             mock_create.assert_called_with("reportportal", settings)
             assert mock_exporter.push.call_count == 2
+
+
+class TestAutoPushUnscopableChildren:
+    """Un-scopable failure-bearing children refuse auto-push (#183).
+
+    A child whose build number is not a strictly positive integer (or
+    whose job name is empty) cannot get an export scope, so its
+    failures would be silently dropped — the push must refuse instead.
+    """
+
+    @pytest.fixture
+    async def setup_test_db(self, temp_db_path: Path):
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            yield temp_db_path
+
+    @staticmethod
+    def _settings() -> Settings:
+        return Settings(
+            **{
+                k.lower(): v
+                for k, v in build_test_env(AUTO_PUSH_EXPORTERS="reportportal").items()
+            }
+        )
+
+    @staticmethod
+    def _mock_exporter() -> MagicMock:
+        mock_exporter = MagicMock()
+        mock_exporter.push = AsyncMock(return_value=MagicMock(details={"pushed": 1}))
+        mock_exporter.__enter__ = MagicMock(return_value=mock_exporter)
+        mock_exporter.__exit__ = MagicMock(return_value=False)
+        return mock_exporter
+
+    async def _seed_human_reviewed_root(self, temp_db_path: Path) -> None:
+        """Root failure with human-reviewed history → auto-reviewed."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "INSERT INTO failure_history "
+                    "(job_id, job_name, build_number, test_name, error_message, "
+                    "error_signature, classification, pattern) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("prev-job", "my-job", 100, "test_a", "", "sig-a", "", ""),
+                )
+                await _insert_human_review(db, "prev-job", "test_a")
+                await db.commit()
+
+    def _result_with_build0_child(self, child_failures: list) -> dict:
+        return {
+            "job_name": "my-job",
+            "build_number": 101,
+            "failures": [
+                {
+                    "test_name": "test_a",
+                    "error": "err",
+                    "error_signature": "sig-a",
+                    "analysis": {"classification": "INFRASTRUCTURE"},
+                }
+            ],
+            "child_job_analyses": [
+                {
+                    "job_name": "zero-build",
+                    "build_number": 0,
+                    "failures": child_failures,
+                }
+            ],
+        }
+
+    async def test_no_push_when_failure_child_cannot_be_scoped(self, setup_test_db):
+        """Build-0 child carrying failures → no auto-push, refusal logged."""
+        await self._seed_human_reviewed_root(setup_test_db)
+        result_data = self._result_with_build0_child(
+            [
+                {
+                    "test_name": "test_c",
+                    "error": "err",
+                    "error_signature": "sig-c",
+                    "analysis": {"classification": "INFRASTRUCTURE"},
+                }
+            ]
+        )
+        settings = self._settings()
+
+        from rootcoz.main import _auto_review_matching_failures
+
+        mock_exporter = self._mock_exporter()
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch(
+                "rootcoz.main._create_exporter", return_value=mock_exporter
+            ) as mock_create,
+            patch("rootcoz.main.logger") as mock_logger,
+        ):
+            await _auto_review_matching_failures(
+                "current-job", "my-job", 101, result_data, settings
+            )
+
+            mock_create.assert_not_called()
+            mock_exporter.push.assert_not_called()
+            refusals = [
+                c
+                for c in mock_logger.warning.call_args_list
+                if c.args and "cannot be scoped for export" in c.args[0]
+            ]
+            assert refusals, "Expected the un-scopable refusal log"
+            assert "zero-build" in refusals[0].args[2]
+
+    async def test_build0_child_without_failures_does_not_block(self, setup_test_db):
+        """A child with no failures cannot be pushed anyway — root pushes."""
+        await self._seed_human_reviewed_root(setup_test_db)
+        result_data = self._result_with_build0_child([])
+        settings = self._settings()
+
+        from rootcoz.main import _auto_review_matching_failures
+
+        mock_exporter = self._mock_exporter()
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch(
+                "rootcoz.main._create_exporter", return_value=mock_exporter
+            ) as mock_create,
+        ):
+            await _auto_review_matching_failures(
+                "current-job", "my-job", 101, result_data, settings
+            )
+
+            mock_create.assert_called_once_with("reportportal", settings)
+            assert mock_exporter.push.call_count == 1

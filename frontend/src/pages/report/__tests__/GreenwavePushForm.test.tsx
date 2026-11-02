@@ -97,7 +97,11 @@ describe('GreenwavePushForm', () => {
     expect(screen.getByText('Subject identifier is required when waivers are enabled.')).toBeDefined()
     expect(postSpy).not.toHaveBeenCalled()
 
+    // Typing the identifier voids the approval (it covers the exact payload),
+    // so the checkbox is re-checked after the edit.
     fireEvent.change(screen.getByLabelText(/subject identifier/i), { target: { value: 'my-nvr-1.0' } })
+    expect(screen.getByRole('button', { name: /push to greenwave/i })).toHaveProperty('disabled', true)
+    approve()
     expect(screen.getByRole('button', { name: /push to greenwave/i })).toHaveProperty('disabled', false)
   })
 
@@ -123,6 +127,14 @@ describe('GreenwavePushForm', () => {
     expect(screen.getByRole('button', { name: /push to greenwave/i })).toHaveProperty('disabled', true)
   })
 
+  it('voids the approval when the subject identifier is edited', () => {
+    renderForm()
+    approve()
+    expect(screen.getByRole('button', { name: /push to greenwave/i })).toHaveProperty('disabled', false)
+    fireEvent.change(screen.getByLabelText(/subject identifier/i), { target: { value: 'other-nvr-2.0' } })
+    expect(screen.getByRole('button', { name: /push to greenwave/i })).toHaveProperty('disabled', true)
+  })
+
   it('shows the final text in the read-only payload preview', () => {
     renderForm({ greenwaveWaivers: true })
     fireEvent.change(screen.getByLabelText(/subject identifier/i), { target: { value: 'my-nvr-1.0' } })
@@ -132,12 +144,37 @@ describe('GreenwavePushForm', () => {
     expect(screen.getByText('Waivers: on')).toBeDefined()
     expect(screen.getByText('Results: 3 failure(s)')).toBeDefined()
     expect(screen.getByText('Text: line one line two')).toBeDefined()
+    expect(screen.getByText('Systems: ResultsDB, WaiverDB')).toBeDefined()
   })
 
   it('shows waivers off and the job-name fallback in results-only mode', () => {
     renderForm()
     expect(screen.getByText('Subject identifier: (job name — results only)')).toBeDefined()
     expect(screen.getByText('Waivers: off')).toBeDefined()
+  })
+
+  it('claims only ResultsDB in results-only mode (waivers disabled)', () => {
+    renderForm()
+    expect(screen.getByText('Systems: ResultsDB')).toBeDefined()
+    expect(
+      screen.getByText(/It will be written to ResultsDB as part of this push\./),
+    ).toBeDefined()
+    expect(screen.queryByText(/WaiverDB/)).toBeNull()
+  })
+
+  it('claims only ResultsDB when waivers are enabled but no identifier is given', () => {
+    renderForm({ greenwaveWaivers: true })
+    expect(screen.getByText('Systems: ResultsDB')).toBeDefined()
+    expect(screen.queryByText(/WaiverDB/)).toBeNull()
+  })
+
+  it('claims ResultsDB and WaiverDB when waivers will be written', () => {
+    renderForm({ greenwaveWaivers: true })
+    fireEvent.change(screen.getByLabelText(/subject identifier/i), { target: { value: 'my-nvr-1.0' } })
+    expect(screen.getByText('Systems: ResultsDB, WaiverDB')).toBeDefined()
+    expect(
+      screen.getByText(/It will be written to ResultsDB, WaiverDB as part of this push\./),
+    ).toBeDefined()
   })
 
   it('surfaces the server 422 detail on failure', async () => {
@@ -152,12 +189,24 @@ describe('GreenwavePushForm', () => {
     expect(screen.getByText(/Failed to push to Greenwave/)).toBeDefined()
   })
 
-  it('calls onPushed after a successful roundtrip', async () => {
+  it('calls onPushed with the result after a successful roundtrip', async () => {
     const onPushed = vi.fn()
     renderForm({ onPushed })
     approve()
     fireEvent.click(screen.getByRole('button', { name: /push to greenwave/i }))
 
     await waitFor(() => expect(onPushed).toHaveBeenCalledOnce())
+    expect(onPushed).toHaveBeenCalledWith({ success: true, message: 'pushed', pushed: 3, waived: 2, skipped: 1 })
+  })
+
+  it('calls onPushed with null when the request fails', async () => {
+    postSpy.mockRejectedValueOnce(new ApiError(502, 'Bad Gateway', { detail: 'upstream down' }))
+    const onPushed = vi.fn()
+    renderForm({ onPushed })
+    approve()
+    fireEvent.click(screen.getByRole('button', { name: /push to greenwave/i }))
+
+    await waitFor(() => expect(onPushed).toHaveBeenCalledOnce())
+    expect(onPushed).toHaveBeenCalledWith(null)
   })
 })

@@ -3,6 +3,17 @@ import { api, extractApiDetail } from '@/lib/api'
 import type { ExporterPushResult } from '@/types'
 
 /**
+ * True only for a fully successful push: the request returned a body,
+ * the exporter reported success, and no per-failure errors came back.
+ * A hosting dialog may close on this; partial errors or a failed
+ * roundtrip must stay visible. Shared by every exporter caller so the
+ * success criterion is defined once.
+ */
+export function pushFullySucceeded(result: ExporterPushResult | null): boolean {
+  return !!result?.success && (result.errors?.length ?? 0) === 0
+}
+
+/**
  * Shared push hook for the generic exporter endpoint
  * `POST /results/{job_id}/push/{plugin}` — the ONLY place that builds this
  * request. Both push buttons and the all-reviewed prompt go through it.

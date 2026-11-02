@@ -8,7 +8,7 @@ import { useExporterPush } from './useExporterPush'
 import { useReportState } from '@/pages/report/reportState'
 import { proposeWaiverComment } from '@/lib/greenwaveComment'
 import { GreenwavePushResultView } from './GreenwavePushResultView'
-import type { FailureAnalysis } from '@/types'
+import type { ExporterPushResult, FailureAnalysis } from '@/types'
 
 interface GreenwavePushFormProps {
   jobId: string
@@ -17,15 +17,16 @@ interface GreenwavePushFormProps {
   childJobName?: string
   childBuildNumber?: number
   failures: FailureAnalysis[]
-  /** Called after a push roundtrip that returned a result. */
-  onPushed?: () => void
+  /** Called after a push roundtrip; receives the result (null when the request failed). */
+  onPushed?: (result: ExporterPushResult | null) => void
 }
 
 /**
  * The one Greenwave submit surface — rendered by both GreenwaveButton's
  * dialog and the all-reviewed prompt. The push is gated client-side behind
  * an explicit approval of the exact text that will be written to
- * ResultsDB/WaiverDB, so a request that would 422 is never fired.
+ * ResultsDB (and WaiverDB when waivers apply), so a request that would
+ * 422 is never fired.
  */
 export function GreenwavePushForm({
   jobId,
@@ -57,7 +58,11 @@ export function GreenwavePushForm({
     setApproved(false)
   }
 
-  const missingIdentifier = greenwaveWaiversEnabled && !subjectIdentifier.trim()
+  // One computation for every systems claim: waivers are only written when
+  // enabled AND a subject identifier is present.
+  const waiversWritten = greenwaveWaiversEnabled && !!subjectIdentifier.trim()
+  const systemsLabel = waiversWritten ? 'ResultsDB, WaiverDB' : 'ResultsDB'
+  const missingIdentifier = greenwaveWaiversEnabled && !waiversWritten
   const canPush = approved && !missingIdentifier
   const disabledReason = !approved
     ? 'Approve the text above to push.'
@@ -69,8 +74,11 @@ export function GreenwavePushForm({
     // Client-side gate — never fire a request that would 422.
     if (!canPush || pushing) return
     const res = await push({ subject_identifier: subjectIdentifier, waiver_comment: comment })
-    if (res && onPushed) onPushed()
+    onPushed?.(res)
   }
+
+  // The approval covers the exact payload — any edit voids it.
+  const onPayloadEdit = () => setApproved(false)
 
   return (
     <div className="space-y-4">
@@ -81,7 +89,10 @@ export function GreenwavePushForm({
         <Input
           id={`${uid}-subject`}
           value={subjectIdentifier}
-          onChange={(e) => setSubjectIdentifier(e.target.value)}
+          onChange={(e) => {
+            setSubjectIdentifier(e.target.value)
+            onPayloadEdit()
+          }}
           placeholder="build/artifact NVR"
         />
         <p className="text-xs text-text-tertiary">
@@ -98,16 +109,16 @@ export function GreenwavePushForm({
           value={comment}
           onChange={(e) => {
             setComment(e.target.value)
-            // The approval covers the exact text — editing voids it.
-            setApproved(false)
+            onPayloadEdit()
           }}
         />
       </div>
 
       <div className="space-y-1.5 rounded-md border border-border-default bg-surface-elevated p-3 font-mono text-xs text-text-secondary">
         <p>Subject identifier: {subjectIdentifier.trim() || '(job name — results only)'}</p>
-        <p>Waivers: {greenwaveWaiversEnabled && subjectIdentifier.trim() ? 'on' : 'off'}</p>
+        <p>Waivers: {waiversWritten ? 'on' : 'off'}</p>
         <p>Results: {failures.length} failure(s)</p>
+        <p>Systems: {systemsLabel}</p>
         <p>Text: {comment.replace(/\s+/g, ' ').trim()}</p>
       </div>
 
@@ -119,7 +130,7 @@ export function GreenwavePushForm({
           className="mt-0.5"
         />
         <span>
-          I approve the text above. It will be written to ResultsDB and WaiverDB as part of this push.
+          I approve the text above. It will be written to {systemsLabel} as part of this push.
         </span>
       </label>
 

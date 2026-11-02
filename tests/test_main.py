@@ -10858,6 +10858,24 @@ class TestAutoPushAutoReviewSettingValidation:
             "auto_push_exporters requires enable_auto_review" in e for e in errors
         )
 
+    async def test_unrelated_update_passes_on_invalid_preexisting_combination(
+        self,
+    ) -> None:
+        """A server already carrying the inert combination can still save.
+
+        The cross-field rule is scoped to updates that touch one of the
+        two keys — otherwise every unrelated batch (a Jenkins URL, a
+        token) would be rejected for a combination the admin is not
+        touching.
+        """
+        errors = await self._validate(
+            build_test_env(
+                AUTO_PUSH_EXPORTERS="reportportal", ENABLE_AUTO_REVIEW="false"
+            ),
+            {"jenkins_url": "https://jenkins.example.com"},
+        )
+        assert not errors
+
     async def test_accepts_valid_combinations(self) -> None:
         """Enabling auto-review, clearing auto-push, or neither — all fine."""
         # Turning auto-review ON while auto-push is configured

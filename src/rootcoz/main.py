@@ -3882,7 +3882,16 @@ async def _auto_review_matching_failures(
         auto_push_names = list(
             dict.fromkeys(n for n in _raw_names if n and n in _EXPORTER_CLASSES)
         )
-        if (
+        unscopable_children = _unscopable_failure_children(result_data)
+        if auto_push_names and total_failures > 0 and unscopable_children:
+            logger.warning(
+                "Auto-push skipped for job_id=%s: failure-bearing children "
+                "cannot be scoped for export (%s) — their failures cannot be "
+                "exported, so no automatic push runs",
+                job_id,
+                ", ".join(unscopable_children),
+            )
+        elif (
             auto_push_names
             and total_failures > 0
             and await _unreviewed_failure_count(job_id, result_data) == 0
@@ -6607,6 +6616,42 @@ def _push_scopes(
     return scopes
 
 
+def _unscopable_failure_children(result_data: dict[str, Any]) -> list[str]:
+    """Failure-bearing children that no export scope can address.
+
+    :func:`_push_scopes` only emits a child scope when the node has a job
+    name and a strictly positive build number — the scoped export context is
+    addressed by that pair. A child with failures and no usable pair can
+    therefore never be exported, and auto-push must not run at all: its
+    failures would be silently dropped while every other scope is pushed
+    under an AI attribution.
+
+    Returns:
+        One ``"child '<name>' (build_number=<raw>)"`` entry per offending
+        node, nested children included. Empty when every failure-bearing
+        child can be scoped.
+    """
+    found: list[str] = []
+
+    def _walk(children: list[Any]) -> None:
+        for child in children:
+            if not isinstance(child, dict):
+                continue
+            name = child.get("job_name") or ""
+            try:
+                build = int(child.get("build_number") or 0)
+            except (TypeError, ValueError):
+                build = 0
+            if child.get("failures") and (not name or build <= 0):
+                found.append(
+                    f"child {name!r} (build_number={child.get('build_number')!r})"
+                )
+            _walk(child.get("failed_children", []))
+
+    _walk(result_data.get("child_job_analyses", []))
+    return found
+
+
 def _all_failures_ai_reviewed(
     result_data: dict[str, Any], reviews: dict[str, dict[str, Any]]
 ) -> bool:
@@ -7885,6 +7930,46 @@ def _find_child_job_in_result(
         result_data.get("child_job_analyses", []),
         child_job_name,
         child_build_number,
+    )
+
+
+_ENCODE_URI_COMPONENT_SAFE = "-_.!~*'()"
+
+
+def _child_report_anchor(
+    children: list[dict[str, Any]],
+    child_job_name: str,
+    child_build_number: int,
+) -> str:
+    """URL fragment identifying a child job's report section.
+
+    Must stay in sync with ``frontend/src/lib/childJobHash.ts``
+    (``childJobHashId``): the report page assigns each child the id
+    ``child-<encodeURIComponent(job_name)>-<build_number>``, prefixed
+    with every ancestor's id joined by ``--``.  The child is located by
+    ``(child_job_name, child_build_number)`` via the shared
+    ``_child_matches`` matcher — no second matcher.  If the child is not
+    in the tree, the legacy single-segment anchor is kept rather than
+    emitting nothing (the caller has already rejected missing children;
+    this guards a stale scope drifting in later).
+    """
+
+    def _chain(nodes: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+        for node in nodes:
+            if _child_matches(node, child_job_name, child_build_number):
+                return [node]
+            nested = _chain(node.get("failed_children", []))
+            if nested:
+                return [node, *nested]
+        return None
+
+    chain = _chain(children)
+    if not chain:
+        return f"child-{_urlquote(child_job_name, safe='')}-{child_build_number}"
+    return "--".join(
+        f"child-{_urlquote(node['job_name'], safe=_ENCODE_URI_COMPONENT_SAFE)}"
+        f"-{node['build_number']}"
+        for node in chain
     )
 
 
@@ -10136,11 +10221,15 @@ async def _build_export_context(
     # Scope to child job when requested. The same resolver serves the push
     # gate, so a push can never be reviewed against a different subtree
     # than the one it exports.
+    root_children = result_data.get("child_job_analyses", [])
     result_data, scope_job, scope_build = _resolve_push_scope(
         result_data, child_job_name, child_build_number
     )
     if scope_job:
-        anchor = f"child-{_urlquote(scope_job, safe='')}-{scope_build}"
+        # Ancestry-qualified fragment id — the format the report page assigns
+        # (frontend/src/lib/childJobHash.ts), so a pushed link resolves for
+        # nested children too.
+        anchor = _child_report_anchor(root_children, scope_job, scope_build)
         report_url = f"{report_url}#{anchor}"
 
     failures_data = result_data.get("failures", [])
@@ -17445,12 +17534,19 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
     # (raising there would hard-fail env-var startups and, via
     # get_settings()'s fallback, wipe every DB override), so the
     # combination is rejected here where the admin can act on it.
+    # The rule only runs when the update actually changes one of the two
+    # keys: a server already carrying the inert combination (set via env
+    # or saved before this rule existed) must still be able to save
+    # unrelated settings — a Jenkins URL, a token — so unrelated batches
+    # are not rejected for a combination the admin is not touching.
     # Evaluated on the EFFECTIVE proposed values — current get_settings()
     # semantics (env + DB overrides, not raw env) overlaid with this
     # update — so an update touching only one of the two keys is caught
     # too.  Covers both PUT and settings import, which share this
     # function.  None/empty values reset to the model default, matching
     # the PUT semantics above.
+    if {"auto_push_exporters", "enable_auto_review"}.isdisjoint(settings_updates):
+        return errors
     effective = get_settings().model_dump()
     for key, value in settings_updates.items():
         if key not in valid_keys:
