@@ -9,7 +9,7 @@
   },
   "dependencies": {
     "@myk-org/pi-sidecar": ">=4.14.0",
-    "@nanonets/graft": "0.19.0"
+    "@trailhq/trail-code": "^0.28.1"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",

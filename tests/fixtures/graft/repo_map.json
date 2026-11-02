@@ -1,0 +1,106 @@
+{
+  "totals": {
+    "files": 4,
+    "symbols": 24,
+    "edges": 45,
+    "languages": [
+      "python"
+    ]
+  },
+  "dirs": [
+    {
+      "path": "simple_logger/logger.py",
+      "files": 1,
+      "symbols": 15,
+      "languages": [
+        "python"
+      ],
+      "hubs": [
+        {
+          "name": "get_logger",
+          "kind": "function",
+          "path": "simple_logger/logger.py",
+          "span": "L87-L168",
+          "inDegree": 6
+        },
+        {
+          "name": "DuplicateFilter",
+          "kind": "class",
+          "path": "simple_logger/logger.py",
+          "span": "L18-L39",
+          "inDegree": 1
+        },
+        {
+          "name": "redact",
+          "kind": "method",
+          "path": "simple_logger/logger.py",
+          "span": "L51-L54",
+          "inDegree": 1
+        }
+      ],
+      "isFile": true
+    },
+    {
+      "path": "simple_logger/tests",
+      "files": 2,
+      "symbols": 9,
+      "languages": [
+        "python"
+      ],
+      "hubs": [],
+      "isFile": false
+    },
+    {
+      "path": "simple_logger/__init__.py",
+      "files": 1,
+      "symbols": 0,
+      "languages": [
+        "python"
+      ],
+      "hubs": [],
+      "isFile": true
+    }
+  ],
+  "hotspots": [
+    {
+      "name": "get_logger",
+      "kind": "function",
+      "path": "simple_logger/logger.py",
+      "span": "L87-L168",
+      "inDegree": 6
+    },
+    {
+      "name": "DuplicateFilter",
+      "kind": "class",
+      "path": "simple_logger/logger.py",
+      "span": "L18-L39",
+      "inDegree": 1
+    },
+    {
+      "name": "redact",
+      "kind": "method",
+      "path": "simple_logger/logger.py",
+      "span": "L51-L54",
+      "inDegree": 1
+    },
+    {
+      "name": "RedactingFilter",
+      "kind": "class",
+      "path": "simple_logger/logger.py",
+      "span": "L42-L54",
+      "inDegree": 1
+    },
+    {
+      "name": "WrapperLogFormatter",
+      "kind": "class",
+      "path": "simple_logger/logger.py",
+      "span": "L57-L59",
+      "inDegree": 1
+    }
+  ],
+  "dropped": 0,
+  "saved": {
+    "files": 4,
+    "baselineChars": 8735
+  }
+}

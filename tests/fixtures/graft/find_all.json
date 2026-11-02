@@ -1,0 +1,149 @@
+{
+  "pattern": "get_logger",
+  "filesSearched": 4,
+  "totalHits": 9,
+  "groups": [
+    {
+      "symbol": {
+        "id": "simple_logger/logger.py#get_logger",
+        "name": "get_logger",
+        "kind": "function",
+        "path": "simple_logger/logger.py",
+        "span": "L87-L168"
+      },
+      "path": "simple_logger/logger.py",
+      "inDegree": 6,
+      "hits": [
+        {
+          "line": 87,
+          "text": "def get_logger("
+        }
+      ]
+    },
+    {
+      "symbol": null,
+      "path": "simple_logger/tests/test_logger.py",
+      "inDegree": 0,
+      "hits": [
+        {
+          "line": 5,
+          "text": "from simple_logger.logger import get_logger"
+        }
+      ]
+    },
+    {
+      "symbol": {
+        "id": "simple_logger/tests/test_logger.py#basic_logger",
+        "name": "basic_logger",
+        "kind": "function",
+        "path": "simple_logger/tests/test_logger.py",
+        "span": "L14-L15"
+      },
+      "path": "simple_logger/tests/test_logger.py",
+      "inDegree": 0,
+      "hits": [
+        {
+          "line": 15,
+          "text": "return get_logger(name=\"test_basic_logger\", filename=tmp_log_file)"
+        }
+      ]
+    },
+    {
+      "symbol": {
+        "id": "simple_logger/tests/test_logger.py#logger_with_mask",
+        "name": "logger_with_mask",
+        "kind": "function",
+        "path": "simple_logger/tests/test_logger.py",
+        "span": "L19-L20"
+      },
+      "path": "simple_logger/tests/test_logger.py",
+      "inDegree": 0,
+      "hits": [
+        {
+          "line": 20,
+          "text": "return get_logger(name=\"test_logger_with_mask\", filename=tmp_log_file, mask_sensitive=True)"
+        }
+      ]
+    },
+    {
+      "symbol": {
+        "id": "simple_logger/tests/test_logger.py#logger_with_mask_and_pattarns",
+        "name": "logger_with_mask_and_pattarns",
+        "kind": "function",
+        "path": "simple_logger/tests/test_logger.py",
+        "span": "L24-L30"
+      },
+      "path": "simple_logger/tests/test_logger.py",
+      "inDegree": 0,
+      "hits": [
+        {
+          "line": 25,
+          "text": "return get_logger("
+        }
+      ]
+    },
+    {
+      "symbol": {
+        "id": "simple_logger/tests/test_logger.py#test_existing_logger",
+        "name": "test_existing_logger",
+        "kind": "function",
+        "path": "simple_logger/tests/test_logger.py",
+        "span": "L50-L53"
+      },
+      "path": "simple_logger/tests/test_logger.py",
+      "inDegree": 0,
+      "hits": [
+        {
+          "line": 51,
+          "text": "logger1 = get_logger(name=\"test_logger\")"
+        },
+        {
+          "line": 52,
+          "text": "logger2 = get_logger(name=\"test_logger\")"
+        }
+      ]
+    },
+    {
+      "symbol": {
+        "id": "simple_logger/tests/test_logger.py#test_disable_console_logging",
+        "name": "test_disable_console_logging",
+        "kind": "function",
+        "path": "simple_logger/tests/test_logger.py",
+        "span": "L56-L58"
+      },
+      "path": "simple_logger/tests/test_logger.py",
+      "inDegree": 0,
+      "hits": [
+        {
+          "line": 57,
+          "text": "logger = get_logger(name=\"test_logger\", console=False)"
+        }
+      ]
+    },
+    {
+      "symbol": {
+        "id": "simple_logger/tests/test_logger.py#test_duplicate_filter_with_percent_placeholders",
+        "name": "test_duplicate_filter_with_percent_placeholders",
+        "kind": "function",
+        "path": "simple_logger/tests/test_logger.py",
+        "span": "L86-L101"
+      },
+      "path": "simple_logger/tests/test_logger.py",
+      "inDegree": 0,
+      "hits": [
+        {
+          "line": 87,
+          "text": "logger = get_logger(name=\"test_duplicate_filter_percent\", filename=tmp_log_file, level=logging.DEBUG)"
+        }
+      ]
+    }
+  ],
+  "truncated": {
+    "files": 0,
+    "hits": 0
+  },
+  "saved": {
+    "files": 2,
+    "baselineChars": 8735
+  }
+}

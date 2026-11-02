@@ -230,6 +230,7 @@
 <li>An admin API key of at least 16 characters if you want to set <code>admin.key</code> yourself; otherwise the interactive setup script requires one and plain <code>helm install</code> auto-generates it</li>
 <li><code>openssl</code>, only for the self-signed certificate in the Ingress recipe</li>
 </ul>
+<p><strong>Running outside the container.</strong> The image ships everything the analysis needs, including the code-graph indexer (<code>@trailhq/trail-code</code>, installed as <code>trail</code> under <code>sidecar-helper/node_modules/.bin/trail</code>) and Node.js for the Pi SDK sidecar. These are <strong>requirements, not optional extras</strong>: a bare host install must provide them itself, or the graph tools and AI sessions do not work at all. RootCoz does not fall back to a degraded mode when a bundled dependency is missing — that is by design, so a misconfigured deployment fails visibly instead of quietly running with fewer capabilities.</p>
 <h2 id="start-locally-with-docker-compose">Start locally with Docker Compose</h2>
 <p>Bring up a local RootCoz on <code>http://localhost:8000</code> with persistent data in <code>./data</code>.</p>
 <div class="highlight"><pre><span></span><code>cat<span class="w"> </span>&gt;<span class="w"> </span>.env<span class="w"> </span><span class="s">&lt;&lt;'EOF'</span>

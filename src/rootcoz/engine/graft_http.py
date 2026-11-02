@@ -10,7 +10,6 @@ from __future__ import annotations
 import asyncio
 import hmac
 import json
-import logging
 import secrets
 import threading
 import time
@@ -18,6 +17,8 @@ import weakref
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
+
+from rootcoz import get_child_logger
 
 # Contract with graft.py: query_repo(workspace, scope, tool, params).
 # The graph module enforces snapshot containment and the fixed command allowlist.
@@ -36,14 +37,17 @@ _REQUIRED = {
     "graft_trace_calls": ("symbol",),
 }
 _SKILL_LOCATIONS = (".pi", ".agents", ".cursor", ".claude", ".gemini")
-logger = logging.getLogger(__name__)
+logger = get_child_logger(__name__)
 _MAX_BODY = 8192
 _MAX_RESULT = 65536
 _lock = threading.RLock()
 _server: ThreadingHTTPServer | None = None
 _thread: threading.Thread | None = None
 # workspace -> (token, {public repo name: resolved clone root}, job_id, write lease)
-_sessions: dict[Path, tuple[str, dict[str, Path], str | None, threading.Lock]] = {}
+_SessionKey = tuple[Path, str | None]
+_sessions: dict[
+    _SessionKey, tuple[str, dict[str, Path], str | None, threading.Lock]
+] = {}
 _leases: weakref.WeakValueDictionary[Path, threading.Lock] = (
     weakref.WeakValueDictionary()
 )
@@ -78,8 +82,8 @@ class _Handler(BaseHTTPRequestHandler):
         with _lock:
             session = next(
                 (
-                    (workspace, *entry, entry)
-                    for workspace, entry in _sessions.items()
+                    (key, *entry, entry)
+                    for key, entry in _sessions.items()
                     if hmac.compare_digest(bearer, f"Bearer {entry[0]}")
                 ),
                 None,
@@ -124,8 +128,8 @@ class _Handler(BaseHTTPRequestHandler):
             if (
                 root is None
                 or not root.is_dir()
-                or (session[0] / body["repo"]).is_symlink()
-                or (session[0] / body["repo"]).resolve() != root
+                or (session[0][0] / body["repo"]).is_symlink()
+                or (session[0][0] / body["repo"]).resolve() != root
             ):
                 raise ValueError
             # Never let a path parameter escape the registered clone. Graft also
@@ -151,7 +155,7 @@ class _Handler(BaseHTTPRequestHandler):
                 if field in params:
                     params[field] = int(params[field])
             result = graft.query_repo(
-                session[0],
+                session[0][0],
                 body["repo"],
                 name.removeprefix("graft_"),
                 params,
@@ -215,6 +219,51 @@ def _query_http_timeout_ms() -> int:
     return (QUERY_SECONDS + 15) * 1000
 
 
+#: When to reach for each tool, in the model's own decision terms. A one-line
+#: "read-only graph query" description is enough to call a tool but not to know
+#: why — a live session with all six made zero calls.
+_TOOL_DESCRIPTIONS = {
+    "graft_find_code": (
+        "Locate where a behaviour lives in an indexed repository (ranked). Use"
+        " this before grep/read when you know the symptom but not the file."
+    ),
+    "graft_find_all": (
+        "Every indexed occurrence of a pattern (exhaustive). Use when you need"
+        " completeness — all call sites or all uses — not just top ranked hits."
+    ),
+    "graft_file_api": (
+        "Signature-level view of one file: functions, classes, parameters. Use"
+        " before reading a large file to decide whether you need its body."
+    ),
+    "graft_trace_calls": (
+        "Callers (direction=in) or callees (direction=out) of a symbol, up to"
+        " depth 10. Use to judge blast radius or find what reaches a failing call."
+    ),
+    "graft_repo_map": (
+        "Directory groups and busiest symbols: orient yourself in an unfamiliar"
+        " clone, or place a component named in a failure."
+    ),
+    "graft_check_freshness": (
+        "Whether the index still matches the source. Use before concluding that"
+        " code is absent when a query came back empty."
+    ),
+}
+
+
+def graph_http_tools(workspace: Path | None, job_id: str) -> list[dict[str, Any]]:
+    """HTTP graph tools for a workspace's already-indexed clones.
+
+    Shared by chat and analysis sessions: the tools are read-only, so both get
+    the same six, built by one function so the lists cannot drift.
+    """
+    if workspace is None:
+        return []
+    from rootcoz.engine.graft import indexed_roots
+
+    roots = indexed_roots(workspace)
+    return register_workspace(workspace, roots, job_id=job_id) if roots else []
+
+
 def build_graph_tools(
     base_url: str, token: str, repos: list[str]
 ) -> list[dict[str, Any]]:
@@ -226,7 +275,7 @@ def build_graph_tools(
         tools.append(
             {
                 "name": name,
-                "description": f"Read-only graph query {name} for a registered repository.",
+                "description": _TOOL_DESCRIPTIONS[name],
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -350,12 +399,13 @@ def register_workspace(
                     _server.server_close()
                     _server, _thread = None, None
                     return []
-            existing = _sessions.get(workspace)
-            if existing is not None and existing[1:3] == (roots, job_id):
+            key: _SessionKey = (workspace, job_id)
+            existing = _sessions.get(key)
+            if existing is not None and existing[1] == roots:
                 entry = existing
             else:
                 entry = (secrets.token_urlsafe(32), roots, job_id, lease)
-                _sessions[workspace] = entry
+                _sessions[key] = entry
             return build_graph_tools(
                 f"http://127.0.0.1:{_server.server_port}", entry[0], list(roots)
             )
@@ -372,7 +422,8 @@ def unregister_workspace(workspace: Path) -> None:
     if lease is None:
         return
     with lease, _lock:
-        _sessions.pop(workspace, None)
+        for key in [key for key in _sessions if key[0] == workspace]:
+            _sessions.pop(key, None)
         if not _sessions and _server is not None:
             server, thread = _server, _thread
             _server, _thread = None, None

@@ -1,0 +1,99 @@
+{
+  "file": "simple_logger/logger.py",
+  "entries": [
+    {
+      "name": "DuplicateFilter",
+      "kind": "class",
+      "span": "L18-L39",
+      "signature": "class DuplicateFilter(logging.Filter)"
+    },
+    {
+      "name": "filter",
+      "kind": "method",
+      "span": "L19-L36",
+      "signature": "def filter(self, record: logging.LogRecord) -> bool"
+    },
+    {
+      "name": "redact",
+      "kind": "method",
+      "span": "L38-L39",
+      "signature": "def redact(self, msg: str) -> str"
+    },
+    {
+      "name": "RedactingFilter",
+      "kind": "class",
+      "span": "L42-L54",
+      "signature": "class RedactingFilter(logging.Filter)"
+    },
+    {
+      "name": "__init__",
+      "kind": "method",
+      "span": "L43-L45",
+      "signature": "def __init__(self, patterns: list[str])"
+    },
+    {
+      "name": "filter",
+      "kind": "method",
+      "span": "L47-L49",
+      "signature": "def filter(self, record: logging.LogRecord) -> bool"
+    },
+    {
+      "name": "redact",
+      "kind": "method",
+      "span": "L51-L54",
+      "signature": "def redact(self, msg: str) -> str"
+    },
+    {
+      "name": "WrapperLogFormatter",
+      "kind": "class",
+      "span": "L57-L59",
+      "signature": "class WrapperLogFormatter(ColoredFormatter)"
+    },
+    {
+      "name": "formatTime",
+      "kind": "method",
+      "span": "L58-L59",
+      "signature": "def formatTime(self, record: logging.LogRecord, datefmt: str | None = None) -> str"
+    },
+    {
+      "name": "SimpleLogger",
+      "kind": "class",
+      "span": "L62-L81",
+      "signature": "class SimpleLogger(logging.getLoggerClass()): # type: ignore[misc]"
+    },
+    {
+      "name": "__init__",
+      "kind": "method",
+      "span": "L63-L68",
+      "signature": "def __init__(self, name: str, level: int = logging.INFO) -> None"
+    },
+    {
+      "name": "success",
+      "kind": "method",
+      "span": "L70-L71",
+      "signature": "def success(self, msg: str, *args: Any, **kwargs: Any) -> None"
+    },
+    {
+      "name": "step",
+      "kind": "method",
+      "span": "L73-L74",
+      "signature": "def step(self, msg: str, *args: Any, **kwargs: Any) -> None"
+    },
+    {
+      "name": "hash",
+      "kind": "method",
+      "span": "L76-L81",
+      "signature": "def hash(self, msg: str, *args: Any, **kwargs: Any) -> None"
+    },
+    {
+      "name": "get_logger",
+      "kind": "function",
+      "span": "L87-L168",
+      "signature": "def get_logger( name: str, level: int | str = logging.INFO, filename: str | None = None, console: bool = True, file_max_bytes: int = 104857600, file_backup_count: int = 20, mask_sensitive: bool = False, duplicate_filter: bool = True, mask_sensitive_patterns: list[str] | None = None, force_color: bool | None = None, ) -> logging.Logger"
+    }
+  ],
+  "saved": {
+    "files": 1,
+    "baselineChars": 5661
+  }
+}

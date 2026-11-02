@@ -545,7 +545,8 @@ def test_analysis_does_not_index_unusable_graphs() -> None:
     ):
         assert "index_repositories" not in inspect.getsource(analysis)
         assert "copy_rootcoz_pi_resources" in inspect.getsource(analysis)
-    assert "index_repositories" in inspect.getsource(main._index_chat_repositories)
+    # Indexing now has one guarded entry point for every session kind.
+    assert "index_workspace_graph" in inspect.getsource(main._index_chat_repositories)
     assert "_index_chat_repositories" in inspect.getsource(
         main._init_chat_under_barrier
     )
@@ -603,7 +604,9 @@ def test_install_lock_reaping_preserves_holder_and_waiter(
     holder.start()
     waiter = other = None
     try:
-        assert entered.wait(5)
+        # A forkserver child can take well over 5s to boot on a loaded
+        # xdist worker; waiting longer only costs time when something is wrong.
+        assert entered.wait(60)
         inode = path.stat().st_ino
         opened = threading.Event()
         acquired = threading.Event()
@@ -624,7 +627,7 @@ def test_install_lock_reaping_preserves_holder_and_waiter(
 
         waiter = threading.Thread(target=wait_for_lock)
         waiter.start()
-        assert opened.wait(5)
+        assert opened.wait(30)
         reaped = threading.Event()
         other_entered = threading.Event()
 
@@ -636,7 +639,7 @@ def test_install_lock_reaping_preserves_holder_and_waiter(
 
         other = threading.Thread(target=run_other)
         other.start()
-        assert other_entered.wait(5)
+        assert other_entered.wait(30)
         assert not acquired.is_set()
         release.set()
         holder.join(5)

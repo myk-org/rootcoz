@@ -1,0 +1,74 @@
+{
+  "query": "get_logger",
+  "matches": [
+    {
+      "symbol": {
+        "id": "simple_logger/logger.py#get_logger",
+        "name": "get_logger",
+        "kind": "function",
+        "path": "simple_logger/logger.py",
+        "span": "L87-L168"
+      },
+      "hits": [
+        {
+          "id": "simple_logger/tests/test_logger.py#basic_logger",
+          "relation": "calls",
+          "depth": 1,
+          "name": "basic_logger",
+          "kind": "function",
+          "path": "simple_logger/tests/test_logger.py",
+          "span": "L14-L15"
+        },
+        {
+          "id": "simple_logger/tests/test_logger.py#logger_with_mask",
+          "relation": "calls",
+          "depth": 1,
+          "name": "logger_with_mask",
+          "kind": "function",
+          "path": "simple_logger/tests/test_logger.py",
+          "span": "L19-L20"
+        },
+        {
+          "id": "simple_logger/tests/test_logger.py#logger_with_mask_and_pattarns",
+          "relation": "calls",
+          "depth": 1,
+          "name": "logger_with_mask_and_pattarns",
+          "kind": "function",
+          "path": "simple_logger/tests/test_logger.py",
+          "span": "L24-L30"
+        },
+        {
+          "id": "simple_logger/tests/test_logger.py#test_disable_console_logging",
+          "relation": "calls",
+          "depth": 1,
+          "name": "test_disable_console_logging",
+          "kind": "function",
+          "path": "simple_logger/tests/test_logger.py",
+          "span": "L56-L58"
+        },
+        {
+          "id": "simple_logger/tests/test_logger.py#test_duplicate_filter_with_percent_placeholders",
+          "relation": "calls",
+          "depth": 1,
+          "name": "test_duplicate_filter_with_percent_placeholders",
+          "kind": "function",
+          "path": "simple_logger/tests/test_logger.py",
+          "span": "L86-L101"
+        },
+        {
+          "id": "simple_logger/tests/test_logger.py#test_existing_logger",
+          "relation": "calls",
+          "depth": 1,
+          "name": "test_existing_logger",
+          "kind": "function",
+          "path": "simple_logger/tests/test_logger.py",
+          "span": "L50-L53"
+        }
+      ]
+    }
+  ],
+  "saved": {
+    "files": 2,
+    "baselineChars": 8735
+  }
+}
