@@ -1648,10 +1648,13 @@ async def test_corrupt_ciphertext_never_becomes_an_api_key(
     # token is base64, and CPython 3.14.2 ignores bytes after the padding, so
     # "token || 'corrupted'" still decrypts there while 3.14.10 rejects it. The
     # test must fail the HMAC on every interpreter, so it edits the body.
+    # CASE keeps the edit real: char 21 is often already 'X', making it a no-op.
     async with storage._connect_db() as db:
         await db.execute(
             "UPDATE server_ai_providers SET api_key_enc ="
-            " substr(api_key_enc, 1, 20) || 'X' || substr(api_key_enc, 22)"
+            " substr(api_key_enc, 1, 20)"
+            " || CASE substr(api_key_enc, 21, 1) WHEN 'X' THEN 'Y' ELSE 'X' END"
+            " || substr(api_key_enc, 22)"
         )
         await db.commit()
 
