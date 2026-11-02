@@ -483,6 +483,10 @@ export interface DatadogPushResult {
   total: number
   errors: string[]
   skipped: number
+  /** Gauge series emitted by the metrics scoreboard push (older servers omit it). */
+  series?: number
+  /** Set when the events landed but the metric scoreboard push failed. */
+  series_error?: string | null
 }
 
 // -- Comment enrichment ---------------------------------------------

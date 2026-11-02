@@ -185,6 +185,53 @@ describe('DatadogButton', () => {
     expect(screen.getByText('1 event skipped')).toBeDefined()
   })
 
+  it('says the metric scoreboard failed, not the events, for a metrics-only failure', async () => {
+    mockPost.mockResolvedValue(
+      makeResultBody({
+        success: false,
+        pushed: 2,
+        total: 2,
+        errors: [],
+        skipped: 0,
+        series: 0,
+        series_error: 'Failed to push 5 Datadog metric series (403 Forbidden)',
+        message: 'Failed to push 5 Datadog metric series (403 Forbidden)',
+      }),
+    )
+
+    renderButton({ reviews: allReviewed() })
+    await confirmPush()
+
+    await waitFor(() => {
+      expect(screen.getByText('Events pushed, but the metric scoreboard failed.')).toBeDefined()
+    })
+    // The backend's series error is printed once, via pushResult.message
+    expect(screen.getByText('Failed to push 5 Datadog metric series (403 Forbidden)')).toBeDefined()
+    expect(screen.queryByText('Some events could not be pushed.')).toBeNull()
+  })
+
+  it('still reports the events as the failure when an event push actually failed', async () => {
+    mockPost.mockResolvedValue(
+      makeResultBody({
+        success: false,
+        pushed: 1,
+        total: 2,
+        errors: ['event 1 failed'],
+        skipped: 0,
+        series: 4,
+        series_error: 'Failed to push 4 Datadog metric series',
+      }),
+    )
+
+    renderButton({ reviews: allReviewed() })
+    await confirmPush()
+
+    await waitFor(() => {
+      expect(screen.getByText('Some events could not be pushed.')).toBeDefined()
+    })
+    expect(screen.queryByText('Events pushed, but the metric scoreboard failed.')).toBeNull()
+  })
+
   it('shows a failure dialog with the abort message when success=false and nothing was pushed', async () => {
     mockPost.mockResolvedValue(
       makeResultBody({

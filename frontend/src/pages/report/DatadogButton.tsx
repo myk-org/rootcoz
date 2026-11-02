@@ -122,6 +122,9 @@ export function DatadogButton({ jobId, jobName, buildNumber, childJobName, child
   // errors (e.g. the exporter aborted: API-key rejection, no failures) —
   // it must never render as a green "Pushed 0 events".
   const isFullFailure = pushFailed || !!(pushResult && pushResult.pushed === 0 && (!pushResult.success || hasResultErrors))
+  // Every event landed, only the metrics scoreboard failed — `success` is
+  // false, but no event was lost, so "some events could not be pushed" lies.
+  const isMetricsOnlyFailure = !!pushResult && pushResult.pushed > 0 && !hasResultErrors && !hasSkipped && !!pushResult.series_error
   const isPartialSuccess = !!pushResult && pushResult.pushed > 0 && (!pushResult.success || hasResultErrors || hasSkipped)
 
   return (
@@ -184,6 +187,8 @@ export function DatadogButton({ jobId, jobName, buildNumber, childJobName, child
                 <><AlertTriangle className="h-5 w-5 text-signal-orange" /> Push blocked — unreviewed failures.</>
               ) : isFullFailure ? (
                 <><XCircle className="h-5 w-5 text-signal-red" /> Failed to push events to Datadog.</>
+              ) : isMetricsOnlyFailure ? (
+                <><AlertTriangle className="h-5 w-5 text-signal-orange" /> Events pushed, but the metric scoreboard failed.</>
               ) : isPartialSuccess ? (
                 <><AlertTriangle className="h-5 w-5 text-signal-orange" /> Some events could not be pushed.</>
               ) : (

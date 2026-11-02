@@ -17,6 +17,17 @@ alert. The ``alert`` branch also requires ``status`` (enum ``warn`` |
 ``error`` | ``ok``), which is always ``error`` here for the same reason: no
 classification→severity mapping.
 
+Alongside the events, every push sends a metrics scoreboard to
+``POST https://api.{site}/api/v2/series`` — a different host from the event
+intake. Two gauges, ``rootcoz.failures.classification`` and
+``rootcoz.failures.pattern``, carry the current number of this build's failed
+tests in each category, zeros included: Datadog keeps the last value of a
+series it no longer receives, so a skipped category would leave the previous
+build's count in place and the dashboard would add both up. Their tag values
+are lowercase and identical to the event tags. The per-push ids stay on the
+events only — a tag that changes on every push double-counts the previous
+push *and* bills as a new custom metric.
+
 Events carry a stable ``aggregation_key`` per analysis/test pair, a tag
 taxonomy (``service``, ``env``, ``tfa.stage``, ``tfa.classification``,
 job/build identity, and the push attribution) and free-form custom
@@ -29,8 +40,9 @@ for console-only analyses that have no test). Datadog documents
 Parity with Report Portal: events also carry per-test history classifications
 and reviewer attribution from the shared ``ExportContext``.
 
-Failures never raise: per-event HTTP/network errors are collected into the
-exporter result so a Datadog outage can never break the analysis pipeline.
+Failures never raise: per-event and per-push metrics HTTP/network errors are
+collected into the exporter result so a Datadog outage can never break the
+analysis pipeline.
 Two abort modes stop a doomed run early: an auth rejection (HTTP 401/403)
 aborts immediately — retrying with the same keys cannot help — and a circuit
 breaker stops the push after 5 consecutive failed events, recording the
@@ -43,6 +55,7 @@ import hashlib
 import re
 import time
 import uuid
+from collections import Counter
 from datetime import UTC, datetime
 from typing import Any
 from urllib.parse import urlparse
@@ -51,7 +64,12 @@ import httpx
 
 from rootcoz import get_child_logger
 from rootcoz.exporters.base import ExportContext, Exporter, ExporterResult
-from rootcoz.storage import AI_SYSTEM_USERNAME
+from rootcoz.storage import (
+    AI_SYSTEM_USERNAME,
+    HISTORY_CLASSIFICATIONS,
+    PATTERN_CLASSIFICATIONS,
+    PRIMARY_CLASSIFICATIONS,
+)
 
 logger = get_child_logger(__name__)
 
@@ -60,6 +78,21 @@ _EVENT_INTAKE_HOST = "event-management-intake.{site}"
 
 #: Datadog v2 event intake path.
 _EVENTS_PATH = "/api/v2/events"
+
+#: The series (metrics) intake lives on ``api.{site}`` — not the event host.
+_SERIES_HOST = "api.{site}"
+
+#: Datadog v2 series intake path.
+_SERIES_PATH = "/api/v2/series"
+
+#: Series type ``3`` is a gauge: the current value, not samples since the
+#: previous push.
+_SERIES_GAUGE = 3
+
+#: The only two metrics written. Two names, and no per-push tag, keep the
+#: tag-combination count (Datadog's billing unit) bounded.
+_CLASSIFICATION_METRIC = "rootcoz.failures.classification"
+_PATTERN_METRIC = "rootcoz.failures.pattern"
 
 #: Per-request timeout (seconds) for event submission.
 _REQUEST_TIMEOUT = 30.0
@@ -463,8 +496,63 @@ def sanitize_tag_value(value: str) -> str:
     return sanitized or "unknown"
 
 
+def _tag_label(value: str) -> str:
+    """Render a classification value as a Datadog tag value.
+
+    Lowercased with spaces and hyphens folded to underscores, so ``PRODUCT
+    BUG``, ``product bug`` and ``product-bug`` are one facet value. Events and
+    metrics both use this helper, so the same classification is literally the
+    same string on both and one dashboard filter matches either.
+
+    Args:
+        value: Raw classification or failure pattern.
+
+    Returns:
+        Tag-safe lowercase value (``unknown`` when empty).
+    """
+    return sanitize_tag_value(value).lower().replace("-", "_")
+
+
+def _identity_tags(context: ExportContext) -> list[str]:
+    """The job/build identity tags shared by the events and the metrics."""
+    return [
+        f"job_name:{sanitize_tag_value(context.job_name)}",
+        f"build_number:{sanitize_tag_value(context.build_number)}",
+    ]
+
+
+def _failure_analysis(failure: dict[str, Any]) -> dict[str, Any]:
+    """The analysis dict of a stored failure, tolerating both stored shapes.
+
+    Legacy stored failures carry the diagnosis as a plain string (mirrors
+    ``FailedTest._coerce_legacy_analysis`` in models.py).
+    """
+    analysis_value = failure.get("analysis")
+    if isinstance(analysis_value, str):
+        return {"details": analysis_value}
+    if isinstance(analysis_value, dict):
+        return analysis_value
+    return {}
+
+
+def _series_entry(
+    *, metric: str, context: ExportContext, timestamp: int, value: int, tag: str
+) -> dict[str, Any]:
+    """One gauge series: the job/build identity plus the one category tag."""
+    return {
+        "metric": metric,
+        "type": _SERIES_GAUGE,
+        "points": [{"timestamp": timestamp, "value": float(value)}],
+        "tags": [*_identity_tags(context), tag],
+    }
+
+
 class DatadogExporter(Exporter):
-    """Exporter that pushes one Datadog event per failed test.
+    """Exporter that pushes one Datadog event per failed test, plus metrics.
+
+    Every push also sends one gauge series per failure category (zeros
+    included) to the v2 series API, so the dashboard scoreboard has a current
+    value for every category instead of a stale last one.
 
     Args:
         api_key: Datadog API key (32 hex chars, ``DD-API-KEY`` header).
@@ -546,6 +634,10 @@ class DatadogExporter(Exporter):
     def _events_url(self) -> str:
         return f"https://{_EVENT_INTAKE_HOST.format(site=self._site)}{_EVENTS_PATH}"
 
+    @property
+    def _series_url(self) -> str:
+        return f"https://{_SERIES_HOST.format(site=self._site)}{_SERIES_PATH}"
+
     def _build_tags(
         self,
         context: ExportContext,
@@ -561,6 +653,10 @@ class DatadogExporter(Exporter):
         Tag order is stable so tests and consumers can rely on it.
         ``classification`` is ``None`` when the ``dd_push_classifications``
         toggle is off — the ``tfa.classification`` tag is then omitted.
+        ``tfa.classification`` and ``tfa.failure_pattern`` are rendered by
+        :func:`_tag_label` (lowercase, spaces and hyphens folded to
+        underscores), so they are literally the same strings the
+        ``rootcoz.failures.*`` metric tags carry.
         The test name is deliberately not a tag: a tag cannot hold brackets
         or spaces, so a sanitized value could never match the verbatim
         ``test.name`` custom attribute.
@@ -581,8 +677,7 @@ class DatadogExporter(Exporter):
             tags.append(f"env:{sanitize_tag_value(self._env)}")
         tags += [
             "tfa.stage:automated",
-            f"job_name:{sanitize_tag_value(context.job_name)}",
-            f"build_number:{sanitize_tag_value(context.build_number)}",
+            *_identity_tags(context),
             f"rootcoz.analysis_id:{sanitize_tag_value(context.job_id)}",
         ]
         if failure_id:
@@ -592,18 +687,16 @@ class DatadogExporter(Exporter):
         if analysis_timestamp:
             tags.append(f"rootcoz.analysis_timestamp:{int(analysis_timestamp)}")
         if classification:
-            tags.append(f"tfa.classification:{sanitize_tag_value(classification)}")
+            tags.append(f"tfa.classification:{_tag_label(classification)}")
         # The previous classification for this test is what the message calls
         # the failure pattern (NEW, FLAKY, INTERMITTENT, ...). Exposed as a
         # tag so it is filterable in Datadog: the message line alone cannot be
-        # searched. Lowercased, with spaces/punctuation folded to underscores,
-        # matching how tfa.classification is normally written.
+        # searched. Both classification tags are lowercase and hyphen-folded
+        # through ``_tag_label``, so they are literally the same strings as
+        # the ``rootcoz.failures.*`` metric tags.
         pattern = context.history_classifications.get(test_name, "")
         if pattern:
-            # Hyphens fold too, so "known-issue" and "known issue" are one
-            # facet value rather than two.
-            pattern_tag = sanitize_tag_value(pattern).lower().replace("-", "_")
-            tags.append(f"tfa.failure_pattern:{pattern_tag}")
+            tags.append(f"tfa.failure_pattern:{_tag_label(pattern)}")
         if context.child_job_name:
             tags.append(f"child_job_name:{sanitize_tag_value(context.child_job_name)}")
         tags.append(
@@ -620,6 +713,7 @@ class DatadogExporter(Exporter):
         failure: dict[str, Any],
         *,
         push_id: str = "",
+        timestamp: int | None = None,
     ) -> dict[str, Any]:
         """Build the Datadog event payload for one failed test.
 
@@ -628,20 +722,14 @@ class DatadogExporter(Exporter):
             failure: Stored failure dict (``test_name`` + ``analysis``).
             push_id: Identifier of this push run, shared by every event it
                 emits so a re-push can be told apart from the original.
+            timestamp: Push time shared with the metrics of the same push;
+                ``None`` stamps the current time for a standalone build.
 
         Returns:
             Datadog v2 event intake payload.
         """
         test_name = str(failure.get("test_name", "") or "")
-        analysis_value = failure.get("analysis")
-        if isinstance(analysis_value, str):
-            # Legacy stored failures carry the diagnosis as a plain string
-            # (mirrors FailedTest._coerce_legacy_analysis in models.py).
-            analysis: dict[str, Any] = {"details": analysis_value}
-        elif isinstance(analysis_value, dict):
-            analysis = analysis_value
-        else:
-            analysis = {}
+        analysis = _failure_analysis(failure)
         raw_classification = str(analysis.get("classification", "") or "").strip()
         if self._push_classifications:
             classification = raw_classification or _UNKNOWN_CLASSIFICATION
@@ -709,13 +797,13 @@ class DatadogExporter(Exporter):
         body_limit = _MESSAGE_MAX - len(_MARKDOWN_OPEN) - len(_MARKDOWN_CLOSE)
         message = f"{_MARKDOWN_OPEN}{_truncate(message, body_limit)}{_MARKDOWN_CLOSE}"
 
-        now = int(time.time())
         # The event carries the push time, not the analysis time: Datadog cannot
         # update or delete an event, so a re-push creates a second event, and an
         # analysis-time timestamp puts it outside the recent-events window where
         # the reviewer looks for it. The analysis time still travels as a tag so
         # the original analysis stays identifiable.
-        timestamp = now
+        if timestamp is None:
+            timestamp = int(time.time())
 
         # Free-form custom attributes. ``rootcoz.scope`` is always present;
         # ``test.name`` only for a real test, so a console-only analysis never
@@ -762,8 +850,96 @@ class DatadogExporter(Exporter):
             }
         }
 
+    def _build_series(
+        self, context: ExportContext, timestamp: int
+    ) -> list[dict[str, Any]]:
+        """Build every gauge series for one push, zeros included.
+
+        A category with no failures must still be reported: Datadog keeps the
+        last value of a series it stops receiving, so a skipped series would
+        leave the previous build's count in place and the dashboard would
+        count it twice. The vocabulary is the stored one (plus the events' own
+        ``UNKNOWN`` fallback for classifications), never a hard-coded list, so
+        nothing an event can carry is left unrepresented.
+
+        The metric tags are the job/build identity plus the one category tag —
+        never the per-push ids, which would double-count and bill as a new
+        custom metric on every push.
+
+        Args:
+            context: Export context; ``failures`` is already scope-resolved.
+            timestamp: Push time, shared with the events of the same push.
+
+        Returns:
+            Gauge series entries: one per classification (omitted entirely
+            when the ``dd_push_classifications`` toggle is off, because the
+            events then carry no classification tag) and one per failure
+            pattern.
+        """
+        classification_counts: Counter[str] = Counter(
+            dict.fromkeys(
+                (
+                    _tag_label(classification)
+                    for classification in (
+                        *PRIMARY_CLASSIFICATIONS,
+                        _UNKNOWN_CLASSIFICATION,
+                    )
+                ),
+                0,
+            )
+        )
+        pattern_counts: Counter[str] = Counter(
+            dict.fromkeys(
+                (
+                    _tag_label(pattern)
+                    for pattern in (
+                        *PATTERN_CLASSIFICATIONS,
+                        *HISTORY_CLASSIFICATIONS,
+                    )
+                ),
+                0,
+            )
+        )
+        for failure in context.failures:
+            if not isinstance(failure, dict):
+                continue
+            if self._push_classifications:
+                raw_classification = str(
+                    _failure_analysis(failure).get("classification", "") or ""
+                ).strip()
+                label = _tag_label(raw_classification or _UNKNOWN_CLASSIFICATION)
+                classification_counts[label] += 1
+            test_name = str(failure.get("test_name", "") or "")
+            pattern = context.history_classifications.get(test_name, "")
+            if pattern:
+                pattern_counts[_tag_label(pattern)] += 1
+
+        series: list[dict[str, Any]] = []
+        if self._push_classifications:
+            series += [
+                _series_entry(
+                    metric=_CLASSIFICATION_METRIC,
+                    context=context,
+                    timestamp=timestamp,
+                    value=count,
+                    tag=f"tfa.classification:{label}",
+                )
+                for label, count in classification_counts.items()
+            ]
+        series += [
+            _series_entry(
+                metric=_PATTERN_METRIC,
+                context=context,
+                timestamp=timestamp,
+                value=count,
+                tag=f"tfa.failure_pattern:{label}",
+            )
+            for label, count in pattern_counts.items()
+        ]
+        return series
+
     async def push(self, context: ExportContext) -> ExporterResult:
-        """Push one Datadog event per failed test.
+        """Push one Datadog event per failed test, then the metrics scoreboard.
 
         Iterates failures, emits 1:N events, and collects per-event
         results. HTTP/network errors never raise — they are recorded as
@@ -772,24 +948,42 @@ class DatadogExporter(Exporter):
         whole push immediately, and after
         :data:`_CIRCUIT_BREAKER_THRESHOLD` consecutive failed events the
         remaining events are skipped and counted in the result details.
+
+        One metrics request then carries every category series for this
+        push. It is skipped when the run aborted on rejected credentials
+        (the same keys would fail again), and a metrics failure is recorded
+        in the result details without rolling back the events already sent.
         """
         failures = context.failures
         if not failures:
             return ExporterResult(
                 success=False,
                 message="No failures to push to Datadog.",
-                details={"pushed": 0, "total": 0, "errors": [], "skipped": 0},
+                details={
+                    "pushed": 0,
+                    "total": 0,
+                    "errors": [],
+                    "skipped": 0,
+                    "series": 0,
+                    "series_error": None,
+                },
             )
 
         pushed = 0
         skipped = 0
+        series_emitted = 0
+        series_error: str | None = None
         errors: list[str] = []
         consecutive_failures = 0
+        auth_rejected = False
         abort_message: str | None = None
         headers = _auth_headers(self._api_key, self._app_key)
         # One id for this run: Datadog events are immutable, so a re-push can
         # only be told apart from the original by a per-run identifier.
         push_id = str(uuid.uuid4())
+        # One timestamp for the whole push, so the metric points and the events
+        # line up on the dashboard instead of straddling a second boundary.
+        timestamp = int(time.time())
         logger.info(
             "Datadog push %s: emitting up to %d event(s) for job=%s to site=%s",
             push_id,
@@ -808,7 +1002,9 @@ class DatadogExporter(Exporter):
                         break
                     continue
                 test_name = failure.get("test_name", "") or "(unnamed test)"
-                event = self._build_event(context, failure, push_id=push_id)
+                event = self._build_event(
+                    context, failure, push_id=push_id, timestamp=timestamp
+                )
                 try:
                     response = await client.post(
                         self._events_url, json=event, headers=headers
@@ -836,6 +1032,7 @@ class DatadogExporter(Exporter):
                     if status in _AUTH_FAILURE_STATUSES:
                         # The key is bad — every remaining request would
                         # fail identically, so abort the whole push now.
+                        auth_rejected = True
                         skipped = len(failures) - index - 1
                         abort_message = (
                             f"Datadog rejected the credentials (HTTP {status}) — "
@@ -862,11 +1059,41 @@ class DatadogExporter(Exporter):
                         )
                         break
 
-        success = pushed > 0 and not errors
+            # The scoreboard is one request for the whole push. Skipped only
+            # when the credentials were rejected — the same keys would fail
+            # again — and never allowed to undo the events already sent.
+            if not auth_rejected:
+                series = self._build_series(context, timestamp)
+                try:
+                    response = await client.post(
+                        self._series_url, json={"series": series}, headers=headers
+                    )
+                    response.raise_for_status()
+                    series_emitted = len(series)
+                    logger.debug(
+                        "Datadog accepted %d metric series for job=%s",
+                        series_emitted,
+                        context.job_id,
+                    )
+                except httpx.HTTPError as exc:
+                    _status, detail = _http_error_detail(exc)
+                    series_error = (
+                        f"Failed to push {len(series)} Datadog metric series"
+                        + (f" ({detail})" if detail else "")
+                    )
+                    logger.error(
+                        "Datadog metric push failed for job=%s: %s",
+                        context.job_id,
+                        detail or exc,
+                    )
+
+        success = pushed > 0 and not errors and not series_error
         if abort_message:
             message = abort_message
         elif errors:
             message = errors[0]
+        elif series_error:
+            message = series_error
         elif success:
             message = f"Pushed {pushed} Datadog event(s)"
         else:
@@ -880,5 +1107,7 @@ class DatadogExporter(Exporter):
                 "total": len(failures),
                 "errors": errors,
                 "skipped": skipped,
+                "series": series_emitted,
+                "series_error": series_error,
             },
         )

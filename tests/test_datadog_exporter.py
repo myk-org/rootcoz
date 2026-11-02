@@ -17,12 +17,14 @@ from rootcoz import storage
 from rootcoz.config import Settings
 from rootcoz.exporters.base import ExportContext
 from rootcoz.exporters.datadog import (
+    _UNKNOWN_CLASSIFICATION,
     API_KEY_IN_APP_SLOT_ERROR,
     APP_KEY_SERVICE_TOKEN_ERROR,
     APPLICATION_KEY_ERROR,
     SERVICE_ACCESS_TOKEN_ERROR,
     DatadogExporter,
     _auth_headers,
+    _tag_label,
     classify_datadog_credential,
     sanitize_tag_value,
     validate_datadog_credentials,
@@ -33,6 +35,9 @@ _API_KEY = "dd-test-key"  # pragma: allowlist secret
 _APP_KEY = "b" * 40  # pragma: allowlist secret
 _SAT = "ddsat_service-token"  # pragma: allowlist secret
 _EVENTS_URL = "https://event-management-intake.datadoghq.eu/api/v2/events"
+_SERIES_URL = "https://api.datadoghq.eu/api/v2/series"
+_CLASSIFICATION_METRIC = "rootcoz.failures.classification"
+_PATTERN_METRIC = "rootcoz.failures.pattern"
 _EXPECTED_HEADERS = {
     "DD-API-KEY": _API_KEY,
     "DD-APPLICATION-KEY": _APP_KEY,
@@ -72,6 +77,26 @@ def _message(event: dict[str, Any]) -> str:
 def _iso(epoch: int) -> str:
     """ISO 8601 UTC rendering the v2 intake expects."""
     return datetime.fromtimestamp(epoch, UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _event_posts(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The event POSTs of a captured push — the metrics POST carries series."""
+    return [post for post in posts if "series" not in post["json"]]
+
+
+def _series_posts(posts: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The metrics POSTs of a captured push — one per push by design."""
+    return [post for post in posts if "series" in post["json"]]
+
+
+def _series_values(payload: dict[str, Any], tag_prefix: str) -> dict[str, int]:
+    """Map ``category -> gauge value`` for one metric family of a push."""
+    return {
+        tag.split(":", 1)[1]: int(entry["points"][0]["value"])
+        for entry in payload["series"]
+        for tag in entry["tags"]
+        if tag.startswith(tag_prefix)
+    }
 
 
 def _failure(
@@ -172,6 +197,19 @@ class TestSanitizeTagValue:
         assert sanitize_tag_value("///") == "unknown"
 
 
+class TestTagLabel:
+    """One helper renders classification values, so events and metrics match."""
+
+    def test_lowercased_with_spaces_and_hyphens_folded(self):
+        assert _tag_label("PRODUCT BUG") == "product_bug"
+        assert _tag_label("CODE ISSUE") == "code_issue"
+        assert _tag_label("known-issue") == "known_issue"
+        assert _tag_label("NEW") == "new"
+
+    def test_empty_value_still_tag_safe(self):
+        assert _tag_label("") == "unknown"
+
+
 class TestV2Envelope:
     """The payload is the documented v2 event envelope, not a v1 event."""
 
@@ -270,7 +308,7 @@ class TestBuildEvent:
             "build_number:42",
             "rootcoz.analysis_id:job-123",
             "rootcoz.analysis_timestamp:1735689600",
-            "tfa.classification:PRODUCT_BUG",
+            "tfa.classification:product_bug",
             "pushed_by:alice",
         ]
 
@@ -432,7 +470,7 @@ class TestContentToggles:
         event = _exporter()._build_event(_context(), _failure())
         assert _attributes(event)["title"].startswith("[PRODUCT BUG]")
         assert "**Classification:** PRODUCT BUG" in _message(event)
-        assert "tfa.classification:PRODUCT_BUG" in _attributes(event)["tags"]
+        assert "tfa.classification:product_bug" in _attributes(event)["tags"]
 
     def test_rootcoz_url_toggle_off(self):
         exporter = _exporter(push_rootcoz_url=False)
@@ -601,7 +639,7 @@ class TestHistoryClassificationsAndReviewers:
         assert "tfa.failure_pattern:code_issue" in event["tags"]
         # Sits right after the classification tag, matching the message order.
         tags = event["tags"]
-        assert tags.index("tfa.classification:PRODUCT_BUG") < tags.index(
+        assert tags.index("tfa.classification:product_bug") < tags.index(
             "tfa.failure_pattern:code_issue"
         )
 
@@ -926,7 +964,14 @@ class TestPush:
     async def test_empty_failures(self):
         result = await _exporter().push(_context())
         assert result.success is False
-        assert result.details == {"pushed": 0, "total": 0, "errors": [], "skipped": 0}
+        assert result.details == {
+            "pushed": 0,
+            "total": 0,
+            "errors": [],
+            "skipped": 0,
+            "series": 0,
+            "series_error": None,
+        }
 
     async def test_one_event_per_failure(self):
         context = _context(
@@ -944,13 +989,14 @@ class TestPush:
         assert result.details["pushed"] == 3
         assert result.details["total"] == 3
         assert result.details["errors"] == []
-        assert len(posts) == 3
-        assert [_attributes(p["json"])["title"] for p in posts] == [
+        event_posts = _event_posts(posts)
+        assert len(event_posts) == 3
+        assert [_attributes(p["json"])["title"] for p in event_posts] == [
             "[PRODUCT BUG] test_a (Build #42)",
             "[INFRASTRUCTURE] test_b (Build #42)",
             "[CODE ISSUE] test_c (Build #42)",
         ]
-        assert [_attributes(p["json"])["aggregation_key"] for p in posts] == [
+        assert [_attributes(p["json"])["aggregation_key"] for p in event_posts] == [
             "rootcoz-job-123-test_a",
             "rootcoz-job-123-test_b",
             "rootcoz-job-123-test_c",
@@ -1009,7 +1055,7 @@ class TestPush:
                 _context(failures=[_failure("test_a"), _failure("test_b")])
             )
 
-        assert len(posts) == 2  # second event still attempted
+        assert len(_event_posts(posts)) == 2  # second event still attempted
         assert result.details["pushed"] == 1
         assert result.details["errors"] == ["Failed to emit Datadog event for 'test_a'"]
 
@@ -1032,6 +1078,236 @@ class TestPush:
         ):
             await _exporter().push(context)
         assert _attributes(posts[0]["json"])["timestamp"] == _iso(12345)
+
+
+class TestSeriesScoreboard:
+    """One gauge per failure category per push — the dashboard scoreboard.
+
+    A series that stops arriving keeps its last value in Datadog, so every
+    category is sent on every push, zeros included.
+    """
+
+    @staticmethod
+    async def _push(
+        context: ExportContext,
+        *,
+        exporter_overrides: dict[str, Any] | None = None,
+        responses: list[Any] | None = None,
+    ) -> tuple[Any, list[dict[str, Any]]]:
+        mock_class, posts = _mock_http_client(responses=responses)
+        exporter = _exporter(**(exporter_overrides or {}))
+        with patch("rootcoz.exporters.datadog.httpx.AsyncClient", mock_class):
+            result = await exporter.push(context)
+        return result, posts
+
+    async def test_one_series_request_per_push(self):
+        result, posts = await self._push(_context(failures=[_failure()]))
+        series_posts = _series_posts(posts)
+        assert len(series_posts) == 1
+        assert series_posts[0]["url"] == _SERIES_URL
+        assert series_posts[0]["headers"] == _EXPECTED_HEADERS
+        payload = series_posts[0]["json"]
+        assert set(payload) == {"series"}
+        for entry in payload["series"]:
+            assert set(entry) == {"metric", "type", "points", "tags"}
+            assert entry["type"] == 3  # gauge
+            assert len(entry["points"]) == 1
+            assert set(entry["points"][0]) == {"timestamp", "value"}
+            assert isinstance(entry["points"][0]["value"], float)
+        assert result.details["series"] == len(payload["series"])
+
+    async def test_exactly_two_metric_names(self):
+        _result, posts = await self._push(_context(failures=[_failure()]))
+        metrics = {
+            entry["metric"] for entry in _series_posts(posts)[0]["json"]["series"]
+        }
+        assert metrics == {_CLASSIFICATION_METRIC, _PATTERN_METRIC}
+
+    async def test_classification_vocabulary_zero_filled(self):
+        """A classification at zero must still be reported, or it goes stale."""
+        _result, posts = await self._push(_context(failures=[_failure()]))
+        values = _series_values(_series_posts(posts)[0]["json"], "tfa.classification:")
+        assert set(values) == {
+            _tag_label(classification)
+            for classification in (
+                *storage.PRIMARY_CLASSIFICATIONS,
+                _UNKNOWN_CLASSIFICATION,
+            )
+        }
+        assert values["product_bug"] == 1
+        assert values["code_issue"] == 0
+        assert values["infrastructure"] == 0
+        assert values["unknown"] == 0
+
+    async def test_pattern_vocabulary_zero_filled(self):
+        """The union storage can return for history — nothing emitted is missing."""
+        _result, posts = await self._push(_context(failures=[_failure()]))
+        values = _series_values(_series_posts(posts)[0]["json"], "tfa.failure_pattern:")
+        assert set(values) == {
+            _tag_label(pattern)
+            for pattern in (
+                *storage.PATTERN_CLASSIFICATIONS,
+                *storage.HISTORY_CLASSIFICATIONS,
+            )
+        }
+        assert set(values.values()) == {0}
+        # The values the consumer asked to see are in the vocabulary.
+        assert {"new", "intermittent", "flaky"} <= set(values)
+
+    async def test_counts_within_a_child_scoped_context(self):
+        """Values are the current build's counts, not a delta — scope already applied."""
+        context = _context(
+            child_job_name="child job",
+            child_build_number=7,
+            failures=[
+                _failure("test_a", classification="CODE ISSUE"),
+                _failure("test_b", classification="CODE ISSUE"),
+                _failure("test_c", classification="INFRASTRUCTURE"),
+            ],
+            history_classifications={
+                "test_a": "FLAKY",
+                "test_b": "FLAKY",
+                "test_c": "INFRASTRUCTURE",
+            },
+        )
+        result, posts = await self._push(context)
+        payload = _series_posts(posts)[0]["json"]
+        classifications = _series_values(payload, "tfa.classification:")
+        patterns = _series_values(payload, "tfa.failure_pattern:")
+        assert classifications["code_issue"] == 2
+        assert classifications["infrastructure"] == 1
+        assert classifications["product_bug"] == 0
+        assert patterns["flaky"] == 2
+        assert patterns["infrastructure"] == 1
+        assert patterns["new"] == 0
+        assert sum(classifications.values()) == 3
+        assert result.details["series"] == len(payload["series"])
+
+    async def test_tags_are_job_build_and_one_category(self):
+        """No per-push id, no service/env: each extra tag bills as a new metric."""
+        context = _context(
+            failures=[_failure()],
+            history_classifications={"test_login_flow": "FLAKY"},
+        )
+        _result, posts = await self._push(
+            context, exporter_overrides={"service": "my svc", "env": "prod"}
+        )
+        payload = _series_posts(posts)[0]["json"]
+        for entry in payload["series"]:
+            prefix = (
+                "tfa.classification:"
+                if entry["metric"] == _CLASSIFICATION_METRIC
+                else "tfa.failure_pattern:"
+            )
+            category = [tag for tag in entry["tags"] if tag.startswith(prefix)]
+            assert len(category) == 1, entry
+            assert entry["tags"] == [
+                "job_name:e2e-suite",
+                "build_number:42",
+                category[0],
+            ]
+            joined = " ".join(entry["tags"])
+            for forbidden in (
+                "rootcoz.push_id:",
+                "rootcoz.analysis_id:",
+                "rootcoz.failure_id:",
+                "service:",
+                "env:",
+                "tfa.stage:",
+                "child_job",
+                "pushed_by:",
+                "reviewed_by:",
+            ):
+                assert forbidden not in joined, (forbidden, entry["tags"])
+
+    async def test_timestamp_matches_the_event_timestamp(self):
+        context = _context(failures=[_failure()])
+        with patch("rootcoz.exporters.datadog.time.time", return_value=1_700_000_000.0):
+            _result, posts = await self._push(context)
+        event = _event_posts(posts)[0]["json"]
+        for entry in _series_posts(posts)[0]["json"]["series"]:
+            assert entry["points"][0]["timestamp"] == 1_700_000_000
+        assert _attributes(event)["timestamp"] == _iso(1_700_000_000)
+
+    async def test_series_failure_recorded_but_events_still_push(self):
+        ok = MagicMock()
+        ok.raise_for_status = MagicMock()
+        rejected = httpx.HTTPStatusError(
+            "Unprocessable",
+            request=MagicMock(),
+            response=httpx.Response(
+                422,
+                json={"errors": [{"detail": "No series payload"}]},
+                request=MagicMock(),
+            ),
+        )
+        result, posts = await self._push(
+            _context(failures=[_failure()]), responses=[ok, rejected]
+        )
+
+        assert len(_event_posts(posts)) == 1  # events were not rolled back
+        assert result.details["pushed"] == 1
+        assert result.details["errors"] == []  # event error semantics unchanged
+        assert result.details["series"] == 0
+        assert "No series payload" in result.details["series_error"]
+        assert result.success is False
+        assert "No series payload" in result.message
+
+    async def test_series_network_error_not_raised(self):
+        ok = MagicMock()
+        ok.raise_for_status = MagicMock()
+        result, _posts = await self._push(
+            _context(failures=[_failure()]),
+            responses=[ok, httpx.RequestError("Connection refused")],
+        )
+        assert result.details["pushed"] == 1
+        assert result.details["series"] == 0
+        assert "metric series" in result.details["series_error"]
+
+    async def test_classification_series_omitted_when_toggle_off(self):
+        """Toggle off means events carry no classification tag at all."""
+        _result, posts = await self._push(
+            _context(failures=[_failure()]),
+            exporter_overrides={"push_classifications": False},
+        )
+        payload = _series_posts(posts)[0]["json"]
+        assert {entry["metric"] for entry in payload["series"]} == {_PATTERN_METRIC}
+        assert _series_values(payload, "tfa.classification:") == {}
+
+    async def test_no_series_after_an_auth_rejection(self):
+        response = MagicMock()
+        response.status_code = 401
+        rejected = httpx.HTTPStatusError(
+            "Unauthorized", request=MagicMock(), response=response
+        )
+        result, posts = await self._push(
+            _context(failures=[_failure()]), responses=[rejected]
+        )
+        assert len(posts) == 1  # no metrics attempt with rejected keys
+        assert _series_posts(posts) == []
+        assert result.details["series"] == 0
+
+    async def test_non_dict_entries_never_counted(self):
+        _result, posts = await self._push(_context(failures=["not-a-dict", _failure()]))
+        values = _series_values(_series_posts(posts)[0]["json"], "tfa.classification:")
+        assert sum(values.values()) == 1
+
+    async def test_metric_and_event_tags_are_the_same_string(self):
+        """Lowercase on both sides, so one dashboard filter matches both."""
+        context = _context(
+            failures=[_failure()],
+            history_classifications={"test_login_flow": "KNOWN_BUG"},
+        )
+        _result, posts = await self._push(context)
+        event_tags = _attributes(_event_posts(posts)[0]["json"])["tags"]
+        metric_tags = [
+            tag
+            for entry in _series_posts(posts)[0]["json"]["series"]
+            for tag in entry["tags"]
+        ]
+        for tag in ("tfa.classification:product_bug", "tfa.failure_pattern:known_bug"):
+            assert tag in event_tags
+            assert tag in metric_tags
 
 
 class TestApiErrorDetail:
@@ -1430,7 +1706,8 @@ class TestFailureAndPushIdentity:
                 return False
 
             async def post(self, url: str, json: dict, headers: dict) -> _Response:
-                seen.append(json)
+                if "series" not in json:  # the metrics request is not an event
+                    seen.append(json)
                 return _Response()
 
         context = _context(
@@ -1571,7 +1848,7 @@ class TestCircuitBreaker:
         with patch("rootcoz.exporters.datadog.httpx.AsyncClient", mock_class):
             result = await _exporter().push(_context(failures=failures))
 
-        assert len(posts) == 5  # circuit broke, last 2 never attempted
+        assert len(_event_posts(posts)) == 5  # circuit broke, last 2 never attempted
         assert result.success is False
         assert result.details["pushed"] == 0
         assert result.details["total"] == 7
@@ -1599,7 +1876,7 @@ class TestCircuitBreaker:
         with patch("rootcoz.exporters.datadog.httpx.AsyncClient", mock_class):
             result = await _exporter().push(_context(failures=failures))
 
-        assert len(posts) == 8  # never broke — no run of 5 consecutive failures
+        assert len(_event_posts(posts)) == 8  # never broke — no run of 5 in a row
         assert result.details["pushed"] == 2
         assert result.details["skipped"] == 0
         assert len(result.details["errors"]) == 6
@@ -1610,7 +1887,7 @@ class TestCircuitBreaker:
         with patch("rootcoz.exporters.datadog.httpx.AsyncClient", mock_class):
             result = await _exporter().push(_context(failures=failures))
 
-        assert posts == []  # broke before any HTTP attempt
+        assert _event_posts(posts) == []  # broke before any event attempt
         assert result.details["skipped"] == 1
         assert result.details["pushed"] == 0
 
