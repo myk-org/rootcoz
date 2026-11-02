@@ -108,6 +108,15 @@ class Exporter(ABC):
     #: :attr:`ExportContext.tracked_in_links` must set this to ``True``.
     needs_tracked_in_links: bool = False
 
+    #: Whether this exporter writes gating-relevant records whose subject
+    #: must identify a build/artifact (e.g. ResultsDB results under
+    #: ``subject_type=koji_build``).  When ``True``, the exporter must not
+    #: be pushed from a context lacking an explicit
+    #: :attr:`ExportContext.subject_identifier`: the automatic push path
+    #: supplies none, and letting the exporter fall back to the CI
+    #: ``job_name`` would write a job name as the gating subject.
+    requires_subject_identifier: bool = False
+
     @property
     @abstractmethod
     def name(self) -> str:

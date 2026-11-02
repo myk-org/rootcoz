@@ -176,16 +176,22 @@ class TestGreenwaveSettings:
             ):
                 Settings(_env_file=None)
 
-    def test_auto_push_without_auto_review_rejected(self):
-        """AUTO_PUSH_EXPORTERS with auto-review disabled is a config error."""
+    def test_auto_push_without_auto_review_warns(self):
+        """AUTO_PUSH_EXPORTERS with auto-review disabled is inert, not fatal."""
         env = _greenwave_env(
             AUTO_PUSH_EXPORTERS="greenwave", ENABLE_AUTO_REVIEW="false"
         )
         with (
             patch.dict(os.environ, env, clear=True),
-            pytest.raises(ValueError, match="AUTO_PUSH_EXPORTERS"),
+            patch("rootcoz.config.logger") as mock_logger,
         ):
-            Settings(_env_file=None)
+            settings = Settings(_env_file=None)
+        assert settings.auto_push_exporters == "greenwave"
+        assert settings.enable_auto_review is False
+        assert any(
+            "auto-push will not run" in str(c.args[0])
+            for c in mock_logger.warning.call_args_list
+        )
 
     def test_auto_push_with_auto_review_accepted(self):
         """AUTO_PUSH_EXPORTERS with auto-review enabled (the default) is fine."""

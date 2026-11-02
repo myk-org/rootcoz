@@ -25,7 +25,7 @@ from rootcoz.models import (
     FailureAnalysis,
 )
 from rootcoz.sources.jenkins_source import JenkinsError
-from tests.conftest import make_test_client
+from tests.conftest import build_test_env, make_test_client
 
 # Fake credentials for tests — annotated once to suppress Ruff S105/S106 globally.
 FAKE_JENKINS_PASSWORD = "not-a-real-password"  # pragma: allowlist secret
@@ -10801,6 +10801,83 @@ class TestEnumeratedSettings:
         assert key.upper() in response.json()["detail"].upper()
         # Nothing was written — the import is validated before any DB write
         assert _settings_item(test_client, key)["source"] != "db"
+
+
+class TestAutoPushAutoReviewSettingValidation:
+    """Auto-push requires auto-review — enforced on the write path (#183).
+
+    The Settings model only warns about the inert combination (raising
+    there would wipe DB overrides via the get_settings() fallback), so
+    _validate_settings_updates — shared by PUT and settings import —
+    rejects it against the EFFECTIVE proposed values.
+    """
+
+    @staticmethod
+    async def _validate(env: dict[str, str], updates: dict[str, Any]) -> list[str]:
+        from rootcoz.main import _validate_settings_updates
+
+        with patch.dict(os.environ, env, clear=True):
+            return await _validate_settings_updates(updates)
+
+    async def test_rejects_turning_auto_review_off_while_auto_push_configured(
+        self,
+    ) -> None:
+        """Disabling auto-review while auto-push is configured is rejected."""
+        errors = await self._validate(
+            build_test_env(AUTO_PUSH_EXPORTERS="reportportal"),
+            {"enable_auto_review": "false"},
+        )
+        assert any(
+            "auto_push_exporters requires enable_auto_review" in e for e in errors
+        )
+
+    async def test_rejects_saving_auto_push_while_auto_review_off(self) -> None:
+        """Configuring auto-push while auto-review is off is rejected."""
+        errors = await self._validate(
+            build_test_env(ENABLE_AUTO_REVIEW="false"),
+            {"auto_push_exporters": "reportportal"},
+        )
+        assert any(
+            "auto_push_exporters requires enable_auto_review" in e for e in errors
+        )
+
+    async def test_uses_effective_settings_not_raw_env(self) -> None:
+        """A DB-configured auto-push is caught even when env has neither key."""
+        from rootcoz.config import update_db_settings_cache
+
+        update_db_settings_cache({"auto_push_exporters": "reportportal"})
+        try:
+            errors = await self._validate(
+                build_test_env(), {"enable_auto_review": "false"}
+            )
+        finally:
+            from rootcoz.config import remove_from_db_settings_cache
+
+            remove_from_db_settings_cache(["auto_push_exporters"])
+        assert any(
+            "auto_push_exporters requires enable_auto_review" in e for e in errors
+        )
+
+    async def test_accepts_valid_combinations(self) -> None:
+        """Enabling auto-review, clearing auto-push, or neither — all fine."""
+        # Turning auto-review ON while auto-push is configured
+        errors = await self._validate(
+            build_test_env(AUTO_PUSH_EXPORTERS="reportportal"),
+            {"enable_auto_review": "true"},
+        )
+        assert not errors
+        # Clearing auto-push while auto-review is off
+        errors = await self._validate(
+            build_test_env(ENABLE_AUTO_REVIEW="false"),
+            {"auto_push_exporters": ""},
+        )
+        assert not errors
+        # Both keys in one update, resolving to a valid combination
+        errors = await self._validate(
+            build_test_env(),
+            {"auto_push_exporters": "reportportal", "enable_auto_review": "true"},
+        )
+        assert not errors
 
 
 class TestAdminSettingsExportImport:

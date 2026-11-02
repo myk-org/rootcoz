@@ -3886,6 +3886,11 @@ async def _auto_review_matching_failures(
             auto_push_names
             and total_failures > 0
             and await _unreviewed_failure_count(job_id, result_data) == 0
+            # Attribution: every pushed failure must carry an AI review, not
+            # merely "some" review — a human review stops the automatic push.
+            and _all_failures_ai_reviewed(
+                result_data, await storage.get_reviews_for_job(job_id)
+            )
         ):
             # Auto-push must emit the same event timestamp as the manual
             # push endpoint: reuse the stored analysis timestamp instead
@@ -3912,6 +3917,23 @@ async def _auto_review_matching_failures(
                     analysis_timestamp=analysis_timestamp,
                 )
                 for plugin_name in auto_push_names:
+                    # Gating exporters (e.g. Greenwave) write records whose
+                    # subject must identify a build/artifact; the automatic
+                    # path has no explicit subject identifier, and the
+                    # job_name fallback would write a CI job name as the
+                    # gating subject.
+                    if getattr(
+                        _EXPORTER_CLASSES.get(plugin_name),
+                        "requires_subject_identifier",
+                        False,
+                    ):
+                        logger.info(
+                            "Auto-push skipped for exporter '%s': it requires an "
+                            "explicit subject identifier, which the automatic "
+                            "path cannot supply",
+                            plugin_name,
+                        )
+                        continue
                     logger.info(
                         "All failures auto-reviewed for job %s%s, pushing to "
                         "'%s' (pushed_by=%s)",
@@ -6564,8 +6586,18 @@ def _push_scopes(
         for child in children:
             if not isinstance(child, dict):
                 continue
-            if child.get("failures"):
-                scope = (child.get("job_name") or None, child.get("build_number"))
+            # A child scope needs an identifiable build: the scoped export
+            # context is addressed by (job_name, build_number), and a scope
+            # without one would resolve to the root context and push the
+            # parent's failures a second time. Such children are still walked
+            # so their own nested children can be pushed.
+            name = child.get("job_name") or None
+            try:
+                build = int(child.get("build_number") or 0)
+            except (TypeError, ValueError):
+                build = 0
+            if child.get("failures") and name and build > 0:
+                scope = (name, build)
                 if scope not in seen:
                     seen.add(scope)
                     scopes.append(scope)
@@ -6573,6 +6605,32 @@ def _push_scopes(
 
     _walk(result_data.get("child_job_analyses", []))
     return scopes
+
+
+def _all_failures_ai_reviewed(
+    result_data: dict[str, Any], reviews: dict[str, dict[str, Any]]
+) -> bool:
+    """Whether every failure in the job tree was reviewed by the AI itself.
+
+    Auto-push attributes its writes to ``AI_SYSTEM_USERNAME``, so it may only
+    run when every failure that would be pushed carries an AI-authored review.
+    "No unreviewed failures" is not enough: one AI auto-review plus human
+    reviews satisfies that count and would produce an AI-attributed push.
+    Review resolution reuses :func:`resolve_failure_review`, so the
+    child-scoping semantics match the report page exactly.
+    """
+    for failure, child_job_name, child_build_number in _iter_scoped_failures(
+        result_data
+    ):
+        entry = resolve_failure_review(
+            reviews,
+            failure.get("test_name", ""),
+            child_job_name,
+            child_build_number,
+        )
+        if not entry or entry.get("username") != AI_SYSTEM_USERNAME:
+            return False
+    return True
 
 
 def _iter_scoped_failures(
@@ -17382,6 +17440,44 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
                 errors.append(
                     f"{key}: {ctx_err if ctx_err else err.get('msg', str(err))}"
                 )
+
+    # Auto-push requires auto-review.  The Settings model only warns
+    # (raising there would hard-fail env-var startups and, via
+    # get_settings()'s fallback, wipe every DB override), so the
+    # combination is rejected here where the admin can act on it.
+    # Evaluated on the EFFECTIVE proposed values — current get_settings()
+    # semantics (env + DB overrides, not raw env) overlaid with this
+    # update — so an update touching only one of the two keys is caught
+    # too.  Covers both PUT and settings import, which share this
+    # function.  None/empty values reset to the model default, matching
+    # the PUT semantics above.
+    effective = get_settings().model_dump()
+    for key, value in settings_updates.items():
+        if key not in valid_keys:
+            continue
+        if value is None or value == "":
+            field = Settings.model_fields[key]
+            effective[key] = (
+                field.default_factory() if field.default_factory else field.default
+            )
+        else:
+            effective[key] = value
+    try:
+        proposed = Settings.model_validate(effective)
+    except ValidationError:
+        # Per-field problems were already reported above; skip the
+        # cross-field check when the merged proposal cannot validate.
+        proposed = None
+    if (
+        proposed is not None
+        and proposed.auto_push_exporters.strip()
+        and proposed.enable_auto_review is False
+    ):
+        errors.append(
+            "auto_push_exporters requires enable_auto_review — auto-push "
+            "only runs for failures auto-review has marked reviewed; "
+            "enable ENABLE_AUTO_REVIEW or clear AUTO_PUSH_EXPORTERS"
+        )
 
     return errors
 

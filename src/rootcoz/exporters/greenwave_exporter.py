@@ -185,6 +185,13 @@ class GreenwaveExporter(Exporter):
     NAME = "greenwave"
     DISPLAY_NAME = "Greenwave"
 
+    #: ResultsDB results carry ``subject_type`` (e.g. koji_build), so the
+    #: pushed subject must identify a build/artifact — never a CI job
+    #: name.  The automatic push path supplies no explicit subject
+    #: identifier, so it skips this exporter entirely (see
+    #: ``Exporter.requires_subject_identifier``).
+    requires_subject_identifier = True
+
     @classmethod
     def missing_waiver_settings(cls, settings: Settings) -> list[str]:
         """WaiverDB settings missing while ``GREENWAVE_PUSH_WAIVERS`` is on.
@@ -306,12 +313,16 @@ class GreenwaveExporter(Exporter):
         Waiver submissions require an explicit ``subject_identifier`` (build
         NVR or artifact identifier) — they never fall back to ``job_name``,
         because a waiver keyed on a CI job name is a malformed gating write.
-        Result pushes fall back to ``job_name`` when no subject identifier
-        was supplied.
+        Result pushes fall back to ``job_name`` only on the manual
+        results-only path; automatic pushes never reach that fallback —
+        the auto-push pipeline skips this exporter (see
+        ``requires_subject_identifier``).
 
-        When ``context.skip_waivers`` is set and no subject identifier is
-        available (the auto-push path), waivers are skipped and results are
-        pushed best-effort instead of refusing the whole push.
+        ``context.skip_waivers`` still makes an identifier-less push skip
+        waivers and push results best-effort rather than refuse; the
+        automatic pipeline no longer routes Greenwave through that path
+        (it skips the exporter outright), so this only serves direct
+        callers that set the flag themselves.
         """
         if not context.failures:
             return ExporterResult(

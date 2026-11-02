@@ -1241,15 +1241,16 @@ class Settings(BaseSettings):
         parse_greenwave_outcome_map(self.greenwave_outcome_map)
         # Auto-push depends on auto-review: failures are only pushed once
         # auto-review has marked them reviewed.  A deployment configuring
-        # AUTO_PUSH_EXPORTERS with auto-review disabled would start
-        # successfully but the setting would be silently inert — reject it
-        # at construction instead.
+        # AUTO_PUSH_EXPORTERS with auto-review disabled is inert — warn,
+        # never fail construction: raising here would hard-fail env-var
+        # startups and, via get_settings()'s fallback, silently drop every
+        # DB override.  The write path (_validate_settings_updates in
+        # main.py) rejects the combination where it is actionable.
         if self.auto_push_exporters.strip() and self.enable_auto_review is False:
-            raise ValueError(
+            logger.warning(
                 "AUTO_PUSH_EXPORTERS is configured but ENABLE_AUTO_REVIEW is "
-                "disabled — auto-push only runs for failures auto-review has "
-                "marked reviewed; enable ENABLE_AUTO_REVIEW or clear "
-                "AUTO_PUSH_EXPORTERS"
+                "disabled — auto-push will not run; enable ENABLE_AUTO_REVIEW "
+                "or clear AUTO_PUSH_EXPORTERS"
             )
         # Warn once at startup about unrecognized waivable classifications.
         parse_greenwave_waivable_classifications(

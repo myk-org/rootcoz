@@ -1004,3 +1004,43 @@ class TestDefaultUserRole:
             pytest.raises(Exception, match="DEFAULT_USER_ROLE"),
         ):
             Settings(_env_file=None)
+
+
+class TestAutoPushRequiresAutoReview:
+    """AUTO_PUSH_EXPORTERS with auto-review disabled is inert, never fatal (#183).
+
+    The Settings model must only warn — raising would hard-fail env-var
+    startups and make get_settings() silently drop every DB override via
+    its env-only fallback.  Enforcement lives on the write path
+    (_validate_settings_updates in main.py).
+    """
+
+    _INERT_ENV = _build_env(
+        ENABLE_AUTO_REVIEW="false",
+        AUTO_PUSH_EXPORTERS="reportportal",
+    )
+
+    def test_settings_does_not_raise_and_warns(self) -> None:
+        """Both env vars set: Settings constructs and logs an inert warning."""
+        with (
+            patch.dict(os.environ, self._INERT_ENV, clear=True),
+            patch("rootcoz.config.logger") as mock_logger,
+        ):
+            settings = Settings(_env_file=None)
+
+        assert settings.auto_push_exporters == "reportportal"
+        assert settings.enable_auto_review is False
+        assert mock_logger.warning.called
+        warning = mock_logger.warning.call_args.args[0]
+        assert "auto-push will not run" in warning
+        assert "ENABLE_AUTO_REVIEW" in warning
+
+    def test_get_settings_keeps_db_overrides_despite_inert_combo(self) -> None:
+        """Regression: the inert combo must not wipe DB overrides."""
+        with patch.dict(os.environ, self._INERT_ENV, clear=True):
+            update_db_settings_cache({"jenkins_url": "https://db-override.example.com"})
+            settings = get_settings()
+
+        assert settings.jenkins_url == "https://db-override.example.com"
+        assert settings.auto_push_exporters == "reportportal"
+        assert settings.enable_auto_review is False
