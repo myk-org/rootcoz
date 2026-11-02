@@ -24,7 +24,9 @@ intake. Two gauges, ``rootcoz.failures.classification`` and
 tests in each category, zeros included: Datadog keeps the last value of a
 series it no longer receives, so a skipped category would leave the previous
 build's count in place and the dashboard would add both up. Their tag values
-are lowercase and identical to the event tags. The per-push ids stay on the
+are lowercase and identical to the event tags. A child-scoped push is its own
+series identity (parent job/build plus the child scope), so it never
+overwrites the parent build's scoreboard. The per-push ids stay on the
 events only — a tag that changes on every push double-counts the previous
 push *and* bills as a new custom metric.
 
@@ -534,11 +536,21 @@ def _metric_label(value: str, vocabulary: tuple[str, ...]) -> str:
 
 
 def _identity_tags(context: ExportContext) -> list[str]:
-    """The job/build identity tags shared by the events and the metrics."""
-    return [
+    """The job/build identity tags shared by the events and the metrics.
+
+    A child-scoped push keeps the parent ``job_name``/``build_number`` and
+    adds the pushed scope on top, so the scope is part of the series identity:
+    a child push writes its own scoreboard series instead of overwriting the
+    parent build's, and two different children never mix their counts.
+    """
+    tags = [
         f"job_name:{sanitize_tag_value(context.job_name)}",
         f"build_number:{sanitize_tag_value(context.build_number)}",
     ]
+    if context.child_job_name:
+        tags.append(f"child_job_name:{sanitize_tag_value(context.child_job_name)}")
+        tags.append(f"child_build_number:{int(context.child_build_number or 0)}")
+    return tags
 
 
 def _failure_analysis(failure: dict[str, Any]) -> dict[str, Any]:
@@ -558,7 +570,7 @@ def _failure_analysis(failure: dict[str, Any]) -> dict[str, Any]:
 def _series_entry(
     *, metric: str, context: ExportContext, timestamp: int, value: int, tag: str
 ) -> dict[str, Any]:
-    """One gauge series: the job/build identity plus the one category tag."""
+    """One gauge series: the job/build (and push scope) identity plus one tag."""
     return {
         "metric": metric,
         "type": _SERIES_GAUGE,
@@ -572,7 +584,9 @@ class DatadogExporter(Exporter):
 
     Every push also sends one gauge series per failure category (zeros
     included) to the v2 series API, so the dashboard scoreboard has a current
-    value for every category instead of a stale last one.
+    value for every category instead of a stale last one. A child-scoped push
+    tags its series with the child scope, so it writes its own series rather
+    than overwriting the parent build's.
 
     Args:
         api_key: Datadog API key (32 hex chars, ``DD-API-KEY`` header).
@@ -717,8 +731,6 @@ class DatadogExporter(Exporter):
         pattern = context.history_classifications.get(test_name, "")
         if pattern:
             tags.append(f"tfa.failure_pattern:{_tag_label(pattern)}")
-        if context.child_job_name:
-            tags.append(f"child_job_name:{sanitize_tag_value(context.child_job_name)}")
         tags.append(
             f"pushed_by:{sanitize_tag_value(context.pushed_by or AI_SYSTEM_USERNAME)}"
         )
@@ -891,9 +903,10 @@ class DatadogExporter(Exporter):
         carrying the raw lowercase value in their tag — only the metric series
         are bounded.
 
-        The metric tags are the job/build identity plus the one category tag —
-        never the per-push ids, which would double-count and bill as a new
-        custom metric on every push.
+        The metric tags are the job/build identity (plus the child scope when
+        the push is scoped, so a child never overwrites the parent build's
+        series) plus the one category tag — never the per-push ids, which
+        would double-count and bill as a new custom metric on every push.
 
         Args:
             context: Export context; ``failures`` is already scope-resolved.

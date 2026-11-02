@@ -340,12 +340,16 @@ class TestBuildEvent:
         assert not any(t.startswith("service:") for t in event["tags"])
         assert not any(t.startswith("env:") for t in event["tags"])
 
-    def test_child_job_tag_when_scoped(self):
+    def test_child_scope_tags_when_scoped(self):
         event = self._event(child_job_name="child job", child_build_number=7)
         tags = event["tags"]
         assert "child_job_name:child_job" in tags
-        # child_build_number is scoping metadata, not a tag
-        assert not any(t.startswith("child_build_number") for t in tags)
+        assert "child_build_number:7" in tags
+
+    def test_no_child_scope_tags_when_unscoped(self):
+        tags = self._event()["tags"]
+        assert not any(t.startswith("child_job_name:") for t in tags)
+        assert not any(t.startswith("child_build_number:") for t in tags)
 
     def test_pushed_by_falls_back_to_ai_system(self):
         event = self._event(pushed_by="")
@@ -1240,6 +1244,63 @@ class TestSeriesScoreboard:
                 "reviewed_by:",
             ):
                 assert forbidden not in joined, (forbidden, entry["tags"])
+
+    async def test_child_scoped_series_carry_the_scope(self):
+        """A child push is its own series: it never overwrites the parent build."""
+        context = _context(
+            child_job_name="child job",
+            child_build_number=7,
+            failures=[_failure()],
+            history_classifications={"test_login_flow": "FLAKY"},
+        )
+        _result, posts = await self._push(context)
+        for entry in _series_posts(posts)[0]["json"]["series"]:
+            category = [
+                tag
+                for tag in entry["tags"]
+                if tag.startswith(("tfa.classification:", "tfa.failure_pattern:"))
+            ]
+            assert len(category) == 1, entry
+            assert entry["tags"] == [
+                "job_name:e2e-suite",
+                "build_number:42",
+                "child_job_name:child_job",
+                "child_build_number:7",
+                category[0],
+            ]
+
+    async def test_unscoped_series_carry_no_scope_tags(self):
+        _result, posts = await self._push(_context(failures=[_failure()]))
+        joined = " ".join(
+            tag
+            for entry in _series_posts(posts)[0]["json"]["series"]
+            for tag in entry["tags"]
+        )
+        assert "child_job_name:" not in joined
+        assert "child_build_number:" not in joined
+
+    async def test_scoped_event_and_metric_scope_tags_are_the_same_string(self):
+        """One helper renders the identity, so both sides carry the same scope."""
+        context = _context(
+            child_job_name="child job",
+            child_build_number=7,
+            failures=[_failure()],
+        )
+        _result, posts = await self._push(context)
+        event_tags = _attributes(_event_posts(posts)[0]["json"])["tags"]
+        metric_tags = [
+            tag
+            for entry in _series_posts(posts)[0]["json"]["series"]
+            for tag in entry["tags"]
+        ]
+        for tag in (
+            "job_name:e2e-suite",
+            "build_number:42",
+            "child_job_name:child_job",
+            "child_build_number:7",
+        ):
+            assert tag in event_tags
+            assert tag in metric_tags
 
     async def test_timestamp_matches_the_event_timestamp(self):
         context = _context(failures=[_failure()])
