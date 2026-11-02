@@ -24,9 +24,9 @@ interface GreenwavePushFormProps {
 /**
  * The one Greenwave submit surface — rendered by both GreenwaveButton's
  * dialog and the all-reviewed prompt. The push is gated client-side behind
- * an explicit approval of the exact text that will be written to
- * ResultsDB (and WaiverDB when waivers apply), so a request that would
- * 422 is never fired.
+ * an explicit approval of the comment text sent with the push: the server
+ * composes the final WaiverDB comment around it, and ResultsDB stores only
+ * the outcome per failure. A request that would 422 is never fired.
  */
 export function GreenwavePushForm({
   jobId,
@@ -58,10 +58,9 @@ export function GreenwavePushForm({
     setApproved(false)
   }
 
-  // One computation for every systems claim: waivers are only written when
+  // One computation for every waiver claim: waivers are only written when
   // enabled AND a subject identifier is present.
   const waiversWritten = greenwaveWaiversEnabled && !!subjectIdentifier.trim()
-  const systemsLabel = waiversWritten ? 'ResultsDB, WaiverDB' : 'ResultsDB'
   const missingIdentifier = greenwaveWaiversEnabled && !waiversWritten
   const canPush = approved && !missingIdentifier
   const disabledReason = !approved
@@ -118,9 +117,17 @@ export function GreenwavePushForm({
         <p>Subject identifier: {subjectIdentifier.trim() || '(job name — results only)'}</p>
         <p>Waivers: {waiversWritten ? 'on' : 'off'}</p>
         <p>Results: {failures.length} failure(s)</p>
-        <p>Systems: {systemsLabel}</p>
+        <p>ResultsDB: outcome per failure (PASSED / FAILED / INFO / NEEDS_INSPECTION)</p>
+        {waiversWritten && <p>WaiverDB: waiver for waivable failures</p>}
         <p>Text: {comment.replace(/\s+/g, ' ').trim()}</p>
       </div>
+      {waiversWritten && (
+        <p className="text-xs text-text-tertiary">
+          The text above is included in the WaiverDB comment, which the server completes with
+          the pusher's name, the classification, the analysis details and the reviewer.
+          ResultsDB stores the outcome only.
+        </p>
+      )}
 
       <label htmlFor={`${uid}-approve`} className="flex items-start gap-2 text-xs text-text-secondary">
         <Checkbox
@@ -130,7 +137,8 @@ export function GreenwavePushForm({
           className="mt-0.5"
         />
         <span>
-          I approve the text above. It will be written to {systemsLabel} as part of this push.
+          I approve the text above
+          {waiversWritten ? '. It will be submitted with the waiver.' : '.'}
         </span>
       </label>
 

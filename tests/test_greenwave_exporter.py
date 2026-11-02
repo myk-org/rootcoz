@@ -1,8 +1,10 @@
 """Tests for the Greenwave/ResultsDB exporter plugin (issue #183)."""
 
 import asyncio
+import logging
 import os
 import uuid as uuid_module
+from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -71,6 +73,9 @@ def _make_context(
     reviewed_by: dict[str, str] | None = None,
     pushed_by: str = "operator",
     skip_waivers: bool = False,
+    effective_classifications: dict[tuple[str, str, int], str] | None = None,
+    child_job_name: str | None = None,
+    child_build_number: int | None = None,
 ) -> ExportContext:
     return ExportContext(
         job_id="job-123",
@@ -84,6 +89,9 @@ def _make_context(
         reviewed_by=reviewed_by or {},
         pushed_by=pushed_by,
         skip_waivers=skip_waivers,
+        effective_classifications=effective_classifications or {},
+        child_job_name=child_job_name,
+        child_build_number=child_build_number,
     )
 
 
@@ -1046,6 +1054,296 @@ class TestGreenwaveExporterPush:
         assert any("group creation failed" in e for e in result.details["errors"])
         # No result writes were attempted after the unusable group response
         assert post.call_count == 1
+
+
+class TestGreenwaveEffectiveClassificationOverrides:
+    """Human overrides in ExportContext.effective_classifications win.
+
+    The override table (test_classifications) is authoritative; the
+    result-JSON classification copy is patched best-effort.  The resolved
+    classification must drive the outcome mapping, the waivable gate,
+    and the waiver comment together.
+    """
+
+    _FULL_WAIVER_ENV: ClassVar[dict[str, str]] = {
+        "GREENWAVE_PUSH_WAIVERS": "true",
+        "GREENWAVE_WAIVER_URL": WAIVERDB_URL,
+        "GREENWAVE_WAIVER_TOKEN": "wdb-token",  # pragma: allowlist secret
+        "GREENWAVE_PRODUCT_VERSION": "el10",
+    }
+
+    def _make_exporter(self, **env_overrides: str) -> GreenwaveExporter:
+        return GreenwaveExporter(_make_settings(**env_overrides))
+
+    def _mock_post(self, exporter: GreenwaveExporter, responses: list) -> AsyncMock:
+        post = AsyncMock(side_effect=responses)
+        exporter._post = post
+        return post
+
+    def test_override_drives_outcome_and_blocks_waiver(self):
+        """INFRASTRUCTURE overridden to PRODUCT BUG: FAILED outcome, no waiver.
+
+        The stale JSON says INFRASTRUCTURE (INFO outcome, waivable) — the
+        override must win for both the outcome and the waiver gate.
+        """
+        exporter = self._make_exporter(**self._FULL_WAIVER_ENV)
+        post = self._mock_post(
+            exporter,
+            [
+                _response({"uuid": "550e8400-e29b-41d4-a716-446655440000"}),
+                _response({"id": 101}),
+            ],
+        )
+        result = _run_push(
+            exporter,
+            _make_context(
+                [_failure("test_a", "INFRASTRUCTURE")],
+                subject_identifier="pkg-1.0-1.el10",
+                reviewed_by={"test_a": "reviewer"},
+                effective_classifications={("test_a", "", 0): "PRODUCT BUG"},
+            ),
+        )
+        assert result.success is True
+        assert result.details["pushed"] == 1
+        assert result.details["waived"] == 0
+        assert post.call_count == 2  # group + result only, no waiver
+
+        result_payload = post.call_args_list[1].kwargs["json"]
+        assert result_payload["outcome"] == "FAILED"
+        assert result_payload["data"]["rootcoz_classification"] == ["PRODUCT BUG"]
+        assert "rootcoz classification: PRODUCT BUG" in result_payload["note"]
+
+    def test_override_makes_failure_waivable(self):
+        """PRODUCT BUG overridden to INFRASTRUCTURE: waiver IS filed with it."""
+        exporter = self._make_exporter(**self._FULL_WAIVER_ENV)
+        post = self._mock_post(
+            exporter,
+            [
+                _response({"uuid": "550e8400-e29b-41d4-a716-446655440000"}),
+                _response({"id": 101}),
+                _response({"id": 201}),
+            ],
+        )
+        result = _run_push(
+            exporter,
+            _make_context(
+                [_failure("test_a", "PRODUCT BUG")],
+                subject_identifier="pkg-1.0-1.el10",
+                reviewed_by={"test_a": "reviewer"},
+                effective_classifications={("test_a", "", 0): "INFRASTRUCTURE"},
+            ),
+        )
+        assert result.success is True
+        assert result.details["waived"] == 1
+        assert result.details["details"]["waiver_ids"] == [201]
+
+        waiver_payload = post.call_args_list[2].kwargs["json"]
+        assert "rootcoz: INFRASTRUCTURE" in waiver_payload["comment"]
+
+    def test_no_override_uses_stored_json(self):
+        """Empty overrides: behaviour identical to the pre-override flow."""
+        exporter = self._make_exporter(**self._FULL_WAIVER_ENV)
+        post = self._mock_post(
+            exporter,
+            [
+                _response({"uuid": "550e8400-e29b-41d4-a716-446655440000"}),
+                _response({"id": 101}),
+                _response({"id": 201}),
+            ],
+        )
+        result = _run_push(
+            exporter,
+            _make_context(
+                [_failure("test_a", "INFRASTRUCTURE")],
+                subject_identifier="pkg-1.0-1.el10",
+                reviewed_by={"test_a": "reviewer"},
+            ),
+        )
+        assert result.details["pushed"] == 1
+        assert result.details["waived"] == 1
+        result_payload = post.call_args_list[1].kwargs["json"]
+        assert result_payload["outcome"] == "INFO"
+        waiver_payload = post.call_args_list[2].kwargs["json"]
+        assert "rootcoz: INFRASTRUCTURE" in waiver_payload["comment"]
+
+    def test_child_scope_override_wins_over_root(self):
+        """A child-scoped failure uses the child's override, not the root's."""
+        overrides = {
+            ("test_a", "", 0): "INFRASTRUCTURE",
+            ("test_a", "child-a", 7): "PRODUCT BUG",
+        }
+        exporter = self._make_exporter()
+        post = self._mock_post(
+            exporter,
+            [
+                _response({"uuid": "550e8400-e29b-41d4-a716-446655440000"}),
+                _response({"id": 101}),
+                _response({"uuid": "550e8400-e29b-41d4-a716-446655440000"}),
+                _response({"id": 102}),
+            ],
+        )
+        # Child-scoped push: the child override applies.
+        child_result = _run_push(
+            exporter,
+            _make_context(
+                [_failure("test_a", "INFRASTRUCTURE")],
+                effective_classifications=overrides,
+                child_job_name="child-a",
+                child_build_number=7,
+            ),
+        )
+        assert child_result.details["pushed"] == 1
+        child_payload = post.call_args_list[1].kwargs["json"]
+        assert child_payload["outcome"] == "FAILED"  # PRODUCT BUG override
+        assert child_payload["data"]["rootcoz_classification"] == ["PRODUCT BUG"]
+
+        # Root-scoped push with the same override table: the root entry
+        # applies — the scope keys must not collide.
+        root_result = _run_push(
+            exporter,
+            _make_context(
+                [_failure("test_a", "INFRASTRUCTURE")],
+                effective_classifications=overrides,
+            ),
+        )
+        assert root_result.details["pushed"] == 1
+        root_payload = post.call_args_list[3].kwargs["json"]
+        assert root_payload["outcome"] == "INFO"  # INFRASTRUCTURE override
+
+
+class TestBuildExportContextEffectiveClassifications:
+    """_build_export_context populates effective_classifications."""
+
+    _RESULT_DATA: ClassVar[dict] = {
+        "job_name": "j",
+        "jenkins_url": "https://jenkins.example.com/job/j/1/",
+        "failures": [{"test_name": "t1"}],
+    }
+
+    def _build(
+        self,
+        *,
+        overrides_mock: AsyncMock,
+        child_job_name: str | None = None,
+        child_build_number: int | None = None,
+        result_data: dict | None = None,
+    ):
+        from rootcoz.main import _build_export_context
+
+        with (
+            patch(
+                "rootcoz.main._extract_base_url",
+                return_value="https://rc.example.com",
+            ),
+            patch(
+                "rootcoz.main.get_history_classification",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            patch(
+                "rootcoz.storage.get_tracked_in_for_scope",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch(
+                "rootcoz.storage.get_reviews_for_job",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            overrides_mock,
+        ):
+            return asyncio.run(
+                _build_export_context(
+                    job_id="job-1",
+                    result_data=result_data or self._RESULT_DATA,
+                    settings=MagicMock(),
+                    child_job_name=child_job_name,
+                    child_build_number=child_build_number,
+                    fetch_history=False,
+                    fetch_tracked_in_links=False,
+                )
+            )
+
+    def test_populates_overrides_from_storage(self):
+        overrides = {("t1", "", 0): "PRODUCT BUG"}
+        mock = patch(
+            "rootcoz.storage.get_all_effective_classifications",
+            new_callable=AsyncMock,
+            return_value=overrides,
+        )
+        ctx = self._build(overrides_mock=mock)
+        assert ctx.effective_classifications == overrides
+
+    def test_child_scope_passes_job_scoped_table_through(self):
+        """The whole job-scoped table is carried; exporters resolve per scope."""
+        overrides = {("t1", "child-a", 7): "PRODUCT BUG"}
+        mock = patch(
+            "rootcoz.storage.get_all_effective_classifications",
+            new_callable=AsyncMock,
+            return_value=overrides,
+        )
+        result_data = {
+            **self._RESULT_DATA,
+            "failures": [],
+            "child_job_analyses": [
+                {
+                    "job_name": "child-a",
+                    "build_number": 7,
+                    "failures": [{"test_name": "t1"}],
+                }
+            ],
+        }
+        ctx = self._build(
+            overrides_mock=mock,
+            child_job_name="child-a",
+            child_build_number=7,
+            result_data=result_data,
+        )
+        assert ctx.effective_classifications == overrides
+
+    def test_storage_failure_falls_back_to_json_and_warns(
+        self, caplog: pytest.LogCaptureFixture
+    ):
+        """DB down: push context still builds with empty overrides + warning."""
+        from rootcoz.main import logger as main_logger
+
+        mock = patch(
+            "rootcoz.storage.get_all_effective_classifications",
+            new_callable=AsyncMock,
+            side_effect=RuntimeError("db down"),
+        )
+        original_level = main_logger.level
+        main_logger.setLevel(logging.WARNING)
+        main_logger.addHandler(caplog.handler)
+        try:
+            ctx = self._build(overrides_mock=mock)
+        finally:
+            main_logger.removeHandler(caplog.handler)
+            main_logger.setLevel(original_level)
+
+        # Fallback: no overrides — the exporter will use the stored JSON.
+        assert ctx.effective_classifications == {}
+        # Guard against a vacuous pass: the fallback must be logged.
+        assert any(
+            "Failed to fetch classification overrides" in record.message
+            for record in caplog.records
+        )
+
+        # The push itself still happens, using the JSON classification.
+        exporter = GreenwaveExporter(_make_settings())
+        exporter._post = AsyncMock(
+            side_effect=[
+                _response({"uuid": "550e8400-e29b-41d4-a716-446655440000"}),
+                _response({"id": 101}),
+            ]
+        )
+        result = _run_push(
+            exporter,
+            _make_context([_failure("test_a", "INFRASTRUCTURE")]),
+        )
+        assert result.success is True
+        payload = exporter._post.call_args_list[1].kwargs["json"]
+        assert payload["outcome"] == "INFO"
 
 
 class TestGreenwaveExporterFactory:

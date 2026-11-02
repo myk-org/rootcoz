@@ -1048,6 +1048,11 @@ class TestBuildExportContextFetchHistory:
                 "rootcoz.main.get_history_classification", new_callable=AsyncMock
             ) as mock_hist,
             patch(
+                "rootcoz.storage.get_all_effective_classifications",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch(
                 "rootcoz.storage.get_tracked_in_for_scope",
                 new_callable=AsyncMock,
                 return_value={},
@@ -1221,6 +1226,11 @@ class TestBuildExportContextFetchTrackedIn:
                 "rootcoz.main.get_history_classification",
                 new_callable=AsyncMock,
                 return_value="",
+            ),
+            patch(
+                "rootcoz.storage.get_all_effective_classifications",
+                new_callable=AsyncMock,
+                return_value={},
             ),
             patch(
                 "rootcoz.main.storage.get_tracked_in_for_scope",

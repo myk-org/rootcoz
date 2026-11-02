@@ -144,7 +144,8 @@ describe('GreenwavePushForm', () => {
     expect(screen.getByText('Waivers: on')).toBeDefined()
     expect(screen.getByText('Results: 3 failure(s)')).toBeDefined()
     expect(screen.getByText('Text: line one line two')).toBeDefined()
-    expect(screen.getByText('Systems: ResultsDB, WaiverDB')).toBeDefined()
+    expect(screen.getByText('ResultsDB: outcome per failure (PASSED / FAILED / INFO / NEEDS_INSPECTION)')).toBeDefined()
+    expect(screen.getByText('WaiverDB: waiver for waivable failures')).toBeDefined()
   })
 
   it('shows waivers off and the job-name fallback in results-only mode', () => {
@@ -153,28 +154,27 @@ describe('GreenwavePushForm', () => {
     expect(screen.getByText('Waivers: off')).toBeDefined()
   })
 
-  it('claims only ResultsDB in results-only mode (waivers disabled)', () => {
+  it('shows only the ResultsDB line in results-only mode (waivers disabled)', () => {
     renderForm()
-    expect(screen.getByText('Systems: ResultsDB')).toBeDefined()
-    expect(
-      screen.getByText(/It will be written to ResultsDB as part of this push\./),
-    ).toBeDefined()
+    expect(screen.getByText('ResultsDB: outcome per failure (PASSED / FAILED / INFO / NEEDS_INSPECTION)')).toBeDefined()
     expect(screen.queryByText(/WaiverDB/)).toBeNull()
+    expect(screen.getByText(/I approve the text above\./)).toBeDefined()
+    expect(screen.queryByText(/submitted with the waiver/)).toBeNull()
   })
 
-  it('claims only ResultsDB when waivers are enabled but no identifier is given', () => {
+  it('shows only the ResultsDB line when waivers are enabled but no identifier is given', () => {
     renderForm({ greenwaveWaivers: true })
-    expect(screen.getByText('Systems: ResultsDB')).toBeDefined()
+    expect(screen.getByText('ResultsDB: outcome per failure (PASSED / FAILED / INFO / NEEDS_INSPECTION)')).toBeDefined()
     expect(screen.queryByText(/WaiverDB/)).toBeNull()
   })
 
-  it('claims ResultsDB and WaiverDB when waivers will be written', () => {
+  it('shows the WaiverDB line and composed-comment note when waivers will be written', () => {
     renderForm({ greenwaveWaivers: true })
     fireEvent.change(screen.getByLabelText(/subject identifier/i), { target: { value: 'my-nvr-1.0' } })
-    expect(screen.getByText('Systems: ResultsDB, WaiverDB')).toBeDefined()
-    expect(
-      screen.getByText(/It will be written to ResultsDB, WaiverDB as part of this push\./),
-    ).toBeDefined()
+    expect(screen.getByText('ResultsDB: outcome per failure (PASSED / FAILED / INFO / NEEDS_INSPECTION)')).toBeDefined()
+    expect(screen.getByText('WaiverDB: waiver for waivable failures')).toBeDefined()
+    expect(screen.getByText(/The text above is included in the WaiverDB comment/)).toBeDefined()
+    expect(screen.getByText(/I approve the text above\. It will be submitted with the waiver\./)).toBeDefined()
   })
 
   it('surfaces the server 422 detail on failure', async () => {

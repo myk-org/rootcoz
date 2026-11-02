@@ -138,6 +138,28 @@ def _build_waiver_comment(
     return comment
 
 
+def _effective_classification(failure: FailureAnalysis, context: ExportContext) -> str:
+    """Resolve a failure's classification for gating writes.
+
+    Human overrides in ``context.effective_classifications`` (from
+    ``storage.get_all_effective_classifications``) win over the stored
+    analysis JSON — the override table is authoritative, while the
+    result-JSON copy is patched best-effort.  The lookup key matches the
+    storage function's scope keys exactly: root-scope failures look up
+    with the empty child values storage returns for root overrides, so
+    a child-scoped override for the same test name can never collide
+    with a root-scope lookup.
+    """
+    override = context.effective_classifications.get(
+        (
+            failure.test_name,
+            context.child_job_name or "",
+            context.child_build_number or 0,
+        )
+    )
+    return (override or failure.analysis.classification).strip().upper()
+
+
 def _sanitize_error(exc: Exception) -> str:
     """Reduce an exception to a safe message for result details.
 
@@ -191,6 +213,10 @@ class GreenwaveExporter(Exporter):
     #: identifier, so it skips this exporter entirely (see
     #: ``Exporter.requires_subject_identifier``).
     requires_subject_identifier = True
+
+    #: Reads ``ExportContext.effective_classifications`` — human
+    #: overrides are authoritative for gating writes.
+    needs_effective_classifications = True
 
     @classmethod
     def missing_waiver_settings(cls, settings: Settings) -> list[str]:
@@ -323,6 +349,14 @@ class GreenwaveExporter(Exporter):
         automatic pipeline no longer routes Greenwave through that path
         (it skips the exporter outright), so this only serves direct
         callers that set the flag themselves.
+
+        Each failure's classification is resolved via
+        :func:`_effective_classification` — a human override in
+        ``context.effective_classifications`` wins over the stored
+        analysis JSON — and that single resolved value drives the
+        outcome mapping, the waivable-classification gate, and the
+        waiver comment, so a failure can never be pushed under one
+        classification and waived under another.
         """
         if not context.failures:
             return ExporterResult(
@@ -386,7 +420,7 @@ class GreenwaveExporter(Exporter):
                 )
                 errors.append(f"failure[{index}]: validation failed")
                 continue
-            classification = failure.analysis.classification.strip().upper()
+            classification = _effective_classification(failure, context)
             if not classification:
                 skipped += 1
                 continue

@@ -20,7 +20,9 @@ export function pushFullySucceeded(result: ExporterPushResult | null): boolean {
  *
  * Extra params are only sent when non-empty; the server requires
  * `subject_identifier` only when waivers are enabled, so an empty value is
- * never sent.
+ * never sent. `waiver_comment` is not stored verbatim: the server embeds it
+ * in the composed WaiverDB comment (pusher name, classification, analysis
+ * details, reviewer) and ResultsDB stores only the outcome per failure.
  */
 export function useExporterPush({ jobId, plugin, childJobName, childBuildNumber }: {
   jobId: string

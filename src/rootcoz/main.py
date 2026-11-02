@@ -3924,6 +3924,9 @@ async def _auto_review_matching_failures(
                         auto_push_names, settings
                     ),
                     analysis_timestamp=analysis_timestamp,
+                    fetch_effective_classifications=(
+                        _exporter_needs_effective_classifications(auto_push_names)
+                    ),
                 )
                 for plugin_name in auto_push_names:
                     # Gating exporters (e.g. Greenwave) write records whose
@@ -8988,6 +8991,11 @@ def _available_exporters(settings: Settings) -> list[ExporterInfo]:
             name=GreenwaveExporter.NAME,
             display_name=GreenwaveExporter.DISPLAY_NAME,
             enabled=_greenwave_ready(settings),
+            # Greenwave has no unreviewed-push escape hatch: its pushes stay
+            # gated on review completion (the waiver guard depends on it).
+            allow_unreviewed_push=_allows_unreviewed_push(
+                GreenwaveExporter.NAME, settings
+            ),
         ),
     ]
 
@@ -10001,6 +10009,9 @@ async def push_to_exporter(
                     [plugin_name], settings
                 ),
                 analysis_timestamp=_stored_analysis_timestamp(stored),
+                fetch_effective_classifications=(
+                    _exporter_needs_effective_classifications([plugin_name])
+                ),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -10176,6 +10187,7 @@ async def _build_export_context(
     fetch_history: bool = True,
     fetch_tracked_in_links: bool = True,
     analysis_timestamp: int | None = None,
+    fetch_effective_classifications: bool = True,
 ) -> ExportContext:
     """Build an ExportContext from stored result data.
 
@@ -10208,6 +10220,13 @@ async def _build_export_context(
         analysis_timestamp: Unix timestamp of the analysis, when the caller
             knows it (e.g. from the stored results row).  ``None`` lets
             exporters fall back to push time.
+        fetch_effective_classifications: When ``True``, fetch the human
+            classification overrides (``storage.get_all_effective_classifications``)
+            into ``ExportContext.effective_classifications``.  Set to
+            ``True`` when a target exporter writes gating records — see
+            :func:`_exporter_needs_effective_classifications`.  A storage
+            failure falls back to the stored result-JSON classifications
+            for this push (logged as a warning) rather than failing it.
 
     Returns:
         Populated ExportContext.
@@ -10238,8 +10257,28 @@ async def _build_export_context(
     history_classifications: dict[str, str] = {}
     tracked_in_data: dict[str, list[dict[str, Any]]] = {}
     reviewed_by: dict[str, str] = {}
+    effective_classifications: dict[tuple[str, str, int], str] = {}
 
     if failures_data:
+        if fetch_effective_classifications:
+            try:
+                effective_classifications = (
+                    await storage.get_all_effective_classifications(job_id)
+                )
+            except Exception:
+                # Storage unavailable: fall back to the stored result-JSON
+                # classifications for this push instead of refusing the
+                # export — never swallow the failure into a default
+                # classification.  Overrides re-apply on the next push
+                # once the DB recovers.
+                logger.warning(
+                    "Failed to fetch classification overrides for export "
+                    "push, job_id=%s — falling back to stored analysis "
+                    "classifications",
+                    job_id,
+                    exc_info=True,
+                )
+
         if fetch_history:
             seen: set[str] = set()
             test_names: list[str] = []
@@ -10324,6 +10363,7 @@ async def _build_export_context(
         subject_identifier=subject_identifier,
         waiver_comment=waiver_comment,
         skip_waivers=skip_waivers,
+        effective_classifications=effective_classifications,
     )
 
 
@@ -10336,6 +10376,25 @@ _EXPORTER_CLASSES: dict[str, type[Exporter]] = {
     DatadogExporter.NAME: DatadogExporter,
     GreenwaveExporter.NAME: GreenwaveExporter,
 }
+
+
+def _any_exporter_needs(plugin_names: Iterable[str], capability: str) -> bool:
+    """Whether any named exporter class declares a static capability.
+
+    Unknown names are ignored here — :func:`_create_exporter` raises for
+    them when the push is actually attempted.
+
+    Args:
+        plugin_names: Exporter identifiers to check.
+        capability: Class attribute name (e.g. ``needs_history_classifications``).
+
+    Returns:
+        ``True`` if at least one known exporter declares the capability.
+    """
+    return any(
+        name in _EXPORTER_CLASSES and getattr(_EXPORTER_CLASSES[name], capability)
+        for name in plugin_names
+    )
 
 
 def _exporter_needs_history_classifications(plugin_names: Iterable[str]) -> bool:
@@ -10352,11 +10411,23 @@ def _exporter_needs_history_classifications(plugin_names: Iterable[str]) -> bool
     Returns:
         ``True`` if at least one known exporter needs history classifications.
     """
-    return any(
-        name in _EXPORTER_CLASSES
-        and _EXPORTER_CLASSES[name].needs_history_classifications
-        for name in plugin_names
-    )
+    return _any_exporter_needs(plugin_names, "needs_history_classifications")
+
+
+def _exporter_needs_effective_classifications(plugin_names: Iterable[str]) -> bool:
+    """Whether any named exporter consumes human classification overrides.
+
+    Lets the push pipeline skip ``storage.get_all_effective_classifications``
+    in :func:`_build_export_context` when no target exporter will read
+    ``ExportContext.effective_classifications``.
+
+    Args:
+        plugin_names: Exporter identifiers to check.
+
+    Returns:
+        ``True`` if at least one known exporter needs the overrides.
+    """
+    return _any_exporter_needs(plugin_names, "needs_effective_classifications")
 
 
 # Exporter name → Settings field gating tracked-in link fetches: when the
@@ -10502,6 +10573,9 @@ async def _execute_rp_push(
         fetch_history=_exporter_needs_history_classifications(["reportportal"]),
         fetch_tracked_in_links=_exporter_needs_tracked_in_links(
             ["reportportal"], settings
+        ),
+        fetch_effective_classifications=_exporter_needs_effective_classifications(
+            ["reportportal"]
         ),
     )
 

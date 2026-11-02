@@ -41,6 +41,12 @@ class ExportContext:
             submissions (pushing results only) instead of refusing the
             push.  Used by the auto-push path, where no explicit subject
             identifier is available.
+        effective_classifications: Human classification overrides keyed by
+            ``(test_name, child_job_name, child_build_number)`` — the scope
+            keys ``storage.get_all_effective_classifications`` returns
+            (root scope uses ``("", 0)``).  Human overrides win over the
+            stored analysis; exporters that write gating records MUST
+            prefer these.
     """
 
     job_id: str
@@ -59,6 +65,9 @@ class ExportContext:
     subject_identifier: str | None = None
     waiver_comment: str | None = None
     skip_waivers: bool = False
+    effective_classifications: dict[tuple[str, str, int], str] = field(
+        default_factory=dict
+    )
 
 
 @dataclass
@@ -107,6 +116,12 @@ class Exporter(ABC):
     #: :class:`ExportContext`.  Subclasses that read
     #: :attr:`ExportContext.tracked_in_links` must set this to ``True``.
     needs_tracked_in_links: bool = False
+
+    #: Whether this exporter consumes human classification overrides
+    #: (``storage.get_all_effective_classifications``) when building the
+    #: :class:`ExportContext`.  Exporters that write gating records (e.g.
+    #: Greenwave) must set this to ``True`` so the overrides are fetched.
+    needs_effective_classifications: bool = False
 
     #: Whether this exporter writes gating-relevant records whose subject
     #: must identify a build/artifact (e.g. ResultsDB results under
