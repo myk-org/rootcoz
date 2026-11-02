@@ -197,7 +197,7 @@ export function DatadogButton({ jobId, jobName, buildNumber, childJobName, child
             </DialogTitle>
           </DialogHeader>
 
-          {(gateMessage || isFullFailure || isPartialSuccess) && (
+          {(gateMessage || isFullFailure || isPartialSuccess || !!pushResult?.series_error) && (
             <div className="space-y-3 py-2 min-w-0">
               <DatadogPushMetadata
                 jobName={displayJobName}
@@ -210,8 +210,13 @@ export function DatadogButton({ jobId, jobName, buildNumber, childJobName, child
               {pushErrorDetail && (
                 <p className="text-xs text-text-secondary" data-testid="datadog-push-message">{pushErrorDetail}</p>
               )}
-              {pushResult?.message && (
+              {/* The backend repeats series_error as message on a metrics-only
+                  failure — print it once, in the scoreboard line below. */}
+              {pushResult?.message && pushResult.message !== pushResult.series_error && (
                 <p className="text-xs text-text-secondary" data-testid="datadog-push-message">{pushResult.message}</p>
+              )}
+              {pushResult?.series_error && (
+                <p className="text-xs text-signal-orange break-all" data-testid="datadog-push-series-error">{pushResult.series_error}</p>
               )}
               {pushResult && pushResult.errors.length > 0 && (
                 <ul className="space-y-1 text-xs text-text-tertiary" data-testid="datadog-push-errors">

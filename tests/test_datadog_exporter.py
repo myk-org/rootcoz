@@ -99,6 +99,29 @@ def _series_values(payload: dict[str, Any], tag_prefix: str) -> dict[str, int]:
     }
 
 
+def _classification_vocabulary() -> set[str]:
+    """The bounded tag values the classification metric may carry."""
+    return {
+        _tag_label(classification)
+        for classification in (
+            *storage.PRIMARY_CLASSIFICATIONS,
+            _UNKNOWN_CLASSIFICATION,
+        )
+    }
+
+
+def _pattern_vocabulary() -> set[str]:
+    """The bounded tag values the failure-pattern metric may carry."""
+    return {
+        _tag_label(pattern)
+        for pattern in (
+            *storage.PATTERN_CLASSIFICATIONS,
+            *storage.HISTORY_CLASSIFICATIONS,
+            _UNKNOWN_CLASSIFICATION,
+        )
+    }
+
+
 def _failure(
     test_name: str = "test_login_flow",
     classification: str = "PRODUCT BUG",
@@ -962,16 +985,26 @@ class TestConnectionTester:
 
 class TestPush:
     async def test_empty_failures(self):
-        result = await _exporter().push(_context())
+        mock_class, posts = _mock_http_client()
+        with patch("rootcoz.exporters.datadog.httpx.AsyncClient", mock_class):
+            result = await _exporter().push(_context())
         assert result.success is False
+        # A clean re-run still resets the previous push's non-zero gauges.
+        assert _event_posts(posts) == []
+        assert len(_series_posts(posts)) == 1
+        payload = _series_posts(posts)[0]["json"]
+        for prefix in ("tfa.classification:", "tfa.failure_pattern:"):
+            assert set(_series_values(payload, prefix).values()) == {0}
         assert result.details == {
             "pushed": 0,
             "total": 0,
             "errors": [],
             "skipped": 0,
-            "series": 0,
+            "series": len(payload["series"]),
             "series_error": None,
         }
+        assert result.details["series"] > 0
+        assert result.message == "No failures to push to Datadog."
 
     async def test_one_event_per_failure(self):
         context = _context(
@@ -1127,13 +1160,7 @@ class TestSeriesScoreboard:
         """A classification at zero must still be reported, or it goes stale."""
         _result, posts = await self._push(_context(failures=[_failure()]))
         values = _series_values(_series_posts(posts)[0]["json"], "tfa.classification:")
-        assert set(values) == {
-            _tag_label(classification)
-            for classification in (
-                *storage.PRIMARY_CLASSIFICATIONS,
-                _UNKNOWN_CLASSIFICATION,
-            )
-        }
+        assert set(values) == _classification_vocabulary()
         assert values["product_bug"] == 1
         assert values["code_issue"] == 0
         assert values["infrastructure"] == 0
@@ -1143,13 +1170,7 @@ class TestSeriesScoreboard:
         """The union storage can return for history — nothing emitted is missing."""
         _result, posts = await self._push(_context(failures=[_failure()]))
         values = _series_values(_series_posts(posts)[0]["json"], "tfa.failure_pattern:")
-        assert set(values) == {
-            _tag_label(pattern)
-            for pattern in (
-                *storage.PATTERN_CLASSIFICATIONS,
-                *storage.HISTORY_CLASSIFICATIONS,
-            )
-        }
+        assert set(values) == _pattern_vocabulary()
         assert set(values.values()) == {0}
         # The values the consumer asked to see are in the vocabulary.
         assert {"new", "intermittent", "flaky"} <= set(values)
@@ -1264,15 +1285,53 @@ class TestSeriesScoreboard:
         assert result.details["series"] == 0
         assert "metric series" in result.details["series_error"]
 
-    async def test_classification_series_omitted_when_toggle_off(self):
-        """Toggle off means events carry no classification tag at all."""
+    async def test_classification_series_zero_filled_when_toggle_off(self):
+        """Toggle off must overwrite last push's gauges, not leave them stale."""
         _result, posts = await self._push(
             _context(failures=[_failure()]),
             exporter_overrides={"push_classifications": False},
         )
         payload = _series_posts(posts)[0]["json"]
-        assert {entry["metric"] for entry in payload["series"]} == {_PATTERN_METRIC}
-        assert _series_values(payload, "tfa.classification:") == {}
+        classifications = _series_values(payload, "tfa.classification:")
+        assert {entry["metric"] for entry in payload["series"]} == {
+            _CLASSIFICATION_METRIC,
+            _PATTERN_METRIC,
+        }
+        assert set(classifications) == _classification_vocabulary()
+        # No classification data leaks into the values while the toggle is off.
+        assert set(classifications.values()) == {0}
+
+    async def test_out_of_vocabulary_values_fold_into_unknown(self):
+        """A stray stored value must not open a series a zero-fill can't reset."""
+        context = _context(
+            failures=[_failure(classification="MYSTERY BUG")],
+            history_classifications={"test_login_flow": "WEIRD PATTERN"},
+        )
+        result, posts = await self._push(context)
+        payload = _series_posts(posts)[0]["json"]
+        classifications = _series_values(payload, "tfa.classification:")
+        patterns = _series_values(payload, "tfa.failure_pattern:")
+        assert classifications["unknown"] == 1
+        assert patterns["unknown"] == 1
+        assert set(classifications) == _classification_vocabulary()
+        assert set(patterns) == _pattern_vocabulary()
+        assert len(payload["series"]) == len(_classification_vocabulary()) + len(
+            _pattern_vocabulary()
+        )
+        assert result.details["series"] == len(payload["series"])
+        # The events keep the raw value in their tag — only the series are bounded.
+        event_tags = _attributes(_event_posts(posts)[0]["json"])["tags"]
+        assert "tfa.classification:mystery_bug" in event_tags
+
+    async def test_empty_failures_metrics_failure_not_raised(self):
+        result, posts = await self._push(
+            _context(failures=[]), responses=[httpx.RequestError("Connection refused")]
+        )
+        assert len(_series_posts(posts)) == 1
+        assert result.success is False
+        assert result.message == "No failures to push to Datadog."
+        assert result.details["series"] == 0
+        assert "metric series" in result.details["series_error"]
 
     async def test_no_series_after_an_auth_rejection(self):
         response = MagicMock()

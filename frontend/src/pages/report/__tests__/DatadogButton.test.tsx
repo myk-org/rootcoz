@@ -205,8 +205,10 @@ describe('DatadogButton', () => {
     await waitFor(() => {
       expect(screen.getByText('Events pushed, but the metric scoreboard failed.')).toBeDefined()
     })
-    // The backend's series error is printed once, via pushResult.message
-    expect(screen.getByText('Failed to push 5 Datadog metric series (403 Forbidden)')).toBeDefined()
+    // The scoreboard error is printed exactly once, in its own line
+    expect(screen.getAllByTestId('datadog-push-series-error')).toHaveLength(1)
+    expect(screen.getAllByText('Failed to push 5 Datadog metric series (403 Forbidden)')).toHaveLength(1)
+    expect(screen.queryByTestId('datadog-push-message')).toBeNull()
     expect(screen.queryByText('Some events could not be pushed.')).toBeNull()
   })
 
@@ -220,6 +222,7 @@ describe('DatadogButton', () => {
         skipped: 0,
         series: 4,
         series_error: 'Failed to push 4 Datadog metric series',
+        message: 'Pushed 1 of 2 Datadog event(s)',
       }),
     )
 
@@ -230,6 +233,9 @@ describe('DatadogButton', () => {
       expect(screen.getByText('Some events could not be pushed.')).toBeDefined()
     })
     expect(screen.queryByText('Events pushed, but the metric scoreboard failed.')).toBeNull()
+    // Both failures are visible: the event error and the scoreboard error
+    expect(screen.getByText('Pushed 1 of 2 Datadog event(s)')).toBeDefined()
+    expect(screen.getByTestId('datadog-push-series-error').textContent).toContain('Failed to push 4 Datadog metric series')
   })
 
   it('shows a failure dialog with the abort message when success=false and nothing was pushed', async () => {
