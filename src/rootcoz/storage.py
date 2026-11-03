@@ -2098,6 +2098,21 @@ async def get_comments_for_job(job_id: str) -> list[dict[str, Any]]:
         return result
 
 
+def review_key(
+    test_name: str, child_job_name: str = "", child_build_number: int = 0
+) -> str:
+    """Build the review-map key for a failure's scope.
+
+    Top-level failures key by bare test name; child-scoped failures key by
+    ``child_job_name#child_build_number::test_name``. Shared by
+    :func:`get_reviews_for_job` (writer) and ``resolve_failure_review`` in
+    ``main`` (reader) so both sides always agree on the format.
+    """
+    if child_job_name:
+        return f"{child_job_name}#{child_build_number}::{test_name}"
+    return test_name
+
+
 async def set_reviewed(
     job_id: str,
     test_name: str,
@@ -2134,10 +2149,9 @@ async def get_reviews_for_job(job_id: str) -> dict[str, dict[str, Any]]:
         rows = await cursor.fetchall()
         result = {}
         for row in rows:
-            if row["child_job_name"] != "":
-                key = f"{row['child_job_name']}#{row['child_build_number']}::{row['test_name']}"
-            else:
-                key = row["test_name"]
+            key = review_key(
+                row["test_name"], row["child_job_name"], row["child_build_number"]
+            )
             result[key] = {
                 "reviewed": bool(row["reviewed"]),
                 "username": row["username"],
