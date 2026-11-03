@@ -1763,3 +1763,80 @@ class TestGatingRefusalAudit:
         assert row["details"]["reason"] == "service_unavailable"
         assert row["target_id"] == "job-1"
         assert row["details"]["plugin"] == "greenwave"
+
+
+class TestAutoPushOverridesUnavailableAudit:
+    """The per-scope overrides-unavailable skip leaves an audit row too."""
+
+    @pytest.fixture
+    async def setup_test_db(self, tmp_path):
+        from rootcoz import storage
+
+        self.db_path = tmp_path / "auto.db"
+        with patch.object(storage, "DB_PATH", self.db_path):
+            await storage.init_db()
+            yield self.db_path
+
+    async def test_scope_skip_is_audited(self, setup_test_db):
+        from rootcoz import storage as st
+        from rootcoz.main import _auto_review_matching_failures
+
+        result_data = {
+            "job_name": "my-job",
+            "build_number": 101,
+            "failures": [
+                {
+                    "test_name": "test_a",
+                    "error": "err",
+                    "error_signature": "sig-a",
+                    "analysis": {"classification": "INFRASTRUCTURE"},
+                }
+            ],
+        }
+        from tests.conftest import build_test_env
+
+        settings = Settings(
+            **{
+                k.lower(): v
+                for k, v in build_test_env(AUTO_PUSH_EXPORTERS="reportportal").items()
+            }
+        )
+        with (
+            patch.object(st, "DB_PATH", setup_test_db),
+            patch(
+                "rootcoz.main._match_and_auto_review_failures",
+                new_callable=AsyncMock,
+                return_value=(1, 1),
+            ),
+            patch(
+                "rootcoz.main._auto_review_child_failures",
+                new_callable=AsyncMock,
+                return_value=(0, 0),
+            ),
+            patch(
+                "rootcoz.main._unreviewed_failure_count",
+                new_callable=AsyncMock,
+                return_value=0,
+            ),
+            patch("rootcoz.main._all_failures_ai_reviewed", return_value=True),
+            # Force the per-scope context build to refuse.
+            patch(
+                "rootcoz.main._build_export_context",
+                new_callable=AsyncMock,
+                side_effect=__import__(
+                    "rootcoz.main", fromlist=["EffectiveClassificationsUnavailable"]
+                ).EffectiveClassificationsUnavailable("nope"),
+            ),
+            patch("rootcoz.main._create_exporter") as mock_create,
+        ):
+            await _auto_review_matching_failures(
+                "current-job", "my-job", 101, result_data, settings
+            )
+            mock_create.assert_not_called()
+            page = await st.list_audit_events(action="export.push", limit=20)
+
+        rows = page["events"] if isinstance(page, dict) else page
+        assert rows, "the per-scope refusal must leave an audit row"
+        assert rows[0]["details"]["reason"] == "overrides_unavailable"
+        assert rows[0]["details"]["scope"] == "root#0"
+        assert rows[0]["actor"] == "rootcoz-ai"

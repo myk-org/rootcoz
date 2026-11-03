@@ -3907,8 +3907,9 @@ async def _auto_review_matching_failures(
             )
         # A configured auto-push that does not run must say why — in the log
         # and in the trail: "nothing was pushed" otherwise looks like a bug to
-        # the operator reading the job afterwards. All four refusals the
-        # branch introduced are named here, in one place.
+        # the operator reading the job afterwards. The three gates evaluated
+        # here are named in one place; the fourth refusal (per-scope
+        # overrides-unavailable) is audited where it is caught, below.
         suppression_reason: str | None = None
         unscopable_children = _unscopable_failure_children(result_data)
         if auto_push_names and total_failures > 0:
@@ -3981,13 +3982,32 @@ async def _auto_review_matching_failures(
                 except EffectiveClassificationsUnavailable:
                     # The pipeline already succeeded; an exporter that cannot
                     # be given safe inputs is skipped for this scope rather
-                    # than failing the analysis.
+                    # than failing the analysis — but it is a refusal like the
+                    # gates above, so it leaves a row too.
                     logger.warning(
                         "Auto-push skipped for job_id=%s scope %s#%s: "
                         "classification overrides are unavailable",
                         job_id,
                         scope_job or "root",
                         scope_build or 0,
+                    )
+                    await record_audit(
+                        action="export.push",
+                        actor=AI_SYSTEM_USERNAME,
+                        message=(
+                            f"Auto-push suppressed for job {job_id} "
+                            f"(scope {scope_job or 'root'}#{scope_build or 0}): "
+                            f"classification overrides are unavailable"
+                        ),
+                        target_type="job",
+                        target_id=job_id,
+                        outcome="failure",
+                        details={
+                            "plugin": ",".join(auto_push_names),
+                            "trigger": "auto",
+                            "reason": "overrides_unavailable",
+                            "scope": f"{scope_job or 'root'}#{scope_build or 0}",
+                        },
                     )
                     continue
                 for plugin_name in auto_push_names:
@@ -9999,8 +10019,9 @@ async def push_to_exporter(
         default=None,
         description=(
             "Subject identifier for exporter writes (build NVR or artifact "
-            "identifier); falls back to job_name for result pushes. "
-            "Greenwave waiver submission requires it explicitly."
+            "identifier). Required by the Greenwave exporter for every push "
+            "— results and waivers are both gating writes keyed on it, so "
+            "there is no job_name fallback (HTTP 422 without it)."
         ),
     ),
     waiver_comment: str | None = Query(

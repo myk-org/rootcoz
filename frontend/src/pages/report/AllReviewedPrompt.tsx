@@ -129,7 +129,11 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
           // Fresh dialog session: reset the whole outcome, not just the
           // succeeded-combination set — a stale "… updated." line would
           // otherwise replace the Yes/No buttons and dead-end the prompt.
+          // The run counter is bumped too: a push still in flight from the
+          // previous session must not land its outcome here (same guard the
+          // navigation reset uses).
           succeededRef.current = new Set()
+          pushRunRef.current++
           setEventPushStatus(null)
           setPushError(null)
           setDialogOpen(true)

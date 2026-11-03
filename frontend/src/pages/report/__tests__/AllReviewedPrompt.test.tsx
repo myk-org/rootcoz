@@ -922,24 +922,53 @@ describe('AllReviewedPrompt', () => {
 })
 
 describe('AllReviewedPrompt session reset', () => {
-  it('offers the answer again on a new all-reviewed session', async () => {
-    renderPrompt({
-      reportportalAvailable: true,
-      additionalReviews: {
-        'test-a': makeReview(true),
-        'test-b': makeReview(true),
-      },
-    })
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Yes' })).toBeDefined())
+  // Both exporters enabled, so a successful Report Portal push leaves the
+  // dialog OPEN with the Greenwave offer: that is the state in which a stale
+  // outcome can survive into the next session and hide the Yes/No buttons.
+  // (With only Report Portal enabled the push closes the dialog through
+  // handleOpenChange, which clears the outcome by itself — a test in that
+  // shape passes without the reset and proves nothing.)
+  const BOTH_EXPORTERS = [
+    { name: 'reportportal', display_name: 'Report Portal', enabled: true },
+    { name: 'greenwave', display_name: 'Greenwave', enabled: true },
+  ]
 
+  function Seed({ exporters }: { exporters: { name: string; display_name: string; enabled: boolean }[] }) {
+    const dispatch = useReportDispatch()
+    useEffect(() => {
+      dispatch({ type: 'SET_EXPORTERS', payload: exporters })
+      dispatch({ type: 'SET_GREENWAVE_WAIVERS_ENABLED', payload: false })
+    }, []) // eslint-disable-line react-hooks/exhaustive-deps
+    return null
+  }
+
+  it('offers the answer again on a new all-reviewed session', async () => {
+    render(
+      <ReportProvider>
+        <Seed exporters={BOTH_EXPORTERS} />
+        <Injector
+          jobId="job-1"
+          result={makeResult()}
+          reviews={{}}
+          reportportalAvailable={true}
+          additionalReviews={{
+            'test-a': makeReview(true),
+            'test-b': makeReview(true),
+          }}
+        />
+      </ReportProvider>,
+    )
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Yes' })).toBeDefined())
     mockPost.mockResolvedValueOnce({ success: true, message: 'ok', pushed: 2 })
     fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
 
-    // Successful push with no Greenwave offer closes the prompt.
-    await waitFor(() => expect(screen.queryByRole('button', { name: 'Yes' })).toBeNull())
+    // The dialog stays open (Greenwave still on offer) with the outcome shown.
+    await waitFor(() => expect(screen.getByRole('status')).toBeDefined())
+    expect(screen.getByRole('checkbox')).toBeDefined()
 
-    // A new all-reviewed session reopens it: the previous outcome must not
-    // survive as a status line that replaces the buttons.
+    // Next session: the stale outcome must not survive — it would replace the
+    // Yes/No buttons with a dead "… updated." line.
     await act(async () => {
       window.dispatchEvent(
         new CustomEvent('rootcoz:review-changed', { detail: { jobId: 'job-1' } }),
