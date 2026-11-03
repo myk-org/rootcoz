@@ -228,7 +228,7 @@
 <p>RootCoz pushes every failed test to Datadog as an event and the failure counts as two gauge metrics. This page shows how to turn that data into one dashboard that sits next to your test runs, using the Datadog <strong>Bits AI</strong> prompt below.</p>
 <h2 id="prerequisites">Prerequisites</h2>
 <ul>
-<li>RootCoz's Datadog exporter is configured: <code>ENABLE_DATADOG</code>, <code>DATADOG_SITE</code>, the API key and application key, and <code>DATADOG_SERVICE=rootcoz</code>. The last one matters here: the dashboard filters RootCoz events on <code>service:rootcoz</code>, and the exporter only emits a <code>service:</code> tag when <code>DATADOG_SERVICE</code> is set. See <a href="create-follow-up-issues-and-push-results.html">Creating Follow-Up Issues and Pushing Results</a> for the exporter settings and <a href="configuration-reference.html">Configuration Reference</a> for the <code>DATADOG_SERVICE</code> and <code>DATADOG_ENV</code> values.</li>
+<li>RootCoz's Datadog exporter is configured: <code>ENABLE_DATADOG</code>, <code>DATADOG_SITE</code>, the API key and application key, and <code>DATADOG_SERVICE=&lt;ROOTCOZ_SERVICE&gt;</code>. The last one matters here: the dashboard filters RootCoz events on a <code>service:</code> tag, and the exporter only emits that tag when <code>DATADOG_SERVICE</code> is set. See <a href="create-follow-up-issues-and-push-results.html">Creating Follow-Up Issues and Pushing Results</a> for the exporter settings and <a href="configuration-reference.html">Configuration Reference</a> for the <code>DATADOG_SERVICE</code> and <code>DATADOG_ENV</code> values.</li>
 <li>You can open <strong>Bits AI</strong> in Datadog, in the same Datadog organization your test runs report to.</li>
 </ul>
 <h2 id="step-by-step">Step-by-Step</h2>
@@ -240,7 +240,7 @@
 <li>RootCoz uses the <strong>same</strong> job name and build number values as your tests.</li>
 </ul>
 <blockquote>
-<p><strong>Note:</strong> RootCoz sanitizes a value before it becomes a Datadog tag — anything outside letters, digits, <code>.</code>, <code>_</code>, <code>:</code>, and <code>-</code> becomes <code>_</code>. A job named <code>CNV tier1 / nightly</code> therefore appears as <code>CNV_tier1___nightly</code>, and the dashboard's RootCoz filters only match that rewritten form. Job names made of letters, digits, dots, underscores, colons, and hyphens are kept as they are.</p>
+<p><strong>Note:</strong> RootCoz sanitizes a value before it becomes a Datadog tag — anything outside letters, digits, <code>.</code>, <code>_</code>, <code>:</code>, and <code>-</code> becomes <code>_</code>. A job named <code>nightly tier1 / x86</code> therefore appears as <code>nightly_tier1___x86</code>, and the dashboard's RootCoz filters only match that rewritten form. Job names made of letters, digits, dots, underscores, colons, and hyphens are kept as they are.</p>
 </blockquote>
 <h3 id="2-create-the-dashboard">2. Create the Dashboard</h3>
 <ol>
@@ -249,6 +249,7 @@
 <li>Replace the placeholders:</li>
 <li><code>&lt;PROJECT&gt;</code>: your project name</li>
 <li><code>&lt;TEST_SERVICE&gt;</code>: your test service name in Test Optimization</li>
+<li><code>&lt;ROOTCOZ_SERVICE&gt;</code>: the <code>DATADOG_SERVICE</code> value you set in RootCoz, for example <code>rootcoz</code></li>
 <li>
 <p><code>&lt;CI_BUILD_URL&gt;</code>: your CI build link pattern, for example <code>https://jenkins.example.com/job/{job}/{build}/</code></p>
 </li>
@@ -265,25 +266,28 @@
 <li>In the <strong>Builds</strong> table, click a build and choose <strong>Drill down to this build</strong>.</li>
 <li>Review the failed tests and the RootCoz classification and failure pattern charts.</li>
 <li>Click a row or a chart slice to open the CI build, Test Optimization or the RootCoz events.</li>
+<li>In the <strong>RootCoz pushes</strong> table, find the push you want and filter the dashboard to that single <code>rootcoz.push_id</code>. Without that step, a failure that was re-pushed more than once is counted more than once.</li>
 </ol>
 <h2 id="the-rootcoz-dashboard-prompt">The RootCoz Dashboard Prompt</h2>
-<p>Copy this whole block into Bits AI and replace the three placeholders before you send it.</p>
+<p>Copy this whole block into Bits AI and replace the four placeholders before you send it.</p>
 <div class="highlight"><pre><span></span><code>Build a Datadog dashboard: "&lt;PROJECT&gt; Test Runs - RootCoz Failure Analysis".
 
 My data:
 - Test Optimization service: &lt;TEST_SERVICE&gt;
 - Test attributes: @job_name, @build_number
 - CI build link: &lt;CI_BUILD_URL&gt;   (e.g. https://jenkins.example.com/job/{job}/{build}/)
-- RootCoz events: service:rootcoz, tags job_name, build_number, tfa.classification, tfa.failure_pattern
+- RootCoz events: service:&lt;ROOTCOZ_SERVICE&gt;, tags job_name, build_number, tfa.classification,
+  tfa.failure_pattern, rootcoz.failure_id, rootcoz.push_id
 - RootCoz metrics (gauges): rootcoz.failures.classification by tfa.classification,
-  rootcoz.failures.pattern by tfa.failure_pattern
+  rootcoz.failures.pattern by tfa.failure_pattern. Their only tags are job_name and build_number.
 
 First check that this data exists and the names are correct. Tell me what's missing. Don't guess.
 
-Template variables: job_name, build_number (default *).
-- Test queries:    @job_name:$job_name.value @build_number:$build_number.value
+Template variables: job_name, build_number, push_id (default *). Use the full form $var inside
+filters, never $var.value, so that "*" means no filter.
+- Test queries:    @job_name:$job_name @build_number:$build_number
 - RootCoz metrics: {$job_name,$build_number}
-- RootCoz events:  job_name:$job_name.value build_number:$build_number.value
+- RootCoz events:  $job_name $build_number $push_id   (push_id is a rootcoz.push_id value)
 
 Widgets:
 1. Note: "Pick a build in Builds &gt; Drill down. Right after a RootCoz push, use Past 1 Hour."
@@ -296,16 +300,48 @@ Widgets:
 6. Table "Failed tests": failed tests grouped by @test.name.
 7. Pie "RootCoz classification": rootcoz.failures.classification by tfa.classification, aggregator last.
 8. Pie "RootCoz failure pattern": rootcoz.failures.pattern by tfa.failure_pattern, aggregator last.
-9. Event list "RootCoz events": service:rootcoz for the selected build.
+9. Table "RootCoz pushes": RootCoz events grouped by rootcoz.push_id, with the number of distinct
+   rootcoz.failure_id per push, so I can set the push_id template variable to one push.
+10. Event list "RootCoz events": service:&lt;ROOTCOZ_SERVICE&gt; for the selected build and push.
 
 Rules:
 - Every test query includes: test_level:test @test.service:&lt;TEST_SERVICE&gt;
+- Base RootCoz filter: service:&lt;ROOTCOZ_SERVICE&gt; -diagnostic:true
 - Test widgets (2, 3, 5, 6): fixed Past 1 Month.
 - RootCoz widgets (4, 7, 8): follow dashboard time (no fixed time range).
-- Use RootCoz metrics, not event counts. Events can't be updated, so every re-push adds duplicates.
-- Check that every widget returns data, then give me the dashboard link.
+- The rootcoz.failures.* gauges are the deduplicated counts: a gauge is overwritten on every push,
+  so a re-push replaces the number instead of adding to it. Use them for the classification and
+  pattern totals. They carry no team, version, reviewer or per-failure data.
+- When a widget needs anything the metrics do not carry, query the RootCoz events instead and count
+  distinct rootcoz.failure_id, not events: a re-push resends the same failures.
+- A re-push can re-classify the same failure. To show the current classification, filter the event
+  widgets by a single rootcoz.push_id (the push_id template variable).
+- Event-query tables: at most 3 group-bys, and the product of the group limits must stay under 10,000.
+  Cardinality with 3 group-bys is rejected - use a count there.
+- Event widgets cannot compute on "timestamp", so there is no "latest push" sort.
+- Check that every widget returns data with verify_widget_data, then give me the dashboard link.
 </code></pre></div>
 
+<h2 id="optional-team-and-version-on-the-rootcoz-events">Optional: Team and Version on the RootCoz Events</h2>
+<p>RootCoz sends <code>job_name</code> and <code>build_number</code> on every event and metric, and nothing about who owns the job or which product version it tests — those values live in your CI job names, not in RootCoz. If you want <code>team</code> and <code>version</code> filters, Datadog has to add them.</p>
+<p>An administrator sets this up once. Bits AI cannot create Event pipelines.</p>
+<ol>
+<li>In Datadog, open <strong>Event Management</strong>, then <strong>Pipelines</strong>, and create a pipeline whose filter is <code>service:&lt;ROOTCOZ_SERVICE&gt;</code>. Add these processors in this order:</li>
+<li><strong>Remapper</strong>: tag key <code>job_name</code> to attribute <code>job_name</code>. Keep <em>Preserve source</em> checked.</li>
+<li><strong>Lookup</strong>, from the <em>Reference Table</em> tab: source <code>job_name</code>, target <code>rt</code>, using a table that maps every job name to its team.</li>
+<li><strong>Remapper</strong>: attribute <code>rt.team</code> to attribute <code>team</code>. Check <em>Override on conflict</em>.</li>
+<li>
+<p><strong>Grok parser</strong> on <code>job_name</code>, to pull the version out of the name:</p>
+<p><code>text
+  extract_version %{data}&lt;product&gt;-%{regex("[0-9]+\\.[0-9]+"):version}-%{data}</code></p>
+</li>
+<li>
+<p>Keep the lookup table current. A job that is not in it gets no team. Ask Bits to refresh it from Test Optimization when new jobs appear.</p>
+</li>
+<li>Add <code>team</code> and <code>version</code> template variables to the dashboard, and add <code>$team $version</code> to the RootCoz widget filters.</li>
+</ol>
+<p>Two limits come with this setup. A pipeline only enriches events that arrive <strong>after</strong> it is saved, so events pushed before that have no team and no version. And the metrics never carry these attributes, so any team- or version-filtered number has to come from events.</p>
+<p>A cleaner long-term fix is for RootCoz to send the team and the version on its events and metrics itself, which would remove the pipeline, the lookup table, and the manual push selection.</p>
 <h2 id="advanced-usage">Advanced Usage</h2>
 <ul>
 <li>Always select one build. When <code>build_number</code> is <code>*</code>, the RootCoz numbers aren't reliable.</li>
@@ -313,12 +349,13 @@ Rules:
 <li>Wait at least 1 minute between RootCoz pushes for the same build.</li>
 <li>A finished dashboard looks like <a href="https://app.datadoghq.eu/dashboard/9si-chz-sbj">this RootCoz dashboard in Datadog</a>. You need access to that Datadog organization to open it.</li>
 <li>A child-scoped push (<code>rootcoz push JOB_ID --plugin datadog --child-job-name ... --child-build-number ...</code>) writes its own metric series, tagged with <code>child_job_name</code>, <code>child_build_number</code>, and <code>rootcoz.scope_id</code>, on top of the parent job and build. When you push both a parent and its children, one build holds one series per pushed scope — filter on the scope tags, or the RootCoz totals add the parent and every child together.</li>
+<li>Count unique failures by <code>rootcoz.failure_id</code>, not by events or by <code>rootcoz.push_id</code>: the same failure keeps its id across re-pushes, while every push gets a new push id.</li>
 </ul>
 <h2 id="troubleshooting">Troubleshooting</h2>
 <ul>
 <li>
 <p>Bits says the RootCoz data is missing.<br>
-  Check that <code>DATADOG_SERVICE=rootcoz</code> is set (the <code>service:</code> tag is omitted otherwise), and that at least one push has run — <code>rootcoz push JOB_ID --plugin datadog</code>.</p>
+  Check that <code>DATADOG_SERVICE</code> is set to the value you gave as <code>&lt;ROOTCOZ_SERVICE&gt;</code> (the <code>service:</code> tag is omitted otherwise), and that at least one push has run — <code>rootcoz push JOB_ID --plugin datadog</code>.</p>
 </li>
 <li>
 <p>The RootCoz widgets are empty for the build I picked.<br>
@@ -327,6 +364,18 @@ Rules:
 <li>
 <p>The tests show up but the RootCoz charts stay at zero.<br>
   The classification gauges are still published when <code>DD_PUSH_CLASSIFICATIONS</code> is off, but every count is zero. Turn that setting on and push again.</p>
+</li>
+<li>
+<p>The failure count is higher than the number of failed tests.<br>
+  Something is counting events instead of distinct <code>rootcoz.failure_id</code> values, so every re-push adds to the total. Switch that widget to the distinct count, or to the <code>rootcoz.failures.*</code> gauge.</p>
+</li>
+<li>
+<p>The classification chart shows two classifications for the same failure.<br>
+  More than one push is in the selected time range and a re-push re-classified the failure. Filter the dashboard to a single <code>rootcoz.push_id</code>.</p>
+</li>
+<li>
+<p>The team or version filter returns nothing.<br>
+  The pipeline only enriches events that arrived after it was saved, and a job that is missing from the lookup table gets no team. The metrics never carry either attribute, so those numbers have to come from events.</p>
 </li>
 <li>
 <p>The push is refused with <code>409 job has N unreviewed failure(s)</code>.<br>
@@ -369,6 +418,7 @@ Rules:
 </ul>
 </li>
 <li><a href="#the-rootcoz-dashboard-prompt">The RootCoz Dashboard Prompt</a></li>
+<li><a href="#optional-team-and-version-on-the-rootcoz-events">Optional: Team and Version on the RootCoz Events</a></li>
 <li><a href="#advanced-usage">Advanced Usage</a></li>
 <li><a href="#troubleshooting">Troubleshooting</a></li>
 <li><a href="#related-pages">Related Pages</a></li>
