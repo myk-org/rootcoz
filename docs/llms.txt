@@ -19,6 +19,7 @@
 ## Exploring Data
 
 - [Exploring History and Reports](explore-history-and-reports.md)
+- [Building a Datadog Dashboard with RootCoz Data](build-a-datadog-dashboard.md)
 - [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analysis.md)
 
 ## Account and Administration

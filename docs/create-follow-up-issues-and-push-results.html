@@ -106,6 +106,13 @@
                     </li>
 
                     <li>
+                        <a href="build-a-datadog-dashboard.html"
+                           class="nav-link">
+                            Building a Datadog Dashboard with RootCoz Data
+                        </a>
+                    </li>
+
+                    <li>
                         <a href="use-server-chat-for-cross-job-analysis.html"
                            class="nav-link">
                             Use Server Chat for Cross-Job Analysis
@@ -353,6 +360,7 @@ rootcoz<span class="w"> </span>push<span class="w"> </span>JOB_ID<span class="w"
 <p>Push it like any other exporter:</p>
 <p><code>bash
    rootcoz push JOB_ID --plugin datadog</code></p>
+<p>To put that data on one screen next to your test runs, see <a href="build-a-datadog-dashboard.html">Building a Datadog Dashboard with RootCoz Data</a>.</p>
 <p>Datadog is a fire-and-forget sink: a failed event (network or HTTP error) is recorded per event in the push result and never breaks the analysis pipeline or the remaining events. The result also reports the scoreboard: <code>series</code> is the number of gauge series Datadog accepted and <code>series_error</code> the metrics failure, if any. A metrics failure does not undo the events already sent — the result says the events went through, with the series error alongside — and the scoreboard is skipped when the push aborted because Datadog rejected the credentials (<code>401</code>/<code>403</code>), since the same keys would fail again. When Datadog answers with a non-2xx status, the push error carries the intake's own verdict — the body's <code>errors[0].detail</code> and its <code>source.pointer</code>, the JSON pointer to the value that caused the error — for example <code>Failed to emit Datadog event for 'test_login_flow' (HTTP 400: Missing required attribute in body at /data/attributes/attributes/status)</code>. A body that is not JSON, is empty, or carries no usable detail falls back to the plain <code>(HTTP 400)</code> form. Manual Datadog pushes obey the same review gate as Report Portal — the <code>DD_ALLOW_UNREVIEWED_PUSH</code> row in the toggle table above is their escape hatch.</p>
 <h2 id="advanced-usage">Advanced Usage</h2>
 <p>Push through the generic exporter endpoint when you want the plugin dispatch rather than the Report Portal shortcut. <code>POST /results/{job_id}/push/{plugin_name}</code> takes the same optional <code>child_job_name</code> and <code>child_build_number</code> parameters and returns the exporter's own result fields plus <code>success</code> and <code>message</code>. The Report Portal-specific endpoint <code>POST /results/{job_id}/push-reportportal</code> remains available and is what the UI button uses.</p>
