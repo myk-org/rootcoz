@@ -514,7 +514,7 @@ function ReportContent() {
               <GreenwaveButton
                 jobId={result.job_id}
                 jobName={result.job_name ?? result.job_id}
-                buildNumber={result.build_number}
+                buildNumber={resolveBuildDisplayId(result) ?? result.build_number}
                 failures={result.failures ?? []}
               />
             )}

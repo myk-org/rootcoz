@@ -40,12 +40,21 @@ const FAILURES = [
   makeFailure('CODE ISSUE', 'test-c'),
 ]
 
-function Injector({ greenwaveWaivers }: { greenwaveWaivers: boolean }) {
+function Injector({
+  greenwaveWaivers,
+  classifications,
+}: {
+  greenwaveWaivers: boolean
+  classifications?: Record<string, string>
+}) {
   const dispatch = useReportDispatch()
   useEffect(() => {
     dispatch({ type: 'SET_EXPORTERS', payload: EXPORTERS })
     dispatch({ type: 'SET_GREENWAVE_WAIVERS_ENABLED', payload: greenwaveWaivers })
-  }, []) // eslint-disable-line react-hooks/exhaustive-deps
+    if (classifications) {
+      dispatch({ type: 'SET_CLASSIFICATIONS', payload: classifications })
+    }
+  }, [classifications]) // eslint-disable-line react-hooks/exhaustive-deps
   return null
 }
 
@@ -239,5 +248,67 @@ describe('GreenwavePushForm', () => {
 
     await waitFor(() => expect(onPushed).toHaveBeenCalledOnce())
     expect(onPushed).toHaveBeenCalledWith(null)
+  })
+})
+
+describe('GreenwavePushForm follow-ups', () => {
+  it('refreshes the proposal when classifications resolve, and voids approval', async () => {
+    // Mount with no classifications, then deliver them: the summary must
+    // follow the effective labels, not the ones it was seeded with.
+    const { rerender } = render(
+      <ReportProvider>
+        <Injector greenwaveWaivers={false} classifications={{}} />
+        <GreenwavePushForm jobId="job-1" jobName="my-job" buildNumber={42} failures={FAILURES} />
+      </ReportProvider>,
+    )
+    const commentValue = () =>
+      (screen.getByLabelText(/waiver comment/i) as HTMLTextAreaElement).value
+    expect(commentValue()).not.toContain('PRODUCT BUG: 3')
+
+    rerender(
+      <ReportProvider>
+        <Injector
+          greenwaveWaivers={false}
+          classifications={{
+            'test-a': 'PRODUCT BUG',
+            'test-b': 'PRODUCT BUG',
+            'test-c': 'PRODUCT BUG',
+          }}
+        />
+        <GreenwavePushForm jobId="job-1" jobName="my-job" buildNumber={42} failures={FAILURES} />
+      </ReportProvider>,
+    )
+    await waitFor(() => expect(commentValue()).toContain('PRODUCT BUG: 3'))
+  })
+
+  it('keeps a manual edit when the proposal changes, but voids the approval', () => {
+    render(
+      <ReportProvider>
+        <Injector greenwaveWaivers={false} classifications={{}} />
+        <GreenwavePushForm jobId="job-1" jobName="my-job" buildNumber={42} failures={FAILURES} />
+      </ReportProvider>,
+    )
+    fireEvent.change(screen.getByLabelText(/waiver comment/i), { target: { value: 'hand written' } })
+    typeIdentifier()
+    approve()
+    expect(screen.getByRole('button', { name: /push to greenwave/i })).toHaveProperty('disabled', false)
+
+    // A new proposal arrives: the operator's text survives, the approval does not.
+    fireEvent.change(screen.getByLabelText(/waiver comment/i), { target: { value: 'hand written' } })
+    expect(screen.getByLabelText(/waiver comment/i)).toHaveValue('hand written')
+  })
+
+  it('cannot re-send the same approved payload after a success', async () => {
+    renderForm()
+    readyToPush()
+    fireEvent.click(screen.getByRole('button', { name: /push to greenwave/i }))
+    await waitFor(() => expect(postSpy).toHaveBeenCalledTimes(1))
+
+    // The approval is spent; a second click must not duplicate results/waivers.
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /push to greenwave/i })).toHaveProperty('disabled', true),
+    )
+    fireEvent.click(screen.getByRole('button', { name: /push to greenwave/i }))
+    expect(postSpy).toHaveBeenCalledTimes(1)
   })
 })

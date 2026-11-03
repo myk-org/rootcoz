@@ -1,4 +1,4 @@
-import { useId, useState } from 'react'
+import { useId, useMemo, useState } from 'react'
 import { Loader2, Upload } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
@@ -40,21 +40,34 @@ export function GreenwavePushForm({
   const { greenwaveWaiversEnabled, classifications } = useReportState()
   const { push, pushing, result, error } = useExporterPush({ jobId, plugin: 'greenwave', childJobName, childBuildNumber })
   const [subjectIdentifier, setSubjectIdentifier] = useState('')
-  const [comment, setComment] = useState(() =>
-    proposeWaiverComment({ jobName, buildNumber, failures, childJobName, childBuildNumber, classifications }),
+  // The proposal is derived, not seeded once: the effective classifications
+  // arrive after mount (and a reviewer can change one while the dialog is
+  // open), and a summary showing stale counts would describe different labels
+  // than the ones the server uses for the results and waivers it files.
+  const proposal = useMemo(
+    () =>
+      proposeWaiverComment({
+        jobName,
+        buildNumber,
+        failures,
+        childJobName,
+        childBuildNumber,
+        classifications,
+      }),
+    [jobName, buildNumber, failures, childJobName, childBuildNumber, classifications],
   )
+  const [comment, setComment] = useState(proposal)
+  // Once the operator edits the text we stop overwriting it — but a new
+  // proposal still voids the approval, because it no longer matches the text
+  // that was approved.
+  const [edited, setEdited] = useState(false)
   const [approved, setApproved] = useState(false)
   const uid = useId()
 
-  // Re-seed the proposal when the job/build changes (render-time reset per
-  // React docs — the parent is keyed by jobId, this guards unkeyed reuse).
-  const seedKey = `${jobName}#${buildNumber ?? ''}`
-  const [prevSeedKey, setPrevSeedKey] = useState(seedKey)
-  if (prevSeedKey !== seedKey) {
-    setPrevSeedKey(seedKey)
-    setComment(
-      proposeWaiverComment({ jobName, buildNumber, failures, childJobName, childBuildNumber, classifications }),
-    )
+  const [prevProposal, setPrevProposal] = useState(proposal)
+  if (prevProposal !== proposal) {
+    setPrevProposal(proposal)
+    if (!edited) setComment(proposal)
     setApproved(false)
   }
 
@@ -77,6 +90,9 @@ export function GreenwavePushForm({
     // Client-side gate — never fire a request that would 422.
     if (!canPush || pushing) return
     const res = await push({ subject_identifier: subjectIdentifier, waiver_comment: comment })
+    // Whatever the outcome, the approval is spent: re-pushing the same
+    // payload would create a second ResultsDB group and duplicate waivers.
+    setApproved(false)
     onPushed?.(res)
   }
 
@@ -111,6 +127,7 @@ export function GreenwavePushForm({
           id={`${uid}-comment`}
           value={comment}
           onChange={(e) => {
+            setEdited(true)
             setComment(e.target.value)
             onPayloadEdit()
           }}

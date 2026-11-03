@@ -12,6 +12,7 @@ import {
 } from '@/components/ui/dialog'
 import { Button } from '@/components/ui/button'
 import { useAuth } from '@/lib/auth'
+import { resolveBuildDisplayId } from '@/lib/utils'
 import { exporterEnabled, useReportState } from '@/pages/report/reportState'
 import { pushRejectionDetail } from '@/lib/pushGate'
 import { pushFullySucceeded } from './useExporterPush'
@@ -302,7 +303,7 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
                   <GreenwavePushForm
                     jobId={jobId}
                     jobName={result.job_name}
-                    buildNumber={result.build_number}
+                    buildNumber={resolveBuildDisplayId(result) ?? result.build_number}
                     failures={result.failures ?? []}
                     onPushed={(res) => {
                       // A failed or partial push must stay visible in the result view.
