@@ -16,7 +16,11 @@
     },
     {
       "name": "Exploring Data",
-      "pages": ["explore-history-and-reports", "use-server-chat-for-cross-job-analysis"]
+      "pages": [
+        "explore-history-and-reports",
+        "build-a-datadog-dashboard",
+        "use-server-chat-for-cross-job-analysis"
+      ]
     },
     {
       "name": "Account and Administration",
