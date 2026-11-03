@@ -124,6 +124,8 @@ This generates and reviews issue content, creates the issue, confirms which expo
    rootcoz push JOB_ID --plugin datadog
    ```
 
+   To put that data on one screen next to your test runs, see [Building a Datadog Dashboard with RootCoz Data](build-a-datadog-dashboard.html).
+
    Datadog is a fire-and-forget sink: a failed event (network or HTTP error) is recorded per event in the push result and never breaks the analysis pipeline or the remaining events. The result also reports the scoreboard: `series` is the number of gauge series Datadog accepted and `series_error` the metrics failure, if any. A metrics failure does not undo the events already sent — the result says the events went through, with the series error alongside — and the scoreboard is skipped when the push aborted because Datadog rejected the credentials (`401`/`403`), since the same keys would fail again. When Datadog answers with a non-2xx status, the push error carries the intake's own verdict — the body's `errors[0].detail` and its `source.pointer`, the JSON pointer to the value that caused the error — for example `Failed to emit Datadog event for 'test_login_flow' (HTTP 400: Missing required attribute in body at /data/attributes/attributes/status)`. A body that is not JSON, is empty, or carries no usable detail falls back to the plain `(HTTP 400)` form. Manual Datadog pushes obey the same review gate as Report Portal — the `DD_ALLOW_UNREVIEWED_PUSH` row in the toggle table above is their escape hatch.
 
 ## Advanced Usage
