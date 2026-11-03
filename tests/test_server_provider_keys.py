@@ -3125,10 +3125,47 @@ def test_ambient_resolution_skips_manifest_declared_providers(tmp_path, monkeypa
     _point_agent_dir(
         monkeypatch,
         tmp_path,
-        {"openai": {"apiKey": "literal-manifest-key"}},  # pragma: allowlist secret
+        {
+            "openai": {"apiKey": "literal-manifest-key"},  # pragma: allowlist secret
+            # An env reference without the trust flag stays today's behaviour:
+            # no deployment credential, and no ambient fallback either.
+            "mygateway": {"apiKey": f"${DEPLOYMENT_ENV}"},
+        },
+    )
+    _register_providers(monkeypatch, "openai", "mygateway")
+    monkeypatch.setenv("OPENAI_API_KEY", AMBIENT_KEY)
+    monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
+
+    assert ai_client.deployment_provider_credentials() == {}
+
+
+def test_ambient_resolution_covers_model_overrides_only_entry(tmp_path, monkeypatch):
+    """A key-less manifest entry does not claim the provider's key (#389).
+
+    The real case is the CNV manifest's
+    ``"openai": {"modelOverrides": {...}}`` — model metadata only, no
+    authentication. It must defer to pi's own ``OPENAI_API_KEY`` resolution,
+    or the provider is invisible and cannot be promoted.
+    """
+    _point_agent_dir(
+        monkeypatch,
+        tmp_path,
+        {"openai": {"modelOverrides": {"gpt-5.6-sol": {"contextWindow": 1050000}}}},
     )
     _register_providers(monkeypatch, "openai")
     monkeypatch.setenv("OPENAI_API_KEY", AMBIENT_KEY)
+
+    assert ai_client.deployment_provider_credentials() == {"openai": AMBIENT_KEY}
+
+
+def test_model_overrides_only_entry_resolves_nothing_without_env(tmp_path, monkeypatch):
+    """A key-less manifest entry plus an unset ambient variable is no credential."""
+    _point_agent_dir(
+        monkeypatch,
+        tmp_path,
+        {"openai": {"modelOverrides": {"gpt-5.6-sol": {"contextWindow": 1050000}}}},
+    )
+    _register_providers(monkeypatch, "openai")
 
     assert ai_client.deployment_provider_credentials() == {}
 
@@ -3519,6 +3556,35 @@ async def test_store_deployment_key_promotes_the_resolved_credential(
         "[AUDIT] Admin 'admin' promoted the deployment credential for 'openai'"
         in logs.text
     )
+
+
+async def test_store_deployment_key_for_model_overrides_only_provider(
+    client, monkeypatch, tmp_path
+):
+    """A ``modelOverrides``-only manifest entry never blocks the promotion (#389)."""
+    _point_agent_dir(
+        monkeypatch,
+        tmp_path,
+        {"openai": {"modelOverrides": {"gpt-5.6-sol": {"contextWindow": 1050000}}}},
+    )
+    _register_providers(monkeypatch, "openai")
+    monkeypatch.setenv("OPENAI_API_KEY", AMBIENT_KEY)
+    _fake_catalog(monkeypatch, [{"provider": "openai", "id": "gpt-5.6-luna"}])
+    _mock_supported(monkeypatch, ["openai"])
+    verified = _mock_verify(monkeypatch, "accepted")
+    _mock_key_discovery(monkeypatch, [{"id": "gpt-5.6-luna"}])
+
+    # The UI path: the card sees the provider before anything is stored.
+    assert _providers(client)["openai"]["has_deployment_credential"] is True
+
+    response = _store_deployment_key(client, "openai")
+
+    assert response.status_code == 200
+    assert response.json()["ok"] is True
+    assert verified == [("openai", "gpt-5.6-luna", AMBIENT_KEY)]
+    assert await storage.get_server_ai_credential("openai") == AMBIENT_KEY
+    assert _providers(client)["openai"]["has_key"] is True
+    assert AMBIENT_KEY not in response.text
 
 
 def test_store_deployment_key_without_a_credential_is_404(client, monkeypatch):
