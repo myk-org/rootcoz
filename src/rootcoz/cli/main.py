@@ -2885,7 +2885,7 @@ def push_cmd(
         ...,
         "--plugin",
         "-p",
-        help="Exporter plugin name: 'reportportal' or 'greenwave'.",
+        help="Exporter plugin name: 'reportportal', 'datadog' or 'greenwave'.",
     ),
     child_job_name: str | None = typer.Option(
         None, "--child-job-name", help="Child job name (for pipeline child push)."
@@ -2899,8 +2899,9 @@ def push_cmd(
         None,
         "--subject-identifier",
         help=(
-            "Subject identifier (build NVR or artifact identifier); falls back "
-            "to job name for result pushes. Required for Greenwave waivers."
+            "Subject identifier (build NVR or artifact identifier); required "
+            "for every Greenwave push — results and waivers are both keyed on "
+            "it, so there is no job-name fallback."
         ),
     ),
     waiver_comment: str | None = typer.Option(

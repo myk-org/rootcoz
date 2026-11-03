@@ -3912,7 +3912,13 @@ async def _auto_review_matching_failures(
         # overrides-unavailable) is audited where it is caught, below.
         suppression_reason: str | None = None
         unscopable_children = _unscopable_failure_children(result_data)
-        if auto_push_names and total_failures > 0:
+        if excluded_exporters and not auto_push_names and total_failures > 0:
+            # Every configured exporter was excluded above (e.g.
+            # AUTO_PUSH_EXPORTERS=greenwave): there is nothing left to run, but
+            # the operator still needs to see why in the trail, which the gate
+            # block below would skip because the list is empty.
+            suppression_reason = "gating_exporter_only"
+        elif auto_push_names and total_failures > 0:
             unreviewed_ok = await _unreviewed_failure_count(job_id, result_data) == 0
             if unscopable_children:
                 suppression_reason = "unscopable_children"
@@ -3945,7 +3951,7 @@ async def _auto_review_matching_failures(
                 target_id=job_id,
                 outcome="failure",
                 details={
-                    "plugin": ",".join(auto_push_names),
+                    "plugin": ",".join(auto_push_names or excluded_exporters),
                     "trigger": "auto",
                     "reason": suppression_reason,
                     "suppressed_exporters": ",".join(excluded_exporters),
@@ -10142,6 +10148,22 @@ async def push_to_exporter(
                 "plugin": plugin_name,
                 "pushed": int(result.details.get("pushed") or 0),
                 "outcome": outcome,
+                # Gating writers: name the subject the write landed on and how
+                # many waivers were filed — reproducing an audit question
+                # ("which build did we waive?") otherwise needs the exporter's
+                # own result, which is not kept.
+                **(
+                    {
+                        "subject_identifier": context.subject_identifier or "",
+                        "waived": int(result.details.get("waived") or 0),
+                        "group_uuid": (
+                            (result.details.get("details") or {}).get("group_uuid")
+                            or ""
+                        ),
+                    }
+                    if _EXPORTER_CLASSES.get(plugin_name) is GreenwaveExporter
+                    else {}
+                ),
             },
             request=request,
         )

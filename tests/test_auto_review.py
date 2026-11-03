@@ -1906,3 +1906,43 @@ class TestAutoPushSuppressionAudit:
         assert row["details"]["reason"] == "unreviewed"
         assert row["details"]["plugin"] == "reportportal"
         assert row["target_id"] == "current-job"
+
+
+class TestGatingOnlyAutoPushAudit:
+    """AUTO_PUSH_EXPORTERS with only gating exporters still leaves a row."""
+
+    @pytest.fixture
+    async def setup_test_db(self, temp_db_path):
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            yield temp_db_path
+
+    async def test_gating_only_configuration_is_audited(self, setup_test_db):
+        from rootcoz.main import _auto_review_matching_failures
+
+        result_data = TestAutoPushAiReviewGate._root_and_child_result()
+        settings = TestAutoPushAiReviewGate._settings("greenwave")
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch(
+                "rootcoz.main._match_and_auto_review_failures",
+                new_callable=AsyncMock,
+                return_value=(1, 1),
+            ),
+            patch(
+                "rootcoz.main._auto_review_child_failures",
+                new_callable=AsyncMock,
+                return_value=(0, 0),
+            ),
+            patch("rootcoz.main._create_exporter") as mock_create,
+        ):
+            await _auto_review_matching_failures(
+                "current-job", "my-job", 101, result_data, settings
+            )
+            mock_create.assert_not_called()
+            page = await storage.list_audit_events(action="export.push", limit=20)
+
+        rows = page["events"] if isinstance(page, dict) else page
+        assert rows, "an all-gating configuration must still explain itself"
+        assert rows[0]["details"]["reason"] == "gating_exporter_only"
+        assert rows[0]["details"]["plugin"] == "greenwave"

@@ -60,6 +60,9 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
   const [eventPushStatus, setEventPushStatus] = useState<
     'pushed' | 'failed' | 'skipped' | null
   >(null)
+  // Whether the Greenwave section has completed a push: the two offers share
+  // one dialog, so neither may dismiss the other while it is still unanswered.
+  const [greenwaveDone, setGreenwaveDone] = useState(false)
   // Push combinations (`exporter + scope query`) that already succeeded in
   // the current dialog session — a retry must only re-push the failed ones,
   // because Datadog events are created per POST.
@@ -106,7 +109,9 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
   const datadogRef = useRef(datadogAvailable)
   datadogRef.current = datadogAvailable
   const greenwaveRef = useRef(greenwaveEnabled)
-  greenwaveRef.current = greenwaveEnabled
+  // What is actually offered, not merely enabled: a child-only pipeline
+  // has nothing for the root-scope Greenwave push.
+  greenwaveRef.current = greenwaveOffered
   const isOperatorRef = useRef(isOperator)
   isOperatorRef.current = isOperator
 
@@ -137,6 +142,7 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
           pushRunRef.current++
           setEventPushStatus(null)
           setPushError(null)
+          setGreenwaveDone(false)
           setDialogOpen(true)
         }
       })
@@ -161,6 +167,7 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
     if (!open) {
       setPushError(null)
       setEventPushStatus(null)
+      setGreenwaveDone(false)
     }
   }, [])
 
@@ -217,7 +224,8 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
         setEventPushStatus('pushed')
         // Only close when there is no Greenwave offer left to answer; the
         // prompt exists to offer both, so one decision must not discard it.
-        if (!greenwaveOffered) handleOpenChange(false)
+        // Close only when nothing else is still on offer.
+        if (!greenwaveOffered || greenwaveDone) handleOpenChange(false)
       }
     } finally {
       if (runId === pushRunRef.current) setPushing(false)
@@ -227,7 +235,7 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
   const handleSkip = () => {
     setPushError(null)
     setEventPushStatus('skipped')
-    if (!greenwaveOffered) handleOpenChange(false)
+    if (!greenwaveOffered || greenwaveDone) handleOpenChange(false)
   }
 
   // Push endpoints are operator-only — never prompt other roles
@@ -288,7 +296,12 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
               <p className="text-sm text-text-primary">
                 Push the reviewed failures to Greenwave
               </p>
-              {greenwaveOffered ? (
+              {greenwaveDone ? (
+                <p className="text-xs text-text-tertiary" role="status">
+                  Greenwave push completed. Answer the remaining exporter question, or
+                  close this prompt.
+                </p>
+              ) : greenwaveOffered ? (
                 <>
                   <p className="text-xs text-text-tertiary">
                     Review and approve the text below before pushing — it states exactly
@@ -307,7 +320,17 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
                     failures={result.failures ?? []}
                     onPushed={(res) => {
                       // A failed or partial push must stay visible in the result view.
-                      if (pushFullySucceeded(res)) handleOpenChange(false)
+                      if (!pushFullySucceeded(res)) return
+                      setGreenwaveDone(true)
+                      // The event question may still be unanswered: keep the
+                      // dialog so answering it is still possible.
+                      if (
+                        !eventExportersOffered ||
+                        eventPushStatus === 'pushed' ||
+                        eventPushStatus === 'skipped'
+                      ) {
+                        handleOpenChange(false)
+                      }
                     }}
                   />
                 </>
