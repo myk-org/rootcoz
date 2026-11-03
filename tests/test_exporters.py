@@ -1133,6 +1133,9 @@ class TestBuildExportContextReviewedBy:
                     result_data=result_data,
                     settings=MagicMock(),
                     fetch_history=False,
+                    # These cases are about reviewed_by; the classification
+                    # overrides need a DB this test does not set up.
+                    fetch_effective_classifications=False,
                 )
             )
 

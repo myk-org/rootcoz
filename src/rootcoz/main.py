@@ -3909,25 +3909,38 @@ async def _auto_review_matching_failures(
             # One context per scope: a whole-job context carries only the
             # top-level failures, so a child-only pipeline would push nothing.
             for scope_job, scope_build in _push_scopes(result_data):
-                context = await _build_export_context(
-                    job_id=job_id,
-                    result_data=result_data,
-                    settings=settings,
-                    child_job_name=scope_job,
-                    child_build_number=scope_build,
-                    pushed_by=AI_SYSTEM_USERNAME,
-                    skip_waivers=True,
-                    fetch_history=_exporter_needs_history_classifications(
-                        auto_push_names
-                    ),
-                    fetch_tracked_in_links=_exporter_needs_tracked_in_links(
-                        auto_push_names, settings
-                    ),
-                    analysis_timestamp=analysis_timestamp,
-                    fetch_effective_classifications=(
-                        _exporter_needs_effective_classifications(auto_push_names)
-                    ),
-                )
+                try:
+                    context = await _build_export_context(
+                        job_id=job_id,
+                        result_data=result_data,
+                        settings=settings,
+                        child_job_name=scope_job,
+                        child_build_number=scope_build,
+                        pushed_by=AI_SYSTEM_USERNAME,
+                        skip_waivers=True,
+                        fetch_history=_exporter_needs_history_classifications(
+                            auto_push_names
+                        ),
+                        fetch_tracked_in_links=_exporter_needs_tracked_in_links(
+                            auto_push_names, settings
+                        ),
+                        analysis_timestamp=analysis_timestamp,
+                        fetch_effective_classifications=(
+                            _exporter_needs_effective_classifications(auto_push_names)
+                        ),
+                    )
+                except EffectiveClassificationsUnavailable:
+                    # The pipeline already succeeded; an exporter that cannot
+                    # be given safe inputs is skipped for this scope rather
+                    # than failing the analysis.
+                    logger.warning(
+                        "Auto-push skipped for job_id=%s scope %s#%s: "
+                        "classification overrides are unavailable",
+                        job_id,
+                        scope_job or "root",
+                        scope_build or 0,
+                    )
+                    continue
                 for plugin_name in auto_push_names:
                     # Gating exporters (e.g. Greenwave) write records whose
                     # subject must identify a build/artifact; the automatic
@@ -6606,7 +6619,7 @@ def _push_scopes(
             name = child.get("job_name") or None
             try:
                 build = int(child.get("build_number") or 0)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 build = 0
             if child.get("failures") and name and build > 0:
                 scope = (name, build)
@@ -6643,7 +6656,7 @@ def _unscopable_failure_children(result_data: dict[str, Any]) -> list[str]:
             name = child.get("job_name") or ""
             try:
                 build = int(child.get("build_number") or 0)
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 build = 0
             if child.get("failures") and (not name or build <= 0):
                 found.append(
@@ -10013,6 +10026,10 @@ async def push_to_exporter(
                     _exporter_needs_effective_classifications([plugin_name])
                 ),
             )
+        except EffectiveClassificationsUnavailable as exc:
+            # 503, not 400: the request is fine, the server cannot read the
+            # override table it needs to make a safe gating write.
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -10173,6 +10190,19 @@ def _stored_analysis_timestamp(stored: dict[str, Any]) -> int | None:
     return None
 
 
+class EffectiveClassificationsUnavailable(RuntimeError):
+    """Human classification overrides could not be read for a gating export.
+
+    Exporters that declare ``needs_effective_classifications`` write
+    gating-relevant records (ResultsDB outcomes, WaiverDB waivers), and the
+    stored result JSON is only a best-effort mirror of the authoritative
+    override table. Falling back to it could publish the outcome a reviewer
+    overruled and file a waiver for the classification they rejected, so the
+    push is refused instead (HTTP 503) — a failed push is recoverable, a
+    wrong gating write is not.
+    """
+
+
 async def _build_export_context(
     *,
     job_id: str,
@@ -10265,19 +10295,24 @@ async def _build_export_context(
                 effective_classifications = (
                     await storage.get_all_effective_classifications(job_id)
                 )
-            except Exception:
-                # Storage unavailable: fall back to the stored result-JSON
-                # classifications for this push instead of refusing the
-                # export — never swallow the failure into a default
-                # classification.  Overrides re-apply on the next push
-                # once the DB recovers.
+            except Exception as exc:
+                # Fail closed: the target exporter writes gating records, and
+                # the result JSON is only a best-effort mirror of the override
+                # table — pushing either could publish an overruled outcome or
+                # file a waiver for a rejected classification. The caller maps
+                # this to 503 so the operator can retry once the DB recovers.
                 logger.warning(
-                    "Failed to fetch classification overrides for export "
-                    "push, job_id=%s — falling back to stored analysis "
-                    "classifications",
+                    "Refusing export push for job_id=%s: classification "
+                    "overrides are unavailable and the target exporter writes "
+                    "gating records",
                     job_id,
                     exc_info=True,
                 )
+                raise EffectiveClassificationsUnavailable(
+                    "Classification overrides are unavailable, so this push "
+                    "could write an out-of-date classification to a gating "
+                    "system. Retry once the database is reachable."
+                ) from exc
 
         if fetch_history:
             seen: set[str] = set()
@@ -18650,6 +18685,7 @@ async def _test_datadog_connection(settings: Settings) -> dict[str, Any]:
         " published",
         site=site,
     )
+
 
 async def _test_greenwave_connection(settings: Settings) -> dict[str, Any]:
     """Authenticated ResultsDB ping against the effective Greenwave settings."""

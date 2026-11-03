@@ -1,7 +1,6 @@
 """Tests for the Greenwave/ResultsDB exporter plugin (issue #183)."""
 
 import asyncio
-import logging
 import os
 import uuid as uuid_module
 from typing import ClassVar
@@ -1301,49 +1300,22 @@ class TestBuildExportContextEffectiveClassifications:
         )
         assert ctx.effective_classifications == overrides
 
-    def test_storage_failure_falls_back_to_json_and_warns(
-        self, caplog: pytest.LogCaptureFixture
-    ):
-        """DB down: push context still builds with empty overrides + warning."""
-        from rootcoz.main import logger as main_logger
+    def test_storage_failure_refuses_instead_of_using_stale_json(self):
+        """DB down: the gating push is refused, never pushed from stale JSON.
+
+        The result JSON is only a best-effort mirror of the override table, so
+        falling back to it could publish an outcome a reviewer overruled or
+        file a waiver for the classification they rejected.
+        """
+        from rootcoz.main import EffectiveClassificationsUnavailable
 
         mock = patch(
             "rootcoz.storage.get_all_effective_classifications",
             new_callable=AsyncMock,
             side_effect=RuntimeError("db down"),
         )
-        original_level = main_logger.level
-        main_logger.setLevel(logging.WARNING)
-        main_logger.addHandler(caplog.handler)
-        try:
-            ctx = self._build(overrides_mock=mock)
-        finally:
-            main_logger.removeHandler(caplog.handler)
-            main_logger.setLevel(original_level)
-
-        # Fallback: no overrides — the exporter will use the stored JSON.
-        assert ctx.effective_classifications == {}
-        # Guard against a vacuous pass: the fallback must be logged.
-        assert any(
-            "Failed to fetch classification overrides" in record.message
-            for record in caplog.records
-        )
-
-        # The push itself still happens, using the JSON classification.
-        exporter = GreenwaveExporter(_make_settings())
-        exporter._post = AsyncMock(
-            side_effect=[
-                _response({"uuid": "550e8400-e29b-41d4-a716-446655440000"}),
-                _response({"id": 101}),
-            ]
-        )
-        result = _run_push(
-            exporter,
-            _make_context([_failure("test_a", "INFRASTRUCTURE")]),
-        )
-        assert result.success is True
-        payload = exporter._post.call_args_list[1].kwargs["json"]
-        assert payload["outcome"] == "INFO"
+        with pytest.raises(EffectiveClassificationsUnavailable):
+            self._build(overrides_mock=mock)
 
 
 class TestGreenwaveExporterFactory:
@@ -1624,3 +1596,65 @@ class TestGreenwaveExporterEndpoints:
             assert data["resultsdb_ids"] == [101]
             assert mock_ctx.call_args.kwargs["subject_identifier"] == "pkg-1.0-1.el10"
             assert mock_ctx.call_args.kwargs["waiver_comment"] == "known flake"
+
+
+class TestEffectiveClassificationsFailClosed:
+    """A gating push must not proceed on possibly-stale classifications."""
+
+    @pytest.fixture(autouse=True)
+    def _init_db(self, temp_db_path):
+        import asyncio
+
+        from rootcoz import storage
+
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            asyncio.run(storage.init_db())
+            yield
+
+    def test_push_returns_503_when_overrides_unreadable(self, temp_db_path):
+        """Storage failure -> 503 and no exporter call, never a JSON fallback."""
+        from unittest.mock import patch
+
+        from tests.conftest import admin_login, make_app_client
+
+        for client in make_app_client(temp_db_path):
+            admin_login(client)
+            with (
+                patch(
+                    "rootcoz.main.storage.get_all_effective_classifications",
+                    new=AsyncMock(side_effect=RuntimeError("db down")),
+                ),
+                patch("rootcoz.main.get_result", new_callable=AsyncMock) as mock_get,
+                patch(
+                    "rootcoz.main._unreviewed_failure_count",
+                    new_callable=AsyncMock,
+                    return_value=0,
+                ),
+                patch("rootcoz.main._create_exporter") as mock_create,
+            ):
+                mock_get.return_value = {
+                    "result": {
+                        "job_name": "j",
+                        "build_number": 1,
+                        "failures": [{"test_name": "t"}],
+                    }
+                }
+                response = client.post("/results/job-1/push/greenwave")
+
+            assert response.status_code == 503, response.text
+            assert "overrides" in response.json()["detail"].lower()
+            mock_create.assert_not_called()
+
+    def test_exporter_declares_it_needs_effective_classifications(self):
+        from rootcoz.exporters import GreenwaveExporter
+
+        assert GreenwaveExporter.needs_effective_classifications is True
+
+    def test_only_gating_exporters_request_the_lookup(self):
+        """Non-gating exporters never trigger the override read at all."""
+        from rootcoz.main import _exporter_needs_effective_classifications
+
+        assert _exporter_needs_effective_classifications(["greenwave"]) is True
+        assert _exporter_needs_effective_classifications(["reportportal"]) is False
+        assert _exporter_needs_effective_classifications(["datadog"]) is False
+        assert _exporter_needs_effective_classifications([]) is False
