@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Building a Datadog Dashboard with RootCoz Data - rootcoz</title>
+    <title>Create a RootCoz Dashboard in Datadog - rootcoz</title>
     <meta name="description" content="AI-powered CI failure analysis for Jenkins, Prow, and JUnit XML">
     <link rel="stylesheet" href="assets/style.css?v=66bf87bdd9">
     <script>try{var t=localStorage.getItem('theme');if(t==='dark')document.documentElement.setAttribute('data-theme','dark')}catch(e){}</script>
@@ -108,7 +108,7 @@
                     <li>
                         <a href="build-a-datadog-dashboard.html"
                            class="nav-link active" aria-current="page">
-                            Building a Datadog Dashboard with RootCoz Data
+                            Create a RootCoz Dashboard in Datadog
                         </a>
                     </li>
 
@@ -224,21 +224,25 @@
                          converted to HTML server-side by the markdown library, not
                          user-supplied input. XSS risk is minimal and accepted since
                          the AI generates the content, not end users. -->
-                    <h1 id="building-a-datadog-dashboard-with-rootcoz-data">Building a Datadog Dashboard with RootCoz Data</h1>
-<p>Once RootCoz pushes results to Datadog, you can build one dashboard that shows your test runs next to the RootCoz failure analysis. This page gives you the checklist and the ready-made prompt for Datadog <strong>Bits AI</strong>, which builds the dashboard for you.</p>
+                    <h1 id="create-a-rootcoz-dashboard-in-datadog">Create a RootCoz Dashboard in Datadog</h1>
+<p>RootCoz pushes every failed test to Datadog as an event and the failure counts as two gauge metrics. This page shows how to turn that data into one dashboard that sits next to your test runs, using the Datadog <strong>Bits AI</strong> prompt below.</p>
 <h2 id="prerequisites">Prerequisites</h2>
 <ul>
-<li>RootCoz is configured to push results to Datadog. See <a href="create-follow-up-issues-and-push-results.html">Creating Follow-Up Issues and Pushing Results</a> for the exporter settings (<code>ENABLE_DATADOG</code>, <code>DATADOG_SITE</code>, and the two Datadog keys).</li>
-<li>You can open <strong>Bits AI</strong> in Datadog and create a dashboard in the same Datadog organization your test runs report to.</li>
+<li>RootCoz's Datadog exporter is configured: <code>ENABLE_DATADOG</code>, <code>DATADOG_SITE</code>, the API key and application key, and <code>DATADOG_SERVICE=rootcoz</code>. The last one matters here: the dashboard filters RootCoz events on <code>service:rootcoz</code>, and the exporter only emits a <code>service:</code> tag when <code>DATADOG_SERVICE</code> is set. See <a href="create-follow-up-issues-and-push-results.html">Creating Follow-Up Issues and Pushing Results</a> for the exporter settings and <a href="configuration-reference.html">Configuration Reference</a> for the <code>DATADOG_SERVICE</code> and <code>DATADOG_ENV</code> values.</li>
+<li>You can open <strong>Bits AI</strong> in Datadog, in the same Datadog organization your test runs report to.</li>
 </ul>
-<h2 id="1-check-your-setup-first">1. Check Your Setup First</h2>
+<h2 id="step-by-step">Step-by-Step</h2>
+<h3 id="1-check-your-setup-first">1. Check Your Setup First</h3>
 <ul>
 <li>Your test results are in Datadog Test Optimization.</li>
 <li>Each test has <code>job_name</code> and <code>build_number</code> attributes. For example, add them when uploading: <code>datadog-ci junit upload --tags job_name:&lt;job&gt; --tags build_number:&lt;n&gt;</code>.</li>
 <li>RootCoz is set up to push results to Datadog.</li>
 <li>RootCoz uses the <strong>same</strong> job name and build number values as your tests.</li>
 </ul>
-<h2 id="2-create-the-dashboard">2. Create the Dashboard</h2>
+<blockquote>
+<p><strong>Note:</strong> RootCoz sanitizes a value before it becomes a Datadog tag — anything outside letters, digits, <code>.</code>, <code>_</code>, <code>:</code>, and <code>-</code> becomes <code>_</code>. A job named <code>CNV tier1 / nightly</code> therefore appears as <code>CNV_tier1___nightly</code>, and the dashboard's RootCoz filters only match that rewritten form. Job names made of letters, digits, dots, underscores, colons, and hyphens are kept as they are.</p>
+</blockquote>
+<h3 id="2-create-the-dashboard">2. Create the Dashboard</h3>
 <ol>
 <li>In Datadog, open <strong>Bits AI</strong>.</li>
 <li>Paste the RootCoz dashboard prompt from <a href="#the-rootcoz-dashboard-prompt">The RootCoz Dashboard Prompt</a> below.</li>
@@ -253,19 +257,15 @@
 </li>
 <li>If Bits says something is missing, fix it and run the prompt again.</li>
 </ol>
-<h2 id="3-use-the-dashboard">3. Use the Dashboard</h2>
+<blockquote>
+<p><strong>Tip:</strong> Keep the <code>{job}</code> and <code>{build}</code> tokens inside <code>&lt;CI_BUILD_URL&gt;</code> exactly as written — Bits substitutes them. Only the <code>&lt;...&gt;</code> placeholders are yours to replace.</p>
+</blockquote>
+<h3 id="3-use-the-dashboard">3. Use the Dashboard</h3>
 <ol>
 <li>In the <strong>Builds</strong> table, click a build and choose <strong>Drill down to this build</strong>.</li>
 <li>Review the failed tests and the RootCoz classification and failure pattern charts.</li>
 <li>Click a row or a chart slice to open the CI build, Test Optimization or the RootCoz events.</li>
 </ol>
-<h2 id="tips">Tips</h2>
-<ul>
-<li>Always select one build. When <code>build_number</code> is <code>*</code>, the RootCoz numbers aren't reliable.</li>
-<li>Right after a RootCoz push, set the time range to <strong>Past 1 Hour</strong>. Longer ranges can show older numbers for a few minutes.</li>
-<li>Wait at least 1 minute between RootCoz pushes for the same build.</li>
-<li>A finished dashboard looks like <a href="https://app.datadoghq.eu/dashboard/9si-chz-sbj">this RootCoz dashboard in Datadog</a>.</li>
-</ul>
 <h2 id="the-rootcoz-dashboard-prompt">The RootCoz Dashboard Prompt</h2>
 <p>Copy this whole block into Bits AI and replace the three placeholders before you send it.</p>
 <div class="highlight"><pre><span></span><code>Build a Datadog dashboard: "&lt;PROJECT&gt; Test Runs - RootCoz Failure Analysis".
@@ -306,6 +306,33 @@ Rules:
 - Check that every widget returns data, then give me the dashboard link.
 </code></pre></div>
 
+<h2 id="advanced-usage">Advanced Usage</h2>
+<ul>
+<li>Always select one build. When <code>build_number</code> is <code>*</code>, the RootCoz numbers aren't reliable.</li>
+<li>Right after a RootCoz push, set the time range to <strong>Past 1 Hour</strong>. Longer ranges can show older numbers for a few minutes.</li>
+<li>Wait at least 1 minute between RootCoz pushes for the same build.</li>
+<li>A finished dashboard looks like <a href="https://app.datadoghq.eu/dashboard/9si-chz-sbj">this RootCoz dashboard in Datadog</a>. You need access to that Datadog organization to open it.</li>
+<li>A child-scoped push (<code>rootcoz push JOB_ID --plugin datadog --child-job-name ... --child-build-number ...</code>) writes its own metric series, tagged with <code>child_job_name</code>, <code>child_build_number</code>, and <code>rootcoz.scope_id</code>, on top of the parent job and build. When you push both a parent and its children, one build holds one series per pushed scope — filter on the scope tags, or the RootCoz totals add the parent and every child together.</li>
+</ul>
+<h2 id="troubleshooting">Troubleshooting</h2>
+<ul>
+<li>
+<p>Bits says the RootCoz data is missing.<br>
+  Check that <code>DATADOG_SERVICE=rootcoz</code> is set (the <code>service:</code> tag is omitted otherwise), and that at least one push has run — <code>rootcoz push JOB_ID --plugin datadog</code>.</p>
+</li>
+<li>
+<p>The RootCoz widgets are empty for the build I picked.<br>
+  Confirm the push used the same job name and build number as the test run, remembering that spaces and most punctuation in a job name become <code>_</code> in Datadog tags. Then set the time range to <strong>Past 1 Hour</strong>.</p>
+</li>
+<li>
+<p>The tests show up but the RootCoz charts stay at zero.<br>
+  The classification gauges are still published when <code>DD_PUSH_CLASSIFICATIONS</code> is off, but every count is zero. Turn that setting on and push again.</p>
+</li>
+<li>
+<p>The push is refused with <code>409 job has N unreviewed failure(s)</code>.<br>
+  Review the failures first, or set <code>DD_ALLOW_UNREVIEWED_PUSH=true</code> to push anyway. See <a href="create-follow-up-issues-and-push-results.html">Creating Follow-Up Issues and Pushing Results</a>.</p>
+</li>
+</ul>
 <h2 id="related-pages">Related Pages</h2>
 <ul>
 <li><a href="create-follow-up-issues-and-push-results.html">Creating Follow-Up Issues and Pushing Results</a></li>
@@ -335,11 +362,15 @@ Rules:
                     <div class="toc">
 <ul>
 <li><a href="#prerequisites">Prerequisites</a></li>
+<li><a href="#step-by-step">Step-by-Step</a><ul>
 <li><a href="#1-check-your-setup-first">1. Check Your Setup First</a></li>
 <li><a href="#2-create-the-dashboard">2. Create the Dashboard</a></li>
 <li><a href="#3-use-the-dashboard">3. Use the Dashboard</a></li>
-<li><a href="#tips">Tips</a></li>
+</ul>
+</li>
 <li><a href="#the-rootcoz-dashboard-prompt">The RootCoz Dashboard Prompt</a></li>
+<li><a href="#advanced-usage">Advanced Usage</a></li>
+<li><a href="#troubleshooting">Troubleshooting</a></li>
 <li><a href="#related-pages">Related Pages</a></li>
 </ul>
 </div>
