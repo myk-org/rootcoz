@@ -247,7 +247,16 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
               <p className="text-sm text-text-primary">
                 All failures reviewed. Update {pushTargets}?
               </p>
-              {eventPushStatus === null ? (
+              {eventPushStatus !== null && (
+                <p className="text-xs text-text-tertiary" role="status">
+                  {eventPushStatus === 'pushed' && `${pushTargets} updated.`}
+                  {eventPushStatus === 'failed' && `${pushTargets} push failed.`}
+                  {eventPushStatus === 'skipped' && `${pushTargets} update skipped.`}
+                </p>
+              )}
+              {/* A failed push keeps the answer editable: retrying only
+                  re-sends the combinations that have not succeeded yet. */}
+              {(eventPushStatus === null || eventPushStatus === 'failed') && (
                 <div className="flex gap-2">
                   <Button onClick={handleConfirm} disabled={pushing}>
                     {pushing ? 'Loading...' : 'Yes'}
@@ -256,12 +265,6 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
                     No
                   </Button>
                 </div>
-              ) : (
-                <p className="text-xs text-text-tertiary" role="status">
-                  {eventPushStatus === 'pushed' && `${pushTargets} updated.`}
-                  {eventPushStatus === 'failed' && `${pushTargets} push failed.`}
-                  {eventPushStatus === 'skipped' && `${pushTargets} update skipped.`}
-                </p>
               )}
               {pushError && (
                 <p className="text-xs text-signal-red" role="alert">

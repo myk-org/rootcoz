@@ -1484,6 +1484,14 @@ class TestGreenwaveExporterEndpoints:
             admin_login(client)
             with (
                 patch("rootcoz.main.get_result", new_callable=AsyncMock) as mock_get,
+                # The unreviewed-push gate is main's; these cases are about the
+                # push plumbing (disabled/prerequisite/query params), so keep it
+                # open rather than seeding reviews they do not need.
+                patch(
+                    "rootcoz.main._unreviewed_failure_count",
+                    new_callable=AsyncMock,
+                    return_value=0,
+                ),
                 patch(
                     "rootcoz.main._build_export_context",
                     new_callable=AsyncMock,
@@ -1504,6 +1512,14 @@ class TestGreenwaveExporterEndpoints:
             admin_login(client)
             with (
                 patch("rootcoz.main.get_result", new_callable=AsyncMock) as mock_get,
+                # The unreviewed-push gate is main's; these cases are about the
+                # push plumbing (disabled/prerequisite/query params), so keep it
+                # open rather than seeding reviews they do not need.
+                patch(
+                    "rootcoz.main._unreviewed_failure_count",
+                    new_callable=AsyncMock,
+                    return_value=0,
+                ),
                 patch(
                     "rootcoz.main._build_export_context",
                     new_callable=AsyncMock,
@@ -1541,6 +1557,14 @@ class TestGreenwaveExporterEndpoints:
             admin_login(client)
             with (
                 patch("rootcoz.main.get_result", new_callable=AsyncMock) as mock_get,
+                # The unreviewed-push gate is main's; these cases are about the
+                # push plumbing (disabled/prerequisite/query params), so keep it
+                # open rather than seeding reviews they do not need.
+                patch(
+                    "rootcoz.main._unreviewed_failure_count",
+                    new_callable=AsyncMock,
+                    return_value=0,
+                ),
                 patch(
                     "rootcoz.main._build_export_context",
                     new_callable=AsyncMock,
@@ -1572,6 +1596,14 @@ class TestGreenwaveExporterEndpoints:
             admin_login(client)
             with (
                 patch("rootcoz.main.get_result", new_callable=AsyncMock) as mock_get,
+                # The unreviewed-push gate is main's; these cases are about the
+                # push plumbing (disabled/prerequisite/query params), so keep it
+                # open rather than seeding reviews they do not need.
+                patch(
+                    "rootcoz.main._unreviewed_failure_count",
+                    new_callable=AsyncMock,
+                    return_value=0,
+                ),
                 patch(
                     "rootcoz.main._build_export_context", new_callable=AsyncMock
                 ) as mock_ctx,
