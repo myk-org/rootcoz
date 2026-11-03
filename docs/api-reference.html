@@ -872,7 +872,7 @@
 <td>POST</td>
 <td><code>/results/{job_id}/push/{plugin_name}</code></td>
 <td>operator</td>
-<td>Generic push (e.g. <code>reportportal</code>, <code>datadog</code>); <code>child_job_name</code> and <code>child_build_number</code> optional</td>
+<td>Generic push (<code>reportportal</code>, <code>datadog</code>, <code>greenwave</code>); <code>child_job_name</code> / <code>child_build_number</code> optional, plus <code>subject_identifier</code> (required for a Greenwave waiver submission — no job-name fallback, <code>422</code> without it) and <code>waiver_comment</code> (optional, embedded in the composed WaiverDB comment). Returns <code>409</code> when the pushed scope has unreviewed failures, <code>422</code> for a missing Greenwave prerequisite, and <code>503</code> when the classification-override table cannot be read</td>
 </tr>
 <tr>
 <td>POST</td>

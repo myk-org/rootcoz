@@ -212,7 +212,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    `GREENWAVE_OUTCOME_MAP` maps RootCoz classifications to ResultsDB outcomes, one `CLASS:OUTCOME` pair per comma-separated entry. Valid outcomes are `PASSED`, `FAILED`, `INFO`, and `NEEDS_INSPECTION`; anything else fails startup. Failures whose classification is not in the map are skipped (not exported). `GREENWAVE_WAIVABLE_CLASSIFICATIONS` is a comma-separated list, matched case-insensitively; unrecognized names log a warning but do not fail.
 
-   Waiver submission needs more than the server settings: `GREENWAVE_PUSH_WAIVERS=true` also requires `GREENWAVE_WAIVER_URL`, `GREENWAVE_WAIVER_TOKEN`, and `GREENWAVE_PRODUCT_VERSION`, plus a per-push `subject_identifier` (the artifact/build being gated) passed as a query parameter on the push request. Waivers are only submitted for failures reviewed by a human; failures reviewed only by `rootcoz-ai` are skipped unless `GREENWAVE_ALLOW_AI_WAIVERS=true`.
+   Every push needs an explicit `subject_identifier` (the build or artifact the results and waivers apply to); a CI job name is never used instead. Waiver submission needs more than the server settings: `GREENWAVE_PUSH_WAIVERS=true` also requires `GREENWAVE_WAIVER_URL`, `GREENWAVE_WAIVER_TOKEN`, and `GREENWAVE_PRODUCT_VERSION`, plus a per-push `subject_identifier` (the artifact/build being gated) passed as a query parameter on the push request. Waivers are only submitted for failures reviewed by a human; failures reviewed only by `rootcoz-ai` are skipped unless `GREENWAVE_ALLOW_AI_WAIVERS=true`.
 
 10. **Auth and Security category.**
 

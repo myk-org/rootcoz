@@ -1615,6 +1615,10 @@ _AUDIT_REASON_BY_STATUS = {
     409: "conflict",
     422: "invalid_payload",
     502: "upstream_failure",
+    # A push the server refused because it could not read state it needs
+    # (e.g. the classification-override table behind a gating write) — not
+    # an upstream failure and not the client's fault.
+    503: "service_unavailable",
 }
 _AUDIT_DENIED_STATUSES = frozenset({401, 403})
 
@@ -3882,25 +3886,71 @@ async def _auto_review_matching_failures(
         auto_push_names = list(
             dict.fromkeys(n for n in _raw_names if n and n in _EXPORTER_CLASSES)
         )
-        unscopable_children = _unscopable_failure_children(result_data)
-        if auto_push_names and total_failures > 0 and unscopable_children:
-            logger.warning(
-                "Auto-push skipped for job_id=%s: failure-bearing children "
-                "cannot be scoped for export (%s) — their failures cannot be "
-                "exported, so no automatic push runs",
-                job_id,
-                ", ".join(unscopable_children),
+        # Gating exporters write records whose subject must identify a
+        # build/artifact; the automatic path has no explicit subject
+        # identifier and must never fall back to the CI job name. Drop them
+        # here rather than inside the loop: the per-scope capability flags
+        # below (history, tracked-in, classification overrides) must describe
+        # only the exporters that will actually run, or one skipped exporter
+        # makes every scope pay for data none of them read.
+        excluded_exporters = [
+            name
+            for name in auto_push_names
+            if getattr(_EXPORTER_CLASSES[name], "requires_subject_identifier", False)
+        ]
+        for plugin_name in excluded_exporters:
+            auto_push_names.remove(plugin_name)
+            logger.info(
+                "Exporter '%s' is never auto-pushed: it requires an explicit "
+                "subject identifier, which the automatic path cannot supply",
+                plugin_name,
             )
-        elif (
-            auto_push_names
-            and total_failures > 0
-            and await _unreviewed_failure_count(job_id, result_data) == 0
+        # A configured auto-push that does not run must say why — in the log
+        # and in the trail: "nothing was pushed" otherwise looks like a bug to
+        # the operator reading the job afterwards. All four refusals the
+        # branch introduced are named here, in one place.
+        suppression_reason: str | None = None
+        unscopable_children = _unscopable_failure_children(result_data)
+        if auto_push_names and total_failures > 0:
+            unreviewed_ok = await _unreviewed_failure_count(job_id, result_data) == 0
+            if unscopable_children:
+                suppression_reason = "unscopable_children"
+            elif not unreviewed_ok:
+                suppression_reason = "unreviewed"
             # Attribution: every pushed failure must carry an AI review, not
             # merely "some" review — a human review stops the automatic push.
-            and _all_failures_ai_reviewed(
+            elif not _all_failures_ai_reviewed(
                 result_data, await storage.get_reviews_for_job(job_id)
+            ):
+                suppression_reason = "not_ai_reviewed"
+
+        if suppression_reason is not None:
+            if suppression_reason == "unscopable_children":
+                # Un-exportable failures are a real warning: the analysis
+                # succeeded, but part of it can never reach an exporter.
+                detail = (
+                    "failure-bearing children cannot be scoped for export "
+                    f"({', '.join(unscopable_children)})"
+                )
+                logger.warning(f"Auto-push skipped for job_id={job_id}: {detail}")
+            else:
+                detail = f"reason={suppression_reason}"
+                logger.info(f"Auto-push skipped for job_id={job_id}: {detail}")
+            await record_audit(
+                action="export.push",
+                actor=AI_SYSTEM_USERNAME,
+                message=(f"Auto-push suppressed for job {job_id}: {detail}"),
+                target_type="job",
+                target_id=job_id,
+                outcome="failure",
+                details={
+                    "plugin": ",".join(auto_push_names),
+                    "trigger": "auto",
+                    "reason": suppression_reason,
+                    "suppressed_exporters": ",".join(excluded_exporters),
+                },
             )
-        ):
+        elif auto_push_names and total_failures > 0:
             # Auto-push must emit the same event timestamp as the manual
             # push endpoint: reuse the stored analysis timestamp instead
             # of push time.
@@ -3917,7 +3967,6 @@ async def _auto_review_matching_failures(
                         child_job_name=scope_job,
                         child_build_number=scope_build,
                         pushed_by=AI_SYSTEM_USERNAME,
-                        skip_waivers=True,
                         fetch_history=_exporter_needs_history_classifications(
                             auto_push_names
                         ),
@@ -3942,23 +3991,6 @@ async def _auto_review_matching_failures(
                     )
                     continue
                 for plugin_name in auto_push_names:
-                    # Gating exporters (e.g. Greenwave) write records whose
-                    # subject must identify a build/artifact; the automatic
-                    # path has no explicit subject identifier, and the
-                    # job_name fallback would write a CI job name as the
-                    # gating subject.
-                    if getattr(
-                        _EXPORTER_CLASSES.get(plugin_name),
-                        "requires_subject_identifier",
-                        False,
-                    ):
-                        logger.info(
-                            "Auto-push skipped for exporter '%s': it requires an "
-                            "explicit subject identifier, which the automatic "
-                            "path cannot supply",
-                            plugin_name,
-                        )
-                        continue
                     logger.info(
                         "All failures auto-reviewed for job %s%s, pushing to "
                         "'%s' (pushed_by=%s)",
@@ -6591,6 +6623,56 @@ async def re_analyze(
     return queued
 
 
+def _scope_walk(
+    result_data: dict[str, Any],
+) -> tuple[list[tuple[str | None, int | None]], list[str]]:
+    """One traversal of the job tree, for every consumer of push scopes.
+
+    Returns ``(scopes, unscopable)``. A scope is
+    ``(child_job_name, child_build_number)``, with ``(None, None)`` for the
+    root; duplicates (two nodes sharing a name/build pair resolve to the same
+    subtree) are emitted once.
+
+    A child scope needs an identifiable build: the scoped export context is
+    addressed by ``(job_name, build_number)``, so a node without a job name or
+    with a non-positive/non-integer build would resolve to the *root* context
+    and push the parent's failures a second time. Such failure-bearing nodes
+    are reported in ``unscopable`` instead — their own failures can never be
+    exported, which is why auto-push refuses to run at all rather than drop
+    them silently (see ``_auto_review_matching_failures``). Their children are
+    still walked, so a scopable grandchild is not lost.
+    """
+    scopes: list[tuple[str | None, int | None]] = []
+    if result_data.get("failures"):
+        scopes.append((None, None))
+    seen: set[tuple[str | None, int | None]] = {(None, None)}
+    unscopable: list[str] = []
+
+    def _walk(children: list[Any]) -> None:
+        for child in children:
+            if not isinstance(child, dict):
+                continue
+            name = child.get("job_name") or None
+            try:
+                build = int(child.get("build_number") or 0)
+            except TypeError, ValueError:
+                build = 0
+            if child.get("failures"):
+                if name and build > 0:
+                    if (name, build) not in seen:
+                        seen.add((name, build))
+                        scopes.append((name, build))
+                else:
+                    unscopable.append(
+                        f"child {name or ''!r} "
+                        f"(build_number={child.get('build_number')!r})"
+                    )
+            _walk(child.get("failed_children", []))
+
+    _walk(result_data.get("child_job_analyses", []))
+    return scopes, unscopable
+
+
 def _push_scopes(
     result_data: dict[str, Any],
 ) -> list[tuple[str | None, int | None]]:
@@ -6598,74 +6680,23 @@ def _push_scopes(
 
     Auto-push must build one context per scope — a whole-job context contains
     only the top-level ``failures`` list, so a pipeline whose failures live in
-    child jobs would push nothing at all. Two child nodes can share a
-    (name, build) pair; they resolve to the same subtree, so a duplicate
-    scope is pushed once.
+    child jobs would push nothing at all. Thin projection over
+    :func:`_scope_walk`, so the scoping rules live in one place.
     """
-    scopes: list[tuple[str | None, int | None]] = []
-    if result_data.get("failures"):
-        scopes.append((None, None))
-    seen: set[tuple[str | None, int | None]] = set(scopes)
-
-    def _walk(children: list[Any]) -> None:
-        for child in children:
-            if not isinstance(child, dict):
-                continue
-            # A child scope needs an identifiable build: the scoped export
-            # context is addressed by (job_name, build_number), and a scope
-            # without one would resolve to the root context and push the
-            # parent's failures a second time. Such children are still walked
-            # so their own nested children can be pushed.
-            name = child.get("job_name") or None
-            try:
-                build = int(child.get("build_number") or 0)
-            except TypeError, ValueError:
-                build = 0
-            if child.get("failures") and name and build > 0:
-                scope = (name, build)
-                if scope not in seen:
-                    seen.add(scope)
-                    scopes.append(scope)
-            _walk(child.get("failed_children", []))
-
-    _walk(result_data.get("child_job_analyses", []))
+    scopes, _ = _scope_walk(result_data)
     return scopes
 
 
 def _unscopable_failure_children(result_data: dict[str, Any]) -> list[str]:
     """Failure-bearing children that no export scope can address.
 
-    :func:`_push_scopes` only emits a child scope when the node has a job
-    name and a strictly positive build number — the scoped export context is
-    addressed by that pair. A child with failures and no usable pair can
-    therefore never be exported, and auto-push must not run at all: its
-    failures would be silently dropped while every other scope is pushed
-    under an AI attribution.
-
-    Returns:
-        One ``"child '<name>' (build_number=<raw>)"`` entry per offending
-        node, nested children included. Empty when every failure-bearing
-        child can be scoped.
+    One entry per offending node, nested children included. Auto-push refuses
+    to run when this is non-empty: those failures can never be exported, and
+    pushing every other scope would attribute the result to the AI while
+    silently dropping them. Projection over :func:`_scope_walk`.
     """
-    found: list[str] = []
-
-    def _walk(children: list[Any]) -> None:
-        for child in children:
-            if not isinstance(child, dict):
-                continue
-            name = child.get("job_name") or ""
-            try:
-                build = int(child.get("build_number") or 0)
-            except TypeError, ValueError:
-                build = 0
-            if child.get("failures") and (not name or build <= 0):
-                found.append(
-                    f"child {name!r} (build_number={child.get('build_number')!r})"
-                )
-            _walk(child.get("failed_children", []))
-
-    _walk(result_data.get("child_job_analyses", []))
-    return found
+    _, unscopable = _scope_walk(result_data)
+    return unscopable
 
 
 def _all_failures_ai_reviewed(
@@ -7982,8 +8013,14 @@ def _child_report_anchor(
     chain = _chain(children)
     if not chain:
         return f"child-{_urlquote(child_job_name, safe='')}-{child_build_number}"
+    for node in chain:
+        # An ancestor is on the chain because it CONTAINS the matched child,
+        # not because it has a usable identity of its own — fall back to the
+        # single-segment anchor rather than raising on a malformed node.
+        if not node.get("job_name") or node.get("build_number") is None:
+            return f"child-{_urlquote(child_job_name, safe='')}-{child_build_number}"
     return "--".join(
-        f"child-{_urlquote(node['job_name'], safe=_ENCODE_URI_COMPONENT_SAFE)}"
+        f"child-{_urlquote(str(node['job_name']), safe=_ENCODE_URI_COMPONENT_SAFE)}"
         f"-{node['build_number']}"
         for node in chain
     )
@@ -10213,7 +10250,6 @@ async def _build_export_context(
     pushed_by: str = "",
     subject_identifier: str | None = None,
     waiver_comment: str | None = None,
-    skip_waivers: bool = False,
     fetch_history: bool = True,
     fetch_tracked_in_links: bool = True,
     analysis_timestamp: int | None = None,
@@ -10231,13 +10267,11 @@ async def _build_export_context(
         child_job_name: Optional child job name for scoped push.
         child_build_number: Optional child build number.
         pushed_by: Username of the user who triggered the push.
-        subject_identifier: Optional subject identifier (build NVR or artifact
-            identifier) for exporter writes; consumed by Greenwave.
         waiver_comment: Optional human comment included in Greenwave waiver
             submissions.
-        skip_waivers: When ``True``, gating exporters skip waiver
-            submissions instead of refusing the push.  Set by the auto-push
-            path, where no explicit subject identifier is available.
+        subject_identifier: Required by Greenwave for every push — both a
+            ResultsDB result and a waiver are gating writes keyed on that
+            subject, so a CI job name is never used instead.
         fetch_history: When ``False``, skip the per-test history classification
             lookups (they hit the DB once per unique test name).  Set to
             ``False`` when no target exporter reads
@@ -10255,14 +10289,19 @@ async def _build_export_context(
             into ``ExportContext.effective_classifications``.  Set to
             ``True`` when a target exporter writes gating records — see
             :func:`_exporter_needs_effective_classifications`.  A storage
-            failure falls back to the stored result-JSON classifications
-            for this push (logged as a warning) rather than failing it.
+            failure raises :class:`EffectiveClassificationsUnavailable`
+            instead of falling back to the stored result JSON: the JSON is
+            only a best-effort mirror, and a gating write made from it can
+            publish an overruled outcome or file a waiver for a rejected
+            classification.
 
     Returns:
         Populated ExportContext.
 
     Raises:
         ValueError: Invalid child job parameters.
+        EffectiveClassificationsUnavailable: A gating exporter needs the human
+            classification overrides and the override table cannot be read.
     """
     base_url = _extract_base_url()
     report_url = f"{base_url}/results/{job_id}" if base_url else ""
@@ -10397,7 +10436,6 @@ async def _build_export_context(
         analysis_timestamp=analysis_timestamp,
         subject_identifier=subject_identifier,
         waiver_comment=waiver_comment,
-        skip_waivers=skip_waivers,
         effective_classifications=effective_classifications,
     )
 

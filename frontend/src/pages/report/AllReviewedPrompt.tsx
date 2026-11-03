@@ -126,8 +126,12 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
         }
         const allNowReviewed = unreviewedKeyCount(currentKeys, currentReviews) === 0
         if (allNowReviewed) {
-          // Fresh dialog session — previous push outcomes no longer apply
+          // Fresh dialog session: reset the whole outcome, not just the
+          // succeeded-combination set — a stale "… updated." line would
+          // otherwise replace the Yes/No buttons and dead-end the prompt.
           succeededRef.current = new Set()
+          setEventPushStatus(null)
+          setPushError(null)
           setDialogOpen(true)
         }
       })
@@ -208,7 +212,7 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
         setEventPushStatus('pushed')
         // Only close when there is no Greenwave offer left to answer; the
         // prompt exists to offer both, so one decision must not discard it.
-        if (!greenwaveOffered) setDialogOpen(false)
+        if (!greenwaveOffered) handleOpenChange(false)
       }
     } finally {
       if (runId === pushRunRef.current) setPushing(false)
@@ -218,7 +222,7 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
   const handleSkip = () => {
     setPushError(null)
     setEventPushStatus('skipped')
-    if (!greenwaveOffered) setDialogOpen(false)
+    if (!greenwaveOffered) handleOpenChange(false)
   }
 
   // Push endpoints are operator-only — never prompt other roles
@@ -298,7 +302,7 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
                     failures={result.failures ?? []}
                     onPushed={(res) => {
                       // A failed or partial push must stay visible in the result view.
-                      if (pushFullySucceeded(res)) setDialogOpen(false)
+                      if (pushFullySucceeded(res)) handleOpenChange(false)
                     }}
                   />
                 </>

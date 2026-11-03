@@ -60,13 +60,17 @@ export function GreenwavePushForm({
 
   // One computation for every waiver claim: waivers are only written when
   // enabled AND a subject identifier is present.
-  const waiversWritten = greenwaveWaiversEnabled && !!subjectIdentifier.trim()
-  const missingIdentifier = greenwaveWaiversEnabled && !waiversWritten
+  const hasIdentifier = !!subjectIdentifier.trim()
+  const waiversWritten = greenwaveWaiversEnabled && hasIdentifier
+  // Every Greenwave write is a gating write: a ResultsDB result carries
+  // subject_type (koji_build by default), so the identifier is required even
+  // when no waiver is filed. The server refuses a push without it (422).
+  const missingIdentifier = !hasIdentifier
   const canPush = approved && !missingIdentifier
   const disabledReason = !approved
     ? 'Approve the text above to push.'
     : missingIdentifier
-      ? 'Subject identifier is required when waivers are enabled.'
+      ? 'Subject identifier is required: ResultsDB and WaiverDB are both keyed on it.'
       : null
 
   const handlePush = async () => {
@@ -83,7 +87,7 @@ export function GreenwavePushForm({
     <div className="space-y-4">
       <div className="space-y-2">
         <label htmlFor={`${uid}-subject`} className="text-xs font-display uppercase tracking-widest text-text-tertiary">
-          Subject identifier {greenwaveWaiversEnabled ? '(required)' : '(optional)'}
+          Subject identifier (required)
         </label>
         <Input
           id={`${uid}-subject`}
@@ -95,7 +99,7 @@ export function GreenwavePushForm({
           placeholder="build/artifact NVR"
         />
         <p className="text-xs text-text-tertiary">
-          The build/artifact NVR the results and waivers apply to. Results-only pushes fall back to the job name.
+          The build/artifact NVR the results and waivers apply to. There is no job-name fallback — a CI job name is never used as a gating subject.
         </p>
       </div>
 
@@ -114,7 +118,7 @@ export function GreenwavePushForm({
       </div>
 
       <div className="space-y-1.5 rounded-md border border-border-default bg-surface-elevated p-3 font-mono text-xs text-text-secondary">
-        <p>Subject identifier: {subjectIdentifier.trim() || '(job name — results only)'}</p>
+        <p>Subject identifier: {subjectIdentifier.trim() || '(required)'}</p>
         <p>Waivers: {waiversWritten ? 'on' : 'off'}</p>
         <p>Results: {failures.length} failure(s)</p>
         <p>ResultsDB: outcome per failure (PASSED / FAILED / INFO / NEEDS_INSPECTION)</p>

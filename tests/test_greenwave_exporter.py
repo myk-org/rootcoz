@@ -64,14 +64,16 @@ def _failure(
     }
 
 
+DEFAULT_SUBJECT = "pkg-1.0-1.el10"
+
+
 def _make_context(
     failures: list[dict],
     *,
-    subject_identifier: str | None = None,
+    subject_identifier: str | None = DEFAULT_SUBJECT,
     waiver_comment: str | None = None,
     reviewed_by: dict[str, str] | None = None,
     pushed_by: str = "operator",
-    skip_waivers: bool = False,
     effective_classifications: dict[tuple[str, str, int], str] | None = None,
     child_job_name: str | None = None,
     child_build_number: int | None = None,
@@ -87,7 +89,6 @@ def _make_context(
         waiver_comment=waiver_comment,
         reviewed_by=reviewed_by or {},
         pushed_by=pushed_by,
-        skip_waivers=skip_waivers,
         effective_classifications=effective_classifications or {},
         child_job_name=child_job_name,
         child_build_number=child_build_number,
@@ -518,7 +519,7 @@ class TestGreenwaveExporterPush:
         first_result = post.call_args_list[1].kwargs["json"]
         assert first_result["testcase"]["name"] == "rootcoz.my-job.test_a"
         assert first_result["outcome"] == "FAILED"
-        assert first_result["data"]["item"] == ["my-job"]  # job_name fallback
+        assert first_result["data"]["item"] == ["pkg-1.0-1.el10"]  # job_name fallback
         assert first_result["groups"] == ["550e8400-e29b-41d4-a716-446655440000"]
         assert "rootcoz classification: PRODUCT BUG" in first_result["note"]
         assert "det-a" in first_result["note"]
@@ -657,7 +658,12 @@ class TestGreenwaveExporterPush:
         exporter = GreenwaveExporter(settings)
         exporter._post = AsyncMock()
         with pytest.raises(ExporterPrerequisiteError, match="subject_identifier"):
-            _run_push(exporter, _make_context([_failure("test_a", "INFRASTRUCTURE")]))
+            _run_push(
+                exporter,
+                _make_context(
+                    [_failure("test_a", "INFRASTRUCTURE")], subject_identifier=None
+                ),
+            )
 
     def test_push_waiver_rejects_invisible_only_subject_identifier(self):
         """Unicode invisible-only input cannot bypass the subject guard."""
@@ -736,36 +742,20 @@ class TestGreenwaveExporterPush:
         # fill before the fastest (0.01s) request can release
         assert state["max_active"] == _MAX_CONCURRENT_WRITES
 
-    def test_push_skip_waivers_allows_missing_subject_identifier(self):
-        """skip_waivers (auto-push path) pushes results instead of refusing."""
-        settings = _make_settings(
-            GREENWAVE_PUSH_WAIVERS="true",
-            GREENWAVE_WAIVER_URL=WAIVERDB_URL,
-            GREENWAVE_WAIVER_TOKEN="wdb-token",  # pragma: allowlist secret
-            GREENWAVE_PRODUCT_VERSION="el10",
-        )
-        exporter = GreenwaveExporter(settings)
-        post = self._mock_post(
-            exporter,
-            [
-                _response({"uuid": "550e8400-e29b-41d4-a716-446655440000"}),
-                _response({"id": 101}),
-            ],
-        )
-        result = _run_push(
-            exporter,
-            _make_context(
-                [_failure("test_a", "INFRASTRUCTURE")],
-                reviewed_by={"test_a": "reviewer"},
-                skip_waivers=True,
-            ),
-        )
-        assert result.success is True
-        assert result.details["pushed"] == 1
-        assert result.details["waived"] == 0
-        # exactly two posts: group + one result; no waiver call
-        assert post.call_count == 2
-        assert not post.call_args_list[1].args[1].startswith(WAIVERDB_URL)
+    def test_results_only_push_also_requires_subject_identifier(self):
+        """A job name is not a subject: results are gating writes too."""
+        from rootcoz.exporters import ExporterPrerequisiteError
+
+        exporter = GreenwaveExporter(_make_settings(GREENWAVE_PUSH_WAIVERS="false"))
+        exporter._post = AsyncMock()
+        with pytest.raises(ExporterPrerequisiteError):
+            _run_push(
+                exporter,
+                _make_context(
+                    [_failure("test_a", "PRODUCT BUG")], subject_identifier=None
+                ),
+            )
+        exporter._post.assert_not_called()
 
     def test_push_waiver_submitted_for_human_review(self):
         settings = _make_settings(
@@ -1658,3 +1648,118 @@ class TestEffectiveClassificationsFailClosed:
         assert _exporter_needs_effective_classifications(["reportportal"]) is False
         assert _exporter_needs_effective_classifications(["datadog"]) is False
         assert _exporter_needs_effective_classifications([]) is False
+
+
+class TestGreenwaveUnreviewedPushGate:
+    """Greenwave obeys main's unreviewed-push gate and has no escape hatch."""
+
+    @pytest.fixture(autouse=True)
+    def _init_db(self, tmp_path):
+        import asyncio
+
+        from rootcoz import storage
+
+        with patch.object(storage, "DB_PATH", tmp_path / "gate.db"):
+            asyncio.run(storage.init_db())
+            yield
+
+    def test_push_is_refused_with_409_and_names_the_scope(self, tmp_path):
+        from unittest.mock import patch
+
+        from tests.conftest import admin_login, make_app_client
+
+        for client in make_app_client(tmp_path / "gate.db"):
+            admin_login(client)
+            with (
+                patch("rootcoz.main.get_result", new_callable=AsyncMock) as mock_get,
+                patch(
+                    "rootcoz.main._unreviewed_failure_count",
+                    new_callable=AsyncMock,
+                    return_value=2,
+                ),
+                patch("rootcoz.main._create_exporter") as mock_create,
+            ):
+                mock_get.return_value = {
+                    "result": {
+                        "job_name": "j",
+                        "build_number": 1,
+                        "failures": [{"test_name": "t"}],
+                    }
+                }
+                response = client.post("/results/job-1/push/greenwave")
+
+            assert response.status_code == 409, response.text
+            detail = response.json()["detail"]
+            assert "2 unreviewed failure(s)" in detail
+            # No escape hatch exists for Greenwave: the message must not
+            # advertise a toggle that would ungate it.
+            assert "ALLOW_UNREVIEWED_PUSH" not in detail
+            mock_create.assert_not_called()
+
+    def test_greenwave_exposes_no_unreviewed_push_toggle(self):
+        """Greenwave is absent from the toggle map, so it always stays gated."""
+        from rootcoz.main import _UNREVIEWED_PUSH_TOGGLE_FIELDS
+
+        assert "greenwave" not in _UNREVIEWED_PUSH_TOGGLE_FIELDS
+        assert set(_UNREVIEWED_PUSH_TOGGLE_FIELDS) == {"reportportal", "datadog"}
+
+
+class TestGatingRefusalAudit:
+    """A refused gating push leaves an audit row with a meaningful reason."""
+
+    @pytest.fixture(autouse=True)
+    def _init_db(self, tmp_path):
+        import asyncio
+
+        from rootcoz import storage
+
+        self.db_path = tmp_path / "audit.db"
+        with patch.object(storage, "DB_PATH", self.db_path):
+            asyncio.run(storage.init_db())
+            yield
+
+    def test_refusal_is_audited_with_service_unavailable(self):
+        import asyncio
+
+        from rootcoz import storage
+        from tests.conftest import admin_login, make_app_client
+
+        for client in make_app_client(self.db_path):
+            admin_login(client)
+            with (
+                patch(
+                    "rootcoz.main.storage.get_all_effective_classifications",
+                    new=AsyncMock(side_effect=RuntimeError("db down")),
+                ),
+                patch("rootcoz.main.get_result", new_callable=AsyncMock) as mock_get,
+                patch(
+                    "rootcoz.main._unreviewed_failure_count",
+                    new_callable=AsyncMock,
+                    return_value=0,
+                ),
+            ):
+                mock_get.return_value = {
+                    "result": {
+                        "job_name": "j",
+                        "build_number": 1,
+                        "failures": [{"test_name": "t"}],
+                    }
+                }
+                response = client.post("/results/job-1/push/greenwave")
+            assert response.status_code == 503
+
+        async def _events():
+            with patch.object(storage, "DB_PATH", self.db_path):
+                return await storage.list_audit_events(limit=50)
+
+        page = asyncio.run(_events())
+        events = page["events"] if isinstance(page, dict) else page
+        push_rows = [e for e in events if e.get("action") == "export.push"]
+        assert push_rows, "a refused push must leave an audit row"
+        row = push_rows[0]
+        # One row per attempt: the reason code names why, and the details name
+        # the subject (plugin + job), with no request text copied in.
+        assert row["outcome"] == "failure"
+        assert row["details"]["reason"] == "service_unavailable"
+        assert row["target_id"] == "job-1"
+        assert row["details"]["plugin"] == "greenwave"

@@ -50,7 +50,7 @@ from rootcoz.exporters.base import (
 )
 from rootcoz.models import FailureAnalysis
 from rootcoz.storage import AI_SYSTEM_USERNAME
-from rootcoz.url_utils import redact_url_userinfo
+from rootcoz.url_utils import strip_url_userinfo_in_text
 from rootcoz.utils import (
     normalize_identifier,
     strip_control_chars,
@@ -168,7 +168,7 @@ def _sanitize_error(exc: Exception) -> str:
     message is preserved — no arbitrary truncation.
     """
     message = str(exc) or exc.__class__.__name__
-    return redact_url_userinfo(strip_control_chars(message))
+    return strip_url_userinfo_in_text(strip_control_chars(message))
 
 
 def _validation_error_summary(exc: ValidationError) -> str:
@@ -344,11 +344,8 @@ class GreenwaveExporter(Exporter):
         the auto-push pipeline skips this exporter (see
         ``requires_subject_identifier``).
 
-        ``context.skip_waivers`` still makes an identifier-less push skip
-        waivers and push results best-effort rather than refuse; the
-        automatic pipeline no longer routes Greenwave through that path
-        (it skips the exporter outright), so this only serves direct
-        callers that set the flag themselves.
+        An explicit ``subject_identifier`` is required for every push — results
+        and waivers are both gating writes, keyed on that subject.
 
         Each failure's classification is resolved via
         :func:`_effective_classification` — a human override in
@@ -376,21 +373,18 @@ class GreenwaveExporter(Exporter):
             )
 
         subject_identifier = normalize_identifier(context.subject_identifier) or ""
-        skip_waivers = context.skip_waivers
-        if not subject_identifier and self._push_waivers and not skip_waivers:
-            raise ExporterPrerequisiteError(
-                "Greenwave waiver submission requires an explicit "
-                "subject_identifier (build NVR or artifact identifier); "
-                "refusing to fall back to job_name for gating writes."
-            )
         if not subject_identifier:
-            subject_identifier = strip_control_chars(context.job_name).strip()
-            if skip_waivers and self._push_waivers:
-                logger.info(
-                    "Skipping Greenwave waivers for job_id=%s: no "
-                    "subject_identifier available (skip_waivers set)",
-                    context.job_id,
-                )
+            # Both writes are gating writes: a ResultsDB result carries
+            # subject_type (koji_build by default) and a waiver is keyed on
+            # the same subject, so a CI job name is not an acceptable
+            # substitute for either. Refusing here is what makes the
+            # "never a job name as a gating subject" rule true in every
+            # configuration, not only when waivers are enabled.
+            raise ExporterPrerequisiteError(
+                "Greenwave requires an explicit subject_identifier (build NVR "
+                "or artifact identifier); refusing to fall back to job_name "
+                "for gating writes."
+            )
 
         pushed = 0
         skipped = 0
@@ -506,7 +500,6 @@ class GreenwaveExporter(Exporter):
                             context=context,
                             subject_identifier=subject_identifier,
                             group_uuid=group_uuid,
-                            skip_waivers=skip_waivers,
                         )
                         for item in items
                     )
@@ -559,7 +552,6 @@ class GreenwaveExporter(Exporter):
         context: ExportContext,
         subject_identifier: str,
         group_uuid: str,
-        skip_waivers: bool,
     ) -> dict[str, Any]:
         """Push one classified failure: ResultsDB result + optional waiver.
 
@@ -594,7 +586,6 @@ class GreenwaveExporter(Exporter):
                 context=context,
                 subject_identifier=subject_identifier,
                 group_uuid=group_uuid,
-                skip_waivers=skip_waivers,
             )
         except Exception as exc:
             safe_error = _sanitize_error(exc)
@@ -620,7 +611,6 @@ class GreenwaveExporter(Exporter):
         context: ExportContext,
         subject_identifier: str,
         group_uuid: str,
-        skip_waivers: bool,
     ) -> None:
         """Result + waiver writes for one pre-validated failure.
 
@@ -631,7 +621,11 @@ class GreenwaveExporter(Exporter):
         testcase_name = _testcase_name(context.job_name, failure.test_name)
         note = f"rootcoz classification: {classification}"
         if failure.analysis.details:
-            note += f" — {failure.analysis.details}"
+            # The details are free text produced by the model from CI output:
+            # sanitize them like every other field that reaches the gating
+            # systems (Cc/Cf code points would otherwise survive into the
+            # ResultsDB note and the waiver comment).
+            note += f" — {strip_invisible_chars(failure.analysis.details)}"
 
         payload: dict[str, Any] = {
             "testcase": {"name": testcase_name},
@@ -687,7 +681,7 @@ class GreenwaveExporter(Exporter):
             )
 
         # Optional waiver for human-reviewed failures.
-        if not self._push_waivers or skip_waivers:
+        if not self._push_waivers:
             return
         if classification not in self._waivable_classifications:
             return
@@ -707,7 +701,7 @@ class GreenwaveExporter(Exporter):
             "product_version": self._product_version,
             "comment": _build_waiver_comment(
                 classification,
-                failure.analysis.details,
+                strip_invisible_chars(failure.analysis.details),
                 context.pushed_by,
                 reviewer,
                 user_comment=context.waiver_comment,

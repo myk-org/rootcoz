@@ -64,7 +64,17 @@ function renderForm(opts: { greenwaveWaivers?: boolean; onPushed?: () => void } 
   )
 }
 
+function typeIdentifier(value = 'my-nvr-1.0') {
+  fireEvent.change(screen.getByLabelText(/subject identifier/i), { target: { value } })
+}
+
 function approve() {
+  fireEvent.click(screen.getByRole('checkbox'))
+}
+
+/** Identifier + approval: the minimum for a pushable payload. */
+function readyToPush(value?: string) {
+  typeIdentifier(value)
   fireEvent.click(screen.getByRole('checkbox'))
 }
 
@@ -89,12 +99,29 @@ describe('GreenwavePushForm', () => {
     expect(postSpy).not.toHaveBeenCalled()
   })
 
+  it('requires the subject identifier for results-only pushes too', () => {
+    renderForm()
+    approve()
+    const pushButton = screen.getByRole('button', { name: /push to greenwave/i })
+    expect(pushButton).toHaveProperty('disabled', true)
+    expect(
+      screen.getByText(
+        'Subject identifier is required: ResultsDB and WaiverDB are both keyed on it.',
+      ),
+    ).toBeDefined()
+    expect(postSpy).not.toHaveBeenCalled()
+  })
+
   it('blocks the push without a subject identifier when waivers are on', () => {
     renderForm({ greenwaveWaivers: true })
     approve()
     const pushButton = screen.getByRole('button', { name: /push to greenwave/i })
     expect(pushButton).toHaveProperty('disabled', true)
-    expect(screen.getByText('Subject identifier is required when waivers are enabled.')).toBeDefined()
+    expect(
+      screen.getByText(
+        'Subject identifier is required: ResultsDB and WaiverDB are both keyed on it.',
+      ),
+    ).toBeDefined()
     expect(postSpy).not.toHaveBeenCalled()
 
     // Typing the identifier voids the approval (it covers the exact payload),
@@ -121,7 +148,7 @@ describe('GreenwavePushForm', () => {
 
   it('voids the approval when the comment is edited', () => {
     renderForm()
-    approve()
+    readyToPush()
     expect(screen.getByRole('button', { name: /push to greenwave/i })).toHaveProperty('disabled', false)
     fireEvent.change(screen.getByLabelText(/waiver comment/i), { target: { value: 'edited' } })
     expect(screen.getByRole('button', { name: /push to greenwave/i })).toHaveProperty('disabled', true)
@@ -129,7 +156,7 @@ describe('GreenwavePushForm', () => {
 
   it('voids the approval when the subject identifier is edited', () => {
     renderForm()
-    approve()
+    readyToPush()
     expect(screen.getByRole('button', { name: /push to greenwave/i })).toHaveProperty('disabled', false)
     fireEvent.change(screen.getByLabelText(/subject identifier/i), { target: { value: 'other-nvr-2.0' } })
     expect(screen.getByRole('button', { name: /push to greenwave/i })).toHaveProperty('disabled', true)
@@ -148,10 +175,14 @@ describe('GreenwavePushForm', () => {
     expect(screen.getByText('WaiverDB: waiver for waivable failures')).toBeDefined()
   })
 
-  it('shows waivers off and the job-name fallback in results-only mode', () => {
-    renderForm()
-    expect(screen.getByText('Subject identifier: (job name — results only)')).toBeDefined()
+  it('shows waivers off and no job-name fallback in results-only mode', () => {
+    renderForm({ greenwaveWaivers: false })
+    readyToPush()
     expect(screen.getByText('Waivers: off')).toBeDefined()
+    expect(screen.getByText('ResultsDB: outcome per failure (PASSED / FAILED / INFO / NEEDS_INSPECTION)')).toBeDefined()
+    expect(screen.queryByText(/WaiverDB: waiver for waivable failures/)).toBeNull()
+    // The identifier is what gets pushed — never the job name.
+    expect(screen.getByText('Subject identifier: my-nvr-1.0')).toBeDefined()
   })
 
   it('shows only the ResultsDB line in results-only mode (waivers disabled)', () => {
@@ -182,7 +213,7 @@ describe('GreenwavePushForm', () => {
       new ApiError(422, 'Unprocessable Entity', { detail: 'subject_identifier is required for waivers' }),
     )
     renderForm()
-    approve()
+    readyToPush()
     fireEvent.click(screen.getByRole('button', { name: /push to greenwave/i }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('subject_identifier is required for waivers')
@@ -192,7 +223,7 @@ describe('GreenwavePushForm', () => {
   it('calls onPushed with the result after a successful roundtrip', async () => {
     const onPushed = vi.fn()
     renderForm({ onPushed })
-    approve()
+    readyToPush()
     fireEvent.click(screen.getByRole('button', { name: /push to greenwave/i }))
 
     await waitFor(() => expect(onPushed).toHaveBeenCalledOnce())
@@ -203,7 +234,7 @@ describe('GreenwavePushForm', () => {
     postSpy.mockRejectedValueOnce(new ApiError(502, 'Bad Gateway', { detail: 'upstream down' }))
     const onPushed = vi.fn()
     renderForm({ onPushed })
-    approve()
+    readyToPush()
     fireEvent.click(screen.getByRole('button', { name: /push to greenwave/i }))
 
     await waitFor(() => expect(onPushed).toHaveBeenCalledOnce())

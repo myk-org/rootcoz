@@ -920,3 +920,142 @@ describe('AllReviewedPrompt', () => {
     expect(screen.queryByRole('alert')).toBeNull()
   })
 })
+
+describe('AllReviewedPrompt session reset', () => {
+  it('offers the answer again on a new all-reviewed session', async () => {
+    renderPrompt({
+      reportportalAvailable: true,
+      additionalReviews: {
+        'test-a': makeReview(true),
+        'test-b': makeReview(true),
+      },
+    })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Yes' })).toBeDefined())
+
+    mockPost.mockResolvedValueOnce({ success: true, message: 'ok', pushed: 2 })
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
+
+    // Successful push with no Greenwave offer closes the prompt.
+    await waitFor(() => expect(screen.queryByRole('button', { name: 'Yes' })).toBeNull())
+
+    // A new all-reviewed session reopens it: the previous outcome must not
+    // survive as a status line that replaces the buttons.
+    await act(async () => {
+      window.dispatchEvent(
+        new CustomEvent('rootcoz:review-changed', { detail: { jobId: 'job-1' } }),
+      )
+    })
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: 'Yes' })).toBeDefined()
+      expect(screen.queryByRole('status')).toBeNull()
+    })
+  })
+})
+
+describe('AllReviewedPrompt greenwave section', () => {
+  const GREENWAVE_ONLY = [{ name: 'greenwave', display_name: 'Greenwave', enabled: true }]
+
+  function renderWithExporters(exporters: { name: string; display_name: string; enabled: boolean }[]) {
+    function Seed() {
+      const dispatch = useReportDispatch()
+      useEffect(() => {
+        dispatch({ type: 'SET_EXPORTERS', payload: exporters })
+        dispatch({ type: 'SET_GREENWAVE_WAIVERS_ENABLED', payload: false })
+      }, []) // eslint-disable-line react-hooks/exhaustive-deps
+      return null
+    }
+    return render(
+      <ReportProvider>
+        <Seed />
+        <Injector
+          jobId="job-1"
+          result={makeResult()}
+          reviews={{}}
+          reportportalAvailable={false}
+          additionalReviews={{
+            'test-a': makeReview(true),
+            'test-b': makeReview(true),
+          }}
+        />
+      </ReportProvider>,
+    )
+  }
+
+  it('offers the greenwave form when the exporter is enabled', async () => {
+    renderWithExporters(GREENWAVE_ONLY)
+    await waitFor(() => {
+      expect(screen.getByText('Push the reviewed failures to Greenwave')).toBeDefined()
+      expect(screen.getByRole('checkbox')).toBeDefined()
+    })
+    // No event exporter to answer — the Close action is the only exit.
+    expect(screen.queryByRole('button', { name: 'Yes' })).toBeNull()
+  })
+
+  it('says so instead of offering a push when the root has no failures', async () => {
+    function Seed() {
+      const dispatch = useReportDispatch()
+      useEffect(() => {
+        dispatch({ type: 'SET_EXPORTERS', payload: GREENWAVE_ONLY })
+      }, []) // eslint-disable-line react-hooks/exhaustive-deps
+      return null
+    }
+    const childOnly = makeResult({ failures: [] })
+    render(
+      <ReportProvider>
+        <Seed />
+        <Injector
+          jobId="job-1"
+          result={childOnly}
+          reviews={{}}
+          reportportalAvailable={false}
+          additionalReviews={{}}
+        />
+      </ReportProvider>,
+    )
+    // Nothing to offer: no approval checkbox, no push form.
+    expect(screen.queryByRole('checkbox')).toBeNull()
+  })
+})
+
+describe('AllReviewedPrompt keeps the greenwave offer after an event push', () => {
+  it('stays open with the form visible when Report Portal succeeds', async () => {
+    const BOTH = [
+      { name: 'reportportal', display_name: 'Report Portal', enabled: true },
+      { name: 'greenwave', display_name: 'Greenwave', enabled: true },
+    ]
+    function Seed() {
+      const dispatch = useReportDispatch()
+      useEffect(() => {
+        dispatch({ type: 'SET_EXPORTERS', payload: BOTH })
+        dispatch({ type: 'SET_GREENWAVE_WAIVERS_ENABLED', payload: false })
+      }, []) // eslint-disable-line react-hooks/exhaustive-deps
+      return null
+    }
+    render(
+      <ReportProvider>
+        <Seed />
+        <Injector
+          jobId="job-1"
+          result={makeResult()}
+          reviews={{}}
+          reportportalAvailable={true}
+          additionalReviews={{
+            'test-a': makeReview(true),
+            'test-b': makeReview(true),
+          }}
+        />
+      </ReportProvider>,
+    )
+
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Yes' })).toBeDefined())
+    mockPost.mockResolvedValueOnce({ success: true, message: 'ok', pushed: 2 })
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('status')).toBeDefined()
+      // The Greenwave offer survives the Report Portal answer.
+      expect(screen.getByRole('checkbox')).toBeDefined()
+      expect(screen.getByText('Push the reviewed failures to Greenwave')).toBeDefined()
+    })
+  })
+})

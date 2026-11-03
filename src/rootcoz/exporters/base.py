@@ -37,10 +37,6 @@ class ExportContext:
             used by gating exporters like Greenwave.  Exporters decide their
             own fallback (e.g. ``job_name``) when unset.
         waiver_comment: Optional comment recorded with submitted waivers.
-        skip_waivers: When ``True``, gating exporters skip waiver
-            submissions (pushing results only) instead of refusing the
-            push.  Used by the auto-push path, where no explicit subject
-            identifier is available.
         effective_classifications: Human classification overrides keyed by
             ``(test_name, child_job_name, child_build_number)`` — the scope
             keys ``storage.get_all_effective_classifications`` returns
@@ -64,7 +60,6 @@ class ExportContext:
     analysis_timestamp: int | None = None
     subject_identifier: str | None = None
     waiver_comment: str | None = None
-    skip_waivers: bool = False
     effective_classifications: dict[tuple[str, str, int], str] = field(
         default_factory=dict
     )

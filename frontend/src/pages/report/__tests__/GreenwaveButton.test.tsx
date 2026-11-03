@@ -75,6 +75,16 @@ function formPushButton(): HTMLButtonElement {
   return screen.getAllByRole('button', { name: 'Push to Greenwave' }).at(-1) as HTMLButtonElement
 }
 
+function typeIdentifier(value = 'my-nvr-1.0') {
+  fireEvent.change(screen.getByLabelText(/subject identifier/i), { target: { value } })
+}
+
+/** Identifier + approval: an identifier is mandatory for every push now. */
+function readyToPush(value?: string) {
+  typeIdentifier(value)
+  fireEvent.click(screen.getByRole('checkbox'))
+}
+
 function approve() {
   fireEvent.click(screen.getByRole('checkbox'))
 }
@@ -119,7 +129,11 @@ describe('GreenwaveButton', () => {
     approve()
 
     expect(formPushButton()).toHaveProperty('disabled', true)
-    expect(screen.getByText('Subject identifier is required when waivers are enabled.')).toBeDefined()
+    expect(
+      screen.getByText(
+        'Subject identifier is required: ResultsDB and WaiverDB are both keyed on it.',
+      ),
+    ).toBeDefined()
     expect(postSpy).not.toHaveBeenCalled()
   })
 
@@ -139,16 +153,16 @@ describe('GreenwaveButton', () => {
     })
   })
 
-  it('does not require the identifier in results-only mode', async () => {
+  it('requires the identifier in results-only mode too', async () => {
     renderButton({ greenwaveWaivers: false })
     await openConfirmDialog()
-    approve()
+    readyToPush()
     fireEvent.click(formPushButton())
 
     await waitFor(() => {
-      // Results-only mode sends no subject_identifier; the seeded comment is sent
+      // The identifier is sent even without waivers: ResultsDB is keyed on it.
       expect(postSpy).toHaveBeenCalledWith(
-        expect.stringContaining('/results/job-1/push/greenwave?waiver_comment=rootcoz%3A'),
+        expect.stringContaining('subject_identifier=my-nvr-1.0'),
       )
     })
   })
@@ -156,7 +170,7 @@ describe('GreenwaveButton', () => {
   it('renders success counts on a successful push', async () => {
     renderButton()
     await openConfirmDialog()
-    approve()
+    readyToPush()
     fireEvent.click(formPushButton())
 
     await waitFor(() => {
@@ -172,7 +186,7 @@ describe('GreenwaveButton', () => {
     postSpy.mockResolvedValue({ success: false, message: 'no matching outcome', pushed: 0, errors: [] } as never)
     renderButton()
     await openConfirmDialog()
-    approve()
+    readyToPush()
     fireEvent.click(formPushButton())
 
     await waitFor(() => {
@@ -187,7 +201,7 @@ describe('GreenwaveButton', () => {
     )
     renderButton({ greenwaveWaivers: false })
     await openConfirmDialog()
-    approve()
+    readyToPush()
     fireEvent.click(formPushButton())
 
     await waitFor(() => {
@@ -202,7 +216,7 @@ describe('GreenwaveButton', () => {
     } as never)
     renderButton()
     await openConfirmDialog()
-    approve()
+    readyToPush()
     fireEvent.click(formPushButton())
 
     await waitFor(() => {

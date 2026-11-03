@@ -1607,6 +1607,69 @@ class TestAutoPushAiReviewGate:
                 )
                 mock_create.assert_not_called()
 
+    async def test_mixed_exporters_still_push_the_non_gating_one(self, setup_test_db):
+        """reportportal,greenwave: the gating exporter must not block RP.
+
+        Hoisting the requires_subject_identifier filter out of the loop exists
+        for this case: with Greenwave merely listed, the context build would
+        request classification overrides for every scope, and a failed read
+        used to skip the whole scope — silently dropping Report Portal's push.
+        """
+        await self._seed_human_reviewed_history(setup_test_db)
+        result_data = self._root_and_child_result()
+        # Greenwave is configured (and would need overrides) alongside RP.
+        settings = self._settings("reportportal,greenwave")
+
+        from rootcoz.main import _auto_review_matching_failures
+
+        mock_exporter = MagicMock()
+        mock_exporter.push = AsyncMock(return_value=MagicMock(details={"pushed": 1}))
+        mock_exporter.__enter__ = MagicMock(return_value=mock_exporter)
+        mock_exporter.__exit__ = MagicMock(return_value=False)
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch(
+                "rootcoz.main._match_and_auto_review_failures",
+                new_callable=AsyncMock,
+                return_value=(0, 0),
+            ),
+            patch(
+                "rootcoz.main._auto_review_child_failures",
+                new_callable=AsyncMock,
+                return_value=(1, 1),
+            ),
+            patch(
+                "rootcoz.main._unreviewed_failure_count",
+                new_callable=AsyncMock,
+                return_value=0,
+            ),
+            patch("rootcoz.main._all_failures_ai_reviewed", return_value=True),
+            # The override read fails outright — the case that used to abort
+            # the whole scope.
+            patch(
+                "rootcoz.main.storage.get_all_effective_classifications",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("db down"),
+            ),
+            patch("rootcoz.main._create_exporter", return_value=mock_exporter) as mc,
+            patch(
+                "rootcoz.main._build_export_context", new_callable=AsyncMock
+            ) as mock_ctx,
+        ):
+            await _auto_review_matching_failures(
+                "current-job", "my-job", 101, result_data, settings
+            )
+
+        # Report Portal is still pushed for its scopes; Greenwave is not.
+        assert mc.call_args_list, "expected the non-gating exporter to be pushed"
+        assert {c.args[0] for c in mc.call_args_list} == {"reportportal"}
+        assert mock_exporter.push.await_count == len(mock_ctx.call_args_list) > 0
+        # And no scope was skipped for want of overrides.
+        assert all(
+            c.kwargs.get("fetch_effective_classifications") is False
+            for c in mock_ctx.call_args_list
+        )
+
     async def test_greenwave_auto_push_skipped_requires_subject(self, setup_test_db):
         """AUTO_PUSH_EXPORTERS=greenwave: exporter never constructed/pushed."""
         from rootcoz.exporters.greenwave_exporter import GreenwaveExporter
@@ -1767,7 +1830,7 @@ class TestAutoPushUnscopableChildren:
                 if c.args and "cannot be scoped for export" in c.args[0]
             ]
             assert refusals, "Expected the un-scopable refusal log"
-            assert "zero-build" in refusals[0].args[2]
+            assert "zero-build" in refusals[0].args[0]
 
     async def test_build0_child_without_failures_does_not_block(self, setup_test_db):
         """A child with no failures cannot be pushed anyway — root pushes."""
@@ -1790,3 +1853,56 @@ class TestAutoPushUnscopableChildren:
 
             mock_create.assert_called_once_with("reportportal", settings)
             assert mock_exporter.push.call_count == 1
+
+
+class TestAutoPushSuppressionAudit:
+    """A configured auto-push that does not run leaves a row, not just a log."""
+
+    @pytest.fixture
+    async def setup_test_db(self, temp_db_path):
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            yield temp_db_path
+
+    async def _rows(self, db_path):
+        with patch.object(storage, "DB_PATH", db_path):
+            page = await storage.list_audit_events(action="export.push", limit=20)
+        return page["events"] if isinstance(page, dict) else page
+
+    async def test_unreviewed_suppression_is_audited(self, setup_test_db):
+        from rootcoz.main import _auto_review_matching_failures
+
+        result_data = TestAutoPushAiReviewGate._root_and_child_result()
+        settings = TestAutoPushAiReviewGate._settings("reportportal")
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch(
+                "rootcoz.main._match_and_auto_review_failures",
+                new_callable=AsyncMock,
+                return_value=(1, 1),
+            ),
+            patch(
+                "rootcoz.main._auto_review_child_failures",
+                new_callable=AsyncMock,
+                return_value=(0, 0),
+            ),
+            patch(
+                "rootcoz.main._unreviewed_failure_count",
+                new_callable=AsyncMock,
+                return_value=1,
+            ),
+            patch("rootcoz.main._create_exporter") as mock_create,
+        ):
+            await _auto_review_matching_failures(
+                "current-job", "my-job", 101, result_data, settings
+            )
+            mock_create.assert_not_called()
+            rows = await self._rows(setup_test_db)
+
+        assert rows, "a suppressed auto-push must leave an audit row"
+        row = rows[0]
+        assert row["actor"] == "rootcoz-ai"
+        assert row["details"]["trigger"] == "auto"
+        assert row["details"]["reason"] == "unreviewed"
+        assert row["details"]["plugin"] == "reportportal"
+        assert row["target_id"] == "current-job"

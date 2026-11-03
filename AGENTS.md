@@ -117,6 +117,7 @@ src/rootcoz/
   exporters/                # Exporter plugins (push results to external systems)
     base.py                 # Exporter ABC, ExportContext, ExporterResult, ExporterPrerequisiteError
     reportportal.py         # Report Portal exporter: ReportPortalClient
+    datadog.py              # Datadog events exporter: DatadogExporter
     greenwave_exporter.py   # Greenwave/ResultsDB exporter: GreenwaveExporter
   prow_validation.py        # Canonical Prow validators (+ URL helper re-exports for compatibility)
   url_utils.py              # Cross-cutting HTTP(S) URL sanitization (strip userinfo, href)
@@ -498,7 +499,7 @@ Sensitive data (passwords, API tokens, credentials) must be:
 2. **Stripped from responses** — use `strip_sensitive_from_response()` before returning to API consumers
 3. **Never logged or pasted** — do not log passwords, tokens, or credentials at any log level, and never paste a live cookie, bearer token or API key into a PR body, a doc, a transcript or captured e2e evidence
 
-Sensitive fields: `jenkins_password`, `jenkins_user`, `jira_api_token`, `jira_pat`, `jira_oauth_client_secret`, `jira_atst_token`, `jira_email`, `jira_sa_token`, `github_token`, `tests_repo_token`, `reportportal_api_token`, `greenwave_api_token`, `greenwave_waiver_token`, `smtp_password`, `slack_webhook_url`, `vapid_private_key`
+Sensitive fields: `jenkins_password`, `jenkins_user`, `jira_api_token`, `jira_pat`, `jira_oauth_client_secret`, `jira_atst_token`, `jira_email`, `jira_sa_token`, `github_token`, `tests_repo_token`, `reportportal_api_token`, `datadog_api_key`, `datadog_app_key`, `greenwave_api_token`, `greenwave_waiver_token`, `smtp_password`, `slack_webhook_url`, `vapid_private_key`
 
 Encryption uses Fernet (AES-128-CBC + HMAC-SHA256). Set `ROOTCOZ_ENCRYPTION_KEY` env var for production; falls back to an auto-generated file-based key under `$XDG_DATA_HOME/rootcoz/.encryption_key` (default: `~/.local/share/rootcoz/.encryption_key`) for development.
 
