@@ -342,6 +342,25 @@ def _restore_process_globals():
     rootcoz_main.logger.level = logger_level
 
 
+@pytest.fixture(autouse=True)
+def _restore_audit_health_counters() -> Generator[None]:
+    """Restore the in-process audit counters a test can leave behind.
+
+    ``build_health_response`` reports ``degraded`` as soon as
+    ``monitoring._audit_write_failures`` is non-zero, so a test whose audit
+    write fails (any test hitting ``record_audit`` without a DB) flips
+    ``test_build_health_response_healthy`` depending on which tests share its
+    xdist worker. Snapshot and restore both counters around every test.
+    """
+    from rootcoz import monitoring
+
+    failures = monitoring._audit_write_failures
+    suppressed = monitoring._audit_suppressed_auth_events
+    yield
+    monitoring._audit_write_failures = failures
+    monitoring._audit_suppressed_auth_events = suppressed
+
+
 _TEST_SIDECAR_CATALOG = [
     {"provider": provider, "id": model}
     for provider, model in (

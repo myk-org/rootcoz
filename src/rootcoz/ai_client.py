@@ -978,10 +978,14 @@ def deployment_provider_credentials() -> dict[str, str] | None:
     2. A sidecar-registered provider (the last-known catalog) authenticated
        from the ambient environment: the variable named by
        :func:`ambient_api_key_var` — ``openai`` with ``OPENAI_API_KEY`` set.
-       A provider the manifest declares is skipped here: the manifest's
-       ``apiKey`` (literal or reference) is the key the sidecar uses. Cursor's
-       ``acpx-``/``cli-`` agents are skipped too: they authenticate through the
-       CLI, not through ``CURSOR_API_KEY``.
+       A provider whose manifest entry carries an ``apiKey`` (literal or
+       reference) is skipped here: that is the key the sidecar uses. Merely
+       *mentioning* a provider is not declaring its key — an entry holding
+       only ``modelOverrides`` (or any other key-less content) changes model
+       metadata, it does not authenticate anything, so pi's own environment
+       resolution still applies (#389). Cursor's ``acpx-``/``cli-`` agents are
+       skipped too: they authenticate through the CLI, not through
+       ``CURSOR_API_KEY``.
 
     Unset/empty variables and literal keys are skipped. Key material is never
     logged — provider names only, at DEBUG so a page-load read does not log
@@ -1028,7 +1032,10 @@ def deployment_provider_credentials() -> dict[str, str] | None:
         ):
             if not isinstance(provider, str) or not isinstance(config, dict):
                 continue
-            declared.add(provider.lower())
+            # Only an entry that supplies a key owns it; a key-less entry
+            # (``modelOverrides`` only) leaves the key to the ambient env.
+            if config.get("apiKey"):
+                declared.add(provider.lower())
             if config.get("trustKeyScopedListing") is not True:
                 continue
             var = _env_reference_var(config.get("apiKey"))

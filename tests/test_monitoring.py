@@ -297,8 +297,16 @@ class TestHealthChecks:
         assert "/api/v1/my_project/launch" in called_url
         assert "page.size=1" in called_url
 
-    async def test_build_health_response_healthy(self, temp_db_path):
+    async def test_build_health_response_healthy(self, temp_db_path, monkeypatch):
         import aiosqlite
+
+        from rootcoz import monitoring
+
+        # The audit entry reads a process-wide counter: a failed audit write
+        # anywhere earlier in this worker reports the response degraded, which
+        # is exactly how this test flaked under `pytest -n auto`. Control it
+        # here so the assertion never depends on what ran before.
+        monkeypatch.setattr(monitoring, "_audit_write_failures", 0)
 
         async with aiosqlite.connect(str(temp_db_path)) as db:
             await db.execute("CREATE TABLE IF NOT EXISTS test (id INTEGER)")

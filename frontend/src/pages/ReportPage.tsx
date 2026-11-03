@@ -28,7 +28,7 @@ import { Skeleton } from '@/components/ui/skeleton'
 import { StatusChip } from '@/components/shared/StatusChip'
 import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons'
 import { Button } from '@/components/ui/button'
-import { ExternalLink, CheckCircle2, Clock, Calendar, Cpu, Timer, FolderGit2, RotateCw, Copy, Check, MessageCircle } from 'lucide-react'
+import { ExternalLink, CheckCircle2, Clock, Calendar, Timer, FolderGit2, RotateCw, Copy, Check, MessageCircle } from 'lucide-react'
 import { JobAttribution } from '@/components/shared/JobAttribution'
 import { ReAnalyzeDialog } from './report/ReAnalyzeDialog'
 import { ReportPortalButton } from './report/ReportPortalButton'
@@ -485,8 +485,12 @@ function ReportContent() {
               )}
             </span>
           )}
+        </div>
+
+        {/* ---- Model + token summary + actions ---- */}
+        <div className="mt-2 flex flex-wrap items-center gap-3">
           {result.ai_provider && (
-            <Badge variant="outline" className="text-[10px]">
+            <Badge variant="outline" className="whitespace-nowrap text-[10px]">
               {formatAiLabel(result.ai_provider, result.ai_model)}
             </Badge>
           )}
@@ -573,12 +577,6 @@ function ReportContent() {
                 </span>
               )
             })()
-          )}
-          {result.ai_provider && (
-            <span className="inline-flex items-center gap-1">
-              <Cpu className="h-3 w-3" />
-              {formatAiLabel(result.ai_provider, result.ai_model)}
-            </span>
           )}
           {repoUrls.length > 0 && (
             <Tooltip>
