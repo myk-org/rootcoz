@@ -1035,12 +1035,80 @@ class TestAutoReviewMatchingFailures:
             assert log_args[1] == "current-job", (
                 f"Expected job_id 'current-job', got '{log_args[1]}'"
             )
-            assert log_args[2] == "reportportal", (
-                f"Expected plugin_name 'reportportal', got '{log_args[2]}'"
+            # args[2] is the scope suffix ("" for a whole-job scope)
+            assert log_args[3] == "reportportal", (
+                f"Expected plugin_name 'reportportal', got '{log_args[3]}'"
             )
-            assert log_args[3] == AI_SYSTEM_USERNAME, (
-                f"Expected AI_SYSTEM_USERNAME, got '{log_args[3]}'"
+            assert log_args[4] == AI_SYSTEM_USERNAME, (
+                f"Expected AI_SYSTEM_USERNAME, got '{log_args[4]}'"
             )
+
+    async def test_auto_push_builds_one_context_per_scope(self, setup_test_db):
+        """A whole-job context only carries top-level failures.
+
+        A pipeline whose failures live in child jobs must therefore get one
+        context per scope — otherwise auto-push sends an empty failure list
+        and the exporter reports "nothing to push".
+        """
+        result_data = {
+            "job_name": "my-job",
+            "build_number": 101,
+            "failures": [],
+            "child_job_analyses": [
+                {
+                    "job_name": "runner",
+                    "build_number": 5,
+                    "failures": [{"test_name": "child_a"}],
+                }
+            ],
+        }
+        settings = Settings(
+            ai_provider="claude",
+            ai_model="test",
+            enable_reportportal=True,
+            reportportal_url="http://rp.example.com",
+            reportportal_api_token="rp-token",
+            reportportal_project="proj",
+            auto_push_exporters="reportportal",
+        )
+
+        from rootcoz.main import _auto_review_matching_failures
+
+        mock_exporter = MagicMock()
+        mock_exporter.push = AsyncMock(return_value=MagicMock(details={"pushed": 1}))
+        mock_exporter.__enter__ = MagicMock(return_value=mock_exporter)
+        mock_exporter.__exit__ = MagicMock(return_value=False)
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch(
+                "rootcoz.main._match_and_auto_review_failures",
+                new_callable=AsyncMock,
+                return_value=(0, 0),
+            ),
+            patch(
+                "rootcoz.main._auto_review_child_failures",
+                new_callable=AsyncMock,
+                return_value=(1, 1),
+            ),
+            patch(
+                "rootcoz.main._unreviewed_failure_count",
+                new_callable=AsyncMock,
+                return_value=0,
+            ),
+            patch(
+                "rootcoz.main._build_export_context", new_callable=AsyncMock
+            ) as mock_ctx,
+            patch("rootcoz.main._create_exporter", return_value=mock_exporter),
+        ):
+            await _auto_review_matching_failures(
+                "current-job", "my-job", 101, result_data, settings
+            )
+
+        scopes = [
+            (c.kwargs.get("child_job_name"), c.kwargs.get("child_build_number"))
+            for c in mock_ctx.call_args_list
+        ]
+        assert scopes == [("runner", 5)], scopes
 
     async def test_no_push_when_auto_push_exporters_empty(self, setup_test_db):
         """Should NOT push when AUTO_PUSH_EXPORTERS is empty (default)."""

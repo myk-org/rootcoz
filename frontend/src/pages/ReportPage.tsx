@@ -21,7 +21,7 @@ import { CrossFailurePatterns } from './report/CrossFailurePatterns'
 import { TestListSection } from './report/TestListSection'
 import { AllReviewedPrompt } from './report/AllReviewedPrompt'
 import { collectChildExpandKeys, expandKey } from '@/lib/childJobHash'
-import { collectAllTestKeys, countAllFailures } from '@/lib/failureKeys'
+import { collectAllTestKeys, countAllFailures, reviewedKeyCount } from '@/lib/failureKeys'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -32,6 +32,7 @@ import { ExternalLink, CheckCircle2, Clock, Calendar, Cpu, Timer, FolderGit2, Ro
 import { JobAttribution } from '@/components/shared/JobAttribution'
 import { ReAnalyzeDialog } from './report/ReAnalyzeDialog'
 import { ReportPortalButton } from './report/ReportPortalButton'
+import { DatadogButton } from './report/DatadogButton'
 import { TokenUsageBadge } from '@/components/shared/TokenUsageBadge'
 import { OriginJobBanner, ReanalyzedForwardBanner } from '@/components/shared/ReanalysisBanner'
 import { originJobLabel } from '@/lib/originJobLabel'
@@ -137,6 +138,28 @@ function ReportContent() {
       })
   }, [dispatch, refreshEnrichments])
 
+  // Capability flags ride on every result fetch. Re-applying them on later
+  // refetches (not just the initial load) keeps the push-button gates in
+  // sync when an admin flips an escape hatch while the report is open.
+  const applyCapabilities = useCallback((caps: ResultResponse['capabilities']) => {
+    if (!caps) return
+    dispatch({ type: 'SET_GITHUB_ISSUES_ENABLED', payload: caps.github_issues_enabled ?? false })
+    dispatch({ type: 'SET_JIRA_ISSUES_ENABLED', payload: caps.jira_issues_enabled ?? false })
+    dispatch({ type: 'SET_REPORTPORTAL_AVAILABLE', payload: caps.reportportal ?? false })
+    dispatch({ type: 'SET_REPORTPORTAL_PROJECT', payload: caps.reportportal_project ?? '' })
+    dispatch({ type: 'SET_DATADOG_AVAILABLE', payload: caps.datadog ?? false })
+    dispatch({ type: 'SET_SERVER_JIRA_PROJECT_KEY', payload: caps.server_jira_project_key ?? '' })
+    // Per-exporter escape hatches for the unreviewed-failure push gate
+    const exporters = caps.exporters ?? []
+    dispatch({
+      type: 'SET_EXPORTER_ALLOW_UNREVIEWED',
+      payload: {
+        reportportal: exporters.find((e) => e.name === 'reportportal')?.allow_unreviewed_push ?? false,
+        datadog: exporters.find((e) => e.name === 'datadog')?.allow_unreviewed_push ?? false,
+      },
+    })
+  }, [dispatch])
+
   useEffect(() => {
     if (!jobId) return
     const id = jobId
@@ -172,13 +195,7 @@ function ReportContent() {
         dispatch({ type: 'SET_TRACKED_IN', payload: resultRes.tracked_in ?? {} })
 
         // Use capabilities from the result response (job-scoped, avoids separate call)
-        if (resultRes.capabilities) {
-          dispatch({ type: 'SET_GITHUB_ISSUES_ENABLED', payload: resultRes.capabilities?.github_issues_enabled ?? false })
-          dispatch({ type: 'SET_JIRA_ISSUES_ENABLED', payload: resultRes.capabilities?.jira_issues_enabled ?? false })
-          dispatch({ type: 'SET_REPORTPORTAL_AVAILABLE', payload: resultRes.capabilities?.reportportal ?? false })
-          dispatch({ type: 'SET_REPORTPORTAL_PROJECT', payload: resultRes.capabilities?.reportportal_project ?? '' })
-          dispatch({ type: 'SET_SERVER_JIRA_PROJECT_KEY', payload: resultRes.capabilities?.server_jira_project_key ?? '' })
-        }
+        applyCapabilities(resultRes.capabilities)
 
         // Initial comment fetch via the shared single-flight helper
         fetchComments(id)
@@ -218,7 +235,7 @@ function ReportContent() {
 
     load()
     return () => { cancelled = true }
-  }, [jobId, navigate, dispatch, refreshEnrichments, fetchComments])
+  }, [jobId, navigate, dispatch, refreshEnrichments, fetchComments, applyCapabilities])
 
   // Ref to track draft count without re-running SSE effect
   const commentDraftCountRef = useRef(state.commentDraftCount)
@@ -255,12 +272,14 @@ function ReportContent() {
         if (resultRes.result) {
           dispatch({ type: 'SET_RESULT', payload: { result: resultRes.result, createdAt: resultRes.created_at, completedAt: resultRes.completed_at ?? '', analysisStartedAt: resultRes.analysis_started_at ?? '', graftEstimatedTokensSaved: resultRes.graft_estimated_tokens_saved, reanalyzedFromJobId: resultRes.reanalyzed_from_job_id, originJobName: resultRes.origin_job_name, reanalyzedToJobIds: resultRes.reanalyzed_to_job_ids } })
           dispatch({ type: 'SET_TRACKED_IN', payload: resultRes.tracked_in ?? {} })
+          // Re-apply capability flags so gate toggles reach an open report
+          applyCapabilities(resultRes.capabilities)
         }
       } catch {
         // best-effort refresh
       }
     },
-  }), [jobId, dispatch])
+  }), [jobId, dispatch, applyCapabilities])
 
   useSSE(jobId ? `results:${jobId}` : null, resultEvents)
 
@@ -370,7 +389,7 @@ function ReportContent() {
   const failedClones = [...cloneStates]
     .filter(([repo, status]) => status === 'failed' && !repo.includes('://') && !repo.includes('@'))
     .map(([repo]) => repo)
-  const reviewedCount = allTestKeys.filter((k) => state.reviews[k]?.reviewed).length
+  const reviewedCount = reviewedKeyCount(allTestKeys, state.reviews)
 
   /** Format the AI provider/model label for display. */
   const formatAiLabel = (provider: string | undefined, model: string | undefined): string =>
@@ -477,8 +496,11 @@ function ReportContent() {
             <TokenUsageBadge graftEstimatedTokensSaved={state.graftEstimatedTokensSaved} />
           ) : null}
           <div className="ml-auto flex items-center gap-3">
-            {state.reportportalAvailable && (result.child_job_analyses ?? []).length === 0 && (
+            {isOperator && state.reportportalAvailable && (result.child_job_analyses ?? []).length === 0 && (
               <ReportPortalButton jobId={result.job_id} jobName={result.job_name ?? result.job_id} buildNumber={resolveBuildDisplayId(result) ?? result.build_number} hasFailures={(result.failures ?? []).length > 0} />
+            )}
+            {isOperator && state.datadogAvailable && (result.child_job_analyses ?? []).length === 0 && (
+              <DatadogButton jobId={result.job_id} jobName={result.job_name ?? result.job_id} buildNumber={resolveBuildDisplayId(result) ?? result.build_number} hasFailures={(result.failures ?? []).length > 0} />
             )}
             {!isViewer && (
               <Button variant="ghost" size="sm" className="gap-1.5 text-xs" asChild>

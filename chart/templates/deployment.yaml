@@ -2,6 +2,9 @@
 {{- $gcloudKey := include "rootcoz.gcloudServiceAccountKey" . -}}
 {{- $cursorAuth := include "rootcoz.cursorAuthJson" . -}}
 {{- $sidecarAgent := include "rootcoz.sidecarAgentSecretData" . -}}
+{{- /* Resolved credentials Secret data (chart values + existing-Secret fallbacks),
+       resolved once and reused for both the checksum and the envFrom gate. */ -}}
+{{- $credentials := include "rootcoz.credentialsSecretData" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -27,7 +30,7 @@ spec:
       annotations:
         checksum/config: {{ include "rootcoz.configMapData" . | sha256sum }}
         {{- /* Salt with Release.Name: constant across upgrades, unique per installation. */}}
-        checksum/credentials: {{ printf "%s\n%s\n%s\n%s\n%s\n%s" .Values.admin.key .Values.ai.geminiApiKey .Values.ai.anthropicApiKey .Values.ai.cursor.apiKey (.Values.sidecar.agentDir.env | toJson) .Release.Name | sha256sum }}
+        checksum/credentials: {{ printf "%s\n%s" $credentials .Release.Name | sha256sum }}
         checksum/encryption: {{ printf "%s\n%s" .Values.encryptionKey .Release.Name | sha256sum }}
         {{- if and .Values.ai.vertex.enabled $gcloudKey }}
         checksum/gcloud: {{ $gcloudKey | sha256sum }}
@@ -126,7 +129,7 @@ spec:
           envFrom:
             - configMapRef:
                 name: {{ include "rootcoz.configMapName" . }}
-            {{- if include "rootcoz.credentialsSecretData" . }}
+            {{- if $credentials }}
             - secretRef:
                 name: {{ include "rootcoz.credentialsSecretName" . }}
             {{- end }}

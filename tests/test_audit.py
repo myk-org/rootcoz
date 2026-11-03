@@ -1368,6 +1368,9 @@ def test_export_push_is_audited(app_client) -> None:
         ),
         patch.object(main, "_build_export_context", AsyncMock(return_value=None)),
         patch.object(main, "_create_exporter", return_value=exporter),
+        # The review gate is covered by its own tests; this one is about the
+        # audit row written when the push actually reaches the exporter.
+        patch.object(main, "_unreviewed_failure_count", AsyncMock(return_value=0)),
     ):
         response = app_client.post("/results/job-1/push/reportportal")
     assert response.status_code == 200, response.text
