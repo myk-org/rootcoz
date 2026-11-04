@@ -9160,21 +9160,10 @@ async def create_github_issue_endpoint(
             status_code=400,
             detail=f"Invalid TESTS_REPO_URL: {exc}",
         ) from exc
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code in (401, 403):
-            raise HTTPException(
-                status_code=401,
-                detail="GitHub token is invalid or expired. Update your token in settings.",
-            ) from exc
-        raise HTTPException(
-            status_code=502,
-            detail=f"GitHub API error: {exc.response.status_code}",
-        ) from exc
-    except httpx.RequestError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"GitHub API unreachable: {exc}",
-        ) from exc
+    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
+        # One refusal for every GitHub issue creation, so the feedback form and
+        # a report's own bug report cannot describe the same outage differently.
+        raise _github_issue_refusal(exc, subject="bug report") from exc
     except (TypeError, KeyError, json.JSONDecodeError) as exc:
         raise HTTPException(
             status_code=502,
@@ -9290,15 +9279,7 @@ async def create_jira_bug_endpoint(
         # error, surfaced as a controlled 400 rather than an unhandled 500.
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except httpx.HTTPStatusError as exc:
-        if exc.response.status_code in (401, 403):
-            raise HTTPException(
-                status_code=401,
-                detail="Jira token is invalid or expired. Update your token in settings.",
-            ) from exc
-        raise HTTPException(
-            status_code=502,
-            detail=f"Jira API error: {exc.response.status_code}",
-        ) from exc
+        raise _jira_bug_refusal(exc) from exc
     except httpx.RequestError as exc:
         raise HTTPException(
             status_code=502,
@@ -19191,22 +19172,75 @@ async def preview_feedback(
         ai_username.reset(token)
 
 
-def _feedback_github_refusal(exc: Exception) -> HTTPException:
-    """The refusal a failed GitHub call answers with.
+def _upstream_error_message(response: httpx.Response) -> str:
+    """The tracker's own error text, parsed defensively.
+
+    Only GitHub's ``message``/``documentation_url`` and Jira's
+    ``errorMessages`` are read and the result is capped: the response text is
+    never logged (it can echo the request) and neither is the request itself,
+    so no token can reach the log.
+    """
+    try:
+        payload = response.json()
+    except ValueError:  # an HTML outage page or an empty body
+        return ""
+    if not isinstance(payload, dict):
+        return ""
+    parts = [
+        str(payload[key]).strip()
+        for key in ("message", "documentation_url")
+        if str(payload.get(key) or "").strip()
+    ]
+    error_messages = payload.get("errorMessages")
+    if isinstance(error_messages, list):
+        parts.extend(str(item).strip() for item in error_messages if str(item).strip())
+    return " ".join(parts)[:300]
+
+
+def _upstream_status(exc: Exception) -> int | None:
+    """The upstream status worth auditing, when the call carried one.
+
+    401/403/429 are the credential's own answer and the audit reason code
+    already names them (unauthenticated/forbidden/rate limit), so only the
+    statuses that tell an outage from a lost token are returned.
+    """
+    if not isinstance(exc, httpx.HTTPStatusError):
+        return None
+    status = exc.response.status_code
+    return None if status in (401, 403, 429) else status
+
+
+def _github_issue_refusal(
+    exc: Exception, *, subject: str = "feedback"
+) -> HTTPException:
+    """The refusal a failed GitHub issue creation answers with.
+
+    ``subject`` names what the user submitted (the feedback form or a report's
+    bug report) so the same wording is not claimed for both.
 
     401 means the token is bad; 403 means it is valid but either lacks the repo
     scope or is rate limited. A classic PAT authenticates fine without `repo`,
     so identity checks cannot tell these apart. Reporting both as "invalid or
     expired" made a scope problem look like a lost key. Neither is a gateway
-    failure: 502 stays reserved for an unreachable GitHub API.
+    failure: 502 stays reserved for an unreachable or failing GitHub API.
 
     Rate limiting is classified up front, before any status branch, so a new
     rate-limit status cannot fall through to the generic 502. GitHub uses 403
     for the primary limit and 429 for the secondary limit; 429 is
     definitionally a rate limit, while 403 needs header/body evidence.
+
+    The upstream status and GitHub's message are logged so a 5xx outage, a
+    token that lost repository access and a timeout are told apart afterwards.
+    The client only ever sees one of the fixed details below: no response body,
+    no repository internals, nothing that changes between two outages.
     """
     if isinstance(exc, httpx.HTTPStatusError):
         response = exc.response
+        logger.warning(
+            "GitHub refused the issue creation: status=%s message=%s",
+            response.status_code,
+            _upstream_error_message(response) or "<none>",
+        )
         if response.status_code == 429 or (
             response.status_code == 403
             and (
@@ -19233,13 +19267,73 @@ def _feedback_github_refusal(exc: Exception) -> HTTPException:
                 detail="GitHub token is missing the 'repo' scope. "
                 "Regenerate it in Profile Settings with repo access.",
             )
+        if response.status_code == 404:
+            # GitHub answers 404 instead of 403 for a repository the token
+            # cannot see, so this is a credential problem, not an outage.
+            return HTTPException(
+                status_code=403,
+                detail=f"GitHub token cannot access the {subject} repository. "
+                "Regenerate it in Profile Settings with access to that repository.",
+            )
+        if response.status_code >= 500:
+            return HTTPException(
+                status_code=502,
+                detail=f"GitHub is unavailable right now, so your {subject} was "
+                "not filed. Try again in a few minutes.",
+            )
         return HTTPException(
             status_code=502, detail=f"GitHub API error: {response.status_code}"
         )
     if isinstance(exc, httpx.RequestError):
+        logger.warning(
+            "GitHub API unreachable for the issue creation: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
         return HTTPException(status_code=502, detail=f"GitHub API unreachable: {exc}")
     logger.exception("Failed to create feedback issue")
     return HTTPException(status_code=500, detail="Failed to create feedback issue")
+
+
+def _jira_bug_refusal(exc: httpx.HTTPStatusError) -> HTTPException:
+    """The refusal a failed Jira bug creation answers with.
+
+    Same split as the GitHub side: 401/403 is the credential's own answer, a
+    404 is Jira hiding a project the token cannot see (it answers 404, not
+    403, for an invisible project key), a 5xx is an outage worth retrying, and
+    anything else keeps the generic status it always had. The upstream status
+    and Jira's own message are logged so an outage is not mistaken for a bad
+    project key afterwards; the client only ever sees a fixed detail.
+    """
+    response = exc.response
+    logger.warning(
+        "Jira refused the bug creation: status=%s message=%s",
+        response.status_code,
+        _upstream_error_message(response) or "<none>",
+    )
+    if response.status_code in (401, 403):
+        return HTTPException(
+            status_code=401,
+            detail="Jira token is invalid or expired. Update your token in settings.",
+        )
+    if response.status_code == 404:
+        # Jira answers 404 instead of 403 for a project key the token cannot
+        # see (or one that does not exist), so this is a credential/project
+        # problem, not an outage: a retry alone never fixes it.
+        return HTTPException(
+            status_code=403,
+            detail="Jira token cannot access that Jira project. Check the project "
+            "key and update your token in settings so it can see the project.",
+        )
+    if response.status_code >= 500:
+        return HTTPException(
+            status_code=502,
+            detail="Jira is unavailable right now, so the bug was not filed. "
+            "Try again in a few minutes.",
+        )
+    return HTTPException(
+        status_code=502, detail=f"Jira API error: {response.status_code}"
+    )
 
 
 @app.post(
@@ -19259,6 +19353,7 @@ async def create_feedback(
     _check_allow_list(request)
     settings = get_settings()
     message = f"User '{request.state.username}' created a feedback issue"
+    upstream_status: int | None = None
     try:
         if not settings.feedback_enabled:
             raise HTTPException(
@@ -19293,15 +19388,21 @@ async def create_feedback(
                 github_token=github_token,
             )
         except Exception as exc:  # GitHub API failure or anything else
-            raise _feedback_github_refusal(exc) from exc
+            upstream_status = _upstream_status(exc)
+            raise _github_issue_refusal(exc) from exc
     except HTTPException as exc:
+        details: dict[str, Any] = {"kind": "github_issue"}
+        if upstream_status is not None:
+            # The number that tells an outage from a lost token; never the
+            # upstream message, which can echo the request.
+            details["upstream_status"] = upstream_status
         await _record_refused_attempt(
             action="feedback.create",
             request=request,
             message=message,
             target_type="feedback",
             exc=exc,
-            details={"kind": "github_issue"},
+            details=details,
         )
         raise
 

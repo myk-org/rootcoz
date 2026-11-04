@@ -1,10 +1,11 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { ReportProvider } from '../ReportContext'
 import { BugCreationDialog } from '../BugCreationDialog'
 import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
+import { ApiError } from '@/lib/api'
 import { SERVER_ACCESS_HELP } from '@/components/shared/CredentialSourceLabel'
 
 HTMLElement.prototype.hasPointerCapture = () => false
@@ -16,14 +17,32 @@ const get = vi.fn()
 const post = vi.fn()
 let grant = true
 
-vi.mock('@/lib/api', () => ({
-  api: { get: (...args: unknown[]) => get(...args), post: (...args: unknown[]) => post(...args) },
-  extractApiDetail: () => null,
-}))
+vi.mock('@/lib/api', () => {
+  class _ApiError extends Error {
+    status: number
+    statusText: string
+    body: unknown
+    constructor(status: number, statusText: string, body: unknown) {
+      super(`API error ${status}: ${statusText}`)
+      this.status = status
+      this.statusText = statusText
+      this.body = body
+    }
+  }
+  return {
+    api: { get: (...args: unknown[]) => get(...args), post: (...args: unknown[]) => post(...args) },
+    ApiError: _ApiError,
+    extractApiDetail: (err: unknown): string | null => {
+      const detail = err instanceof _ApiError ? (err.body as { detail?: unknown })?.detail : null
+      return typeof detail === 'string' ? detail : null
+    },
+  }
+})
 vi.mock('@/lib/cookies', () => ({
   getGithubToken: () => 'ghp_test_token',
   getJiraToken: () => '',
   getJiraEmail: () => '',
+  getJiraSaToken: () => 'jira-sa-token',
 }))
 vi.mock('@/lib/auth', () => ({
   useAuth: () => ({ role: 'operator', isOperator: true, isAdmin: false, username: 'alice', authenticated: true, canUseServerProviders: grant }),
@@ -144,5 +163,115 @@ describe('BugCreationDialog AI picker', () => {
     await waitFor(() => expect(post).toHaveBeenCalled())
     expect(post).toHaveBeenCalledWith('/results/job-1/preview-github-issue',
       expect.objectContaining({ ai_provider: '', ai_model: '' }))
+  })
+})
+
+/** Opens the dialog, generates the preview, and leaves it on the Create button. */
+async function openGeneratedPreview(user: ReturnType<typeof userEvent.setup>, target: 'github' | 'jira' = 'github') {
+  render(
+    <MemoryRouter>
+      <ReportProvider>
+        <BugCreationDialog open onOpenChange={() => {}} jobId="job-1" testName="test-a" target={target} />
+      </ReportProvider>
+    </MemoryRouter>,
+  )
+  await waitFor(() => expect(screen.getByLabelText('Issue Prompt')).toBeInTheDocument())
+  await user.click(screen.getByRole('button', { name: /continue/i }))
+  await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+}
+
+const previewPathFor = (target: 'github' | 'jira') =>
+  target === 'github' ? '/results/job-1/preview-github-issue' : '/results/job-1/preview-jira-bug'
+const createPathFor = (target: 'github' | 'jira') =>
+  target === 'github' ? '/results/job-1/create-github-issue' : '/results/job-1/create-jira-bug'
+
+/** Preview resolves, create fails `failures` times with `failure`, then succeeds. */
+function mockCreateFlow(target: 'github' | 'jira', failure: unknown, failures = 1) {
+  let attempts = 0
+  post.mockImplementation(async (path: string) => {
+    if (path === previewPathFor(target)) return { title: 'Issue title', body: 'Issue body', similar_issues: [] }
+    if (path === createPathFor(target)) {
+      attempts += 1
+      if (attempts <= failures) throw failure
+      return { url: 'https://tracker/issue/1', key: 'KEY-1', title: 'Issue title', comment_id: 1 }
+    }
+    return {}
+  })
+}
+
+describe('BugCreationDialog submit retry', () => {
+  it.each(['github', 'jira'] as const)('keeps the generated issue after a failed %s create', async (target) => {
+    const user = userEvent.setup()
+    mockCreateFlow(target, new ApiError(502, 'Bad Gateway', { detail: 'GitHub is unavailable right now, so your feedback was not filed. Try again in a few minutes.' }))
+    await openGeneratedPreview(user, target)
+
+    await user.click(screen.getByRole('button', { name: target === 'github' ? /create github issue/i : /create jira ticket/i }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'GitHub is unavailable right now, so your feedback was not filed. Try again in a few minutes.',
+    )
+    expect(screen.getByLabelText('Title')).toHaveValue('Issue title')
+    expect(screen.getByLabelText('Body')).toHaveValue('Issue body')
+    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
+  })
+
+  it('Retry resubmits the same payload without regenerating', async () => {
+    const user = userEvent.setup()
+    mockCreateFlow('github', new ApiError(502, 'Bad Gateway', { detail: 'GitHub is unavailable right now.' }))
+    await openGeneratedPreview(user)
+
+    await user.click(screen.getByRole('button', { name: /create github issue/i }))
+    await waitFor(() => expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument())
+
+    const before = post.mock.calls.filter(([path]) => path === createPathFor('github'))
+    await user.click(screen.getByRole('button', { name: /retry/i }))
+    await waitFor(() => expect(screen.getByText('GitHub Issue created successfully.')).toBeInTheDocument())
+
+    expect(post.mock.calls.filter(([path]) => path === previewPathFor('github'))).toHaveLength(1)
+    const createCalls = post.mock.calls.filter(([path]) => path === createPathFor('github'))
+    expect(createCalls).toHaveLength(before.length + 1)
+    expect(createCalls[1][1]).toEqual(createCalls[0][1])
+  })
+
+  it('retries a failed Jira create with the same payload', async () => {
+    const user = userEvent.setup()
+    mockCreateFlow('jira', new ApiError(503, 'Bad Gateway', { detail: 'Jira is unavailable right now.' }))
+    await openGeneratedPreview(user, 'jira')
+
+    await user.click(screen.getByRole('button', { name: /create jira ticket/i }))
+    await waitFor(() => expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /retry/i }))
+    await waitFor(() => expect(screen.getByText('Jira Ticket created successfully.')).toBeInTheDocument())
+
+    expect(post.mock.calls.filter(([path]) => path === previewPathFor('jira'))).toHaveLength(1)
+    const createCalls = post.mock.calls.filter(([path]) => path === createPathFor('jira'))
+    expect(createCalls).toHaveLength(2)
+    expect(createCalls[1][1]).toEqual(createCalls[0][1])
+  })
+
+  it('falls back to the generic message when the server sends no detail', async () => {
+    const user = userEvent.setup()
+    mockCreateFlow('github', new ApiError(502, 'Bad Gateway', {}))
+    await openGeneratedPreview(user)
+
+    await user.click(screen.getByRole('button', { name: /create github issue/i }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Creation failed')
+  })
+
+  it('double-clicking Retry submits once', async () => {
+    const user = userEvent.setup()
+    mockCreateFlow('github', new ApiError(502, 'Bad Gateway', { detail: 'GitHub is unavailable right now.' }))
+    await openGeneratedPreview(user)
+
+    await user.click(screen.getByRole('button', { name: /create github issue/i }))
+    await waitFor(() => expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument())
+
+    const retryButton = screen.getByRole('button', { name: /retry/i })
+    fireEvent.click(retryButton)
+    fireEvent.click(retryButton)
+    await waitFor(() => expect(screen.getByText('GitHub Issue created successfully.')).toBeInTheDocument())
+
+    // One failed create + exactly one retry.
+    expect(post.mock.calls.filter(([path]) => path === createPathFor('github'))).toHaveLength(2)
   })
 })

@@ -1,5 +1,5 @@
-import { useEffect, useState } from 'react'
-import { api, extractApiDetail } from '@/lib/api'
+import { useEffect, useRef, useState } from 'react'
+import { ApiError, api, extractApiDetail } from '@/lib/api'
 import {
   Dialog,
   DialogContent,
@@ -89,6 +89,10 @@ export function BugCreationDialog({
   const [similar, setSimilar] = useState<SimilarIssue[]>([])
   const [createdUrl, setCreatedUrl] = useState('')
   const [errorMsg, setErrorMsg] = useState('')
+  // A failed create returns to the preview with the generated issue intact, so the
+  // same title/body/type can be retried without regenerating it.
+  const [createError, setCreateError] = useState('')
+  const submittingRef = useRef(false)
   const [selectedRepo, setSelectedRepo] = useState(availableRepos?.[0]?.url ?? '')
   const [jiraProjectKey, setJiraProjectKey] = useState(defaultProjectKey || '')
   const [confirmedProjectKey, setConfirmedProjectKey] = useState(defaultProjectKey || '')
@@ -211,6 +215,10 @@ export function BugCreationDialog({
   }
 
   async function handleCreate() {
+    // Guards a double click that lands before the creating phase re-renders.
+    if (submittingRef.current) return
+    submittingRef.current = true
+    setCreateError('')
     setPhase('creating')
     try {
       const res = await api.post<CreateIssueResponse>(`/results/${jobId}/${createPath}`, {
@@ -233,8 +241,14 @@ export function BugCreationDialog({
       // Also refresh enrichments for the link badges
       refreshEnrichments(jobId)
     } catch (err) {
-      setErrorMsg(extractApiDetail(err) ?? (err instanceof Error ? err.message : 'Creation failed'))
-      setPhase('error')
+      // The server's own wording when it sent one; the generic copy otherwise.
+      setCreateError(
+        extractApiDetail(err)
+        ?? (err instanceof ApiError ? 'Creation failed' : err instanceof Error ? err.message : 'Creation failed'),
+      )
+      setPhase('preview')
+    } finally {
+      submittingRef.current = false
     }
   }
 
@@ -249,6 +263,7 @@ export function BugCreationDialog({
       setSimilar([])
       setCreatedUrl('')
       setErrorMsg('')
+      setCreateError('')
       setSelectedRepo(availableRepos?.[0]?.url ?? '')
       setJiraProjectKey(defaultProjectKey || '')
       setConfirmedProjectKey(defaultProjectKey || '')
@@ -341,6 +356,14 @@ export function BugCreationDialog({
         {/* Preview */}
         {promptPhase === 'preview' && (
           <div className="space-y-4">
+            {createError && (
+              <div role="alert" className="space-y-1">
+                <p className="text-sm text-signal-red">{createError}</p>
+                {createError.toLowerCase().includes('token') && (
+                  <p className="text-xs text-text-tertiary">You can update your tokens in <a href="/settings" target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline">Profile Settings</a>.</p>
+                )}
+              </div>
+            )}
             {target === 'github' && availableRepos && availableRepos.length > 1 && (
               <div className="space-y-2">
                 <label htmlFor="bug-repo" className="text-xs font-display uppercase tracking-widest text-text-tertiary">Repository</label>
@@ -556,7 +579,7 @@ export function BugCreationDialog({
           {promptPhase === 'preview' && (
             <div className="flex gap-2 sm:ml-auto">
               <Button variant="outline" onClick={() => handleCancel()}>Cancel</Button>
-              <Button onClick={handleCreate} disabled={!title.trim() || !hasToken || (target === 'jira' && jiraIssueType === '__custom__' && !customIssueType.trim())}>Create {label}</Button>
+              <Button onClick={handleCreate} disabled={!title.trim() || !hasToken || (target === 'jira' && jiraIssueType === '__custom__' && !customIssueType.trim())}>{createError ? 'Retry' : `Create ${label}`}</Button>
             </div>
           )}
           {promptPhase === 'prompt' && (

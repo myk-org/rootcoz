@@ -830,13 +830,13 @@
 <td>POST</td>
 <td><code>/results/{job_id}/create-github-issue</code></td>
 <td>reviewer</td>
-<td><code>test_name</code>, <code>title</code>, <code>body</code>; returns <code>201</code></td>
+<td><code>test_name</code>, <code>title</code>, <code>body</code>; returns <code>201</code>. Same refusal classes as <code>POST /api/feedback/create</code> — <code>502</code> when GitHub is unreachable or failing, <code>403</code> when the token cannot see <code>TESTS_REPO_URL</code> or lacks the <code>repo</code> scope, <code>401</code> for an invalid token, <code>429</code> when rate limited</td>
 </tr>
 <tr>
 <td>POST</td>
 <td><code>/results/{job_id}/create-jira-bug</code></td>
 <td>reviewer</td>
-<td>Adds <code>jira_issue_type</code>; returns <code>201</code></td>
+<td>Adds <code>jira_issue_type</code>; returns <code>201</code>. <code>401</code> for an invalid or expired Jira token, <code>403</code> when the token cannot access the Jira project (Jira answers <code>404</code> for that), <code>502</code> with a retryable <code>Jira is unavailable right now…</code> detail on an upstream <code>5xx</code>, <code>502 Jira API error: &lt;status&gt;</code> for anything else</td>
 </tr>
 <tr>
 <td>PUT</td>
@@ -1183,10 +1183,17 @@
 <td>POST</td>
 <td><code>/api/feedback/create</code></td>
 <td>viewer</td>
-<td>Creates the GitHub issue; returns <code>201</code></td>
+<td>Creates the GitHub issue; returns <code>201</code>. <code>503</code> when feedback is disabled, <code>400</code> when no GitHub token is stored, <code>429</code> when GitHub rate-limited, <code>403</code> when the token is invalid, lacks the <code>repo</code> scope, or cannot see the repository, <code>502</code> when GitHub is unreachable or failing</td>
 </tr>
 </tbody>
 </table></div>
+<blockquote>
+<p><strong>Note:</strong> <code>POST /api/feedback/create</code> and <code>POST /results/{job_id}/create-github-issue</code> share one refusal helper, so both keep <code>502</code> for GitHub trouble (unreachable, timeout, any <code>5xx</code>) and <code>403</code> for credential trouble, including a <code>404</code> from GitHub — that is how GitHub answers a repository the token cannot see, and reporting it as <code>403</code> keeps it away from the gateway-failure class. The two are separated on purpose: <code>502</code> means retry, <code>403</code> means fix the token. Only the subject differs — a refused feedback submission says the feedback was not filed, a refused failure issue says the bug report was not filed. Each refusal is logged at <code>WARNING</code> — the upstream status and the tracker's own <code>message</code> when there was an answer, the exception type and text when the call never landed — never the token and never the submitted body.
+</p>
+<p><code>POST /results/{job_id}/create-jira-bug</code> applies the same split to Jira: <code>401</code> for an invalid or expired token, <code>403</code> for a project the token cannot access — Jira hides it behind a <code>404</code>, the same trick GitHub plays — and <code>502</code> with a retryable outage detail on an upstream <code>5xx</code>. Anything else stays <code>502 Jira API error: &lt;status&gt;</code>, with no rate-limit wording invented. Its refusals are logged the same way, including Jira's own <code>errorMessages</code>.
+</p>
+<p>Auditing is narrower than that: a refused <code>feedback.create</code> is recorded as a failed event whose <code>details</code> carries <code>upstream_status</code> whenever GitHub answered — the number an operator uses to tell an outage from a lost token. Refusals on <code>create-github-issue</code> are not audited at all; only a successful create writes an <code>issue.create</code> row, so that path has no <code>upstream_status</code> to read.</p>
+</blockquote>
 <h3 id="admin">Admin</h3>
 <div class="table-wrap"><table>
 <thead>
