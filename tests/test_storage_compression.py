@@ -8,6 +8,7 @@ site that used to read the payload with JSON functions — which cannot read a f
 import asyncio
 import json
 import re
+import sqlite3
 import time
 from compression import zstd
 from pathlib import Path
@@ -226,9 +227,7 @@ async def test_unreadable_frames_degrade_to_none(_storage) -> None:
 async def test_backfill_is_byte_identical(_storage) -> None:
     """The frame decompresses to exactly the bytes the old build stored."""
     text = await _insert_legacy("job-bytes", _payload(failure_count=30))
-    async with storage._connect_db() as db:
-        await storage._backfill_results_denorm(db)
-        await db.commit()
+    await storage.backfill_results_denorm()
 
     stats = await storage.backfill_result_json_compression()
     assert stats["rows"] == 1
@@ -242,9 +241,8 @@ async def test_backfill_shrinks_the_column(_storage) -> None:
     """The acceptance factor measured locally: the column is a fraction of itself."""
     for index in range(20):
         await _insert_legacy(f"job-compress-{index}", _payload(failure_count=40))
+    await storage.backfill_results_denorm()
     async with storage._connect_db() as db:
-        await storage._backfill_results_denorm(db)
-        await db.commit()
         before = (
             await (
                 await db.execute(
@@ -270,13 +268,36 @@ async def test_backfill_shrinks_the_column(_storage) -> None:
     assert (await storage.backfill_result_json_compression())["rows"] == 0
 
 
+async def test_compression_does_not_overwrite_a_concurrent_patch(_storage) -> None:
+    """The UPDATE is a compare-and-swap on the text it read, not just its type."""
+    await _insert_legacy("job-race", _payload(failure_count=40))
+    await storage.backfill_results_denorm()
+    newer = {"job_name": "newer", "request_params": {}, "failures": []}
+    compress = storage._compress_result_rows
+
+    def race(rows: list) -> list:
+        # Another writer replaces the payload after this batch was read.
+        with sqlite3.connect(_storage) as conn:
+            conn.execute(
+                "UPDATE results SET result_json = ? WHERE job_id = 'job-race'",
+                (json.dumps(newer),),
+            )
+        return compress(rows)
+
+    with patch.object(storage, "_compress_result_rows", race):
+        stats = await storage.backfill_result_json_compression()
+
+    assert stats["rows"] == 0
+    row = await _stored(_storage, "job-race")
+    assert row["kind"] == "text"
+    assert json.loads(row["result_json"]) == newer
+
+
 async def test_backfill_does_not_block_the_event_loop(_storage) -> None:
     """Encode runs in a thread, so a ticker keeps firing between batches (#402)."""
     for index in range(120):
         await _insert_legacy(f"job-loop-{index}", _payload(failure_count=60))
-    async with storage._connect_db() as db:
-        await storage._backfill_results_denorm(db)
-        await db.commit()
+    await storage.backfill_results_denorm()
 
     ticks = 0
     stop = False
@@ -316,11 +337,10 @@ async def test_denorm_backfill_repairs_a_late_old_build_row(_storage) -> None:
     row = await _stored(_storage, "job-late")
     assert row["submitted_by"] == row["summary"] == row["failure_ids"] == ""
 
-    # This boot's sweep was already marked applied by init_db.
+    # This boot's sweep was already stamped applied by init_db.
     async with storage._connect_db() as db:
         assert await storage._migration_applied(db, storage._RESULTS_DENORM_KEY)
-        await storage._backfill_results_denorm(db)
-        await db.commit()
+    await storage.backfill_results_denorm()
 
     row = await _stored(_storage, "job-late")
     assert (row["submitted_by"], row["summary"], row["display_name"]) == (
@@ -339,6 +359,70 @@ async def test_denorm_backfill_repairs_a_late_old_build_row(_storage) -> None:
     assert storage.parse_result_json(row["result_json"]) == payload
 
 
+async def test_init_db_leaves_legacy_row_payloads_alone(_storage) -> None:
+    """Startup is schema-only; the derive pass is a background task (#409).
+
+    Parsing every legacy payload inside ``init_db`` outlives the startup probe on
+    a large database and the rolled-back transaction repeats on the next boot.
+    """
+    text = await _insert_legacy("job-startup", _payload(failure_count=5))
+
+    await storage.init_db()
+
+    after = await _stored(_storage, "job-startup")
+    assert (after["kind"], after["result_json"]) == ("text", text)
+    assert (after["submitted_by"], after["summary"], after["failure_ids"]) == (
+        "",
+        "",
+        "",
+    )
+    assert after["denorm_version"] == 0
+
+    # The background passes are what derive it, then compress it.
+    assert await storage.backfill_results_denorm() == 1
+    assert (await storage.backfill_result_json_compression())["rows"] == 1
+
+
+async def test_denorm_backfill_resumes_after_an_interrupted_pass(_storage) -> None:
+    """One page per transaction: a killed pass keeps its progress (#409)."""
+    for index in range(3):
+        await _insert_legacy(f"job-resume-{index}", _payload(failure_count=2))
+
+    derive = storage._denorm_row_params
+    pages = 0
+
+    def kill_after_first_page(rows: list) -> list:
+        nonlocal pages
+        pages += 1
+        if pages > 1:
+            raise RuntimeError("pod killed mid-sweep")
+        return derive(rows)
+
+    with (
+        patch.object(storage, "_denorm_row_params", kill_after_first_page),
+        pytest.raises(RuntimeError, match="pod killed"),
+    ):
+        await storage.backfill_results_denorm(batch_size=1)
+
+    # The first page was committed before the kill, so its progress survived.
+    first = await _stored(_storage, "job-resume-0")
+    assert first["denorm_version"] == storage._RESULTS_DENORM_VERSION
+    assert (await _stored(_storage, "job-resume-1"))["denorm_version"] == 0
+
+    # The next boot finishes the rest and does not redo the committed page.
+    async with storage._connect_db() as db:
+        await db.execute(
+            "UPDATE results SET summary = 'sentinel' WHERE job_id = 'job-resume-0'"
+        )
+        await db.commit()
+    assert await storage.backfill_results_denorm(batch_size=1) == 2
+    assert (await _stored(_storage, "job-resume-0"))["summary"] == "sentinel"
+    for index in (1, 2):
+        row = await _stored(_storage, f"job-resume-{index}")
+        assert row["denorm_version"] == storage._RESULTS_DENORM_VERSION
+        assert row["submitted_by"] == "yuval"
+
+
 async def test_compression_skips_a_row_whose_columns_are_not_derived(_storage) -> None:
     """Ordering guard: a row below the current denorm version is never compressed."""
     payload = _payload(failure_count=20)
@@ -355,6 +439,11 @@ async def test_submitted_by_index_is_a_plain_column_index(_storage) -> None:
         await db.execute(
             "CREATE INDEX idx_results_submitted_by ON results "
             "(json_extract(result_json, '$.request_params.submitted_by'))"
+        )
+        # The replacement is claimed once per database: replay this build's first boot.
+        await db.execute(
+            "DELETE FROM _migrations_applied WHERE key = ?",
+            (storage._SUBMITTED_BY_INDEX_KEY,),
         )
         await db.commit()
 
@@ -375,6 +464,16 @@ async def test_submitted_by_index_is_a_plain_column_index(_storage) -> None:
         )
     assert columns == ["submitted_by"]
     assert "idx_results_submitted_by" in plan
+
+    # A later boot must not drop and rebuild it: the swap is claimed once.
+    async with storage._connect_db() as db:
+        cursor = await db.execute("PRAGMA schema_version")
+        schema_version = (await cursor.fetchone())[0]
+    await storage.init_db()
+    async with storage._connect_db() as db:
+        cursor = await db.execute("PRAGMA schema_version")
+        after = (await cursor.fetchone())[0]
+    assert after == schema_version, "startup must not run DDL on every boot"
 
 
 # --- the six SQL sites that used to read JSON inside SQLite -----------------
@@ -441,16 +540,12 @@ async def test_find_failure_by_uuid_reads_a_compressed_row(_storage) -> None:
 async def test_no_sql_site_still_parses_result_json(_storage) -> None:
     """Every site that reads the payload must go through parse_result_json.
 
-    Two maintenance-only blocks are allowlisted: the one-shot
-    ``backfill_results_denorm_v1`` UPDATE and the build-id candidate CTE. Both
-    run inside ``init_db``, before the background compression task exists, and
-    both carry a ``typeof(...) = 'text'`` guard for the boot after it.
+    One maintenance-only block is allowlisted: the ``failure_history`` build-id
+    candidate CTE, which runs inside ``init_db`` and carries a
+    ``typeof(...) = 'text'`` guard for the boot after the compression sweep.
     """
     source = Path(storage.__file__).read_text()
-    for allowed in (
-        storage._RESULTS_DENORM_V1_SQL,
-        storage._FH_BUILD_ID_CANDIDATES_CTE,
-    ):
+    for allowed in (storage._FH_BUILD_ID_CANDIDATES_CTE,):
         assert source.count(allowed) == 1
         source = source.replace(allowed, "")
 

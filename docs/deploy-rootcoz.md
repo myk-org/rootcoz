@@ -305,25 +305,30 @@ grow stays plain text. SQLite reports which shape a row has (`typeof(result_json
 is `blob` or `text`), and the application decodes both transparently — no
 migration step, no setting to turn it on.
 
-- Rows written before the upgrade compact themselves in the background after the
-  next start. The sweep runs in batches, is safe to interrupt, and resumes where
-  it stopped on the following boot; `result_json compression: ... N -> M bytes`
-  in the log reports what it did.
+- Rows written before the upgrade are derived and compacted in the background
+  after the next start, so startup and `/health` are never delayed by them. The
+  sweep commits one batch at a time, is safe to interrupt, and resumes where it
+  stopped on the following boot; the log reports the column bytes and the
+  database file size before and after.
 - The database **file** only shrinks after a rewrite plus `VACUUM`, which takes
   the write lock and needs free space roughly equal to the file size. That is an
-  operator step, deliberately not automated on a live single-replica deployment:
+  operator step, deliberately not automated on a live single-replica deployment.
+  The image has no `sqlite3` CLI, but it does ship Python:
 
-  ```bash
-  kubectl exec -n rootcoz deploy/rootcoz -- \
-    sqlite3 /data/results.db 'VACUUM;'
-  ```
+```bash
+kubectl exec -n rootcoz deploy/rootcoz -- python -c \
+  "import sqlite3; sqlite3.connect('/data/results.db').execute('VACUUM')"
+```
 
-  Stop the deployment first if the volume has no headroom for a second copy of
-  the file.
+  Retry it while the application reports `database is locked`. If the volume has
+  no headroom for a second copy of the file, scale the deployment to zero and run
+  the same statement from a pod that mounts the volume instead.
 - Rows written by a pre-compression build are still readable by that build as
-  long as they are plain text; a build from before this change reads a
-  compressed row as an empty payload but never destroys it. Upgrade all
-  replicas together.
+  long as they are plain text. A build from before this change cannot read a
+  compressed row — parsing the frame raises a decode error, so those results
+  surface as errors until you upgrade again — but it never destroys one. Do not
+  roll back once the background sweep has run: restore the database from a
+  backup taken before the upgrade instead. Upgrade all replicas together.
 
 ## Troubleshooting
 

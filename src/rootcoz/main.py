@@ -282,6 +282,7 @@ from rootcoz.storage import (
     ANALYSIS_STATE_SUBMITTED,
     DB_PATH,
     backfill_result_json_compression,
+    backfill_results_denorm,
     claim_submitted_job_for_analyze,
     copy_stable_analysis_ids,
     get_effective_classification,
@@ -2456,7 +2457,18 @@ async def _backfill_job_metadata(rules: list[dict[str, Any]]) -> None:
 
 
 async def _compress_stored_results() -> None:
-    """Compress pre-compression result_json rows in the background. Best-effort."""
+    """Derive the denormalized columns, then compress legacy result_json rows.
+
+    Background and best-effort (#409): both passes parse or rewrite every legacy
+    payload, so neither may run inside ``init_db`` — on a large database they
+    outlive the startup probe and the rollout crash-loops. Sequential in one
+    task: the compression predicate skips a row whose columns are not derived.
+    """
+    try:
+        await backfill_results_denorm()
+    except Exception:
+        logger.exception("Failed to derive denormalized result columns")
+        return
     try:
         await backfill_result_json_compression()
     except Exception:

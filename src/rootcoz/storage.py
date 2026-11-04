@@ -463,94 +463,102 @@ async def _claim_migration(db: aiosqlite.Connection, key: str) -> bool:
     return row is not None and row[0] == 1
 
 
-# Job_name/build_number/build_id, derived in SQL from a payload that was still
-# inline JSON. Kept for the one-shot ``backfill_results_denorm_v1`` claim; the
-# ``typeof`` guard is the only reason it still mentions result_json at all.
-# No compressed row can reach it: this runs in init_db, before the background
-# compression task starts (allowlisted in tests/test_storage_compression.py).
-_RESULTS_DENORM_V1_SQL = """
-    UPDATE results
-    SET job_name = COALESCE(json_extract(result_json, '$.job_name'), ''),
-        build_number = CASE
-            WHEN json_type(result_json, '$.build_number') = 'integer'
-                 AND json_extract(result_json, '$.build_number') >= 0
-                 AND json_extract(result_json, '$.build_number') <= 9223372036854775807
-            THEN json_extract(result_json, '$.build_number')
-            WHEN json_type(result_json, '$.build_number') = 'text'
-                 AND json_extract(result_json, '$.build_number') NOT GLOB '*[^0-9]*'
-                 AND json_extract(result_json, '$.build_number') != ''
-                 AND (
-                     ltrim(json_extract(result_json, '$.build_number'), '0') = ''
-                     OR length(ltrim(json_extract(result_json, '$.build_number'), '0')) < 19
-                     OR (length(ltrim(json_extract(result_json, '$.build_number'), '0')) = 19
-                         AND ltrim(json_extract(result_json, '$.build_number'), '0') <= '9223372036854775807')
-                 )
-            THEN CAST(json_extract(result_json, '$.build_number') AS INTEGER)
-            ELSE 0
-        END,
-        build_id = COALESCE(CAST(json_extract(result_json, '$.build_id') AS TEXT), '')
-    WHERE result_json IS NOT NULL AND json_valid(result_json) AND job_name = ''
-      AND typeof(result_json) = 'text'
-"""
+# One UPDATE per derived row, shared by the background sweep. ``denorm_version``
+# is stamped in the same statement, so a row is never left half-derived.
+_RESULTS_DENORM_UPDATE_SQL = (
+    "UPDATE results SET job_name = ?, build_number = ?, build_id = ?,"
+    " submitted_by = ?, summary = ?, display_name = ?, failure_ids = ?,"
+    " denorm_version = ? WHERE rowid = ?"
+)
 
-# Claim key for "the denormalized columns have been derived at least once".
+# Claim key for "this build knows the denormalized columns". Marked in init_db,
+# which stays schema-only: the columns themselves are derived by
+# backfill_results_denorm in the background, after /health can answer.
 _RESULTS_DENORM_KEY = "backfill_results_denorm_v2"
 
+# One-shot: the plain-column index replaced an expression index of the same
+# name, and CREATE INDEX IF NOT EXISTS would keep the old one silently. Dropped
+# once, not every boot — a rebuild reads every row's payload.
+_SUBMITTED_BY_INDEX_KEY = "results_submitted_by_index_plain_v1"
 
-async def _backfill_results_denorm(
-    db: aiosqlite.Connection, batch_size: int = 200
-) -> None:
+
+def _denorm_row_params(rows: Sequence[aiosqlite.Row]) -> list[tuple[Any, ...]]:
+    """``UPDATE`` parameters for one page, parsed off the event loop."""
+    return [
+        (
+            *_extract_denormalized_fields(
+                parse_result_json(row["result_json"], job_id=row["job_id"])
+            ),
+            _RESULTS_DENORM_VERSION,
+            row["rid"],
+        )
+        for row in rows
+    ]
+
+
+async def backfill_results_denorm(batch_size: int = 200) -> int:
     """Derive every denormalized ``results`` column from the stored payload.
 
     Gated per row on ``denorm_version`` instead of claimed once: a build that
     does not know a column keeps writing rows without it during a mixed-version
     window, and only a re-runnable sweep makes that converge. Rows already at
-    the current version are never rewritten. Only TEXT payloads are read — a
-    compressed row was derived before it was compressed.
+    the current version are never rewritten.
+
+    Runs in the background, never inside ``init_db``: it parses every legacy
+    payload, which on a large database outlives the startup probe and would
+    crash-loop the pod with the transaction rolled back on every boot. One page
+    per transaction, so an interrupted pass keeps its progress and resumes where
+    it stopped. Only TEXT payloads are read — a compressed row was derived
+    before it was compressed.
 
     Args:
-        db: Open connection inside ``init_db``.
-        batch_size: Rows per keyset page.
+        batch_size: Rows per keyset page, and per transaction.
+
+    Returns:
+        Rows rewritten.
     """
     if batch_size <= 0:
         raise ValueError("batch_size must be > 0")
-    cursor = await db.execute(
-        "SELECT COUNT(*) FROM results WHERE typeof(result_json) = 'text'"
-        " AND COALESCE(denorm_version, 0) < ?",
-        (_RESULTS_DENORM_VERSION,),
-    )
-    pending = (await cursor.fetchone())[0]
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM results WHERE typeof(result_json) = 'text'"
+            " AND COALESCE(denorm_version, 0) < ?",
+            (_RESULTS_DENORM_VERSION,),
+        )
+        pending = (await cursor.fetchone())[0]
     if not pending:
-        return
+        return 0
     logger.info(
         "Migration: deriving denormalized columns for %d results row(s)", pending
     )
     rowid = 0
     done = 0
     while True:
-        cursor = await db.execute(
-            "SELECT rowid AS rid, job_id, result_json FROM results"
-            " WHERE rowid > ? AND typeof(result_json) = 'text'"
-            " AND COALESCE(denorm_version, 0) < ?"
-            " ORDER BY rowid LIMIT ?",
-            (rowid, _RESULTS_DENORM_VERSION, batch_size),
-        )
-        rows = await cursor.fetchall()
-        if not rows:
-            break
-        for row in rows:
-            rowid = row["rid"]
-            fields = _extract_denormalized_fields(
-                parse_result_json(row["result_json"], job_id=row["job_id"])
+        async with _connect_db() as db:
+            cursor = await db.execute(
+                "SELECT rowid AS rid, job_id, result_json FROM results"
+                " WHERE rowid > ? AND typeof(result_json) = 'text'"
+                " AND COALESCE(denorm_version, 0) < ?"
+                " ORDER BY rowid LIMIT ?",
+                (rowid, _RESULTS_DENORM_VERSION, batch_size),
             )
-            await db.execute(
-                "UPDATE results SET job_name = ?, build_number = ?, build_id = ?,"
-                " submitted_by = ?, summary = ?, display_name = ?, failure_ids = ?,"
-                " denorm_version = ? WHERE rowid = ?",
-                (*fields, _RESULTS_DENORM_VERSION, rowid),
+            rows = await cursor.fetchall()
+            if not rows:
+                break
+            rowid = rows[-1]["rid"]
+            # Parsing a multi-MB payload must not stall /health (#402).
+            for params in await asyncio.to_thread(_denorm_row_params, rows):
+                await db.execute(_RESULTS_DENORM_UPDATE_SQL, params)
+            await db.commit()
+            done += len(rows)
+            logger.debug(
+                "Migration: %d/%d result(s) derived, cursor rowid=%d",
+                done,
+                pending,
+                rowid,
             )
-            done += 1
     logger.info("Migration: derived denormalized columns for %d results row(s)", done)
+    return done
 
 
 # The rows the writer would have compressed: still inline JSON, denormalized
@@ -578,20 +586,31 @@ async def _eligible_result_bytes(db: aiosqlite.Connection) -> int:
     return (await cursor.fetchone())[0]
 
 
+async def _db_storage_report(db: aiosqlite.Connection) -> str:
+    """File size plus free pages — the space a VACUUM could return."""
+    cursor = await db.execute("PRAGMA freelist_count")
+    free_pages = (await cursor.fetchone())[0]
+    cursor = await db.execute("PRAGMA page_size")
+    page_size = (await cursor.fetchone())[0]
+    return (
+        f"{DB_PATH.stat().st_size} bytes on disk, {free_pages * page_size} bytes free"
+    )
+
+
 def _compress_result_rows(
     rows: Sequence[aiosqlite.Row],
-) -> list[tuple[int, bytes, int]]:
+) -> list[tuple[int, bytes, str]]:
     """Compress one batch's stored text as-is.
 
     Returns:
-        ``(rowid, frame, text bytes it replaces)``; a row a frame would grow is
-        left out, so it stays TEXT and is retried on the next boot.
+        ``(rowid, frame, text it replaces)``; a row a frame would grow is left
+        out, so it stays TEXT and is retried on the next boot.
     """
-    pairs: list[tuple[int, bytes, int]] = []
+    pairs: list[tuple[int, bytes, str]] = []
     for row in rows:
         encoded = _encode_result_text(row["result_json"])
         if isinstance(encoded, bytes):
-            pairs.append((row["rid"], encoded, len(row["result_json"].encode())))
+            pairs.append((row["rid"], encoded, row["result_json"]))
     return pairs
 
 
@@ -620,10 +639,12 @@ async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, i
             )
             return stats
         stats["bytes_before"] = await _eligible_result_bytes(db)
+        on_disk_before = await _db_storage_report(db)
     stats["bytes_after"] = stats["bytes_before"]
     logger.info(
-        "result_json compression: starting (%d bytes of legacy results)",
+        "result_json compression: starting (%d bytes of legacy results, database %s)",
         stats["bytes_before"],
+        on_disk_before,
     )
     rowid = 0
     while True:
@@ -642,27 +663,35 @@ async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, i
             continue
         async with _connect_db() as db:
             await db.execute("BEGIN IMMEDIATE")
-            for rid, frame, text_bytes in pairs:
-                # The typeof guard lets a concurrent patch_result_json win.
+            for rid, frame, text in pairs:
+                # Compare-and-swap on the payload, not just on its type: a
+                # concurrent patch — or a write from a pre-compression replica —
+                # must win over a frame built from the older text.
                 cursor = await db.execute(
                     "UPDATE results SET result_json = ?"
-                    " WHERE rowid = ? AND typeof(result_json) = 'text'",
-                    (frame, rid),
+                    " WHERE rowid = ? AND typeof(result_json) = 'text'"
+                    " AND result_json = ?",
+                    (frame, rid, text),
                 )
                 if cursor.rowcount:
                     stats["rows"] += 1
-                    stats["bytes_after"] += len(frame) - text_bytes
+                    stats["bytes_after"] += len(frame) - len(text.encode())
             await db.commit()
         logger.debug(
             "result_json compression: %d row(s) so far, cursor rowid=%d",
             stats["rows"],
             rowid,
         )
+    async with _connect_db() as db:
+        on_disk_after = await _db_storage_report(db)
     logger.info(
-        "result_json compression: done, %d row(s) compressed, %d -> %d bytes",
+        "result_json compression: done, %d row(s) compressed, %d -> %d bytes,"
+        " database %s -> %s",
         stats["rows"],
         stats["bytes_before"],
         stats["bytes_after"],
+        on_disk_before,
+        on_disk_after,
     )
     return stats
 
@@ -1185,19 +1214,12 @@ async def init_db() -> None:
             db, "results", "denorm_version", "INTEGER NOT NULL DEFAULT 0"
         )
 
-        # Backfill job_name/build_number/build_id from result_json.
-        # Uses atomic claim so only one concurrent init_db() runs the scan.
-        _results_denorm_key = "backfill_results_denorm_v1"
-        if await _claim_migration(db, _results_denorm_key):
-            cursor = await db.execute(_RESULTS_DENORM_V1_SQL)
-            if cursor.rowcount:
-                logger.info(
-                    "Migration: backfilled job_name/build_number/build_id on %d results row(s)",
-                    cursor.rowcount,
-                )
-        # Must finish before the background compression, so no compressed row can
-        # exist with columns missing (the compression predicate skips such rows).
-        await _backfill_results_denorm(db)
+        # Schema only, never a row rewrite: init_db must stay fast enough for the
+        # startup probe. The columns are derived by backfill_results_denorm in the
+        # background (it also covers a row an old build writes during a
+        # mixed-version window). This key only tells the compression sweep that
+        # this build knows them.
+        await _ensure_migrations_table(db)
         await _mark_migration_applied(db, _RESULTS_DENORM_KEY)
 
         await db.execute(
@@ -1215,8 +1237,10 @@ async def init_db() -> None:
         )
         # Submitter enumeration goes through the plain-column index, never per-row JSON.
         # The plain column replaced an expression index of the same name, and
-        # CREATE INDEX IF NOT EXISTS would keep the old one silently: drop it first.
-        await db.execute("DROP INDEX IF EXISTS idx_results_submitted_by")
+        # CREATE INDEX IF NOT EXISTS would keep the old one silently: drop it once,
+        # not every boot, which would rebuild the index (and read every row) forever.
+        if await _claim_migration(db, _SUBMITTED_BY_INDEX_KEY):
+            await db.execute("DROP INDEX IF EXISTS idx_results_submitted_by")
         await db.execute(_SUBMITTED_BY_INDEX_SQL)
 
         # failure_history: denormalized table for fast history queries
@@ -2512,10 +2536,10 @@ async def get_historical_comments(
 
 
 # Bumped whenever the denormalized columns change shape: a row written by a
-# build that does not know a column keeps its default, and _backfill_results_denorm
+# build that does not know a column keeps its default, and backfill_results_denorm
 # re-derives every row still below this version. That makes the backfill
 # idempotent and re-runnable instead of a one-shot claim, so a mixed-version
-# window (an old build writing after the sweep) converges on the next boot.
+# window (an old build inserting rows after the sweep) converges on the next boot.
 _RESULTS_DENORM_VERSION = 2
 
 
