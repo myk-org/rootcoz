@@ -48,6 +48,8 @@ import { MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/co
 import { FilterPresetsMenu } from '@/components/shared/FilterPresetsMenu'
 import { applyFiltersToParams, FILTER_PRESET_KEYS } from '@/lib/filterPresets'
 import { useMetadataOptions } from '@/components/shared/useMetadataOptions'
+import { useDashboardSubmitters } from '@/components/shared/useDashboardSubmitters'
+import { SearchableMultiSelect } from '@/components/ui/searchable-multi-select'
 import { MetadataBadges } from '@/components/shared/MetadataBadges'
 import { WhatsNewDialog } from '@/components/shared/WhatsNewDialog'
 import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons'
@@ -111,6 +113,38 @@ function relativeTime(iso: string): string {
 
 function getJobDisplayName(job: DashboardJob | null | undefined): string {
   return job?.job_name || job?.job_id || ''
+}
+
+/** Caps the filtered endpoint enforces on submitted_by (src/rootcoz/main.py). */
+const MAX_SUBMITTERS = 50
+const MAX_SUBMITTER_LENGTH = 64
+
+/**
+ * The submitter selection held in the URL.
+ *
+ * Names may contain commas, so the values stay a list instead of being joined
+ * and re-split. Each value is folded onto the enumerated spelling when one
+ * exists — the server matches case-insensitively, so `ALICE` and `alice` are one
+ * selection, not two chips that toggle against each other. Values the server
+ * would reject (blank, too long, past the cap) are dropped here so a shared link
+ * cannot turn the dashboard into a 400 error.
+ */
+function normalizeSubmitters(values: string[], options: string[]): string[] {
+  const spelling = new Map(options.map((name) => [name.toLowerCase(), name]))
+  const seen = new Set<string>()
+  const picked: string[] = []
+  for (const raw of values) {
+    const value = spelling.get(raw.trim().toLowerCase()) ?? raw.trim()
+    const key = value.toLowerCase()
+    // Code points, not UTF-16 units: the server counts characters, so an emoji
+    // name must not be dropped for a length the endpoint would have accepted.
+    const length = [...value].length
+    if (!value || length > MAX_SUBMITTER_LENGTH || seen.has(key)) continue
+    if (picked.length === MAX_SUBMITTERS) break
+    seen.add(key)
+    picked.push(value)
+  }
+  return picked
 }
 
 export function DashboardPage() {
@@ -198,11 +232,25 @@ export function DashboardPage() {
   const versionParam = searchParams.getAll('version').sort().join(',')
   const labelParam = searchParams.getAll('label').sort().join(',')
   const excludeLabelParam = searchParams.getAll('exclude_label').sort().join(',')
+  const { submitters, loading: submittersLoading } = useDashboardSubmitters()
   const metaTeams = useMemo(() => new Set(teamParam ? teamParam.split(',') : []), [teamParam])
   const metaTiers = useMemo(() => new Set(tierParam ? tierParam.split(',') : []), [tierParam])
   const metaVersions = useMemo(() => new Set(versionParam ? versionParam.split(',') : []), [versionParam])
   const metaLabels = useMemo(() => labelParam ? labelParam.split(',') : [], [labelParam])
   const metaExcludeLabels = useMemo(() => excludeLabelParam ? excludeLabelParam.split(',') : [], [excludeLabelParam])
+  const submittedBy = useMemo(
+    () => normalizeSubmitters(searchParams.getAll('submitted_by'), submitters),
+    [searchParams, submitters],
+  )
+
+  const setSubmittedBy = useCallback((values: string[]) => {
+    setSearchParams((prev) => {
+      const next = new URLSearchParams(prev)
+      next.delete('submitted_by')
+      for (const v of values) next.append('submitted_by', v)
+      return next
+    }, { replace: true })
+  }, [setSearchParams])
 
   const toggleMetaParam = useCallback((key: string, value: string) => {
     setSearchParams((prev) => {
@@ -256,10 +304,11 @@ export function DashboardPage() {
       next.delete('status')
       next.delete('review_status')
       next.delete('analysis_state')
+      next.delete('submitted_by')
       return next
     }, { replace: true })
   }, [setSearchParams])
-  const hasMetadataFilters = !!(metaTeams.size > 0 || metaTiers.size > 0 || metaVersions.size > 0 || metaLabels.length > 0 || metaExcludeLabels.length > 0 || selectedStatuses.size > 0 || reviewStatus !== 'all' || analysisState !== 'all')
+  const hasMetadataFilters = !!(metaTeams.size > 0 || metaTiers.size > 0 || metaVersions.size > 0 || metaLabels.length > 0 || metaExcludeLabels.length > 0 || submittedBy.length > 0 || selectedStatuses.size > 0 || reviewStatus !== 'all' || analysisState !== 'all')
   const { options: metadataOptions } = useMetadataOptions()
   const setDateRange = useCallback((from: string, to: string) => {
     setSearchParams((prev) => {
@@ -311,6 +360,7 @@ export function DashboardPage() {
       for (const v of metaVersions) params.append('version', v)
       for (const l of metaLabels) params.append('label', l)
       for (const l of metaExcludeLabels) params.append('exclude_label', l)
+      for (const s of submittedBy) params.append('submitted_by', s)
       // Push search/status/date filters to backend (SQL-level filtering)
       if (debouncedSearch) params.set('search', debouncedSearch)
       for (const s of selectedStatuses) params.append('status', s)
@@ -338,7 +388,7 @@ export function DashboardPage() {
         setLoading(false)
       }
     }
-  }, [metaTeams, metaTiers, metaVersions, metaLabels, metaExcludeLabels, debouncedSearch, selectedStatuses, dateFrom, dateTo, reviewStatus, analysisState, perPage, page])
+  }, [metaTeams, metaTiers, metaVersions, metaLabels, metaExcludeLabels, submittedBy, debouncedSearch, selectedStatuses, dateFrom, dateTo, reviewStatus, analysisState, perPage, page])
 
   const fetchJobsRef = useLatestRef(fetchJobs)
 
@@ -356,12 +406,12 @@ export function DashboardPage() {
   // Reset page when filters change (but not when page itself changes)
   const prevFiltersRef = useRef('')
   useEffect(() => {
-    const filterKey = [debouncedSearch, statusParam, reviewStatus, analysisState, perPage, dateFrom, dateTo, teamParam, tierParam, versionParam, labelParam, excludeLabelParam].join('|')
+    const filterKey = [debouncedSearch, statusParam, reviewStatus, analysisState, perPage, dateFrom, dateTo, teamParam, tierParam, versionParam, labelParam, excludeLabelParam, JSON.stringify(submittedBy)].join('|')
     if (prevFiltersRef.current && prevFiltersRef.current !== filterKey) {
       setPage(1)
     }
     prevFiltersRef.current = filterKey
-  }, [debouncedSearch, statusParam, reviewStatus, analysisState, perPage, dateFrom, dateTo, teamParam, tierParam, versionParam, labelParam, excludeLabelParam])
+  }, [debouncedSearch, statusParam, reviewStatus, analysisState, perPage, dateFrom, dateTo, teamParam, tierParam, versionParam, labelParam, excludeLabelParam, submittedBy])
 
   const sorted = useMemo(() => {
     const copy = [...jobs]
@@ -545,6 +595,17 @@ export function DashboardPage() {
             }
           />
           <SearchInput value={search} onChange={setSearch} placeholder="Filter jobs..." className="w-full sm:w-64" />
+          <SearchableMultiSelect
+            label="Submitted by"
+            values={submittedBy}
+            options={submitters.map((value) => ({ value }))}
+            loading={submittersLoading}
+            // Picked options are exact names; a typed term is a partial one and
+            // the server matches substrings, so both work from one control.
+            allowCustom
+            onChange={setSubmittedBy}
+            className="w-full sm:w-48"
+          />
           <MetadataDropdowns
             options={metadataOptions}
             teams={metaTeams}

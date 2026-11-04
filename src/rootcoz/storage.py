@@ -967,6 +967,8 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_results_created_at "
             "ON results (created_at DESC)"
         )
+        # Submitter enumeration goes through this expression index, never per-row JSON.
+        await db.execute(_SUBMITTED_BY_INDEX_SQL)
 
         # failure_history: denormalized table for fast history queries
         await db.execute("""
@@ -3105,6 +3107,52 @@ async def add_graft_estimated_tokens_saved(job_id: str, tokens: int) -> None:
         await db.commit()
 
 
+# Single source of the submitted_by JSON path. The json_valid guard lives inside the
+# constant so every use (filter, enumeration, ownership lookup) is safe on bad rows,
+# and it stays table-alias free so the enumeration matches the expression index below.
+_SUBMITTED_BY_RAW_SQL = (
+    "CASE WHEN json_valid(result_json) "
+    "THEN trim(json_extract(result_json, '$.request_params.submitted_by')) END"
+)
+# Folding happens only in SQL: SQLite lower() is ASCII-only, so a Python lower()
+# would make a non-ASCII name unmatchable against its own rows.
+_SUBMITTED_BY_SQL = f"lower({_SUBMITTED_BY_RAW_SQL})"
+# The picker lists every stored name, and this index lets it do so without decoding
+# result JSON per row: DISTINCT reads the index alone. Only the enumeration uses it —
+# a LIKE '%name%' filter cannot (no index can narrow an unanchored substring match).
+_SUBMITTED_BY_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_results_submitted_by "
+    f"ON results ({_SUBMITTED_BY_RAW_SQL})"
+)
+_SUBMITTER_LIST_SQL = (
+    f"SELECT DISTINCT {_SUBMITTED_BY_RAW_SQL} AS name FROM results "
+    f"WHERE {_SUBMITTED_BY_RAW_SQL} IS NOT NULL"
+)
+
+
+def _ascii_fold(value: str) -> str:
+    """Fold a name the way SQLite ``lower()`` does: ASCII only.
+
+    Python's ``str.lower()`` lowers non-ASCII too, which would merge ``Änne``
+    and ``änne`` — two names the SQL fold keeps apart — and hide one of them.
+    """
+    return "".join(chr(ord(ch) + 32) if "A" <= ch <= "Z" else ch for ch in value)
+
+
+def _submitted_by_predicate(values: set[str]) -> tuple[str, list[str]]:
+    """Build a LIKE-any predicate for submitted_by values, folded in SQL."""
+    patterns: list[str] = []
+    for value in sorted(values):
+        trimmed = value.strip()
+        # Escape the LIKE metacharacters, backslash first so it cannot eat the rest.
+        escaped = trimmed.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        patterns.append(f"%{escaped}%")
+    clause = " OR ".join(
+        f"{_SUBMITTED_BY_SQL} LIKE lower(?) ESCAPE '\\'" for _ in patterns
+    )
+    return f"({clause})", patterns
+
+
 async def get_job_submitters(job_ids: list[str]) -> dict[str, str]:
     """Return {job_id: submitted_by} for multiple jobs in one query."""
     if not job_ids:
@@ -3112,8 +3160,8 @@ async def get_job_submitters(job_ids: list[str]) -> dict[str, str]:
     placeholders = ", ".join("?" for _ in job_ids)
     async with _connect_db() as db:
         cursor = await db.execute(
-            f"SELECT job_id, json_extract(result_json, '$.request_params.submitted_by') as submitter "
-            f"FROM results WHERE job_id IN ({placeholders})",
+            f"SELECT job_id, {_SUBMITTED_BY_RAW_SQL} as submitter "
+            f"FROM results r WHERE r.job_id IN ({placeholders})",
             job_ids,
         )
         rows = await cursor.fetchall()
@@ -4611,6 +4659,7 @@ async def list_results_for_dashboard_filtered(
     date_to: str = "",
     review_status: str = "all",
     analysis_state: str = "",
+    submitters: set[str] | None = None,
     limit: int = DEFAULT_DASHBOARD_LIMIT,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -4626,6 +4675,10 @@ async def list_results_for_dashboard_filtered(
         status: Filter by status values.
         date_from: ISO date string for start of range (inclusive).
         date_to: ISO date string for end of range (inclusive, end-of-day).
+        review_status: Filter by review state (all, reviewed, not_reviewed).
+        analysis_state: Filter by analysis state, empty = all.
+        submitters: Case-insensitive (ASCII) substring match on submitted_by;
+            ``None`` or an empty set means no filter.
         limit: Max results. 0 = no limit.
         offset: Rows to skip.
 
@@ -4708,6 +4761,11 @@ async def list_results_for_dashboard_filtered(
         conditions.append(f"(r.job_name IS NULL OR r.job_name NOT IN ({placeholders}))")
         params.extend(exclude_list)
 
+    if submitters:
+        clause, like_params = _submitted_by_predicate(submitters)
+        conditions.append(clause)
+        params.extend(like_params)
+
     where = " WHERE " + " AND ".join(conditions) if conditions else ""
 
     async with _connect_db() as db:
@@ -4732,6 +4790,44 @@ async def list_results_for_dashboard_filtered(
         cursor = await db.execute(sql, fetch_params)
         rows = await cursor.fetchall()
         return {"jobs": [_parse_dashboard_row(row) for row in rows], "total": total}
+
+
+# The dashboard endpoint caps one submitted_by value at this many characters. The
+# constant lives here because storage also drops over-long historical values from the
+# picker; main.py validates new input against the same number.
+MAX_SUBMITTED_BY_LENGTH = 64
+
+
+async def list_dashboard_submitters() -> list[str]:
+    """Return the distinct submitted_by names shown on the dashboard.
+
+    Every stored name is listed — no row window, so an old name is never dropped
+    from the picker. Names are deduped on the same ASCII fold the filter uses (so
+    ``Yuli``/``yuli`` collapse to one option), blank and over-long values are
+    dropped, and the result is sorted case-insensitively. DISTINCT is answered by
+    ``idx_results_submitted_by``, so no result JSON is decoded per row.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(_SUBMITTER_LIST_SQL)
+        rows = await cursor.fetchall()
+    picked: dict[str, str] = {}
+    dropped = 0
+    for row in rows:
+        name = row["name"]
+        if not name:
+            continue
+        if len(name) > MAX_SUBMITTED_BY_LENGTH:
+            dropped += 1
+            continue
+        # First spelling in BINARY order wins, the same choice MIN() made.
+        picked.setdefault(_ascii_fold(name), name)
+    if dropped:
+        logger.debug(
+            "Skipped %d stored submitted_by value(s) longer than %d characters",
+            dropped,
+            MAX_SUBMITTED_BY_LENGTH,
+        )
+    return sorted(picked.values(), key=_ascii_fold)
 
 
 async def get_parent_job_name_for_test(test_name: str, job_id: str = "") -> str:
