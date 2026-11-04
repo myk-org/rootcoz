@@ -483,7 +483,7 @@ helm<span class="w"> </span><span class="nb">test</span><span class="w"> </span>
 <p>For clusters that scrape nothing, the chart can run its own check: a CronJob that curls <code>/metrics</code> on a schedule and posts one Slack message listing every failing check (unhealthy, error rate above the threshold, <code>/data</code> above the warning or critical threshold with absolute sizes such as <code>5.4G / 6.0G (90%)</code>).</p>
 <div class="highlight"><pre><span></span><code><span class="nt">alerts</span><span class="p">:</span>
 <span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-<span class="w">  </span><span class="c1"># Adopt an existing cluster-only CronJob instead of creating a second one</span>
+<span class="w">  </span><span class="c1"># Reuse the existing name you are adopting (see the naming note below)</span>
 <span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rootcoz-prod-health-alerts</span>
 <span class="w">  </span><span class="nt">envLabel</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">prod</span>
 <span class="w">  </span><span class="nt">schedule</span><span class="p">:</span><span class="w"> </span><span class="s">"*/5</span><span class="nv"> </span><span class="s">*</span><span class="nv"> </span><span class="s">*</span><span class="nv"> </span><span class="s">*</span><span class="nv"> </span><span class="s">*"</span>
@@ -495,8 +495,15 @@ helm<span class="w"> </span><span class="nb">test</span><span class="w"> </span>
 <p>The webhook is read from the release's credentials Secret under the key named by <code>alerts.slackSecretKey</code> (<code>SLACK_WEBHOOK_URL</code> by default). That key is optional: with it unset the job still schedules and prints the message into its own log instead of posting, so an alerting path that was never wired up stays quiet instead of crash-looping. <strong>A webhook saved in Server Settings does not reach this CronJob</strong> — the job runs outside the application and can only see the Secret, so the two must be configured separately.</p>
 <ul>
 <li><code>alerts.enabled</code> defaults to <code>false</code>; nothing renders unless you turn it on.</li>
-<li>Set <code>alerts.name</code> to the name of an existing CronJob to adopt it. Left empty, the chart creates <code>&lt;fullname&gt;-health-alerts</code>, which sits next to a cluster-only CronJob rather than replacing it.</li>
-<li>Pin <code>alerts.image</code> by digest for production. The default <code>curlimages/curl:8.12.1</code> is a tag, and the job runs with <code>automountServiceAccountToken: false</code> because it only needs to reach the application Service.</li>
+<li>Set <code>alerts.name</code> to the name of an existing CronJob to reuse that name. A name override is <strong>not</strong> adoption: Helm only manages an object that carries its ownership metadata, so an existing <code>rootcoz-prod-health-alerts</code> without it makes <code>helm upgrade</code> fail with <code>invalid ownership metadata</code>. Adopt it by adding the metadata first, or delete the CronJob and let the chart recreate it:</li>
+</ul>
+<p><code>bash
+  kubectl -n rootcoz label cronjob rootcoz-prod-health-alerts app.kubernetes.io/managed-by=Helm
+  kubectl -n rootcoz annotate cronjob rootcoz-prod-health-alerts \
+    meta.helm.sh/release-name=rootcoz meta.helm.sh/release-namespace=rootcoz</code></p>
+<p>Left empty, the chart creates <code>&lt;fullname&gt;-health-alerts</code>, which sits next to a cluster-only CronJob rather than replacing it. Both names are bounded (CronJob 52 characters, script ConfigMap 63), so a long release name cannot produce an object the API server rejects.</p>
+<ul>
+<li>Pin <code>alerts.image</code> by digest for production. The default <code>curlimages/curl:8.12.1</code> is a tag, and the job runs with <code>automountServiceAccountToken: false</code> because it only needs to reach the application Service. The pod pulls the image with the release's <code>imagePullSecrets</code>, the same ones the application Deployment uses.</li>
 <li>Deploy the alert before or after the image that carries the PVC gauges: when the ratio line is absent the disk check is skipped silently, and the health and error-rate checks keep working.</li>
 </ul>
 <h2 id="troubleshooting">Troubleshooting</h2>

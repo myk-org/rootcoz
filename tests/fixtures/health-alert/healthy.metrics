@@ -10,4 +10,4 @@ rootcoz_pvc_used_bytes 644245094
 # TYPE rootcoz_pvc_capacity_bytes gauge
 rootcoz_pvc_capacity_bytes 6442450944
 # TYPE rootcoz_pvc_used_ratio gauge
-rootcoz_pvc_used_ratio 0.1
+rootcoz_pvc_used_ratio 0.1000

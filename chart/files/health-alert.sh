@@ -94,13 +94,22 @@ if [ -z "$metrics" ]; then
   exit 0
 fi
 
+# A non-empty 200 is not proof of metrics: a login page or proxy error page served
+# from a wrong URL parses as "no samples", which would silence every check below.
+# rootcoz_error_rate is always exported, so its absence means this is not a
+# rootcoz /metrics body — say so loudly instead of staying quiet.
+if [ -z "$(metric "$metrics" rootcoz_error_rate)" ]; then
+  post "🔴 $ENV_LABEL: metrics endpoint returned no rootcoz metrics"
+  exit 0
+fi
+
 health=$(metric "$metrics" rootcoz_health_up)
 if [ -n "$health" ] && [ "$health" = "0" ]; then
   add_line "🔴 health: unhealthy"
 fi
 
 rate=$(metric "$metrics" rootcoz_error_rate)
-if [ -n "$rate" ] && gt "$rate" "$(percent "$ERROR_RATE_PERCENT")"; then
+if gt "$rate" "$(percent "$ERROR_RATE_PERCENT")"; then
   add_line "⚠️ error rate $(awk -v r="$rate" 'BEGIN { printf "%.2f", r * 100 }')% (threshold ${ERROR_RATE_PERCENT}%)"
 fi
 

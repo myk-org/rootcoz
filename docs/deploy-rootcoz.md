@@ -271,7 +271,7 @@ For clusters that scrape nothing, the chart can run its own check: a CronJob tha
 ```yaml
 alerts:
   enabled: true
-  # Adopt an existing cluster-only CronJob instead of creating a second one
+  # Reuse the existing name you are adopting (see the naming note below)
   name: rootcoz-prod-health-alerts
   envLabel: prod
   schedule: "*/5 * * * *"
@@ -283,8 +283,16 @@ alerts:
 The webhook is read from the release's credentials Secret under the key named by `alerts.slackSecretKey` (`SLACK_WEBHOOK_URL` by default). That key is optional: with it unset the job still schedules and prints the message into its own log instead of posting, so an alerting path that was never wired up stays quiet instead of crash-looping. **A webhook saved in Server Settings does not reach this CronJob** — the job runs outside the application and can only see the Secret, so the two must be configured separately.
 
 - `alerts.enabled` defaults to `false`; nothing renders unless you turn it on.
-- Set `alerts.name` to the name of an existing CronJob to adopt it. Left empty, the chart creates `<fullname>-health-alerts`, which sits next to a cluster-only CronJob rather than replacing it.
-- Pin `alerts.image` by digest for production. The default `curlimages/curl:8.12.1` is a tag, and the job runs with `automountServiceAccountToken: false` because it only needs to reach the application Service.
+- Set `alerts.name` to the name of an existing CronJob to reuse that name. A name override is **not** adoption: Helm only manages an object that carries its ownership metadata, so an existing `rootcoz-prod-health-alerts` without it makes `helm upgrade` fail with `invalid ownership metadata`. Adopt it by adding the metadata first, or delete the CronJob and let the chart recreate it:
+
+  ```bash
+  kubectl -n rootcoz label cronjob rootcoz-prod-health-alerts app.kubernetes.io/managed-by=Helm
+  kubectl -n rootcoz annotate cronjob rootcoz-prod-health-alerts \
+    meta.helm.sh/release-name=rootcoz meta.helm.sh/release-namespace=rootcoz
+  ```
+
+  Left empty, the chart creates `<fullname>-health-alerts`, which sits next to a cluster-only CronJob rather than replacing it. Both names are bounded (CronJob 52 characters, script ConfigMap 63), so a long release name cannot produce an object the API server rejects.
+- Pin `alerts.image` by digest for production. The default `curlimages/curl:8.12.1` is a tag, and the job runs with `automountServiceAccountToken: false` because it only needs to reach the application Service. The pod pulls the image with the release's `imagePullSecrets`, the same ones the application Deployment uses.
 - Deploy the alert before or after the image that carries the PVC gauges: when the ratio line is absent the disk check is skipped silently, and the health and error-rate checks keep working.
 
 ## Troubleshooting

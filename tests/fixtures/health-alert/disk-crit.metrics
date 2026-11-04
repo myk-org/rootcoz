@@ -2,4 +2,4 @@ rootcoz_health_up 1
 rootcoz_error_rate 0
 rootcoz_pvc_used_bytes 5798205850
 rootcoz_pvc_capacity_bytes 6442450944
-rootcoz_pvc_used_ratio 0.9
+rootcoz_pvc_used_ratio 0.9000

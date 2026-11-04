@@ -3,7 +3,7 @@
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: {{ include "rootcoz.fullname" . }}-health-alerts-script
+  name: {{ include "rootcoz.healthAlertsConfigMapName" . }}
   labels:
     {{- include "rootcoz.labels" . | nindent 4 }}
 data:
@@ -13,7 +13,7 @@ data:
 apiVersion: batch/v1
 kind: CronJob
 metadata:
-  name: {{ .Values.alerts.name | default (printf "%s-health-alerts" (include "rootcoz.fullname" .)) }}
+  name: {{ include "rootcoz.healthAlertsCronJobName" . }}
   labels:
     {{- include "rootcoz.labels" . | nindent 4 }}
 spec:
@@ -30,6 +30,10 @@ spec:
           labels:
             {{- include "rootcoz.labels" . | nindent 12 }}
         spec:
+          {{- with .Values.imagePullSecrets }}
+          imagePullSecrets:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
           restartPolicy: Never
           serviceAccountName: {{ include "rootcoz.serviceAccountName" . }}
           # The job only curls the application Service; it never calls the API
@@ -69,5 +73,5 @@ spec:
           volumes:
             - name: script
               configMap:
-                name: {{ include "rootcoz.fullname" . }}-health-alerts-script
+                name: {{ include "rootcoz.healthAlertsConfigMapName" . }}
 {{- end }}

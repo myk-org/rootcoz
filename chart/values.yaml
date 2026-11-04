@@ -164,9 +164,14 @@ tests:
 alerts:
   # Opt-in: enabling it creates the CronJob and its script ConfigMap.
   enabled: false
-  # CronJob name override. Set it to adopt an existing cluster-only CronJob
-  # (e.g. rootcoz-prod-health-alerts) instead of creating a second one;
-  # empty means <fullname>-health-alerts.
+  # CronJob name override, truncated to 52 chars (the Job controller appends 11).
+  # Empty means <fullname>-health-alerts. Overriding the name does NOT adopt an
+  # existing cluster-only CronJob: adoption is Helm ownership metadata, and a name
+  # alone leaves the helm upgrade failing with `invalid ownership metadata`.
+  # Adopt one by adding that metadata to it first (or just delete it), e.g.
+  #   kubectl -n rootcoz label cronjob rootcoz-prod-health-alerts app.kubernetes.io/managed-by=Helm
+  #   kubectl -n rootcoz annotate cronjob rootcoz-prod-health-alerts \
+  #     meta.helm.sh/release-name=rootcoz meta.helm.sh/release-namespace=rootcoz
   name: ""
   # Cron expression for the scrape
   schedule: "*/5 * * * *"

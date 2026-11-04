@@ -90,6 +90,27 @@ ADMIN_KEY,GEMINI_API_KEY,ANTHROPIC_API_KEY,CURSOR_API_KEY,DATADOG_API_KEY,DATADO
 {{- end }}
 
 {{/*
+Health-alert CronJob name, bounded to 52 chars: the Job controller appends an
+11-char suffix to the name of the Job it creates from the CronJob. A name
+override is truncated as given; the derived name keeps its suffix (38 + 14).
+*/}}
+{{- define "rootcoz.healthAlertsCronJobName" -}}
+{{- if .Values.alerts.name }}
+{{- .Values.alerts.name | trunc 52 | trimSuffix "-" }}
+{{- else }}
+{{- printf "%s-health-alerts" (include "rootcoz.fullname" . | trunc 38 | trimSuffix "-") }}
+{{- end }}
+{{- end }}
+
+{{/*
+Health-alert script ConfigMap name, bounded to 63 chars including the suffix
+(42 + 21).
+*/}}
+{{- define "rootcoz.healthAlertsConfigMapName" -}}
+{{- printf "%s-health-alerts-script" (include "rootcoz.fullname" . | trunc 42 | trimSuffix "-") }}
+{{- end }}
+
+{{/*
 Validate chart values: routing, AI config.
 */}}
 {{- define "rootcoz.validate" -}}

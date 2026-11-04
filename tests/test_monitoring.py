@@ -840,11 +840,11 @@ class TestHealthEndpointIntegration:
 
         assert observed.get("off_loop") is True
         assert response.status_code == 200
-        assert "rootcoz_pvc_used_ratio 0.25" in response.text
+        assert "rootcoz_pvc_used_ratio 0.2500" in response.text
 
     def test_stuck_probe_times_out_and_leaves_the_shared_pool_free(self, test_client):
-        # Bound the wait: a genuinely-forever probe parks the interpreter at exit
-        # (ThreadPoolExecutor joins its workers) and would hang the suite.
+        # Bound the wait: the probe runs on its own daemon thread, which is never
+        # joined at exit, so release it instead of leaving a 5 s block behind.
         release = threading.Event()
 
         def stuck_probe(db_path):
@@ -864,8 +864,8 @@ class TestHealthEndpointIntegration:
             assert "rootcoz_pvc_" not in response.text
             # The 2 s probe timeout, not the probe's own 5 s block, ended the scrape.
             assert elapsed < 4
-            # The hung probe is parked in its own pool; the shared default pool
-            # still serves other asyncio.to_thread callers on the app loop.
+            # The hung probe is parked on its own daemon thread; the shared default
+            # pool still serves other asyncio.to_thread callers on the app loop.
             assert test_client.portal.call(unrelated_to_thread) == 42
         finally:
             release.set()

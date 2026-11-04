@@ -234,7 +234,7 @@ An optional CronJob scrapes `/metrics` on a schedule and posts one Slack message
 ```yaml
 alerts:
   enabled: true
-  name: rootcoz-prod-health-alerts  # adopt an existing cluster-only CronJob
+  name: rootcoz-prod-health-alerts  # reuse the existing name you adopt (see Naming)
   envLabel: prod
   schedule: "*/5 * * * *"
   errorRatePercent: 5
@@ -245,7 +245,7 @@ alerts:
 | Value | Default | Meaning |
 | --- | --- | --- |
 | `alerts.enabled` | `false` | Render the CronJob and its script ConfigMap |
-| `alerts.name` | `""` | CronJob name; empty means `<fullname>-health-alerts` |
+| `alerts.name` | `""` | CronJob name, truncated to 52 chars; empty means `<fullname>-health-alerts` |
 | `alerts.schedule` | `*/5 * * * *` | Cron expression |
 | `alerts.envLabel` | `""` | Message prefix; empty means `<fullname>` |
 | `alerts.metricsUrl` | `""` | Metrics URL; empty means `http://<fullname>:8000/metrics` |
@@ -259,7 +259,17 @@ alerts:
 Things to know before turning it on:
 
 - **The webhook comes from the Secret, not from Server Settings.** `SLACK_WEBHOOK_URL` saved in the UI drives only the in-process alerts; the CronJob cannot read the database. Without the Secret key the job still schedules and prints the message into the job log — it never crash-loops, and it never posts.
-- **Naming.** The live `rootcoz-prod-health-alerts` / `rootcoz-dev-health-alerts` CronJobs predate this chart. Set `alerts.name` to the existing name to adopt it; leaving it empty creates `<fullname>-health-alerts` as a second CronJob.
+- **Naming.** The live `rootcoz-prod-health-alerts` / `rootcoz-dev-health-alerts` CronJobs predate this chart. Leaving `alerts.name` empty creates `<fullname>-health-alerts` as a second CronJob. Setting `alerts.name` to an existing name is **not** adoption: Helm only takes over an object that carries its ownership metadata, so `helm upgrade` fails with `invalid ownership metadata` if the CronJob exists without it. Adopt it by adding that metadata first (or delete the CronJob and let the chart recreate it):
+
+  ```bash
+  kubectl -n rootcoz label cronjob rootcoz-prod-health-alerts app.kubernetes.io/managed-by=Helm
+  kubectl -n rootcoz annotate cronjob rootcoz-prod-health-alerts \
+    meta.helm.sh/release-name=rootcoz meta.helm.sh/release-namespace=rootcoz
+  ```
+
+  Both names are bounded — CronJob 52 characters (the Job controller appends an 11-character suffix), script ConfigMap 63 — so a long release name cannot produce an object the API server rejects.
+- **The image is pulled with `imagePullSecrets`.** The CronJob pod uses the same `imagePullSecrets` as the application Deployment, so a mirrored alert image in a private registry pulls with the credentials already configured for the app.
+- **A wrong URL fails loudly.** A non-empty response that is not rootcoz metrics (a login page, a proxy error page) is reported as `metrics endpoint returned no rootcoz metrics` instead of silencing every check.
 - **The disk check is the newest part.** When `/metrics` has no `rootcoz_pvc_used_ratio` (an image older than the gauges, or a failing filesystem probe) the disk check is skipped silently and the health and error-rate checks still run.
 - The job needs no cluster permissions: the pod sets `automountServiceAccountToken: false` and only curls the application Service.
 

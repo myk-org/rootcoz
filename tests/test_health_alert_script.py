@@ -86,6 +86,14 @@ class TestHealthAlertScript:
         assert result.returncode == 0
         assert "/metrics unreachable" in result.stdout
 
+    def test_non_metrics_body_is_loud_instead_of_silent(self):
+        """A login or proxy error page at a wrong URL must not silence every check."""
+        result = run_script(metrics_file=str(FIXTURES / "not-metrics.metrics"))
+        assert result.returncode == 0
+        assert result.stdout.strip() == (
+            "🔴 test: metrics endpoint returned no rootcoz metrics"
+        )
+
     def test_payload_escapes_control_characters(self, tmp_path):
         """A tab in a value must not produce invalid JSON for the webhook."""
         bindir = tmp_path / "bin"

@@ -12,6 +12,7 @@ import logging
 import logging.handlers
 import math
 import os
+import queue
 import re
 import sqlite3
 import threading
@@ -28,9 +29,9 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
-from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
 from urllib.parse import quote as _urlquote
@@ -12316,11 +12317,28 @@ async def admin_get_component_versions(request: Request) -> dict[str, Any]:
     return strip_sensitive_from_response({"components": await get_component_versions()})
 
 
-# Dedicated single-worker pool for the /metrics filesystem probe. A timeout cancels
-# the await, not the thread: a hung mount permanently parks this one probe thread, so
-# later scrapes each pay the 2 s timeout and abandoned work items accumulate in the dead
-# queue (~one small object per scrape) — but nothing else in the process is affected.
-_pvc_probe_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pvc-probe")
+# Dedicated daemon worker for the /metrics filesystem probe. It is not a
+# ThreadPoolExecutor: the executor's workers are joined at interpreter exit, so a probe
+# stuck in a filesystem call (a hung mount) would block shutdown. A daemon thread is
+# never joined — the stuck probe simply dies with the process — and the bounded queue
+# means further scrapes skip the probe instead of piling up work behind it. A timeout
+# cancels the wait, not the probe, so later scrapes each pay the 2 s timeout until the
+# hung call returns.
+_pvc_probe_queue: queue.Queue[tuple[Callable[[], Any], list[Any]]] = queue.Queue(
+    maxsize=8
+)
+
+
+def _pvc_probe_worker() -> None:
+    while True:
+        func, box = _pvc_probe_queue.get()
+        try:
+            box.append(func())
+        except Exception:
+            logger.debug("PVC usage probe failed", exc_info=True)
+
+
+threading.Thread(target=_pvc_probe_worker, name="pvc-probe", daemon=True).start()
 
 
 @app.get("/metrics", operation_id="prometheusMetrics")
@@ -12353,10 +12371,12 @@ async def prometheus_metrics() -> Response:
     pvc_used_bytes: int | None = None
     pvc_capacity_bytes: int | None = None
     try:
+        box: list[Any] = []
+        _pvc_probe_queue.put_nowait((partial(read_pvc_usage, db_path), box))
         async with asyncio.timeout(2):
-            pvc = await asyncio.get_running_loop().run_in_executor(
-                _pvc_probe_executor, read_pvc_usage, db_path
-            )
+            while not box:
+                await asyncio.sleep(0.05)
+        pvc = box[0]
         if pvc is not None:
             pvc_used_bytes, pvc_capacity_bytes = pvc
     except Exception:

@@ -986,8 +986,9 @@ def render_prometheus_metrics(
                 "database directory that is used (0-1)."
             )
             lines.append("# TYPE rootcoz_pvc_used_ratio gauge")
+            # Fixed four decimals, so the exposition never prints a bare "0.25".
             lines.append(
-                f"rootcoz_pvc_used_ratio {round(pvc_used_bytes / pvc_capacity_bytes, 4)}"
+                f"rootcoz_pvc_used_ratio {pvc_used_bytes / pvc_capacity_bytes:.4f}"
             )
 
     lines.append("")
