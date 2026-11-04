@@ -190,6 +190,13 @@ commands = [
   [
     "sh",
     "-c",
+    # Two releases whose fullnames share the first 38 chars must not collide: the
+    # derived names carry a hash of the whole fullname, still within 52 / 63.
+    "P=$(awk 'BEGIN{for(i=0;i<38;i++) printf \"a\"}'); A=/tmp/rootcoz-alerts-shared-prefix-a-$$.yaml; B=/tmp/rootcoz-alerts-shared-prefix-b-$$.yaml; T='helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render --set alerts.enabled=true'; $T --set fullnameOverride=$P-one > $A 2>&1 && $T --set fullnameOverride=$P-two > $B 2>&1 && CJA=$(grep -oE '^  name: .*-health-alerts$' $A | awk '{print $2}') && CJB=$(grep -oE '^  name: .*-health-alerts$' $B | awk '{print $2}') && CMA=$(grep -oE '^  name: .*-health-alerts-script$' $A | awk '{print $2}') && CMB=$(grep -oE '^  name: .*-health-alerts-script$' $B | awk '{print $2}') && [ -n \"$CJA\" ] && [ -n \"$CJB\" ] && [ \"$CJA\" != \"$CJB\" ] && [ -n \"$CMA\" ] && [ -n \"$CMB\" ] && [ \"$CMA\" != \"$CMB\" ] && [ ${#CJA} -le 52 ] && [ ${#CJB} -le 52 ] && [ ${#CMA} -le 63 ] && [ ${#CMB} -le 63 ] && rm -f $A $B",  # pragma: allowlist secret
+  ],
+  [
+    "sh",
+    "-c",
     "! helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'kind: CronJob'",  # pragma: allowlist secret
   ],
 ]

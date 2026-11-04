@@ -12,13 +12,12 @@ import logging
 import logging.handlers
 import math
 import os
-import queue
 import re
 import sqlite3
 import threading
 import time as _time
 import uuid
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from collections.abc import (
     AsyncIterator,
     Awaitable,
@@ -12320,21 +12319,31 @@ async def admin_get_component_versions(request: Request) -> dict[str, Any]:
 # Dedicated daemon worker for the /metrics filesystem probe. It is not a
 # ThreadPoolExecutor: the executor's workers are joined at interpreter exit, so a probe
 # stuck in a filesystem call (a hung mount) would block shutdown. A daemon thread is
-# never joined — the stuck probe simply dies with the process — and the bounded queue
-# means further scrapes skip the probe instead of piling up work behind it. A timeout
-# cancels the wait, not the probe, so later scrapes each pay the 2 s timeout until the
-# hung call returns.
-_pvc_probe_queue: queue.Queue[tuple[Callable[[], Any], list[Any]]] = queue.Queue(
-    maxsize=8
-)
+# never joined — the stuck probe simply dies with the process — and the single-slot
+# mailbox means a timed-out scrape never leaves work queued behind it: a new scrape
+# overwrites the pending request, so the worker only ever runs the most recent one. A
+# timeout cancels the wait, not the probe, so later scrapes each pay the 2 s timeout
+# until the hung call returns.
+_PVC_PROBE_TIMEOUT_SECONDS = 2.0
+_pvc_probe_mailbox: deque[tuple[Callable[[], Any], list[Any]]] = deque(maxlen=1)
+# Wakes the worker; deque.append/popleft are atomic, so no other lock is needed.
+_pvc_probe_ready = threading.Event()
 
 
 def _pvc_probe_worker() -> None:
     while True:
-        func, box = _pvc_probe_queue.get()
+        _pvc_probe_ready.wait()
+        _pvc_probe_ready.clear()
+        try:
+            func, box = _pvc_probe_mailbox.popleft()
+        except IndexError:
+            continue
         try:
             box.append(func())
         except Exception:
+            # A result must land in the box either way, or the scrape waits out its
+            # whole timeout for a worker that is already done.
+            box.append(None)
             logger.debug("PVC usage probe failed", exc_info=True)
 
 
@@ -12372,10 +12381,17 @@ async def prometheus_metrics() -> Response:
     pvc_capacity_bytes: int | None = None
     try:
         box: list[Any] = []
-        _pvc_probe_queue.put_nowait((partial(read_pvc_usage, db_path), box))
-        async with asyncio.timeout(2):
-            while not box:
-                await asyncio.sleep(0.05)
+        request = (partial(read_pvc_usage, db_path), box)
+        _pvc_probe_mailbox.append(request)
+        _pvc_probe_ready.set()
+        try:
+            async with asyncio.timeout(_PVC_PROBE_TIMEOUT_SECONDS):
+                while not box:
+                    await asyncio.sleep(0.05)
+        finally:
+            # Withdraw an abandoned request so the worker does not run it later.
+            with contextlib.suppress(ValueError):
+                _pvc_probe_mailbox.remove(request)
         pvc = box[0]
         if pvc is not None:
             pvc_used_bytes, pvc_capacity_bytes = pvc

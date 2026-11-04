@@ -846,27 +846,53 @@ class TestHealthEndpointIntegration:
         # Bound the wait: the probe runs on its own daemon thread, which is never
         # joined at exit, so release it instead of leaving a 5 s block behind.
         release = threading.Event()
+        calls: list[str] = []
 
         def stuck_probe(db_path):
+            calls.append("stuck")
             release.wait(5)
             return (1, 2)
+
+        def healthy_probe(db_path):
+            calls.append("healthy")
+            return (1000, 4000)
 
         async def unrelated_to_thread():
             return await asyncio.to_thread(lambda: 42)
 
         try:
-            with patch("rootcoz.main.read_pvc_usage", stuck_probe):
+            with (
+                patch("rootcoz.main._PVC_PROBE_TIMEOUT_SECONDS", 0.2),
+                patch("rootcoz.main.read_pvc_usage", stuck_probe),
+            ):
                 started = time.monotonic()
                 response = test_client.get("/metrics")
                 elapsed = time.monotonic() - started
 
-            assert response.status_code == 200
-            assert "rootcoz_pvc_" not in response.text
-            # The 2 s probe timeout, not the probe's own 5 s block, ended the scrape.
-            assert elapsed < 4
-            # The hung probe is parked on its own daemon thread; the shared default
-            # pool still serves other asyncio.to_thread callers on the app loop.
-            assert test_client.portal.call(unrelated_to_thread) == 42
+                assert response.status_code == 200
+                assert "rootcoz_pvc_" not in response.text
+                # The probe timeout, not the probe's own 5 s block, ended the scrape.
+                assert elapsed < 1
+                # The hung probe is parked on its own daemon thread; the shared default
+                # pool still serves other asyncio.to_thread callers on the app loop.
+                assert test_client.portal.call(unrelated_to_thread) == 42
+
+                # Two more scrapes abandon their probes while the mount is still hung.
+                for _ in range(2):
+                    assert "rootcoz_pvc_" not in test_client.get("/metrics").text
+
+                calls.clear()
+                release.set()
+                started = time.monotonic()
+                with patch("rootcoz.main.read_pvc_usage", healthy_probe):
+                    response = test_client.get("/metrics")
+                elapsed = time.monotonic() - started
+
+            # The mount is back: the next scrape reports real gauges promptly, and the
+            # abandoned probes were overwritten in the mailbox instead of replayed.
+            assert "rootcoz_pvc_used_ratio 0.2500" in response.text
+            assert elapsed < 1
+            assert calls == ["healthy"]
         finally:
             release.set()
 
