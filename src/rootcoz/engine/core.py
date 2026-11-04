@@ -2587,6 +2587,7 @@ def _expand_group_to_analyses(
     failures: list[FailedTest],
     analysis: AnalysisDetail,
     peer_debate: PeerDebate | None = None,
+    analysis_error: str = "",
 ) -> list[FailureAnalysis]:
     """Create FailureAnalysis objects for all failures in a group.
 
@@ -2597,6 +2598,9 @@ def _expand_group_to_analyses(
     must stay in step -- a per-failure field added here and not there is a
     signature assigned in one analysis and missing from the other -- so this is
     the only mapping from a grouped failure to its stored record.
+
+    *analysis_error* carries the reason a group has no diagnosis, so an
+    unclassified row explains itself instead of looking like an empty success.
     """
     return [
         FailureAnalysis(
@@ -2604,6 +2608,7 @@ def _expand_group_to_analyses(
             error=f.error_message,
             stack_trace=f.stack_trace,
             analysis=analysis,
+            analysis_error=analysis_error,
             error_signature=get_legacy_signature(f),
             error_signature_v2=sig,
             peer_debate=peer_debate,

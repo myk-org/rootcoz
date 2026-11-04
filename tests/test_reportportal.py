@@ -657,6 +657,21 @@ class TestPushClassifications:
         issues = mock_session.put.call_args[1]["json"]["issues"]
         assert [i["issue"]["issueType"] for i in issues] == ["pb001", "ti001"]
 
+    def test_failed_batch_does_not_claim_defaulted_tests_were_pushed(self):
+        """A rejected batch pushed nothing, so nothing may be reported as pushed."""
+        client, mock_session = self._setup_push_client()
+        mock_session.put.side_effect = _requests.RequestException("RP API error")
+
+        failure = self._make_failure("", "no classification")
+        matched = [({"id": 303, "name": "test_defaulted"}, failure)]
+
+        result = client.push_classifications(
+            matched, "http://rootcoz.example.com/results/abc-123"
+        )
+        assert result["pushed"] == 0
+        assert result["errors"]
+        assert result["defaulted"] == []
+
     def test_push_with_jira_matches_as_external_issues(self):
         client = ReportPortalClient(
             url="http://rp.example.com", token="tok", project="proj"
@@ -718,8 +733,9 @@ class TestPushClassifications:
         assert result["pushed"] == 0
         assert len(result["errors"]) == 1
         assert "missing 'id'" in result["errors"][0]
-        # Not pushed, so it is genuinely unmatched -- never "defaulted".
-        assert result["unmatched"] == ["test_no_id (no Report Portal item id)"]
+        # The error names the item; `unmatched` is reserved for classifications
+        # RP has no defect type for, and nothing was defaulted either.
+        assert result["unmatched"] == []
         assert result["defaulted"] == []
         mock_session.put.assert_not_called()
 

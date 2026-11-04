@@ -7418,6 +7418,74 @@ class TestReAnalyzeFailure:
         assert failure["status"] == "FAILED"
 
     @pytest.mark.asyncio
+    async def test_successful_reanalysis_clears_stale_analysis_error(
+        self, test_client
+    ) -> None:
+        """A row that now has a classification must not keep its old reason."""
+        job_id = "job-reanalyze-clears-error"
+        stale = FailureAnalysis(
+            test_name="tests.TestReAnalyze.test_stale",
+            error="ValueError",
+            analysis=AnalysisDetail(),
+            analysis_error="AI analysis incomplete",
+        ).model_dump(mode="json")
+        await storage.save_result(
+            job_id,
+            "",
+            "completed",
+            {
+                "summary": "1 failure",
+                "failures": [stale],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "ai_provider": "claude",
+                        "ai_model": "opus",
+                        "submitted_by": "admin",
+                    }
+                ),
+            },
+        )
+
+        new_analysis = FailureAnalysis(
+            test_name=stale["test_name"],
+            error="ValueError",
+            analysis=AnalysisDetail(classification="CODE ISSUE"),
+        )
+        with (
+            patch(
+                "rootcoz.main.analyze_failure_group",
+                new_callable=AsyncMock,
+                return_value=[new_analysis],
+            ),
+            patch(
+                "rootcoz.main._create_ai_auth_header",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            patch("rootcoz.main.RepositoryManager"),
+        ):
+            response = test_client.post(f"/api/failures/{stale['id']}/re-analyze")
+            assert response.status_code == 202
+
+            import asyncio
+
+            for _ in range(50):
+                await asyncio.sleep(0.1)
+                stored = await storage.get_result(job_id)
+                failures = (stored or {}).get("result", {}).get("failures", [])
+                if (
+                    failures
+                    and failures[0].get("analysis", {}).get("classification")
+                    == "CODE ISSUE"
+                ):
+                    break
+
+        stored = await storage.get_result(job_id)
+        failure = stored["result"]["failures"][0]
+        assert failure["analysis"]["classification"] == "CODE ISSUE"
+        assert "analysis_error" not in failure
+
+    @pytest.mark.asyncio
     async def test_reanalyze_usage_isolated_by_attempt_and_child(
         self, test_client
     ) -> None:

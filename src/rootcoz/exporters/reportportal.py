@@ -702,8 +702,9 @@ class ReportPortalClient(Exporter):
             ``launch_id``. ``defaulted`` lists items whose classification maps
             to no RP defect type; they are still pushed with the neutral
             ``TO_INVESTIGATE`` locator, and each entry names that
-            classification. ``unmatched`` keeps only items that were genuinely
-            not pushed.
+            classification. ``unmatched`` keeps only entries that name a
+            classification RP has no defect type for -- an item that could not
+            be pushed at all is named in ``errors`` instead.
         """
         if not matched_pairs:
             return {
@@ -743,8 +744,8 @@ class ReportPortalClient(Exporter):
             item_id = rp_item.get("id")
             item_name = rp_item.get("name", "")
             if item_id is None:
-                # No id, no update: this one really was not pushed.
-                unmatched.append(f"{item_name} (no Report Portal item id)")
+                # No update target: the error names it, and `unmatched` stays
+                # reserved for classifications RP has no defect type for.
                 errors.append(f"RP item missing 'id' field ({item_name})")
                 continue
             if launch_id is None:
@@ -888,7 +889,9 @@ class ReportPortalClient(Exporter):
         return {
             "pushed": pushed,
             "unmatched": unmatched,
-            "defaulted": defaulted,
+            # A failed batch pushed nothing, so claiming these reached RP under
+            # TO_INVESTIGATE would be false; the failure is in `errors`.
+            "defaulted": defaulted if pushed else [],
             "errors": errors,
             "launch_id": launch_id,
         }

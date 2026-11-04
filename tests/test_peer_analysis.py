@@ -3179,12 +3179,69 @@ class TestOrchestratorEmptyFallback:
         assert len(results) == 1
         analysis = results[0].analysis
         assert analysis.classification == "PRODUCT BUG"
+        # The primary's narration is context for the peers, never the analysis.
+        assert "Now let me read the test source code" not in (analysis.details or "")
         # Classified by the peers: the row must not be reported as incomplete.
+        assert results[0].analysis_error == ""
         assert (
             storage.incomplete_failures(
                 {"failures": [r.model_dump(mode="json") for r in results]}
             )
             == []
+        )
+
+    @pytest.mark.asyncio
+    async def test_unclassified_group_keeps_the_incomplete_reason(self) -> None:
+        """A narration-only primary with no usable peer vote explains itself.
+
+        The narration is never stored as the analysis, and the row carries the
+        reason it has no diagnosis (#397).
+        """
+        from unittest.mock import AsyncMock
+
+        from rootcoz.engine.core import AnalysisIncompleteError
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
+
+        reason = "AI analysis incomplete: response has no usable classification"
+        mock_orchestrator = AsyncMock(
+            side_effect=AnalysisIncompleteError(
+                reason,
+                error_signature="sig123",
+                raw_text="Now let me read the test source code.",
+            )
+        )
+
+        async def mock_peer_call(
+            prompt,
+            *,
+            cwd=None,
+            ai_provider="",
+            ai_model="",
+            ai_call_timeout=None,
+            session_id=None,
+            **_kwargs,
+        ):
+            return AIResult(success=False, text="CLI error")
+
+        with (
+            patch("rootcoz.peer_analysis.run_single_ai_analysis", mock_orchestrator),
+            _patch_peer_ai_calls(mock_peer_call),
+        ):
+            results = await analyze_failure_group_with_peers(
+                failures=[_make_failure()],
+                console_context="console output",
+                repo_path=None,
+                main_ai_provider="claude",
+                main_ai_model="claude-sonnet-4-20250514",
+                peer_ai_configs=_peer_configs(),
+                max_rounds=1,
+            )
+
+        assert len(results) == 1
+        assert results[0].analysis.classification == ""
+        assert results[0].analysis_error == reason
+        assert "Now let me read the test source code" not in (
+            results[0].analysis.details or ""
         )
 
     @pytest.mark.asyncio

@@ -688,8 +688,8 @@ describe('AllReviewedPrompt', () => {
     expect(alert.textContent).toContain(
       '2 test(s) have no classification to map to a Report Portal defect type',
     )
-    // Nothing was pushed: the split is stated rather than left implicit
-    expect(alert.textContent).toContain('Pushed 0 · skipped 2')
+    // Nothing was pushed: there is no split to state, only the reason
+    expect(alert.textContent).not.toContain('Pushed 0')
     // The old copy blamed Report Portal matching for an analysis problem
     expect(alert.textContent).not.toContain('could not be matched')
     // The offending entries (they name the classification) on a second line

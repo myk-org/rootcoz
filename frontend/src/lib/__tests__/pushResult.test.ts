@@ -22,4 +22,23 @@ describe('unmatchedFailure', () => {
     expect(message).toContain('Pushed 3 · skipped 1')
     expect(detail).toBe('test-z (classification: UNKNOWN)')
   })
+
+  it('shows the split when pushed and skipped counts are equal', () => {
+    const { message } = unmatchedFailure(2, [
+      'test-a (classification: UNKNOWN)',
+      'test-b (classification: UNKNOWN)',
+    ])
+    expect(message).toContain('Pushed 2 · skipped 2')
+  })
+
+  it('states only the reason when nothing was pushed', () => {
+    const { message } = unmatchedFailure(0, [
+      'test-a (classification: UNKNOWN)',
+      'test-b (classification: UNKNOWN)',
+    ])
+    expect(message).not.toContain('Pushed 0')
+    expect(message).toContain(
+      '2 test(s) have no classification to map to a Report Portal defect type',
+    )
+  })
 })

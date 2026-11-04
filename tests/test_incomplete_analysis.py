@@ -303,6 +303,60 @@ class TestOverridesClearIncompleteness:
         resp = client.get("/api/results/incomplete", headers=_ADMIN_HEADERS)
         assert resp.json() == []
 
+    async def test_legacy_plain_text_analysis_gets_the_override(
+        self, client: TestClient, temp_db_path: Path
+    ) -> None:
+        """A legacy string analysis must not stay unclassified after an override.
+
+        The listing reads overrides directly, so the result payload has to show
+        the same effective classification -- or the report disagrees with it.
+        """
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.save_result(
+                job_id="job-1",
+                build_url="https://ci.example.com/job/example-job/7/",
+                status="completed",
+                result=_result_payload(
+                    [_failure("t1", analysis="free text legacy analysis")]
+                ),
+            )
+            await storage.override_classification(
+                job_id="job-1",
+                test_name="t1",
+                classification="CODE ISSUE",
+                username="alice",
+            )
+
+        resp = client.get("/results/job-1", headers=_ADMIN_HEADERS)
+        assert resp.status_code == 200
+        assert resp.json()["result"]["incomplete_count"] == 0
+        analysis = resp.json()["result"]["failures"][0]["analysis"]
+        assert analysis["classification"] == "CODE ISSUE"
+        # The legacy text is kept, just where a details field lives.
+        assert analysis["details"] == "free text legacy analysis"
+
+    async def test_listing_drops_the_legacy_job(
+        self, client: TestClient, temp_db_path: Path
+    ) -> None:
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.save_result(
+                job_id="job-1",
+                build_url="https://ci.example.com/job/example-job/7/",
+                status="completed",
+                result=_result_payload(
+                    [_failure("t1", analysis="free text legacy analysis")]
+                ),
+            )
+            await storage.override_classification(
+                job_id="job-1",
+                test_name="t1",
+                classification="CODE ISSUE",
+                username="alice",
+            )
+
+        resp = client.get("/api/results/incomplete", headers=_ADMIN_HEADERS)
+        assert resp.json() == []
+
 
 class TestListingScanIsBounded:
     async def _seed(self, temp_db_path: Path, count: int) -> None:

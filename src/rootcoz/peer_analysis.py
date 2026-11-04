@@ -514,6 +514,10 @@ async def analyze_failure_group_with_peers(
         f"Peer analysis: calling main AI ({main_ai_provider}/{main_ai_model}) "
         f"for failure group ({len(failures)} tests)"
     )
+    # Why the primary answer carried no analysis, when it didn't. Kept off the
+    # analysis/details fields and onto the rows that end up unclassified.
+    incomplete_reason = ""
+    primary_narration = ""
     try:
         parsed_analysis, error_signature = await run_single_ai_analysis(
             failures=failures,
@@ -535,13 +539,16 @@ async def analyze_failure_group_with_peers(
         # The main model narrated instead of answering. That is not a reason to
         # abort the debate: the peers can still classify the group, and
         # _peer_consensus_fallback needs their votes. Run with no primary
-        # analysis; its narration is still context for them.
+        # analysis; the narration is passed to the peers as context only --
+        # narration must never be stored as the group's analysis (#397).
         logger.warning(
             "Peer analysis: main AI produced no usable analysis (%s); "
             "letting the peers analyze the failure",
             exc,
         )
-        parsed_analysis = AnalysisDetail(details=exc.raw_text)
+        incomplete_reason = str(exc)
+        primary_narration = exc.raw_text
+        parsed_analysis = AnalysisDetail()
         error_signature = exc.error_signature
 
     # Compute other_groups_file path for peer/revision prompts
@@ -642,6 +649,11 @@ async def analyze_failure_group_with_peers(
                 f"Classification: {parsed_analysis.classification}\n"
                 f"Details: {parsed_analysis.details}"
             )
+            if primary_narration:
+                orchestrator_analysis_text += (
+                    "\nPrimary model narration (it gave no classification; "
+                    f"read it as context, do not store it): {primary_narration}"
+                )
 
             # Record orchestrator entry for this round
             all_rounds.append(
@@ -1145,6 +1157,12 @@ async def analyze_failure_group_with_peers(
     # Apply analysis to all failures in the group.
     # Shared with the non-peer path: all failures share the same v2 signature
     # (that's how they were grouped), and the anchor is per failure.
+    # A peer classification means the group has a diagnosis; without one the
+    # row keeps the reason it has none.
     return _expand_group_to_analyses(
-        error_signature, failures, parsed_analysis, peer_debate
+        error_signature,
+        failures,
+        parsed_analysis,
+        peer_debate,
+        analysis_error="" if parsed_analysis.classification else incomplete_reason,
     )

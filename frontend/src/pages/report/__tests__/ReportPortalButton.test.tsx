@@ -200,7 +200,8 @@ describe('ReportPortalButton', () => {
     expect(reason.textContent).toContain(
       '2 test(s) have no classification to map to a Report Portal defect type',
     )
-    expect(reason.textContent).toContain('Pushed 0 · skipped 2')
+    // Nothing was pushed, so there is no split to state
+    expect(reason.textContent).not.toContain('Pushed 0')
     expect(reason.textContent).not.toContain('could not be matched')
     expect(screen.queryByText(/could not be matched/i)).toBeNull()
     // The entries name the offending classification, on their own line

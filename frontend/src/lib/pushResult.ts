@@ -21,7 +21,9 @@ export function unmatchedFailure(
   const skipped = unmatched.length
   const reason = `${skipped} test(s) have no classification to map to a Report Portal defect type`
   // A partial push must be visible at a glance, not inferred from the sentence.
-  const message = pushed !== skipped ? `Pushed ${pushed} · skipped ${skipped} — ${reason}` : reason
+  // Only a real split counts: "Pushed 0" is not a push.
+  const isPartial = pushed > 0 && skipped > 0
+  const message = isPartial ? `Pushed ${pushed} · skipped ${skipped} — ${reason}` : reason
   return { message, detail: listDetail(unmatched) }
 }
 

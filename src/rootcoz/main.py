@@ -6630,11 +6630,19 @@ async def _apply_effective_classifications(
         if not test_name:
             return
         analysis = failure.get("analysis")
-        if not isinstance(analysis, dict):
-            return
         key = (test_name, child_job_name, child_build_number)
         effective = overrides.get(key)
         if not effective:
+            return
+        if not isinstance(analysis, dict):
+            # A legacy plain-text analysis carries no classification, so the
+            # override has nowhere to land. Materialise it here — otherwise the
+            # listing (which reads overrides directly) calls the failure
+            # complete while the report still shows it unclassified.
+            failure["analysis"] = {
+                "classification": effective,
+                "details": analysis if isinstance(analysis, str) else "",
+            }
             return
         current = analysis.get("classification", "")
         if effective == current:
@@ -7376,6 +7384,9 @@ async def _reanalyze_failure_background(
             # Remove running status and any previous error
             failure.pop("reanalysis_status", None)
             failure.pop("reanalysis_error", None)
+            # A successful re-analysis is a real diagnosis; the reason the row
+            # had none no longer applies.
+            failure.pop("analysis_error", None)
 
         await patch_result_json(job_id, _patch_success)
         logger.info(
@@ -7406,7 +7417,10 @@ async def _reanalyze_failure_background(
                 failure["reanalysis_error"] = error_msg
                 # analysis_error explains a *missing* analysis; a classified row
                 # keeps the analysis it already had.
-                if not (failure.get("analysis") or {}).get("classification"):
+                analysis = failure.get("analysis")
+                if not (
+                    analysis.get("classification") if isinstance(analysis, dict) else ""
+                ):
                     failure["analysis_error"] = error_msg
 
         try:
