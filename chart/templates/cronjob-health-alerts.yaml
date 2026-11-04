@@ -46,6 +46,16 @@ spec:
               image: {{ .Values.alerts.image | quote }}
               securityContext:
                 {{- include "rootcoz.containerSecurityContext" . | nindent 16 }}
+              resources:
+                # Small and equal on both sides: sh + curl need no burst room, and
+                # quota-enforced namespaces (LimitRange / ResourceQuota without
+                # defaults) reject containers without requests.
+                requests:
+                  cpu: 10m
+                  memory: 16Mi
+                limits:
+                  cpu: 10m
+                  memory: 16Mi
               command: ["/bin/sh", "/scripts/health-alert.sh"]
               env:
                 - name: METRICS_URL

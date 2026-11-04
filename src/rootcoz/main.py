@@ -12321,11 +12321,11 @@ async def admin_get_component_versions(request: Request) -> dict[str, Any]:
 # stuck in a filesystem call (a hung mount) would block shutdown. A daemon thread is
 # never joined — the stuck probe simply dies with the process — and the single-slot
 # mailbox means a timed-out scrape never leaves work queued behind it: a new scrape
-# overwrites the pending request, so the worker only ever runs the most recent one. A
+# displaces the pending request, so the worker only ever runs the most recent one. A
 # timeout cancels the wait, not the probe, so later scrapes each pay the 2 s timeout
 # until the hung call returns.
 _DATA_PROBE_TIMEOUT_SECONDS = 2.0
-_data_probe_mailbox: deque[tuple[Callable[[], Any], list[Any]]] = deque(maxlen=1)
+_data_probe_mailbox: deque[tuple[Callable[[], Any], list[Any]]] = deque()
 # Wakes the worker; deque.append/popleft are atomic, so no other lock is needed.
 _data_probe_ready = threading.Event()
 
@@ -12381,6 +12381,14 @@ async def prometheus_metrics() -> Response:
     data_capacity_bytes: int | None = None
     try:
         box: list[Any] = []
+        # Single slot: a displaced request is answered with None right away, otherwise
+        # its scrape waits out the whole timeout for a probe that will never run.
+        while _data_probe_mailbox:
+            try:
+                _, displaced_box = _data_probe_mailbox.popleft()
+            except IndexError:  # the worker took it first
+                break
+            displaced_box.append(None)
         request = (partial(read_data_usage, db_path), box)
         _data_probe_mailbox.append(request)
         _data_probe_ready.set()

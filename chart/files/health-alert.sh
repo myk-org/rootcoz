@@ -46,10 +46,10 @@ gt() {
   awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 > b + 0) }'
 }
 
-# JSON string body. Backslash, quote and the control characters that would
-# otherwise produce invalid JSON (a raw tab or CR makes Slack reject the
-# payload silently) — built per character because gsub replacement strings
-# cannot carry a literal backslash portably.
+# JSON string body. Backslash, quote and every character below U+0020, because a raw
+# control character (a tab, backspace or form feed from a configured label) makes the
+# body invalid JSON and Slack rejects the whole message silently — built per character
+# because gsub replacement strings cannot carry a literal backslash portably.
 json_escape() {
   awk '
     function esc(s,   out, i, c) {
@@ -58,13 +58,18 @@ json_escape() {
         c = substr(s, i, 1)
         if (c == "\\") out = out "\\\\"
         else if (c == "\"") out = out "\\\""
-        else if (c == "\t") out = out "\\t"
-        else if (c == "\r") out = out "\\r"
+        else if (c in ctrl) out = out ctrl[c]
         else out = out c
       }
       return out
     }
-    BEGIN { ORS = "" }
+    BEGIN {
+      ORS = ""
+      for (i = 1; i < 32; i++) ctrl[sprintf("%c", i)] = sprintf("\\u%04x", i)
+      # Short forms JSON also defines for these two.
+      ctrl["\t"] = "\\t"
+      ctrl["\r"] = "\\r"
+    }
     { if (NR > 1) printf "\\n"; printf "%s", esc($0) }
   '
 }

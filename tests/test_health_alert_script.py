@@ -36,6 +36,29 @@ def run_script(
     )
 
 
+def webhook_shim(tmp_path: Path) -> dict[str, str]:
+    """Env that sends the script's curl to a file dump instead of the network."""
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    shim = bindir / "curl"
+    shim.write_text(
+        "#!/bin/sh\n"
+        "while [ $# -gt 0 ]; do\n"
+        '  if [ "$1" = "--data" ]; then\n'
+        "    shift\n"
+        '    printf "%s" "$1" > "$CURL_DUMP"\n'
+        "  fi\n"
+        "  shift\n"
+        "done\n"
+    )
+    shim.chmod(0o755)
+    return {
+        "PATH": f"{bindir}:{os.environ['PATH']}",
+        "SLACK_WEBHOOK_URL": "http://webhook.invalid/hook",
+        "CURL_DUMP": str(tmp_path / "payload.json"),
+    }
+
+
 class TestHealthAlertScript:
     def test_healthy_body_sends_nothing(self):
         result = run_script(metrics_file=str(FIXTURES / "healthy.metrics"))
@@ -96,33 +119,31 @@ class TestHealthAlertScript:
 
     def test_payload_escapes_control_characters(self, tmp_path):
         """A tab in a value must not produce invalid JSON for the webhook."""
-        bindir = tmp_path / "bin"
-        bindir.mkdir()
+        env = webhook_shim(tmp_path)
+        env["ENV_LABEL"] = "Root\tCoz"
         dump = tmp_path / "payload.json"
-        shim = bindir / "curl"
-        shim.write_text(
-            "#!/bin/sh\n"
-            "while [ $# -gt 0 ]; do\n"
-            '  if [ "$1" = "--data" ]; then\n'
-            "    shift\n"
-            '    printf "%s" "$1" > "$CURL_DUMP"\n'
-            "  fi\n"
-            "  shift\n"
-            "done\n"
-        )
-        shim.chmod(0o755)
 
         result = run_script(
-            metrics_file=str(tmp_path / "missing.metrics"),
-            extra_env={
-                "PATH": f"{bindir}:{os.environ['PATH']}",
-                "SLACK_WEBHOOK_URL": "http://webhook.invalid/hook",
-                "CURL_DUMP": str(dump),
-                "ENV_LABEL": "Root\tCoz",
-            },
+            metrics_file=str(tmp_path / "missing.metrics"), extra_env=env
         )
 
         assert result.returncode == 0
         payload = dump.read_text()
         assert "\t" not in payload
         assert json.loads(payload)["text"] == "🔴 Root\tCoz: /metrics unreachable"
+
+    def test_payload_escapes_every_control_character(self, tmp_path):
+        """A backspace or form feed in a value must not produce invalid JSON."""
+        env = webhook_shim(tmp_path)
+        env["ENV_LABEL"] = "Root\bCoz\fX"
+        dump = tmp_path / "payload.json"
+
+        result = run_script(
+            metrics_file=str(tmp_path / "missing.metrics"), extra_env=env
+        )
+
+        assert result.returncode == 0
+        payload = dump.read_text()
+        assert "\b" not in payload
+        assert "\f" not in payload
+        assert json.loads(payload)["text"] == "🔴 Root\bCoz\fX: /metrics unreachable"

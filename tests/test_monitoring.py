@@ -896,6 +896,70 @@ class TestHealthEndpointIntegration:
         finally:
             release.set()
 
+    def test_overlapping_scrapes_answer_the_displaced_one(self, test_client):
+        """Two overlapping scrapes: the displaced one returns at once with the gauges
+        omitted, and the surviving one still reports them."""
+        from rootcoz import main as main_module
+
+        release = threading.Event()
+        calls: list[str] = []
+        results: dict[str, tuple[float, str]] = {}
+
+        def probe(db_path):
+            calls.append("probe")
+            if len(calls) == 1:
+                release.wait(5)
+                return (1, 2)
+            return (1000, 4000)
+
+        def scrape(name):
+            started = time.monotonic()
+            body = test_client.get("/metrics").text
+            results[name] = (time.monotonic() - started, body)
+
+        try:
+            with (
+                patch("rootcoz.main._DATA_PROBE_TIMEOUT_SECONDS", 5.0),
+                patch("rootcoz.main.read_data_usage", probe),
+            ):
+                # Park the worker on the first probe, so the next request stays queued.
+                parked = threading.Thread(target=scrape, args=("parked",))
+                parked.start()
+                deadline = time.monotonic() + 2
+                while time.monotonic() < deadline and len(calls) < 1:
+                    time.sleep(0.01)
+                assert len(calls) == 1
+
+                displaced = threading.Thread(target=scrape, args=("displaced",))
+                displaced.start()
+                deadline = time.monotonic() + 2
+                while (
+                    time.monotonic() < deadline and not main_module._data_probe_mailbox
+                ):
+                    time.sleep(0.01)
+                assert main_module._data_probe_mailbox
+
+                # The second scrape displaces the queued request; the displaced scrape
+                # must return on that eviction instead of waiting out the timeout.
+                survivor = threading.Thread(target=scrape, args=("survivor",))
+                survivor.start()
+                displaced.join(3)
+                assert not displaced.is_alive()
+                release.set()
+                survivor.join(5)
+                parked.join(5)
+
+            displaced_elapsed, displaced_body = results["displaced"]
+            survivor_elapsed, survivor_body = results["survivor"]
+            assert displaced_elapsed < 1
+            assert "rootcoz_data_" not in displaced_body
+            assert "rootcoz_data_used_ratio 0.2500" in survivor_body
+            assert survivor_elapsed < 1
+            # The displaced request was never run: only the parked and survivor probes.
+            assert len(calls) == 2
+        finally:
+            release.set()
+
 
 # ---------------------------------------------------------------------------
 # Admin component-versions endpoint
