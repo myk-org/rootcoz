@@ -103,6 +103,9 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
     if (!description.trim()) return
 
     const gen = generationRef.current
+    // A create error belongs to the issue it failed on; a new preview must not
+    // show it (or label its own button "Retry").
+    setCreateError('')
     setPhase('previewing')
     try {
       const failedCalls = getRecentFailedCalls()

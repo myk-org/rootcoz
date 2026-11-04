@@ -361,6 +361,29 @@ describe('FeedbackDialog', () => {
     expect(createCalls[1][1]).toEqual({ title: 'AI title', body: 'AI body', labels: ['bug'] })
   })
 
+  it('clears a stale create error when a new preview is generated', async () => {
+    mockPost.mockResolvedValueOnce({ title: 'AI title', body: 'AI body', labels: ['bug'] })
+    mockPost.mockRejectedValueOnce(new Error('Create failed'))
+    mockPost.mockResolvedValueOnce({ title: 'Second title', body: 'Second body', labels: ['bug'] })
+
+    const user = userEvent.setup()
+    render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
+    await user.type(screen.getByLabelText('Description'), 'Some feedback')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /create issue/i }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Create failed')
+
+    // Back to the form and generate a fresh preview: the old failure belongs to
+    // the previous issue, so it must not paint the new one.
+    await user.click(screen.getByRole('button', { name: /back/i }))
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+
+    await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('Second title'))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument()
+  })
+
   it('falls back to the generic message when the server sends no detail', async () => {
     mockPost.mockResolvedValueOnce({ title: 'AI title', body: 'AI body', labels: ['bug'] })
     const { ApiError } = await import('@/lib/api')
