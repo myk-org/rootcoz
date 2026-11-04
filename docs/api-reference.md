@@ -137,7 +137,8 @@ The shared body accepts the server defaults as per-request overrides:
 | GET | `/api/failures/{failure_uuid}` | viewer | none |
 | GET | `/results/{job_id}/review-status` | viewer | none |
 | GET | `/api/dashboard` | viewer | `limit`, `offset` |
-| GET | `/api/dashboard/filtered` | viewer | `search`, `status`, `date_from`, `date_to`, `review_status`, `analysis_state`, `limit`, `offset`, plus metadata filters `team`, `tier`, `version`, `label`, `exclude_label` (each repeatable) |
+| GET | `/api/dashboard/filtered` | viewer | `search`, `status`, `date_from`, `date_to`, `review_status`, `analysis_state`, `limit`, `offset`, plus metadata filters `team`, `tier`, `version`, `label`, `exclude_label` (each repeatable). `submitted_by` (repeatable) is also accepted: each value is trimmed and matched as a **case-insensitive substring** on the original submitter (`yuva` matches `yuval` and `yuvalb`), values OR together, and blanks are dropped. At most 50 values of 64 chars each (`400` above either limit); no values means no filter. Matching is case-insensitive for ASCII only — SQLite's `lower()` does not fold non-ASCII names, which then match case-sensitively |
+| GET | `/api/dashboard/submitters` | viewer | none; returns `{"submitters": ["alice", ...]}` — the distinct names shown on the dashboard, sorted, deduped case-insensitively on the same ASCII rule, blank and over-64-char values dropped. Viewers already receive `submitted_by` on every dashboard row, so this endpoint discloses nothing new |
 | GET | `/api/dashboard/active-count` | viewer | none |
 
 `fields` returns full values for allowlisted paths only and is never truncated. Unknown paths return `400`, so fetch `/api/results/fields` first when you build against it.

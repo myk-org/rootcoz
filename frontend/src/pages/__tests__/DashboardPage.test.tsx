@@ -46,6 +46,7 @@ function job(overrides: Record<string, unknown> = {}) {
     comment_count: 0,
     child_job_count: 0,
     analysis_state: 'analyzed',
+    submitted_by: 'alice',
     metadata: { labels: [] },
     ...overrides,
   }
@@ -54,29 +55,42 @@ function job(overrides: Record<string, unknown> = {}) {
 /** Serve the requested page of jobs; records the limit/offset the page asked for. */
 const requests: URLSearchParams[] = []
 
-function mockApi(total: number) {
+/** Odd rows belong to yuval, even rows to alice, so a submitter filter narrows. */
+const submitted = (index: number) => (index % 2 === 1 ? 'yuval' : 'alice')
+
+function mockApi(total: number, submitters = ['alice', 'yuval']) {
   requests.length = 0
   apiGet.mockImplementation((path: string) => {
+    if (path === '/api/dashboard/submitters') {
+      return Promise.resolve({ submitters })
+    }
     if (path.startsWith('/api/dashboard/filtered')) {
       const params = new URLSearchParams(path.split('?')[1] ?? '')
       requests.push(params)
+      const wanted = params.getAll('submitted_by').map((v) => v.toLowerCase()).filter(Boolean)
+      const jobs = Array.from({ length: total }, (_, i) =>
+        job({ job_id: `job-${i + 1}`, job_name: `job-${i + 1}`, submitted_by: submitted(i) }),
+      ).filter((j) => wanted.length === 0 || wanted.some((w) => j.submitted_by.toLowerCase().includes(w)))
       const limit = Number(params.get('limit') ?? 20)
       const offset = Number(params.get('offset') ?? 0)
-      const jobs = Array.from({ length: Math.max(0, Math.min(limit, total - offset)) }, (_, i) =>
-        job({ job_id: `job-${offset + i + 1}`, job_name: `job-${offset + i + 1}` }),
-      )
-      return Promise.resolve({ jobs, total })
+      return Promise.resolve({ jobs: jobs.slice(offset, offset + limit), total: jobs.length })
     }
     return Promise.resolve([])
   })
 }
 
-function renderPage() {
+function renderPage(route = '/') {
   return render(
-    <MemoryRouter>
+    <MemoryRouter initialEntries={[route]}>
       <DashboardPage />
     </MemoryRouter>,
   )
+}
+
+/** Open the submitter picker and type a term. */
+async function searchSubmitter(value: string) {
+  await userEvent.click(screen.getByRole('combobox', { name: 'Add Submitted by' }))
+  await userEvent.type(screen.getByRole('combobox', { name: 'Search Submitted by' }), value)
 }
 
 /** The filter row must hold filters only; presentation controls live in the summary row. */
@@ -151,5 +165,144 @@ describe('DashboardPage presentation controls', () => {
     // Still in the summary row, never in the filter row.
     const { filters } = await rows()
     expect(filters.queryByRole('button', { name: 'Expand All' })).not.toBeInTheDocument()
+  })
+})
+
+describe('DashboardPage submitter filter', () => {
+  afterEach(() => {
+    apiGet.mockReset()
+  })
+
+  it('lists every endpoint name as an option, and picks one into the request', async () => {
+    mockApi(5, ['Yuval', 'alice'])
+    renderPage()
+    await waitFor(() => expect(requests.length).toBeGreaterThan(0))
+
+    await searchSubmitter('yuva')
+    expect(screen.getAllByRole('option')).toHaveLength(2) // Yuval + Add "yuva"
+    await userEvent.click(screen.getByRole('option', { name: 'Yuval' }))
+
+    await waitFor(() => expect(requests.at(-1)?.getAll('submitted_by')).toEqual(['Yuval']))
+    expect(await screen.findByText('2 analysis runs')).toBeInTheDocument()
+    expect(screen.queryByText('job-1')).not.toBeInTheDocument()
+  })
+
+  it('keeps a comma-bearing name as one filter', async () => {
+    mockApi(5, ['Doe, Jane', 'alice'])
+    renderPage('/?submitted_by=Doe%2C%20Jane')
+
+    // One URL value stays one SQL filter: splitting on the comma would send
+    // `Doe` and ` Jane` and mix their jobs into the result.
+    await waitFor(() =>
+      expect(requests.at(-1)?.getAll('submitted_by')).toEqual(['Doe, Jane']),
+    )
+  })
+
+  it('folds a differently-cased shared link onto the enumerated name', async () => {
+    mockApi(5)
+    renderPage('/?submitted_by=ALICE')
+
+    // Matching is case-insensitive server-side, so ALICE and alice are one pick.
+    await waitFor(() => expect(requests.at(-1)?.getAll('submitted_by')).toEqual(['alice']))
+
+    await searchSubmitter('alice')
+    await userEvent.click(screen.getByRole('option', { name: 'alice' }))
+    // Toggling the option off, not adding a second chip beside the booking.
+    await waitFor(() => expect(requests.at(-1)?.get('submitted_by')).toBeNull())
+    expect(screen.queryByRole('button', { name: 'Remove alice' })).not.toBeInTheDocument()
+  })
+
+  it('counts a name in characters, so emoji names survive', async () => {
+    // 33 emoji are 66 UTF-16 units but 33 characters — the server accepts them.
+    const emoji = '\u{1F600}'.repeat(33)
+    mockApi(5, [emoji])
+    renderPage(`/?submitted_by=${encodeURIComponent(emoji)}`)
+
+    await waitFor(() => expect(requests.length).toBeGreaterThan(0))
+    expect(requests.at(-1)?.getAll('submitted_by')).toEqual([emoji])
+    await rows()
+  })
+
+  it('drops values the server rejects instead of failing the whole load', async () => {
+    const long = 'x'.repeat(65)
+    const many = Array.from({ length: 51 }, (_, i) => `user-${i}`)
+    const query = [...many, long]
+      .map((value) => `submitted_by=${encodeURIComponent(value)}`)
+      .join('&')
+    mockApi(5)
+    renderPage(`/?${query}`)
+
+    // 50 values is the server's cap and 64 chars its per-value limit; sending
+    // them as-is would 400 the dashboard with a load error.
+    await waitFor(() => expect(requests.length).toBeGreaterThan(0))
+    const sent = requests.at(-1)?.getAll('submitted_by') ?? []
+    expect(sent).toHaveLength(50)
+    expect(sent).not.toContain(long)
+    await rows()
+  })
+
+  it('sends a typed partial that no option offers', async () => {
+    mockApi(5)
+    renderPage()
+    await waitFor(() => expect(requests.length).toBeGreaterThan(0))
+
+    await searchSubmitter('yuva')
+    // Not an option and not an exact name: the free-entry row is the only way.
+    await userEvent.click(screen.getByRole('option', { name: 'Add "yuva"' }))
+
+    await waitFor(() => expect(requests.at(-1)?.getAll('submitted_by')).toEqual(['yuva']))
+    expect(await screen.findByText('2 analysis runs')).toBeInTheDocument()
+  })
+
+  it('combines with another filter and resets the offset', async () => {
+    mockApi(25)
+    renderPage('/?status=completed')
+    await waitFor(() => expect(requests[0]?.get('offset')).toBe('0'))
+
+    await userEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await waitFor(() => expect(requests.at(-1)?.get('offset')).toBe('20'))
+
+    await searchSubmitter('yuval')
+    await userEvent.click(screen.getByRole('option', { name: 'yuval' }))
+
+    await waitFor(() => expect(requests.at(-1)?.get('submitted_by')).toBe('yuval'))
+    const last = requests.at(-1)
+    expect(last?.getAll('status')).toEqual(['completed'])
+    expect(last?.get('offset')).toBe('0')
+  })
+
+  it('clears the filter and hides the Clear button again', async () => {
+    mockApi(5)
+    renderPage()
+    await waitFor(() => expect(requests.length).toBeGreaterThan(0))
+
+    await searchSubmitter('yuval')
+    await userEvent.click(screen.getByRole('option', { name: 'yuval' }))
+    await waitFor(() => expect(requests.at(-1)?.get('submitted_by')).toBe('yuval'))
+
+    // A submitter alone is a filter: the Clear button appears for it.
+    await userEvent.click(await screen.findByRole('button', { name: /Clear filters/ }))
+
+    await waitFor(() => expect(requests.at(-1)?.get('submitted_by')).toBeNull())
+    expect(screen.queryByRole('button', { name: /Clear filters/ })).not.toBeInTheDocument()
+  })
+
+  it('honours a bookmarkable ?submitted_by= link', async () => {
+    mockApi(5)
+    renderPage('/?submitted_by=yuval')
+
+    await waitFor(() => expect(requests[0]?.getAll('submitted_by')).toEqual(['yuval']))
+    expect(await screen.findByText('2 analysis runs')).toBeInTheDocument()
+  })
+
+  it('stays usable when the endpoint returns nothing', async () => {
+    mockApi(5, [])
+    renderPage()
+    await waitFor(() => expect(requests.length).toBeGreaterThan(0))
+
+    await searchSubmitter('yuva')
+    await userEvent.click(screen.getByRole('option', { name: 'Add "yuva"' }))
+
+    await waitFor(() => expect(requests.at(-1)?.get('submitted_by')).toBe('yuva'))
   })
 })

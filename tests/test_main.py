@@ -2146,6 +2146,127 @@ class TestApiDashboardFilteredExcludeLabel:
         assert names == {"job-a", "job-b", "job-c"}
 
 
+async def _seed_submitter_results(db_path: Path, rows: list[tuple[str, str]]) -> None:
+    """Seed results rows carrying request_params.submitted_by."""
+    with patch.object(storage, "DB_PATH", db_path):
+        for job_id, submitted_by in rows:
+            await storage.save_result(
+                job_id,
+                f"https://jenkins.example.com/job/{job_id}/1",
+                "completed",
+                {
+                    "job_name": job_id,
+                    "build_number": 1,
+                    "failures": [],
+                    "request_params": {"submitted_by": submitted_by},
+                },
+            )
+
+
+class TestDashboardSubmittersEndpoint:
+    """Tests for GET /api/dashboard/submitters and submitted_by filtering (#390)."""
+
+    def test_lists_sorted_deduped_names(self, test_client, temp_db_path: Path) -> None:
+        """Yuli/yuli collapse to one option; names come back NOCASE-sorted."""
+        asyncio.run(
+            _seed_submitter_results(
+                temp_db_path,
+                [("job-a", "Yuli"), ("job-b", "yuli"), ("job-c", "avi")],
+            )
+        )
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            resp = test_client.get("/api/dashboard/submitters")
+        assert resp.status_code == 200
+        assert resp.json()["submitters"] == ["avi", "Yuli"]
+
+    def test_requires_auth(self, mock_settings, temp_db_path: Path) -> None:
+        """The enumeration is not a public path."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            from starlette.testclient import TestClient
+
+            from rootcoz.main import app
+
+            with TestClient(app) as client:
+                assert client.get("/api/dashboard/submitters").status_code == 401
+
+    def test_viewer_can_list_submitters(self, test_client, temp_db_path: Path) -> None:
+        """A viewer already sees submitted_by on every row, so 200 is fine."""
+        asyncio.run(_seed_submitter_results(temp_db_path, [("job-a", "yuval")]))
+        created = test_client.post(
+            "/api/admin/users/create",
+            json={"username": "submitter_viewer", "role": "viewer"},
+        )
+        assert created.status_code == 200
+        login = test_client.post(
+            "/api/auth/login",
+            json={
+                "username": "submitter_viewer",
+                "api_key": created.json()["api_key"],
+            },
+        )
+        assert login.status_code == 200
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            resp = test_client.get(
+                "/api/dashboard/submitters", cookies=dict(login.cookies)
+            )
+        assert resp.status_code == 200
+        assert resp.json()["submitters"] == ["yuval"]
+
+    def test_filtered_endpoint_filters_by_submitter(
+        self, test_client, temp_db_path: Path
+    ) -> None:
+        """?submitted_by narrows the filtered endpoint to matching rows."""
+        asyncio.run(
+            _seed_submitter_results(
+                temp_db_path, [("job-yuval", "yuval"), ("job-dana", "dana")]
+            )
+        )
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            resp = test_client.get(
+                "/api/dashboard/filtered", params={"submitted_by": "yuval"}
+            )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert {j["job_name"] for j in data["jobs"]} == {"job-yuval"}
+        assert data["total"] == 1
+
+    @pytest.mark.parametrize(
+        "params", [None, {"submitted_by": ""}, {"submitted_by": ["", ""]}]
+    )
+    def test_filtered_endpoint_empty_submitter_is_no_filter(
+        self, test_client, temp_db_path: Path, params
+    ) -> None:
+        """An empty submitted_by query value means unfiltered."""
+        asyncio.run(
+            _seed_submitter_results(
+                temp_db_path, [("job-yuval", "yuval"), ("job-dana", "dana")]
+            )
+        )
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            resp = test_client.get("/api/dashboard/filtered", params=params)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert {j["job_name"] for j in data["jobs"]} == {"job-yuval", "job-dana"}
+        assert data["total"] == 2
+
+    def test_filtered_endpoint_rejects_too_many_submitters(self, test_client) -> None:
+        """More than 50 submitted_by values is a 400."""
+        values = [f"user{i}" for i in range(51)]
+        resp = test_client.get(
+            "/api/dashboard/filtered", params={"submitted_by": values}
+        )
+        assert resp.status_code == 400
+        assert "50" in resp.json()["detail"]
+
+    def test_filtered_endpoint_rejects_too_long_submitter(self, test_client) -> None:
+        """A submitted_by value longer than 64 characters is a 400."""
+        resp = test_client.get(
+            "/api/dashboard/filtered", params={"submitted_by": "x" * 65}
+        )
+        assert resp.status_code == 400
+        assert "64" in resp.json()["detail"]
+
+
 class TestFaviconEndpoint:
     """Tests for the GET /favicon.ico endpoint."""
 
