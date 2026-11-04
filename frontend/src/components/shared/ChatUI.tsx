@@ -311,7 +311,9 @@ export function ChatUI({
         }
       })
       .catch(err => { if (!ignore && historyIsCurrent(generation)) { setHistoryFailed(true); setError(err instanceof Error ? err.message : 'Failed to load chat history') } })
-      .finally(() => { if (!ignore && historyIsCurrent(generation)) setLoadingHistory(false) })
+      // Not generation-gated: a send or a sync can invalidate this fetch, and the
+      // spinner must still clear once the initial load has settled.
+      .finally(() => { if (!ignore && mountedRef.current) setLoadingHistory(false) })
     return () => { ignore = true }
   }, [fetchMessages, historyRetry, historyIsCurrent, applySession])
 
@@ -422,16 +424,21 @@ export function ChatUI({
 
   useSSE(sseTopic, chatEvents, { onReconnect: chatSseOnReconnect })
 
-  // Auto-scroll
+  // Auto-scroll — `sending` is in the deps because the transient Sending row is
+  // rendered from that flag, not from `messages`, so appending it fires nothing.
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+  }, [messages, sending])
 
   const handleSend = useCallback(async (e?: FormEvent) => {
     e?.preventDefault()
     const trimmed = input.trim()
     if (!trimmed || !sessionStarted || clearing || sendBusy || sendInFlightRef.current) return
     sendInFlightRef.current = true
+    // A history fetch started before this send carries a snapshot without the
+    // optimistic row; invalidate it so its late arrival cannot drop the row and
+    // re-enable the composer mid-turn.
+    historyGenerationRef.current++
     setSending(true)
     console.info('[ChatUI] Sending message')
     setError('')
@@ -750,8 +757,8 @@ export function ChatUI({
               )}
             </div>
           ))}
-          {/* Below the thread, not above it: a scrolled conversation must show this
-              row without waiting for a `messages` change to trigger auto-scroll. */}
+          {/* Below the thread, right above the sentinel. Rendering here does not by
+              itself keep it visible: the auto-scroll effect keys on `sending` too. */}
           {sending && !hasPending && <ChatBusyRow label="Sending..." canStop={false} onStop={handleAbort} />}
           <div ref={messagesEndRef} />
         </div>

@@ -716,3 +716,54 @@ it('shows a transient Sending row at the bottom of the thread', async () => {
   await act(async () => { finishPost({ user_message: { id: 2, username: 'alice' }, assistant_message_id: 3 }) })
   expect(screen.getByText(/^Thinking\.\.\./)).toBeInTheDocument()
 })
+
+it('scrolls the transient Sending row into view in an already bottom-scrolled thread', async () => {
+  setup({
+    messages: [{ id: 1, job_id: 'job', role: 'user', content: 'earlier question', username: 'alice', ai_provider: '', ai_model: '', status: 'completed', created_at: new Date().toISOString() }],
+    total: 1,
+    active_session: ACTIVE_SESSION,
+  })
+  post.mockImplementation((path: string) => path === '/api/chat/job' ? new Promise(() => {}) : Promise.resolve({}))
+  // The global stub is inert; this spy records which element got scrolled.
+  const scrolled: HTMLElement[] = []
+  const scrollSpy = vi.spyOn(HTMLElement.prototype, 'scrollIntoView')
+    .mockImplementation(function (this: HTMLElement) { scrolled.push(this) })
+  render(page())
+  const composer = await readyComposer()
+  const sentinel = screen.getByText('earlier question').closest('.overflow-y-auto')!.lastElementChild
+  scrolled.length = 0
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  // `messages` does not change when the row appears — only `sending` flips.
+  expect(screen.getByText('Sending...')).toBeInTheDocument()
+  await waitFor(() => expect(scrolled).toContain(sentinel))
+  expect(composer).toBeDisabled()
+  scrollSpy.mockRestore()
+})
+
+it('ignores a history fetch that started before the send so the reply stays pending', async () => {
+  setup({ messages: [], total: 0, active_session: ACTIVE_SESSION })
+  render(page())
+  const composer = await readyComposer()
+  let finishPost!: (value: unknown) => void
+  post.mockImplementation((path: string) => path === '/api/chat/job' ? new Promise(resolve => { finishPost = resolve }) : Promise.resolve({}))
+  let finishStale!: (value: unknown) => void
+  get.mockImplementation((path: string) => path.startsWith('/api/ai-models')
+    ? Promise.resolve(catalog)
+    : new Promise(resolve => { finishStale = resolve }))
+  // A sync fetch starts before the send, so its snapshot predates the turn.
+  act(() => { vi.mocked(useSSE).mock.lastCall![1]['chat-changed']('') })
+  await waitFor(() => expect(finishStale).toBeDefined())
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await act(async () => { finishPost({ user_message: { id: 2, username: 'alice' }, assistant_message_id: 3 }) })
+  expect(screen.getByText(/^Thinking\.\.\./)).toBeInTheDocument()
+  await act(async () => { finishStale({ messages: [], total: 0, active_session: ACTIVE_SESSION }) })
+  // Without invalidating the pre-send fetch this snapshot drops the pending row
+  // and re-enables the composer while the turn is still running.
+  expect(screen.getByText(/^Thinking\.\.\./)).toBeInTheDocument()
+  expect(composer).toBeDisabled()
+  const reply = { ...pendingRow(new Date().toISOString()), content: 'answer', status: 'completed' }
+  get.mockImplementation((path: string) => Promise.resolve(path.startsWith('/api/ai-models') ? catalog : { messages: [reply], total: 1, active_session: ACTIVE_SESSION }))
+  act(() => { vi.mocked(useSSE).mock.lastCall![1]['chat-changed']('') })
+  expect(await screen.findByText('answer')).toBeInTheDocument()
+  await waitFor(() => expect(composer).toBeEnabled())
+})
