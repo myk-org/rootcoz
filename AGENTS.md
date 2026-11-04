@@ -46,6 +46,16 @@ uvx --with tox-uv tox -e frontend   # Frontend only
 uvx --with tox-uv tox -e chart      # Helm chart only
 ```
 
+### End-to-end means a real browser (MANDATORY)
+
+**An e2e test is a real browser driving the real UI against a running app.** Not jsdom, not Testing Library, not Vitest, not a unit suite.
+
+- `tox -e backend`, `tox -e frontend`, `tox -e chart` and `prek` are **suites**. They prove the code compiles and its contracts hold — never that a behaviour works.
+- **API-only change**: `curl` against a running instance is a valid e2e step. **UI path**: the browser is mandatory.
+- Every e2e claim carries the URL, the clicks, a screenshot, and the console/network errors.
+- Verdicts are `pass` / `fail` / `blocked`; a `blocked` names the exact request or URL that failed.
+- **"Covered by unit tests" is not an acceptable reason** to skip e2e. An undeployed branch is verified by running that branch's own dev server or API from its worktree on a free port — never by restarting the maintainer's container.
+
 ## Smart Context Management
 
 - Prefer structured data (test reports, APIs) over raw logs
@@ -69,6 +79,14 @@ uvx --with tox-uv tox -e chart      # Helm chart only
 - Show how components connect and interact
 
 ## Architecture Rules
+
+### Product Generality (MANDATORY)
+
+**rootcoz is a container product, not one deployment.** It runs with an OpenShift PVC, a Docker Compose volume, a bind mount, or a plain directory; against Jenkins, Prow, JUnit XML, or a raw failure list; on a single node or behind a proxy. A rule written for one of those is a bug in the product.
+
+- **An issue names one environment because that is the reporter's environment — it is evidence of a need, not the specification.** Restate the requirement as the capability behind it, and name the reporter-specific details as incidental. If the two cannot be separated, ask the maintainer instead of guessing.
+- **Name by capability, not by one deployment's backend**: `rootcoz_data_*`, "the data directory" — never `rootcoz_pvc_*` or `/data`, unless it is literally the path.
+- **The worked example, as the failure it was:** #405 asked for "PVC usage". The first implementation shipped `rootcoz_pvc_used_bytes` on a probe that measures whatever filesystem holds the data directory — so Docker-volume, bind-mount and plain-directory deployments were told by the metric name that they were unsupported.
 
 ### Tech Stack
 
