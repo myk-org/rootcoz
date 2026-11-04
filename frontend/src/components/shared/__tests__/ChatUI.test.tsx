@@ -767,3 +767,31 @@ it('ignores a history fetch that started before the send so the reply stays pend
   expect(await screen.findByText('answer')).toBeInTheDocument()
   await waitFor(() => expect(composer).toBeEnabled())
 })
+
+it('offers Create issue only once an answer exists', async () => {
+  setup({ messages: [], total: 0 })
+  render(page())
+  expect(await screen.findByRole('button', { name: 'Create issue' })).toBeDisabled()
+})
+
+it('seeds the create-issue dialog from the last completed answer', async () => {
+  const answer = { id: 3, job_id: 'job', role: 'assistant', content: 'The login test fails on DNS.', username: '', ai_provider: 'openai', ai_model: 'gpt', status: 'completed', created_at: '2026-01-01T00:00:00Z' }
+  const history = { messages: [answer], total: 1, active_session: { ai_provider: 'openai', ai_model: 'gpt', credential_source: 'user' }, active_session_version: 'session-version' }
+  get.mockImplementation(async (path: string) => {
+    if (path.startsWith('/api/ai-models')) return catalog
+    if (path === '/api/capabilities') return { github_issues_enabled: true, jira_issues_enabled: false }
+    if (path === '/api/user/tokens') return { github_token: 'ghp_stored', jira_token: '', jira_sa_token: '' }
+    return history
+  })
+  post.mockImplementation(async (path: string) =>
+    path === '/api/chat-issue/prefill'
+      ? { title: 'Login test fails on DNS', body: 'The login test fails on DNS.' }
+      : { ready: true, session_id: 'session', user_message: { id: 2, username: 'alice' }, assistant_message_id: 3 })
+  render(page())
+  const button = await screen.findByRole('button', { name: 'Create issue' })
+  await waitFor(() => expect(button).toBeEnabled())
+  await userEvent.setup().click(button)
+  expect(post).toHaveBeenCalledWith('/api/chat-issue/prefill', { text: answer.content })
+  expect(await screen.findByLabelText('Issue title')).toHaveValue('Login test fails on DNS')
+  expect(screen.getByLabelText('Issue body')).toHaveValue('The login test fails on DNS.')
+})

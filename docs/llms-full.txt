@@ -1624,6 +1624,8 @@ This asks the job's assistant for a cross-failure answer and leaves the evidence
 
    > **Tip:** Because the assistant can read the cloned test code, questions like `Why does test_login assert on the old token format?` are often answered faster than asking for a re-analysis with a different model.
 
+   A good answer can become the issue itself: click `Create issue` above the conversation, review the prefilled title and body, and click Create. The issue uses the token saved in your account (add one in Profile Settings if the dialog says you have none) — see [Creating Follow-Up Issues and Pushing Results](create-follow-up-issues-and-push-results.html) for the whole flow.
+
 4. Comment on the failure, not just in the chat.
 
    Expand a failure card and use the `Add a comment...` box, then click `Post`. Comments are attached to the specific test — including grouped cards, where the comment covers the group you clicked — and they persist independently of any chat session.
@@ -1722,7 +1724,7 @@ Source: create-follow-up-issues-and-push-results.md
 
 # Creating Follow-Up Issues and Pushing Results
 
-Turn a reviewed failure into real follow-up work: file a GitHub issue or Jira ticket from the report, link a failure to a ticket that already exists, and push the finished classifications into Report Portal. Every action here starts from a result page, and the issue content is generated from the same AI analysis you already reviewed.
+Turn a reviewed failure into real follow-up work: file a GitHub issue or Jira ticket from the report, link a failure to a ticket that already exists, and push the finished classifications into Report Portal. Every action here starts from a result page or from a chat answer, and the issue content is generated from the same AI analysis you already reviewed.
 
 ## Prerequisites
 
@@ -1777,6 +1779,15 @@ This generates and reviews issue content, creates the issue, confirms which expo
    Creation uses your own credentials. A missing or expired token returns an error that points back to your profile settings.
 
    > **Warning:** GitHub and Jira issue creation can be disabled per server with `ENABLE_GITHUB_ISSUES` and `ENABLE_JIRA_ISSUES`. When disabled, the buttons are greyed out and the endpoints refuse the request.
+
+   > **From chat:** a chat answer can become an issue too. In job chat or admin chat, click `Create issue` above the conversation and RootCoz opens the same kind of dialog, prefilled with the title and body drafted from the **last completed answer**. Review and edit them, then click `Create GitHub issue` or `Create Jira ticket`. The dialog only offers a tracker when the server enables it **and** your account holds that tracker's token, so a token saved in Profile Settings works even on a fresh browser. Nothing is sent until you click Create — the AI has no tool that can write to a tracker. If a credential is missing, the dialog says so and points at Profile Settings; the server's refusal (`400`, `403`, `401`, `502`) is shown verbatim. The same thing from a terminal, with the same account credential and no token flags:
+
+   ```bash
+   rootcoz create-chat-issue --target github \
+     --title "Login fails after token refresh" --body "$(cat issue-body.md)"
+   ```
+
+   Chat-created issues carry no comment and no tracked-in link: there is no failure to attach them to, and the endpoint deliberately takes no job id.
 
 5. Link a failure to an issue that already exists.
 
@@ -2225,6 +2236,12 @@ This confirms the CLI is using an admin identity, then asks a server-wide questi
    ```
 
    > **Tip:** Use the web UI when you want the clearest live experience. It shows the busy state from the moment you send, tells you how long the turn has been running, and gives you a `Stop` button while the assistant is still working.
+
+   > **From an answer to a ticket:** click `Create issue` above the conversation to open a GitHub issue or Jira ticket from the **last completed answer**. Server Chat itself resolves no tracker credential — the dialog files the issue with the token saved in *your* account, so add one in Profile Settings first, or the dialog tells you that none is available. The same call from the CLI, with no token flags:
+
+   ```bash
+   rootcoz create-chat-issue --target jira --title "Dashboard filters drop the team" --body "$(cat ticket-body.md)"
+   ```
 
 4. Stop the current reply or start over.
 
@@ -2945,6 +2962,8 @@ Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pat
 | POST | `/results/{job_id}/preview-jira-bug` | reviewer | Same shape, Jira flavour |
 | POST | `/results/{job_id}/create-github-issue` | reviewer | `test_name`, `title`, `body`; returns `201` |
 | POST | `/results/{job_id}/create-jira-bug` | reviewer | Adds `jira_issue_type`; returns `201` |
+| POST | `/api/chat-issue` | reviewer | `target` (`github`/`jira`), `title`, `body`, optional `jira_project_key`, `jira_security_level`, `jira_issue_type`; returns `201` |
+| POST | `/api/chat-issue/prefill` | reviewer | `text`; returns the scrubbed `title` and `body` an issue created from that chat answer would carry |
 | PUT | `/results/{job_id}/tracked-in` | reviewer | `test_name`, `url`, `type` |
 | GET | `/results/{job_id}/tracked-in` | reviewer | Current tracker links |
 | DELETE | `/results/{job_id}/tracked-in/{link_id}` | reviewer | Remove one link |
@@ -2953,6 +2972,8 @@ Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pat
 | POST | `/results/{job_id}/push-reportportal` | operator | Backward-compatible Report Portal push |
 
 > **Note:** All four issue preview and create endpoints call `_require_reviewer`, so a `viewer` receives `403` before the allow list is consulted. They additionally require valid tracker credentials and the matching `ENABLE_GITHUB_ISSUES` or `ENABLE_JIRA_ISSUES` toggle.
+
+`POST /api/chat-issue` is the chat counterpart: it takes no `test_name` and no credentials. The tracker credential is **always** the caller's saved account token (`GET /api/user/tokens` is the source of truth for which trackers are available) — never the deployment's `GITHUB_TOKEN` or Jira credential, and with no exception for the bootstrap `admin`, which has no profile to store one. Status codes: `201` created; `400` for a missing account credential, a missing `TESTS_REPO_URL` or Jira project key, or an unusable/legacy service-account secret; `403` when the allow list blocks the caller, the caller is a `viewer`, or the tracker's `ENABLE_*` toggle is off; `401` when the tracker rejects the credential; `502` when the tracker is unreachable or errors. Every attempt — success or refusal — writes one `issue.create` audit row with `target_type="chat"` and `details.result` of `success` or `refused`; no row carries the issue text or a token. `title` and `body` pass `scrub_sensitive_data` before the tracker call, and the prefill route returns the same scrubbed text so a redaction the user disagrees with is visible and editable before anything is filed.
 
 ### History and classification lookup
 
@@ -2978,6 +2999,8 @@ Send `source="ai"` to attribute the classification to the reserved `rootcoz-ai` 
 | POST | `/api/chat/{job_id}/close` | reviewer | Close the AI session |
 | DELETE | `/api/chat/{job_id}` | reviewer | Clear chat history |
 | GET | `/api/chat/{job_id}/stream` | viewer | SSE stream of new messages |
+
+An answer can become a tracker issue: `ChatUI` offers **Create issue**, which drafts the title and body from the last answer through `POST /api/chat-issue/prefill` and files them through `POST /api/chat-issue` (see [Trackers, issues, and exporters](#trackers-issues-and-exporters)). Admin chat (`/api/admin/chat/*`) has no tracker credential of its own; the dialog uses the caller's account tokens in both chats, and the human click is the only way chat text reaches a tracker — the AI has no issue-creation tool.
 
 ### Server-Sent Events streams
 
@@ -3365,6 +3388,7 @@ Sparse field paths include `result.summary`, `result.failed_count`, `result.fail
 | `rootcoz preview-issue JOB_ID` | `--test`/`-t`, `--type` (`github` or `jira`), `--child-job`, `--child-build`, `--include-links`, `--ai-provider`, `--ai-model`, `--github-token`, `--github-repo-url`, `--jira-token`, `--jira-email`, `--jira-sa-token`, `--jira-project-key`, `--jira-security-level`, `--issue-prompt` | Render issue title, body, and similar issues without creating anything. |
 | `rootcoz get-issue-prompt JOB_ID` | — | The issue prompt attached to the job's tests repo. |
 | `rootcoz create-issue JOB_ID` | `--test`/`-t`, `--type`, `--title`, `--body`, `--child-job`, `--child-build`, `--github-token`, `--github-repo-url`, `--jira-token`, `--jira-email`, `--jira-sa-token`, `--jira-project-key`, `--jira-security-level`, `--jira-issue-type` (default `Bug`) | Create the issue. |
+| `rootcoz create-chat-issue` | `--target` (`github` or `jira`), `--title`, `--body`, `--jira-project-key`, `--jira-security-level`, `--jira-issue-type` (default `Bug`) | File an issue from chat text. Deliberately exposes **no** token flags: the issue is created with the credentials saved in your account, so it can never be filed under a server token. |
 | `rootcoz validate-token github\|jira` | `--token` (hidden prompt), `--email` | Check a tracker token before using it. An ATOA-prefixed Jira value (an Atlassian OAuth 2.0 credential client secret) is validated as a service account against the scoped Atlassian gateway, using the server's `atlassian_oauth_client_id`; an ATST-prefixed value (an Atlassian service-account scoped token) is sent as Bearer to the same gateway with no exchange. |
 | `rootcoz ai-models` | `--provider`/`-p` | Model IDs per provider, with credential sources. |
 

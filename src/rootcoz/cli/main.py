@@ -2542,12 +2542,12 @@ def _resolve_tracker_tokens(
     )
 
 
-def _validate_issue_type(issue_type: str) -> str:
+def _validate_issue_type(issue_type: str, option: str = "--type") -> str:
     """Validate and normalize issue type, exit on invalid input."""
     normalized = issue_type.lower()
     if normalized not in ("github", "jira"):
         typer.echo(
-            f"Error: --type must be 'github' or 'jira', got '{issue_type}'",
+            f"Error: {option} must be 'github' or 'jira', got '{issue_type}'",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -2810,6 +2810,57 @@ def create_issue(
         typer.echo(f"URL: {data.get('url', '')}")
         if data.get("comment_id"):
             typer.echo(f"Comment added (id: {data['comment_id']})")
+
+
+@app.command("create-chat-issue")
+def create_chat_issue(
+    target: str = typer.Option(..., "--target", help="github or jira."),
+    title: str = typer.Option(..., "--title", help="Issue title."),
+    body: str = typer.Option(..., "--body", help="Issue body."),
+    jira_project_key: str = typer.Option(
+        "",
+        "--jira-project-key",
+        help="Jira project key for bug creation (overrides server config).",
+    ),
+    jira_security_level: str = typer.Option(
+        "",
+        "--jira-security-level",
+        help="Jira security level name for restricted issues.",
+    ),
+    jira_issue_type: str = typer.Option(
+        "Bug",
+        "--jira-issue-type",
+        help="Jira issue type name (e.g. Bug, Story, Task). Default: Bug.",
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Create a GitHub issue or Jira ticket from chat text.
+
+    Tracker credentials are the ones saved in your account: this command
+    deliberately has no token options, so it can never file an issue under a
+    server token.
+    """
+    _set_json(json_output)
+    normalized_target = _validate_issue_type(target, option="--target")
+    try:
+        client = _get_client()
+        data = client.create_chat_issue(
+            target=normalized_target,
+            title=title,
+            body=body,
+            jira_project_key=jira_project_key,
+            jira_security_level=jira_security_level,
+            jira_issue_type=jira_issue_type,
+        )
+    except RootCozError as err:
+        _handle_error(err)
+
+    if _state.get("json", False):
+        print_output(data, columns=[], as_json=True)
+    else:
+        key_or_number = data.get("key") or f"#{data.get('number', '')}"
+        typer.echo(f"Created: {key_or_number}")
+        typer.echo(f"URL: {data.get('url', '')}")
 
 
 @app.command("validate-token")

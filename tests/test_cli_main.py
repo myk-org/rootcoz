@@ -2393,6 +2393,64 @@ class TestCreateIssueCommand:
         assert kwargs["jira_email"] == "user@example.com"
 
 
+class TestCreateChatIssueCommand:
+    def test_create_chat_issue(self, mock_client):
+        mock_client.create_chat_issue.return_value = {
+            "url": "https://github.com/org/repo/issues/99",
+            "number": 99,
+            "key": "",
+            "title": "Bug fix",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "create-chat-issue",
+                "--target",
+                "github",
+                "--title",
+                "Bug fix",
+                "--body",
+                "Details...",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "#99" in result.output
+        assert "github.com/org/repo/issues/99" in result.output
+        mock_client.create_chat_issue.assert_called_once_with(
+            target="github",
+            title="Bug fix",
+            body="Details...",
+            jira_project_key="",
+            jira_security_level="",
+            jira_issue_type="Bug",
+        )
+
+    def test_create_chat_issue_rejects_an_unknown_target(self, mock_client):
+        result = runner.invoke(
+            app,
+            [
+                "create-chat-issue",
+                "--target",
+                "invalid",
+                "--title",
+                "X",
+                "--body",
+                "Y",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "--target" in result.output
+        mock_client.create_chat_issue.assert_not_called()
+
+    def test_create_chat_issue_exposes_no_token_options(self):
+        """A command that could take a token could file under a server token."""
+        result = runner.invoke(app, ["create-chat-issue", "--help"])
+        assert result.exit_code == 0
+        assert "--github-token" not in result.output
+        assert "--jira-token" not in result.output
+        assert "--jira-sa-token" not in result.output
+
+
 class TestOverrideClassificationCommand:
     def test_override(self, mock_client):
         mock_client.override_classification.return_value = {

@@ -1104,28 +1104,57 @@ class PreviewIssueRequest(_ChildJobFieldsValidator, _TrackerCredentialsMixin):
     )
 
 
+def _require_issue_title(v: str) -> str:
+    if not v.strip():
+        raise ValueError("title must not be empty")
+    return v
+
+
+def _default_issue_type(v: str) -> str:
+    stripped = v.strip()
+    return stripped if stripped else "Bug"
+
+
+#: Issue-creation text rules, shared by every body that files an issue.
+IssueTitle = Annotated[str, AfterValidator(_require_issue_title)]
+IssueTypeName = Annotated[str, AfterValidator(_default_issue_type)]
+
+
 class CreateIssueRequest(_ChildJobFieldsValidator, _TrackerCredentialsMixin):
     """Request body for creating a GitHub issue or Jira bug."""
 
     test_name: str
-    title: str
+    title: IssueTitle
     body: str
-    jira_issue_type: str = Field(
+    jira_issue_type: IssueTypeName = Field(
         default="Bug", description="Jira issue type name (e.g. Bug, Story, Task)"
     )
 
-    @field_validator("jira_issue_type")
-    @classmethod
-    def jira_issue_type_not_empty(cls, v: str) -> str:
-        stripped = v.strip()
-        return stripped if stripped else "Bug"
 
-    @field_validator("title")
+class ChatIssueRequest(BaseModel):
+    """Request body for opening a tracker issue from a chat conversation.
+
+    No credentials and no ``test_name``: there is no failure to name, and the
+    credential is the caller's saved account token — never the request's.
+    """
+
+    target: Literal["github", "jira"]
+    title: IssueTitle
+    body: str
+    jira_project_key: str = ""
+    jira_security_level: str = ""
+    jira_issue_type: IssueTypeName = "Bug"
+
+    @field_validator("jira_project_key", "jira_security_level")
     @classmethod
-    def title_not_empty(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("title must not be empty")
-        return v
+    def _strip_overrides(cls, v: str) -> str:
+        return v.strip() if isinstance(v, str) else v
+
+
+class ChatIssuePrefillRequest(BaseModel):
+    """Request body for drafting an issue from chat text."""
+
+    text: str
 
 
 OverrideClassificationLiteral = Literal["CODE ISSUE", "PRODUCT BUG", "INFRASTRUCTURE"]

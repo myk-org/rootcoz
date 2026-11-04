@@ -184,6 +184,8 @@ Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pat
 | POST | `/results/{job_id}/preview-jira-bug` | reviewer | Same shape, Jira flavour |
 | POST | `/results/{job_id}/create-github-issue` | reviewer | `test_name`, `title`, `body`; returns `201` |
 | POST | `/results/{job_id}/create-jira-bug` | reviewer | Adds `jira_issue_type`; returns `201` |
+| POST | `/api/chat-issue` | reviewer | `target` (`github`/`jira`), `title`, `body`, optional `jira_project_key`, `jira_security_level`, `jira_issue_type`; returns `201` |
+| POST | `/api/chat-issue/prefill` | reviewer | `text`; returns the scrubbed `title` and `body` an issue created from that chat answer would carry |
 | PUT | `/results/{job_id}/tracked-in` | reviewer | `test_name`, `url`, `type` |
 | GET | `/results/{job_id}/tracked-in` | reviewer | Current tracker links |
 | DELETE | `/results/{job_id}/tracked-in/{link_id}` | reviewer | Remove one link |
@@ -192,6 +194,8 @@ Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pat
 | POST | `/results/{job_id}/push-reportportal` | operator | Backward-compatible Report Portal push |
 
 > **Note:** All four issue preview and create endpoints call `_require_reviewer`, so a `viewer` receives `403` before the allow list is consulted. They additionally require valid tracker credentials and the matching `ENABLE_GITHUB_ISSUES` or `ENABLE_JIRA_ISSUES` toggle.
+
+`POST /api/chat-issue` is the chat counterpart: it takes no `test_name` and no credentials. The tracker credential is **always** the caller's saved account token (`GET /api/user/tokens` is the source of truth for which trackers are available) — never the deployment's `GITHUB_TOKEN` or Jira credential, and with no exception for the bootstrap `admin`, which has no profile to store one. Status codes: `201` created; `400` for a missing account credential, a missing `TESTS_REPO_URL` or Jira project key, or an unusable/legacy service-account secret; `403` when the allow list blocks the caller, the caller is a `viewer`, or the tracker's `ENABLE_*` toggle is off; `401` when the tracker rejects the credential; `502` when the tracker is unreachable or errors. Every attempt — success or refusal — writes one `issue.create` audit row with `target_type="chat"` and `details.result` of `success` or `refused`; no row carries the issue text or a token. `title` and `body` pass `scrub_sensitive_data` before the tracker call, and the prefill route returns the same scrubbed text so a redaction the user disagrees with is visible and editable before anything is filed.
 
 ### History and classification lookup
 
@@ -217,6 +221,8 @@ Send `source="ai"` to attribute the classification to the reserved `rootcoz-ai` 
 | POST | `/api/chat/{job_id}/close` | reviewer | Close the AI session |
 | DELETE | `/api/chat/{job_id}` | reviewer | Clear chat history |
 | GET | `/api/chat/{job_id}/stream` | viewer | SSE stream of new messages |
+
+An answer can become a tracker issue: `ChatUI` offers **Create issue**, which drafts the title and body from the last answer through `POST /api/chat-issue/prefill` and files them through `POST /api/chat-issue` (see [Trackers, issues, and exporters](#trackers-issues-and-exporters)). Admin chat (`/api/admin/chat/*`) has no tracker credential of its own; the dialog uses the caller's account tokens in both chats, and the human click is the only way chat text reaches a tracker — the AI has no issue-creation tool.
 
 ### Server-Sent Events streams
 

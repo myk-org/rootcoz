@@ -1403,6 +1403,32 @@ class RootCozClient:
             accept_statuses=(201,),
         )
 
+    def create_chat_issue(
+        self,
+        target: str,
+        title: str,
+        body: str,
+        jira_project_key: str = "",
+        jira_security_level: str = "",
+        jira_issue_type: str = "Bug",
+    ) -> dict[str, Any]:
+        """Create an issue from chat text. POST /api/chat-issue
+
+        No token parameter on purpose: the server files the issue with the
+        credentials saved in the caller's account, and a deployment token is
+        never a fallback.
+        """
+        payload: dict[str, Any] = {"target": target, "title": title, "body": body}
+        if jira_project_key:
+            payload["jira_project_key"] = jira_project_key
+        if jira_security_level:
+            payload["jira_security_level"] = jira_security_level
+        if jira_issue_type and jira_issue_type != "Bug":
+            payload["jira_issue_type"] = jira_issue_type
+        return self._request(
+            "POST", "/api/chat-issue", json=payload, accept_statuses=(201,)
+        )
+
     # -- User Tokens ----------------------------------------------------------
 
     def get_user_tokens(self) -> dict[str, Any]:

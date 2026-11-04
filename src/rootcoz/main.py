@@ -157,6 +157,7 @@ from rootcoz.exporters.reportportal import (
 from rootcoz.feedback import (
     create_feedback_from_preview,
     generate_feedback_preview,
+    scrub_sensitive_data,
 )
 from rootcoz.github_issues import enrich_with_tests_repo_matches
 from rootcoz.jenkins import JenkinsClient
@@ -185,6 +186,8 @@ from rootcoz.models import (
     BulkDeleteRequest,
     BulkJobMetadataRequest,
     ChatInitRequest,
+    ChatIssuePrefillRequest,
+    ChatIssueRequest,
     ChatMessageRequest,
     ChildJobAnalysis,
     ClassifyTestRequest,
@@ -9100,6 +9103,228 @@ async def _add_tracker_comment(
     return comment_id
 
 
+#: The 400 for a missing tracker credential, in two wordings: the caller that
+#: gets it must be able to follow it. An account with no users row (the
+#: bootstrap ``admin``) cannot save a token at all — ``PUT /api/user/tokens``
+#: answers 404 for it, so pointing it at Profile Settings is a dead end.
+_TRACKER_CREDENTIAL_DETAIL = (
+    "{kind} token is required. Set up your token in Profile Settings."
+)
+_TRACKER_CREDENTIAL_NO_PROFILE_DETAIL = (
+    "{kind} token is required, and this account has no profile to store one. "
+    "Sign in with your own account and add the token in Profile Settings."
+)
+
+
+async def _require_user_tracker_credential(username: str, kind: str) -> str:
+    """The 400 detail for a caller with no *kind* credential in their account.
+
+    Returns the detail instead of raising, so a caller can attach its own
+    follow-up context; ``kind`` is the tracker name (``"GitHub"``/``"Jira"``).
+    """
+    if username and await storage.get_user_by_username(username) is None:
+        return _TRACKER_CREDENTIAL_NO_PROFILE_DETAIL.format(kind=kind)
+    return _TRACKER_CREDENTIAL_DETAIL.format(kind=kind)
+
+
+#: Everything a tracker create call can raise for a handled reason. Anything
+#: else is a real bug and stays a 500.
+_ISSUE_CREATE_REFUSALS: tuple[type[Exception], ...] = (
+    JiraOAuthMintError,
+    ValueError,
+    httpx.HTTPStatusError,
+    httpx.RequestError,
+    TypeError,
+    KeyError,
+    json.JSONDecodeError,
+)
+
+
+def _map_create_refusal(
+    target: Literal["github", "jira"], exc: Exception
+) -> HTTPException:
+    """The refusal a failed tracker create answers with.
+
+    The branch set is the union the two report endpoints used to carry inline:
+    a configuration error is a 400 (an unresolvable repo URL, an OAuth
+    credential that cannot mint), an auth failure is a 401, and a tracker or
+    transport failure is a retryable 502. ``JiraOAuthMintError`` is caught by
+    none of those branches — it subclasses ``RuntimeError`` — so dropping it
+    would turn the likeliest chat-path failure into a 500.
+    """
+    github = target == "github"
+    label = "GitHub" if github else "Jira"
+    if isinstance(exc, JiraOAuthMintError):
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, ValueError):
+        return HTTPException(
+            status_code=400,
+            detail=f"Invalid TESTS_REPO_URL: {exc}" if github else str(exc),
+        )
+    if isinstance(exc, httpx.HTTPStatusError):
+        if exc.response.status_code in (401, 403):
+            return HTTPException(
+                status_code=401,
+                detail=f"{label} token is invalid or expired. "
+                "Update your token in settings.",
+            )
+        return HTTPException(
+            status_code=502,
+            detail=f"{label} API error: {exc.response.status_code}",
+        )
+    if isinstance(exc, httpx.RequestError):
+        return HTTPException(status_code=502, detail=f"{label} API unreachable: {exc}")
+    return HTTPException(
+        status_code=502,
+        detail=f"{label} API returned unexpected response: {exc}",
+    )
+
+
+async def _create_issue_from_text(
+    target: Literal["github", "jira"],
+    title: str,
+    body: str,
+    *,
+    username: str,
+    settings: Settings,
+    github_token: str = "",
+    jira_token: str = "",
+    jira_email: str = "",
+    jira_sa_token: str = "",
+    jira_project_key: str = "",
+    jira_security_level: str = "",
+    jira_issue_type: str = "Bug",
+    via: str = "rootcoz",
+    pre_check: Callable[[], Awaitable[Any]] | None = None,
+) -> dict[str, Any]:
+    """File one tracker issue from an already-written title and body.
+
+    The one create sequence in the codebase: the enable gate, the credential
+    gate, target resolution, the create call with attribution and the refusal
+    mapping live here, so the report endpoints and chat cannot drift apart.
+
+    Every credential is the caller's — this function never reads a deployment
+    credential.
+
+    Args:
+        target: Which tracker to write to.
+        title: Issue title.
+        body: Issue body, without the attribution footer (added here).
+        username: The caller, for the attribution footer.
+        settings: Effective settings, used to resolve the repo / project key.
+        via: How the issue was produced (``rootcoz``, ``rootcoz chat``).
+        pre_check: Runs after the gates and before the create call — the report
+            path uses it to reject an unknown test name without filing an
+            issue.
+
+    Returns:
+        The created issue payload (``url``/``title`` plus ``number`` for GitHub
+        or ``key`` for Jira).
+    """
+    github = target == "github"
+    label = "GitHub" if github else "Jira"
+    if github:
+        if settings.enable_github_issues is False:
+            raise HTTPException(
+                status_code=403,
+                detail="GitHub issue creation is disabled on this server",
+            )
+        if not (github_token or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail=_TRACKER_CREDENTIAL_DETAIL.format(kind=label),
+            )
+    else:
+        if not _jira_issue_creation_enabled(settings):
+            raise HTTPException(
+                status_code=403,
+                detail="Jira issue creation is disabled on this server",
+            )
+        if not (jira_token or "").strip() and not (jira_sa_token or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail=_TRACKER_CREDENTIAL_DETAIL.format(kind=label),
+            )
+        # A legacy (non-ATOA) service-account secret must be rejected, not
+        # silently dropped (which would file the bug under the SERVER's Jira
+        # identity).
+        _require_usable_jira_sa_token(jira_token, jira_sa_token)
+        # Effective settings first: the user's credential pins the auth method,
+        # so the method-configured check must run against the EFFECTIVE
+        # settings — a user credential can satisfy a method the server's own
+        # secret cannot.
+        effective_jira_settings = _build_effective_jira_settings(
+            settings,
+            jira_token,
+            jira_email,
+            jira_project_key,
+            user_jira_sa_token=jira_sa_token,
+        )
+        _require_jira_method_configured(effective_jira_settings)
+
+    if pre_check is not None:
+        await pre_check()
+
+    issue_body = body
+    if username:
+        issue_body += (
+            f"\n\n---\n_Reported by: {username} via {via}_"
+            if github
+            else f"\n\n----\nReported by: {username} via {via}"
+        )
+
+    tests_repo_url = ""
+    if github:
+        tests_repo_url = _resolve_github_repo_url(settings)
+        if not tests_repo_url:
+            raise HTTPException(
+                status_code=400,
+                detail="No test repository URL available. The job was analyzed without tests_repo_url.",
+            )
+
+    try:
+        if github:
+            # The server states the attribution explicitly; a model-specific
+            # line in a client-supplied body is stripped upstream and never
+            # decides the footer.
+            result = await create_github_issue(
+                title=title,
+                body=issue_body,
+                repo_url=tests_repo_url,
+                github_token=github_token.strip(),
+                attribution=AiProvenance(ai_used=True),
+            )
+        else:
+            if not effective_jira_settings.jira_project_key:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Jira project key is required. Provide it in the"
+                        " request or configure JIRA_PROJECT_KEY on the server."
+                    ),
+                )
+            result = await create_jira_bug(
+                title=title,
+                body=issue_body,
+                settings=effective_jira_settings,
+                project_key=jira_project_key,
+                security_level=jira_security_level,
+                issue_type=jira_issue_type,
+            )
+    except _ISSUE_CREATE_REFUSALS as exc:
+        raise _map_create_refusal(target, exc) from exc
+
+    issue_url = _require_tracker_url(result, label)
+    if github:
+        return {
+            "url": issue_url,
+            "number": result.get("number", 0),
+            "key": "",
+            "title": title,
+        }
+    return {"url": issue_url, "key": result.get("key", ""), "title": title}
+
+
 @app.post(
     "/results/{job_id}/create-github-issue",
     status_code=201,
@@ -9118,72 +9343,20 @@ async def create_github_issue_endpoint(
     logger.debug(
         f"POST /results/{job_id}/create-github-issue: test_name={body.test_name}"
     )
-    if settings.enable_github_issues is False:
-        raise HTTPException(
-            status_code=403,
-            detail="GitHub issue creation is disabled on this server",
-        )
-    github_token = (body.github_token or "").strip()
-    if not github_token:
-        raise HTTPException(
-            status_code=400,
-            detail=("GitHub token is required. Set up your token in Profile Settings."),
-        )
-
-    _failure, _result_data, _matched_child = await _load_effective_failure(
-        job_id, body.test_name, body.child_job_name, body.child_build_number
-    )
-
     username = request.state.username
-    issue_body = body.body
-    if username:
-        issue_body += f"\n\n---\n_Reported by: {username} via rootcoz_"
-
-    tests_repo_url = _resolve_github_repo_url(settings)
-    if not tests_repo_url:
-        raise HTTPException(
-            status_code=400,
-            detail="No test repository URL available. The job was analyzed without tests_repo_url.",
-        )
-
-    try:
-        # This path always creates from rootcoz's own failure analysis, so the
-        # server states the attribution explicitly; a model-specific line in a
-        # client-supplied --body is stripped and never decides the footer.
-        result = await create_github_issue(
-            title=body.title,
-            body=issue_body,
-            repo_url=tests_repo_url,
-            github_token=github_token,
-            attribution=AiProvenance(ai_used=True),
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid TESTS_REPO_URL: {exc}",
-        ) from exc
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code in (401, 403):
-            raise HTTPException(
-                status_code=401,
-                detail="GitHub token is invalid or expired. Update your token in settings.",
-            ) from exc
-        raise HTTPException(
-            status_code=502,
-            detail=f"GitHub API error: {exc.response.status_code}",
-        ) from exc
-    except httpx.RequestError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"GitHub API unreachable: {exc}",
-        ) from exc
-    except (TypeError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"GitHub API returned unexpected response: {exc}",
-        ) from exc
-
-    issue_url = _require_tracker_url(result, "GitHub")
+    result = await _create_issue_from_text(
+        "github",
+        body.title,
+        body.body,
+        username=username,
+        settings=settings,
+        github_token=body.github_token or "",
+        # Reject an unknown test name before an issue is filed for it.
+        pre_check=lambda: _load_effective_failure(
+            job_id, body.test_name, body.child_job_name, body.child_build_number
+        ),
+    )
+    issue_url = result["url"]
 
     comment_id = await _add_tracker_comment(
         "GitHub Issue", job_id, body, result, username, tracked_type="github"
@@ -9199,13 +9372,7 @@ async def create_github_issue_endpoint(
         request=request,
     )
 
-    return {
-        "url": issue_url,
-        "number": result.get("number", 0),
-        "key": "",
-        "title": body.title,
-        "comment_id": comment_id,
-    }
+    return {**result, "comment_id": comment_id}
 
 
 @app.post(
@@ -9225,94 +9392,25 @@ async def create_jira_bug_endpoint(
     _check_allow_list(request)
     logger.debug(f"POST /results/{job_id}/create-jira-bug: test_name={body.test_name}")
 
-    if not _jira_issue_creation_enabled(settings):
-        raise HTTPException(
-            status_code=403,
-            detail="Jira issue creation is disabled on this server",
-        )
-
-    # User must provide their own Jira token (regular or service account) —
-    # fail fast before DB work
-    user_jira_token = (body.jira_token or "").strip()
-    user_jira_sa_token = (body.jira_sa_token or "").strip()
-    if not user_jira_token and not user_jira_sa_token:
-        raise HTTPException(
-            status_code=400,
-            detail=("Jira token is required. Set up your token in Profile Settings."),
-        )
-    # A legacy (non-ATOA) service-account secret must be rejected, not
-    # silently dropped (which would file the bug under the SERVER's Jira
-    # identity).
-    _require_usable_jira_sa_token(body.jira_token, body.jira_sa_token)
-    # Effective settings first (Finding 9): the user's credential pins the
-    # auth method, so the method-configured check must run against the
-    # EFFECTIVE settings — a user-supplied credential can satisfy a method
-    # the server's own secret cannot.
-    effective_jira_settings = _build_effective_jira_settings(
-        settings,
-        body.jira_token,
-        body.jira_email,
-        body.jira_project_key,
-        user_jira_sa_token=body.jira_sa_token,
-    )
-    _require_jira_method_configured(effective_jira_settings)
-
-    _failure, _result_data, _matched_child = await _load_effective_failure(
-        job_id, body.test_name, body.child_job_name, body.child_build_number
-    )
-
     username = request.state.username
-    bug_body = body.body
-    if username:
-        bug_body += f"\n\n----\nReported by: {username} via rootcoz"
-
-    try:
-        if not effective_jira_settings.jira_project_key:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Jira project key is required. Provide it in the"
-                    " request or configure JIRA_PROJECT_KEY on the server."
-                ),
-            )
-        result = await create_jira_bug(
-            title=body.title,
-            body=bug_body,
-            settings=effective_jira_settings,
-            project_key=body.jira_project_key,
-            security_level=body.jira_security_level,
-            issue_type=body.jira_issue_type,
-        )
-    except JiraOAuthMintError as exc:
-        # OAuth 2.0 credential could not mint an access token — a
-        # configuration error, surfaced as a controlled 400.
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except ValueError as exc:
-        # Unresolvable SA cloud ID / missing site URL — a configuration
-        # error, surfaced as a controlled 400 rather than an unhandled 500.
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code in (401, 403):
-            raise HTTPException(
-                status_code=401,
-                detail="Jira token is invalid or expired. Update your token in settings.",
-            ) from exc
-        raise HTTPException(
-            status_code=502,
-            detail=f"Jira API error: {exc.response.status_code}",
-        ) from exc
-    except httpx.RequestError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Jira API unreachable: {exc}",
-        ) from exc
-    except (TypeError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Jira API returned unexpected response: {exc}",
-        ) from exc
-
-    issue_url = _require_tracker_url(result, "Jira")
+    result = await _create_issue_from_text(
+        "jira",
+        body.title,
+        body.body,
+        username=username,
+        settings=settings,
+        jira_token=body.jira_token or "",
+        jira_email=body.jira_email or "",
+        jira_sa_token=body.jira_sa_token or "",
+        jira_project_key=body.jira_project_key,
+        jira_security_level=body.jira_security_level,
+        jira_issue_type=body.jira_issue_type,
+        # Reject an unknown test name before an issue is filed for it.
+        pre_check=lambda: _load_effective_failure(
+            job_id, body.test_name, body.child_job_name, body.child_build_number
+        ),
+    )
+    issue_url = result["url"]
 
     comment_id = await _add_tracker_comment(
         "Jira Bug", job_id, body, result, username, tracked_type="jira"
@@ -9328,12 +9426,108 @@ async def create_jira_bug_endpoint(
         request=request,
     )
 
-    return {
-        "url": issue_url,
-        "key": result.get("key", ""),
-        "title": body.title,
-        "comment_id": comment_id,
-    }
+    return {**result, "comment_id": comment_id}
+
+
+_CHAT_ISSUE_TITLE_MAX = 120
+
+
+def _chat_issue_draft(text: str) -> dict[str, str]:
+    """The title and body a chat answer would be filed as.
+
+    One pattern set, here in Python: the dialog prefills from this, so a false
+    redaction is visible in the box about to be submitted and can be restored,
+    and the create handler scrubs again as a backstop.
+    """
+    body = scrub_sensitive_data(text)
+    for line in body.splitlines():
+        title = line.strip().lstrip("#>-*").strip()
+        if title:
+            return {"title": title[:_CHAT_ISSUE_TITLE_MAX], "body": body}
+    return {"title": "", "body": body}
+
+
+@app.post("/api/chat-issue/prefill", operation_id="prefillChatIssue")
+async def prefill_chat_issue(
+    request: Request, body: ChatIssuePrefillRequest
+) -> dict[str, str]:
+    """Draft the title and body of an issue from a chat answer."""
+    _require_reviewer(request)
+    _check_allow_list(request)
+    return _chat_issue_draft(body.text)
+
+
+@app.post("/api/chat-issue", status_code=201, operation_id="createChatIssue")
+async def create_chat_issue(
+    request: Request,
+    body: ChatIssueRequest,
+    settings: Settings = _SETTINGS_DEP,
+) -> dict[str, Any]:
+    """Open a GitHub issue or Jira ticket from a chat conversation.
+
+    The only tracker write reachable from chat, and it is human-driven: the
+    caller has already seen and edited the text in a dialog, so no
+    model-authored request ever reaches a tracker. Credentials come from the
+    caller's account row — never a deployment credential, and there is no
+    bootstrap-``admin`` exception.
+    """
+    _require_reviewer(request)
+    _check_allow_list(request)
+    username = request.state.username
+    tracker = body.target
+    message = f"User '{username}' created a {tracker} issue from chat"
+    try:
+        user_tokens = await storage.get_user_tokens(username)
+        if tracker == "github":
+            has_credential = bool(user_tokens.get("github_token"))
+            kind = "GitHub"
+        else:
+            has_credential = bool(
+                user_tokens.get("jira_token") or user_tokens.get("jira_sa_token")
+            )
+            kind = "Jira"
+        if not has_credential:
+            raise HTTPException(
+                status_code=400,
+                detail=await _require_user_tracker_credential(username, kind),
+            )
+        result = await _create_issue_from_text(
+            tracker,
+            scrub_sensitive_data(body.title),
+            scrub_sensitive_data(body.body),
+            username=username,
+            settings=settings,
+            github_token=user_tokens.get("github_token", ""),
+            jira_token=user_tokens.get("jira_token", ""),
+            jira_email=user_tokens.get("jira_email", ""),
+            jira_sa_token=user_tokens.get("jira_sa_token", ""),
+            jira_project_key=body.jira_project_key,
+            jira_security_level=body.jira_security_level,
+            jira_issue_type=body.jira_issue_type,
+            via="rootcoz chat",
+        )
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="issue.create",
+            request=request,
+            message=message,
+            target_type="chat",
+            exc=exc,
+            details={"tracker": tracker, "result": "refused"},
+        )
+        raise
+
+    # Never the body: the tracker, the outcome and the issue this run produced.
+    await record_audit(
+        action="issue.create",
+        actor=username,
+        message=f"{message}: {result['url']}",
+        target_type="chat",
+        target_id=None,
+        details={"tracker": tracker, "result": "success"},
+        request=request,
+    )
+    return result
 
 
 def _detect_tracker_type(url: str) -> str:
@@ -19402,7 +19596,7 @@ async def create_feedback(
         if not github_token:
             raise HTTPException(
                 status_code=400,
-                detail="GitHub token is required. Set up your token in Profile Settings.",
+                detail=await _require_user_tracker_credential(username, "GitHub"),
             )
 
         try:

@@ -58,6 +58,8 @@ This asks the job's assistant for a cross-failure answer and leaves the evidence
 
    > **Tip:** Because the assistant can read the cloned test code, questions like `Why does test_login assert on the old token format?` are often answered faster than asking for a re-analysis with a different model.
 
+   A good answer can become the issue itself: click `Create issue` above the conversation, review the prefilled title and body, and click Create. The issue uses the token saved in your account (add one in Profile Settings if the dialog says you have none) — see [Creating Follow-Up Issues and Pushing Results](create-follow-up-issues-and-push-results.html) for the whole flow.
+
 4. Comment on the failure, not just in the chat.
 
    Expand a failure card and use the `Add a comment...` box, then click `Post`. Comments are attached to the specific test — including grouped cards, where the comment covers the group you clicked — and they persist independently of any chat session.

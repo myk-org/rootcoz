@@ -4404,6 +4404,363 @@ class TestCreateJiraBugApiErrors:
         assert "Jira API unreachable" in response.json()["detail"]
 
 
+class TestChatIssueEndpoint:
+    """POST /api/chat-issue — a tracker write driven from a chat conversation.
+
+    Every credential here must come from the caller's account row: no
+    deployment token on any path, no bootstrap-``admin`` exception.
+    """
+
+    _CHAT: ClassVar[dict[str, str]] = {
+        "title": "test_login fails with DNS timeout",
+        "body": "The login test timed out resolving the auth service.",
+    }
+
+    # -- helpers -------------------------------------------------------------
+
+    @staticmethod
+    async def _user(name: str, **tokens: str) -> dict[str, str]:
+        """A registered user whose account row holds *tokens*."""
+        _, api_key = await storage.create_user(name)
+        if tokens:
+            await storage.save_user_tokens(name, **tokens)
+        return {"Authorization": f"Bearer {api_key}"}
+
+    @staticmethod
+    async def _chat_audit() -> dict[str, Any]:
+        return await storage.list_audit_events(
+            action="issue.create", target_type="chat"
+        )
+
+    # -- GitHub --------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_github_uses_the_callers_row_token(self, test_client):
+        """The token on the outbound call is the caller's, and the attempt is audited."""
+        headers = await self._user("chat-gh", github_token="ghp_row_token")
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/7",
+                "number": 7,
+            }
+            with _with_github_issue_config():
+                response = test_client.post(
+                    "/api/chat-issue",
+                    json={**self._CHAT, "target": "github"},
+                    headers=headers,
+                )
+        assert response.status_code == 201, response.text
+        assert response.json()["number"] == 7
+        assert mock_create.call_args[1]["github_token"] == "ghp_row_token"
+        audit = await self._chat_audit()
+        assert audit["total"] == 1
+        event = audit["events"][0]
+        assert event["details"]["result"] == "success"
+        assert event["details"]["tracker"] == "github"
+        assert event["target_id"] is None
+        assert event["outcome"] == "success"
+
+    @pytest.mark.asyncio
+    async def test_github_without_a_row_token_refuses_and_audits(self, test_client):
+        """No account token → the followable 400, nothing sent, one refusal row."""
+        headers = await self._user("chat-gh-none")
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post(
+                "/api/chat-issue",
+                json={**self._CHAT, "target": "github"},
+                headers=headers,
+            )
+        assert response.status_code == 400
+        assert response.json()["detail"] == (
+            "GitHub token is required. Set up your token in Profile Settings."
+        )
+        mock_create.assert_not_called()
+        audit = await self._chat_audit()
+        assert audit["total"] == 1
+        assert audit["events"][0]["details"]["result"] == "refused"
+        assert audit["events"][0]["details"]["reason"] == "invalid_request"
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_admin_is_pointed_at_a_path_it_can_take(self, test_client):
+        """The bootstrap admin has no users row, so Profile Settings is a dead end."""
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post(
+                "/api/chat-issue",
+                json={**self._CHAT, "target": "github"},
+            )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert "GitHub token is required" in detail
+        assert "no profile to store one" in detail
+        assert "Sign in with your own account" in detail
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_github_never_falls_back_to_the_server_token(self, test_client):
+        """A deployment GITHUB_TOKEN is configuration, never identity."""
+        headers = await self._user("chat-gh-srvtok")
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post(
+                "/api/chat-issue",
+                json={**self._CHAT, "target": "github"},
+                headers=headers,
+            )
+        assert response.status_code == 400
+        assert "token is required" in response.json()["detail"].lower()
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_github_disabled_returns_403(self, test_client):
+        headers = await self._user("chat-gh-disabled", github_token="ghp_row_token")
+        from rootcoz.config import get_settings
+
+        with patch.dict(
+            os.environ,
+            {
+                "ENABLE_GITHUB_ISSUES": "false",
+                "TESTS_REPO_URL": "https://github.com/test-org/test-repo",
+            },
+        ):
+            get_settings.cache_clear()
+            try:
+                response = test_client.post(
+                    "/api/chat-issue",
+                    json={**self._CHAT, "target": "github"},
+                    headers=headers,
+                )
+            finally:
+                get_settings.cache_clear()
+        assert response.status_code == 403
+        assert "disabled" in response.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    async def test_github_without_a_repo_url_returns_400(self, test_client):
+        headers = await self._user("chat-gh-norepo", github_token="ghp_row_token")
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            response = test_client.post(
+                "/api/chat-issue",
+                json={**self._CHAT, "target": "github"},
+                headers=headers,
+            )
+        assert response.status_code == 400
+        assert "No test repository URL available" in response.json()["detail"]
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_github_upstream_error_keeps_the_report_path_mapping(
+        self, test_client
+    ):
+        import httpx
+
+        headers = await self._user("chat-gh-404", github_token="ghp_row_token")
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.side_effect = httpx.HTTPStatusError(
+                "Not Found",
+                request=httpx.Request("POST", "https://api.github.com"),
+                response=httpx.Response(404),
+            )
+            with _with_github_issue_config():
+                response = test_client.post(
+                    "/api/chat-issue",
+                    json={**self._CHAT, "target": "github"},
+                    headers=headers,
+                )
+        assert response.status_code == 502
+        assert response.json()["detail"] == "GitHub API error: 404"
+
+    # -- Jira -----------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_jira_uses_the_callers_row_credentials(self, test_client):
+        headers = await self._user(
+            "chat-jira", jira_token="user_jira_token", jira_email="user@example.com"
+        )
+        with patch("rootcoz.main.create_jira_bug") as mock_create:
+            mock_create.return_value = {
+                "key": "PROJ-7",
+                "url": "https://jira.example.com/browse/PROJ-7",
+            }
+            with _enable_feature("jira_enabled"):
+                response = test_client.post(
+                    "/api/chat-issue",
+                    json={**self._CHAT, "target": "jira"},
+                    headers=headers,
+                )
+        assert response.status_code == 201, response.text
+        assert response.json()["key"] == "PROJ-7"
+        call_settings = mock_create.call_args[1]["settings"]
+        assert call_settings.jira_api_token.get_secret_value() == "user_jira_token"
+        assert call_settings.jira_auth_mode == "basic"
+
+    @pytest.mark.asyncio
+    async def test_jira_never_falls_back_to_the_server_token(self, test_client):
+        """The deployment holds a working Jira credential; the caller does not.
+
+        Without this, a weakened gate would file the ticket under the server's
+        identity and every other test would still pass.
+        """
+        headers = await self._user("chat-jira-srvtok")
+        with (
+            patch("rootcoz.main.create_jira_bug") as mock_create,
+            _enable_feature("jira_enabled"),
+        ):
+            response = test_client.post(
+                "/api/chat-issue",
+                json={**self._CHAT, "target": "jira"},
+                headers=headers,
+            )
+        assert response.status_code == 400
+        assert response.json()["detail"] == (
+            "Jira token is required. Set up your token in Profile Settings."
+        )
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_jira_disabled_returns_403(self, test_client):
+        headers = await self._user("chat-jira-off", jira_token="user_jira_token")
+        from rootcoz.config import get_settings
+
+        with patch.dict(os.environ, {"ENABLE_JIRA_ISSUES": "false"}):
+            get_settings.cache_clear()
+            try:
+                response = test_client.post(
+                    "/api/chat-issue",
+                    json={**self._CHAT, "target": "jira"},
+                    headers=headers,
+                )
+            finally:
+                get_settings.cache_clear()
+        assert response.status_code == 403
+        assert "disabled" in response.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    async def test_jira_legacy_service_account_secret_is_refused(self, test_client):
+        """A legacy SA secret is rejected, never silently dropped."""
+        headers = await self._user(
+            "chat-jira-legacy", jira_sa_token="legacy-secret-token"
+        )
+        with (
+            patch("rootcoz.main.create_jira_bug") as mock_create,
+            _enable_feature("jira_enabled"),
+        ):
+            response = test_client.post(
+                "/api/chat-issue",
+                json={**self._CHAT, "target": "jira"},
+                headers=headers,
+            )
+        assert response.status_code == 400
+        assert "not a recognized" in response.json()["detail"]
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_jira_mint_error_is_a_controlled_400(self, test_client):
+        """A credential that cannot mint is a configuration error, not a 500."""
+        from rootcoz.jira import JiraOAuthMintError
+        from rootcoz.main import app, get_settings
+
+        headers = await self._user("chat-jira-mint", jira_sa_token="ATOAsecret")
+        # oauth method: the user's ATOA secret replaces the deployment's, and the
+        # client/cloud ids stay the server's.
+        app.dependency_overrides[get_settings] = lambda: _build_wait_settings(
+            jira_auth_mode="oauth",
+            jira_project_key="PROJ",
+            atlassian_oauth_client_id="client-id",
+            atlassian_oauth_cloud_id="cloud-id",
+        )
+        try:
+            with patch("rootcoz.main.create_jira_bug") as mock_create:
+                mock_create.side_effect = JiraOAuthMintError("cannot mint access token")
+                response = test_client.post(
+                    "/api/chat-issue",
+                    json={**self._CHAT, "target": "jira"},
+                    headers=headers,
+                )
+        finally:
+            app.dependency_overrides.pop(get_settings, None)
+        assert response.status_code == 400
+        assert response.json()["detail"] == "cannot mint access token"
+
+    # -- access ---------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_viewer_cannot_create_a_chat_issue(self, test_client):
+        _, api_key = await storage.create_user("chat-viewer", role="viewer")
+        response = test_client.post(
+            "/api/chat-issue",
+            json={**self._CHAT, "target": "github"},
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        assert response.status_code == 403
+        assert "Reviewer access required" in response.json()["detail"]
+
+    # -- scrubbing ------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_chat_text_is_scrubbed_before_it_leaves(self, test_client):
+        """A pasted token never reaches the tracker — not even as a hex SHA.
+
+        A 40-hex commit SHA is also a legacy GitHub token shape, so the shared
+        scrubber redacts it; the dialog prefills through the same scrubber, so
+        the user sees the marker and restores the SHA by hand if it was one.
+        """
+        sha = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
+        headers = await self._user("chat-scrub", github_token="ghp_row_token")
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/8",
+                "number": 8,
+            }
+            with _with_github_issue_config():
+                response = test_client.post(
+                    "/api/chat-issue",
+                    json={
+                        "target": "github",
+                        "title": "auth broke with ghp_abcdefghijklmnopqrstuvwxyz0123",
+                        "body": f"Commit {sha} broke login.",
+                    },
+                    headers=headers,
+                )
+        assert response.status_code == 201, response.text
+        kwargs = mock_create.call_args[1]
+        assert "ghp_" not in kwargs["title"]
+        assert "[REDACTED_GITHUB_TOKEN]" in kwargs["title"]
+        assert sha not in kwargs["body"]
+        assert "[REDACTED_HEX_TOKEN]" in kwargs["body"]
+
+    def test_prefill_drafts_a_scrubbed_title_and_body(self, test_client):
+        sha = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
+        text = (
+            "## Login test fails\n\n"
+            "The login test timed out with token=ghp_abcdefghijklmnopqrstuvwxyz0123."
+            f" It broke on commit {sha}."
+        )
+        response = test_client.post("/api/chat-issue/prefill", json={"text": text})
+        assert response.status_code == 200
+        data = response.json()
+        assert data["title"] == "Login test fails"
+        assert "ghp_" not in data["body"]
+        assert "[REDACTED]" in data["body"]
+        # The dialog shows the same text it will submit: the SHA redaction is
+        # visible in the box, so the user can restore a real commit id by hand.
+        assert sha not in data["body"]
+        assert "[REDACTED_HEX_TOKEN]" in data["body"]
+
+    def test_prefill_truncates_the_title(self, test_client):
+        response = test_client.post("/api/chat-issue/prefill", json={"text": "x" * 500})
+        assert response.status_code == 200
+        assert response.json()["title"] == "x" * 120
+        assert response.json()["body"] == "x" * 500
+
+
 class TestHistoryEndpoints:
     """Tests for the /history/* endpoints."""
 

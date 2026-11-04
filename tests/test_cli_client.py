@@ -633,6 +633,35 @@ class TestRootCozClientBugCreation:
         )
         assert result["key"] == "PROJ-456"
 
+    def test_create_chat_issue(self):
+        def handler(request):
+            assert request.method == "POST"
+            assert str(request.url).endswith("/api/chat-issue")
+            # No credential ever rides in the request body.
+            assert json.loads(request.content) == {
+                "target": "jira",
+                "title": "DNS timeout",
+                "body": "Description...",
+                "jira_project_key": "PROJ",
+            }
+            return httpx.Response(
+                201,
+                json={
+                    "url": "https://jira.example.com/browse/PROJ-7",
+                    "key": "PROJ-7",
+                    "title": "DNS timeout",
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.create_chat_issue(
+            target="jira",
+            title="DNS timeout",
+            body="Description...",
+            jira_project_key="PROJ",
+        )
+        assert result["key"] == "PROJ-7"
+
     def test_override_classification(self):
         def handler(request):
             assert request.method == "PUT"

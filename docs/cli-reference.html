@@ -865,6 +865,11 @@
 <td>Create the issue.</td>
 </tr>
 <tr>
+<td><code>rootcoz create-chat-issue</code></td>
+<td><code>--target</code> (<code>github</code> or <code>jira</code>), <code>--title</code>, <code>--body</code>, <code>--jira-project-key</code>, <code>--jira-security-level</code>, <code>--jira-issue-type</code> (default <code>Bug</code>)</td>
+<td>File an issue from chat text. Deliberately exposes <strong>no</strong> token flags: the issue is created with the credentials saved in your account, so it can never be filed under a server token.</td>
+</tr>
+<tr>
 <td><code>rootcoz validate-token github\|jira</code></td>
 <td><code>--token</code> (hidden prompt), <code>--email</code></td>
 <td>Check a tracker token before using it. An ATOA-prefixed Jira value (an Atlassian OAuth 2.0 credential client secret) is validated as a service account against the scoped Atlassian gateway, using the server's <code>atlassian_oauth_client_id</code>; an ATST-prefixed value (an Atlassian service-account scoped token) is sent as Bearer to the same gateway with no exchange.</td>
