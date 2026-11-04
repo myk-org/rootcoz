@@ -17592,11 +17592,14 @@ async def _normalize_enumerated_value(key: str, value: str) -> tuple[str, str | 
 # Greenwave settings whose save must re-check the selected auth mode's
 # prerequisites: the mode itself, the ResultsDB URL scheme, and every
 # per-mode credential field (fields that never gate mode completeness —
-# krb5 service class, CA bundle, waiver settings — are excluded).
+# krb5 service class, CA bundle — are excluded, as are the waiver
+# credentials; the waiver URL is included because its HTTPS-only scheme
+# rule is enforced on this write path).
 _GREENWAVE_AUTH_SETTING_KEYS: frozenset[str] = frozenset(
     {
         "greenwave_auth_mode",
         "greenwave_url",
+        "greenwave_waiver_url",
         "greenwave_api_token",
         "greenwave_oidc_token_url",
         "greenwave_oidc_client_id",
@@ -17716,7 +17719,13 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
             "prow_url",
             "gcs_bucket",
             "default_user_role",
-            "greenwave_url",
+            # greenwave_url is NOT skipped: its STRUCTURAL problems
+            # (userinfo, query, fragment, bad port) are reported by the
+            # per-key model_validate below, while its mode-aware SCHEME rule
+            # needs the merged proposal and runs in the Greenwave cross-field
+            # block. greenwave_waiver_url skips here because the pre-validate
+            # block above already model-validates it (one message per
+            # problem, #361 Qodo r2).
             "greenwave_waiver_url",
             "greenwave_outcome_map",
         ):
@@ -17801,38 +17810,42 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
                 )
 
     # Greenwave auth mode (#183): the selected mode's required fields must
-    # be complete, and the ResultsDB URL scheme must match the mode (plain
-    # HTTP is valid only for the credential-less 'none' mode).  Like the
-    # auto-push rule below, it runs only when the update touches one of
-    # the mode's keys, and is evaluated on the EFFECTIVE proposed values
-    # so an update touching only one key is caught too.  Mirrors the Jira
-    # mode-field gate ("auth method 'X' is selected but missing: ...").
+    # be complete, and the URL schemes must match the mode (plain HTTP is
+    # valid only for the credential-less 'none' mode, or while no mode is
+    # selected — the exporter is inert then).  Like the auto-push rule
+    # below, it runs only when the update touches one of the mode's keys,
+    # and is evaluated on the EFFECTIVE proposed values via
+    # _effective_proposed_settings so absent-vs-explicitly-cleared is the
+    # helper's job: an explicit CLEAR of the mode is judged on the cleared
+    # value (a batch clearing the mode while setting an inert http URL is
+    # accepted), and a batch replacing url+mode together is judged on the
+    # new values — never on ``or``-fallbacks to the pre-batch state.
+    # Mirrors the Jira mode-field gate ("auth method 'X' is selected but
+    # missing: ...").
     if not _GREENWAVE_AUTH_SETTING_KEYS.isdisjoint(settings_updates):
-        current = get_settings()
-        url = settings_updates.get("greenwave_url")
-        if url in (None, ""):
-            url = current.greenwave_url
-        url = str(url).strip() if url is not None else ""
-        mode = settings_updates.get("greenwave_auth_mode")
-        if mode in (None, ""):
-            mode = current.greenwave_auth_mode
-        mode = str(mode) if mode is not None else ""
-        token_url = settings_updates.get("greenwave_oidc_token_url")
-        if token_url in (None, ""):
-            token_url = current.greenwave_oidc_token_url
-        token_url = str(token_url).strip() if token_url is not None else ""
-        try:
-            # Unset mode = exporter disabled, so its URL is inert (mirrors the
-            # Settings post-init check); the OIDC token endpoint is always
-            # HTTPS because the client secret is POSTed to it.
-            validate_greenwave_url(
-                url or None,
-                "GREENWAVE_URL",
-                allow_http=normalize_greenwave_auth_mode(mode) in ("none", ""),
-            )
-            validate_greenwave_url(token_url or None, "GREENWAVE_OIDC_TOKEN_URL")
-        except ValueError as exc:
-            errors.append(str(exc))
+        proposed = _effective_proposed_settings(settings_updates)
+        if proposed is not None:
+            try:
+                # Unset mode = exporter disabled, so its URL is inert; the
+                # OIDC token endpoint is always HTTPS because the client
+                # secret is POSTed to it; a waiver write gates releases, so
+                # the waiver endpoint stays HTTPS-only in every mode.
+                validate_greenwave_url(
+                    proposed.greenwave_url,
+                    "GREENWAVE_URL",
+                    allow_http=normalize_greenwave_auth_mode(
+                        proposed.greenwave_auth_mode
+                    )
+                    in ("none", ""),
+                )
+                validate_greenwave_url(
+                    proposed.greenwave_oidc_token_url, "GREENWAVE_OIDC_TOKEN_URL"
+                )
+                validate_greenwave_url(
+                    proposed.greenwave_waiver_url, "GREENWAVE_WAIVER_URL"
+                )
+            except ValueError as exc:
+                errors.append(str(exc))
         # A save is NOT rejected for an incomplete mode. The mode has to be
         # storable first: the Server Settings UI renders a mode's fields only
         # once that mode is persisted, so rejecting the switch would leave the
@@ -18984,16 +18997,24 @@ async def _test_greenwave_connection(settings: Settings) -> dict[str, Any]:
     # for what was actually exercised — rather than the value re-derived
     # above for the prerequisite messages.
     mode = auth.mode
-    # Kerberos only authenticates when the server issues a 401 challenge, so
-    # a 200 on the first request means the credentials were never exercised —
-    # claiming "authenticated" there would green-light an unauthenticated
-    # endpoint. Every other mode attaches its credentials to that request.
+    # Kerberos only authenticates when the server issues a 401 challenge,
+    # so a 200 on the first request means the credentials were never
+    # exercised — claiming "authenticated" there would green-light an
+    # unauthenticated endpoint. When the SPNEGO dance DID complete, the
+    # strategy recorded it, and the message says so. Every other mode
+    # attaches its credentials to that request.
     if mode == "kerberos":
-        message = (
-            f"ResultsDB at {redact_urls_in_text(url)} is reachable; the endpoint "
-            "did not request Negotiate authentication, so the keytab was not "
-            "exercised by this check"
-        )
+        if auth.spnego_exchange_completed:
+            message = (
+                f"ResultsDB at {redact_urls_in_text(url)} is reachable and "
+                "authenticated via kerberos (SPNEGO exchange completed)"
+            )
+        else:
+            message = (
+                f"ResultsDB at {redact_urls_in_text(url)} is reachable; the "
+                "endpoint did not request Negotiate authentication, so the "
+                "keytab was not exercised by this check"
+            )
     else:
         message = (
             f"ResultsDB at {redact_urls_in_text(url)} is reachable and "

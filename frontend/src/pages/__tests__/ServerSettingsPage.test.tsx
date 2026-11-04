@@ -132,6 +132,7 @@ const baseSettings = (): TestSetting[] => [
   mk('greenwave_oidc_client_secret', 'Greenwave', '', { sensitive: true }),
   mk('greenwave_keytab_path', 'Greenwave', ''),
   mk('greenwave_keytab_principal', 'Greenwave', ''),
+mk('greenwave_krb5_realm', 'Greenwave', ''),
   mk('greenwave_krb5_service', 'Greenwave', ''),
   mk('greenwave_client_cert', 'Greenwave', ''),
   mk('greenwave_client_key', 'Greenwave', '', { sensitive: true }),
@@ -881,7 +882,9 @@ describe('ServerSettingsPage Greenwave auth mode selection', () => {
 
     expect(greenwaveAuthSelect()).toHaveTextContent('Not set — exporter disabled')
     expect(
-      screen.getByText('Exactly one mode is active. Unset or None disables the Greenwave exporter.'),
+      screen.getByText(
+        'Unset disables the exporter. None is an active mode: it sends no credentials (and is the only mode that may use a plain http:// URL).',
+      ),
     ).toBeInTheDocument()
 
     // No mode's credential fields render
@@ -913,6 +916,32 @@ describe('ServerSettingsPage Greenwave auth mode selection', () => {
     // The previous mode's fields are hidden
     expect(shown('greenwave_basic_user')).toBe(false)
     expect(shown('greenwave_basic_password')).toBe(false)
+  })
+
+  it('kerberos owns greenwave_krb5_realm; other modes hide it', async () => {
+    mockGreenwaveModeSettings('kerberos')
+    await openGreenwaveTab()
+
+    expect(shown('greenwave_krb5_realm')).toBe(true)
+
+    chooseGreenwaveMethod('Bearer token')
+    await waitFor(() => expect(greenwaveAuthSelect()).toHaveTextContent('Bearer token'))
+    expect(shown('greenwave_krb5_realm')).toBe(false)
+  })
+
+  it('bearer owns greenwave_waiver_token; none and kerberos hide it', async () => {
+    mockGreenwaveModeSettings('bearer')
+    await openGreenwaveTab()
+
+    expect(shown('greenwave_waiver_token')).toBe(true)
+
+    chooseGreenwaveMethod('None (unauthenticated)')
+    await waitFor(() => expect(greenwaveAuthSelect()).toHaveTextContent('None (unauthenticated)'))
+    expect(shown('greenwave_waiver_token')).toBe(false)
+
+    chooseGreenwaveMethod('Kerberos (keytab)')
+    await waitFor(() => expect(greenwaveAuthSelect()).toHaveTextContent('Kerberos (keytab)'))
+    expect(shown('greenwave_waiver_token')).toBe(false)
   })
 
   it('offers exactly the six modes in the picker', async () => {

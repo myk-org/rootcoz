@@ -151,14 +151,14 @@ const JIRA_METHODS: { id: JiraMethod; label: string; fields: string[] }[] = [
 
 // Greenwave auth modes (exactly one is persisted as greenwave_auth_mode;
 // unset = exporter disabled, 'none' = enabled without credentials). Each mode
-// owns its credential fields; greenwave_url and the waiver/outcome settings are
-// mode-independent.
+// owns its credential fields; greenwave_url and the outcome/waiver settings
+// are mode-independent, except greenwave_waiver_token (bearer-only).
 type GreenwaveMethod = 'bearer' | 'oidc' | 'kerberos' | 'mtls' | 'basic' | 'none'
 const GREENWAVE_METHODS: { id: GreenwaveMethod; label: string; fields: string[] }[] = [
   {
     id: 'bearer',
     label: 'Bearer token',
-    fields: ['greenwave_api_token'],
+    fields: ['greenwave_api_token', 'greenwave_waiver_token'],
   },
   {
     id: 'oidc',
@@ -168,7 +168,7 @@ const GREENWAVE_METHODS: { id: GreenwaveMethod; label: string; fields: string[] 
   {
     id: 'kerberos',
     label: 'Kerberos (keytab)',
-    fields: ['greenwave_keytab_path', 'greenwave_keytab_principal', 'greenwave_krb5_service'],
+    fields: ['greenwave_keytab_path', 'greenwave_keytab_principal', 'greenwave_krb5_realm', 'greenwave_krb5_service'],
   },
   {
     id: 'mtls',
@@ -1858,7 +1858,7 @@ export function ServerSettingsPage() {
                 error={greenwaveModeError}
                 header={methodCardHeader(greenwaveAuthSetting)}
                 history={methodCardHistory(greenwaveAuthSetting)}
-                footer="Exactly one mode is active. Unset or None disables the Greenwave exporter."
+                footer="Unset disables the exporter. None is an active mode: it sends no credentials (and is the only mode that may use a plain http:// URL)."
                 placeholder="Not set — exporter disabled"
                 onSelect={(value) => void handleGreenwaveMethodChange(value as GreenwaveMethod)}
               />

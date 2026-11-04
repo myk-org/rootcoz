@@ -7,8 +7,9 @@
 #   greenwave_client_cert:  /var/run/secrets/rootcoz/greenwave/client.crt
 #   greenwave_client_key:   /var/run/secrets/rootcoz/greenwave/client.key
 #   greenwave_ca_bundle:    /var/run/secrets/rootcoz/greenwave/ca.crt
-# In production, supply the keytab via --set-file (it is binary):
-#   --set-file greenwave.keytab=./my.keytab
+# In production, supply the keytab (binary) base64-encoded, written to the
+# Secret as-is (never re-encoded):
+#   --set greenwave.keytabBase64=$(base64 -w0 my.keytab)
 greenwave:
   keytab: test-keytab-blob  # pragma: allowlist secret
   clientCert: |

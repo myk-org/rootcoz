@@ -116,24 +116,29 @@ def parse_greenwave_waivable_classifications(
     return frozenset(parsed)
 
 
-def validate_greenwave_url(
+def validate_greenwave_url_structure(
     value: str | None,
     env_name: str,
-    *,
-    allow_http: bool = False,
 ) -> None:
-    """Validate a Greenwave ResultsDB/WaiverDB URL at Settings construction.
+    """Structurally validate a Greenwave URL; never scheme-dependent.
 
-    These URLs are push targets for authenticated writes, so they must be
-    strict HTTPS with a hostname and no userinfo, query, or fragment —
-    credentials embedded in a URL would risk leaking into logs and errors.
-    ``allow_http`` is set for the ResultsDB URL in the credential-less
-    ``none`` auth mode (public ResultsDB instances).  The URL itself is
-    intentionally NOT echoed in the error message for the same reason.
+    Raises for a syntactically invalid port, a missing hostname, or
+    userinfo/query/fragment (credentials embedded in a URL would risk
+    leaking into logs and errors). The URL itself is intentionally NOT
+    echoed in the error message for the same reason.
+
+    The scheme rule (credentials must not travel over plain HTTP) does NOT
+    live in Settings construction: ``GREENWAVE_URL`` may come from the
+    environment while ``greenwave_auth_mode`` is DB-only, and raising on
+    the mismatch would make the merged config unvalidatable —
+    ``get_settings()`` then falls back to env-only and silently drops
+    every database override. The scheme rule is enforced where a
+    credential would actually be sent: the settings write path
+    (``_validate_settings_updates``) and ``build_greenwave_auth``.
 
     Raises:
-        ValueError: When *value* is set but not a valid bare HTTPS URL
-            (or bare HTTP/HTTPS when *allow_http* is set).
+        ValueError: When *value* is set but not a valid bare HTTP(S) URL
+            (hostname required; userinfo, query, and fragment not allowed).
     """
     if not value:
         return
@@ -144,10 +149,8 @@ def validate_greenwave_url(
         _ = parts.port
     except ValueError as exc:
         raise ValueError(f"Invalid {env_name}: URL contains an invalid port") from exc
-    allowed_schemes = ("https", "http") if allow_http else ("https",)
     if (
-        parts.scheme not in allowed_schemes
-        or not parts.hostname
+        not parts.hostname
         or parts.username is not None
         or parts.password is not None
         or parts.query
@@ -155,9 +158,71 @@ def validate_greenwave_url(
     ):
         raise ValueError(
             f"Invalid {env_name}: must be an "
+            "HTTP(S) URL with a hostname "
+            "(userinfo, query, and fragment are not allowed)"
+        )
+
+
+def validate_greenwave_url(
+    value: str | None,
+    env_name: str,
+    *,
+    allow_http: bool = False,
+) -> None:
+    """Validate a Greenwave ResultsDB/WaiverDB URL for a write or a push.
+
+    Structural validation (see :func:`validate_greenwave_url_structure`)
+    plus the scheme rule: these URLs are push targets for authenticated
+    writes, so they must be strict HTTPS — plain HTTP is legal only with
+    ``allow_http`` (the credential-less ``none`` auth mode, for public
+    ResultsDB instances). This is the write-path/auth-build half of the
+    scheme rule; Settings construction runs the structural half only.
+
+    Raises:
+        ValueError: When *value* is set but not a valid bare HTTPS URL
+            (or bare HTTP/HTTPS when *allow_http* is set).
+    """
+    validate_greenwave_url_structure(value, env_name)
+    if not value:
+        return
+    allowed_schemes = ("https", "http") if allow_http else ("https",)
+    if urlsplit(value).scheme not in allowed_schemes:
+        raise ValueError(
+            f"Invalid {env_name}: must be an "
             f"{'HTTP(S)' if allow_http else 'HTTPS'} URL with a hostname "
             "(userinfo, query, and fragment are not allowed)"
         )
+
+
+def greenwave_scheme_error(settings: Settings, mode: str) -> str | None:
+    """Why the configured targets cannot carry this mode's credentials, if so.
+
+    The single predicate behind both the push boundary
+    (:func:`rootcoz.exporters.greenwave_auth.build_greenwave_auth`, which
+    refuses) and :attr:`Settings.greenwave_enabled` (which must not advertise
+    an exporter whose every push is guaranteed to fail). Keeping it here means
+    the two can never disagree, and keeps it OUT of Settings construction,
+    which has to stay mergeable when the URL comes from the environment and
+    the mode only from the database.
+
+    Args:
+        settings: Effective settings.
+        mode: Normalised auth mode (an unset mode is inert — no error).
+
+    Returns:
+        A human-readable reason, or ``None`` when the targets are acceptable.
+    """
+    allow_http = mode in ("none", "")
+    for value, env_name, http_ok in (
+        (settings.greenwave_url, "GREENWAVE_URL", allow_http),
+        (settings.greenwave_waiver_url, "GREENWAVE_WAIVER_URL", False),
+        (settings.greenwave_oidc_token_url, "GREENWAVE_OIDC_TOKEN_URL", False),
+    ):
+        try:
+            validate_greenwave_url(value, env_name, allow_http=http_ok)
+        except ValueError as exc:
+            return str(exc)
+    return None
 
 
 def _split_outside_brackets(raw: str) -> list[str]:
@@ -1267,28 +1332,28 @@ class Settings(BaseSettings):
             if isinstance(value, str):
                 stripped = value.strip()
                 object.__setattr__(self, field_name, stripped or None)
-        # Validate Greenwave push targets before anything can use them —
-        # a malformed or credential-bearing URL is a startup error. The
-        # ResultsDB URL scheme check is mode-aware: the credential-less
-        # 'none' mode may target a plain-HTTP public instance. An UNSET mode
-        # leaves the exporter disabled, so its URL is inert and may also be
-        # plain HTTP — otherwise an env-configured http:// URL would crash
-        # startup against a mode that only the database can supply.
-        greenwave_mode = normalize_greenwave_auth_mode(self.greenwave_auth_mode)
-        validate_greenwave_url(
-            self.greenwave_url,
-            "GREENWAVE_URL",
-            allow_http=greenwave_mode in ("none", ""),
+        # Validate Greenwave push-target URL STRUCTURE before anything can
+        # use it — a malformed or credential-bearing URL is a startup error.
+        # The SCHEME rule (credentials never over plain HTTP) lives in the
+        # settings write path and in build_greenwave_auth instead: the URL
+        # may come from the environment while the mode is DB-only, and
+        # raising on that mismatch here would make the merged config
+        # unvalidatable — get_settings() then falls back to env-only and
+        # every database override is lost (credentials, roles, allow lists).
+        validate_greenwave_url_structure(self.greenwave_url, "GREENWAVE_URL")
+        # The waiver URL is held to the same structural rule at
+        # construction; its stricter HTTPS-only scheme rule (a waiver lifts
+        # a gate, so it is never downgraded to plain HTTP — even in the
+        # credential-less 'none' mode) is enforced by the write path and
+        # build_greenwave_waiver_auth.
+        validate_greenwave_url_structure(
+            self.greenwave_waiver_url, "GREENWAVE_WAIVER_URL"
         )
-        # Deliberately stricter than GREENWAVE_URL: the waiver write is the
-        # gating action, so it stays HTTPS-only even in the credential-less
-        # 'none' mode. A public ResultsDB may be read/written over plain HTTP;
-        # lifting a gate may not.
-        validate_greenwave_url(self.greenwave_waiver_url, "GREENWAVE_WAIVER_URL")
         # The OIDC token endpoint receives the client secret on every push
-        # and its response supplies the bearer token, so it is always
-        # HTTPS-only — no mode makes it safe over plain HTTP.
-        validate_greenwave_url(
+        # and its response supplies the bearer token, so its HTTPS-only
+        # scheme rule is likewise enforced at the write path and at the auth
+        # build — never here, for the same DB-override-survival reason.
+        validate_greenwave_url_structure(
             self.greenwave_oidc_token_url, "GREENWAVE_OIDC_TOKEN_URL"
         )
         # Strip whitespace from string fields with empty-string defaults
@@ -1551,6 +1616,13 @@ class Settings(BaseSettings):
         Mirrors ``jira_enabled``: an unset ``greenwave_auth_mode`` disables
         the exporter outright (no credential inference), and the selected
         mode's required fields must all be configured.
+
+        A target that would carry a credential over plain HTTP also counts as
+        not enabled: construction must stay mergeable (see
+        :func:`validate_greenwave_url_structure`), so the scheme rule is
+        enforced at the push boundary — but advertising the exporter as
+        available while every push is guaranteed to refuse would be a lie to
+        the UI, so the same predicate is consulted here.
         """
         if self.enable_greenwave is False:
             return False
@@ -1572,6 +1644,11 @@ class Settings(BaseSettings):
                     mode,
                     ", ".join(missing),
                 )
+            return False
+        scheme_error = greenwave_scheme_error(self, mode)
+        if scheme_error:
+            if self.enable_greenwave is True:
+                logger.warning("enable_greenwave is True but %s", scheme_error)
             return False
         return True
 

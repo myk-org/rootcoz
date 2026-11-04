@@ -74,8 +74,10 @@ datadog:
 
 # Greenwave exporter auth FILES (optional). Two greenwave_auth_mode values
 # (kerberos, mtls) need files that cannot be supplied through Server Settings,
-# which takes a path. Each value is file CONTENT (a keytab is binary — use
-# --set-file or a YAML block with base64/quoted content); empty renders nothing.
+# which takes a path. The mTLS values (clientCert/clientKey/caBundle) are PEM
+# text, so raw content or --set-file is fine there. A keytab is BINARY (almost
+# never valid UTF-8): use greenwave.keytabBase64 (see below), not --set-file.
+# greenwave.keytab stays for text-safe content only. Empty renders nothing.
 # The files land in one Secret mounted read-only at greenwave.mountPath, and
 # the admin then sets the matching PATHS in Server Settings → Greenwave:
 #   keytab     → greenwave_keytab_path = <mountPath>/keytab
@@ -85,6 +87,15 @@ datadog:
 # The auth MODE itself (greenwave_auth_mode) is a DB-only Server Setting by
 # design (like jira_auth_mode) — only the files belong in the chart.
 greenwave:
+  # Recommended for keytabs (they are binary): base64 of the file, written to
+  # the Secret data key as-is (never re-encoded). Fill with e.g.
+  #   --set greenwave.keytabBase64=$(base64 -w0 my.keytab)
+  # Do NOT use --set-file for a real keytab: a later `helm upgrade
+  # --reuse-values` that does not re-pass the file re-renders the release's
+  # stored (mangled) value over the good Secret. Mutually exclusive with
+  # greenwave.keytab below.
+  keytabBase64: ""
+  # Raw keytab content — text-safe content only; prefer keytabBase64 above.
   keytab: ""
   clientCert: ""
   clientKey: ""

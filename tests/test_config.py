@@ -53,6 +53,30 @@ class TestSettings:
             settings = Settings()
             assert not hasattr(settings, "unknown_field")
 
+    def test_enabled_is_false_when_credentials_would_go_over_http(self) -> None:
+        """Availability must not advertise an exporter whose pushes all refuse.
+
+        Settings construction stays mergeable (an env http URL + a DB-only
+        mode must not drop the DB overrides), so the scheme rule is enforced
+        at the push boundary — but ``greenwave_enabled`` has to agree with it,
+        or the UI offers a push that can only fail.
+        """
+        http_bearer = Settings(
+            _env_file=None,
+            greenwave_url="http://resultsdb.example.com",
+            greenwave_auth_mode="bearer",
+            greenwave_api_token=SecretStr("token"),  # pragma: allowlist secret
+        )
+        assert http_bearer.greenwave_enabled is False
+
+        # The credential-less mode is the one http target that is legitimate.
+        http_none = Settings(
+            _env_file=None,
+            greenwave_url="http://resultsdb.example.com",
+            greenwave_auth_mode="none",
+        )
+        assert http_none.greenwave_enabled is True
+
     def test_no_setting_can_waive_auto_reviews(self) -> None:
         """No knob may re-enable waivers for rootcoz auto-reviews.
 
@@ -669,19 +693,27 @@ class TestGreenwaveAuthMode:
             settings = Settings(greenwave_auth_mode=mode, greenwave_url=url, **extra)
             assert settings.greenwave_enabled, mode
 
-    def test_http_url_allowed_only_for_none_mode(self) -> None:
-        """Plain HTTP is valid for the credential-less none mode only."""
+    def test_http_url_scheme_mismatch_is_not_a_construction_error(self) -> None:
+        """Plain HTTP + a credential mode must not fail Settings construction.
+
+        The scheme rule lives at the settings write path and at
+        ``build_greenwave_auth`` (which refuses to send a credential over
+        plain http): raising here would make an env URL + DB-only mode
+        unvalidatable, so ``get_settings()`` would fall back to env-only
+        and silently drop every database override.
+        """
         settings = Settings(
             greenwave_auth_mode="none",
             greenwave_url="http://resultsdb.example.com",
         )
         assert settings.greenwave_url == "http://resultsdb.example.com"
         assert settings.greenwave_enabled
-        with pytest.raises(ValueError, match="GREENWAVE_URL"):
-            Settings(
-                greenwave_auth_mode="bearer",
-                greenwave_url="http://resultsdb.example.com",
-            )
+        # Construction succeeds; build_greenwave_auth refuses the token
+        # over plain http (TestHttpSchemeRefusedAtBuild, test_greenwave_auth).
+        assert Settings(
+            greenwave_auth_mode="bearer",
+            greenwave_url="http://resultsdb.example.com",
+        )
 
     def test_http_url_still_rejects_userinfo_and_query_in_none_mode(self) -> None:
         """Even in none mode, credential-bearing URL shapes are rejected."""
@@ -696,13 +728,18 @@ class TestGreenwaveAuthMode:
                 greenwave_url="http://resultsdb.example.com?token=x",
             )
 
-    def test_waiver_url_stays_https_in_all_modes(self) -> None:
-        with pytest.raises(ValueError, match="GREENWAVE_WAIVER_URL"):
-            Settings(
-                greenwave_auth_mode="none",
-                greenwave_url="http://resultsdb.example.com",
-                greenwave_waiver_url="http://waiverdb.example.com",
-            )
+    def test_waiver_url_scheme_is_not_a_construction_error(self) -> None:
+        """An http waiver URL constructs; the refusal lives at the build.
+
+        ``build_greenwave_waiver_auth`` refuses it in every mode (a waiver
+        lifts a gate, so it is never downgraded to plain HTTP).
+        """
+        settings = Settings(
+            greenwave_auth_mode="none",
+            greenwave_url="http://resultsdb.example.com",
+            greenwave_waiver_url="http://waiverdb.example.com",
+        )
+        assert settings.greenwave_waiver_url == "http://waiverdb.example.com"
 
 
 class TestGitHubIssuesSettings:

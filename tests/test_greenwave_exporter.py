@@ -205,9 +205,12 @@ class TestGreenwaveSettings:
     @pytest.mark.parametrize(
         ("env_name", "bad_url"),
         [
-            # http is only tolerated while no mode is selected (exporter
-            # disabled, URL inert); a credential mode must be HTTPS. The
-            # explicit http-with-mode case is covered separately.
+            # Structural problems (userinfo, query, fragment, no hostname,
+            # bad port) stay construction errors. Scheme problems do not —
+            # the credentials-over-plain-http rule lives at the write path
+            # and the auth build (see TestHttpSchemeRefusedAtBuild in
+            # test_greenwave_auth.py), because an env URL + DB-only mode
+            # must never make the merged config unvalidatable.
             (
                 "GREENWAVE_URL",
                 "https://user:pass@resultsdb.example.com",  # pragma: allowlist secret
@@ -215,7 +218,6 @@ class TestGreenwaveSettings:
             ("GREENWAVE_URL", "https://resultsdb.example.com?token=secret"),
             ("GREENWAVE_URL", "https://resultsdb.example.com#section"),
             ("GREENWAVE_URL", "not-a-url"),
-            ("GREENWAVE_WAIVER_URL", "http://waiverdb.example.com"),
         ],
     )
     def test_invalid_greenwave_url_rejected(self, env_name: str, bad_url: str):
@@ -226,13 +228,16 @@ class TestGreenwaveSettings:
         ):
             Settings(_env_file=None)
 
-    def test_http_url_allowed_only_without_credentials(self):
-        """Plain http is accepted only for an inert (unset) or 'none' mode.
+    def test_http_url_scheme_mismatch_is_not_a_construction_error(self):
+        """Plain http + a credential mode must not crash Settings.
 
         The mode is DB-only, so at startup the env-only Settings sees it
         unset: an env-configured http:// ResultsDB URL must not crash the
-        process for a mode only the database can supply. Once a credential
-        mode is selected the same URL is rejected.
+        process for a mode only the database can supply — and once the DB
+        supplies that mode, get_settings() must keep merging instead of
+        falling back to env-only (which would wipe every DB override).
+        The credential is never sent over http: build_greenwave_auth
+        refuses the combination (TestHttpSchemeRefusedAtBuild).
         """
         env = _greenwave_env(GREENWAVE_URL="http://resultsdb.example.com")
         with patch.dict(os.environ, env, clear=True):
@@ -240,15 +245,44 @@ class TestGreenwaveSettings:
             assert Settings(_env_file=None).greenwave_enabled is False
             # none mode: credential-less, so http stays legal.
             assert Settings(_env_file=None, greenwave_auth_mode="none")
-            # bearer mode sends a token: http is refused.
-            with pytest.raises(ValueError, match="GREENWAVE_URL"):
-                Settings(_env_file=None, greenwave_auth_mode="bearer")
+            # bearer mode sends a token: still constructible — the refusal
+            # happens at the auth build (TestHttpSchemeRefusedAtBuild).
+            assert Settings(_env_file=None, greenwave_auth_mode="bearer")
 
-    def test_waiver_url_stays_https_even_in_none_mode(self):
-        """The gating write is never downgraded to plain HTTP.
+    def test_get_settings_keeps_db_overrides_on_scheme_mismatch(self):
+        """An env http URL + DB mode must not wipe the DB overrides.
 
-        ``none`` may target a public ResultsDB over http (no credentials are
-        sent), but a waiver lifts a gate, so its endpoint stays HTTPS-only.
+        Regression: raising on the scheme/mode mismatch made the merged
+        config unvalidatable, so get_settings() fell back to env-only and
+        silently dropped EVERY database override (credentials, roles,
+        allow lists) — a URL reset could not be the trigger for that.
+        """
+        from rootcoz.config import (
+            clear_db_settings_cache,
+            get_settings,
+            update_db_settings_cache,
+        )
+
+        env = _greenwave_env(GREENWAVE_URL="http://resultsdb.example.com")
+        with patch.dict(os.environ, env, clear=True):
+            update_db_settings_cache(
+                {"greenwave_auth_mode": "bearer", "greenwave_basic_user": "svc"}
+            )
+            try:
+                settings = get_settings()
+            finally:
+                clear_db_settings_cache()
+        assert settings.greenwave_auth_mode == "bearer"
+        assert settings.greenwave_basic_user == "svc"
+        assert settings.greenwave_url == "http://resultsdb.example.com"
+
+    def test_waiver_url_scheme_is_not_a_construction_error(self):
+        """An http waiver URL must not crash Settings either.
+
+        Same reliability rule as the ResultsDB URL: the scheme check lives
+        at the write path and at build_greenwave_waiver_auth (which refuses
+        it in EVERY mode — a waiver lifts a gate, so it is never downgraded
+        to plain HTTP). Construction only rejects structural problems.
         """
         env = _greenwave_env(
             GREENWAVE_URL="http://resultsdb.example.com",
@@ -256,28 +290,26 @@ class TestGreenwaveSettings:
             GREENWAVE_PUSH_WAIVERS="true",
             GREENWAVE_PRODUCT_VERSION="el10",
         )
+        with patch.dict(os.environ, env, clear=True):
+            settings = Settings(_env_file=None, greenwave_auth_mode="none")
+        assert settings.greenwave_waiver_url == "http://waiverdb.example.com"
+
+    def test_oidc_token_url_userinfo_is_a_construction_error(self):
+        """Structural problems in the token URL still fail construction.
+
+        The http-scheme case is NOT a construction error (same reliability
+        rule as GREENWAVE_URL): it is refused at the auth build, before the
+        client secret is POSTed anywhere.
+        """
+        env = _greenwave_env(
+            GREENWAVE_AUTH_MODE="oidc",
+            GREENWAVE_OIDC_TOKEN_URL="https://u:p@sso.example.com",
+        )
         with (
             patch.dict(os.environ, env, clear=True),
-            pytest.raises(ValueError, match="GREENWAVE_WAIVER_URL"),
+            pytest.raises(ValueError, match="GREENWAVE_OIDC_TOKEN_URL"),
         ):
-            Settings(_env_file=None, greenwave_auth_mode="none")
-
-    def test_oidc_token_url_must_be_https(self):
-        """The client secret is POSTed to the token endpoint — HTTPS only.
-
-        Regression: the token URL was never validated, so a plain-http token
-        endpoint would receive ``greenwave_oidc_client_secret`` in clear text.
-        """
-        for bad in ("http://sso.example.com/token", "https://u:p@sso.example.com"):
-            env = _greenwave_env(
-                GREENWAVE_AUTH_MODE="oidc",
-                GREENWAVE_OIDC_TOKEN_URL=bad,
-            )
-            with (
-                patch.dict(os.environ, env, clear=True),
-                pytest.raises(ValueError, match="GREENWAVE_OIDC_TOKEN_URL"),
-            ):
-                Settings(_env_file=None, greenwave_auth_mode="oidc")
+            Settings(_env_file=None, greenwave_auth_mode="oidc")
 
     def test_invalid_greenwave_port_rejected(self):
         """Syntactically invalid ports fail at Settings construction."""
@@ -1609,6 +1641,23 @@ class TestGreenwaveExporterFactory:
         settings.greenwave_auth_mode = "bearer"
         settings.greenwave_api_token = None
         with pytest.raises(ExporterPrerequisiteError, match="greenwave_api_token"):
+            _create_exporter("greenwave", settings)
+
+    def test_create_greenwave_http_url_with_credentials_fails_closed(self):
+        """A push never sends a credential over plain http.
+
+        The scheme rule cannot live in Settings construction (an env URL
+        + DB-only mode must stay mergeable), so the exporter refuses to
+        build instead — the push fails closed before any request.
+        """
+        from rootcoz.main import _create_exporter
+
+        settings = MagicMock()
+        settings.greenwave_enabled = True
+        settings.greenwave_url = "http://resultsdb.example.com"
+        settings.greenwave_auth_mode = "bearer"
+        settings.greenwave_api_token = "rdb-token"  # pragma: allowlist secret
+        with pytest.raises(ExporterPrerequisiteError, match="GREENWAVE_URL"):
             _create_exporter("greenwave", settings)
 
     def test_exporter_classes_registry_contains_greenwave(self):

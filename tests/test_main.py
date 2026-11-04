@@ -1,8 +1,10 @@
 """Tests for FastAPI main application."""
 
 import asyncio
+import base64
 import json
 import os
+import sys
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -25,7 +27,12 @@ from rootcoz.models import (
     FailureAnalysis,
 )
 from rootcoz.sources.jenkins_source import JenkinsError
-from tests.conftest import build_test_env, make_test_client
+from tests.conftest import (
+    build_test_env,
+    fake_spnego_module,
+    fresh_spnego_record,
+    make_test_client,
+)
 
 # Fake credentials for tests — annotated once to suppress Ruff S105/S106 globally.
 FAKE_JENKINS_PASSWORD = "not-a-real-password"  # pragma: allowlist secret
@@ -10397,6 +10404,75 @@ class TestAdminSettingsEndpoints:
         assert response.status_code == 200
         assert "greenwave_auth_mode" in response.json()["updated"]
 
+    def test_put_settings_clearing_mode_accepts_inert_http_url(
+        self, test_client
+    ) -> None:
+        """An explicit CLEAR of the mode is judged on the cleared value.
+
+        Regression (Qodo 18): clearing ``greenwave_auth_mode`` in the same
+        batch as an http URL was validated against the OLD mode — so an
+        admin disabling the exporter and pointing it at a public plain-HTTP
+        ResultsDB in one save was wrongly rejected. The batch must be
+        judged on the effective PROPOSED values, not ``or``-fallbacks to
+        the pre-batch state.
+        """
+        put = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "greenwave_auth_mode": "bearer",
+                    "greenwave_url": "https://resultsdb.example.com",
+                    "greenwave_api_token": "rdb-token",  # pragma: allowlist secret
+                }
+            },
+        )
+        assert put.status_code == 200
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "greenwave_auth_mode": "",
+                    "greenwave_url": "http://resultsdb.example.com",
+                }
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert "greenwave_auth_mode" in response.json()["updated"]
+
+    def test_put_settings_clearing_url_with_mode_pick_accepted(
+        self, test_client
+    ) -> None:
+        """A batch clearing the URL while picking a mode uses the new values.
+
+        Regression (Qodo 49): the cleared URL fell back to the pre-batch DB
+        value, so an admin replacing an old http URL (empty → reset) in the
+        same batch as the mode pick was refused over a URL the batch had
+        just removed. The genuinely-bad combination (credentials + http)
+        is still rejected — see test_put_settings_http_url_rejected_outside_none_mode.
+        """
+        put = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "greenwave_auth_mode": "none",
+                    "greenwave_url": "http://old-resultsdb.example.com",
+                }
+            },
+        )
+        assert put.status_code == 200
+        response = test_client.put(
+            "/api/admin/settings",
+            json={
+                "settings": {
+                    "greenwave_auth_mode": "bearer",
+                    "greenwave_url": "",
+                    "greenwave_api_token": "rdb-token",  # pragma: allowlist secret
+                }
+            },
+        )
+        assert response.status_code == 200, response.text
+        assert "greenwave_auth_mode" in response.json()["updated"]
+
     def test_put_settings_clearing_mode_field_disables_the_exporter(
         self, test_client
     ) -> None:
@@ -12740,8 +12816,6 @@ class TestIntegrationConnectionEndpoints:
         data = response.json()
         assert data["ok"] is True
         assert data["details"]["auth_mode"] == "basic"
-        import base64
-
         expected = base64.b64encode(b"svc-rootcoz:not-a-real-password").decode()
         assert seen["authorization"] == f"Basic {expected}"
         assert "not-a-real-password" not in json.dumps(data)
@@ -12802,6 +12876,68 @@ class TestIntegrationConnectionEndpoints:
         ):
             assert name in data["message"]
         MockClient.assert_not_called()
+
+    def test_greenwave_kerberos_spnego_completed_message(self, test_client) -> None:
+        """A completed Negotiate exchange is reported as authenticated.
+
+        Regression: the success message always claimed the keytab was not
+        exercised, even when the SPNEGO dance completed — misleading for an
+        admin verifying kerberos setup.
+        """
+        settings = Settings(
+            greenwave_url="https://resultsdb.example.com",
+            greenwave_auth_mode="kerberos",
+            greenwave_keytab_path="/secrets/rootcoz.keytab",
+            greenwave_keytab_principal="rootcoz@EXAMPLE.COM",
+        )
+        server_token = base64.b64encode(b"server-challenge").decode()
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if not request.headers.get("Authorization"):
+                return httpx.Response(
+                    401, headers={"WWW-Authenticate": f"Negotiate {server_token}"}
+                )
+            return httpx.Response(200, json={"results": []})
+
+        fake = fake_spnego_module(fresh_spnego_record())
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            patch.dict(sys.modules, {"spnego": fake}),
+            self._greenwave_transport_client(handler),
+        ):
+            response = test_client.post("/api/admin/settings/test/greenwave")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["details"]["auth_mode"] == "kerberos"
+        assert "SPNEGO exchange completed" in data["message"]
+        assert "not exercised" not in data["message"]
+
+    def test_greenwave_kerberos_no_negotiate_message(self, test_client) -> None:
+        """No 401 challenge: reachable, but the keytab was never exercised."""
+        settings = Settings(
+            greenwave_url="https://resultsdb.example.com",
+            greenwave_auth_mode="kerberos",
+            greenwave_keytab_path="/secrets/rootcoz.keytab",
+            greenwave_keytab_principal="rootcoz@EXAMPLE.COM",
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"results": []})
+
+        fake = fake_spnego_module(fresh_spnego_record())
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            patch.dict(sys.modules, {"spnego": fake}),
+            self._greenwave_transport_client(handler),
+        ):
+            response = test_client.post("/api/admin/settings/test/greenwave")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["details"]["auth_mode"] == "kerberos"
+        assert "did not request Negotiate" in data["message"]
+        assert "keytab was not exercised" in data["message"]
 
     def test_greenwave_connection_failure(self, test_client) -> None:
         """A ResultsDB failure yields ok:false with the mode reported."""

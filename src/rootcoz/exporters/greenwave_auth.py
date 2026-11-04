@@ -28,6 +28,7 @@ from rootcoz.config import (
     Settings,
     greenwave_method_missing_fields,
     normalize_greenwave_auth_mode,
+    validate_greenwave_url,
 )
 from rootcoz.exporters.base import ExporterPrerequisiteError
 from rootcoz.url_utils import strip_url_userinfo_in_text
@@ -38,6 +39,20 @@ _TOKEN_TIMEOUT = 30.0
 
 #: Refresh an OIDC token this many seconds before its reported expiry.
 _TOKEN_EXPIRY_MARGIN = 60.0
+
+#: Maximum SPNEGO exchanges per request before the flow gives up with a
+#: clear error — a server that keeps issuing Negotiate challenges must not
+#: spin the client forever.
+_MAX_NEGOTIATE_EXCHANGES = 5
+
+#: Configured Greenwave file-path settings → stable placeholders used to
+#: scrub credential locations out of error messages.
+_FILE_PATH_SETTINGS: tuple[tuple[str, str], ...] = (
+    ("greenwave_keytab_path", "<keytab>"),
+    ("greenwave_client_cert", "<client-cert>"),
+    ("greenwave_client_key", "<client-key>"),
+    ("greenwave_ca_bundle", "<ca-bundle>"),
+)
 
 
 class GreenwaveAuthError(Exception):
@@ -61,6 +76,16 @@ class GreenwaveAuth:
     def auth(self) -> httpx.Auth | None:
         """``httpx.Auth`` for header/flow modes; ``None`` for mtls/none."""
         return self._auth
+
+    @property
+    def spnego_exchange_completed(self) -> bool:
+        """Whether a Negotiate exchange completed (kerberos mode only).
+
+        Lets the connection test say "authenticated via kerberos" only
+        when the keytab was actually exercised — a 200 without a 401
+        challenge proves reachability, not authentication.
+        """
+        return bool(getattr(self._auth, "negotiate_completed", False))
 
     def client_kwargs(self) -> dict[str, Any]:
         """httpx client constructor kwargs (``verify``, ``cert``)."""
@@ -193,9 +218,12 @@ class _KerberosAuth(httpx.Auth):
     """HTTP Negotiate (SPNEGO) dance backed by a client keytab.
 
     Per request: send unauthenticated, and on a ``401`` challenge with
-    ``WWW-Authenticate: Negotiate [token]`` produce a token from a FRESH
-    security context (never cached or reused across requests) and retry
-    once. A retry that still 401s surfaces as a clear error.
+    ``WWW-Authenticate: Negotiate [token]`` run the exchange against a
+    FRESH security context (never cached or reused across requests). A
+    server may answer a client token with another continuation
+    ``Negotiate <token>`` challenge — the SAME context is then stepped
+    again, up to :data:`_MAX_NEGOTIATE_EXCHANGES` rounds, after which the
+    flow fails with a clear error instead of spinning.
 
     The keytab reaches GSSAPI through ``spnego.KerberosKeytab`` (the
     path is passed to ``krb5_kt_resolve`` directly, never formatted into
@@ -212,12 +240,19 @@ class _KerberosAuth(httpx.Auth):
         principal: str,
         service: str,
         hostname: str,
+        path_placeholders: dict[str, str],
     ) -> None:
         self._spnego = spnego_module
         self._keytab = keytab
         self._principal = principal
         self._service = service
         self._hostname = hostname
+        self._path_placeholders = path_placeholders
+        # Set when a Negotiate exchange completed — read by the Greenwave
+        # connection test to word its success message. Fresh per strategy
+        # instance, and the test builds its own instance, so no
+        # cross-request leakage.
+        self.negotiate_completed = False
         # No process-global KRB5_CLIENT_KTNAME: the explicit
         # ``spnego.KerberosKeytab`` credential below supplies the keytab to
         # every context this code creates. Mutating os.environ here would leak
@@ -250,49 +285,57 @@ class _KerberosAuth(httpx.Auth):
         response = yield request
         if response.status_code != 401:
             return
-        challenge = response.headers.get("WWW-Authenticate", "")
-        token = self._negotiate_token(challenge)
+        token = self._negotiate_token(response.headers.get("WWW-Authenticate", ""))
         if token is None:
             raise GreenwaveAuthError(
                 "Greenwave kerberos authentication failed: server did not "
                 "offer Negotiate authentication"
             )
+        # ONE context per request — the exchange is multi-step; FRESH on
+        # the next request: a security context is single-use. The GSSAPI
+        # work is blocking (it can reach the KDC for a TGT), so it runs
+        # off the event loop: a push writes one results row per failure,
+        # and stalling the loop per row would serialize the whole server
+        # behind a KDC round trip.
         try:
-            in_token = base64.b64decode(token) if token else None
-            # FRESH context per request — a security context is single-use.
-            # The GSSAPI work is blocking (it can reach the KDC for a TGT), so
-            # it runs off the event loop: a push writes one results row per
-            # failure, and stalling the loop per row would serialize the whole
-            # server behind a KDC round trip.
-            out_token = await asyncio.to_thread(self._step, in_token)
-        except GreenwaveAuthError:
-            raise
+            context = await asyncio.to_thread(self._new_context)
         except Exception as exc:
-            # Keep the provider's message (e.g. "Server not found in Kerberos
-            # database"): the class name alone leaves an operator with nothing
-            # to act on. Sanitised, and the keytab path is never part of a
-            # GSSAPI error string.
-            raise GreenwaveAuthError(
-                "Greenwave kerberos authentication failed: "
-                f"{strip_control_chars(strip_url_userinfo_in_text(f'{type(exc).__name__}: {exc}'))}"
-            ) from exc
-        if not out_token:
-            raise GreenwaveAuthError(
-                "Greenwave kerberos authentication produced no token"
+            raise self._gssapi_error(exc) from exc
+        for _ in range(_MAX_NEGOTIATE_EXCHANGES):
+            in_token = base64.b64decode(token) if token else None
+            try:
+                out_token = await asyncio.to_thread(context.step, in_token)
+            except Exception as exc:
+                raise self._gssapi_error(exc) from exc
+            if not out_token:
+                raise GreenwaveAuthError(
+                    "Greenwave kerberos authentication produced no token"
+                )
+            request.headers["Authorization"] = (
+                f"Negotiate {base64.b64encode(out_token).decode('ascii')}"
             )
-        request.headers["Authorization"] = (
-            f"Negotiate {base64.b64encode(out_token).decode('ascii')}"
+            response = yield request
+            if response.status_code != 401:
+                self.negotiate_completed = True
+                return
+            # A 401 answering our token with another Negotiate challenge
+            # is a continuation exchange — feed the new token back into the
+            # same context. A 401 that drops Negotiate is a rejection.
+            token = self._negotiate_token(response.headers.get("WWW-Authenticate", ""))
+            if token is None:
+                raise GreenwaveAuthError(
+                    "Greenwave kerberos authentication failed: server "
+                    "rejected the Negotiate credentials"
+                )
+        raise GreenwaveAuthError(
+            "Greenwave kerberos authentication failed: server kept "
+            "requesting Negotiate authentication after "
+            f"{_MAX_NEGOTIATE_EXCHANGES} exchanges"
         )
-        response = yield request
-        if response.status_code == 401:
-            raise GreenwaveAuthError(
-                "Greenwave kerberos authentication failed: server rejected "
-                "the Negotiate credentials"
-            )
 
-    def _step(self, in_token: bytes | None) -> bytes:
-        """One blocking GSSAPI step: build a fresh context and advance it."""
-        context = self._spnego.client(
+    def _new_context(self) -> Any:
+        """Build a fresh client security context (blocking GSSAPI work)."""
+        return self._spnego.client(
             username=self._spnego.KerberosKeytab(
                 keytab=self._keytab, principal=self._principal
             ),
@@ -300,7 +343,24 @@ class _KerberosAuth(httpx.Auth):
             service=self._service,
             hostname=self._hostname,
         )
-        return context.step(in_token)
+
+    def _gssapi_error(self, exc: Exception) -> GreenwaveAuthError:
+        """A loggable error keeping the provider's text, scrubbed.
+
+        The class name alone (e.g. "ValueError") leaves an operator with
+        nothing to act on, so the message keeps the provider text — but a
+        GSSAPI keytab-open error carries the FILENAME, and every
+        configured Greenwave file path is a credential location that must
+        not reach logs, warnings or the push response.
+        """
+        message = strip_control_chars(
+            strip_url_userinfo_in_text(f"{type(exc).__name__}: {exc}")
+        )
+        for path, placeholder in self._path_placeholders.items():
+            message = message.replace(path, placeholder)
+        return GreenwaveAuthError(
+            f"Greenwave kerberos authentication failed: {message}"
+        )
 
 
 def _load_spnego() -> Any:
@@ -340,8 +400,17 @@ def _kerberos_hostname(settings: Settings, url: str) -> str:
     return f"{host}@{realm}" if realm else host
 
 
+def _greenwave_file_path_placeholders(settings: Settings) -> dict[str, str]:
+    """Configured Greenwave file paths → stable log placeholders."""
+    return {
+        path: placeholder
+        for attr, placeholder in _FILE_PATH_SETTINGS
+        if (path := getattr(settings, attr))
+    }
+
+
 def build_greenwave_auth(
-    settings: Settings, *, url: str | None = None
+    settings: Settings, *, url: str | None = None, env_name: str = "GREENWAVE_URL"
 ) -> GreenwaveAuth:
     """Build the auth strategy for the selected ``greenwave_auth_mode``.
 
@@ -351,10 +420,17 @@ def build_greenwave_auth(
     certificate. ResultsDB and WaiverDB are different hosts, so their
     kerberos strategies must be built separately.
 
+    The credentials-over-plain-http scheme rule is enforced HERE (not in
+    Settings construction, which must stay mergeable when the URL comes
+    from the env and the mode from the DB): refusing at the build means a
+    push fails closed before any credential is sent.
+
     Raises:
         ExporterPrerequisiteError: No mode is selected, the selected
-            mode's required fields are missing, or (kerberos) the
-            optional pyspnego dependency is not installed.
+            mode's required fields are missing, the target URL (or, for
+            oidc, the token endpoint) would carry a credential over plain
+            HTTP, or (kerberos) the optional pyspnego dependency is not
+            installed.
     """
     mode = normalize_greenwave_auth_mode(settings.greenwave_auth_mode)
     if not mode:
@@ -366,6 +442,22 @@ def build_greenwave_auth(
         raise ExporterPrerequisiteError(
             f"Greenwave auth method '{mode}' is missing: {', '.join(missing)}"
         )
+    try:
+        # 'none' sends no credentials, so a public plain-HTTP ResultsDB is
+        # legal for it — every credential-bearing mode must be HTTPS.
+        validate_greenwave_url(
+            url if url is not None else settings.greenwave_url,
+            env_name,
+            allow_http=mode == "none",
+        )
+        if mode == "oidc":
+            # The client secret is POSTed to the token endpoint on every
+            # push — HTTPS only, in every mode.
+            validate_greenwave_url(
+                settings.greenwave_oidc_token_url, "GREENWAVE_OIDC_TOKEN_URL"
+            )
+    except ValueError as exc:
+        raise ExporterPrerequisiteError(str(exc)) from None
     verify: bool | str = settings.greenwave_verify_ssl
     if mode == "bearer":
         token = settings.greenwave_api_token
@@ -414,6 +506,7 @@ def build_greenwave_auth(
                 hostname=_kerberos_hostname(
                     settings, url or settings.greenwave_url or ""
                 ),
+                path_placeholders=_greenwave_file_path_placeholders(settings),
             ),
             {"verify": verify},
         )
@@ -443,15 +536,26 @@ def build_greenwave_waiver_auth(settings: Settings) -> GreenwaveAuth:
     (``GREENWAVE_API_TOKEN`` vs ``GREENWAVE_WAIVER_TOKEN``).
 
     Raises:
-        ExporterPrerequisiteError: bearer mode without a waiver token, or
-            whatever :func:`build_greenwave_auth` raises for the mode.
+        ExporterPrerequisiteError: bearer mode without a waiver token, an
+            http waiver endpoint (HTTPS-only in every mode — a waiver lifts
+            a gate, so it is never downgraded to plain HTTP), or whatever
+            :func:`build_greenwave_auth` raises for the mode.
     """
+    try:
+        # The scheme rule lives here and at the write path, never in
+        # Settings construction (an env URL + DB-only mode must stay
+        # mergeable — see validate_greenwave_url_structure).
+        validate_greenwave_url(settings.greenwave_waiver_url, "GREENWAVE_WAIVER_URL")
+    except ValueError as exc:
+        raise ExporterPrerequisiteError(str(exc)) from None
     if normalize_greenwave_auth_mode(settings.greenwave_auth_mode) != "bearer":
         # Non-bearer modes authenticate both services with the same
         # mechanism, built for the WaiverDB host: a kerberos SPN is
         # per-service (HTTP/<host>), so reusing the ResultsDB strategy would
         # ask the KDC for the wrong service principal.
-        return build_greenwave_auth(settings, url=settings.greenwave_waiver_url)
+        return build_greenwave_auth(
+            settings, url=settings.greenwave_waiver_url, env_name="GREENWAVE_WAIVER_URL"
+        )
     token = settings.greenwave_waiver_token
     if token is None or not token.get_secret_value():
         raise ExporterPrerequisiteError(

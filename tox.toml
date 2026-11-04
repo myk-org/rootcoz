@@ -179,6 +179,10 @@ commands = [
     "sh",
     "-c", "OUT=/tmp/rootcoz-greenwave-test-$$.yaml; helm template rootcoz chart/ -f chart/examples/values-openshift.yaml -f chart/examples/values-greenwave-fixture.yaml --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render > $OUT 2>&1 && grep -q 'rootcoz-greenwave-auth' $OUT && grep -q 'checksum/greenwave-auth' $OUT && grep -q 'mountPath: /var/run/secrets/rootcoz/greenwave' $OUT && grep -q 'defaultMode: 0440' $OUT && rm -f $OUT && ! helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'greenwave'",  # pragma: allowlist secret
   ],
+  [
+    "sh",
+    "-c", "KT=$(printf test-keytab-blob | base64 -w0); OUT=/tmp/rootcoz-greenwave-keytabb64-test-$$.yaml; helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set greenwave.keytabBase64=$KT --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render > $OUT 2>&1 && grep -q \"keytab: \\\"$KT\\\"\" $OUT && ! grep -q \"$(printf %s $KT | base64 -w0)\" $OUT && rm -f $OUT && helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set greenwave.keytab=x --set greenwave.keytabBase64=y --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'greenwave.keytab and greenwave.keytabBase64 are mutually exclusive'",  # pragma: allowlist secret
+  ],
 
   [
     "helm",

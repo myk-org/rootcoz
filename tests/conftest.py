@@ -2,8 +2,10 @@
 
 import os
 import tempfile
+import types
 from collections.abc import Awaitable, Callable, Generator
 from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # pi_sidecar_client reads PI_SIDECAR_LOG_LEVEL at import time and passes the
@@ -38,6 +40,65 @@ def _register_usage_recorder() -> None:
 
 
 CLI_TEST_BASE_URL = "http://localhost:8700"
+
+
+class FakeSpnegoContext:
+    """Records step() calls; emits a deterministic client token.
+
+    Shared fake for the kerberos SPNEGO flow — no KDC exists in CI, so
+    every kerberos test (auth unit tests and connection-endpoint tests
+    alike) drives the real ``_KerberosAuth`` flow through this.
+    """
+
+    def __init__(self, record: dict[str, Any]) -> None:
+        self._record = record
+
+    def step(self, in_token: bytes | None) -> bytes:
+        self._record["steps"].append(in_token)
+        return b"client-token-" + (in_token or b"")
+
+
+def fresh_spnego_record() -> dict[str, Any]:
+    """A record dict shared by the fake spnego helpers."""
+    return {"client_kwargs": [], "contexts": [], "steps": [], "keytabs": []}
+
+
+def fake_spnego_module(record: dict[str, Any]) -> types.ModuleType:
+    """A fake ``spnego`` module recording every client() construction."""
+
+    class KerberosKeytab:
+        def __init__(self, keytab: str, principal: str | None) -> None:
+            record["keytabs"].append((keytab, principal))
+
+    module = types.ModuleType("spnego")
+
+    def client(**kwargs: Any) -> FakeSpnegoContext:
+        record["client_kwargs"].append(kwargs)
+        context = FakeSpnegoContext(record)
+        record["contexts"].append(context)
+        return context
+
+    module.KerberosKeytab = KerberosKeytab
+    module.client = client
+    return module
+
+
+def failing_spnego_module(exc: Exception) -> types.ModuleType:
+    """A fake ``spnego`` whose client() raises *exc* (e.g. keytab open)."""
+
+    class KerberosKeytab:
+        def __init__(self, keytab: str, principal: str | None) -> None:
+            pass
+
+    module = types.ModuleType("spnego")
+
+    def client(**kwargs: Any) -> FakeSpnegoContext:
+        raise exc
+
+    module.KerberosKeytab = KerberosKeytab
+    module.client = client
+    return module
+
 
 # The host variables the app-under-test may legitimately see. An allowlist, never
 # "real environment minus a denylist": a denylist leaks every credential the

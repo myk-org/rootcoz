@@ -89,6 +89,7 @@
       "additionalProperties": false,
       "properties": {
         "keytab": { "type": "string" },
+        "keytabBase64": { "type": "string" },
         "clientCert": { "type": "string" },
         "clientKey": { "type": "string" },
         "caBundle": { "type": "string" },

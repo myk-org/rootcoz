@@ -150,7 +150,11 @@ sidecar:
 Custom providers appear in the model catalog (`GET /api/ai-models`, or `rootcoz ai-models`)
 and are selectable as `ai.provider` / `ai.model` like any built-in provider.
 
-### Greenwave exporter auth files (Kerberos / mTLS)
+#### Waiver writes need a WaiverDB permission
+
+Mounting a credential is necessary but not sufficient for waivers: the rootcoz service account must also hold **write permission for `rootcoz.*` testcases in WaiverDB**. Without it, waiver submission fails with HTTP 403 while the ResultsDB result pushes in the same run still succeed, so the symptom is a *partially* successful push. Result-only deployments do not need it.
+
+## Greenwave exporter auth files (Kerberos / mTLS)
 
 The Greenwave exporter's auth mode (`greenwave_auth_mode`, Server Settings →
 Greenwave, DB-only like `jira_auth_mode`) selects `bearer | oidc | kerberos |
@@ -159,7 +163,8 @@ cannot hold — it takes a path. The chart mounts them:
 
 ```yaml
 greenwave:
-  keytab: ""        # Kerberos keytab (binary — use --set-file greenwave.keytab=./my.keytab)
+  keytabBase64: "" # base64 of a Kerberos keytab — RECOMMENDED for keytabs (see below)
+  keytab: ""        # raw keytab content — text-safe content only
   clientCert: ""    # mTLS client certificate (PEM)
   clientKey: ""     # mTLS client private key (PEM)
   caBundle: ""      # custom CA bundle (PEM) for the Greenwave endpoint
@@ -188,6 +193,25 @@ The auth mode itself is **not** a chart value — set `greenwave_auth_mode` in
 Server Settings. Omitting a previously set file on upgrade preserves the
 existing Secret value (Helm `lookup`), same as Vertex SA JSON and Cursor
 `auth.json`.
+
+### Keytabs are binary — use `keytabBase64`
+
+A Kerberos keytab is binary and almost never valid UTF-8, so do **not** pass
+it with `--set-file greenwave.keytab=./my.keytab` or as a raw YAML string —
+helm stores/re-renders the mangled value, and a later
+`helm upgrade --reuse-values` that does not re-pass the file writes the
+mangled value over the good Secret, breaking every Kerberos push. Instead,
+base64-encode it yourself; the chart writes it to the Secret `data:` key
+as-is (it is already base64, so it is never re-encoded):
+
+```bash
+helm install rootcoz chart/ ... --set greenwave.keytabBase64=$(base64 -w0 my.keytab)
+```
+
+`greenwave.keytab` remains for text-safe content only, and the two are
+mutually exclusive — setting both fails the render with a clear message.
+The mTLS entries (`clientCert` / `clientKey` / `caBundle`) are PEM text, so
+raw values or `--set-file` are fine there.
 
 ## Bootstrap Secrets
 

@@ -8,7 +8,6 @@ OIDC infrastructure.
 import base64
 import os
 import sys
-import types
 from typing import Any
 from unittest.mock import patch
 
@@ -22,6 +21,11 @@ from rootcoz.exporters.greenwave_auth import (
     GreenwaveAuthError,
     build_greenwave_auth,
     build_greenwave_waiver_auth,
+)
+from tests.conftest import (
+    failing_spnego_module,
+    fake_spnego_module,
+    fresh_spnego_record,
 )
 
 RESULTSDB_URL = "https://resultsdb.example.com"
@@ -314,37 +318,6 @@ class TestOidcMode:
         assert "not-a-real-secret" not in str(excinfo.value)
 
 
-class _FakeSpnegoContext:
-    """Records step() calls; emits a deterministic client token."""
-
-    def __init__(self, record: dict[str, Any]) -> None:
-        self._record = record
-
-    def step(self, in_token: bytes | None) -> bytes:
-        self._record["steps"].append(in_token)
-        return b"client-token-" + (in_token or b"")
-
-
-def _fake_spnego_module(record: dict[str, Any]) -> types.ModuleType:
-    """A fake ``spnego`` module recording every client() construction."""
-
-    class KerberosKeytab:
-        def __init__(self, keytab: str, principal: str | None) -> None:
-            record["keytabs"].append((keytab, principal))
-
-    module = types.ModuleType("spnego")
-
-    def client(**kwargs: Any) -> _FakeSpnegoContext:
-        record["client_kwargs"].append(kwargs)
-        context = _FakeSpnegoContext(record)
-        record["contexts"].append(context)
-        return context
-
-    module.KerberosKeytab = KerberosKeytab
-    module.client = client
-    return module
-
-
 def _kerberos_settings() -> Settings:
     return _settings(
         greenwave_url=RESULTSDB_URL,
@@ -354,14 +327,10 @@ def _kerberos_settings() -> Settings:
     )
 
 
-def _fresh_kerberos_record() -> dict[str, Any]:
-    return {"client_kwargs": [], "contexts": [], "steps": [], "keytabs": []}
-
-
 class TestKerberosMode:
     async def test_negotiate_dance_and_spn(self):
-        record = _fresh_kerberos_record()
-        fake = _fake_spnego_module(record)
+        record = fresh_spnego_record()
+        fake = fake_spnego_module(record)
         server_token = base64.b64encode(b"server-challenge").decode()
         seen: list[str] = []
 
@@ -404,8 +373,8 @@ class TestKerberosMode:
         strategy for a WaiverDB write would ask the KDC for a principal that
         does not exist on the waiver host.
         """
-        record = _fresh_kerberos_record()
-        fake = _fake_spnego_module(record)
+        record = fresh_spnego_record()
+        fake = fake_spnego_module(record)
         settings = _settings(
             greenwave_url=RESULTSDB_URL,
             greenwave_waiver_url="https://waiverdb.example.com/api/v1.0",
@@ -433,8 +402,8 @@ class TestKerberosMode:
         service principal lives in; an explicit knob keeps that decision out
         of the keytab filename/principal.
         """
-        record = _fresh_kerberos_record()
-        fake = _fake_spnego_module(record)
+        record = fresh_spnego_record()
+        fake = fake_spnego_module(record)
         settings = _settings(
             greenwave_url=RESULTSDB_URL,
             greenwave_auth_mode="kerberos",
@@ -457,8 +426,8 @@ class TestKerberosMode:
         where dns_canonicalize_hostname can fight the SPN, so an unset realm
         must not invent one.
         """
-        record = _fresh_kerberos_record()
-        fake = _fake_spnego_module(record)
+        record = fresh_spnego_record()
+        fake = fake_spnego_module(record)
         settings = _settings(
             greenwave_url=RESULTSDB_URL,
             greenwave_auth_mode="kerberos",
@@ -473,8 +442,8 @@ class TestKerberosMode:
 
     async def test_multi_scheme_challenge_is_understood(self):
         """`Negotiate, Basic realm="x"` must not be read as "no Negotiate"."""
-        record = _fresh_kerberos_record()
-        fake = _fake_spnego_module(record)
+        record = fresh_spnego_record()
+        fake = fake_spnego_module(record)
         server_token = base64.b64encode(b"server-challenge").decode()
         seen: list[str] = []
 
@@ -499,8 +468,8 @@ class TestKerberosMode:
         assert seen[1].startswith("Negotiate ")
 
     async def test_fresh_context_per_request(self):
-        record = _fresh_kerberos_record()
-        fake = _fake_spnego_module(record)
+        record = fresh_spnego_record()
+        fake = fake_spnego_module(record)
         server_token = base64.b64encode(b"server-challenge").decode()
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -519,8 +488,15 @@ class TestKerberosMode:
         assert len(record["contexts"]) == 3
 
     async def test_retried_401_is_a_clear_error(self):
-        record = _fresh_kerberos_record()
-        fake = _fake_spnego_module(record)
+        """A server that keeps challenging past the bound fails clearly.
+
+        A 401 answering a Negotiate token with ANOTHER Negotiate challenge
+        is a continuation exchange, so the client keeps stepping the
+        context — but a server that never stops challenging is broken, and
+        the loop is bounded so it cannot spin forever.
+        """
+        record = fresh_spnego_record()
+        fake = fake_spnego_module(record)
         server_token = base64.b64encode(b"server-challenge").decode()
 
         def handler(request: httpx.Request) -> httpx.Response:
@@ -530,14 +506,108 @@ class TestKerberosMode:
 
         with (
             patch.dict(sys.modules, {"spnego": fake}),
-            pytest.raises(GreenwaveAuthError, match="rejected"),
+            pytest.raises(GreenwaveAuthError, match="exchanges"),
         ):
             strategy = build_greenwave_auth(_kerberos_settings())
             await _get_with(strategy.auth, handler)
+        # The bound is 5 exchanges, not an unbounded loop.
+        assert len(record["steps"]) == 5
+
+    async def test_continuation_exchange_completes(self):
+        """A continuation Negotiate challenge finishes the same context.
+
+        Some servers split the SPNEGO exchange across multiple 401 rounds;
+        the client must feed each continuation token back into the SAME
+        security context (a context is a multi-step exchange) instead of
+        treating the second challenge as a rejection.
+        """
+        record = fresh_spnego_record()
+        fake = fake_spnego_module(record)
+        first = base64.b64encode(b"challenge-one").decode()
+        second = base64.b64encode(b"challenge-two").decode()
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers.get("Authorization", ""))
+            if len(seen) == 1:
+                return httpx.Response(
+                    401, headers={"WWW-Authenticate": f"Negotiate {first}"}
+                )
+            if len(seen) == 2:
+                return httpx.Response(
+                    401, headers={"WWW-Authenticate": f"Negotiate {second}"}
+                )
+            return httpx.Response(200, json={})
+
+        with patch.dict(sys.modules, {"spnego": fake}):
+            strategy = build_greenwave_auth(_kerberos_settings())
+            response = await _get_with(strategy.auth, handler)
+
+        assert response.status_code == 200
+        # Both server tokens went through ONE context, in order.
+        assert record["steps"] == [b"challenge-one", b"challenge-two"]
+        assert len(record["contexts"]) == 1
+        # The final request carries the token produced by the last step.
+        expected = base64.b64encode(b"client-token-" + b"challenge-two").decode()
+        assert seen[-1] == f"Negotiate {expected}"
+
+    async def test_gssapi_error_scrubs_configured_file_paths(self):
+        """A GSSAPI error names the keytab FILE — the path must not leak.
+
+        ``GREENWAVE_KEYTAB_PATH`` is a credential location; the sanitized
+        error keeps the useful GSSAPI text but replaces every configured
+        Greenwave file path with a stable placeholder.
+        """
+        keytab = "/secrets/rootcoz.keytab"
+        cert = "/certs/client.pem"
+        settings = _settings(
+            greenwave_url=RESULTSDB_URL,
+            greenwave_auth_mode="kerberos",
+            greenwave_keytab_path=keytab,
+            greenwave_keytab_principal="rootcoz@EXAMPLE.COM",
+            greenwave_client_cert=cert,
+        )
+        fake = failing_spnego_module(
+            ValueError(f"cannot open keytab {keytab} (cert {cert})")
+        )
+        with (
+            patch.dict(sys.modules, {"spnego": fake}),
+            pytest.raises(GreenwaveAuthError) as excinfo,
+        ):
+            strategy = build_greenwave_auth(settings)
+            await _get_with(strategy.auth, _negotiate_handler())
+        message = str(excinfo.value)
+        assert "cannot open keytab" in message  # useful GSSAPI text kept
+        assert "<keytab>" in message
+        assert "<client-cert>" in message
+        assert keytab not in message
+        assert cert not in message
+
+    async def test_spnego_exchange_completed_flag(self):
+        """The strategy records whether a Negotiate exchange completed.
+
+        The connection-test message reports "authenticated via kerberos"
+        only when the keytab was actually exercised.
+        """
+        record = fresh_spnego_record()
+        fake = fake_spnego_module(record)
+
+        def plain_handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={})
+
+        with patch.dict(sys.modules, {"spnego": fake}):
+            strategy = build_greenwave_auth(_kerberos_settings())
+            # No 401 challenge: the keytab was never exercised.
+            await _get_with(strategy.auth, plain_handler)
+            assert strategy.spnego_exchange_completed is False
+            # A completed challenge flips the flag.
+            response = await _get_with(strategy.auth, _negotiate_handler())
+        assert response.status_code == 200
+        assert strategy.spnego_exchange_completed is True
 
     async def test_non_negotiate_challenge_is_a_clear_error(self):
-        record = _fresh_kerberos_record()
-        fake = _fake_spnego_module(record)
+        record = fresh_spnego_record()
+        fake = fake_spnego_module(record)
 
         def handler(request: httpx.Request) -> httpx.Response:
             return httpx.Response(401, headers={"WWW-Authenticate": "Basic realm=x"})
@@ -589,3 +659,55 @@ class TestBuildErrors:
             build_greenwave_auth(settings)
         for name in missing:
             assert name in str(excinfo.value)
+
+
+class TestHttpSchemeRefusedAtBuild:
+    """The credentials-over-plain-http rule lives here, not in Settings.
+
+    Settings construction must not raise on a URL-scheme/auth-mode
+    mismatch: the URL may come from the environment while the mode lives
+    only in the database, and an unvalidatable merged config makes
+    ``get_settings()`` fall back to env-only — silently dropping every DB
+    override. So the scheme rule is enforced where a credential would
+    actually be sent: the auth build (and the settings write path).
+    """
+
+    def test_http_url_with_credential_mode_refused(self):
+        """Bearer mode over plain HTTP never sends the token — refuse."""
+        settings = _settings(
+            greenwave_url="http://resultsdb.example.com",
+            greenwave_auth_mode="bearer",
+            greenwave_api_token=SecretStr("rdb-token"),  # pragma: allowlist secret
+        )
+        with pytest.raises(ExporterPrerequisiteError, match="GREENWAVE_URL"):
+            build_greenwave_auth(settings)
+
+    def test_http_url_allowed_in_none_mode(self):
+        """The credential-less none mode may target a public HTTP instance."""
+        settings = _settings(
+            greenwave_url="http://resultsdb.example.com",
+            greenwave_auth_mode="none",
+        )
+        assert build_greenwave_auth(settings).mode == "none"
+
+    def test_http_waiver_url_refused_even_in_none_mode(self):
+        """A waiver lifts a gate — the waiver endpoint stays HTTPS-only."""
+        settings = _settings(
+            greenwave_url="http://resultsdb.example.com",
+            greenwave_waiver_url="http://waiverdb.example.com",
+            greenwave_auth_mode="none",
+        )
+        with pytest.raises(ExporterPrerequisiteError, match="GREENWAVE_WAIVER_URL"):
+            build_greenwave_waiver_auth(settings)
+
+    def test_http_oidc_token_url_refused(self):
+        """The client secret is POSTed to the token endpoint — HTTPS only."""
+        settings = _settings(
+            greenwave_url=RESULTSDB_URL,
+            greenwave_auth_mode="oidc",
+            greenwave_oidc_token_url="http://sso.example.com/token",
+            greenwave_oidc_client_id="rootcoz",
+            greenwave_oidc_client_secret=SecretStr("sec"),  # pragma: allowlist secret
+        )
+        with pytest.raises(ExporterPrerequisiteError, match="GREENWAVE_OIDC_TOKEN_URL"):
+            build_greenwave_auth(settings)
