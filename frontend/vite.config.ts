@@ -33,6 +33,15 @@ export default defineConfig({
     maxWorkers: 4,
     setupFiles: './src/test/setup.ts',
     css: true,
+    // 15 s, not vitest's 5 s default. Measured with the suite pinned to two
+    // cores plus two burners on those cores — the same recipe that reproduced
+    // the CI timeout on UsersPage.test.tsx — several jsdom tests need more than
+    // 5 s of wall time on a loaded runner: UsersPage pagination 4321-6331 ms,
+    // AnalysisAiPicker 5082-7133 ms, UsersGrant 4151-5137 ms. With 5 s the
+    // suite failed on those three; with 15 s it passed 3/3 runs and the worst
+    // test in the whole suite took 7280 ms (2x headroom). A budget that fails
+    // on the clock rather than an assertion teaches people to weaken tests.
+    testTimeout: 15_000,
   },
   server: {
     // Polling required for Docker bind mount — inotify doesn't work across container boundaries
