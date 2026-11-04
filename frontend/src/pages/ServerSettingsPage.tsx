@@ -1305,9 +1305,15 @@ export function ServerSettingsPage() {
     setGreenwaveModeError(error)
     if (!error) cancelHiddenGreenwaveEdit()
     // The admin must land on a WORKING mode: after a successful switch to a
-    // real mode, auto-run the Greenwave test for it. 'none' never tests; the
-    // result is surfaced, the switch itself never reverts.
-    if (method !== 'none' && !error) void handleTestConnection('Greenwave')
+    // real mode, auto-run the Greenwave test for it. 'none' never tests (no
+    // credentials to test), and neither does an explicitly DISABLED exporter:
+    // testing it would report a healthy connection for something the server
+    // excludes from every push, which reads as "greenwave works" when it does
+    // not. The manual button still tests on demand.
+    const greenwaveDisabled = settingValue('enable_greenwave').trim() === 'false'
+    if (method !== 'none' && !error && !greenwaveDisabled) {
+      void handleTestConnection('Greenwave')
+    }
   }
 
   // ---- Test connection helpers ----

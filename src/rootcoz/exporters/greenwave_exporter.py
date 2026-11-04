@@ -363,6 +363,12 @@ class GreenwaveExporter(Exporter):
     async def push(self, context: ExportContext) -> ExporterResult:
         """Push analysis results to ResultsDB and optionally WaiverDB.
 
+        When waiver submission is enabled, an unavailable reviewer lookup
+        refuses the push BEFORE any write: an empty ``reviewed_by`` cannot be
+        distinguished from "nobody reviewed this", and pushing results while
+        the requested waivers are silently dropped is the failure this
+        exporter exists to avoid.
+
         An explicit ``subject_identifier`` is required for every push — results
         and waivers are both gating writes, keyed on that subject. There is no
         ``job_name`` fallback: a write keyed on a CI job name is a malformed
@@ -392,6 +398,17 @@ class GreenwaveExporter(Exporter):
                         "group_uuid": None,
                     },
                 },
+            )
+
+        if self._push_waivers and context.reviews_unavailable:
+            # "Reviewers unknown" is not "nobody reviewed this". Writing the
+            # ResultsDB rows and quietly dropping the waivers the caller asked
+            # for would report success for a gate that was never lifted.
+            raise ExporterPrerequisiteError(
+                "Greenwave refused the push: waiver submission is enabled but "
+                "the reviewer lookup failed, so human-reviewed failures cannot "
+                "be identified. No results or waivers were written; retry once "
+                "the review data is readable."
             )
 
         subject_identifier = normalize_identifier(context.subject_identifier) or ""

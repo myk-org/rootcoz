@@ -10396,6 +10396,7 @@ async def _build_export_context(
     history_classifications: dict[str, str] = {}
     tracked_in_data: dict[str, list[dict[str, Any]]] = {}
     reviewed_by: dict[str, str] = {}
+    reviews_unavailable = False
     effective_classifications: dict[tuple[str, str, int], str] = {}
 
     if failures_data:
@@ -10485,7 +10486,17 @@ async def _build_export_context(
                     if safe:
                         reviewed_by[name] = safe
         except Exception:
-            logger.debug("Failed to fetch reviews for job %s", job_id, exc_info=True)
+            # Not the same as "nobody reviewed this": a reader that needs
+            # reviewer identity (Greenwave waivers) must be able to tell the
+            # two apart, or it silently omits the gating writes it was asked
+            # for while still succeeding at the informational ones.
+            reviews_unavailable = True
+            logger.warning(
+                "Failed to fetch reviews for job %s — reviewers unknown, "
+                "gating exports will refuse",
+                job_id,
+                exc_info=True,
+            )
 
         if reviewed_by:
             logger.debug("Export push reviewed_by for job %s: %s", job_id, reviewed_by)
@@ -10503,6 +10514,7 @@ async def _build_export_context(
         history_classifications=history_classifications,
         tracked_in_links=tracked_in_data,
         reviewed_by=reviewed_by,
+        reviews_unavailable=reviews_unavailable,
         analysis_timestamp=analysis_timestamp,
         subject_identifier=subject_identifier,
         waiver_comment=waiver_comment,

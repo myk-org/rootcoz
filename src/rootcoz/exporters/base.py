@@ -63,6 +63,11 @@ class ExportContext:
     effective_classifications: dict[tuple[str, str, int], str] = field(
         default_factory=dict
     )
+    #: True when the reviewer lookup FAILED (as opposed to finding nothing).
+    #: A reader that needs reviewer identity to decide a gating write must
+    #: refuse rather than read "unknown" as "no human review": the two are
+    #: indistinguishable in ``reviewed_by`` and only one is safe to act on.
+    reviews_unavailable: bool = False
 
 
 @dataclass

@@ -147,7 +147,9 @@ mk('greenwave_krb5_realm', 'Greenwave', ''),
   mk('greenwave_subject_type', 'Greenwave', ''),
   mk('greenwave_product_version', 'Greenwave', ''),
   mk('greenwave_verify_ssl', 'Greenwave', 'true', { type: 'boolean' }),
-  mk('enable_greenwave', 'Greenwave', 'false', { type: 'boolean' }),
+  // Unset is the real default (None ⇒ enablement follows the auth mode).
+  // 'false' is an EXPLICIT disable, which must not be the baseline here.
+  mk('enable_greenwave', 'Greenwave', '', { type: 'boolean' }),
   mk('prow_url', 'Prow', 'https://prow.example.com'),
   mk('admin_key', 'Auth & Security', 'key', { sensitive: true }),
   mk('vapid_public_key', 'Web Push', 'vk'),
@@ -980,6 +982,28 @@ describe('ServerSettingsPage Greenwave auth mode selection', () => {
     expect(banner).toHaveTextContent('Connection successful')
     expect(greenwaveAuthSelect()).toHaveTextContent('Bearer token')
     expect(shown('greenwave_api_token')).toBe(true)
+  })
+
+  it('does not auto-test a mode switch while the exporter is disabled', async () => {
+    mockGreenwaveModeSettings('')
+    // enable_greenwave is explicitly false: the server excludes the exporter
+    // from every push, so a green connection test would be actively
+    // misleading. The manual button still tests on demand.
+    get.mockImplementation(async () => {
+      const settings = baseSettings()
+      settings.find((s) => s.key === 'greenwave_auth_mode')!.value = ''
+      settings.find((s) => s.key === 'enable_greenwave')!.value = 'false'
+      return settings
+    })
+    await openGreenwaveTab()
+
+    chooseGreenwaveMethod('Bearer token')
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: { greenwave_auth_mode: 'bearer' },
+      }),
+    )
+    expect(testIntegration).not.toHaveBeenCalled()
   })
 })
 

@@ -3,6 +3,7 @@
 import asyncio
 import os
 import uuid as uuid_module
+from dataclasses import replace
 from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -993,6 +994,63 @@ class TestGreenwaveExporterPush:
         assert result.details["waived"] == 0
         urls = [call.args[1] for call in post.call_args_list]
         assert not any(url.endswith("/waivers/") for url in urls), urls
+
+    def test_unavailable_reviewer_lookup_refuses_a_waiver_push(self):
+        """An unreadable review table must not silently drop waivers.
+
+        Empty ``reviewed_by`` looks identical whether nobody reviewed the
+        failure or the lookup failed. With waivers enabled the difference
+        matters: pushing results and omitting the requested waivers would
+        report success for a gate that was never lifted.
+        """
+        from rootcoz.exporters import ExporterPrerequisiteError
+
+        settings = _make_settings(
+            GREENWAVE_PUSH_WAIVERS="true",
+            GREENWAVE_WAIVER_URL=WAIVERDB_URL,
+            GREENWAVE_WAIVER_TOKEN="wdb-token",  # pragma: allowlist secret
+            GREENWAVE_PRODUCT_VERSION="el10",
+        )
+        exporter = GreenwaveExporter(settings)
+        post = self._mock_post(exporter, [])
+        with pytest.raises(ExporterPrerequisiteError, match="reviewer lookup failed"):
+            _run_push(
+                exporter,
+                replace(
+                    _make_context(
+                        [_failure("test_a", "INFRASTRUCTURE")],
+                        subject_identifier="pkg-1.0-1.el10",
+                    ),
+                    reviews_unavailable=True,
+                ),
+            )
+        post.assert_not_called()
+
+    def test_unavailable_reviewer_lookup_still_pushes_results_only(self):
+        """Results are informational: they do not need reviewer identity."""
+        exporter = GreenwaveExporter(_make_settings())
+        post = self._mock_post(
+            exporter,
+            [
+                _response({"uuid": "550e8400-e29b-41d4-a716-446655440000"}),
+                _response({"id": 101}),
+            ],
+        )
+        context = replace(
+            _make_context(
+                [_failure("test_a", "PRODUCT BUG")],
+                subject_identifier="pkg-1.0-1.el10",
+            ),
+            reviews_unavailable=True,
+        )
+        result = _run_push(exporter, context)
+        assert result.success is True
+        assert result.details["pushed"] == 1
+        # Two POSTs: the group and the result row. No waiver write.
+        assert len(post.call_args_list) == 2
+        assert not any(
+            call.args[1].endswith("/waivers/") for call in post.call_args_list
+        )
 
     def test_push_waiver_submitted_for_human_review(self):
         settings = _make_settings(
@@ -2117,3 +2175,57 @@ class TestAutoPushOverridesUnavailableAudit:
         assert rows[0]["details"]["reason"] == "overrides_unavailable"
         assert rows[0]["details"]["scope"] == "root#0"
         assert rows[0]["actor"] == "rootcoz-ai"
+
+
+class TestReviewerLookupFlag:
+    """The reviewer-lookup FAILURE must be distinguishable from 'no reviews'.
+
+    These pin the wiring, not just the exporter's use of it: if
+    ``_build_export_context`` ever goes back to swallowing the error into an
+    empty ``reviewed_by``, the waiver refusal above silently disappears.
+    """
+
+    @pytest.mark.asyncio
+    async def test_failed_review_lookup_sets_the_flag(self, initialized_db):
+        from rootcoz import main as main_module
+
+        with patch.object(
+            main_module.storage,
+            "get_reviews_for_job",
+            AsyncMock(side_effect=RuntimeError("db down")),
+        ):
+            context = await main_module._build_export_context(
+                job_id="job-1",
+                result_data={
+                    "job_name": "my-job",
+                    "build_number": 42,
+                    "failures": [{"test_name": "test_a"}],
+                },
+                settings=_make_settings(),
+                fetch_history=False,
+                fetch_tracked_in_links=False,
+            )
+        assert context.reviews_unavailable is True
+        assert context.reviewed_by == {}
+
+    @pytest.mark.asyncio
+    async def test_successful_lookup_with_no_reviews_does_not_set_the_flag(
+        self, initialized_db
+    ):
+        from rootcoz import main as main_module
+
+        with patch.object(
+            main_module.storage, "get_reviews_for_job", AsyncMock(return_value={})
+        ):
+            context = await main_module._build_export_context(
+                job_id="job-1",
+                result_data={
+                    "job_name": "my-job",
+                    "build_number": 42,
+                    "failures": [{"test_name": "test_a"}],
+                },
+                settings=_make_settings(),
+                fetch_history=False,
+                fetch_tracked_in_links=False,
+            )
+        assert context.reviews_unavailable is False
