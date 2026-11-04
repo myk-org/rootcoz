@@ -326,6 +326,26 @@ describe('BugCreationDialog submit retry', () => {
     expect(screen.queryByText('GitHub Issue created successfully.')).not.toBeInTheDocument()
   })
 
+  it('never reports a reviewer\'s link for the same failure as this create succeeding', async () => {
+    const user = userEvent.setup()
+    mockCreateFlow('github', new ApiError(502, 'Bad Gateway', { detail: 'GitHub is unavailable right now.' }))
+    // Someone else files an issue for this same test while our POST fails.
+    get.mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/ai-models')) return catalog
+      if (path.endsWith('/issue-prompt')) return { issue_prompt: 'Describe the bug' }
+      if (path.endsWith('/tracked-in')) {
+        return { tracked_in: { 'test-a': [{ id: 8, tracked_in_url: 'https://tracker/issue/8', tracked_in_type: 'github', tracked_in_by: 'bob' }] } }
+      }
+      return {}
+    })
+    await openGeneratedPreview(user)
+
+    await user.click(screen.getByRole('button', { name: /create github issue/i }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('GitHub is unavailable right now.')
+    expect(screen.queryByText('GitHub Issue created successfully.')).not.toBeInTheDocument()
+  })
+
   it('still offers the retry when the tracked-in check itself fails', async () => {
     const user = userEvent.setup()
     mockCreateFlow('github', new ApiError(502, 'Bad Gateway', { detail: 'GitHub is unavailable right now.' }))

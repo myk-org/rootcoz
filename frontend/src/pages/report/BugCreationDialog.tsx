@@ -75,7 +75,7 @@ export function BugCreationDialog({
 }: BugCreationDialogProps) {
   const dispatch = useReportDispatch()
   const refreshEnrichments = useRefreshEnrichments()
-  const { canUseServerProviders, canUseFreeProviders } = useAuth()
+  const { canUseServerProviders, canUseFreeProviders, username } = useAuth()
   const { aiProvider, aiModel, setAiPair } = useAiSelection(defaultAiProvider, defaultAiModel)
   const { providers, providerStatus } = useProviderCatalog()
   const [phase, setPhase] = useState<Phase>('idle')
@@ -275,10 +275,12 @@ export function BugCreationDialog({
     }
   }
 
-  /** The link a create added while it was reporting a failure, if there is one. */
+  /** The link our create added while it was reporting a failure, if there is one. */
   async function newTrackerLinkUrl(before: Set<number>): Promise<string | null> {
     try {
-      return (await failureLinks()).find((link) => !before.has(link.id))?.tracked_in_url ?? null
+      // Another reviewer filing for the same failure and tracker is not our
+      // result: only a link this account made can be the one our POST filed.
+      return (await failureLinks()).find((link) => link.tracked_in_by === username && !before.has(link.id))?.tracked_in_url ?? null
     } catch {
       // Cannot tell — the retry stays available rather than claiming success.
       return null

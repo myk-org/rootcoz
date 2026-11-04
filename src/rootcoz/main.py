@@ -19548,7 +19548,8 @@ def _upstream_error_message(response: httpx.Response) -> str:
     ``errorMessages`` are read and the result is capped at
     ``_UPSTREAM_MESSAGE_LIMIT``: the response text is never logged (it can echo
     the request) and neither is the request itself, so no token can reach the
-    log.
+    log. Control characters are stripped too, so a newline in the tracker's own
+    text cannot start a forged record inside the WARNING line that carries it.
     """
     try:
         payload = response.json()
@@ -19564,7 +19565,7 @@ def _upstream_error_message(response: httpx.Response) -> str:
     error_messages = payload.get("errorMessages")
     if isinstance(error_messages, list):
         parts.extend(str(item).strip() for item in error_messages if str(item).strip())
-    return " ".join(parts)[:_UPSTREAM_MESSAGE_LIMIT]
+    return _sanitize_control_chars(" ".join(parts))[:_UPSTREAM_MESSAGE_LIMIT]
 
 
 def _upstream_status(exc: Exception) -> int | None:
@@ -19747,16 +19748,8 @@ async def create_feedback(
 
         if not github_token:
             # This is the one issue-creation path that reads the token from the
-            # user's row, so the guidance must match the account that got it: a
-            # caller with no row (the bootstrap `admin`) cannot save a token at
-            # all — PUT /api/user/tokens answers 404 for it (#400).
-            if username and await storage.get_user_by_username(username) is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="GitHub token is required, and this account has no "
-                    "profile to store one. Sign in with your own account and add "
-                    "the token in Profile Settings.",
-                )
+            # user's row instead of the request, so the no-profile wording that
+            # helper owns (#400) is the one the bootstrap `admin` gets here.
             raise HTTPException(
                 status_code=400,
                 detail=await _require_user_tracker_credential(username, "GitHub"),

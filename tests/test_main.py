@@ -4328,6 +4328,24 @@ class TestCreateGithubIssueApiErrors:
         assert (await storage.list_audit_events(action="issue.create"))["events"] == []
 
     @pytest.mark.asyncio
+    async def test_github_error_text_cannot_forge_a_log_record(
+        self, test_client, caplog
+    ):
+        """A newline in GitHub's own message stays inside one WARNING record."""
+        exc = self._raise_status(
+            503, json={"message": "Server Error\nFAKE LOG LINE: token=leaked"}
+        )
+        with capture_main_logs(caplog):
+            response = await self._post_with_github_failure(
+                test_client, "job-gh-forge", exc
+            )
+
+        assert response.status_code == 502
+        offenders = [r for r in caplog.records if "FAKE LOG LINE" in r.getMessage()]
+        assert len(offenders) == 1
+        assert "\n" not in offenders[0].getMessage()
+
+    @pytest.mark.asyncio
     async def test_github_404_points_at_the_configured_repository(
         self, test_client, caplog
     ):
