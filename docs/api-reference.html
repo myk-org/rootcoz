@@ -830,7 +830,7 @@
 <td>POST</td>
 <td><code>/results/{job_id}/create-github-issue</code></td>
 <td>reviewer</td>
-<td><code>test_name</code>, <code>title</code>, <code>body</code>; returns <code>201</code>. Same refusal classes as <code>POST /api/feedback/create</code> — <code>502</code> when GitHub is unreachable or failing, <code>403</code> when the token cannot see <code>TESTS_REPO_URL</code> or lacks the <code>repo</code> scope, <code>401</code> for an invalid token, <code>429</code> when rate limited</td>
+<td><code>test_name</code>, <code>title</code>, <code>body</code>; returns <code>201</code>. Same refusal classes as <code>POST /api/feedback/create</code> — <code>502</code> when GitHub is unreachable or failing, <code>403</code> when the token cannot see <code>TESTS_REPO_URL</code> (GitHub answers <code>404</code> for that), lacks the <code>repo</code> scope, or is invalid or expired, <code>429</code> when rate limited</td>
 </tr>
 <tr>
 <td>POST</td>
@@ -1192,7 +1192,7 @@
 </p>
 <p><code>POST /results/{job_id}/create-jira-bug</code> applies the same split to Jira: <code>401</code> for an invalid or expired token, <code>403</code> for a project the token cannot access — Jira hides it behind a <code>404</code>, the same trick GitHub plays — and <code>502</code> with a retryable outage detail on an upstream <code>5xx</code>. Anything else stays <code>502 Jira API error: &lt;status&gt;</code>, with no rate-limit wording invented. Its refusals are logged the same way, including Jira's own <code>errorMessages</code>.
 </p>
-<p>Auditing is narrower than that: a refused <code>feedback.create</code> is recorded as a failed event whose <code>details</code> carries <code>upstream_status</code> whenever GitHub answered — the number an operator uses to tell an outage from a lost token. Refusals on <code>create-github-issue</code> are not audited at all; only a successful create writes an <code>issue.create</code> row, so that path has no <code>upstream_status</code> to read.</p>
+<p>Auditing is narrower than that: a refused <code>feedback.create</code> is recorded as a <code>denied</code> event with reason <code>forbidden</code> for the mapped <code>401</code>/<code>403</code> refusals (an invalid token, a missing <code>repo</code> scope, a repository the token cannot see), and as a <code>failure</code> event for the rest — <code>upstream_failure</code> for a <code>502</code>, <code>http_429</code> for the rate limit. Its <code>details</code> carries <code>upstream_status</code> only when the upstream status is not already named by that reason code — <code>401</code>, <code>403</code>, and <code>429</code> are omitted, every other status (a <code>404</code>, a <code>5xx</code>, a <code>422</code>) is recorded. Refusals on <code>create-github-issue</code> are not audited at all; only a successful create writes an <code>issue.create</code> row, so that path has no <code>upstream_status</code> to read.</p>
 </blockquote>
 <h3 id="admin">Admin</h3>
 <div class="table-wrap"><table>

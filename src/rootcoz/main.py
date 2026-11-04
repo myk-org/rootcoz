@@ -19172,13 +19172,22 @@ async def preview_feedback(
         ai_username.reset(token)
 
 
+# Cap on the tracker error text copied into one WARNING line. GitHub's
+# ``message`` plus ``documentation_url`` fit comfortably; Jira can return an
+# ``errorMessages`` list long enough to flood the log, so its tail is dropped
+# on purpose — the upstream status leads the same line and is what an outage
+# investigation actually needs.
+_UPSTREAM_MESSAGE_LIMIT = 300
+
+
 def _upstream_error_message(response: httpx.Response) -> str:
     """The tracker's own error text, parsed defensively.
 
     Only GitHub's ``message``/``documentation_url`` and Jira's
-    ``errorMessages`` are read and the result is capped: the response text is
-    never logged (it can echo the request) and neither is the request itself,
-    so no token can reach the log.
+    ``errorMessages`` are read and the result is capped at
+    ``_UPSTREAM_MESSAGE_LIMIT``: the response text is never logged (it can echo
+    the request) and neither is the request itself, so no token can reach the
+    log.
     """
     try:
         payload = response.json()
@@ -19194,7 +19203,7 @@ def _upstream_error_message(response: httpx.Response) -> str:
     error_messages = payload.get("errorMessages")
     if isinstance(error_messages, list):
         parts.extend(str(item).strip() for item in error_messages if str(item).strip())
-    return " ".join(parts)[:300]
+    return " ".join(parts)[:_UPSTREAM_MESSAGE_LIMIT]
 
 
 def _upstream_status(exc: Exception) -> int | None:
@@ -19269,11 +19278,22 @@ def _github_issue_refusal(
             )
         if response.status_code == 404:
             # GitHub answers 404 instead of 403 for a repository the token
-            # cannot see, so this is a credential problem, not an outage.
+            # cannot see, so this is a credential problem, not an outage. The
+            # feedback form only offers repositories the user's own token
+            # already sees, but a report's issue goes to the deployment's
+            # TESTS_REPO_URL, so a mistyped or deleted repository lands here
+            # too — that one is not the user's token to fix.
+            if subject == "feedback":
+                return HTTPException(
+                    status_code=403,
+                    detail=f"GitHub token cannot access the {subject} repository. "
+                    "Regenerate it in Profile Settings with access to that repository.",
+                )
             return HTTPException(
                 status_code=403,
-                detail=f"GitHub token cannot access the {subject} repository. "
-                "Regenerate it in Profile Settings with access to that repository.",
+                detail="GitHub cannot see the repository in TESTS_REPO_URL, so your "
+                f"{subject} was not filed. Check that the repository exists and that "
+                "your token can access it in Profile Settings.",
             )
         if response.status_code >= 500:
             return HTTPException(

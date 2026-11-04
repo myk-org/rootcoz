@@ -26,7 +26,7 @@ from rootcoz.models import (
     FailureAnalysis,
 )
 from rootcoz.sources.jenkins_source import JenkinsError
-from tests.conftest import make_test_client
+from tests.conftest import capture_main_logs, make_test_client
 
 # Fake credentials for tests — annotated once to suppress Ruff S105/S106 globally.
 FAKE_JENKINS_PASSWORD = "not-a-real-password"  # pragma: allowlist secret
@@ -36,18 +36,6 @@ FAKE_GITHUB_TOKEN = "not-a-real-token"
 # log or detail that echoes either one can be asserted against.
 _REPORT_GITHUB_TOKEN = "ghp_report_token_0123456789"  # pragma: allowlist secret
 _REPORT_BODY = "REPORT-BODY-MUST-NOT-BE-LOGGED"
-
-
-@contextmanager
-def _capture_main_logs(caplog):
-    """Capture rootcoz.main logs (python-simple-logger sets propagate=False)."""
-    logger = logging.getLogger("rootcoz.main")
-    with caplog.at_level(logging.WARNING, logger="rootcoz.main"):
-        logger.propagate = True
-        try:
-            yield
-        finally:
-            logger.propagate = False
 
 
 def _patch_preflight():
@@ -4197,7 +4185,7 @@ class TestCreateGithubIssueApiErrors:
                 "documentation_url": "https://docs.github.com/rest",
             },
         )
-        with _capture_main_logs(caplog):
+        with capture_main_logs(caplog):
             response = await self._post_with_github_failure(
                 test_client, "job-gh-503", exc
             )
@@ -4218,18 +4206,25 @@ class TestCreateGithubIssueApiErrors:
         assert (await storage.list_audit_events(action="issue.create"))["events"] == []
 
     @pytest.mark.asyncio
-    async def test_github_404_names_repository_access(self, test_client, caplog):
-        """GitHub hides a repository the token cannot see behind a 404."""
+    async def test_github_404_points_at_the_configured_repository(
+        self, test_client, caplog
+    ):
+        """A report's issue goes to TESTS_REPO_URL, so a 404 is not always the token.
+
+        GitHub hides an unreadable repository behind a 404, but a mistyped or
+        deleted one in the deployment setting answers the same way — that is
+        not something the user can fix in Profile Settings alone.
+        """
         exc = self._raise_status(404, json={"message": "Not Found"})
-        with _capture_main_logs(caplog):
+        with capture_main_logs(caplog):
             response = await self._post_with_github_failure(
                 test_client, "job-gh-404", exc
             )
 
         assert response.status_code == 403
         detail = response.json()["detail"]
-        assert "cannot access the bug report repository" in detail
-        assert "Regenerate" in detail
+        assert "TESTS_REPO_URL" in detail
+        assert "cannot see the repository" in detail
         assert "unavailable" not in detail.lower()
         assert "404" not in detail
         assert "status=404" in caplog.text
@@ -4238,7 +4233,7 @@ class TestCreateGithubIssueApiErrors:
     @pytest.mark.asyncio
     async def test_github_401_still_names_the_token(self, test_client, caplog):
         """An upstream 401 keeps saying the token is bad, never 'unavailable'."""
-        with _capture_main_logs(caplog):
+        with capture_main_logs(caplog):
             response = await self._post_with_github_failure(
                 test_client, "job-gh-401", self._raise_status(401)
             )
@@ -4256,7 +4251,7 @@ class TestCreateGithubIssueApiErrors:
         exc = self._raise_status(
             403, json={"message": "Resource not accessible by personal access token"}
         )
-        with _capture_main_logs(caplog):
+        with capture_main_logs(caplog):
             response = await self._post_with_github_failure(
                 test_client, "job-gh-403", exc
             )
@@ -4270,7 +4265,7 @@ class TestCreateGithubIssueApiErrors:
     @pytest.mark.asyncio
     async def test_github_429_still_names_the_rate_limit(self, test_client, caplog):
         """429 stays a rate limit, not an outage."""
-        with _capture_main_logs(caplog):
+        with capture_main_logs(caplog):
             response = await self._post_with_github_failure(
                 test_client, "job-gh-429", self._raise_status(429)
             )
@@ -4361,7 +4356,7 @@ class TestCreateJiraBugApiErrors:
             ),
         )
         with (
-            _capture_main_logs(caplog),
+            capture_main_logs(caplog),
             patch("rootcoz.main.create_jira_bug", side_effect=exc),
             _enable_feature("jira_enabled"),
         ):
@@ -4493,7 +4488,7 @@ class TestCreateJiraBugApiErrors:
             ),
         )
         with (
-            _capture_main_logs(caplog),
+            capture_main_logs(caplog),
             patch("rootcoz.main.create_jira_bug", side_effect=exc),
             _enable_feature("jira_enabled"),
         ):
@@ -4548,7 +4543,7 @@ class TestCreateJiraBugApiErrors:
             response=httpx.Response(status, request=request),
         )
         with (
-            _capture_main_logs(caplog),
+            capture_main_logs(caplog),
             patch("rootcoz.main.create_jira_bug", side_effect=exc),
             _enable_feature("jira_enabled"),
         ):
@@ -10246,7 +10241,6 @@ class TestAdminSettingsEndpoints:
         self, test_client, monkeypatch, caplog
     ) -> None:
         """A cold catalog plus no discovery answer must not reject a save."""
-        import logging
 
         from rootcoz import ai_client
 
@@ -10277,7 +10271,6 @@ class TestAdminSettingsEndpoints:
         self, test_client, monkeypatch, caplog
     ) -> None:
         """A warm catalog whose deployment credentials cannot be read fails open."""
-        import logging
 
         _no_key_providers(monkeypatch)
         monkeypatch.setattr(
@@ -10831,7 +10824,6 @@ class TestEnumeratedSettings:
         self, test_client, monkeypatch, caplog
     ) -> None:
         """A cold registry must not block an admin — accept, but warn."""
-        import logging
 
         from rootcoz import main
 
@@ -12374,7 +12366,6 @@ class TestIntegrationConnectionEndpoints:
         self, test_client, caplog
     ) -> None:
         """The catch-all log keeps the redacted message, never a raw traceback."""
-        import logging
 
         secret_url = (
             "https://user:secretpass@jenkins.example.com/"  # pragma: allowlist secret

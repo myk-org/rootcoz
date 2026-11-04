@@ -255,7 +255,36 @@ describe('BugCreationDialog submit retry', () => {
     await openGeneratedPreview(user)
 
     await user.click(screen.getByRole('button', { name: /create github issue/i }))
-    expect(await screen.findByRole('alert')).toHaveTextContent('Creation failed')
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Failed to create issue')
+    // The HTTP status text is never shown to the user.
+    expect(alert).not.toHaveTextContent('Bad Gateway')
+  })
+
+  it('adopts an issue filed while the create was failing instead of duplicating it', async () => {
+    const user = userEvent.setup()
+    mockCreateFlow('github', new ApiError(502, 'Bad Gateway', { detail: 'GitHub is unavailable right now.' }))
+    // The POST reports a failure, but the server did file the issue: its
+    // tracked-in link appears between the snapshot and the failure.
+    let reads = 0
+    get.mockImplementation(async (path: string) => {
+      if (path.startsWith('/api/ai-models')) return catalog
+      if (path.endsWith('/issue-prompt')) return { issue_prompt: 'Describe the bug' }
+      if (path.endsWith('/tracked-in')) {
+        reads += 1
+        return reads === 1 ? { tracked_in: {} } : { tracked_in: { 'test-a': [{ id: 7, tracked_in_url: 'https://tracker/issue/7', tracked_in_type: 'github', tracked_in_by: 'alice' }] } }
+      }
+      return {}
+    })
+    await openGeneratedPreview(user)
+
+    await user.click(screen.getByRole('button', { name: /create github issue/i }))
+
+    expect(await screen.findByText('GitHub Issue created successfully.')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: /open github issue/i })).toHaveAttribute('href', 'https://tracker/issue/7')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    // No duplicate POST: one create attempt, and the failure was not retried.
+    expect(post.mock.calls.filter(([path]) => path === createPathFor('github'))).toHaveLength(1)
   })
 
   it('double-clicking Retry submits once', async () => {
