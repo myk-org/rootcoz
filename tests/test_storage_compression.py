@@ -9,6 +9,7 @@ import asyncio
 import json
 import re
 import sqlite3
+import threading
 import time
 from compression import zstd
 from pathlib import Path
@@ -359,6 +360,96 @@ async def test_denorm_backfill_repairs_a_late_old_build_row(_storage) -> None:
     assert storage.parse_result_json(row["result_json"]) == payload
 
 
+async def test_denorm_sweep_does_not_overwrite_a_concurrent_patch(_storage) -> None:
+    """The sweep's UPDATE is a compare-and-swap on the payload it derived from.
+
+    The derive runs off the loop, so a patch can land inside that window. An
+    unconditional rowid-only update would then write the stale ``failure_ids``
+    back and stamp the row current, and the new failure would never be found by
+    identifier again.
+    """
+    # Small enough that the patch writes TEXT, so the sweep can re-read it.
+    await _insert_legacy(
+        "job-denorm-race",
+        {
+            "job_name": "race",
+            "summary": "one failure",
+            "failures": [{"id": "failure-0", "test_name": "test_0"}],
+        },
+    )
+    derive = storage._denorm_row_params
+    deriving = threading.Event()
+    release = threading.Event()
+
+    def delayed(rows: list) -> list:
+        deriving.set()
+        assert release.wait(10), "the test never released the derive"
+        return derive(rows)
+
+    with patch.object(storage, "_denorm_row_params", delayed):
+        sweep = asyncio.create_task(storage.backfill_results_denorm())
+        assert await asyncio.to_thread(deriving.wait, 10), "derive never started"
+        await storage.patch_result_json(
+            "job-denorm-race",
+            lambda data: data["failures"].append(
+                {"id": "failure-raced", "test_name": "test_raced", "error": "boom"}
+            ),
+        )
+        release.set()
+        assert await sweep == 0, "the stale derivation must not be written"
+
+    row = await _stored(_storage, "job-denorm-race")
+    assert row["denorm_version"] == 0, "the row must stay pending for the next pass"
+    assert "failure-raced" in row["failure_ids"], "the patch kept its own columns"
+
+    # The next pass derives it from the newer payload, not from the stale one.
+    assert await storage.backfill_results_denorm() == 1
+    row = await _stored(_storage, "job-denorm-race")
+    assert row["denorm_version"] == storage._RESULTS_DENORM_VERSION
+    assert "failure-raced" in row["failure_ids"]
+    found = await storage.find_failure_by_uuid("failure-raced")
+    assert found is not None
+    assert found["job_id"] == "job-denorm-race"
+
+
+async def test_denorm_sweep_repairs_a_row_an_old_build_rewrote(_storage) -> None:
+    """A pre-compression build updates the payload and leaves the version alone.
+
+    That build cannot decode a frame, so the only row it can still rewrite is a
+    TEXT one. Trusting ``denorm_version`` alone there would leave the row at the
+    current version with stale filters and unfindable failures forever.
+    """
+    await _insert_legacy("job-old-writer", _payload(failure_count=20))
+    assert await storage.backfill_results_denorm() == 1
+
+    newer = _payload(failure_count=20, summary="newer summary", job_name="renamed")
+    newer["request_params"]["submitted_by"] = "dana"
+    newer["failures"].append(
+        {"id": "failure-old-writer", "test_name": "t", "error": "e"}
+    )
+    async with storage._connect_db() as db:
+        await db.execute(
+            "UPDATE results SET result_json = ?, job_name = ?, build_number = ?,"
+            " build_id = ? WHERE job_id = 'job-old-writer'",
+            (json.dumps(newer), "renamed", 42, "4242"),
+        )
+        await db.commit()
+
+    stale = await _stored(_storage, "job-old-writer")
+    assert stale["denorm_version"] == storage._RESULTS_DENORM_VERSION
+    assert (stale["summary"], stale["submitted_by"]) == ("many failures", "yuval")
+
+    assert await storage.backfill_results_denorm() == 1
+
+    row = await _stored(_storage, "job-old-writer")
+    assert (row["summary"], row["submitted_by"]) == ("newer summary", "dana")
+    assert "failure-old-writer" in row["failure_ids"]
+    assert await storage.list_dashboard_submitters() == ["dana"]
+
+    # Converged: a further pass parses the row but no longer writes it.
+    assert await storage.backfill_results_denorm() == 0
+
+
 async def test_init_db_leaves_legacy_row_payloads_alone(_storage) -> None:
     """Startup is schema-only; the derive pass is a background task (#409).
 
@@ -386,7 +477,7 @@ async def test_init_db_leaves_legacy_row_payloads_alone(_storage) -> None:
 async def test_denorm_backfill_resumes_after_an_interrupted_pass(_storage) -> None:
     """One page per transaction: a killed pass keeps its progress (#409)."""
     for index in range(3):
-        await _insert_legacy(f"job-resume-{index}", _payload(failure_count=2))
+        await _insert_legacy(f"job-resume-{index}", _payload(failure_count=40))
 
     derive = storage._denorm_row_params
     pages = 0
@@ -408,6 +499,10 @@ async def test_denorm_backfill_resumes_after_an_interrupted_pass(_storage) -> No
     first = await _stored(_storage, "job-resume-0")
     assert first["denorm_version"] == storage._RESULTS_DENORM_VERSION
     assert (await _stored(_storage, "job-resume-1"))["denorm_version"] == 0
+
+    # Compressing it is this build's own next step, and it makes the derived
+    # page final: only a row left as TEXT is re-derived by the next pass.
+    assert (await storage.backfill_result_json_compression())["rows"] == 1
 
     # The next boot finishes the rest and does not redo the committed page.
     async with storage._connect_db() as db:

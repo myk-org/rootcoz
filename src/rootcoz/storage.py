@@ -463,12 +463,67 @@ async def _claim_migration(db: aiosqlite.Connection, key: str) -> bool:
     return row is not None and row[0] == 1
 
 
-# One UPDATE per derived row, shared by the background sweep. ``denorm_version``
-# is stamped in the same statement, so a row is never left half-derived.
+# One UPDATE per derived row, shared by the background sweep, keyed by name so
+# the statement can also compare: a row whose columns already match its payload
+# is left alone, so the rows a frame cannot shrink cost no write per boot.
+#
+# The payload is the compare-and-swap key, not the rowid: the columns were
+# derived from the text this sweep read, across an ``asyncio.to_thread`` window.
+# A concurrent ``patch_result_json`` rewrites the payload *and* its columns in
+# one transaction, so it must win here — a rowid-only update would replace its
+# ``failure_ids`` with the stale list and stamp it current, and no later pass
+# would find the new failure by identifier again. Losing the CAS leaves the row
+# below the swept version, so the next pass derives it from the newer payload.
+# The ``typeof`` guard keeps that from applying to a row a concurrent
+# compression pass just turned into a frame.
 _RESULTS_DENORM_UPDATE_SQL = (
-    "UPDATE results SET job_name = ?, build_number = ?, build_id = ?,"
-    " submitted_by = ?, summary = ?, display_name = ?, failure_ids = ?,"
-    " denorm_version = ? WHERE rowid = ?"
+    "UPDATE results SET job_name = :job_name, build_number = :build_number,"
+    " build_id = :build_id, submitted_by = :submitted_by, summary = :summary,"
+    " display_name = :display_name, failure_ids = :failure_ids,"
+    " denorm_version = :denorm_version"
+    " WHERE rowid = :rid AND typeof(result_json) = 'text'"
+    " AND result_json = :payload"
+    " AND (denorm_version IS NOT :denorm_version"
+    " OR (job_name, build_number, build_id, submitted_by, summary, display_name,"
+    " failure_ids) IS NOT (:job_name, :build_number, :build_id, :submitted_by,"
+    " :summary, :display_name, :failure_ids))"
+)
+
+# The sweep's two pending sets, both limited to inline TEXT payloads. The
+# unproven set runs first, so a row it re-derives is not picked up again by the
+# version-gated set in the same pass.
+#
+# ``_DENORM_PENDING_BELOW`` is the ordinary work: a row an older build inserted,
+# derived for the first time. It is resumable by rowid, so the expensive first
+# pass over a legacy database keeps its progress across a restart.
+#
+# ``_DENORM_PENDING_UNPROVEN`` is the mixed-version window. A pre-compression
+# build updating a row leaves ``denorm_version`` at its current value and only
+# refreshes the identity columns it knows, so that row can sit at the current
+# version while its newer payload disagrees with ``submitted_by``, ``summary``,
+# ``display_name`` and ``failure_ids`` — and a version-only gate would never
+# revisit it, leaving the stale columns (and unfindable failures) behind
+# forever. Such a build cannot touch a compressed row: its ``parse_result_json``
+# cannot decode a frame. So the row the sweep can still doubt is exactly the
+# TEXT one, and the version integer alone cannot be trusted for it. That is the
+# invariant this sweep and the writers agree on:
+#
+#   BLOB at the current version => the columns were derived from that payload
+#   (only this build writes a frame, and it frames a payload it just derived).
+#   TEXT => unproven, derive again before anything compresses it.
+#
+# Cost: everything that is still TEXT after a pass — payloads below the 1 KB
+# compression gate, and payloads a frame would not shrink — is parsed once per
+# boot, and only rows whose columns disagree with that payload are written. That
+# is the residue the compression sweep already re-reads on every boot, and it is
+# the cheapest check that catches a payload rewritten behind the version's back
+# without a full column-vs-payload compare in SQL (impossible: ``json_extract``
+# cannot read a frame).
+_DENORM_PENDING_BELOW = (
+    "typeof(result_json) = 'text' AND COALESCE(denorm_version, 0) < ?"
+)
+_DENORM_PENDING_UNPROVEN = (
+    "typeof(result_json) = 'text' AND COALESCE(denorm_version, 0) >= ?"
 )
 
 # Claim key for "this build knows the denormalized columns". Marked in init_db,
@@ -482,48 +537,106 @@ _RESULTS_DENORM_KEY = "backfill_results_denorm_v2"
 _SUBMITTED_BY_INDEX_KEY = "results_submitted_by_index_plain_v1"
 
 
-def _denorm_row_params(rows: Sequence[aiosqlite.Row]) -> list[tuple[Any, ...]]:
-    """``UPDATE`` parameters for one page, parsed off the event loop."""
-    return [
+def _denorm_row_params(rows: Sequence[aiosqlite.Row]) -> list[dict[str, Any]]:
+    """``UPDATE`` parameters for one page, parsed off the event loop.
+
+    Keyed by name: the UPDATE reuses each derived value to tell whether the row
+    already matches its payload.
+    """
+    params: list[dict[str, Any]] = []
+    for row in rows:
         (
-            *_extract_denormalized_fields(
-                parse_result_json(row["result_json"], job_id=row["job_id"])
-            ),
-            _RESULTS_DENORM_VERSION,
-            row["rid"],
+            job_name,
+            build_number,
+            build_id,
+            submitted_by,
+            summary,
+            display_name,
+            failure_ids,
+        ) = _extract_denormalized_fields(
+            parse_result_json(row["result_json"], job_id=row["job_id"])
         )
-        for row in rows
-    ]
+        params.append(
+            {
+                "job_name": job_name,
+                "build_number": build_number,
+                "build_id": build_id,
+                "submitted_by": submitted_by,
+                "summary": summary,
+                "display_name": display_name,
+                "failure_ids": failure_ids,
+                "denorm_version": _RESULTS_DENORM_VERSION,
+                "rid": row["rid"],
+                "payload": row["result_json"],
+            }
+        )
+    return params
+
+
+async def _derive_denorm_pages(
+    where: str, where_params: Sequence[Any], batch_size: int
+) -> int:
+    """Derive one pending set, keyset-paged, one transaction per page.
+
+    Returns:
+        Rows whose columns this pass actually rewrote.
+    """
+    rowid = 0
+    done = 0
+    while True:
+        async with _connect_db() as db:
+            cursor = await db.execute(
+                "SELECT rowid AS rid, job_id, result_json FROM results"
+                f" WHERE rowid > ? AND {where} ORDER BY rowid LIMIT ?",
+                (rowid, *where_params, batch_size),
+            )
+            rows = await cursor.fetchall()
+            if not rows:
+                return done
+            rowid = rows[-1]["rid"]
+            # Parsing a multi-MB payload must not stall /health (#402).
+            for params in await asyncio.to_thread(_denorm_row_params, rows):
+                cursor = await db.execute(_RESULTS_DENORM_UPDATE_SQL, params)
+                done += cursor.rowcount
+            await db.commit()
+            logger.debug(
+                "Migration: %d result(s) derived so far, cursor rowid=%d",
+                done,
+                rowid,
+            )
 
 
 async def backfill_results_denorm(batch_size: int = 200) -> int:
     """Derive every denormalized ``results`` column from the stored payload.
 
-    Gated per row on ``denorm_version`` instead of claimed once: a build that
-    does not know a column keeps writing rows without it during a mixed-version
-    window, and only a re-runnable sweep makes that converge. Rows already at
-    the current version are never rewritten.
+    Gated per row, not claimed once: a build that does not know a column keeps
+    writing rows without it during a mixed-version window, and only a re-runnable
+    sweep makes that converge. Two sets are pending — a row below the current
+    version, and a row still holding inline TEXT at the current version, which is
+    the only shape an older build can still rewrite behind the version's back (see
+    ``_DENORM_PENDING_BELOW``/``_DENORM_PENDING_UNPROVEN``). A compressed row at
+    the current version is final: it was derived from that exact payload, and an
+    older build cannot decode a frame to disagree with it.
 
     Runs in the background, never inside ``init_db``: it parses every legacy
     payload, which on a large database outlives the startup probe and would
     crash-loop the pod with the transaction rolled back on every boot. One page
-    per transaction, so an interrupted pass keeps its progress and resumes where
-    it stopped. Only TEXT payloads are read — a compressed row was derived
-    before it was compressed.
+    per transaction, so an interrupted pass keeps the progress of the version-
+    gated set and resumes where it stopped.
 
     Args:
         batch_size: Rows per keyset page, and per transaction.
 
     Returns:
-        Rows rewritten.
+        Rows whose columns this pass rewrote.
     """
     if batch_size <= 0:
         raise ValueError("batch_size must be > 0")
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT COUNT(*) FROM results WHERE typeof(result_json) = 'text'"
-            " AND COALESCE(denorm_version, 0) < ?",
-            (_RESULTS_DENORM_VERSION,),
+            "SELECT COUNT(*) FROM results WHERE"
+            f" ({_DENORM_PENDING_BELOW}) OR ({_DENORM_PENDING_UNPROVEN})",
+            (_RESULTS_DENORM_VERSION, _RESULTS_DENORM_VERSION),
         )
         pending = (await cursor.fetchone())[0]
     if not pending:
@@ -531,32 +644,13 @@ async def backfill_results_denorm(batch_size: int = 200) -> int:
     logger.info(
         "Migration: deriving denormalized columns for %d results row(s)", pending
     )
-    rowid = 0
-    done = 0
-    while True:
-        async with _connect_db() as db:
-            cursor = await db.execute(
-                "SELECT rowid AS rid, job_id, result_json FROM results"
-                " WHERE rowid > ? AND typeof(result_json) = 'text'"
-                " AND COALESCE(denorm_version, 0) < ?"
-                " ORDER BY rowid LIMIT ?",
-                (rowid, _RESULTS_DENORM_VERSION, batch_size),
-            )
-            rows = await cursor.fetchall()
-            if not rows:
-                break
-            rowid = rows[-1]["rid"]
-            # Parsing a multi-MB payload must not stall /health (#402).
-            for params in await asyncio.to_thread(_denorm_row_params, rows):
-                await db.execute(_RESULTS_DENORM_UPDATE_SQL, params)
-            await db.commit()
-            done += len(rows)
-            logger.debug(
-                "Migration: %d/%d result(s) derived, cursor rowid=%d",
-                done,
-                pending,
-                rowid,
-            )
+    done = await _derive_denorm_pages(
+        _DENORM_PENDING_UNPROVEN, (_RESULTS_DENORM_VERSION,), batch_size
+    )
+    # Second: rows an older build inserted and never derived at all.
+    done += await _derive_denorm_pages(
+        _DENORM_PENDING_BELOW, (_RESULTS_DENORM_VERSION,), batch_size
+    )
     logger.info("Migration: derived denormalized columns for %d results row(s)", done)
     return done
 
