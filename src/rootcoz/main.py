@@ -13628,6 +13628,7 @@ _FILTER_PRESET_KEYS: dict[str, set[str]] = {
         "status",
         "review_status",
         "analysis_state",
+        "submitted_by",
         "date_from",
         "date_to",
     },
@@ -13653,6 +13654,15 @@ def _validate_filter_preset_filters(page: str, filters: dict[str, Any]) -> None:
             status_code=422,
             detail=f"Unknown filter key(s) for {page}: " + ", ".join(sorted(unknown)),
         )
+    submitters = filters.get("submitted_by")
+    if submitters is not None:
+        # A preset is replayed into the dashboard endpoint, so it must carry only
+        # submitted_by values that endpoint would accept (count and length caps).
+        values = [submitters] if isinstance(submitters, str) else list(submitters)
+        try:
+            _normalize_submitters([str(value) for value in values])
+        except HTTPException as exc:
+            raise HTTPException(status_code=422, detail=exc.detail) from exc
 
 
 # SQLite integers are signed 64-bit; an out-of-range preset id cannot exist.
@@ -18630,6 +18640,36 @@ async def preview_metadata_rules(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _normalize_submitters(values: list[str] | None) -> set[str] | None:
+    """Normalise ``submitted_by`` query values; empty means no filter.
+
+    Values are trimmed and deduplicated but never lowercased: the case fold
+    happens in SQL, where SQLite's ASCII-only ``lower()`` matches the stored
+    names. There is deliberately no character whitelist — usernames legitimately
+    contain ``+``, spaces and non-ASCII characters.
+    """
+    if not values:
+        return None
+    cleaned = [value.strip() for value in values if value.strip()]
+    if len(cleaned) > 50:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Too many submitted_by values ({len(cleaned)}, max 50)",
+        )
+    too_long = [
+        value for value in cleaned if len(value) > storage.MAX_SUBMITTED_BY_LENGTH
+    ]
+    if too_long:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"submitted_by value too long ({len(too_long[0])} chars, "
+                f"max {storage.MAX_SUBMITTED_BY_LENGTH})"
+            ),
+        )
+    return set(cleaned) or None
+
+
 @app.get("/api/dashboard/filtered", operation_id="apiDashboardFiltered")
 async def api_dashboard_filtered(
     filters: Annotated[dict[str, Any], Depends(_metadata_filters)],
@@ -18644,6 +18684,7 @@ async def api_dashboard_filtered(
         default="",
         description="Filter: submitted, analyzed (empty = all)",
     ),
+    submitted_by: Annotated[list[str] | None, Query()] = None,
     limit: int = Query(default=500, ge=0, description="Max results (0 = no limit)"),
     offset: int = Query(default=0, ge=0, description="Rows to skip"),
 ) -> dict[str, Any]:
@@ -18651,6 +18692,8 @@ async def api_dashboard_filtered(
 
     Filters are applied in SQL before LIMIT, so older jobs are reachable
     when filters match them. Returns ``{jobs, total}`` for pagination.
+    ``submitted_by`` is repeatable; each value is a case-insensitive (ASCII)
+    substring match on the original submitter of the job.
     """
     if review_status not in ("all", "reviewed", "not_reviewed"):
         raise HTTPException(
@@ -18699,6 +18742,7 @@ async def api_dashboard_filtered(
             date_to=date_to,
             review_status=review_status,
             analysis_state=analysis_state,
+            submitters=_normalize_submitters(submitted_by),
             limit=limit,
             offset=offset,
         )
@@ -18712,6 +18756,17 @@ async def api_dashboard_filtered(
         job["metadata"] = all_metadata_by_name.get(jn, None)
 
     return {"jobs": jobs, "total": result["total"]}
+
+
+@app.get("/api/dashboard/submitters", operation_id="listDashboardSubmitters")
+async def list_dashboard_submitters() -> dict[str, list[str]]:
+    """Return the submitted_by values shown on the dashboard (viewer+).
+
+    Viewers already receive ``submitted_by`` on every dashboard row, so this
+    aggregate discloses no new identity.
+    """
+    logger.debug("GET /api/dashboard/submitters")
+    return {"submitters": await storage.list_dashboard_submitters()}
 
 
 # --- Reports endpoints ---

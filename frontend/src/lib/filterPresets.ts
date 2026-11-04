@@ -22,7 +22,7 @@ export type FilterValues = Record<string, string | string[]>
 export const FILTER_PRESET_KEYS: Record<FilterPresetPage, readonly string[]> = {
   dashboard: [
     'team', 'tier', 'version', 'label', 'exclude_label',
-    'status', 'review_status', 'analysis_state', 'date_from', 'date_to',
+    'status', 'review_status', 'analysis_state', 'submitted_by', 'date_from', 'date_to',
   ],
   reports: [
     'team', 'tier', 'version', 'label', 'exclude_label',
