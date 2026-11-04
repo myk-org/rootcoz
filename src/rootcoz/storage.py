@@ -961,6 +961,12 @@ async def init_db() -> None:
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_results_job_name ON results (job_name)"
         )
+        # Serves the dashboard's bare ORDER BY created_at DESC. Without it the
+        # planner sorts every row (materialising result_json) before LIMIT.
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_results_created_at "
+            "ON results (created_at DESC)"
+        )
         # Submitter enumeration goes through this expression index, never per-row JSON.
         await db.execute(_SUBMITTED_BY_INDEX_SQL)
 
@@ -4234,7 +4240,7 @@ async def get_test_history(
             total_query = (
                 "SELECT COUNT(DISTINCT job_id) FROM results "
                 "WHERE status = 'completed' "
-                "AND json_extract(result_json, '$.job_name') = ?"
+                "AND job_name = ?"
             )
             total_params: list[Any] = [job_name]
         else:
@@ -4427,11 +4433,11 @@ async def get_job_stats(job_name: str, exclude_job_id: str = "") -> dict[str, An
 
         # Total completed builds — count from results table (not failure_history)
         # so that builds with zero failures are included in the denominator.
-        # Uses json_extract to match job_name stored in result_json.
+        # Matches the denormalized job_name column written by save_result.
         total_builds_query = (
             "SELECT COUNT(DISTINCT job_id) FROM results "
             "WHERE status = 'completed' AND "
-            "json_extract(result_json, '$.job_name') = ?"
+            "job_name = ?"
         )
         total_builds_params: list[Any] = [job_name]
         if exclude_job_id:
@@ -4539,8 +4545,7 @@ async def list_distinct_job_names() -> set[str]:
     """Return distinct non-empty job names from results. Lightweight query for backfill."""
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT DISTINCT json_extract(result_json, '$.job_name') AS job_name "
-            "FROM results WHERE result_json IS NOT NULL"
+            "SELECT DISTINCT job_name FROM results WHERE job_name != ''"
         )
         rows = await cursor.fetchall()
         return {row[0] for row in rows if row[0]}
@@ -4687,10 +4692,9 @@ async def list_results_for_dashboard_filtered(
     params: list[Any] = []
 
     if search:
-        # Search job_name in result_json and job_id
-        conditions.append(
-            "(r.job_id LIKE ? OR json_extract(r.result_json, '$.job_name') LIKE ?)"
-        )
+        # Search job_name and job_id. LIKE '%term%' cannot use an index — this
+        # stays a scan; it only avoids reading the result_json blob.
+        conditions.append("(r.job_id LIKE ? OR r.job_name LIKE ?)")
         like_param = f"%{search}%"
         params.extend([like_param, like_param])
 
@@ -4748,18 +4752,13 @@ async def list_results_for_dashboard_filtered(
             return {"jobs": [], "total": 0}
         names_list = sorted(job_names)
         placeholders = ", ".join("?" for _ in names_list)
-        conditions.append(
-            f"json_extract(r.result_json, '$.job_name') IN ({placeholders})"
-        )
+        conditions.append(f"r.job_name IN ({placeholders})")
         params.extend(names_list)
 
     if exclude_job_names:
         exclude_list = sorted(exclude_job_names)
         placeholders = ", ".join("?" for _ in exclude_list)
-        conditions.append(
-            f"(json_extract(r.result_json, '$.job_name') IS NULL OR "
-            f"json_extract(r.result_json, '$.job_name') NOT IN ({placeholders}))"
-        )
+        conditions.append(f"(r.job_name IS NULL OR r.job_name NOT IN ({placeholders}))")
         params.extend(exclude_list)
 
     if submitters:

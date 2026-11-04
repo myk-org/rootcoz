@@ -519,7 +519,9 @@ class TestGetTestHistory:
             # Insert results rows for pass inference
             for i in range(5):
                 await db.execute(
-                    "INSERT INTO results (job_id, build_url, status, result_json) VALUES (?, ?, ?, ?)",
+                    "INSERT INTO results"
+                    " (job_id, build_url, status, result_json, job_name)"
+                    " VALUES (?, ?, ?, ?, ?)",
                     (
                         f"job-{i}",
                         "https://jenkins.example.com/job/test/1/",
@@ -532,6 +534,7 @@ class TestGetTestHistory:
                                 "child_job_analyses": [],
                             }
                         ),
+                        "ocp-4.16-e2e",
                     ),
                 )
 
@@ -588,7 +591,7 @@ class TestGetTestHistory:
 
         with patch.object(storage, "DB_PATH", setup_test_db):
             await self._seed_failures(setup_test_db)
-            # Add a failure for a different job
+            # Add a failure and a completed result for a different job
             async with aiosqlite.connect(setup_test_db) as db:
                 await db.execute(
                     """INSERT INTO failure_history
@@ -603,12 +606,25 @@ class TestGetTestHistory:
                         "CODE ISSUE",
                     ),
                 )
+                await db.execute(
+                    "INSERT INTO results"
+                    " (job_id, status, result_json, job_name)"
+                    " VALUES (?, 'completed', ?, ?)",
+                    (
+                        "job-other-res",
+                        json.dumps({"job_name": "other-job", "failures": []}),
+                        "other-job",
+                    ),
+                )
                 await db.commit()
 
             result = await storage.get_test_history(
                 "tests.network.TestDNS.test_lookup", job_name="ocp-4.16-e2e"
             )
             assert result["failures"] == 3  # Only from ocp-4.16-e2e
+            # Denominator counts only the filtered job's completed results.
+            assert result["total_runs"] == 5
+            assert result["passes"] == 2
 
     async def test_get_test_history_nonexistent(self, setup_test_db):
         with patch.object(storage, "DB_PATH", setup_test_db):
@@ -667,7 +683,9 @@ class TestGetJobStats:
                 # 3 builds, 2 with failures
                 for i in range(3):
                     await db.execute(
-                        "INSERT INTO results (job_id, build_url, status, result_json) VALUES (?, ?, ?, ?)",
+                        "INSERT INTO results"
+                        " (job_id, build_url, status, result_json, job_name)"
+                        " VALUES (?, ?, ?, ?, ?)",
                         (
                             f"stats-{i}",
                             "https://j.example.com/job/test/1/",
@@ -680,6 +698,7 @@ class TestGetJobStats:
                                     "child_job_analyses": [],
                                 }
                             ),
+                            "ocp-e2e",
                         ),
                     )
 
