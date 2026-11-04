@@ -229,6 +229,23 @@ class TestIncompleteListingEndpoint:
         assert resp.status_code == 200
         assert len(resp.json()) == 1
 
+    async def test_the_cap_is_applied_not_just_accepted(
+        self,
+        client: TestClient,
+        temp_db_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """Pin the clamp: without it an oversized limit returns every match."""
+        for job_id in ("job-a", "job-b", "job-c"):
+            await self._seed(temp_db_path, job_id, _failure(f"t-{job_id}"))
+        monkeypatch.setattr("rootcoz.main.MAX_INCOMPLETE_LIST_LIMIT", 2)
+
+        resp = client.get(
+            "/api/results/incomplete", params={"limit": 100}, headers=_ADMIN_HEADERS
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()) == 2
+
 
 class TestOverridesClearIncompleteness:
     """A reviewer override classifies the failure: every path must follow it.
