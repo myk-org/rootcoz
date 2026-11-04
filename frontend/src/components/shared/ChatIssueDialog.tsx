@@ -24,7 +24,12 @@ interface ChatIssueDialogProps {
 }
 
 type Draft = { title: string; body: string }
-type Capabilities = { github_issues_enabled?: boolean; jira_issues_enabled?: boolean }
+type Capabilities = {
+  github_issues_enabled?: boolean
+  jira_issues_enabled?: boolean
+  /** The deployment's default Jira project; empty means the user must name one. */
+  server_jira_project_key?: string
+}
 type Tokens = { github_token?: string; jira_token?: string; jira_sa_token?: string }
 
 const NO_TRACKERS: Tracker[] = []
@@ -41,6 +46,7 @@ export function ChatIssueDialog({ open, onOpenChange, message }: ChatIssueDialog
   const [draft, setDraft] = useState<Draft>({ title: '', body: '' })
   const [trackers, setTrackers] = useState<Tracker[]>(NO_TRACKERS)
   const [tracker, setTracker] = useState<Tracker>('github')
+  const [projectKey, setProjectKey] = useState('')
   const [loading, setLoading] = useState(false)
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
@@ -52,6 +58,10 @@ export function ChatIssueDialog({ open, onOpenChange, message }: ChatIssueDialog
     setLoading(true)
     setError('')
     setCreatedUrl('')
+    // Opening for another answer must not show what the previous answer drafted.
+    setDraft({ title: '', body: '' })
+    setTrackers(NO_TRACKERS)
+    setProjectKey('')
     Promise.all([
       api.post<Draft>('/api/chat-issue/prefill', { text: message }),
       api.get<Capabilities>('/api/capabilities'),
@@ -64,6 +74,8 @@ export function ChatIssueDialog({ open, onOpenChange, message }: ChatIssueDialog
         if (caps.jira_issues_enabled !== false && (!!tokens.jira_token || !!tokens.jira_sa_token)) available.push('jira')
         setTrackers(available)
         setTracker(available[0] ?? 'github')
+        // The server's default project, still editable: a Jira create without one is refused.
+        setProjectKey(caps.server_jira_project_key ?? '')
         setDraft(prefill)
         setLoading(false)
       })
@@ -85,6 +97,7 @@ export function ChatIssueDialog({ open, onOpenChange, message }: ChatIssueDialog
         target: tracker,
         title: draft.title,
         body: draft.body,
+        ...(tracker === 'jira' && projectKey.trim() ? { jira_project_key: projectKey.trim() } : {}),
       })
       setCreatedUrl(res.url)
     } catch (err) {
@@ -96,6 +109,7 @@ export function ChatIssueDialog({ open, onOpenChange, message }: ChatIssueDialog
   }
 
   const label = tracker === 'github' ? 'GitHub issue' : 'Jira ticket'
+  const projectKeyMissing = tracker === 'jira' && !projectKey.trim()
 
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -140,7 +154,9 @@ export function ChatIssueDialog({ open, onOpenChange, message }: ChatIssueDialog
                 <div className="flex flex-col gap-1">
                   <p className="text-sm font-medium text-text-primary">No tracker credential in your account</p>
                   <p className="text-xs text-text-secondary">
-                    Add a GitHub or Jira token in Profile Settings to create issues from chat.
+                    Add a GitHub or Jira token in Profile Settings to create issues from chat. The
+                    bootstrap admin account has no profile to store one — sign in with your own
+                    account to file issues.
                   </p>
                   <a
                     href="/settings"
@@ -163,12 +179,21 @@ export function ChatIssueDialog({ open, onOpenChange, message }: ChatIssueDialog
                         size="sm"
                         variant={option === tracker ? 'default' : 'ghost'}
                         className="h-7 px-3 text-xs"
+                        disabled={submitting}
                         onClick={() => setTracker(option)}
                       >
                         {option === 'github' ? 'GitHub' : 'Jira'}
                       </Button>
                     ))}
                   </div>
+                )}
+                {tracker === 'jira' && (
+                  <Input
+                    value={projectKey}
+                    onChange={(e) => setProjectKey(e.target.value)}
+                    aria-label="Jira project key"
+                    placeholder="Jira project key (e.g. MTV)"
+                  />
                 )}
                 <Input
                   value={draft.title}
@@ -201,7 +226,7 @@ export function ChatIssueDialog({ open, onOpenChange, message }: ChatIssueDialog
           {!loading && !createdUrl && trackers.length > 0 && (
             <Button
               onClick={() => void handleCreate()}
-              disabled={submitting || !draft.title.trim() || !draft.body.trim()}
+              disabled={submitting || !draft.title.trim() || !draft.body.trim() || projectKeyMissing}
             >
               {submitting ? <LoadingSpinner size="sm" /> : `Create ${label}`}
             </Button>

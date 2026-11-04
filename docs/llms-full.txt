@@ -1782,10 +1782,11 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    > **From chat:** a chat answer can become an issue too. In job chat or admin chat, click `Create issue` above the conversation and RootCoz opens the same kind of dialog, prefilled with the title and body drafted from the **last completed answer**. Review and edit them, then click `Create GitHub issue` or `Create Jira ticket`. The dialog only offers a tracker when the server enables it **and** your account holds that tracker's token, so a token saved in Profile Settings works even on a fresh browser. Nothing is sent until you click Create — the AI has no tool that can write to a tracker. If a credential is missing, the dialog says so and points at Profile Settings; the server's refusal (`400`, `403`, `401`, `502`) is shown verbatim. The same thing from a terminal, with the same account credential and no token flags:
 
-   ```bash
-   rootcoz create-chat-issue --target github \
-     --title "Login fails after token refresh" --body "$(cat issue-body.md)"
-   ```
+```
+    rootcoz create-chat-issue --target github \
+      --title "Login fails after token refresh" --body "$(cat issue-body.md)"
+    rootcoz prefill-chat-issue --text "$(cat answer.md)"
+```
 
    Chat-created issues carry no comment and no tracked-in link: there is no failure to attach them to, and the endpoint deliberately takes no job id.
 
@@ -2239,9 +2240,9 @@ This confirms the CLI is using an admin identity, then asks a server-wide questi
 
    > **From an answer to a ticket:** click `Create issue` above the conversation to open a GitHub issue or Jira ticket from the **last completed answer**. Server Chat itself resolves no tracker credential — the dialog files the issue with the token saved in *your* account, so add one in Profile Settings first, or the dialog tells you that none is available. The same call from the CLI, with no token flags:
 
-   ```bash
-   rootcoz create-chat-issue --target jira --title "Dashboard filters drop the team" --body "$(cat ticket-body.md)"
-   ```
+```
+    rootcoz create-chat-issue --target jira --title "Dashboard filters drop the team" --body "$(cat ticket-body.md)"
+```
 
 4. Stop the current reply or start over.
 
@@ -3389,6 +3390,7 @@ Sparse field paths include `result.summary`, `result.failed_count`, `result.fail
 | `rootcoz get-issue-prompt JOB_ID` | — | The issue prompt attached to the job's tests repo. |
 | `rootcoz create-issue JOB_ID` | `--test`/`-t`, `--type`, `--title`, `--body`, `--child-job`, `--child-build`, `--github-token`, `--github-repo-url`, `--jira-token`, `--jira-email`, `--jira-sa-token`, `--jira-project-key`, `--jira-security-level`, `--jira-issue-type` (default `Bug`) | Create the issue. |
 | `rootcoz create-chat-issue` | `--target` (`github` or `jira`), `--title`, `--body`, `--jira-project-key`, `--jira-security-level`, `--jira-issue-type` (default `Bug`) | File an issue from chat text. Deliberately exposes **no** token flags: the issue is created with the credentials saved in your account, so it can never be filed under a server token. |
+| `rootcoz prefill-chat-issue` | `--text` | Draft the scrubbed title and body an issue created from chat text would carry, so the redaction is reviewable before anything is filed. Read-only, and no token flags. |
 | `rootcoz validate-token github\|jira` | `--token` (hidden prompt), `--email` | Check a tracker token before using it. An ATOA-prefixed Jira value (an Atlassian OAuth 2.0 credential client secret) is validated as a service account against the scoped Atlassian gateway, using the server's `atlassian_oauth_client_id`; an ATST-prefixed value (an Atlassian service-account scoped token) is sent as Bearer to the same gateway with no exchange. |
 | `rootcoz ai-models` | `--provider`/`-p` | Model IDs per provider, with credential sources. |
 

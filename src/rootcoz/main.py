@@ -3213,7 +3213,15 @@ app.add_middleware(ErrorTrackingMiddleware)
 
 
 _BODY_LOGGING_SKIP_PATHS = frozenset(
-    {"/api/feedback/preview", "/api/feedback/create", "/analyze"}
+    {
+        "/api/feedback/preview",
+        "/api/feedback/create",
+        "/analyze",
+        # Chat text is not structurally secret, so key-based masking misses a
+        # pasted credential — the same reason /api/chat/ is skipped above.
+        "/api/chat-issue",
+        "/api/chat-issue/prefill",
+    }
 )
 
 
@@ -9180,6 +9188,28 @@ def _map_create_refusal(
     )
 
 
+def _require_tracker_enabled(
+    target: Literal["github", "jira"], settings: Settings
+) -> None:
+    """Refuse a tracker the deployment disabled, before any credential is read.
+
+    The enable gate runs first so a disabled tracker answers ``403`` even for a
+    caller with no credential for it: adding a token cannot turn it on.
+    """
+    if target == "github":
+        if settings.enable_github_issues is False:
+            raise HTTPException(
+                status_code=403,
+                detail="GitHub issue creation is disabled on this server",
+            )
+        return
+    if not _jira_issue_creation_enabled(settings):
+        raise HTTPException(
+            status_code=403,
+            detail="Jira issue creation is disabled on this server",
+        )
+
+
 async def _create_issue_from_text(
     target: Literal["github", "jira"],
     title: str,
@@ -9223,23 +9253,14 @@ async def _create_issue_from_text(
     """
     github = target == "github"
     label = "GitHub" if github else "Jira"
+    _require_tracker_enabled(target, settings)
     if github:
-        if settings.enable_github_issues is False:
-            raise HTTPException(
-                status_code=403,
-                detail="GitHub issue creation is disabled on this server",
-            )
         if not (github_token or "").strip():
             raise HTTPException(
                 status_code=400,
                 detail=_TRACKER_CREDENTIAL_DETAIL.format(kind=label),
             )
     else:
-        if not _jira_issue_creation_enabled(settings):
-            raise HTTPException(
-                status_code=403,
-                detail="Jira issue creation is disabled on this server",
-            )
         if not (jira_token or "").strip() and not (jira_sa_token or "").strip():
             raise HTTPException(
                 status_code=400,
@@ -9471,12 +9492,15 @@ async def create_chat_issue(
     caller's account row — never a deployment credential, and there is no
     bootstrap-``admin`` exception.
     """
-    _require_reviewer(request)
-    _check_allow_list(request)
     username = request.state.username
     tracker = body.target
     message = f"User '{username}' created a {tracker} issue from chat"
     try:
+        # Inside the try on purpose: a viewer or allow-list denial is an attempt
+        # the docs promise a row for, and this endpoint has no other refusal path.
+        _require_reviewer(request)
+        _check_allow_list(request)
+        _require_tracker_enabled(tracker, settings)
         user_tokens = await storage.get_user_tokens(username)
         if tracker == "github":
             has_credential = bool(user_tokens.get("github_token"))

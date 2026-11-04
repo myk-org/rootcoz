@@ -15,7 +15,7 @@ const DRAFT = { title: 'Login test fails', body: 'The login test timed out resol
 const CAPS = { github_issues_enabled: true, jira_issues_enabled: true }
 const NO_TOKENS = { github_token: '', jira_token: '', jira_sa_token: '' }
 
-function respond(caps: Record<string, boolean>, tokens: Record<string, string>) {
+function respond(caps: Record<string, boolean | string>, tokens: Record<string, string>) {
   get.mockImplementation(async (path: string) => {
     if (path === '/api/capabilities') return caps
     if (path === '/api/user/tokens') return tokens
@@ -65,7 +65,7 @@ describe('ChatIssueDialog', () => {
   })
 
   it('offers only a tracker the deployment enables and the account can use', async () => {
-    respond({ github_issues_enabled: false, jira_issues_enabled: true }, {
+    respond({ github_issues_enabled: false, jira_issues_enabled: true, server_jira_project_key: 'MTV' }, {
       github_token: 'ghp_stored',
       jira_token: 'jira_stored',
       jira_sa_token: '',
@@ -78,7 +78,45 @@ describe('ChatIssueDialog', () => {
       target: 'jira',
       title: DRAFT.title,
       body: DRAFT.body,
+      jira_project_key: 'MTV',
     })
+  })
+
+  it('asks for a Jira project key when the server has no default and sends it', async () => {
+    respond({ github_issues_enabled: false, jira_issues_enabled: true, server_jira_project_key: '' }, {
+      github_token: '',
+      jira_token: 'jira_stored',
+      jira_sa_token: '',
+    })
+    open()
+    const key = await screen.findByLabelText('Jira project key')
+    expect(key).toHaveValue('')
+    expect(screen.getByRole('button', { name: 'Create Jira ticket' })).toBeDisabled()
+    await userEvent.setup().type(key, 'MTV')
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Create Jira ticket' }))
+    expect(post).toHaveBeenCalledWith('/api/chat-issue', {
+      target: 'jira',
+      title: DRAFT.title,
+      body: DRAFT.body,
+      jira_project_key: 'MTV',
+    })
+  })
+
+  it('shows nothing from the previous answer when a reopening prefill fails', async () => {
+    respond(CAPS, { github_token: 'ghp_stored', jira_token: '', jira_sa_token: '' })
+    const { rerender } = open()
+    expect(await screen.findByLabelText('Issue title')).toHaveValue(DRAFT.title)
+    rerender(<ChatIssueDialog open onOpenChange={() => {}} message="another answer" />)
+    post.mockImplementation(async (path: string) => {
+      if (path === '/api/chat-issue/prefill') {
+        throw new ApiError(500, 'Internal Server Error', { detail: 'Failed to draft the issue' })
+      }
+      return { url: 'https://github.com/org/repo/issues/8' }
+    })
+    rerender(<ChatIssueDialog open onOpenChange={() => {}} message="third answer" />)
+    expect(await screen.findByText('Failed to draft the issue')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Issue title')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /^Create / })).not.toBeInTheDocument()
   })
 
   it('shows the server refusal verbatim', async () => {
@@ -95,6 +133,24 @@ describe('ChatIssueDialog', () => {
     expect(
       await screen.findByText('GitHub token is required. Set up your token in Profile Settings.'),
     ).toBeInTheDocument()
+  })
+
+  it('locks the tracker choice while a create is in flight', async () => {
+    respond(CAPS, { github_token: 'ghp_stored', jira_token: 'jira_stored', jira_sa_token: '' })
+    let finish: (value: unknown) => void = () => {}
+    post.mockImplementation((path: string) =>
+      path === '/api/chat-issue/prefill'
+        ? Promise.resolve(DRAFT)
+        : new Promise(resolve => {
+            finish = resolve
+          }),
+    )
+    open()
+    await screen.findByLabelText('Issue title')
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Create GitHub issue' }))
+    expect(screen.getByRole('button', { name: 'Jira' })).toBeDisabled()
+    finish({ url: 'https://github.com/org/repo/issues/7' })
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Close' })).toBeInTheDocument())
   })
 
   it('does not submit twice', async () => {

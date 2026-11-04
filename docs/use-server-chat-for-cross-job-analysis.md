@@ -69,9 +69,9 @@ This confirms the CLI is using an admin identity, then asks a server-wide questi
 
    > **From an answer to a ticket:** click `Create issue` above the conversation to open a GitHub issue or Jira ticket from the **last completed answer**. Server Chat itself resolves no tracker credential — the dialog files the issue with the token saved in *your* account, so add one in Profile Settings first, or the dialog tells you that none is available. The same call from the CLI, with no token flags:
 
-   ```bash
-   rootcoz create-chat-issue --target jira --title "Dashboard filters drop the team" --body "$(cat ticket-body.md)"
-   ```
+```
+rootcoz create-chat-issue --target jira --title "Dashboard filters drop the team" --body "$(cat ticket-body.md)"
+```
 
 4. Stop the current reply or start over.
 

@@ -276,9 +276,11 @@ rootcoz<span class="w"> </span>push<span class="w"> </span>JOB_ID<span class="w"
 <p><strong>Warning:</strong> GitHub and Jira issue creation can be disabled per server with <code>ENABLE_GITHUB_ISSUES</code> and <code>ENABLE_JIRA_ISSUES</code>. When disabled, the buttons are greyed out and the endpoints refuse the request.</p>
 <p><strong>From chat:</strong> a chat answer can become an issue too. In job chat or admin chat, click <code>Create issue</code> above the conversation and RootCoz opens the same kind of dialog, prefilled with the title and body drafted from the <strong>last completed answer</strong>. Review and edit them, then click <code>Create GitHub issue</code> or <code>Create Jira ticket</code>. The dialog only offers a tracker when the server enables it <strong>and</strong> your account holds that tracker's token, so a token saved in Profile Settings works even on a fresh browser. Nothing is sent until you click Create — the AI has no tool that can write to a tracker. If a credential is missing, the dialog says so and points at Profile Settings; the server's refusal (<code>400</code>, <code>403</code>, <code>401</code>, <code>502</code>) is shown verbatim. The same thing from a terminal, with the same account credential and no token flags:</p>
 </blockquote>
-<p><code>bash
-   rootcoz create-chat-issue --target github \
-     --title "Login fails after token refresh" --body "$(cat issue-body.md)"</code></p>
+<div class="highlight"><pre><span></span><code>rootcoz create-chat-issue --target github \
+  --title "Login fails after token refresh" --body "$(cat issue-body.md)"
+rootcoz prefill-chat-issue --text "$(cat answer.md)"
+</code></pre></div>
+
 <p>Chat-created issues carry no comment and no tracked-in link: there is no failure to attach them to, and the endpoint deliberately takes no job id.</p>
 <ol>
 <li>Link a failure to an issue that already exists.</li>

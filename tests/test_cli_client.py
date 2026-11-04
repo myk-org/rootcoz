@@ -662,6 +662,20 @@ class TestRootCozClientBugCreation:
         )
         assert result["key"] == "PROJ-7"
 
+    def test_prefill_chat_issue(self):
+        def handler(request):
+            assert request.method == "POST"
+            assert str(request.url).endswith("/api/chat-issue/prefill")
+            assert json.loads(request.content) == {"text": "raw chat answer"}
+            return httpx.Response(
+                200,
+                json={"title": "Login fails", "body": "The login test timed out."},
+            )
+
+        client = _make_client(handler)
+        result = client.prefill_chat_issue(text="raw chat answer")
+        assert result["title"] == "Login fails"
+
     def test_override_classification(self):
         def handler(request):
             assert request.method == "PUT"

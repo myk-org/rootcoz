@@ -4543,6 +4543,33 @@ class TestChatIssueEndpoint:
         assert "disabled" in response.json()["detail"].lower()
 
     @pytest.mark.asyncio
+    async def test_disabled_tracker_reads_as_disabled_without_a_token(
+        self, test_client
+    ):
+        """A disabled tracker answers 403, not a token error the user cannot fix."""
+        from rootcoz.config import get_settings
+
+        headers = await self._user("chat-gh-disabled-notoken")
+        with patch.dict(
+            os.environ,
+            {
+                "ENABLE_GITHUB_ISSUES": "false",
+                "TESTS_REPO_URL": "https://github.com/test-org/test-repo",
+            },
+        ):
+            get_settings.cache_clear()
+            try:
+                response = test_client.post(
+                    "/api/chat-issue",
+                    json={**self._CHAT, "target": "github"},
+                    headers=headers,
+                )
+            finally:
+                get_settings.cache_clear()
+        assert response.status_code == 403
+        assert "disabled" in response.json()["detail"].lower()
+
+    @pytest.mark.asyncio
     async def test_github_without_a_repo_url_returns_400(self, test_client):
         headers = await self._user("chat-gh-norepo", github_token="ghp_row_token")
         with patch("rootcoz.main.create_github_issue") as mock_create:
@@ -4701,6 +4728,11 @@ class TestChatIssueEndpoint:
         )
         assert response.status_code == 403
         assert "Reviewer access required" in response.json()["detail"]
+        # A denied attempt is an attempt: the chat trail has the row.
+        audit = await self._chat_audit()
+        assert audit["total"] == 1
+        assert audit["events"][0]["outcome"] == "denied"
+        assert audit["events"][0]["actor"] == "chat-viewer"
 
     # -- scrubbing ------------------------------------------------------------
 

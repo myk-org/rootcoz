@@ -300,8 +300,9 @@ rootcoz<span class="w"> </span>admin-chat<span class="w"> </span>send<span class
 <p><strong>Tip:</strong> Use the web UI when you want the clearest live experience. It shows the active reply immediately and gives you a <code>Stop</code> button while the assistant is still working.</p>
 <p><strong>From an answer to a ticket:</strong> click <code>Create issue</code> above the conversation to open a GitHub issue or Jira ticket from the <strong>last completed answer</strong>. Server Chat itself resolves no tracker credential — the dialog files the issue with the token saved in <em>your</em> account, so add one in Profile Settings first, or the dialog tells you that none is available. The same call from the CLI, with no token flags:</p>
 </blockquote>
-<p><code>bash
-   rootcoz create-chat-issue --target jira --title "Dashboard filters drop the team" --body "$(cat ticket-body.md)"</code></p>
+<div class="highlight"><pre><span></span><code>rootcoz create-chat-issue --target jira --title "Dashboard filters drop the team" --body "$(cat ticket-body.md)"
+</code></pre></div>
+
 <ol>
 <li>Stop the current reply or start over.</li>
 </ol>

@@ -58,10 +58,11 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    > **From chat:** a chat answer can become an issue too. In job chat or admin chat, click `Create issue` above the conversation and RootCoz opens the same kind of dialog, prefilled with the title and body drafted from the **last completed answer**. Review and edit them, then click `Create GitHub issue` or `Create Jira ticket`. The dialog only offers a tracker when the server enables it **and** your account holds that tracker's token, so a token saved in Profile Settings works even on a fresh browser. Nothing is sent until you click Create — the AI has no tool that can write to a tracker. If a credential is missing, the dialog says so and points at Profile Settings; the server's refusal (`400`, `403`, `401`, `502`) is shown verbatim. The same thing from a terminal, with the same account credential and no token flags:
 
-   ```bash
-   rootcoz create-chat-issue --target github \
-     --title "Login fails after token refresh" --body "$(cat issue-body.md)"
-   ```
+```
+rootcoz create-chat-issue --target github \
+  --title "Login fails after token refresh" --body "$(cat issue-body.md)"
+rootcoz prefill-chat-issue --text "$(cat answer.md)"
+```
 
    Chat-created issues carry no comment and no tracked-in link: there is no failure to attach them to, and the endpoint deliberately takes no job id.
 
