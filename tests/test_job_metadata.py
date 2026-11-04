@@ -544,6 +544,233 @@ class TestJobMetadataAPI:
         assert "beta-job" in job_names
 
 
+# --- Dashboard submitted_by filter tests ---
+
+
+def _seed_dashboard_results(
+    db_path: Path, rows: list[tuple[str, str]], *, status: str = "completed"
+) -> None:
+    """Insert results rows carrying request_params.submitted_by."""
+
+    import asyncio
+
+    async def _seed() -> None:
+        with patch.object(storage, "DB_PATH", db_path):
+            for job_id, submitted_by in rows:
+                await storage.save_result(
+                    job_id,
+                    f"https://jenkins.example.com/job/{job_id}/1",
+                    status,
+                    {
+                        "job_name": job_id,
+                        "build_number": 1,
+                        "failures": [],
+                        "request_params": {"submitted_by": submitted_by},
+                    },
+                )
+
+    asyncio.run(_seed())
+
+
+def _insert_raw_result(db_path: Path, job_id: str, result_json: str) -> None:
+    """Insert a results row with a literal (possibly malformed) result_json."""
+
+    import asyncio
+
+    async def _insert() -> None:
+        import aiosqlite
+
+        async with aiosqlite.connect(db_path) as db:
+            await db.execute(
+                "INSERT INTO results (job_id, build_url, status, result_json) "
+                "VALUES (?, '', 'completed', ?)",
+                (job_id, result_json),
+            )
+            await db.commit()
+
+    asyncio.run(_insert())
+
+
+class TestDashboardSubmitterFilter:
+    """submitted_by filtering on GET /api/dashboard/filtered (#390)."""
+
+    def test_partial_value_returns_multiple_submitters(
+        self, api_client, temp_db_path
+    ) -> None:
+        """A partial term matches every stored name containing it."""
+        _seed_dashboard_results(
+            temp_db_path,
+            [("job-yuval", "yuval"), ("job-yuvalb", "yuvalb"), ("job-dana", "dana")],
+        )
+        resp = api_client.get(
+            "/api/dashboard/filtered", params={"submitted_by": "yuva"}
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert {j["job_name"] for j in data["jobs"]} == {"job-yuval", "job-yuvalb"}
+        assert data["total"] == 2
+
+    def test_two_values_are_ored(self, api_client, temp_db_path) -> None:
+        """Two submitters return the union of their rows."""
+        _seed_dashboard_results(
+            temp_db_path,
+            [("job-yuval", "yuval"), ("job-dana", "dana"), ("job-avi", "avi")],
+        )
+        resp = api_client.get(
+            "/api/dashboard/filtered", params={"submitted_by": ["yuval", "dana"]}
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert {j["job_name"] for j in data["jobs"]} == {"job-yuval", "job-dana"}
+        assert data["total"] == 2
+
+    def test_combines_with_existing_filter_as_and(
+        self, api_client, temp_db_path
+    ) -> None:
+        """submitted_by ANDs with the other filters."""
+        _seed_dashboard_results(
+            temp_db_path, [("job-done", "yuval")], status="completed"
+        )
+        _seed_dashboard_results(
+            temp_db_path, [("job-failed", "yuval")], status="failed"
+        )
+        resp = api_client.get(
+            "/api/dashboard/filtered",
+            params={"submitted_by": "yuval", "status": "completed"},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert {j["job_name"] for j in data["jobs"]} == {"job-done"}
+        assert data["total"] == 1
+
+    def test_total_counts_filtered_set_not_page(self, api_client, temp_db_path) -> None:
+        """total is the filtered set size, not the page size."""
+        _seed_dashboard_results(
+            temp_db_path,
+            [("job-yuval", "yuval"), ("job-yuvalb", "yuvalb"), ("job-dana", "dana")],
+        )
+        resp = api_client.get(
+            "/api/dashboard/filtered",
+            params={"submitted_by": "yuva", "limit": 1},
+        )
+        assert resp.status_code == 200
+        data = resp.json()
+        assert len(data["jobs"]) == 1
+        assert data["total"] == 2
+
+    @pytest.mark.parametrize(
+        "params",
+        [
+            None,
+            {"submitted_by": ""},
+            {"submitted_by": ["", ""]},
+            {"submitted_by": ["  "]},
+        ],
+    )
+    def test_empty_and_blank_values_mean_unfiltered(
+        self, api_client, temp_db_path, params
+    ) -> None:
+        """An empty, blank or absent submitted_by filter is no filter."""
+        _seed_dashboard_results(
+            temp_db_path, [("job-yuval", "yuval"), ("job-dana", "dana")]
+        )
+        resp = api_client.get("/api/dashboard/filtered", params=params)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert {j["job_name"] for j in data["jobs"]} == {"job-yuval", "job-dana"}
+        assert data["total"] == 2
+
+    @pytest.mark.parametrize(
+        ("submitted_by", "decoy"),
+        [
+            ("100%done", "100Xdone"),
+            ("o'brien", "oXbrien"),
+            ("dom\\user", "domuser"),
+            ("trail\\", "trailX"),
+        ],
+    )
+    def test_like_metacharacters_match_literally(
+        self, api_client, temp_db_path, submitted_by: str, decoy: str
+    ) -> None:
+        """%, ' and backslashes match literally instead of acting as wildcards."""
+        _seed_dashboard_results(
+            temp_db_path, [("job-target", submitted_by), ("job-decoy", decoy)]
+        )
+        resp = api_client.get(
+            "/api/dashboard/filtered", params={"submitted_by": submitted_by}
+        )
+        assert resp.status_code == 200
+        assert {j["job_name"] for j in resp.json()["jobs"]} == {"job-target"}
+
+    def test_non_ascii_name_enumerates_and_filters(
+        self, api_client, temp_db_path
+    ) -> None:
+        """Folding happens in SQL only, so a non-ASCII name matches its own rows."""
+        _seed_dashboard_results(
+            temp_db_path, [("job-anne", "Änne"), ("job-yuval", "yuval")]
+        )
+        options = api_client.get("/api/dashboard/submitters")
+        assert options.status_code == 200
+        assert "Änne" in options.json()["submitters"]
+
+        resp = api_client.get(
+            "/api/dashboard/filtered", params={"submitted_by": "Änne"}
+        )
+        assert resp.status_code == 200
+        assert {j["job_name"] for j in resp.json()["jobs"]} == {"job-anne"}
+
+    def test_malformed_result_json_does_not_break_queries(
+        self, api_client, temp_db_path
+    ) -> None:
+        """The json_valid guard keeps a bad row out instead of raising."""
+        _seed_dashboard_results(temp_db_path, [("job-yuval", "yuval")])
+        _insert_raw_result(temp_db_path, "job-broken", "{not json")
+
+        resp = api_client.get(
+            "/api/dashboard/filtered", params={"submitted_by": "yuval"}
+        )
+        assert resp.status_code == 200
+        assert {j["job_name"] for j in resp.json()["jobs"]} == {"job-yuval"}
+
+        resp = api_client.get("/api/dashboard/submitters")
+        assert resp.status_code == 200
+        assert resp.json()["submitters"] == ["yuval"]
+
+    async def test_get_job_submitters_unchanged(self, setup_test_db) -> None:
+        """get_job_submitters returns the same map after adopting the constant."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                "job-1",
+                status="completed",
+                result={"request_params": {"submitted_by": "yuval"}},
+            )
+            await storage.save_result(
+                "job-2", status="completed", result={"job_name": "no-submitter"}
+            )
+            submitters = await storage.get_job_submitters(["job-1", "job-2", "missing"])
+        assert submitters == {"job-1": "yuval", "job-2": ""}
+
+    async def test_list_dashboard_submitters_sorted_and_deduped(
+        self, setup_test_db
+    ) -> None:
+        """Names are deduped on the SQL fold, blanks dropped, sorted NOCASE."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            for job_id, submitted_by in [
+                ("job-a", "Yuli"),
+                ("job-b", "yuli"),
+                ("job-c", "avi"),
+                ("job-d", "   "),
+                ("job-e", "x" * 65),
+            ]:
+                await storage.save_result(
+                    job_id,
+                    status="completed",
+                    result={"request_params": {"submitted_by": submitted_by}},
+                )
+            names = await storage.list_dashboard_submitters()
+        assert names == ["avi", "Yuli"]
+
+
 # --- Non-admin access tests ---
 
 

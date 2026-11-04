@@ -315,6 +315,38 @@ class TestRootCozClientDashboard:
         assert len(result) == 1
         assert result[0]["job_id"] == "test-1"
 
+    def test_dashboard_submitters(self):
+        """Test dashboard submitters unwraps the payload."""
+
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/dashboard/submitters"
+            return httpx.Response(200, json={"submitters": ["Yuli", "myakove"]})
+
+        client = _make_client(handler)
+        assert client.dashboard_submitters() == ["Yuli", "myakove"]
+
+    def test_dashboard_filtered_submitted_by_repeatable(self):
+        """Each submitted_by value is sent as its own query param."""
+
+        def handler(request):
+            assert request.url.path == "/api/dashboard/filtered"
+            assert request.url.params.get_list("submitted_by") == ["Yuli", "mya"]
+            return httpx.Response(200, json={"jobs": [], "total": 0})
+
+        client = _make_client(handler)
+        client.dashboard_filtered(submitted_by=["Yuli", "mya"])
+
+    def test_dashboard_filtered_without_submitted_by(self):
+        """No submitted_by values means no param at all."""
+
+        def handler(request):
+            assert "submitted_by" not in request.url.params
+            return httpx.Response(200, json={"jobs": [], "total": 0})
+
+        client = _make_client(handler)
+        client.dashboard_filtered(submitted_by=[])
+
 
 class TestRootCozClientAnalyze:
     def test_analyze(self):

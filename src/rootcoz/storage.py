@@ -3099,6 +3099,31 @@ async def add_graft_estimated_tokens_saved(job_id: str, tokens: int) -> None:
         await db.commit()
 
 
+# Single source of the submitted_by JSON path. The json_valid guard lives inside the
+# constant so every use (filter, enumeration, ownership lookup) is safe on bad rows.
+_SUBMITTED_BY_RAW_SQL = (
+    "CASE WHEN json_valid(r.result_json) "
+    "THEN trim(json_extract(r.result_json, '$.request_params.submitted_by')) END"
+)
+# Folding happens only in SQL: SQLite lower() is ASCII-only, so a Python lower()
+# would make a non-ASCII name unmatchable against its own rows.
+_SUBMITTED_BY_SQL = f"lower({_SUBMITTED_BY_RAW_SQL})"
+
+
+def _submitted_by_predicate(values: set[str]) -> tuple[str, list[str]]:
+    """Build a LIKE-any predicate for submitted_by values, folded in SQL."""
+    patterns: list[str] = []
+    for value in sorted(values):
+        trimmed = value.strip()
+        # Escape the LIKE metacharacters, backslash first so it cannot eat the rest.
+        escaped = trimmed.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
+        patterns.append(f"%{escaped}%")
+    clause = " OR ".join(
+        f"{_SUBMITTED_BY_SQL} LIKE lower(?) ESCAPE '\\'" for _ in patterns
+    )
+    return f"({clause})", patterns
+
+
 async def get_job_submitters(job_ids: list[str]) -> dict[str, str]:
     """Return {job_id: submitted_by} for multiple jobs in one query."""
     if not job_ids:
@@ -3106,8 +3131,8 @@ async def get_job_submitters(job_ids: list[str]) -> dict[str, str]:
     placeholders = ", ".join("?" for _ in job_ids)
     async with _connect_db() as db:
         cursor = await db.execute(
-            f"SELECT job_id, json_extract(result_json, '$.request_params.submitted_by') as submitter "
-            f"FROM results WHERE job_id IN ({placeholders})",
+            f"SELECT job_id, {_SUBMITTED_BY_RAW_SQL} as submitter "
+            f"FROM results r WHERE r.job_id IN ({placeholders})",
             job_ids,
         )
         rows = await cursor.fetchall()
@@ -4606,6 +4631,7 @@ async def list_results_for_dashboard_filtered(
     date_to: str = "",
     review_status: str = "all",
     analysis_state: str = "",
+    submitters: set[str] | None = None,
     limit: int = DEFAULT_DASHBOARD_LIMIT,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -4621,6 +4647,10 @@ async def list_results_for_dashboard_filtered(
         status: Filter by status values.
         date_from: ISO date string for start of range (inclusive).
         date_to: ISO date string for end of range (inclusive, end-of-day).
+        review_status: Filter by review state (all, reviewed, not_reviewed).
+        analysis_state: Filter by analysis state, empty = all.
+        submitters: Case-insensitive (ASCII) substring match on submitted_by;
+            ``None`` or an empty set means no filter.
         limit: Max results. 0 = no limit.
         offset: Rows to skip.
 
@@ -4709,6 +4739,11 @@ async def list_results_for_dashboard_filtered(
         )
         params.extend(exclude_list)
 
+    if submitters:
+        clause, like_params = _submitted_by_predicate(submitters)
+        conditions.append(clause)
+        params.extend(like_params)
+
     where = " WHERE " + " AND ".join(conditions) if conditions else ""
 
     async with _connect_db() as db:
@@ -4733,6 +4768,25 @@ async def list_results_for_dashboard_filtered(
         cursor = await db.execute(sql, fetch_params)
         rows = await cursor.fetchall()
         return {"jobs": [_parse_dashboard_row(row) for row in rows], "total": total}
+
+
+async def list_dashboard_submitters() -> list[str]:
+    """Return the distinct submitted_by names shown on the dashboard.
+
+    Names are deduped on the SQL fold (so ``Yuli``/``yuli`` collapse to one
+    option), blank and over-long values are dropped, and the result is sorted
+    case-insensitively.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            f"SELECT MIN({_SUBMITTED_BY_RAW_SQL}) AS name "
+            f"FROM results r "
+            f"WHERE length({_SUBMITTED_BY_RAW_SQL}) BETWEEN 1 AND 64 "
+            f"GROUP BY {_SUBMITTED_BY_SQL} "
+            f"ORDER BY name COLLATE NOCASE"
+        )
+        rows = await cursor.fetchall()
+    return [row["name"] for row in rows]
 
 
 async def get_parent_job_name_for_test(test_name: str, job_id: str = "") -> str:
