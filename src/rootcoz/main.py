@@ -127,6 +127,7 @@ from rootcoz.encryption import (
 )
 from rootcoz.engine.core import (
     ROOTCOZ_ISSUE_PROMPT_FILENAME,
+    AnalysisIncompleteError,
     _failed_group_analyses,
     analyze_failure_group,
     clone_additional_repos,
@@ -5132,6 +5133,9 @@ async def _analyze_failures_or_exit(
                 summary=make_user_friendly_error(error_text),
                 ai_provider=ai_provider,
                 ai_model=ai_model,
+                # A narration-only answer still carries a placeholder row with
+                # its analysis_error, so the report says why it is unclassified.
+                failures=console_results,
             )
             fail_data = fail_result.model_dump(mode="json")
             fail_data["error"] = fail_result.summary
@@ -5261,7 +5265,15 @@ async def _analyze_failures_or_exit(
             all_analyses = [
                 analysis
                 for signature, failures in groups.items()
-                for analysis in _failed_group_analyses(signature, failures)
+                for analysis in _failed_group_analyses(
+                    signature,
+                    failures,
+                    analysis_error=(
+                        str(fallback_exc)
+                        if isinstance(fallback_exc, AnalysisIncompleteError)
+                        else ""
+                    ),
+                )
             ]
 
     unique_errors = len(groups)
@@ -6650,7 +6662,7 @@ async def list_result_fields() -> dict[str, Any]:
     return {"fields": sorted(RESULT_FIELD_PATHS)}
 
 
-@app.get("/api/results/incomplete", operation_id="listIncompleteAnalyses")
+@app.get("/api/results/incomplete", operation_id="apiIncompleteAnalyses")
 async def api_incomplete_analyses(
     limit: int = Query(
         default=100, ge=0, description="Max jobs to return (0 = no limit)"
@@ -7373,7 +7385,12 @@ async def _reanalyze_failure_background(
         )
 
     except Exception as exc:
-        error_msg = "Re-analysis failed unexpectedly. Check server logs for details."
+        # A narration-only answer is our own diagnosis, not a crash: say it.
+        error_msg = (
+            str(exc)
+            if isinstance(exc, AnalysisIncompleteError)
+            else "Re-analysis failed unexpectedly. Check server logs for details."
+        )
         logger.exception(
             "Failure %s re-analysis failed in job %s: %s",
             failure_uuid,
@@ -7387,6 +7404,10 @@ async def _reanalyze_failure_background(
             if failure:
                 failure["reanalysis_status"] = "failed"
                 failure["reanalysis_error"] = error_msg
+                # analysis_error explains a *missing* analysis; a classified row
+                # keeps the analysis it already had.
+                if not (failure.get("analysis") or {}).get("classification"):
+                    failure["analysis_error"] = error_msg
 
         try:
             await patch_result_json(job_id, _patch_error)

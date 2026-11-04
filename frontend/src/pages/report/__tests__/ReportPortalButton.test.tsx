@@ -223,4 +223,44 @@ describe('ReportPortalButton', () => {
       '1 test(s) have no classification to map to a Report Portal defect type',
     )
   })
+
+  it('treats TO INVESTIGATE-defaulted tests as pushed, not skipped', async () => {
+    mockPost.mockResolvedValue(
+      makePushBody({ pushed: 3, defaulted: ['test-a (classification: none)'], unmatched: [] }),
+    )
+
+    renderButton({ reviews: allReviewed(), allowUnreviewedPush: false })
+    await confirmPush()
+
+    expect(await screen.findByText('Pushed 3 classifications to Report Portal.')).toBeDefined()
+    expect(screen.getByTestId('reportportal-push-defaulted').textContent).toContain(
+      '1 test(s) were pushed as TO INVESTIGATE because they have no classification',
+    )
+    expect(screen.getByTestId('reportportal-push-defaulted-items').textContent).toContain(
+      'test-a (classification: none)',
+    )
+    // Information, not a warning: success banner, no skipped run, no failure copy
+    expect(screen.queryByText('Some classifications could not be pushed.')).toBeNull()
+    expect(screen.queryByText('No classifications could be pushed.')).toBeNull()
+    expect(screen.queryByTestId('reportportal-push-unmatched')).toBeNull()
+    expect(screen.queryByText(/skipped/)).toBeNull()
+  })
+
+  it('counts only unmatched tests as skipped when defaulted tests were pushed', async () => {
+    mockPost.mockResolvedValue(
+      makePushBody({
+        pushed: 3,
+        defaulted: ['test-a (classification: none)'],
+        unmatched: ['test-b (classification: UNKNOWN)'],
+      }),
+    )
+
+    renderButton({ reviews: allReviewed(), allowUnreviewedPush: false })
+    await confirmPush()
+
+    const reason = await screen.findByTestId('reportportal-push-unmatched')
+    expect(reason.textContent).toContain('Pushed 3 · skipped 1')
+    expect(screen.getByText('Some classifications could not be pushed.')).toBeDefined()
+    expect(screen.getByTestId('reportportal-push-defaulted')).toBeDefined()
+  })
 })

@@ -612,7 +612,9 @@ class TestPushClassifications:
             matched, "http://rootcoz.example.com/results/abc-123"
         )
         assert result["pushed"] == 1
-        assert result["unmatched"] == ["test_x (classification: SOMETHING UNKNOWN)"]
+        # Pushed under the TO_INVESTIGATE fallback: named, but not skipped.
+        assert result["defaulted"] == ["test_x (classification: SOMETHING UNKNOWN)"]
+        assert result["unmatched"] == []
         payload = _extract_put_json(mock_session)
         assert payload["issue"]["issueType"] == "ti001"
 
@@ -628,7 +630,8 @@ class TestPushClassifications:
         )
         assert result["pushed"] == 1
         assert result["errors"] == []
-        assert result["unmatched"] == ["test_empty (classification: none)"]
+        assert result["defaulted"] == ["test_empty (classification: none)"]
+        assert result["unmatched"] == []
         payload = _extract_put_json(mock_session)
         assert payload["issue"]["issueType"] == "ti001"
 
@@ -649,7 +652,8 @@ class TestPushClassifications:
             matched, "http://rootcoz.example.com/results/abc-123"
         )
         assert result["pushed"] == 2
-        assert result["unmatched"] == ["test_unmapped (classification: none)"]
+        assert result["defaulted"] == ["test_unmapped (classification: none)"]
+        assert result["unmatched"] == []
         issues = mock_session.put.call_args[1]["json"]["issues"]
         assert [i["issue"]["issueType"] for i in issues] == ["pb001", "ti001"]
 
@@ -714,6 +718,9 @@ class TestPushClassifications:
         assert result["pushed"] == 0
         assert len(result["errors"]) == 1
         assert "missing 'id'" in result["errors"][0]
+        # Not pushed, so it is genuinely unmatched -- never "defaulted".
+        assert result["unmatched"] == ["test_no_id (no Report Portal item id)"]
+        assert result["defaulted"] == []
         mock_session.put.assert_not_called()
 
     def test_push_error_handling(self):
@@ -926,7 +933,7 @@ class TestPushContentToggles(TestPushClassifications):
         assert payload["issue"]["issueType"] == "ti001"
 
     def test_classifications_disabled_skips_unmatched(self):
-        """When classifications disabled, unknown classifications don't go to unmatched."""
+        """With classifications off, an unknown one is neither defaulted nor unmatched."""
         client, mock_session = self._setup_push_client()
         failure = self._make_failure("SOMETHING UNKNOWN")
         matched = [({"id": 202, "name": "test_unknown", "launchId": 10}, failure)]
@@ -938,6 +945,7 @@ class TestPushContentToggles(TestPushClassifications):
         )
         assert result["pushed"] == 1
         assert result["unmatched"] == []
+        assert result["defaulted"] == []
         payload = _extract_put_json(mock_session)
         assert payload["issue"]["issueType"] == "ti001"
 

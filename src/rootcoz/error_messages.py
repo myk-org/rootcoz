@@ -56,6 +56,13 @@ def make_user_friendly_error(error: str | Exception) -> str:
         logger.debug("Error mapped to AI-service-unavailable: %s", err_str[:200])
         return "The AI service is temporarily unavailable. Please try again."
 
+    if "no usable classification" in err_lower or "analysis incomplete" in err_lower:
+        logger.debug("Error mapped to analysis-incomplete: %s", err_str[:200])
+        return (
+            "The AI returned no usable analysis (no classification) for this job. "
+            "Re-analyze it to classify the failures."
+        )
+
     if "ssl" in err_lower or "certificate" in err_lower:
         logger.debug("Error mapped to SSL-certificate: %s", err_str[:200])
         return "SSL certificate verification failed when connecting to an external service."

@@ -335,7 +335,8 @@ class TestPushReportPortalEndpoint:
         ]
         mock_rp.push_classifications.return_value = {
             "pushed": 1,
-            "unmatched": ["test_a (classification: none)"],
+            "unmatched": [],
+            "defaulted": ["test_a (classification: none)"],
             "errors": [],
             "launch_id": 100,
         }
@@ -351,7 +352,8 @@ class TestPushReportPortalEndpoint:
         assert response.status_code == 200, f"Response: {response.text}"
         data = response.json()
         assert data["pushed"] == 1
-        assert data["unmatched"] == ["test_a (classification: none)"]
+        assert data["defaulted"] == ["test_a (classification: none)"]
+        assert data["unmatched"] == []
         assert data["errors"] == []
         assert data["launch_id"] == 100
 

@@ -22,7 +22,7 @@ import {
   unreviewedPushTooltip,
 } from '@/lib/pushGate'
 import { useUnreviewedPushGate } from './pushGate'
-import { unmatchedFailure } from '@/lib/pushResult'
+import { defaultedNotice, unmatchedFailure } from '@/lib/pushResult'
 import { Upload, Loader2, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react'
 import type { ReportPortalPushResult } from '@/types'
 import { useReportState } from '@/pages/report/reportState'
@@ -149,6 +149,12 @@ export function ReportPortalButton({ jobId, jobName, buildNumber, childJobName, 
     pushResult && pushResult.unmatched.length > 0
       ? unmatchedFailure(pushResult.pushed, pushResult.unmatched)
       : null
+  // Items the backend pushed under the TO INVESTIGATE fallback: pushed, so
+  // information only — they must not colour the result as a partial failure.
+  const defaulted =
+    pushResult && pushResult.defaulted && pushResult.defaulted.length > 0
+      ? defaultedNotice(pushResult.defaulted)
+      : null
 
   return (
     <>
@@ -218,7 +224,7 @@ export function ReportPortalButton({ jobId, jobName, buildNumber, childJobName, 
             </DialogTitle>
           </DialogHeader>
 
-          {(gateMessage || isFullFailure || isPartialSuccess || isNoop) && (
+          {(gateMessage || isFullFailure || isPartialSuccess || isNoop || defaulted) && (
             <div className="space-y-3 py-2 min-w-0">
               <RPPushMetadata
                 project={reportportalProject}
@@ -237,6 +243,12 @@ export function ReportPortalButton({ jobId, jobName, buildNumber, childJobName, 
                 <>
                   <p className="text-xs text-text-secondary" data-testid="reportportal-push-unmatched">{unmatchedInfo.message}</p>
                   <p className="text-xs text-text-tertiary" data-testid="reportportal-push-unmatched-items">{unmatchedInfo.detail}</p>
+                </>
+              )}
+              {defaulted && (
+                <>
+                  <p className="text-xs text-text-secondary" data-testid="reportportal-push-defaulted">{defaulted.message}</p>
+                  <p className="text-xs text-text-tertiary" data-testid="reportportal-push-defaulted-items">{defaulted.detail}</p>
                 </>
               )}
 

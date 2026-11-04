@@ -587,9 +587,10 @@ class FailureAnalysis(BaseModel):
     analysis_error: str = Field(
         default="",
         description=(
-            "Why this failure has no real analysis (e.g. the AI returned no "
-            "usable classification). Empty on analysed failures; non-empty marks "
-            "the row analysis-incomplete and re-analysable."
+            "Explanatory text for why this failure has no real analysis (e.g. "
+            "the AI returned no usable classification). It is not what marks a "
+            "row incomplete -- that is an empty effective classification, so a "
+            "reviewer override still completes the row."
         ),
     )
     error_signature: str = Field(
@@ -1284,9 +1285,16 @@ class ReportPortalPushResult(BaseModel):
     unmatched: list[str] = Field(
         default_factory=list,
         description=(
-            "Items whose classification maps to no RP defect type, as "
-            "'<item name> (classification: <value>)'. They are still pushed "
-            "with the neutral TO_INVESTIGATE defect type."
+            "Items that were NOT pushed, as '<item name> (classification: "
+            "<value>)'. The frontend reads this as skipped/failed."
+        ),
+    )
+    defaulted: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Items whose classification maps to no RP defect type, naming each "
+            "item and its classification. They WERE pushed, under the neutral "
+            "TO_INVESTIGATE defect type -- informational, not skipped."
         ),
     )
     errors: list[str] = Field(

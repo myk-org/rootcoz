@@ -25,8 +25,8 @@ interface PushResponse {
  * Extract a user-facing failure detail from a push response, or null when
  * the push succeeded. Covers the generic exporter response
  * (`success`/`message`) and the Report Portal response (`errors`,
- * `unmatched` — a test with no classification to map, mirroring the
- * ReportPortalButton noop semantics).
+ * `unmatched` — a test that was not pushed). `defaulted` is not a failure:
+ * those tests were pushed under the TO INVESTIGATE fallback.
  */
 function pushFailureDetail(
   res: unknown,

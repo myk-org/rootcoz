@@ -1052,8 +1052,17 @@ class AnalysisIncompleteError(RuntimeError):
     """The AI answered, but without a usable classification.
 
     Distinct from a provider failure: the tests stay reviewable and the group
-    can be re-analysed, but there is no diagnosis to store.
+    can be re-analysed, but there is no diagnosis to store. It carries what the
+    caller can still use: the group signature (so a peer call keeps its
+    workspace file) and the raw narration (peer prompt).
     """
+
+    def __init__(
+        self, message: str, *, error_signature: str = "", raw_text: str = ""
+    ) -> None:
+        super().__init__(message)
+        self.error_signature = error_signature
+        self.raw_text = raw_text
 
 
 def _usable_classification(value: str) -> str:
@@ -1788,6 +1797,12 @@ _NON_RETRYABLE_AI_ERRORS = (
 )
 
 
+#: Longest raw AI answer ever written to a log, and only at DEBUG. WARNING
+#: carries the length plus a fingerprint instead: model narration can quote CI
+#: logs, artifact contents or tokens, and this engine runs on server credentials.
+AI_LOG_EXCERPT_CHARS = 2000
+
+
 async def _call_ai_with_retry(
     prompt: str,
     *,
@@ -1935,17 +1950,24 @@ async def _call_ai_with_retry(
             ):
                 break
             # Narration without a final answer is not an analysis: retry it.
-            # Truncated here (the log boundary) so a runaway answer stays readable.
+            # The text itself stays out of WARNING (see AI_LOG_EXCERPT_CHARS).
             logger.warning(
                 "AI answer has no usable classification (attempt=%d/%d) "
-                "provider=%s, model=%s, call_type=%s, job_id=%s; raw text: %s",
+                "provider=%s, model=%s, call_type=%s, job_id=%s, "
+                "text_length=%d, text_sha256=%s",
                 attempt,
                 max_attempts,
                 ai_provider,
                 ai_model,
                 call_type,
                 job_id,
-                result.text[:2000],
+                len(result.text or ""),
+                hashlib.sha256((result.text or "").encode()).hexdigest()[:12],
+            )
+            logger.debug(
+                "AI answer with no usable classification, first %d chars: %s",
+                AI_LOG_EXCERPT_CHARS,
+                (result.text or "")[:AI_LOG_EXCERPT_CHARS],
             )
             if attempt >= max_attempts:
                 break
@@ -2189,7 +2211,9 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
             )
             raise AnalysisIncompleteError(
                 "AI analysis incomplete: response has no usable classification; "
-                "re-analyze the job"
+                "re-analyze the job",
+                error_signature=error_signature,
+                raw_text=result.text,
             )
         return parsed, error_signature
     finally:

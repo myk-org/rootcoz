@@ -16,6 +16,7 @@ from collections.abc import (
     Callable,
     Collection,
     Iterator,
+    Mapping,
     Sequence,
 )
 from contextlib import asynccontextmanager
@@ -3242,19 +3243,28 @@ async def list_results(
         return [with_build_url_aliases(dict(row)) for row in rows]
 
 
-def _iter_all_failures(result_data: dict[str, Any]) -> Iterator[Any]:
-    """Yield every failure across ``failures``, children and nested children.
+def _iter_all_failures(
+    result_data: dict[str, Any],
+) -> Iterator[tuple[Any, str, int]]:
+    """Yield every failure with the child scope it is stored under.
 
-    Top-level failures first, then ``child_job_analyses`` depth-first through
-    ``failed_children``. Items are yielded as stored — callers type-check.
+    Top-level failures first (scope ``""``/``0``), then ``child_job_analyses``
+    depth-first through ``failed_children``. Items are yielded as stored —
+    callers type-check. The scope is what a review override resolves against.
     """
-    yield from result_data.get("failures") or []
+    for failure in result_data.get("failures") or []:
+        yield failure, "", 0
 
-    def _walk_children(children: Any) -> Iterator[Any]:
+    def _walk_children(
+        children: Any,
+    ) -> Iterator[tuple[Any, str, int]]:
         for child in children if isinstance(children, list) else []:
             if not isinstance(child, dict):
                 continue
-            yield from child.get("failures") or []
+            child_job = str(child.get("job_name") or "")
+            child_build = child.get("build_number") or 0
+            for failure in child.get("failures") or []:
+                yield failure, child_job, child_build
             yield from _walk_children(child.get("failed_children"))
 
     yield from _walk_children(result_data.get("child_job_analyses"))
@@ -3276,34 +3286,83 @@ def count_all_failures(result_data: dict[str, Any]) -> int:
     return sum(1 for _ in _iter_all_failures(result_data))
 
 
-def incomplete_failures(result_data: dict[str, Any]) -> list[str]:
-    """Return test names of failures that have no usable classification.
+def _effective_classification(
+    failure: dict[str, Any],
+    child_job_name: str,
+    child_build_number: int,
+    overrides: Mapping[tuple[str, str, int], str] | None,
+) -> str:
+    """Return the classification a reviewer sees: the override wins over stored.
 
-    A failure is incomplete when the engine recorded ``analysis_error`` (the
-    AI answer carried nothing classifiable) or when ``analysis.classification``
-    is empty. Legacy results stored the analysis as plain text, which carries
-    no classification either. The count is ``len()`` of this list — callers
-    must not re-implement the predicate.
+    Legacy results stored the analysis as plain text, which carries no
+    classification at all.
+    """
+    if overrides:
+        key = (str(failure.get("test_name") or ""), child_job_name, child_build_number)
+        override = overrides.get(key)
+        if override:
+            return str(override).strip()
+    analysis = failure.get("analysis")
+    stored = analysis.get("classification") if isinstance(analysis, dict) else ""
+    return str(stored or "").strip()
+
+
+def incomplete_failures(
+    result_data: dict[str, Any],
+    overrides: Mapping[tuple[str, str, int], str] | None = None,
+) -> list[str]:
+    """Return test names of failures whose effective classification is empty.
+
+    Incompleteness is defined on the *effective* classification, so a reviewer
+    override that classifies a failure clears it. ``analysis_error`` is only
+    the explanatory text for why there is no analysis — never the trigger.
+    The count is ``len()`` of this list — callers must not re-implement the
+    predicate.
 
     Args:
         result_data: Parsed result dictionary from result_json.
+        overrides: Map of ``(test_name, child_job_name, child_build_number)`` to
+            the reviewer's classification, as stored by
+            :func:`get_all_effective_classifications`. Omit when the caller
+            already applied them to ``result_data``.
 
     Returns:
         Test names across ``failures``, ``child_job_analyses`` and nested
         ``failed_children``.
     """
     names: list[str] = []
-    for failure in _iter_all_failures(result_data):
+    for failure, child_job, child_build in _iter_all_failures(result_data):
         if not isinstance(failure, dict):
             continue
-        analysis = failure.get("analysis")
-        classification = (
-            analysis.get("classification") if isinstance(analysis, dict) else ""
-        )
-        has_error = bool(str(failure.get("analysis_error") or "").strip())
-        if has_error or not str(classification or "").strip():
-            names.append(str(failure.get("test_name", "")))
+        if _effective_classification(failure, child_job, child_build, overrides):
+            continue
+        names.append(str(failure.get("test_name", "")))
     return names
+
+
+async def incomplete_failures_for_job(
+    job_id: str, result_data: dict[str, Any]
+) -> list[str]:
+    """Return a stored job's unclassified test names, overrides applied.
+
+    An override can only fill in a classification, never blank one, so a result
+    whose stored classifications are all non-empty is complete without a
+    database round-trip.
+
+    Args:
+        job_id: Analysis job identifier.
+        result_data: Parsed result dictionary from result_json.
+
+    Returns:
+        Test names whose effective classification is empty.
+    """
+    candidates = incomplete_failures(result_data)
+    if not candidates:
+        return []
+    overrides = await get_all_effective_classifications(job_id)
+    if not overrides:
+        return candidates
+    return incomplete_failures(result_data, overrides)
 
 
 def _resolve_history_build_fields(result_data: dict[str, Any]) -> tuple[str, int]:
@@ -4532,8 +4591,13 @@ async def list_distinct_job_names() -> set[str]:
         return {row[0] for row in rows if row[0]}
 
 
-def _parse_dashboard_row(row: aiosqlite.Row) -> dict[str, Any]:
-    """Parse a single dashboard result row into a dict with summary data."""
+async def _parse_dashboard_row(row: aiosqlite.Row) -> dict[str, Any]:
+    """Parse a single dashboard result row into a dict with summary data.
+
+    Async because ``incomplete_count`` resolves review overrides: the dashboard
+    must report the same number as the result payload and the incomplete
+    listing, or a job classified by override keeps showing as unclassified.
+    """
     row_data = dict(row)
     entry: dict[str, Any] = {
         "job_id": row_data["job_id"],
@@ -4555,7 +4619,9 @@ def _parse_dashboard_row(row: aiosqlite.Row) -> dict[str, Any]:
         if result_data.get("build_id"):
             entry["build_id"] = result_data["build_id"]
         entry["failure_count"] = count_all_failures(result_data)
-        incomplete_count = len(incomplete_failures(result_data))
+        incomplete_count = len(
+            await incomplete_failures_for_job(row["job_id"], result_data)
+        )
         if incomplete_count:
             entry["incomplete_count"] = incomplete_count
         child_jobs = result_data.get("child_job_analyses", [])
@@ -4630,19 +4696,33 @@ async def list_results_for_dashboard(
             params.append(offset)
         cursor = await db.execute(sql, params)
         rows = await cursor.fetchall()
-        return [_parse_dashboard_row(row) for row in rows]
+        return [await _parse_dashboard_row(row) for row in rows]
+
+
+#: Rows fetched per round-trip while scanning for incomplete analyses. The
+#: scan stops as soon as ``limit`` matches are collected, so this only bounds
+#: how much work one fetched batch can do.
+_INCOMPLETE_SCAN_BATCH = 100
 
 
 async def list_incomplete_analyses(limit: int = 100) -> list[dict[str, Any]]:
     """List jobs holding failures with no usable classification.
 
-    Newest first. Only rows whose stored result actually contains such a
-    failure are returned, so ``limit`` counts matching jobs rather than
-    scanned rows.
+    Newest first, review overrides applied — the same effective-classification
+    predicate as the result payload and the dashboard. Only rows whose stored
+    result actually contains such a failure are returned, so ``limit`` counts
+    matching jobs rather than scanned rows.
+
+    Cost is proportional to the rows visited, not to ``limit``: the predicate
+    is derived from ``result_json`` (an unindexed JSON column) with overrides in
+    another table, so there is no index to seek on. Rows are streamed in
+    batches of :data:`_INCOMPLETE_SCAN_BATCH` and the scan stops as soon as
+    ``limit`` matches are collected. Denormalising the count onto ``results`` is
+    what would turn this into one indexed query (issue #392).
 
     Args:
         limit: Maximum number of matching jobs to return.  ``0`` means no
-            limit.
+            limit, i.e. scan every row.
 
     Returns:
         Dicts with ``job_id``, ``job_name``, ``build_number``,
@@ -4657,25 +4737,33 @@ async def list_incomplete_analyses(limit: int = 100) -> list[dict[str, Any]]:
             "SELECT job_id, result_json FROM results "
             "WHERE result_json IS NOT NULL ORDER BY created_at DESC"
         )
-        async for row in cursor:
-            result_data = parse_result_json(row["result_json"], job_id=row["job_id"])
-            if not result_data:
-                continue
-            test_names = incomplete_failures(result_data)
-            if not test_names:
-                continue
-            jobs.append(
-                {
-                    "job_id": row["job_id"],
-                    "job_name": result_data.get("job_name", ""),
-                    "build_number": result_data.get("build_number", 0),
-                    "build_id": result_data.get("build_id", ""),
-                    "incomplete_count": len(test_names),
-                    "test_names": test_names,
-                }
-            )
-            if limit and len(jobs) >= limit:
+        while True:
+            rows = await cursor.fetchmany(_INCOMPLETE_SCAN_BATCH)
+            if not rows:
                 break
+            for row in rows:
+                result_data = parse_result_json(
+                    row["result_json"], job_id=row["job_id"]
+                )
+                if not result_data:
+                    continue
+                test_names = await incomplete_failures_for_job(
+                    row["job_id"], result_data
+                )
+                if not test_names:
+                    continue
+                jobs.append(
+                    {
+                        "job_id": row["job_id"],
+                        "job_name": result_data.get("job_name", ""),
+                        "build_number": result_data.get("build_number", 0),
+                        "build_id": result_data.get("build_id", ""),
+                        "incomplete_count": len(test_names),
+                        "test_names": test_names,
+                    }
+                )
+                if limit and len(jobs) >= limit:
+                    return jobs
     return jobs
 
 
@@ -4815,7 +4903,10 @@ async def list_results_for_dashboard_filtered(
 
         cursor = await db.execute(sql, fetch_params)
         rows = await cursor.fetchall()
-        return {"jobs": [_parse_dashboard_row(row) for row in rows], "total": total}
+        return {
+            "jobs": [await _parse_dashboard_row(row) for row in rows],
+            "total": total,
+        }
 
 
 async def get_parent_job_name_for_test(test_name: str, job_id: str = "") -> str:

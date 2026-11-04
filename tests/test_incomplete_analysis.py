@@ -219,3 +219,144 @@ class TestIncompleteListingEndpoint:
         )
         assert resp.status_code == 200
         assert len(resp.json()) == 1
+
+
+class TestOverridesClearIncompleteness:
+    """A reviewer override classifies the failure: every path must follow it.
+
+    The override is seeded in ``test_classifications`` only (not patched into
+    ``result_json``), which is what a carried-forward override looks like.
+    """
+
+    async def _seed_and_override(self, temp_db_path: Path, job_id: str = "job-1"):
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.save_result(
+                job_id=job_id,
+                build_url=f"https://ci.example.com/job/example-job/{job_id}/",
+                status="completed",
+                result=_result_payload([_failure("t1")]),
+            )
+            await storage.override_classification(
+                job_id=job_id,
+                test_name="t1",
+                classification="CODE ISSUE",
+                username="alice",
+            )
+
+    async def test_result_payload_counts_it_complete(
+        self, client: TestClient, temp_db_path: Path
+    ) -> None:
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.save_result(
+                job_id="job-1",
+                build_url="https://ci.example.com/job/example-job/7/",
+                status="completed",
+                result=_result_payload([_failure("t1")]),
+            )
+        resp = client.get("/results/job-1", headers=_ADMIN_HEADERS)
+        assert resp.json()["result"]["incomplete_count"] == 1
+
+        await self._seed_and_override(temp_db_path)
+        resp = client.get("/results/job-1", headers=_ADMIN_HEADERS)
+        assert resp.status_code == 200
+        assert resp.json()["result"]["incomplete_count"] == 0
+
+    async def test_dashboard_row_counts_it_complete(
+        self, client: TestClient, temp_db_path: Path
+    ) -> None:
+        await self._seed_and_override(temp_db_path)
+
+        resp = client.get("/api/dashboard", headers=_ADMIN_HEADERS)
+        assert resp.status_code == 200
+        rows = {row["job_id"]: row for row in resp.json()}
+        assert "incomplete_count" not in rows["job-1"]
+
+    async def test_listing_drops_the_job(
+        self, client: TestClient, temp_db_path: Path
+    ) -> None:
+        await self._seed_and_override(temp_db_path)
+
+        resp = client.get("/api/results/incomplete", headers=_ADMIN_HEADERS)
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    async def test_analysis_error_text_does_not_keep_it_incomplete(
+        self, client: TestClient, temp_db_path: Path
+    ) -> None:
+        """analysis_error explains the miss; the override still completes the row."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.save_result(
+                job_id="job-1",
+                build_url="https://ci.example.com/job/example-job/7/",
+                status="completed",
+                result=_result_payload(
+                    [_failure("t1", analysis_error="no usable classification")]
+                ),
+            )
+            await storage.override_classification(
+                job_id="job-1",
+                test_name="t1",
+                classification="PRODUCT BUG",
+                username="alice",
+            )
+
+        resp = client.get("/api/results/incomplete", headers=_ADMIN_HEADERS)
+        assert resp.json() == []
+
+
+class TestListingScanIsBounded:
+    async def _seed(self, temp_db_path: Path, count: int) -> None:
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            for i in range(count):
+                await storage.save_result(
+                    job_id=f"job-{i}",
+                    build_url=f"https://ci.example.com/job/example-job/{i}/",
+                    status="completed",
+                    result=_result_payload([_failure(f"t{i}")]),
+                )
+
+    async def test_limit_stops_the_scan_early(
+        self, client: TestClient, temp_db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        await self._seed(temp_db_path, 8)
+        batch = 3
+        monkeypatch.setattr(storage, "_INCOMPLETE_SCAN_BATCH", batch)
+
+        visited: list[str] = []
+        real_parse = storage.parse_result_json
+
+        def _counting(raw: str, **kwargs: Any) -> dict[str, Any] | None:
+            visited.append(str(kwargs.get("job_id", "")))
+            return real_parse(raw, **kwargs)
+
+        monkeypatch.setattr(storage, "parse_result_json", _counting)
+
+        resp = client.get(
+            "/api/results/incomplete", params={"limit": 1}, headers=_ADMIN_HEADERS
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()) == 1
+        assert len(visited) <= 1 + batch
+
+    async def test_limit_zero_scans_every_batch(
+        self, client: TestClient, temp_db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        await self._seed(temp_db_path, 5)
+        monkeypatch.setattr(storage, "_INCOMPLETE_SCAN_BATCH", 2)
+
+        resp = client.get(
+            "/api/results/incomplete", params={"limit": 0}, headers=_ADMIN_HEADERS
+        )
+        assert resp.status_code == 200
+        assert len(resp.json()) == 5
+
+
+class TestOperationId:
+    def test_incomplete_listing_operation_id_matches_handler_name(
+        self, client: TestClient
+    ) -> None:
+        schema = client.get("/openapi.json").json()
+        assert (
+            schema["paths"]["/api/results/incomplete"]["get"]["operationId"]
+            == "apiIncompleteAnalyses"
+        )

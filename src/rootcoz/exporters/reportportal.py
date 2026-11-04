@@ -263,6 +263,7 @@ class ReportPortalClient(Exporter):
         details: dict[str, Any] = {
             "pushed": 0,
             "unmatched": [],
+            "defaulted": [],
             "errors": [message],
             "launch_id": launch_id,
         }
@@ -697,15 +698,18 @@ class ReportPortalClient(Exporter):
                 line is appended to the RP comment.
 
         Returns:
-            Dict with keys: ``pushed``, ``unmatched``, ``errors``, ``launch_id``.
-            ``unmatched`` lists items whose classification maps to no RP defect
-            type; they are still pushed with the neutral ``TO_INVESTIGATE``
-            locator, and each entry names that classification.
+            Dict with keys: ``pushed``, ``unmatched``, ``defaulted``, ``errors``,
+            ``launch_id``. ``defaulted`` lists items whose classification maps
+            to no RP defect type; they are still pushed with the neutral
+            ``TO_INVESTIGATE`` locator, and each entry names that
+            classification. ``unmatched`` keeps only items that were genuinely
+            not pushed.
         """
         if not matched_pairs:
             return {
                 "pushed": 0,
                 "unmatched": [],
+                "defaulted": [],
                 "errors": [],
                 "launch_id": None,
             }
@@ -726,6 +730,7 @@ class ReportPortalClient(Exporter):
         history = history_classifications or {}
         reviewed_by = reviewed_by or {}
         unmatched: list[str] = []
+        defaulted: list[str] = []
         errors: list[str] = []
         launch_id: int | None = None
 
@@ -738,6 +743,8 @@ class ReportPortalClient(Exporter):
             item_id = rp_item.get("id")
             item_name = rp_item.get("name", "")
             if item_id is None:
+                # No id, no update: this one really was not pushed.
+                unmatched.append(f"{item_name} (no Report Portal item id)")
                 errors.append(f"RP item missing 'id' field ({item_name})")
                 continue
             if launch_id is None:
@@ -755,7 +762,7 @@ class ReportPortalClient(Exporter):
                 locators.get("TO_INVESTIGATE") or _DEFAULT_LOCATORS["TO_INVESTIGATE"]
             )
             if push_classifications and not locator:
-                unmatched.append(
+                defaulted.append(
                     f"{item_name} (classification: {ai_classification or 'none'})"
                 )
             issue_type = (locator if push_classifications else None) or to_investigate
@@ -881,6 +888,7 @@ class ReportPortalClient(Exporter):
         return {
             "pushed": pushed,
             "unmatched": unmatched,
+            "defaulted": defaulted,
             "errors": errors,
             "launch_id": launch_id,
         }

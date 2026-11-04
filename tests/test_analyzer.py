@@ -1,6 +1,7 @@
 """Tests for analyzer module."""
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -436,6 +437,76 @@ class TestRunSingleAiAnalysis:
                 job_id="job-1",
             )
         assert mock_cli.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_narration_logged_as_fingerprint_not_raw_text(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """WARNING carries length + sha256 only; the excerpt is DEBUG and bounded.
+
+        Model narration can quote CI logs, artifacts or tokens, so it must never
+        land in a WARNING line.
+        """
+        from rootcoz.engine.core import AI_LOG_EXCERPT_CHARS
+        from rootcoz.engine.core import logger as core_logger
+
+        narration = "QUOTED-CI-LOG " + "x" * (AI_LOG_EXCERPT_CHARS + 500)
+        mock_cli = AsyncMock(
+            side_effect=lambda *a, **kw: AIResult(success=True, text=narration)
+        )
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_cli)
+
+        original_level = core_logger.level
+        core_logger.setLevel(logging.DEBUG)
+        core_logger.addHandler(caplog.handler)
+        try:
+            with pytest.raises(AnalysisIncompleteError):
+                await run_single_ai_analysis(
+                    failures=[
+                        FailedTest(
+                            test_name="test_foo",
+                            error_message="timeout",
+                            stack_trace="st",
+                        )
+                    ],
+                    console_context="",
+                    repo_path=None,
+                    ai_provider="cursor",
+                    ai_model="cursor:grok",
+                    ai_call_timeout=None,
+                    custom_prompt="",
+                    artifacts_context="",
+                    server_url="",
+                    job_id="job-1",
+                )
+        finally:
+            core_logger.removeHandler(caplog.handler)
+            core_logger.setLevel(original_level)
+
+        warnings = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "no usable classification" in r.getMessage()
+        ]
+        assert warnings, "the narration-only answer must be reported"
+        for record in warnings:
+            message = record.getMessage()
+            assert "QUOTED-CI-LOG" not in message
+            assert hashlib.sha256(narration.encode()).hexdigest()[:12] in message
+            assert str(len(narration)) in message
+
+        excerpts = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.DEBUG and "QUOTED-CI-LOG" in r.getMessage()
+        ]
+        assert excerpts, "DEBUG keeps a bounded excerpt for diagnosis"
+        for excerpt in excerpts:
+            # Exactly the named bound, never the whole runaway answer.
+            assert excerpt.count("x") == AI_LOG_EXCERPT_CHARS - len("QUOTED-CI-LOG ")
 
     @pytest.mark.asyncio
     async def test_narration_then_valid_answer_uses_second_response(

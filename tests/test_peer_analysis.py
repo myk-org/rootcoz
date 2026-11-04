@@ -3134,6 +3134,60 @@ class TestPeerConsensusFallback:
 
 class TestOrchestratorEmptyFallback:
     @pytest.mark.asyncio
+    async def test_peers_still_run_when_primary_narrates(self) -> None:
+        """A narration-only main answer must not abort the debate (#397).
+
+        ``run_single_ai_analysis`` raises ``AnalysisIncompleteError``; the peers
+        must still classify the group, and the stored row must be classified.
+        """
+        from unittest.mock import AsyncMock
+
+        from rootcoz import storage
+        from rootcoz.engine.core import AnalysisIncompleteError
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
+
+        mock_orchestrator = AsyncMock(
+            side_effect=AnalysisIncompleteError(
+                "AI analysis incomplete: response has no usable classification",
+                error_signature="sig123",
+                raw_text="Now let me read the test source code.",
+            )
+        )
+
+        peer_response = _make_peer_json_response(
+            agrees=False,
+            classification="PRODUCT BUG",
+            reasoning="This is a product bug",
+        )
+        peer_call = AsyncMock(return_value=AIResult(success=True, text=peer_response))
+
+        with (
+            patch("rootcoz.peer_analysis.run_single_ai_analysis", mock_orchestrator),
+            _patch_peer_ai_calls(peer_call),
+        ):
+            results = await analyze_failure_group_with_peers(
+                failures=[_make_failure()],
+                console_context="console output",
+                repo_path=None,
+                main_ai_provider="claude",
+                main_ai_model="claude-sonnet-4-20250514",
+                peer_ai_configs=_peer_configs(),
+                max_rounds=1,
+            )
+
+        assert peer_call.await_count >= 1
+        assert len(results) == 1
+        analysis = results[0].analysis
+        assert analysis.classification == "PRODUCT BUG"
+        # Classified by the peers: the row must not be reported as incomplete.
+        assert (
+            storage.incomplete_failures(
+                {"failures": [r.model_dump(mode="json") for r in results]}
+            )
+            == []
+        )
+
+    @pytest.mark.asyncio
     async def test_peer_consensus_adopted_when_orchestrator_empty(self) -> None:
         """When orchestrator returns empty classification, peer majority is adopted."""
         from unittest.mock import AsyncMock

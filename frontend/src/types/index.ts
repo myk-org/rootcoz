@@ -472,6 +472,10 @@ export interface ExporterInfo {
 
 export interface ReportPortalPushResult {
   pushed: number
+  /** Tests pushed under the TO INVESTIGATE fallback (they had no
+   *  classification to map) — pushed, not skipped. Older servers omit it. */
+  defaulted?: string[]
+  /** Tests that were not pushed at all. */
   unmatched: string[]
   errors: string[]
   launch_id: number | null

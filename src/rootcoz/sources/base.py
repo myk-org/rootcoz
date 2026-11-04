@@ -744,7 +744,13 @@ async def run_console_only_analysis(
     max_concurrent_ai_calls: int = 3,
 ) -> tuple[bool, list[FailureAnalysis], str]:
     """Run console-only AI analysis when no structured test failures exist."""
-    from rootcoz.engine.core import analyze_failure_group, normalize_for_signature
+    from rootcoz.engine.core import (
+        AnalysisIncompleteError,
+        _failed_group_analyses,
+        analyze_failure_group,
+        get_failure_signature,
+        normalize_for_signature,
+    )
     from rootcoz.models import FailedTest
 
     synthetic_failure = FailedTest(
@@ -776,6 +782,25 @@ async def run_console_only_analysis(
             auth_header=auth_header,
         )
         return True, results, ""
+    except AnalysisIncompleteError as exc:
+        # The model answered but never classified the failure: a re-analysis can
+        # fix that, new credentials cannot. Keep the reason on the placeholder
+        # row so the report says why instead of blaming the credentials.
+        logger.error(
+            "Console-only analysis incomplete for job=%s: %s (text_length=%d)",
+            job_id,
+            exc,
+            len(exc.raw_text),
+        )
+        return (
+            False,
+            _failed_group_analyses(
+                get_failure_signature(synthetic_failure),
+                [synthetic_failure],
+                analysis_error=str(exc),
+            ),
+            str(exc),
+        )
     except (RuntimeError, ValueError, OSError, TypeError) as exc:
         from rootcoz.engine.chat import safe_exception_frames
 

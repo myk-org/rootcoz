@@ -24,6 +24,7 @@ from pi_sidecar_client import run_parallel_with_limit
 from rootcoz import get_child_logger
 from rootcoz.config import Settings
 from rootcoz.engine.core import (
+    AnalysisIncompleteError,
     analyze_failure_group,
     derive_error_details,
     extract_relevant_console_lines,
@@ -134,7 +135,11 @@ def _normalize_child_results(
                         job_name=child_name,
                         build_number=child_num,
                         jenkins_url="",
-                        note="Child analysis failed; check server logs for details",
+                        note=(
+                            str(result)
+                            if isinstance(result, AnalysisIncompleteError)
+                            else "Child analysis failed; check server logs for details"
+                        ),
                         all_groups_failed=True,
                     )
                 )
@@ -1325,6 +1330,11 @@ async def _analyze_grouped_failures(
                         stack_trace=tf.stack_trace,
                         error_signature=get_legacy_signature(tf),
                         error_signature_v2=get_failure_signature(tf),
+                        analysis_error=(
+                            str(result)
+                            if isinstance(result, AnalysisIncompleteError)
+                            else ""
+                        ),
                         analysis=AnalysisDetail(
                             details="Analysis failed; check server logs for details"
                         ),
@@ -1621,16 +1631,21 @@ async def _analyze_child_job_inner(
 
     if not success:
         logger.error(
-            "Console-only analysis failed for %s #%d",
+            "Console-only analysis failed for %s #%d: %s",
             job_name,
             build_number,
+            _error_text,
         )
         return ChildJobResult(
             analysis=ChildJobAnalysis(
                 job_name=job_name,
                 build_number=build_number,
                 jenkins_url=jenkins_url,
-                note="Child console analysis failed; check server logs for details",
+                # Placeholder rows (narration-only answer) carry their reason;
+                # on a provider failure the list is empty and the note stands.
+                failures=failures,
+                note=_error_text
+                or "Child console analysis failed; check server logs for details",
                 all_groups_failed=True,
                 passed_count=_passed_count,
                 skipped_count=_skipped_count,
