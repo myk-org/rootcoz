@@ -97,7 +97,42 @@ commands = [
   [
     "sh",
     "-c",
-    "helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set route.enabled=true --set ingress.enabled=true --set route.host=x.example.com --set ingress.host=y.example.com --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'mutually exclusive'",  # pragma: allowlist secret
+    "OUT=/tmp/rootcoz-production-$$.yaml && helm template rootcoz chart/ -f chart/examples/values-openshift.yaml -f chart/examples/values-production.yaml --set ai.geminiApiKey=test-key --set admin.key=test-admin-key --set encryptionKey=test-encryption-key-for-helm-template-render > $OUT && [ \"$(grep -c 'memory: 32Gi' $OUT)\" = 2 ] && [ \"$(grep -c 'cpu: \"4\"' $OUT)\" = 2 ] && [ \"$(grep -c 'ephemeral-storage: 16Gi' $OUT)\" = 2 ] && grep -q 'sizeLimit: \"16Gi\"' $OUT && [ \"$(awk '/^      containers:/,/^      volumes:/' $OUT | grep -c 'mountPath: /tmp$')\" = 1 ] && [ \"$(awk '/^      initContainers:/,/^      containers:/' $OUT | grep -c 'mountPath: /tmp$')\" = 0 ] && rm -f $OUT",  # pragma: allowlist secret
+  ],
+  [
+    "sh",
+    "-c",
+    "OUT=/tmp/rootcoz-production-sidecar-$$.yaml && helm template rootcoz chart/ -f chart/examples/values-openshift.yaml -f chart/examples/values-sidecar-agent-fixture.yaml -f chart/examples/values-production.yaml --set ai.geminiApiKey=test-key --set admin.key=test-admin-key --set encryptionKey=test-encryption-key-for-helm-template-render > $OUT && grep -q 'copy-sidecar-agent' $OUT && [ \"$(awk '/^      initContainers:/,/^      containers:/' $OUT | grep -c 'mountPath: /tmp$')\" = 0 ] && [ \"$(awk '/^      initContainers:/,/^      containers:/' $OUT | grep -c 'TMPDIR')\" = 0 ] && [ \"$(grep -c 'mountPath: /tmp$' $OUT)\" = 1 ] && [ \"$(grep -c 'name: TMPDIR' $OUT)\" = 1 ] && rm -f $OUT",  # pragma: allowlist secret
+  ],
+  [
+    "sh",
+    "-c",
+    "OUT=/tmp/rootcoz-no-ephemeral-$$.yaml && helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render > $OUT && ! grep -q 'ephemeral-storage' $OUT && ! grep -q 'mountPath: /tmp$' $OUT && ! grep -q 'name: TMPDIR' $OUT && rm -f $OUT",  # pragma: allowlist secret
+  ],
+  [
+    "sh",
+    "-c",
+    "helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set resources.limit.cpu=4 --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'resources: Additional property limit is not allowed'",  # pragma: allowlist secret
+  ],
+  [
+    "sh",
+    "-c",
+    "helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set resources.requests.cpuu=4 --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'resources.requests: Additional property cpuu is not allowed'",  # pragma: allowlist secret
+  ],
+  [
+    "sh",
+    "-c",
+    "helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set resources.requests.ephemeral-storage=16 --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'resources.requests.ephemeral-storage: Invalid type. Expected: string, given: integer'",  # pragma: allowlist secret
+  ],
+  [
+    "sh",
+    "-c",
+    "helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set 'resources.requests.nvidia\\.com/gpu=1' --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render | grep -q 'nvidia.com/gpu: 1' && helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set 'resources.limits.hugepages-2Mi=1Gi' --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render | grep -q 'hugepages-2Mi: 1Gi'",  # pragma: allowlist secret
+  ],
+  [
+    "sh",
+    "-c",
+    "helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set resources.requests.cpu=4 --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render | grep -q 'cpu: 4'",  # pragma: allowlist secret
   ],
   [
     "helm",

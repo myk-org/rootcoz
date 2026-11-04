@@ -120,7 +120,53 @@
         "annotations": { "type": "object" }
       }
     },
-    "resources": { "type": "object" },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Container resource requests/limits. Unknown keys are rejected (a typo like resources.limit silently rendered an invalid pod). Extended resources (nvidia.com/gpu) and hugepages-* are allowed. memory/ephemeral-storage must carry a unit: a bare number means bytes in Kubernetes.",
+      "properties": {
+        "requests": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Scheduling floor. Omit a key rather than setting it to an empty string — a Kubernetes quantity cannot be empty.",
+          "properties": {
+            "cpu": { "type": ["string", "number"], "minLength": 1 },
+            "memory": {
+              "type": "string",
+              "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)$"
+            },
+            "ephemeral-storage": {
+              "type": "string",
+              "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)$"
+            }
+          },
+          "patternProperties": {
+            "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?/[a-z0-9]([-a-z0-9]*[a-z0-9])?$": { "type": ["string", "number"], "minLength": 1 },
+            "^hugepages-[0-9]+[KMGT]i$": { "type": ["string", "number"], "minLength": 1 }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Eviction/throttle ceiling. An ephemeral-storage limit here also caps the /tmp emptyDir at the same sizeLimit.",
+          "properties": {
+            "cpu": { "type": ["string", "number"], "minLength": 1 },
+            "memory": {
+              "type": "string",
+              "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)$"
+            },
+            "ephemeral-storage": {
+              "type": "string",
+              "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)$"
+            }
+          },
+          "patternProperties": {
+            "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?/[a-z0-9]([-a-z0-9]*[a-z0-9])?$": { "type": ["string", "number"], "minLength": 1 },
+            "^hugepages-[0-9]+[KMGT]i$": { "type": ["string", "number"], "minLength": 1 }
+          }
+        }
+      }
+    },
     "env": {
       "type": "object",
       "properties": {
@@ -178,10 +224,10 @@
         "annotations": { "type": "object" }
       }
     },
-    "podAnnotations": { "type": "object" },
-    "podLabels": { "type": "object" },
-    "nodeSelector": { "type": "object" },
+    "podAnnotations": { "type": "object", "additionalProperties": { "type": "string" } },
+    "podLabels": { "type": "object", "additionalProperties": { "type": "string" } },
+    "nodeSelector": { "type": "object", "additionalProperties": { "type": "string" } },
     "tolerations": { "type": "array", "items": { "type": "object" } },
-    "affinity": { "type": "object" }
+    "affinity": { "type": "object", "description": "Free-form Kubernetes affinity block, rendered verbatim by the chart; not validated." }
   }
 }

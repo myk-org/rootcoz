@@ -109,8 +109,11 @@ persistence:
     helm.sh/resource-policy: keep
 
 resources:
-  # Modest defaults for dev/evaluation clusters. For production AI workloads use
-  # requests/limits of 4 CPU and 32Gi memory (see chart/README.md).
+  # Modest defaults for dev/evaluation clusters. For production AI workloads apply
+  # chart/examples/values-production.yaml (4 CPU / 32Gi / 16Gi ephemeral-storage);
+  # sizing basis in chart/README.md. ephemeral-storage is optional and goes on both
+  # requests and limits — the limit also becomes the /tmp emptyDir sizeLimit
+  # (setting it mounts /tmp and rolls the pod once).
   requests:
     cpu: "1"
     memory: 4Gi
