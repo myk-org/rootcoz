@@ -947,6 +947,33 @@ class TestFeedbackEndpoint:
             assert "GitHub token is required" in resp.json()["detail"]
             assert "Profile Settings" in resp.json()["detail"]
 
+    def test_create_never_falls_back_to_the_server_github_token(
+        self, _init_db, temp_db_path
+    ):
+        """#398: a configured server token is never used to file an issue.
+
+        The bootstrap ``admin`` (ADMIN_KEY auth, no users row) was the one
+        caller a fallback served: with GITHUB_TOKEN set on the server it filed
+        the feedback under the deployment's identity. Issue creation is the
+        user's own credential or a blocked request — never a server token.
+        """
+        for client in self._make_client(temp_db_path, github_token=_TEST_GITHUB_TOKEN):
+            with (
+                patch.object(storage, "get_user_tokens", return_value={}),
+                patch("rootcoz.feedback.create_github_issue") as mock_create,
+            ):
+                resp = client.post(
+                    "/api/feedback/create",
+                    json={
+                        "title": "Test title",
+                        "body": "Test body",
+                        "labels": ["bug"],
+                    },
+                )
+            assert resp.status_code == 400
+            assert "GitHub token is required" in resp.json()["detail"]
+            mock_create.assert_not_called()
+
     def test_create_successful(self, _init_db, temp_db_path):
         for client in self._make_client(temp_db_path):
             with (

@@ -1826,7 +1826,7 @@ For raw endpoints, see [API Endpoint Reference](api-reference.html) for details.
   Issue creation is disabled for this server, or the job was analyzed without a repository or Jira project to target. Ask an administrator to check `ENABLE_GITHUB_ISSUES` and `ENABLE_JIRA_ISSUES`.
 
 - Creation fails with `GitHub token is required` or `Jira token is required`.
-  Issue creation uses only your own credentials. Add the token on your profile settings page and try again.
+  Issue creation uses only your own credentials and is refused with `400` before anything is filed when you have none. A server-configured `GITHUB_TOKEN` or Jira credential is never used on your behalf — that includes the bootstrap `admin` account, which has no profile tokens of its own. Add the token on your profile settings page and try again.
 
 - The preview has no `Include links` effect.
   The server has no public base URL configured. Set `PUBLIC_BASE_URL` so report links can be absolute.
@@ -2325,9 +2325,9 @@ The registration key is the only credential that signs you in; the tracker token
 
    | Field | What it is used for |
    | --- | --- |
-   | `GitHub Token` | Personal access token with `repo` scope. Used to create GitHub issues. It is **not** what enriches comment badges: `enrich_comments` reads the server's `GITHUB_TOKEN` from Server Settings, so status badges resolve against the server-wide credential, not yours. |
+   | `GitHub Token` | Personal access token with `repo` scope. Required to create GitHub issues — they are always filed with this, never with the server's `GITHUB_TOKEN`, and without it issue creation is refused with `400`. It is **not** what enriches comment badges: `enrich_comments` reads the server's `GITHUB_TOKEN` from Server Settings, so status badges resolve against the server-wide credential, not yours. |
    | `Jira Email` | Your Atlassian account email, required for Jira Cloud API-token auth. |
-   | `Jira Token` | Jira Cloud API token, or a personal access token on Jira Server/Data Center. |
+   | `Jira Token` | Jira Cloud API token, or a personal access token on Jira Server/Data Center. Required to create Jira tickets — they are always filed with your token (or your service-account token), never with the server's Jira credential, and without one ticket creation is refused with `400`. |
 
    Validation happens through `POST /api/validate-token`, and a failed validation leaves the stored value unchanged. The two entry points differ, though. The Settings form (`ProfileForm.handleSubmit`) validates any non-empty GitHub or Jira token that is not already known-good and **aborts the save** if the check fails, so a bad token typed there is never stored. The registration flow does not: `RegisterPage` sends whatever you typed straight to `PUT /api/user/tokens`, which stores it as supplied. A mistyped or already-revoked token entered at registration therefore persists and only fails later, when a tracker action tries to use it. They are kept in your browser for convenience and synced to the server encrypted at rest, so a second browser picks them up automatically.
 
@@ -2885,8 +2885,8 @@ Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pat
 | GET | `/results/{job_id}/issue-prompt` | viewer | Custom `.rootcoz/ROOTCOZ_ISSUE_PROMPT.md` for the repo |
 | POST | `/results/{job_id}/preview-github-issue` | reviewer | `test_name`, `include_links`, AI overrides; returns preview content |
 | POST | `/results/{job_id}/preview-jira-bug` | reviewer | Same shape, Jira flavour |
-| POST | `/results/{job_id}/create-github-issue` | reviewer | `test_name`, `title`, `body`; returns `201`. Same refusal classes as `POST /api/feedback/create` — `502` when GitHub is unreachable or failing, `403` when the token cannot see `TESTS_REPO_URL` (GitHub answers `404` for that), lacks the `repo` scope, or is invalid or expired, `429` when rate limited |
-| POST | `/results/{job_id}/create-jira-bug` | reviewer | Adds `jira_issue_type`; returns `201`. `401` for an invalid or expired Jira token, `403` when the token cannot access the Jira project (Jira answers `404` for that), `502` with a retryable `Jira is unavailable right now…` detail on an upstream `5xx`, `502 Jira API error: <status>` for anything else |
+| POST | `/results/{job_id}/create-github-issue` | reviewer | `test_name`, `title`, `body`; returns `201`. Files with the caller's own token only — a missing one is a `400`, never the server's `GITHUB_TOKEN`. Same refusal classes as `POST /api/feedback/create` — `502` when GitHub is unreachable or failing, `403` when the token cannot see `TESTS_REPO_URL` (GitHub answers `404` for that), lacks the `repo` scope, or is invalid or expired, `429` when rate limited |
+| POST | `/results/{job_id}/create-jira-bug` | reviewer | Adds `jira_issue_type`; returns `201`. Files with the caller's own Jira token or service-account token only — `400` when neither is supplied, never a server Jira credential; server settings supply only the project key and site URL. `401` for an invalid or expired Jira token, `403` when the token cannot access the Jira project (Jira answers `404` for that), `502` with a retryable `Jira is unavailable right now…` detail on an upstream `5xx`, `502 Jira API error: <status>` for anything else |
 | PUT | `/results/{job_id}/tracked-in` | reviewer | `test_name`, `url`, `type` |
 | GET | `/results/{job_id}/tracked-in` | reviewer | Current tracker links |
 | DELETE | `/results/{job_id}/tracked-in/{link_id}` | reviewer | Remove one link |
@@ -2971,7 +2971,7 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | GET | `/api/capabilities` | viewer | Feature toggles and whether server credentials exist |
 | GET | `/api/default-server-settings` | viewer | Non-sensitive settings and defaults only |
 | POST | `/api/feedback/preview` | viewer | AI-drafted feedback issue |
-| POST | `/api/feedback/create` | viewer | Creates the GitHub issue; returns `201`. `503` when feedback is disabled, `400` when no GitHub token is stored, `429` when GitHub rate-limited, `403` when the token is invalid, lacks the `repo` scope, or cannot see the repository, `502` when GitHub is unreachable or failing |
+| POST | `/api/feedback/create` | viewer | Creates the GitHub issue; returns `201`. `503` when feedback is disabled, `400` when the caller has no GitHub token of their own stored (the server's `GITHUB_TOKEN` is never used, not even for the bootstrap `admin`), `429` when GitHub rate-limited, `403` when the token is invalid, lacks the `repo` scope, or cannot see the repository, `502` when GitHub is unreachable or failing |
 
 > **Note:** `POST /api/feedback/create` and `POST /results/{job_id}/create-github-issue` share one refusal helper, so both keep `502` for GitHub trouble (unreachable, timeout, any `5xx`) and `403` for credential trouble, including a `404` from GitHub — that is how GitHub answers a repository the token cannot see, and reporting it as `403` keeps it away from the gateway-failure class. The two are separated on purpose: `502` means retry, `403` means fix the token. Only the subject differs — a refused feedback submission says the feedback was not filed, a refused failure issue says the bug report was not filed. Each refusal is logged at `WARNING` — the upstream status and the tracker's own `message` when there was an answer, the exception type and text when the call never landed — never the token and never the submitted body.
 >

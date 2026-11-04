@@ -186,7 +186,7 @@ For raw endpoints, see [API Endpoint Reference](api-reference.html) for details.
   Issue creation is disabled for this server, or the job was analyzed without a repository or Jira project to target. Ask an administrator to check `ENABLE_GITHUB_ISSUES` and `ENABLE_JIRA_ISSUES`.
 
 - Creation fails with `GitHub token is required` or `Jira token is required`.  
-  Issue creation uses only your own credentials. Add the token on your profile settings page and try again.
+  Issue creation uses only your own credentials and is refused with `400` before anything is filed when you have none. A server-configured `GITHUB_TOKEN` or Jira credential is never used on your behalf — that includes the bootstrap `admin` account, which has no profile tokens of its own. Add the token on your profile settings page and try again.
 
 - The preview has no `Include links` effect.  
   The server has no public base URL configured. Set `PUBLIC_BASE_URL` so report links can be absolute.
