@@ -1375,6 +1375,11 @@
 </tr>
 <tr>
 <td>GET</td>
+<td><code>/api/admin/server-status</code></td>
+<td>Live server status: <code>disk</code> (filesystem usage of the data directory plus <code>database</code>/<code>transcripts</code>/<code>logs</code> sizes), <code>cpu</code>, <code>memory</code>, <code>process</code>, <code>database</code> (size and row counts), <code>sidecar</code>, <code>activity</code>, and <code>warnings</code>. Each block carries <code>available</code>; a probe that cannot read its source answers <code>{"available": false, "reason": "..."}</code> instead of failing the request</td>
+</tr>
+<tr>
+<td>GET</td>
 <td><code>/api/admin/db/schema</code></td>
 <td>Read-only schema dump</td>
 </tr>

@@ -1041,6 +1041,11 @@
 <td>Installed AI-sidecar component versions.</td>
 </tr>
 <tr>
+<td><code>server-status</code></td>
+<td>—</td>
+<td>Live server status: disk (data-directory usage plus database, transcripts and logs sizes), CPU, memory, process (version, commit, uptime, pid, event-loop lag), database row counts, sidecar reachability and model counts, activity, and the derived warnings. A block the server cannot read prints <code>unavailable</code> with the reason instead of a zero.</td>
+</tr>
+<tr>
 <td><code>token-usage</code></td>
 <td><code>--period</code> (<code>today</code>, <code>week</code>, <code>month</code>, <code>all</code>), <code>--start-date</code>, <code>--end-date</code>, <code>--provider</code>, <code>--model</code>, <code>--call-type</code>, <code>--group-by</code> (<code>provider</code>, <code>model</code>, <code>call_type</code>, <code>day</code>, <code>week</code>, <code>month</code>, <code>job</code>), <code>--job-id</code>, <code>--format</code> (<code>table</code>, <code>json</code>, <code>csv</code>)</td>
 <td>AI token usage and cost. No filters prints the summary dashboard.</td>

@@ -61,7 +61,7 @@ from simple_logger.logger import get_logger
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
-from rootcoz import storage
+from rootcoz import server_status, storage
 from rootcoz import transcripts as sidecar_transcripts
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
@@ -1014,6 +1014,31 @@ _chat_listeners: dict[str, set[asyncio.Event]] = {}
 _VALID_JOB_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 
+def _sse_client_count() -> int:
+    """Live SSE connections, from the per-connection listener registries.
+
+    Only the registries that hold one entry per connection are counted; the
+    navbar auxiliary events (mentions, active/pending counts) ride existing
+    connections and would double-count them.
+    """
+    per_key_registries = (
+        _job_status_listeners,
+        _comment_listeners,
+        _chat_listeners,
+    )
+    return (
+        len(_dashboard_listeners)
+        + len(_token_usage_listeners)
+        + sum(
+            len(events)
+            for registry in per_key_registries
+            for events in registry.values()
+        )
+        + _log_broadcast.listener_count
+        + _audit_broadcast.listener_count
+    )
+
+
 def notify_dashboard_changed() -> None:
     """Signal all dashboard SSE listeners that the job list changed."""
     for event in _dashboard_listeners:
@@ -1092,6 +1117,12 @@ class _PayloadBroadcast:
     def has_listeners(self) -> bool:
         """Cheap check so a hot producer skips work when nobody is listening."""
         return bool(self._listeners)
+
+    @property
+    def listener_count(self) -> int:
+        """Number of live subscribers (server status reports this)."""
+        with self._lock:
+            return len(self._listeners)
 
     def publish(self, payload: Any) -> None:
         """Push one payload to every subscriber (thread-safe)."""
@@ -2639,6 +2670,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     try:
         cleanup_task = asyncio.create_task(_periodic_session_cleanup())
+        # One sampler for the event-loop lag the admin status page reports.
+        server_status.start_loop_lag_watchdog()
 
         # Pre-populate cursor models in background (don't block startup)
         task = asyncio.create_task(_safe_preload_cursor_models())
@@ -2672,6 +2705,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
         yield
     finally:
+        server_status.stop_loop_lag_watchdog()
         cleanup_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await cleanup_task
@@ -12348,6 +12382,23 @@ def _data_probe_worker() -> None:
 
 
 threading.Thread(target=_data_probe_worker, name="data-probe", daemon=True).start()
+
+
+@app.get("/api/admin/server-status", operation_id="getAdminServerStatus")
+async def admin_server_status(request: Request) -> dict[str, Any]:
+    """Live server status for the admin page (admin only, read-only).
+
+    Disk, CPU, memory, process, database, sidecar and the warnings derived from
+    them. Every block reports its own ``available`` flag: a probe that cannot
+    read what it needs degrades that block, never the request.
+    """
+    _require_admin(request)
+    return await server_status.collect_server_status(
+        db_path=storage.DB_PATH,
+        transcripts_dir=sidecar_transcripts.TRANSCRIPTS_DIR,
+        log_dir=Path(_LOG_FILE).parent if _LOG_FILE else None,
+        sse_clients=_sse_client_count(),
+    )
 
 
 @app.get("/metrics", operation_id="prometheusMetrics")

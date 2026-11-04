@@ -241,6 +241,7 @@ See [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analy
 | Command | Flags | Purpose |
 | --- | --- | --- |
 | `component-versions` | — | Installed AI-sidecar component versions. |
+| `server-status` | — | Live server status: disk (data-directory usage plus database, transcripts and logs sizes), CPU, memory, process (version, commit, uptime, pid, event-loop lag), database row counts, sidecar reachability and model counts, activity, and the derived warnings. A block the server cannot read prints `unavailable` with the reason instead of a zero. |
 | `token-usage` | `--period` (`today`, `week`, `month`, `all`), `--start-date`, `--end-date`, `--provider`, `--model`, `--call-type`, `--group-by` (`provider`, `model`, `call_type`, `day`, `week`, `month`, `job`), `--job-id`, `--format` (`table`, `json`, `csv`) | AI token usage and cost. No filters prints the summary dashboard. |
 | `transcripts list` | `--job` (filter to one run), `--format` (`table`, `json`) | Recorded AI session transcripts (redacted JSONL) with per-session context. Admin only. |
 | `transcripts show SESSION_ID` | `--output`/`-o` FILE | Download one transcript JSONL. Admin only. |

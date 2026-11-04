@@ -308,6 +308,7 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | GET | `/api/admin/audit/export` | Stream every event matching the list filters: `format` (`json`/`csv`) plus the same filters as `/api/admin/audit`. Uncapped — the way to retain evidence before retention deletes it |
 | POST | `/api/admin/ai-models/refresh` | Re-discover models from the sidecar |
 | GET | `/api/admin/component-versions` | Backend, sidecar, and chart versions |
+| GET | `/api/admin/server-status` | Live server status: `disk` (filesystem usage of the data directory plus `database`/`transcripts`/`logs` sizes), `cpu`, `memory`, `process`, `database` (size and row counts), `sidecar`, `activity`, and `warnings`. Each block carries `available`; a probe that cannot read its source answers `{"available": false, "reason": "..."}` instead of failing the request |
 | GET | `/api/admin/db/schema` | Read-only schema dump |
 | POST | `/api/admin/db/query` | Read-only SQL for the admin chat |
 | GET | `/api/admin/chat` | Admin chat history |

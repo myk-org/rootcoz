@@ -4507,6 +4507,82 @@ class TestAdminComponentVersionsCommand:
         assert parsed["components"] == {"pi": "1.0.0"}
 
 
+class TestAdminServerStatusCommand:
+    _PAYLOAD: ClassVar[dict] = {
+        "disk": {
+            "available": True,
+            "used_bytes": 75,
+            "capacity_bytes": 100,
+            "used_ratio": 0.75,
+            "filesystem_note": "note",
+            "database_bytes": 1024,
+            "transcripts_bytes": 2048,
+            "logs_bytes": 0,
+        },
+        "cpu": {
+            "available": True,
+            "process_percent": 5.0,
+            "quota_cores": 2.0,
+            "period_us": 100000,
+        },
+        "memory": {
+            "available": True,
+            "rss_bytes": 1024,
+            "current_bytes": 50,
+            "limit_bytes": 100,
+            "percent_of_limit": 50.0,
+        },
+        "process": {
+            "version": "4.14.0",
+            "git_sha": "abc123",
+            "uptime_seconds": 61.0,
+            "pid": 42,
+            "loop_lag_ms": 12.0,
+        },
+        "database": {
+            "available": True,
+            "size_bytes": 4096,
+            "results": 3,
+            "failures": 2,
+            "test_entries": 1,
+        },
+        "sidecar": {"reachable": True, "models": 7, "free_models": 1},
+        "activity": {"analyses_running": 1, "sse_clients": 2},
+        "warnings": [
+            {
+                "level": "warn",
+                "code": "disk_high",
+                "message": "Data directory is 75% full",
+            }
+        ],
+    }
+
+    def test_server_status_table(self, mock_client):
+        mock_client.server_status.return_value = self._PAYLOAD
+        result = runner.invoke(app, ["admin", "server-status"])
+        assert result.exit_code == 0
+        assert "Process: rootcoz 4.14.0" in result.output
+        assert "Disk: 75% used" in result.output
+        assert "Sidecar: reachable" in result.output
+        assert "Data directory is 75% full" in result.output
+
+    def test_server_status_json(self, mock_client):
+        mock_client.server_status.return_value = self._PAYLOAD
+        result = runner.invoke(app, ["--json", "admin", "server-status"])
+        assert result.exit_code == 0
+        assert json.loads(result.output) == self._PAYLOAD
+
+    def test_server_status_unavailable_block(self, mock_client):
+        mock_client.server_status.return_value = {
+            **self._PAYLOAD,
+            "cpu": {"available": False, "reason": "no cgroup"},
+            "warnings": [],
+        }
+        result = runner.invoke(app, ["admin", "server-status"])
+        assert result.exit_code == 0
+        assert "CPU: unavailable (no cgroup)" in result.output
+
+
 class TestAdminUsersListCommand:
     def test_admin_users_list(self, mock_client):
         mock_client.admin_list_users.return_value = {
