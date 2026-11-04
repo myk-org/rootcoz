@@ -113,7 +113,10 @@ resources:
   # chart/examples/values-production.yaml (4 CPU / 32Gi / 16Gi ephemeral-storage);
   # sizing basis in chart/README.md. ephemeral-storage is optional and goes on both
   # requests and limits — the limit also becomes the /tmp emptyDir sizeLimit
-  # (setting it mounts /tmp and rolls the pod once).
+  # (setting it mounts /tmp and rolls the pod once). "" drops a key, but a cleared
+  # request is not "no floor": Kubernetes copies the limit into the request, so
+  # requests.memory: "" still schedules for limits.memory. Clear both for a real
+  # no-floor pod (a LimitRange default also supplies the request).
   requests:
     cpu: "1"
     memory: 4Gi

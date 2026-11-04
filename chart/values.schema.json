@@ -128,7 +128,7 @@
         "requests": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Scheduling floor. Setting a key to \"\" omits it from the rendered pod.",
+          "description": "Scheduling floor. Setting a key to \"\" omits the explicit request, but the limit still becomes the effective request unless a LimitRange defaults one.",
           "properties": {
             "cpu": {
               "description": "Quantity or bare number. \"\" omits the key.",

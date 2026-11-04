@@ -197,10 +197,13 @@ changing `persistence.size` either no-ops or triggers a PVC resize. Database gro
 beats burst. Guaranteed QoS is computed from cpu and memory only (ephemeral-storage does not
 affect it) **and across init containers too** — the `copy-sidecar-agent` init container matches its own
 requests and limits for exactly that reason, so enabling `sidecar.agentDir` cannot quietly downgrade a
-Guaranteed pod to Burstable. The third value is matched for a different reason — the request drives
-scheduling and the limit drives kubelet eviction, so one number describes both thresholds. The cost is
-a scheduling floor of 32Gi memory + 16Gi ephemeral: the node must have that allocatable. The repo's dev
-deployment requests `16Gi` instead (`1000m` CPU) — Burstable, the fallback for smaller nodes.
+Guaranteed pod to Burstable. Those init-container numbers are new (`10m/32Mi` on both sides, previously
+`10m/16Mi` request against `100m/128Mi` limit), which is why that pod template rolls once on upgrade —
+see [Rollout on upgrade](#rollout-on-upgrade). The third value is matched for a different reason —
+the request drives scheduling and the limit drives kubelet eviction, so one number describes both
+thresholds. The cost is a scheduling floor of 32Gi memory + 16Gi ephemeral: the node must have that
+allocatable. The repo's dev deployment requests `16Gi` instead (`1000m` CPU) — Burstable, the fallback
+for smaller nodes.
 
 ### `/tmp` and ephemeral storage
 
@@ -226,8 +229,18 @@ Media unchanged by this: `/data` (PVC) and `PI_SIDECAR_TRANSCRIPTS_DIR` stay on 
 `XDG_CONFIG_HOME` already pointed at `/tmp/config`, so its lifetime is unchanged.
 
 **Opt-in only.** The default profile is untouched: defaults set no `ephemeral-storage` and the
-evaluation recipes render exactly as before — no rollout for existing installs. Setting the ephemeral
-limit mounts `/tmp` and rolls the pod once.
+evaluation recipes render byte-identically. Setting the ephemeral limit mounts `/tmp` and rolls the
+pod once.
+
+### Rollout on upgrade
+
+The byte-identical default render holds for installs that **do not** set `sidecar.agentDir`. Installs
+that do get **one pod restart** from this chart version alone: the `copy-sidecar-agent` init
+container's request and limit changed (`10m/16Mi` request + `100m/128Mi` limit → `10m/32Mi` on both
+sides), and any pod-template change is a rollout. The equality is the point — without it the pod is
+Burstable whenever the sidecar agent dir is set, so the restart is what buys Guaranteed QoS. It is
+still a restart: one replica, `Recreate`, 30 s grace period, so an analysis running at that moment is
+interrupted and has to be re-submitted (results are written on completion; SQLite recovers via WAL).
 
 ### Extended resources
 
@@ -238,9 +251,16 @@ instead of producing a pod the API server refuses.
 
 **Units:** `memory` and `ephemeral-storage` must be strings with a unit (`4Gi`, `512Mi`) — Kubernetes
 reads a bare number as **bytes**, so `memory: 4` is 4 bytes and an OOM-kill on start. `cpu` accepts a
-string or a bare number (`--set resources.requests.cpu=4` is valid). Setting a key to `""` **omits**
-it — `--set resources.requests.memory=""` renders a pod with no `memory` request (an empty quantity
-is invalid, so the chart drops the key instead of emitting one).
+string or a bare number (`--set resources.requests.cpu=4` is valid). Setting a key to `""` omits **that
+key** from the render — an empty quantity is invalid, so the chart drops it instead of emitting one.
+
+**A cleared request is not "no floor".** Dropping the request key does not stop the **limit** from
+becoming the effective request: Kubernetes defaults a missing request to the matching limit, so
+`--set resources.requests.memory=""` on the default profile (`limits.memory: 8Gi`) still schedules for
+`8Gi`. Only a namespace `LimitRange` defaulting the request supplies a different number, and the chart
+renders nothing that would. A genuine no-floor pod needs **both** sides cleared
+(`resources.requests.memory=""` and `resources.limits.memory=""`); clearing the request alone just
+removes the explicit value.
 
 Full sizing guidance for operators: [Deploying rootcoz → Sizing](deploy-rootcoz.html#sizing).
 

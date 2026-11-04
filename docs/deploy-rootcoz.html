@@ -451,6 +451,16 @@ memory only) and raises the scheduling floor to 32Gi memory + 16Gi ephemeral, so
 that allocatable. On smaller nodes request <code>16Gi</code> memory instead — Burstable, which is what the dev
 deployment uses. The live <code>.dev/openshift/deployment.yaml</code> request is therefore deliberately
 different from this profile.</p>
+<p><strong>Upgrading to this chart version.</strong> The default render is byte-identical for installs that do not set
+<code>sidecar.agentDir</code>, so those do not roll. Installs that set it get <strong>one pod restart</strong>: the
+<code>copy-sidecar-agent</code> init container's request and limit are now equal (<code>10m/32Mi</code>) where they were
+<code>10m/16Mi</code> and <code>100m/128Mi</code>, and that equality is what keeps a Guaranteed pod Guaranteed. With one
+replica on <code>Recreate</code> and a 30 s grace period, an analysis in flight at that moment is interrupted and
+has to be re-submitted.</p>
+<p><strong>Clearing a request does not remove the floor.</strong> Setting <code>resources.requests.memory=""</code> drops only
+the explicit request; Kubernetes copies the matching limit into the request when no admission policy
+supplies one, so the default profile still schedules for <code>8Gi</code>. Clear the limit too for a genuine
+no-floor pod, or let a namespace <code>LimitRange</code> default the request.</p>
 <p><strong>Persistent storage.</strong> Database growth is ~83 KB per stored result with no retention yet (#409); the
 PVC size is not part of the production profile, because applying it over a live release either no-ops
 or triggers a PVC resize.</p>
