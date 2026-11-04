@@ -373,7 +373,10 @@ describe('FeedbackDialog', () => {
     await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
     await user.click(screen.getByRole('button', { name: /create issue/i }))
 
-    expect(await screen.findByRole('alert')).toHaveTextContent('Failed to create issue')
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Failed to create issue')
+    // The HTTP status text is never shown to the user.
+    expect(alert).not.toHaveTextContent('Bad Gateway')
   })
 
   it('double-clicking Retry submits once', async () => {

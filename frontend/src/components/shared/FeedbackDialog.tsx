@@ -1,8 +1,11 @@
 import { useState, useRef, useEffect } from 'react'
-import { ApiError, api, extractApiDetail } from '@/lib/api'
+import { api } from '@/lib/api'
+import { createIssueFailureMessage } from '@/lib/issueCreateError'
 import { getRecentFailedCalls } from '@/lib/api'
 import { getRecentErrors } from '@/lib/errorCapture'
 import { getGithubToken } from '@/lib/cookies'
+import { IssueCreateError } from '@/components/shared/IssueCreateError'
+import { useSubmitGuard } from '@/lib/useSubmitGuard'
 import {
   Dialog,
   DialogContent,
@@ -44,7 +47,7 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
   // A failed create keeps the generated issue in the preview so it can be retried
   // as-is; only a failed preview sends the user back to the form.
   const [createError, setCreateError] = useState('')
-  const submittingRef = useRef(false)
+  const guardSubmit = useSubmitGuard()
   const generationRef = useRef(0)
   const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -137,34 +140,27 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
   }
 
   async function handleCreate() {
-    // Guards a double click that lands before the creating phase re-renders.
-    if (submittingRef.current) return
-    submittingRef.current = true
-    const gen = generationRef.current
-    setCreateError('')
-    setPhase('creating')
-    try {
-      const payload: FeedbackCreateRequest = {
-        title: previewTitle,
-        body: previewBody,
-        labels: previewLabels,
-      }
+    await guardSubmit(async () => {
+      const gen = generationRef.current
+      setCreateError('')
+      setPhase('creating')
+      try {
+        const payload: FeedbackCreateRequest = {
+          title: previewTitle,
+          body: previewBody,
+          labels: previewLabels,
+        }
 
-      const res = await api.post<FeedbackCreateResponse>('/api/feedback/create', payload)
-      if (gen !== generationRef.current) return
-      setIssueUrl(res.issue_url)
-      setPhase('success')
-    } catch (err) {
-      if (gen !== generationRef.current) return
-      // The server's own wording when it sent one; the generic copy otherwise.
-      setCreateError(
-        extractApiDetail(err)
-        ?? (err instanceof ApiError ? 'Failed to create issue' : err instanceof Error ? err.message : 'Failed to create issue'),
-      )
-      setPhase('preview')
-    } finally {
-      submittingRef.current = false
-    }
+        const res = await api.post<FeedbackCreateResponse>('/api/feedback/create', payload)
+        if (gen !== generationRef.current) return
+        setIssueUrl(res.issue_url)
+        setPhase('success')
+      } catch (err) {
+        if (gen !== generationRef.current) return
+        setCreateError(createIssueFailureMessage(err))
+        setPhase('preview')
+      }
+    })
   }
 
   function handleBack() {
@@ -279,14 +275,7 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
         {/* Phase 2: Preview */}
         {phase === 'preview' && (
           <div className="space-y-4">
-            {createError && (
-              <div role="alert" className="space-y-1">
-                <p className="text-sm text-signal-red">{createError}</p>
-                {createError.toLowerCase().includes('token') && (
-                  <p className="text-xs text-text-tertiary">You can update your tokens in <a href="/settings" target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline">Profile Settings</a>.</p>
-                )}
-              </div>
-            )}
+            {createError && <IssueCreateError message={createError} />}
             <div className="rounded-md border border-border-muted bg-surface-elevated px-3 py-2 text-xs text-text-secondary">
               {previewAi.generated
                 ? `Generated using AI with ${previewAi.provider}/${previewAi.model}`

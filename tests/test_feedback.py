@@ -1,8 +1,6 @@
 """Tests for user feedback endpoint and scrubbing logic."""
 
-import contextlib
 import json
-import logging
 import os
 from typing import ClassVar
 from unittest.mock import AsyncMock, patch
@@ -33,7 +31,7 @@ from rootcoz.models import (
     FeedbackResponse,
     PageState,
 )
-from tests.conftest import host_env
+from tests.conftest import capture_main_logs, host_env
 
 _TEST_GITHUB_TOKEN = "test-token-placeholder"
 
@@ -45,18 +43,6 @@ _TEST_HMAC_KEY = "test-encryption-key-for-hmac"  # pragma: allowlist secret
 _GITHUB_FOOTER_MARKER = (
     "Generated using AI with [rootcoz](https://github.com/myk-org/rootcoz)"
 )
-
-
-@contextlib.contextmanager
-def _capture_main_logs(caplog):
-    """Capture rootcoz.main logs (python-simple-logger sets propagate=False)."""
-    logger = logging.getLogger("rootcoz.main")
-    with caplog.at_level(logging.WARNING, logger="rootcoz.main"):
-        logger.propagate = True
-        try:
-            yield
-        finally:
-            logger.propagate = False
 
 
 # The host variables the app-under-test may legitimately see now come from
@@ -1219,7 +1205,7 @@ class TestFeedbackEndpoint:
                 "documentation_url": "https://docs.github.com/rest",
             },
         )
-        with _capture_main_logs(caplog):
+        with capture_main_logs(caplog):
             resp = self._create_with_github_failure(temp_db_path, exc)
 
         assert resp.status_code == 502
@@ -1238,7 +1224,7 @@ class TestFeedbackEndpoint:
     ):
         """GitHub hides a repository the token cannot see behind a 404."""
         exc = self._raise_status(404, json={"message": "Not Found"})
-        with _capture_main_logs(caplog):
+        with capture_main_logs(caplog):
             resp = self._create_with_github_failure(temp_db_path, exc)
 
         assert resp.status_code == 403
@@ -1252,7 +1238,7 @@ class TestFeedbackEndpoint:
     def test_create_unreachable_github_stays_502(self, _init_db, temp_db_path, caplog):
         """502 remains reserved for a genuinely unreachable GitHub API."""
         exc = httpx.RequestError("connection refused")
-        with _capture_main_logs(caplog):
+        with capture_main_logs(caplog):
             resp = self._create_with_github_failure(temp_db_path, exc)
         assert resp.status_code == 502
         assert "unreachable" in resp.json()["detail"]
