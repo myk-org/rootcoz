@@ -624,6 +624,18 @@ it.each(['without a session', 'with a live session'])('never offers a viewer a S
   expect(post).not.toHaveBeenCalledWith('/api/chat/job/abort', expect.anything())
 })
 
+it('offers a Stop for a pending turn that outlived its session', async () => {
+  // abort_chat only requires the reviewer role — it never checks for a session.
+  // Hiding Stop when the session is gone would wedge an authorized reviewer with
+  // no way to end the turn this bubble represents.
+  setup({ messages: [pendingRow(new Date(Date.now() - 5000).toISOString())], total: 1, active_session: null })
+  render(page())
+  const stop = await screen.findByRole('button', { name: 'Stop' })
+  fireEvent.click(stop)
+  await waitFor(() => expect(post).toHaveBeenCalledWith('/api/chat/job/abort', {}))
+  expect(post.mock.calls.filter(([path]) => path === '/api/chat/job/abort')).toHaveLength(1)
+})
+
 it('reports a refused abort once and keeps the turn running until the reply lands', async () => {
   setup({ messages: [], total: 0, active_session: ACTIVE_SESSION })
   render(page())
@@ -656,14 +668,21 @@ it('Stop clears the busy state even when no server row ever arrives', async () =
   expect(screen.queryByText(/^Thinking\.\.\./)).not.toBeInTheDocument()
 })
 
-it('shows a transient Sending row between the click and the POST response', async () => {
-  setup({ messages: [], total: 0, active_session: ACTIVE_SESSION })
+it('shows a transient Sending row at the bottom of the thread', async () => {
+  // A scrolled chat must show the row where the user is looking: below the last
+  // message, right above the scroll sentinel.
+  setup({
+    messages: [{ id: 1, job_id: 'job', role: 'user', content: 'earlier question', username: 'alice', ai_provider: '', ai_model: '', status: 'completed', created_at: new Date().toISOString() }],
+    total: 1,
+    active_session: ACTIVE_SESSION,
+  })
   let finishPost!: (value: unknown) => void
   post.mockImplementation((path: string) => path === '/api/chat/job' ? new Promise(resolve => { finishPost = resolve }) : Promise.resolve({}))
   render(page())
   const composer = await readyComposer()
   fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
-  expect(screen.getByText('Sending...')).toBeInTheDocument()
+  const row = screen.getByText('Sending...')
+  expect(row.compareDocumentPosition(screen.getByText('earlier question')) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy()
   expect(composer).toHaveValue('')
   expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument()
   await act(async () => { finishPost({ user_message: { id: 2, username: 'alice' }, assistant_message_id: 3 }) })
