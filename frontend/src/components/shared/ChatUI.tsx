@@ -186,9 +186,11 @@ export function ChatUI({
 
   const hasPending = messages.some(m => m.status === 'pending')
   const sendBusy = sending || hasPending
-  // sessionStarted alone is not enough: applySession trusts history, so a viewer
-  // opening a job with a live session would get a Stop that the server answers 403.
-  const canStop = sessionStarted && ABORT_ROLES.includes(role)
+  // Mirrors the server's `_require_reviewer` on abort_chat, which never checks that a
+  // session exists. Gating on sessionStarted would hide Stop whenever a pending turn
+  // outlives the session (credential or server grant revoked), wedging the composer.
+  // A stale role still fails safely: the 403 surfaces and the bubble keeps ticking.
+  const canStop = ABORT_ROLES.includes(role)
 
   const historyIsCurrent = useCallback((generation: number) =>
     mountedRef.current && !clearingRef.current && historyGenerationRef.current === generation, [])
@@ -679,7 +681,6 @@ export function ChatUI({
               {emptySubtitle && <p className="text-xs mt-1">{emptySubtitle}</p>}
             </div>
           )}
-          {sending && !hasPending && <ChatBusyRow label="Sending..." canStop={false} onStop={handleAbort} />}
           {messages.map(msg => msg.status === 'pending' ? (
             <ChatBusyRow
               key={msg.id}
@@ -749,6 +750,9 @@ export function ChatUI({
               )}
             </div>
           ))}
+          {/* Below the thread, not above it: a scrolled conversation must show this
+              row without waiting for a `messages` change to trigger auto-scroll. */}
+          {sending && !hasPending && <ChatBusyRow label="Sending..." canStop={false} onStop={handleAbort} />}
           <div ref={messagesEndRef} />
         </div>
 
