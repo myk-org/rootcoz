@@ -28,6 +28,7 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
+from compression import zstd
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -20942,6 +20943,11 @@ async def admin_db_schema(request: Request) -> dict[str, Any]:
         conn.close()
 
 
+# A preview decodes at most this much of a frame: the query is read-only but it
+# takes arbitrary SQL, so one crafted blob can expand to gigabytes.
+_ADMIN_PREVIEW_MAX_BYTES = 1 << 20
+
+
 def _admin_row_value(value: Any) -> Any:
     """Render one queried row value for the admin query response (#409).
 
@@ -20951,6 +20957,17 @@ def _admin_row_value(value: Any) -> Any:
     """
     if not isinstance(value, (bytes, bytearray)):
         return value
+    decompressor = zstd.ZstdDecompressor()
+    try:
+        decompressor.decompress(value, max_length=_ADMIN_PREVIEW_MAX_BYTES)
+    except zstd.ZstdError:
+        return f"<{len(value)} undecodable frame>"
+    if not decompressor.eof:
+        return (
+            f"<{len(value)}-byte frame, decoded payload over"
+            f" {_ADMIN_PREVIEW_MAX_BYTES} bytes: not shown>"
+        )
+    # Now known to fit the cap, so the shared parser stays bounded here.
     decoded = parse_result_json(value)
     return decoded if decoded is not None else f"<{len(value)} undecodable frame>"
 

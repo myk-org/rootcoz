@@ -99,8 +99,9 @@ async def _stored(db_path: Path, job_id: str):
         return await (
             await db.execute(
                 "SELECT typeof(result_json) AS kind, length(result_json) AS size,"
-                " result_json, submitted_by, summary, display_name, failure_ids,"
-                " denorm_version FROM results WHERE job_id = ?",
+                " result_json, job_name, build_number, build_id, submitted_by,"
+                " summary, display_name, failure_ids, denorm_version"
+                " FROM results WHERE job_id = ?",
                 (job_id,),
             )
         ).fetchone()
@@ -448,6 +449,55 @@ async def test_denorm_sweep_repairs_a_row_an_old_build_rewrote(_storage) -> None
 
     # Converged: a further pass parses the row but no longer writes it.
     assert await storage.backfill_results_denorm() == 0
+
+
+async def test_denorm_sweep_never_blanks_identity_a_partial_payload_omits(
+    _storage,
+) -> None:
+    """A derived empty value means the payload does not know, not "clear it".
+
+    ``update_status`` keeps ``build_id`` in the column when its payload has none
+    and stamps the row current, so the sweep re-derives that row from the partial
+    payload — where the missing key must leave the preserved identity alone.
+    """
+    await storage.save_result(
+        job_id="job-partial",
+        status="running",
+        result={
+            "job_name": "partial-job",
+            "build_number": 42,
+            "build_id": "999",
+            "display_name": "Human Name",
+            "request_params": {"submitted_by": "yuval"},
+        },
+    )
+    await storage.update_status(
+        "job-partial",
+        "failed",
+        result={"job_name": "partial-job", "error": "boom"},
+    )
+    assert await storage.backfill_results_denorm() == 1
+
+    row = await _stored(_storage, "job-partial")
+    assert (row["build_id"], row["build_number"]) == ("999", 42)
+    assert (row["submitted_by"], row["display_name"]) == ("yuval", "Human Name")
+    assert row["denorm_version"] == storage._RESULTS_DENORM_VERSION
+    assert row["kind"] == "text"
+    payload = storage.parse_result_json(row["result_json"])
+    assert (payload["job_name"], payload["error"]) == ("partial-job", "boom")
+    assert "build_id" not in payload, "the payload never carried it"
+
+    # Fill-in still works: a payload that does carry a build_id replaces it.
+    async with storage._connect_db() as db:
+        await db.execute(
+            "UPDATE results SET result_json = ? WHERE job_id = 'job-partial'",
+            (json.dumps({"job_name": "partial-job", "build_id": "1000"}),),
+        )
+        await db.commit()
+    assert await storage.backfill_results_denorm() == 1
+    row = await _stored(_storage, "job-partial")
+    assert row["build_id"] == "1000"
+    assert row["build_number"] == 42, "the payload still says nothing about it"
 
 
 async def test_init_db_leaves_legacy_row_payloads_alone(_storage) -> None:

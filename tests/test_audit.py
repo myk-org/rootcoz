@@ -16,6 +16,7 @@ import io
 import json
 import logging
 import sqlite3
+from compression import zstd
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -2779,6 +2780,21 @@ def test_admin_db_query_masks_credential_columns(
     details = _events(action="admin.db_query")[0]["details"]
     assert details["rows"] == 1
     assert secret not in json.dumps(details)
+
+
+def test_admin_db_query_preview_bounds_a_crafted_frame() -> None:
+    """Read-only SQL can craft a tiny frame that expands to gigabytes (#419).
+
+    The preview decodes at most ``_ADMIN_PREVIEW_MAX_BYTES``, so a bomb costs the
+    cap, not its advertised size — and a real payload still decodes.
+    """
+    bomb = zstd.compress(b"0" * (4 << 20))
+    assert len(bomb) < 1024, "cheap to send, expensive to decode"
+    assert "not shown" in main._admin_row_value(bomb)
+    assert main._admin_row_value(zstd.compress(b'{"job_name": "j"}')) == {
+        "job_name": "j"
+    }
+    assert main._admin_row_value(b"not a frame") == "<11 undecodable frame>"
 
 
 def test_admin_db_query_rejection_is_audited_as_denied(

@@ -476,10 +476,26 @@ async def _claim_migration(db: aiosqlite.Connection, key: str) -> bool:
 # below the swept version, so the next pass derives it from the newer payload.
 # The ``typeof`` guard keeps that from applying to a row a concurrent
 # compression pass just turned into a frame.
+#
+# The identity columns can only be filled in, never blanked: a partial
+# ``update_status`` payload omits keys by design (it keeps ``build_id`` in the
+# column while its payload has none), so "derived empty" means "this payload
+# does not know", not "clear it" — overwriting would strip the build identity
+# the writer deliberately preserved. Such a row stays "columns disagree with the
+# payload", so each pass re-writes it once with the same values: one no-op
+# UPDATE per boot, never a lost column.
 _RESULTS_DENORM_UPDATE_SQL = (
-    "UPDATE results SET job_name = :job_name, build_number = :build_number,"
-    " build_id = :build_id, submitted_by = :submitted_by, summary = :summary,"
-    " display_name = :display_name, failure_ids = :failure_ids,"
+    "UPDATE results SET"
+    " job_name = CASE WHEN :job_name <> '' THEN :job_name ELSE job_name END,"
+    " build_number = CASE WHEN :build_number <> 0"
+    " THEN :build_number ELSE build_number END,"
+    " build_id = CASE WHEN :build_id <> '' THEN :build_id ELSE build_id END,"
+    " submitted_by = CASE WHEN :submitted_by <> ''"
+    " THEN :submitted_by ELSE submitted_by END,"
+    " summary = :summary,"
+    " display_name = CASE WHEN :display_name <> ''"
+    " THEN :display_name ELSE display_name END,"
+    " failure_ids = :failure_ids,"
     " denorm_version = :denorm_version"
     " WHERE rowid = :rid AND typeof(result_json) = 'text'"
     " AND result_json = :payload"
