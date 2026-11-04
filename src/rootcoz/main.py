@@ -19385,6 +19385,17 @@ async def create_feedback(
         github_token = user_tokens.get("github_token", "")
 
         if not github_token:
+            # This is the one issue-creation path that reads the token from the
+            # user's row, so the guidance must match the account that got it: a
+            # caller with no row (the bootstrap `admin`) cannot save a token at
+            # all — PUT /api/user/tokens answers 404 for it (#400).
+            if username and await storage.get_user_by_username(username) is None:
+                raise HTTPException(
+                    status_code=400,
+                    detail="GitHub token is required, and this account has no "
+                    "profile to store one. Sign in with your own account and add "
+                    "the token in Profile Settings.",
+                )
             raise HTTPException(
                 status_code=400,
                 detail="GitHub token is required. Set up your token in Profile Settings.",
