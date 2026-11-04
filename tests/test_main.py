@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import socket
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -7545,6 +7546,7 @@ class TestReAnalyzeFailure:
         """Re-analysis changes only its card; job totals retain all attempts."""
         from pi_sidecar_client import AIResult, AITokenUsage
 
+        from rootcoz.sources.base import CISourceResult
         from rootcoz.token_tracking import failure_group_usage, record_ai_usage
 
         job_id = "job-attempt-scopes"
@@ -7619,6 +7621,16 @@ class TestReAnalyzeFailure:
                 )
             ]
 
+        # The child failure has CI coordinates, so its re-analysis reconstructs a
+        # JenkinsSource and refetches console output from the real JENKINS_URL.
+        # Mock that boundary and record any name resolution so the test never
+        # depends on DNS or network latency.
+        egress: list[Any] = []
+
+        def _block_egress(host, port, *args, **kwargs):
+            egress.append((host, port))
+            raise OSError(f"test blocks network egress to {host}:{port}")
+
         with (
             patch(
                 "rootcoz.main.analyze_failure_group", side_effect=analyze_replacement
@@ -7629,6 +7641,12 @@ class TestReAnalyzeFailure:
                 return_value="",
             ),
             patch("rootcoz.main.RepositoryManager"),
+            patch(
+                "rootcoz.sources.jenkins_source.JenkinsSource.refetch_context",
+                new_callable=AsyncMock,
+                return_value=CISourceResult(failures=[]),
+            ) as refetch_context,
+            patch.object(socket, "getaddrinfo", _block_egress),
         ):
             for failure_id in (child_failure["id"], top[0]["id"]):
                 response = test_client.post(f"/api/failures/{failure_id}/re-analyze")
@@ -7737,6 +7755,11 @@ class TestReAnalyzeFailure:
             assert result["failures"][0]["token_usage"]["total_input_tokens"] == 5
             assert result["token_usage"]["total_calls"] == 6
             assert result["token_usage"]["total_input_tokens"] == 50
+
+        # Only the child failure has CI coordinates, so exactly one refetch ran —
+        # mocked — and nothing reached the network.
+        assert refetch_context.await_count == 1
+        assert egress == []
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("has_history", [False, True])
