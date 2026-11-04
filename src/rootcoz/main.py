@@ -18656,11 +18656,16 @@ def _normalize_submitters(values: list[str] | None) -> set[str] | None:
             status_code=400,
             detail=f"Too many submitted_by values ({len(cleaned)}, max 50)",
         )
-    too_long = [value for value in cleaned if len(value) > 64]
+    too_long = [
+        value for value in cleaned if len(value) > storage.MAX_SUBMITTED_BY_LENGTH
+    ]
     if too_long:
         raise HTTPException(
             status_code=400,
-            detail=f"submitted_by value too long ({len(too_long[0])} chars, max 64)",
+            detail=(
+                f"submitted_by value too long ({len(too_long[0])} chars, "
+                f"max {storage.MAX_SUBMITTED_BY_LENGTH})"
+            ),
         )
     return set(cleaned) or None
 

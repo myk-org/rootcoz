@@ -4793,6 +4793,12 @@ async def list_results_for_dashboard_filtered(
         return {"jobs": [_parse_dashboard_row(row) for row in rows], "total": total}
 
 
+# The dashboard endpoint caps one submitted_by value at this many characters. The
+# constant lives here because storage also drops over-long historical values from the
+# picker; main.py validates new input against the same number.
+MAX_SUBMITTED_BY_LENGTH = 64
+
+
 async def list_dashboard_submitters() -> list[str]:
     """Return the distinct submitted_by names shown on the dashboard.
 
@@ -4806,12 +4812,22 @@ async def list_dashboard_submitters() -> list[str]:
         cursor = await db.execute(_SUBMITTER_LIST_SQL)
         rows = await cursor.fetchall()
     picked: dict[str, str] = {}
+    dropped = 0
     for row in rows:
         name = row["name"]
-        if not name or len(name) > 64:
+        if not name:
+            continue
+        if len(name) > MAX_SUBMITTED_BY_LENGTH:
+            dropped += 1
             continue
         # First spelling in BINARY order wins, the same choice MIN() made.
         picked.setdefault(_ascii_fold(name), name)
+    if dropped:
+        logger.debug(
+            "Skipped %d stored submitted_by value(s) longer than %d characters",
+            dropped,
+            MAX_SUBMITTED_BY_LENGTH,
+        )
     return sorted(picked.values(), key=_ascii_fold)
 
 
