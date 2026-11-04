@@ -819,6 +819,82 @@ class TestEnrichCommentsCommand:
         assert parsed["enriched"] == 3
 
 
+class TestDashboardSubmittersCommand:
+    def test_results_submitters(self, mock_client):
+        mock_client.dashboard_submitters.return_value = ["Yuli", "myakove"]
+        result = runner.invoke(app, ["results", "submitters"])
+        assert result.exit_code == 0
+        assert result.output.split("\n")[:2] == ["Yuli", "myakove"]
+        mock_client.dashboard_submitters.assert_called_once_with()
+
+    def test_results_submitters_json(self, mock_client):
+        mock_client.dashboard_submitters.return_value = ["Yuli"]
+        result = runner.invoke(app, ["results", "submitters", "--json"])
+        assert result.exit_code == 0
+        assert json.loads(result.output) == ["Yuli"]
+
+    def test_dashboard_submitted_by_alone_uses_filtered_endpoint(self, mock_client):
+        """--submitted-by alone must flip use_filtered, not hit /api/dashboard."""
+
+        def handler(request):
+            assert request.url.path == "/api/dashboard/filtered"
+            assert request.url.params.get_list("submitted_by") == ["Yuli"]
+            return httpx.Response(200, json={"jobs": [], "total": 0})
+
+        real_client = make_test_client(handler)
+        with patch("rootcoz.cli.main._get_client", return_value=real_client):
+            result = runner.invoke(
+                app, ["results", "dashboard", "--submitted-by", "Yuli"]
+            )
+        assert result.exit_code == 0
+        mock_client.dashboard.assert_not_called()
+
+    def test_dashboard_submitted_by_repeatable(self, mock_client):
+        def handler(request):
+            assert request.url.params.get_list("submitted_by") == ["Yuli", "mya"]
+            return httpx.Response(200, json={"jobs": [], "total": 0})
+
+        real_client = make_test_client(handler)
+        with patch("rootcoz.cli.main._get_client", return_value=real_client):
+            result = runner.invoke(
+                app,
+                [
+                    "results",
+                    "dashboard",
+                    "--submitted-by",
+                    "Yuli",
+                    "--submitted-by",
+                    "mya",
+                ],
+            )
+        assert result.exit_code == 0
+
+    def test_dashboard_submitted_by_with_label_uses_filtered(self, mock_client):
+        mock_client.dashboard_filtered.return_value = {"jobs": [], "total": 0}
+        result = runner.invoke(
+            app,
+            [
+                "results",
+                "dashboard",
+                "--submitted-by",
+                "Yuli",
+                "--label",
+                "nightly",
+            ],
+        )
+        assert result.exit_code == 0
+        mock_client.dashboard.assert_not_called()
+        mock_client.dashboard_filtered.assert_called_once_with(
+            labels=["nightly"],
+            exclude_labels=None,
+            search="",
+            review_status="all",
+            analysis_state="",
+            submitted_by=["Yuli"],
+            limit=500,
+        )
+
+
 class TestDashboardCommand:
     def test_dashboard_default(self, mock_client):
         mock_client.dashboard.return_value = [
@@ -875,6 +951,7 @@ class TestDashboardCommand:
             search="",
             review_status="all",
             analysis_state="",
+            submitted_by=None,
             limit=500,
         )
         assert "pr-check-job" in result.output
@@ -912,6 +989,7 @@ class TestDashboardCommand:
             search="",
             review_status="all",
             analysis_state="",
+            submitted_by=None,
             limit=500,
         )
         assert "unit-test-job" in result.output

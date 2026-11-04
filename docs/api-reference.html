@@ -665,7 +665,13 @@
 <td>GET</td>
 <td><code>/api/dashboard/filtered</code></td>
 <td>viewer</td>
-<td><code>search</code>, <code>status</code>, <code>date_from</code>, <code>date_to</code>, <code>review_status</code>, <code>analysis_state</code>, <code>limit</code>, <code>offset</code>, plus metadata filters <code>team</code>, <code>tier</code>, <code>version</code>, <code>label</code>, <code>exclude_label</code> (each repeatable)</td>
+<td><code>search</code>, <code>status</code>, <code>date_from</code>, <code>date_to</code>, <code>review_status</code>, <code>analysis_state</code>, <code>limit</code>, <code>offset</code>, plus metadata filters <code>team</code>, <code>tier</code>, <code>version</code>, <code>label</code>, <code>exclude_label</code> (each repeatable). <code>submitted_by</code> (repeatable) is also accepted: each value is trimmed and matched as a <strong>case-insensitive substring</strong> on the original submitter (<code>yuva</code> matches <code>yuval</code> and <code>yuvalb</code>), values OR together, and blanks are dropped. At most 50 values of 64 chars each (<code>400</code> above either limit); no values means no filter. Matching is case-insensitive for ASCII only — SQLite's <code>lower()</code> does not fold non-ASCII names, which then match case-sensitively</td>
+</tr>
+<tr>
+<td>GET</td>
+<td><code>/api/dashboard/submitters</code></td>
+<td>viewer</td>
+<td>none; returns <code>{"submitters": ["alice", ...]}</code> — the distinct names shown on the dashboard, sorted, deduped case-insensitively on the same ASCII rule, blank and over-64-char values dropped. Viewers already receive <code>submitted_by</code> on every dashboard row, so this endpoint discloses nothing new</td>
 </tr>
 <tr>
 <td>GET</td>

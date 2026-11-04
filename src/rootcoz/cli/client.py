@@ -726,6 +726,7 @@ class RootCozClient:
         date_to: str = "",
         review_status: str = "all",
         analysis_state: str = "",
+        submitted_by: list[str] | None = None,
         limit: int = 500,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -751,11 +752,21 @@ class RootCozClient:
             params["review_status"] = review_status
         if analysis_state:
             params["analysis_state"] = analysis_state
+        if submitted_by:
+            params["submitted_by"] = submitted_by
         if limit != 500:
             params["limit"] = limit
         if offset:
             params["offset"] = offset
         return self._request("GET", "/api/dashboard/filtered", params=params)
+
+    def dashboard_submitters(self) -> list[str]:
+        """List submitted_by names shown on the dashboard.
+
+        GET /api/dashboard/submitters
+        """
+        data = self._request("GET", "/api/dashboard/submitters")
+        return data.get("submitters", []) if isinstance(data, dict) else []
 
     def get_active_count(self) -> dict[str, Any]:
         """Get count of currently active analyses. GET /api/dashboard/active-count"""

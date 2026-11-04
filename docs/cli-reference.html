@@ -580,8 +580,13 @@
 </tr>
 <tr>
 <td><code>dashboard</code></td>
-<td><code>--label</code>/<code>-l</code> (repeatable), <code>--exclude-tag</code> (repeatable), <code>--search</code>/<code>-s</code>, <code>--review-status</code> (<code>all</code>, <code>reviewed</code>, <code>not_reviewed</code>), <code>--analysis-state</code>, <code>--limit</code> (500)</td>
-<td>Jobs with failure counts and review progress.</td>
+<td><code>--label</code>/<code>-l</code> (repeatable), <code>--exclude-tag</code> (repeatable), <code>--submitted-by</code> (repeatable, substring match), <code>--search</code>/<code>-s</code>, <code>--review-status</code> (<code>all</code>, <code>reviewed</code>, <code>not_reviewed</code>), <code>--analysis-state</code>, <code>--limit</code> (500)</td>
+<td>Jobs with failure counts and review progress. <code>--submitted-by</code> matches the original submitter as a case-insensitive (ASCII) substring, e.g. <code>--submitted-by yuva</code> finds both <code>yuval</code> and <code>yuvalb</code>.</td>
+</tr>
+<tr>
+<td><code>submitters</code></td>
+<td><code>--json</code></td>
+<td>Submitter names shown on the dashboard, one per line (sorted, deduped case-insensitively).</td>
 </tr>
 <tr>
 <td><code>show JOB_ID</code></td>

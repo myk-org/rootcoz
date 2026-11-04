@@ -719,12 +719,16 @@ def results_list(
 _EXCLUDE_TAG_OPTION = typer.Option(
     [], "--exclude-tag", help="Exclude results with this tag (can repeat)."
 )
+_SUBMITTED_BY_OPTION = typer.Option(
+    [], "--submitted-by", help="Filter by submitter (can repeat, substring match)."
+)
 
 
 @results_app.command("dashboard")
 def dashboard(
     label: list[str] = _LABEL_FILTER_OPTION,
     exclude_tag: list[str] = _EXCLUDE_TAG_OPTION,
+    submitted_by: list[str] = _SUBMITTED_BY_OPTION,
     search: str = typer.Option("", "--search", "-s", help="Search job name or ID."),
     review_status: str = typer.Option(
         "all", "--review-status", help="Filter: all, reviewed, not_reviewed."
@@ -741,6 +745,7 @@ def dashboard(
     use_filtered = bool(
         label
         or exclude_tag
+        or submitted_by
         or search
         or review_status != "all"
         or analysis_state
@@ -755,6 +760,7 @@ def dashboard(
                 search=search,
                 review_status=review_status,
                 analysis_state=analysis_state,
+                submitted_by=submitted_by or None,
                 limit=limit,
             )
             # dashboard_filtered returns {jobs, total}
@@ -878,6 +884,21 @@ def results_incomplete(
         lambda c: c.list_incomplete_analyses(limit=limit),
         columns=["job_id", "job_name", "build_number", "incomplete_count"],
     )
+
+
+@results_app.command("submitters")
+def results_submitters(
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """List submitter names shown on the dashboard."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.dashboard_submitters(),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        for name in data:
+            typer.echo(name)
 
 
 @results_app.command("delete")

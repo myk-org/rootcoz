@@ -120,7 +120,8 @@ Related lifecycle commands:
 | Command | Flags | Purpose |
 | --- | --- | --- |
 | `list` | `--limit`/`-l` (50), `--analysis-state` | Recent jobs. Without `--analysis-state`, both `submitted` and `analyzed` jobs are returned; pass `--analysis-state analyzed` to restrict it. |
-| `dashboard` | `--label`/`-l` (repeatable), `--exclude-tag` (repeatable), `--search`/`-s`, `--review-status` (`all`, `reviewed`, `not_reviewed`), `--analysis-state`, `--limit` (500) | Jobs with failure counts and review progress. |
+| `dashboard` | `--label`/`-l` (repeatable), `--exclude-tag` (repeatable), `--submitted-by` (repeatable, substring match), `--search`/`-s`, `--review-status` (`all`, `reviewed`, `not_reviewed`), `--analysis-state`, `--limit` (500) | Jobs with failure counts and review progress. `--submitted-by` matches the original submitter as a case-insensitive (ASCII) substring, e.g. `--submitted-by yuva` finds both `yuval` and `yuvalb`. |
+| `submitters` | `--json` | Submitter names shown on the dashboard, one per line (sorted, deduped case-insensitively). |
 | `show JOB_ID` | `--full`/`-f`, `--fields` | Summary by default, full JSON with `--full`, or a sparse projection with `--fields`. |
 | `fields` | — | Print the allowlist of field paths accepted by `--fields`. |
 | `incomplete` | `--limit` (100, min 1, server caps at 500) | Jobs with failures that have no usable classification: job, build, and the count. `--json` also carries `test_names`. |
