@@ -10,7 +10,14 @@ import secrets
 import sqlite3
 import time
 import uuid
-from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Sequence
+from collections.abc import (
+    AsyncIterator,
+    Awaitable,
+    Callable,
+    Collection,
+    Iterator,
+    Sequence,
+)
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -3235,6 +3242,24 @@ async def list_results(
         return [with_build_url_aliases(dict(row)) for row in rows]
 
 
+def _iter_all_failures(result_data: dict[str, Any]) -> Iterator[Any]:
+    """Yield every failure across ``failures``, children and nested children.
+
+    Top-level failures first, then ``child_job_analyses`` depth-first through
+    ``failed_children``. Items are yielded as stored — callers type-check.
+    """
+    yield from result_data.get("failures") or []
+
+    def _walk_children(children: Any) -> Iterator[Any]:
+        for child in children if isinstance(children, list) else []:
+            if not isinstance(child, dict):
+                continue
+            yield from child.get("failures") or []
+            yield from _walk_children(child.get("failed_children"))
+
+    yield from _walk_children(result_data.get("child_job_analyses"))
+
+
 def count_all_failures(result_data: dict[str, Any]) -> int:
     """Count all failures including those in nested child job analyses.
 
@@ -3248,28 +3273,37 @@ def count_all_failures(result_data: dict[str, Any]) -> int:
     Returns:
         Total number of failures across all levels.
     """
-    count = len(result_data.get("failures", []))
-    for child in result_data.get("child_job_analyses", []):
-        count += _count_child_failures_recursive(child)
-    return count
+    return sum(1 for _ in _iter_all_failures(result_data))
 
 
-def _count_child_failures_recursive(child: dict[str, Any]) -> int:
-    """Recursively count failures in a child job analysis dict.
+def incomplete_failures(result_data: dict[str, Any]) -> list[str]:
+    """Return test names of failures that have no usable classification.
 
-    Each child has a ``failures`` list and a ``failed_children`` list that can
-    nest arbitrarily deep.
+    A failure is incomplete when the engine recorded ``analysis_error`` (the
+    AI answer carried nothing classifiable) or when ``analysis.classification``
+    is empty. Legacy results stored the analysis as plain text, which carries
+    no classification either. The count is ``len()`` of this list — callers
+    must not re-implement the predicate.
 
     Args:
-        child: A single child job analysis dictionary.
+        result_data: Parsed result dictionary from result_json.
 
     Returns:
-        Total number of failures for this child and its descendants.
+        Test names across ``failures``, ``child_job_analyses`` and nested
+        ``failed_children``.
     """
-    count = len(child.get("failures", []))
-    for nested in child.get("failed_children", []):
-        count += _count_child_failures_recursive(nested)
-    return count
+    names: list[str] = []
+    for failure in _iter_all_failures(result_data):
+        if not isinstance(failure, dict):
+            continue
+        analysis = failure.get("analysis")
+        classification = (
+            analysis.get("classification") if isinstance(analysis, dict) else ""
+        )
+        has_error = bool(str(failure.get("analysis_error") or "").strip())
+        if has_error or not str(classification or "").strip():
+            names.append(str(failure.get("test_name", "")))
+    return names
 
 
 def _resolve_history_build_fields(result_data: dict[str, Any]) -> tuple[str, int]:
@@ -4521,6 +4555,9 @@ def _parse_dashboard_row(row: aiosqlite.Row) -> dict[str, Any]:
         if result_data.get("build_id"):
             entry["build_id"] = result_data["build_id"]
         entry["failure_count"] = count_all_failures(result_data)
+        incomplete_count = len(incomplete_failures(result_data))
+        if incomplete_count:
+            entry["incomplete_count"] = incomplete_count
         child_jobs = result_data.get("child_job_analyses", [])
         if child_jobs:
             entry["child_job_count"] = len(child_jobs)
@@ -4594,6 +4631,52 @@ async def list_results_for_dashboard(
         cursor = await db.execute(sql, params)
         rows = await cursor.fetchall()
         return [_parse_dashboard_row(row) for row in rows]
+
+
+async def list_incomplete_analyses(limit: int = 100) -> list[dict[str, Any]]:
+    """List jobs holding failures with no usable classification.
+
+    Newest first. Only rows whose stored result actually contains such a
+    failure are returned, so ``limit`` counts matching jobs rather than
+    scanned rows.
+
+    Args:
+        limit: Maximum number of matching jobs to return.  ``0`` means no
+            limit.
+
+    Returns:
+        Dicts with ``job_id``, ``job_name``, ``build_number``,
+        ``incomplete_count``, and the ``test_names`` still unclassified.
+    """
+    if limit < 0:
+        raise ValueError("limit must be >= 0")
+
+    jobs: list[dict[str, Any]] = []
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT job_id, result_json FROM results "
+            "WHERE result_json IS NOT NULL ORDER BY created_at DESC"
+        )
+        async for row in cursor:
+            result_data = parse_result_json(row["result_json"], job_id=row["job_id"])
+            if not result_data:
+                continue
+            test_names = incomplete_failures(result_data)
+            if not test_names:
+                continue
+            jobs.append(
+                {
+                    "job_id": row["job_id"],
+                    "job_name": result_data.get("job_name", ""),
+                    "build_number": result_data.get("build_number", 0),
+                    "build_id": result_data.get("build_id", ""),
+                    "incomplete_count": len(test_names),
+                    "test_names": test_names,
+                }
+            )
+            if limit and len(jobs) >= limit:
+                break
+    return jobs
 
 
 async def list_results_for_dashboard_filtered(

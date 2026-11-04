@@ -625,6 +625,33 @@ function ReportContent() {
         </div>
       ) : null}
 
+      {/* ---- Unclassified failures banner ---- */}
+      {(result.incomplete_count ?? 0) > 0 && (
+        <div
+          role="status"
+          data-testid="incomplete-analysis-banner"
+          className="rounded-lg border border-border-muted bg-background-offset p-4 animate-slide-up"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-text-tertiary">
+              {result.incomplete_count} failure(s) have no usable analysis — the model returned nothing that could be classified. Re-analyze to classify them.
+            </p>
+            {isOperator && result.request_params && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="gap-1.5 text-xs"
+                onClick={() => dispatch({ type: 'SET_RE_ANALYZE_OPEN', payload: true })}
+                disabled={result.status === 'running' || result.status === 'pending' || result.status === 'waiting'}
+              >
+                <RotateCw className="h-3.5 w-3.5" />
+                {submitted ? 'Analyze' : 'Re-Analyze'}
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* ---- Zero-failure banner ---- */}
       {totalFailures === 0 && result.status === 'completed' && !submitted && !result.failed_analysis_groups && (
         <div className="rounded-lg border-l-4 border-l-signal-green bg-signal-green/5 p-4 animate-slide-up">

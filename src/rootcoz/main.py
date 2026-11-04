@@ -284,6 +284,7 @@ from rootcoz.storage import (
     get_effective_classification,
     get_history_classification,
     get_result,
+    incomplete_failures,
     init_db,
     list_distinct_job_names,
     list_results,
@@ -6649,6 +6650,20 @@ async def list_result_fields() -> dict[str, Any]:
     return {"fields": sorted(RESULT_FIELD_PATHS)}
 
 
+@app.get("/api/results/incomplete", operation_id="listIncompleteAnalyses")
+async def api_incomplete_analyses(
+    limit: int = Query(
+        default=100, ge=0, description="Max jobs to return (0 = no limit)"
+    ),
+) -> list[dict[str, Any]]:
+    """List jobs whose stored failures have no usable classification (viewer+).
+
+    Read-only: identifies analyses that were never classified (or whose AI
+    answer carried nothing classifiable) so they can be re-analyzed.
+    """
+    return await storage.list_incomplete_analyses(limit=limit)
+
+
 @app.get("/results/{job_id}", response_model=None, operation_id="getJobResult")
 async def get_job_result(
     request: Request,
@@ -6699,6 +6714,12 @@ async def get_job_result(
             await _attach_token_usage(job_id, result["result"])
     _attach_result_links(result, _extract_base_url(), job_id)
     await _attach_origin_job_info(result)
+    # Count failures with no usable classification so the report can flag
+    # analyses that were never actually classified (computed after overrides).
+    if isinstance(result.get("result"), dict):
+        result["result"]["incomplete_count"] = len(
+            incomplete_failures(result["result"])
+        )
     # Attach tracked-in data per failure
     result["tracked_in"] = await storage.get_tracked_in_for_job(job_id)
     settings = get_settings()

@@ -252,6 +252,7 @@ rootcoz<span class="w"> </span>override-pattern<span class="w"> </span>JOB_ID<sp
 <li>Triage the report header before you open individual failures.</li>
 </ol>
 <p>The header shows total failures, review progress, and the AI used for the run. If peer analysis was enabled, the <code>Peer Analysis</code> summary near the top also shows how many debates reached <code>Consensus</code> and how many did not.</p>
+<p>If a banner reads <code>N failure(s) have no usable analysis</code>, at least one failure was stored without a classification. An answer is only accepted as an analysis when it names <code>CODE ISSUE</code>, <code>PRODUCT BUG</code>, or <code>INFRASTRUCTURE</code>; a reply that only narrates the failure is retried, and when the retries carry no classification either the failure is stored as <em>analysis incomplete</em> with the reason in <code>analysis_error</code>. The model's narration is never used as the diagnosis, so these failures have nothing to review — <code>Re-Analyze</code> in the banner re-runs the job and classifies them, and it needs <code>operator</code> or <code>admin</code>. The same count travels as <code>result.incomplete_count</code> (see <a href="api-reference.html">API Endpoint Reference</a>), on dashboard rows, and in <code>rootcoz results incomplete</code> (see <a href="cli-reference.html">CLI Command Reference</a>).</p>
 <ol>
 <li>Expand one failure card and confirm the scope.</li>
 </ol>
@@ -320,6 +321,10 @@ rootcoz<span class="w"> </span>override-pattern<span class="w"> </span>JOB_ID<sp
 <li>
 <p><code>I can open the report but my changes are rejected.</code><br>
   Changing the root cause or pattern needs <code>reviewer</code> access or above (<code>Reviewer access required. Viewers cannot perform this action.</code>), and re-analysis needs <code>operator</code> or <code>admin</code> (<code>Operator access required.</code>).</p>
+</li>
+<li>
+<p><code>The report shows "N failure(s) have no usable analysis".</code><br>
+  The model answered without a classification, so RootCoz stored the failure as analysis incomplete instead of treating its narration as a diagnosis. Use <code>Re-Analyze</code> to re-run the job, or <code>rootcoz results incomplete</code> to list every job in that state.</p>
 </li>
 <li>
 <p><code>My change affected several tests.</code><br>

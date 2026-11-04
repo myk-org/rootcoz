@@ -248,6 +248,41 @@ class TestResultsCommands:
         assert "result.summary" in result.output
         mock_client.list_result_fields.assert_called_once()
 
+    def test_results_incomplete(self, mock_client):
+        mock_client.list_incomplete_analyses.return_value = [
+            {
+                "job_id": "abc-123",
+                "job_name": "example",
+                "build_number": 7,
+                "incomplete_count": 2,
+                "test_names": ["t1", "t2"],
+            }
+        ]
+        result = runner.invoke(app, ["results", "incomplete", "--limit", "10"])
+        assert result.exit_code == 0
+        assert "abc-123" in result.output
+        assert "example" in result.output
+        assert "2" in result.output
+        mock_client.list_incomplete_analyses.assert_called_once_with(limit=10)
+
+    def test_results_incomplete_json_includes_test_names(self, mock_client):
+        mock_client.list_incomplete_analyses.return_value = [
+            {
+                "job_id": "abc-123",
+                "job_name": "example",
+                "build_number": 7,
+                "incomplete_count": 2,
+                "test_names": ["t1", "t2"],
+            }
+        ]
+        result = runner.invoke(app, ["--json", "results", "incomplete"])
+        assert result.exit_code == 0
+        rows = json.loads(result.output)
+        assert rows[0]["job_id"] == "abc-123"
+        assert rows[0]["incomplete_count"] == 2
+        assert rows[0]["test_names"] == ["t1", "t2"]
+        mock_client.list_incomplete_analyses.assert_called_once_with(limit=100)
+
     def test_results_delete(self, mock_client):
         mock_client.delete_job.return_value = {"status": "deleted", "job_id": "abc-123"}
         result = runner.invoke(app, ["results", "delete", "abc-123"])

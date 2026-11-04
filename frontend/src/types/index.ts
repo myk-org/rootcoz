@@ -228,6 +228,8 @@ export interface AnalysisResult {
   analysis_state?: 'submitted' | 'analyzed'
   analyzed_by?: string
   analyzed_at?: string
+  /** Failures with no usable classification (empty classification or analysis_error). */
+  incomplete_count?: number
 }
 
 // -- Dashboard ------------------------------------------------------
@@ -258,6 +260,8 @@ export interface DashboardJob {
   skipped_count?: number
   failed_count?: number
   analysis_state?: 'submitted' | 'analyzed'
+  /** Failures with no usable classification. */
+  incomplete_count?: number
 }
 
 export interface TestEntry {

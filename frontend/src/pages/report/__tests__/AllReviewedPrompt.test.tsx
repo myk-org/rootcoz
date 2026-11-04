@@ -660,7 +660,10 @@ describe('AllReviewedPrompt', () => {
     mockPost.mockResolvedValueOnce({
       pushed: 0,
       total: 2,
-      unmatched: ['test-a', 'test-b'],
+      unmatched: [
+        'test-a (classification: UNKNOWN)',
+        'test-b (classification: UNKNOWN)',
+      ],
       errors: [],
       launch_id: null,
     })
@@ -681,10 +684,50 @@ describe('AllReviewedPrompt', () => {
     await waitFor(() => {
       expect(screen.getByRole('alert')).toBeDefined()
     })
-    expect(screen.getByRole('alert').textContent).toContain(
-      '2 test(s) could not be matched to Report Portal items',
+    const alert = screen.getByRole('alert')
+    expect(alert.textContent).toContain(
+      '2 test(s) have no classification to map to a Report Portal defect type',
     )
+    // Nothing was pushed: the split is stated rather than left implicit
+    expect(alert.textContent).toContain('Pushed 0 · skipped 2')
+    // The old copy blamed Report Portal matching for an analysis problem
+    expect(alert.textContent).not.toContain('could not be matched')
+    // The offending entries (they name the classification) on a second line
+    expect(screen.getByText(/test-a \(classification: UNKNOWN\)/)).toBeDefined()
     expect(screen.getByText('All failures reviewed. Update Report Portal?')).toBeDefined()
+  })
+
+  it('shows the pushed/skipped split for a partial push', async () => {
+    mockPost.mockResolvedValueOnce({
+      pushed: 3,
+      total: 4,
+      unmatched: ['test-c (classification: UNKNOWN)'],
+      errors: [],
+      launch_id: 7,
+    })
+
+    renderPrompt({
+      additionalReviews: {
+        'test-a': makeReview(true),
+        'test-b': makeReview(true),
+      },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('All failures reviewed. Update Report Portal?')).toBeDefined()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toBeDefined()
+    })
+    const alert = screen.getByRole('alert')
+    expect(alert.textContent).toContain('Pushed 3 · skipped 1')
+    expect(alert.textContent).toContain(
+      '1 test(s) have no classification to map to a Report Portal defect type',
+    )
+    expect(alert.textContent).not.toContain('could not be matched')
   })
 
   it('retries only the failed scope/exporter combinations', async () => {

@@ -30,6 +30,8 @@ Use this when you already know the job ID and test name and only need to confirm
 
    The header shows total failures, review progress, and the AI used for the run. If peer analysis was enabled, the `Peer Analysis` summary near the top also shows how many debates reached `Consensus` and how many did not.
 
+   If a banner reads `N failure(s) have no usable analysis`, at least one failure was stored without a classification. An answer is only accepted as an analysis when it names `CODE ISSUE`, `PRODUCT BUG`, or `INFRASTRUCTURE`; a reply that only narrates the failure is retried, and when the retries carry no classification either the failure is stored as *analysis incomplete* with the reason in `analysis_error`. The model's narration is never used as the diagnosis, so these failures have nothing to review — `Re-Analyze` in the banner re-runs the job and classifies them, and it needs `operator` or `admin`. The same count travels as `result.incomplete_count` (see [API Endpoint Reference](api-reference.html)), on dashboard rows, and in `rootcoz results incomplete` (see [CLI Command Reference](cli-reference.html)).
+
 3. Expand one failure card and confirm the scope.
 
    A card can represent one failing test or several tests with the same error. When a group contains more than one test, RootCoz shows `Affected Tests` and gives you a group-level `Review All` button.
@@ -86,6 +88,9 @@ The `AI Spend` section of the report page attributes what the job spent: a break
 ## Troubleshooting
 - `I can open the report but my changes are rejected.`  
   Changing the root cause or pattern needs `reviewer` access or above (`Reviewer access required. Viewers cannot perform this action.`), and re-analysis needs `operator` or `admin` (`Operator access required.`).
+
+- `The report shows "N failure(s) have no usable analysis".`  
+  The model answered without a classification, so RootCoz stored the failure as analysis incomplete instead of treating its narration as a diagnosis. Use `Re-Analyze` to re-run the job, or `rootcoz results incomplete` to list every job in that state.
 
 - `My change affected several tests.`  
   That card represents a same-error group. RootCoz applies classification and pattern changes across the whole group, so confirm the `Affected Tests` list before you save.

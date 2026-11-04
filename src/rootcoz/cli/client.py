@@ -777,6 +777,16 @@ class RootCozClient:
         """List allowlisted sparse field paths. GET /api/results/fields"""
         return self._request("GET", "/api/results/fields")
 
+    def list_incomplete_analyses(self, limit: int = 100) -> list[dict[str, Any]]:
+        """List jobs with failures that have no usable classification.
+
+        GET /api/results/incomplete
+        """
+        params: dict[str, Any] | None = None
+        if limit != 100:
+            params = {"limit": limit}
+        return self._request("GET", "/api/results/incomplete", params=params)
+
     def set_tracked_in(
         self,
         job_id: str,

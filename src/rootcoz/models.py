@@ -584,6 +584,14 @@ class FailureAnalysis(BaseModel):
         ),
     )
     analysis: AnalysisDetail = Field(description="Structured AI analysis output")
+    analysis_error: str = Field(
+        default="",
+        description=(
+            "Why this failure has no real analysis (e.g. the AI returned no "
+            "usable classification). Empty on analysed failures; non-empty marks "
+            "the row analysis-incomplete and re-analysable."
+        ),
+    )
     error_signature: str = Field(
         default="",
         description=(
@@ -1275,7 +1283,11 @@ class ReportPortalPushResult(BaseModel):
     pushed: int = Field(description="Number of items successfully updated")
     unmatched: list[str] = Field(
         default_factory=list,
-        description="RP item names that could not be matched to rootcoz failures or mapped to a defect type",
+        description=(
+            "Items whose classification maps to no RP defect type, as "
+            "'<item name> (classification: <value>)'. They are still pushed "
+            "with the neutral TO_INVESTIGATE defect type."
+        ),
     )
     errors: list[str] = Field(
         default_factory=list,

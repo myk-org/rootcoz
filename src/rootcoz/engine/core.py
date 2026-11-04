@@ -49,7 +49,11 @@ from rootcoz.models import (
     ProductBugReport,
 )
 from rootcoz.repository import RepositoryManager
-from rootcoz.storage import update_clone_progress, update_progress_phase
+from rootcoz.storage import (
+    PRIMARY_CLASSIFICATIONS,
+    update_clone_progress,
+    update_progress_phase,
+)
 from rootcoz.token_tracking import failure_group_usage
 
 _log_file = get_log_file()
@@ -991,7 +995,7 @@ def extract_json_dict(raw_text: str) -> dict[str, Any] | None:
     return None
 
 
-def parse_json_response(raw_text: str) -> AnalysisDetail:
+def parse_json_response(raw_text: str) -> AnalysisDetail | None:
     """Parse AI JSON response into an AnalysisDetail.
 
     Attempts to extract a JSON object from the AI response text.
@@ -1002,27 +1006,60 @@ def parse_json_response(raw_text: str) -> AnalysisDetail:
     1. Try parsing the raw text directly as JSON
     2. Try extracting JSON from brace-matching ({...})
     3. Try extracting from markdown code blocks
-    4. Fallback: store raw text in details, then attempt recovery
+    4. Fallback: regex/markdown recovery from the raw text
+
+    A reply is only an analysis when it names a classification from the
+    taxonomy (``PRIMARY_CLASSIFICATIONS``). Narration without a final answer is
+    not one: it used to be wrapped into ``details`` and stored as a successful
+    analysis, which is how an empty classification reached the exporters.
 
     Args:
         raw_text: The raw text output from the AI.
 
     Returns:
-        An AnalysisDetail instance parsed from the JSON, or a
-        fallback instance with the raw text stored in details.
+        An AnalysisDetail parsed from the JSON, or None when the answer carries
+        no usable classification.
     """
     data = extract_json_dict(raw_text)
     if data is not None:
         try:
-            return AnalysisDetail(**data)
+            parsed = AnalysisDetail(**data)
         except (ValueError, TypeError) as exc:
             logger.warning(
                 "AI JSON validated as object but failed schema parsing: %s", exc
             )
+        else:
+            classification = _usable_classification(parsed.classification)
+            if classification:
+                return parsed.model_copy(update={"classification": classification})
+            logger.warning(
+                "AI JSON answer has no usable classification (%r); not an analysis",
+                parsed.classification,
+            )
 
-    # Fallback: store raw text in details, then attempt recovery
-    fallback = AnalysisDetail(details=raw_text)
-    return recover_from_details(fallback)
+    # Regex/markdown recovery for an answer that did not parse as JSON
+    recovered = recover_from_details(AnalysisDetail(details=raw_text))
+    classification = _usable_classification(recovered.classification)
+    if classification:
+        return recovered.model_copy(update={"classification": classification})
+    return None
+
+
+_USABLE_CLASSIFICATIONS = frozenset(PRIMARY_CLASSIFICATIONS)
+
+
+class AnalysisIncompleteError(RuntimeError):
+    """The AI answered, but without a usable classification.
+
+    Distinct from a provider failure: the tests stay reviewable and the group
+    can be re-analysed, but there is no diagnosis to store.
+    """
+
+
+def _usable_classification(value: str) -> str:
+    """Return the canonical taxonomy classification, or ``""`` if unusable."""
+    normalized = " ".join((value or "").split()).upper()
+    return normalized if normalized in _USABLE_CLASSIFICATIONS else ""
 
 
 def _decode_recovered_json_string(value: str) -> str:
@@ -1088,12 +1125,18 @@ def recover_from_details(result: AnalysisDetail) -> AnalysisDetail:
 
     details = result.details
     if not details:
+        logger.warning("Cannot recover a classification: the AI answer is empty")
         return result
 
     # Try markdown classification recovery (e.g. "**Classification: INFRASTRUCTURE**")
     if '"classification"' not in details:
         md_match = re.search(r"\*\*Classification:\s*([A-Z][A-Z _]+?)\*\*", details)
         if not md_match:
+            logger.warning(
+                "Cannot recover a classification from the AI answer: no JSON "
+                "field and no '**Classification: X**' marker in %d chars of text",
+                len(details),
+            )
             return result
         # Found markdown classification — extract what we can
         classification = md_match.group(1).strip()
@@ -1120,6 +1163,10 @@ def recover_from_details(result: AnalysisDetail) -> AnalysisDetail:
     # Extract classification
     class_match = re.search(r'"classification"\s*:\s*"([^"]+)"', details)
     if not class_match:
+        logger.warning(
+            "Cannot recover a classification from the AI answer: the JSON "
+            "'classification' field is missing or truncated"
+        )
         return result
 
     classification = class_match.group(1)
@@ -1754,6 +1801,7 @@ async def _call_ai_with_retry(
     call_type: str = "primary",
     system_prompt: str = "",
     repos: dict[str, Path] | None = None,
+    require_usable_analysis: bool = False,
 ) -> AIResult:
     """Call AI with retry on empty response and record usage.
 
@@ -1772,6 +1820,8 @@ async def _call_ai_with_retry(
         auth_header: Bearer token for history tools.
         call_type: Token usage call type label.
         system_prompt: Optional system prompt (e.g. agent file body).
+        require_usable_analysis: Treat an answer without a taxonomy
+            classification exactly like an empty one -- retry it.
 
     Returns:
         The AIResult from the AI call.
@@ -1879,7 +1929,27 @@ async def _call_ai_with_retry(
             continue
 
         if not _is_empty_ai_text(result):
-            break
+            if (
+                not require_usable_analysis
+                or parse_json_response(result.text) is not None
+            ):
+                break
+            # Narration without a final answer is not an analysis: retry it.
+            # Truncated here (the log boundary) so a runaway answer stays readable.
+            logger.warning(
+                "AI answer has no usable classification (attempt=%d/%d) "
+                "provider=%s, model=%s, call_type=%s, job_id=%s; raw text: %s",
+                attempt,
+                max_attempts,
+                ai_provider,
+                ai_model,
+                call_type,
+                job_id,
+                result.text[:2000],
+            )
+            if attempt >= max_attempts:
+                break
+            continue
 
         logger.debug(
             "AI returned empty response (attempt=%d/%d), provider=%s, "
@@ -2100,20 +2170,27 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
                 auth_header=auth_header,
                 call_type="primary",
                 system_prompt=system_prompt,
+                require_usable_analysis=True,
             )
 
         if not result.success:
             raise RuntimeError(
                 "AI call failed. Check provider credentials and try again."
             )
-        parsed: AnalysisDetail | None = None
         if _is_empty_ai_text(result):
             raise RuntimeError("AI returned empty response after retry.")
-        elif result.success:
-            parsed = parse_json_response(result.text)
+        parsed = parse_json_response(result.text)
         if parsed is None:
-            parsed = AnalysisDetail(details=result.text)
-
+            logger.error(
+                "AI analysis incomplete: no usable classification for job=%s "
+                "(text_length=%d); see the raw text logged by the retry loop",
+                job_id,
+                len(result.text),
+            )
+            raise AnalysisIncompleteError(
+                "AI analysis incomplete: response has no usable classification; "
+                "re-analyze the job"
+            )
         return parsed, error_signature
     finally:
         # Clean up temp console dir if created
@@ -2596,9 +2673,13 @@ def _parse_cross_failure_response(
 
 
 def _failed_group_analyses(
-    signature: str, failures: list[FailedTest]
+    signature: str, failures: list[FailedTest], analysis_error: str = ""
 ) -> list[FailureAnalysis]:
-    """Keep failed tests visible without exposing the provider error as analysis."""
+    """Keep failed tests visible without exposing the provider error as analysis.
+
+    ``analysis_error`` marks a group whose answer carried no usable analysis
+    (e.g. narration only) so the row is reviewable and re-analysable.
+    """
     return [
         FailureAnalysis(
             test_name=f.test_name,
@@ -2606,6 +2687,7 @@ def _failed_group_analyses(
             stack_trace=f.stack_trace,
             error_signature=get_legacy_signature(f),
             error_signature_v2=signature,
+            analysis_error=analysis_error,
             analysis=AnalysisDetail(
                 details="Analysis failed; check server logs for details"
             ),
@@ -2810,7 +2892,19 @@ async def run_orchestrated_analysis(
                     type(result).__name__,
                     safe_exception_frames(result),
                 )
-                all_analyses.extend(_failed_group_analyses(sig, failures))
+                # Only our own message: a provider error may echo a credential
+                # and must never be persisted into the result.
+                all_analyses.extend(
+                    _failed_group_analyses(
+                        sig,
+                        failures,
+                        analysis_error=(
+                            str(result)
+                            if isinstance(result, AnalysisIncompleteError)
+                            else ""
+                        ),
+                    )
+                )
                 continue
             all_analyses.extend(result)
             if result:

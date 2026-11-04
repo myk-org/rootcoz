@@ -77,6 +77,8 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    Click `Push to Report Portal` in the report header, confirm, and RootCoz matches the job to its Report Portal launch, updates the matching test items, and reports how many classifications were pushed, plus any unmatched items and errors.
 
+   A failure whose classification is empty or unknown is not dropped from the push: it has no defect type to map to, so it is pushed with the neutral `TO INVESTIGATE` defect type and listed under `unmatched` as `<item name> (classification: <value>)` — `<value>` is `none` when the classification is empty. `unmatched` therefore names only the classifications that map to no Report Portal defect type, not items that failed to match the launch, and it does not shrink the batch. The report phrases it the same way: `N test(s) have no classification to map to a Report Portal defect type`, with a `Pushed N · skipped M` split when the counts differ, where `M` is the number pushed without a mapped defect type.
+
    You can also check what is available before pushing:
 
    ```bash
@@ -176,7 +178,7 @@ For raw endpoints, see [API Endpoint Reference](api-reference.html) for details.
   Exporter pushes need `operator` or `admin`. Reviewers can create and link issues, but not push.
 
 - The push reports unmatched items.  
-  RootCoz matched the launch but could not pair some failures with Report Portal test items. Check the reported item names against the launch, and confirm the job name and build number match the Report Portal launch.
+  Those failures have no classification (or an unknown one) to map to a Report Portal defect type. They were still pushed with `TO INVESTIGATE`; the entry names the classification it could not map. Re-analyze the job to classify them and push again. If the item names themselves look out of place for the launch, confirm the job name and build number match the Report Portal launch.
 
 ## Related Pages
 

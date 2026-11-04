@@ -123,6 +123,7 @@ Related lifecycle commands:
 | `dashboard` | `--label`/`-l` (repeatable), `--exclude-tag` (repeatable), `--search`/`-s`, `--review-status` (`all`, `reviewed`, `not_reviewed`), `--analysis-state`, `--limit` (500) | Jobs with failure counts and review progress. |
 | `show JOB_ID` | `--full`/`-f`, `--fields` | Summary by default, full JSON with `--full`, or a sparse projection with `--fields`. |
 | `fields` | — | Print the allowlist of field paths accepted by `--fields`. |
+| `incomplete` | `--limit` (100, `0` = no limit) | Jobs with failures that have no usable classification: job, build, and the count. `--json` also carries `test_names`. |
 | `tests JOB_ID` | `--status`/`-s` (`passed`, `skipped`, `failed`, repeatable), `--child-job`, `--child-build`, `--offset` (0), `--limit` (50, max 200) | Paginated test entries with `total` and `has_more`. |
 | `full JOB_ID` | `--status`/`-s`, `--child-job`, `--child-build`, `--offset` (0), `--limit` (50, max 200) — all scope the `tests` section | Complete job data in one call: failures with review state and effective classifications, summary, tests page, comments, tracked-in links. |
 | `review-status JOB_ID` | — | Failure, reviewed, and comment counts. |
@@ -132,7 +133,7 @@ Related lifecycle commands:
 | `enrich-comments JOB_ID` | — | Refresh live PR and ticket status on comments. |
 | `delete [JOB_ID ...]` | `--all`, `--confirm` | Delete jobs and related data. `--all` requires `--confirm`. |
 
-Sparse field paths include `result.summary`, `result.failed_count`, `result.failures.test_name`, `result.failures.classification`, and `result.failures.details`. Unknown paths are rejected with HTTP 400, so run `rootcoz results fields` first.
+Sparse field paths include `result.summary`, `result.failed_count`, `result.failures.test_name`, `result.failures.classification`, `result.failures.details`, and `result.incomplete_count`. Unknown paths are rejected with HTTP 400, so run `rootcoz results fields` first.
 
 > **Note:** Pass `--child-job` before `--child-build`. The CLI validates the pair and rejects a build number with no job name, because the client drops `child_build_number` when `--child-job` is absent — an unpaired `--child-build` would otherwise be applied unscoped and silently. `results set-tracked-in` is included in that validation.
 

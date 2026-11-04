@@ -698,6 +698,9 @@ class ReportPortalClient(Exporter):
 
         Returns:
             Dict with keys: ``pushed``, ``unmatched``, ``errors``, ``launch_id``.
+            ``unmatched`` lists items whose classification maps to no RP defect
+            type; they are still pushed with the neutral ``TO_INVESTIGATE``
+            locator, and each entry names that classification.
         """
         if not matched_pairs:
             return {
@@ -745,17 +748,17 @@ class ReportPortalClient(Exporter):
             hist_cls = history.get(failure.test_name)
             locator = self._map_classification(ai_classification, hist_cls, locators)
 
-            if push_classifications:
-                if not locator:
-                    unmatched.append(item_name)
-                    continue
-                issue_type = locator
-            else:
-                # RP API requires issueType; use TO_INVESTIGATE as neutral default
-                issue_type = (
-                    locators.get("TO_INVESTIGATE")
-                    or _DEFAULT_LOCATORS["TO_INVESTIGATE"]
+            # RP API requires issueType; TO_INVESTIGATE is the neutral default
+            # for push_classifications=False and for an unmappable classification
+            # (such a test must still reach the launch, not be dropped).
+            to_investigate = (
+                locators.get("TO_INVESTIGATE") or _DEFAULT_LOCATORS["TO_INVESTIGATE"]
+            )
+            if push_classifications and not locator:
+                unmatched.append(
+                    f"{item_name} (classification: {ai_classification or 'none'})"
                 )
+            issue_type = (locator if push_classifications else None) or to_investigate
 
             # Build issue update payload (RP API uses camelCase)
             issue_payload: dict[str, Any] = {

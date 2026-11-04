@@ -865,6 +865,19 @@ def results_fields(
             typer.echo(field)
 
 
+@results_app.command("incomplete")
+def results_incomplete(
+    limit: int = typer.Option(100, "--limit", help="Max jobs to list (0 = no limit)."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """List jobs with failures that have no usable classification."""
+    _run_client_command(
+        json_output,
+        lambda c: c.list_incomplete_analyses(limit=limit),
+        columns=["job_id", "job_name", "build_number", "incomplete_count"],
+    )
+
+
 @results_app.command("delete")
 def results_delete(
     job_ids: list[str] | None = _JOB_IDS_ARGUMENT,

@@ -24,7 +24,7 @@ async def test_console_only_usage_attaches_to_each_child_build(temp_db_path) -> 
         build = _child_context.get()
         return AIResult(
             success=True,
-            text='{"details": "diagnosed"}',
+            text='{"classification": "INFRASTRUCTURE", "details": "diagnosed"}',
             usage=AITokenUsage(input_tokens=7 if build == ("leaf", 7) else 11),
         )
 

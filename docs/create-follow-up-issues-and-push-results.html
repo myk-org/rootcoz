@@ -295,6 +295,7 @@ rootcoz<span class="w"> </span>push<span class="w"> </span>JOB_ID<span class="w"
 <li>Push reviewed classifications to Report Portal.</li>
 </ol>
 <p>Click <code>Push to Report Portal</code> in the report header, confirm, and RootCoz matches the job to its Report Portal launch, updates the matching test items, and reports how many classifications were pushed, plus any unmatched items and errors.</p>
+<p>A failure whose classification is empty or unknown is not dropped from the push: it has no defect type to map to, so it is pushed with the neutral <code>TO INVESTIGATE</code> defect type and listed under <code>unmatched</code> as <code>&lt;item name&gt; (classification: &lt;value&gt;)</code> — <code>&lt;value&gt;</code> is <code>none</code> when the classification is empty. <code>unmatched</code> therefore names only the classifications that map to no Report Portal defect type, not items that failed to match the launch, and it does not shrink the batch. The report phrases it the same way: <code>N test(s) have no classification to map to a Report Portal defect type</code>, with a <code>Pushed N · skipped M</code> split when the counts differ, where <code>M</code> is the number pushed without a mapped defect type.</p>
 <p>You can also check what is available before pushing:</p>
 <p><code>bash
    rootcoz exporters</code></p>
@@ -409,7 +410,7 @@ rootcoz<span class="w"> </span>push<span class="w"> </span>JOB_ID<span class="w"
 </li>
 <li>
 <p>The push reports unmatched items.<br>
-  RootCoz matched the launch but could not pair some failures with Report Portal test items. Check the reported item names against the launch, and confirm the job name and build number match the Report Portal launch.</p>
+  Those failures have no classification (or an unknown one) to map to a Report Portal defect type. They were still pushed with <code>TO INVESTIGATE</code>; the entry names the classification it could not map. Re-analyze the job to classify them and push again. If the item names themselves look out of place for the launch, confirm the job name and build number match the Report Portal launch.</p>
 </li>
 </ul>
 <h2 id="related-pages">Related Pages</h2>

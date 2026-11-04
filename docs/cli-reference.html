@@ -594,6 +594,11 @@
 <td>Print the allowlist of field paths accepted by <code>--fields</code>.</td>
 </tr>
 <tr>
+<td><code>incomplete</code></td>
+<td><code>--limit</code> (100, <code>0</code> = no limit)</td>
+<td>Jobs with failures that have no usable classification: job, build, and the count. <code>--json</code> also carries <code>test_names</code>.</td>
+</tr>
+<tr>
 <td><code>tests JOB_ID</code></td>
 <td><code>--status</code>/<code>-s</code> (<code>passed</code>, <code>skipped</code>, <code>failed</code>, repeatable), <code>--child-job</code>, <code>--child-build</code>, <code>--offset</code> (0), <code>--limit</code> (50, max 200)</td>
 <td>Paginated test entries with <code>total</code> and <code>has_more</code>.</td>
@@ -635,7 +640,7 @@
 </tr>
 </tbody>
 </table></div>
-<p>Sparse field paths include <code>result.summary</code>, <code>result.failed_count</code>, <code>result.failures.test_name</code>, <code>result.failures.classification</code>, and <code>result.failures.details</code>. Unknown paths are rejected with HTTP 400, so run <code>rootcoz results fields</code> first.</p>
+<p>Sparse field paths include <code>result.summary</code>, <code>result.failed_count</code>, <code>result.failures.test_name</code>, <code>result.failures.classification</code>, <code>result.failures.details</code>, and <code>result.incomplete_count</code>. Unknown paths are rejected with HTTP 400, so run <code>rootcoz results fields</code> first.</p>
 <blockquote>
 <p><strong>Note:</strong> Pass <code>--child-job</code> before <code>--child-build</code>. The CLI validates the pair and rejects a build number with no job name, because the client drops <code>child_build_number</code> when <code>--child-job</code> is absent — an unpaired <code>--child-build</code> would otherwise be applied unscoped and silently. <code>results set-tracked-in</code> is included in that validation.</p>
 </blockquote>

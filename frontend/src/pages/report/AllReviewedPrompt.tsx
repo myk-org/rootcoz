@@ -6,6 +6,7 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { useAuth } from '@/lib/auth'
 import { useReportState } from '@/pages/report/reportState'
 import { pushRejectionDetail } from '@/lib/pushGate'
+import { unmatchedFailure } from '@/lib/pushResult'
 
 interface AllReviewedPromptProps {
   jobId: string
@@ -16,6 +17,7 @@ interface PushResponse {
   success?: boolean
   message?: string
   errors?: string[]
+  pushed?: number
   unmatched?: string[]
 }
 
@@ -23,16 +25,18 @@ interface PushResponse {
  * Extract a user-facing failure detail from a push response, or null when
  * the push succeeded. Covers the generic exporter response
  * (`success`/`message`) and the Report Portal response (`errors`,
- * `unmatched` — a push with unmatched tests recorded nothing, mirroring
- * the ReportPortalButton noop semantics).
+ * `unmatched` — a test with no classification to map, mirroring the
+ * ReportPortalButton noop semantics).
  */
-function pushFailureDetail(res: unknown): string | null {
+function pushFailureDetail(
+  res: unknown,
+): { message: string; detail?: string } | null {
   if (!res || typeof res !== 'object') return null
   const r = res as PushResponse
-  if (r.success === false) return r.message || r.errors?.[0] || 'push failed'
-  if (r.errors && r.errors.length > 0) return r.errors[0]
+  if (r.success === false) return { message: r.message || r.errors?.[0] || 'push failed' }
+  if (r.errors && r.errors.length > 0) return { message: r.errors[0] }
   if (r.unmatched && r.unmatched.length > 0) {
-    return `${r.unmatched.length} test(s) could not be matched to Report Portal items`
+    return unmatchedFailure(r.pushed ?? 0, r.unmatched)
   }
   return null
 }
@@ -43,6 +47,9 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [pushing, setPushing] = useState(false)
   const [pushError, setPushError] = useState<string | null>(null)
+  // Muted second line under the error — the unmatched entries, which name the
+  // classification the backend could not map
+  const [pushErrorDetail, setPushErrorDetail] = useState<string | null>(null)
   // Push combinations (`exporter + scope query`) that already succeeded in
   // the current dialog session — a retry must only re-push the failed ones,
   // because Datadog events are created per POST.
@@ -111,6 +118,7 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
     setDialogOpen(false)
     setPushing(false)
     setPushError(null)
+    setPushErrorDetail(null)
     succeededRef.current = new Set()
     pushRunRef.current++
   }, [jobId])
@@ -118,13 +126,17 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
   const handleOpenChange = (open: boolean) => {
     setDialogOpen(open)
     // A closed dialog must not resurrect a stale error on reopen
-    if (!open) setPushError(null)
+    if (!open) {
+      setPushError(null)
+      setPushErrorDetail(null)
+    }
   }
 
   const handleConfirm = async () => {
     const runId = ++pushRunRef.current
     setPushing(true)
     setPushError(null)
+    setPushErrorDetail(null)
     try {
       // One push per scope (parent + each child job with failures) per
       // available exporter — child scopes carry child_job_name +
@@ -154,19 +166,25 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
       const settled = await Promise.allSettled(pushes.map((p) => p.promise))
       if (runId !== pushRunRef.current) return
       const failures: string[] = []
+      const details: string[] = []
       settled.forEach((outcome, i) => {
         const { key, label } = pushes[i]
         if (outcome.status === 'rejected') {
           failures.push(`${label}: ${pushRejectionDetail(outcome.reason)}`)
         } else {
           const detail = pushFailureDetail(outcome.value)
-          if (detail) failures.push(`${label}: ${detail}`)
-          else succeededRef.current.add(key)
+          if (detail) {
+            failures.push(`${label}: ${detail.message}`)
+            if (detail.detail) details.push(detail.detail)
+          } else {
+            succeededRef.current.add(key)
+          }
         }
       })
       if (failures.length > 0) {
         // Keep the dialog open so the user sees what failed
         setPushError(failures.join('; '))
+        setPushErrorDetail(details.length > 0 ? details.join('; ') : null)
       } else {
         setDialogOpen(false)
       }
@@ -196,6 +214,7 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
       onConfirm={handleConfirm}
       loading={pushing}
       error={pushError}
+      errorDetail={pushErrorDetail}
     />
   )
 }

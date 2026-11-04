@@ -990,6 +990,13 @@ async def analyze_failure_group_with_peers(
 
                 if rev_result.success:
                     revised = parse_json_response(rev_result.text)
+                    if revised is None:
+                        logger.warning(
+                            f"Revision round {round_num} returned no usable "
+                            "classification; keeping prior analysis"
+                        )
+                        parsed_analysis = previous_analysis
+                        continue
                     normalized_revised = _coerce_supported_classification(
                         revised.classification
                     )
