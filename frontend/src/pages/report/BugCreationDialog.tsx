@@ -3,6 +3,7 @@ import { api, extractApiDetail } from '@/lib/api'
 import { createIssueFailureMessage } from '@/lib/issueCreateError'
 import { IssueCreateError } from '@/components/shared/IssueCreateError'
 import { useSubmitGuard } from '@/lib/useSubmitGuard'
+import { reviewKey } from '@/lib/reviewKey'
 import {
   Dialog,
   DialogContent,
@@ -238,7 +239,9 @@ export function BugCreationDialog({
         // A lost response or an intermediary error is not proof that nothing was
         // filed: the server writes the tracked-in link in the same request. Adopt
         // a link that appeared meanwhile instead of resubmitting into a duplicate.
-        const filedUrl = await newTrackerLinkUrl(linksBefore)
+        // Without a snapshot we cannot tell a new link from an old one, so the
+        // retry stays available.
+        const filedUrl = linksBefore ? await newTrackerLinkUrl(linksBefore) : null
         if (filedUrl) {
           markCreated(filedUrl)
           return
@@ -263,25 +266,31 @@ export function BugCreationDialog({
     refreshEnrichments(jobId)
   }
 
-  /** Ids of the tracked-in links this dialog's tracker already had. */
-  async function trackerLinkIds(): Promise<Set<number>> {
-    const res = await api.get<{ tracked_in: Record<string, TrackedInEntry[]> }>(`/results/${jobId}/tracked-in`)
-    return new Set(linksForTarget(res.tracked_in).map((link) => link.id))
+  /** Ids of this failure's tracked-in links, or null when they cannot be read. */
+  async function trackerLinkIds(): Promise<Set<number> | null> {
+    try {
+      return new Set((await failureLinks()).map((link) => link.id))
+    } catch {
+      return null
+    }
   }
 
   /** The link a create added while it was reporting a failure, if there is one. */
   async function newTrackerLinkUrl(before: Set<number>): Promise<string | null> {
     try {
-      const res = await api.get<{ tracked_in: Record<string, TrackedInEntry[]> }>(`/results/${jobId}/tracked-in`)
-      return linksForTarget(res.tracked_in).find((link) => !before.has(link.id))?.tracked_in_url ?? null
+      return (await failureLinks()).find((link) => !before.has(link.id))?.tracked_in_url ?? null
     } catch {
       // Cannot tell — the retry stays available rather than claiming success.
       return null
     }
   }
 
-  function linksForTarget(trackedIn: Record<string, TrackedInEntry[]> | undefined): TrackedInEntry[] {
-    return Object.values(trackedIn ?? {}).flat().filter((link) => link.tracked_in_type === target)
+  /** This failure's links only: another test's link appearing while our POST
+   *  failed is not ours to report as a success. */
+  async function failureLinks(): Promise<TrackedInEntry[]> {
+    const res = await api.get<{ tracked_in: Record<string, TrackedInEntry[]> }>(`/results/${jobId}/tracked-in`)
+    const scoped = res.tracked_in?.[reviewKey(testName, childJobName, childBuildNumber)] ?? []
+    return scoped.filter((link) => link.tracked_in_type === target)
   }
 
   const isBusy = promptPhase === 'loading-prompt' || promptPhase === 'loading' || promptPhase === 'prompt' || promptPhase === 'preview' || promptPhase === 'creating'
