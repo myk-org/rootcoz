@@ -170,6 +170,21 @@ class TestFilterPresetsCRUD:
         )
         assert resp.status_code == 422
 
+    def test_dashboard_submitter_key_accepted(self, client):
+        """submitted_by is a dashboard filter, so both save paths accept it (#390)."""
+        cookies = _register(client, "alice")
+        resp = _create(client, cookies, filters={"submitted_by": ["yuval"]})
+        assert resp.status_code == 201, resp.text
+        preset_id = resp.json()["id"]
+
+        resp = client.put(
+            f"/api/user/filter-presets/{preset_id}",
+            json={"filters": {"submitted_by": ["yuval", "dana"]}},
+            cookies=cookies,
+        )
+        assert resp.status_code == 200, resp.text
+        assert resp.json()["filters"] == {"submitted_by": ["yuval", "dana"]}
+
     def test_empty_and_whitespace_name_422(self, client):
         cookies = _register(client, "alice")
         resp = _create(client, cookies, name="   ")

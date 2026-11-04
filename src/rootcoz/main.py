@@ -13628,6 +13628,7 @@ _FILTER_PRESET_KEYS: dict[str, set[str]] = {
         "status",
         "review_status",
         "analysis_state",
+        "submitted_by",
         "date_from",
         "date_to",
     },

@@ -13,14 +13,17 @@ describe('useDashboardSubmitters', () => {
     apiGet.mockReset()
   })
 
-  it('returns the names the endpoint sends, once each', async () => {
-    apiGet.mockResolvedValue({ submitters: ['Yuval', 'yuval', 'alice'] })
+  it('returns the names the endpoint sends, exactly as sent', async () => {
+    // The server folded with SQLite's ASCII-only lower(); folding again here in
+    // full-Unicode JS would drop a name it kept, and the picker could then never
+    // offer the dropped spelling.
+    apiGet.mockResolvedValue({ submitters: ['Änne', 'änne', 'alice'] })
 
     const { result } = renderHook(() => useDashboardSubmitters())
 
     await waitFor(() => expect(result.current.loading).toBe(false))
     expect(apiGet).toHaveBeenCalledWith('/api/dashboard/submitters')
-    expect(result.current.submitters).toEqual(['Yuval', 'alice'])
+    expect(result.current.submitters).toEqual(['Änne', 'änne', 'alice'])
   })
 
   it('settles on an empty list for an empty or failed response', async () => {

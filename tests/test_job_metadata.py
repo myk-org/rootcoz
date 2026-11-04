@@ -770,6 +770,27 @@ class TestDashboardSubmitterFilter:
             names = await storage.list_dashboard_submitters()
         assert names == ["avi", "Yuli"]
 
+    async def test_list_dashboard_submitters_reads_newest_rows_only(
+        self, setup_test_db
+    ) -> None:
+        """The enumeration is bounded, so a long history cannot scan on mount."""
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch.object(storage, "_SUBMITTER_SCAN_ROWS", 2),
+        ):
+            for job_id, submitted_by in [
+                ("job-old", "retired"),
+                ("job-mid", "yuval"),
+                ("job-new", "dana"),
+            ]:
+                await storage.save_result(
+                    job_id,
+                    status="completed",
+                    result={"request_params": {"submitted_by": submitted_by}},
+                )
+            names = await storage.list_dashboard_submitters()
+        assert names == ["dana", "yuval"]
+
 
 # --- Non-admin access tests ---
 

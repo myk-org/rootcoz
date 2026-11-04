@@ -15,16 +15,11 @@ export function useDashboardSubmitters(): { submitters: string[]; loading: boole
     api.get<{ submitters?: string[] }>('/api/dashboard/submitters')
       .then((data) => {
         if (cancelled) return
-        const names = Array.isArray(data?.submitters) ? data.submitters : []
-        // One option per name: the server dedupes case-insensitively, keep the
-        // first spelling if it ever repeats one.
-        const seen = new Set<string>()
-        setSubmitters(names.filter((name) => {
-          const key = name.toLowerCase()
-          if (seen.has(key)) return false
-          seen.add(key)
-          return true
-        }))
+        // No dedupe here: the server already collapsed names with SQLite's
+        // ASCII-only lower(), and folding again in JS (full Unicode) would drop
+        // a name the server deliberately kept — and the picker could then never
+        // offer it, since it treats a case-folded match as already listed.
+        setSubmitters(Array.isArray(data?.submitters) ? data.submitters : [])
         setLoading(false)
       })
       .catch(() => {

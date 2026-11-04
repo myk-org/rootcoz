@@ -3108,6 +3108,12 @@ _SUBMITTED_BY_RAW_SQL = (
 # Folding happens only in SQL: SQLite lower() is ASCII-only, so a Python lower()
 # would make a non-ASCII name unmatchable against its own rows.
 _SUBMITTED_BY_SQL = f"lower({_SUBMITTED_BY_RAW_SQL})"
+# The picker's name list is built from the newest rows only: a distinct over the
+# whole table scans every stored result JSON on each dashboard mount, while one
+# bounded rowid range costs the same for a small table and stays flat for a big
+# one. Older names remain matchable by typing them — the filter predicate runs on
+# every row, not on this window.
+_SUBMITTER_SCAN_ROWS = 5000
 
 
 def _submitted_by_predicate(values: set[str]) -> tuple[str, list[str]]:
@@ -4775,15 +4781,17 @@ async def list_dashboard_submitters() -> list[str]:
 
     Names are deduped on the SQL fold (so ``Yuli``/``yuli`` collapse to one
     option), blank and over-long values are dropped, and the result is sorted
-    case-insensitively.
+    case-insensitively. Only the newest ``_SUBMITTER_SCAN_ROWS`` rows are read.
     """
     async with _connect_db() as db:
         cursor = await db.execute(
-            f"SELECT MIN({_SUBMITTED_BY_RAW_SQL}) AS name "
-            f"FROM results r "
-            f"WHERE length({_SUBMITTED_BY_RAW_SQL}) BETWEEN 1 AND 64 "
-            f"GROUP BY {_SUBMITTED_BY_SQL} "
-            f"ORDER BY name COLLATE NOCASE"
+            f"SELECT MIN(name) AS name FROM ("
+            f"SELECT {_SUBMITTED_BY_RAW_SQL} AS name FROM results r "
+            f"WHERE r.rowid > (SELECT MAX(rowid) - ? FROM results)"
+            f") WHERE length(name) BETWEEN 1 AND 64 "
+            f"GROUP BY lower(name) "
+            f"ORDER BY name COLLATE NOCASE",
+            (_SUBMITTER_SCAN_ROWS,),
         )
         rows = await cursor.fetchall()
     return [row["name"] for row in rows]

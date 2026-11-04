@@ -173,19 +173,61 @@ describe('DashboardPage submitter filter', () => {
     apiGet.mockReset()
   })
 
-  it('lists the endpoint names once each, and picks one into the request', async () => {
-    mockApi(5, ['Yuval', 'yuval', 'alice'])
+  it('lists every endpoint name as an option, and picks one into the request', async () => {
+    mockApi(5, ['Yuval', 'alice'])
     renderPage()
     await waitFor(() => expect(requests.length).toBeGreaterThan(0))
 
     await searchSubmitter('yuva')
-    // Deduped case-insensitively, one option even though the server sent two.
     expect(screen.getAllByRole('option')).toHaveLength(2) // Yuval + Add "yuva"
     await userEvent.click(screen.getByRole('option', { name: 'Yuval' }))
 
     await waitFor(() => expect(requests.at(-1)?.getAll('submitted_by')).toEqual(['Yuval']))
     expect(await screen.findByText('2 analysis runs')).toBeInTheDocument()
     expect(screen.queryByText('job-1')).not.toBeInTheDocument()
+  })
+
+  it('keeps a comma-bearing name as one filter', async () => {
+    mockApi(5, ['Doe, Jane', 'alice'])
+    renderPage('/?submitted_by=Doe%2C%20Jane')
+
+    // One URL value stays one SQL filter: splitting on the comma would send
+    // `Doe` and ` Jane` and mix their jobs into the result.
+    await waitFor(() =>
+      expect(requests.at(-1)?.getAll('submitted_by')).toEqual(['Doe, Jane']),
+    )
+  })
+
+  it('folds a differently-cased shared link onto the enumerated name', async () => {
+    mockApi(5)
+    renderPage('/?submitted_by=ALICE')
+
+    // Matching is case-insensitive server-side, so ALICE and alice are one pick.
+    await waitFor(() => expect(requests.at(-1)?.getAll('submitted_by')).toEqual(['alice']))
+
+    await searchSubmitter('alice')
+    await userEvent.click(screen.getByRole('option', { name: 'alice' }))
+    // Toggling the option off, not adding a second chip beside the booking.
+    await waitFor(() => expect(requests.at(-1)?.get('submitted_by')).toBeNull())
+    expect(screen.queryByRole('button', { name: 'Remove alice' })).not.toBeInTheDocument()
+  })
+
+  it('drops values the server rejects instead of failing the whole load', async () => {
+    const long = 'x'.repeat(65)
+    const many = Array.from({ length: 51 }, (_, i) => `user-${i}`)
+    const query = [...many, long]
+      .map((value) => `submitted_by=${encodeURIComponent(value)}`)
+      .join('&')
+    mockApi(5)
+    renderPage(`/?${query}`)
+
+    // 50 values is the server's cap and 64 chars its per-value limit; sending
+    // them as-is would 400 the dashboard with a load error.
+    await waitFor(() => expect(requests.length).toBeGreaterThan(0))
+    const sent = requests.at(-1)?.getAll('submitted_by') ?? []
+    expect(sent).toHaveLength(50)
+    expect(sent).not.toContain(long)
+    await rows()
   })
 
   it('sends a typed partial that no option offers', async () => {
