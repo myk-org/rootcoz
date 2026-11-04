@@ -1069,6 +1069,49 @@ class TestGreenwaveExporterPush:
             call.args[1].endswith("/waivers/") for call in post.call_args_list
         )
 
+    def test_outage_does_not_block_mapped_failures_behind_unmapped_waivable(
+        self,
+    ):
+        """A waivable-but-UNMAPPED classification can never be waived.
+
+        The push loop skips it (no outcome mapping) before any waiver is
+        considered, so it must not make the outage fatal for the mapped,
+        non-waivable failures in the same push.
+        """
+        settings = _make_settings(
+            GREENWAVE_PUSH_WAIVERS="true",
+            GREENWAVE_WAIVER_URL=WAIVERDB_URL,
+            GREENWAVE_WAIVER_TOKEN="wdb-token",  # pragma: allowlist secret
+            GREENWAVE_PRODUCT_VERSION="el10",
+            GREENWAVE_WAIVABLE_CLASSIFICATIONS="INFRASTRUCTURE",
+            # Only PRODUCT BUG is mapped; INFRASTRUCTURE is deliberately absent.
+            GREENWAVE_OUTCOME_MAP="PRODUCT BUG:FAILED",
+        )
+        exporter = GreenwaveExporter(settings)
+        post = self._mock_post(
+            exporter,
+            [
+                _response({"uuid": "550e8400-e29b-41d4-a716-446655440000"}),
+                _response({"id": 101}),
+            ],
+        )
+        context = replace(
+            _make_context(
+                [
+                    _failure("test_infra", "INFRASTRUCTURE"),
+                    _failure("test_bug", "PRODUCT BUG"),
+                ],
+                subject_identifier="pkg-1.0-1.el10",
+            ),
+            reviews_unavailable=True,
+        )
+        result = _run_push(exporter, context)
+        assert result.success is True
+        assert result.details["pushed"] == 1  # the mapped PRODUCT BUG failure
+        assert not any(
+            call.args[1].endswith("/waivers/") for call in post.call_args_list
+        )
+
     def test_unavailable_reviewer_lookup_still_pushes_results_only(self):
         """Results are informational: they do not need reviewer identity."""
         exporter = GreenwaveExporter(_make_settings())

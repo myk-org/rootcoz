@@ -390,8 +390,13 @@ class GreenwaveExporter(Exporter):
         """
         return any(
             parsed is not None
-            and _effective_classification(parsed, context)
-            in self._waivable_classifications
+            and (classification := _effective_classification(parsed, context))
+            and classification in self._waivable_classifications
+            # The push loop skips a classification with no outcome mapping
+            # BEFORE it considers a waiver, so such a failure can never be
+            # waived — counting it here would block the mapped failures in the
+            # same push for nothing.
+            and classification in self._outcome_by_classification
             for parsed, _reason in (_coerce_failure(raw) for raw in context.failures)
         )
 
