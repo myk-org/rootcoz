@@ -1,6 +1,7 @@
 """Tests for SQLite storage."""
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from pathlib import Path
 from unittest.mock import patch
@@ -1420,6 +1421,197 @@ async def test_list_distinct_job_names(setup_test_db: Path):
         assert "" not in names
         # Duplicates should be deduplicated
         assert len([n for n in names if n == "pipeline-alpha"]) == 1
+
+
+class _PlanRecorder:
+    """Proxy an aiosqlite connection, recording the query plan of each SELECT."""
+
+    def __init__(self, db: aiosqlite.Connection, plans: list[tuple[str, list[str]]]):
+        self._db = db
+        self._plans = plans
+
+    async def execute(self, sql: str, params=()):
+        if sql.lstrip().upper().startswith("SELECT"):
+            cursor = await self._db.execute("EXPLAIN QUERY PLAN " + sql, params)
+            self._plans.append((sql, [row[-1] for row in await cursor.fetchall()]))
+        return await self._db.execute(sql, params)
+
+    def __getattr__(self, name: str):
+        return getattr(self._db, name)
+
+
+@asynccontextmanager
+async def _recording_connect(plans: list[tuple[str, list[str]]]):
+    """Drop-in replacement for ``storage._connect_db`` that collects plans."""
+    async with aiosqlite.connect(storage.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        yield _PlanRecorder(db, plans)
+
+
+def _plan_for(plans: list[tuple[str, list[str]]], marker: str) -> list[str]:
+    """Return the recorded plan for the first query containing *marker*."""
+    for sql, plan in plans:
+        if marker in sql:
+            return plan
+    raise AssertionError(f"no recorded query containing {marker!r}: {plans}")
+
+
+class TestDashboardQueryPlan:
+    """The dashboard page query must be index-served, not temp-B-tree sorted."""
+
+    async def _seed(self, db_path: Path, count: int = 400) -> None:
+        """Seed rows the way save_result writes them (job_name denormalized)."""
+        with patch.object(storage, "DB_PATH", db_path):
+            await storage.init_db()
+        async with aiosqlite.connect(db_path) as db:
+            await db.executemany(
+                "INSERT INTO results (job_id, build_url, status, result_json, job_name) "
+                "VALUES (?, '', 'completed', ?, ?)",
+                [
+                    (
+                        f"plan-{i}",
+                        json.dumps({"job_name": f"plan-job-{i % 20}", "failures": []}),
+                        f"plan-job-{i % 20}",
+                    )
+                    for i in range(count)
+                ],
+            )
+            await db.execute("ANALYZE")
+            await db.commit()
+
+    async def test_page_query_uses_created_at_index(self, setup_test_db: Path) -> None:
+        await self._seed(setup_test_db)
+        plans: list[tuple[str, list[str]]] = []
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch.object(storage, "_connect_db", lambda: _recording_connect(plans)),
+        ):
+            await storage.list_results_for_dashboard(limit=20, offset=0)
+
+        plan = _plan_for(plans, "ORDER BY r.created_at DESC")
+        assert any("idx_results_created_at" in step for step in plan), plan
+        assert not any("TEMP B-TREE" in step for step in plan), plan
+
+    async def test_job_name_include_filter_uses_job_name_index(
+        self, setup_test_db: Path
+    ) -> None:
+        await self._seed(setup_test_db)
+        plans: list[tuple[str, list[str]]] = []
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch.object(storage, "_connect_db", lambda: _recording_connect(plans)),
+        ):
+            await storage.list_results_for_dashboard_filtered(
+                job_names={"plan-job-1", "plan-job-2"}, limit=20
+            )
+
+        plan = _plan_for(plans, "WHERE r.job_name IN")
+        assert any("idx_results_job_name" in step for step in plan), plan
+
+    async def test_job_name_equality_uses_job_name_index(
+        self, setup_test_db: Path
+    ) -> None:
+        await self._seed(setup_test_db)
+        plans: list[tuple[str, list[str]]] = []
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch.object(storage, "_connect_db", lambda: _recording_connect(plans)),
+        ):
+            await storage.get_job_stats("plan-job-1")
+
+        plan = _plan_for(plans, "COUNT(DISTINCT job_id) FROM results")
+        assert any("idx_results_job_name" in step for step in plan), plan
+
+    async def test_substring_search_remains_a_scan(self, setup_test_db: Path) -> None:
+        """LIKE '%term%' cannot use the index — the search path stays a scan."""
+        await self._seed(setup_test_db)
+        plans: list[tuple[str, list[str]]] = []
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch.object(storage, "_connect_db", lambda: _recording_connect(plans)),
+        ):
+            await storage.list_results_for_dashboard_filtered(search="plan", limit=20)
+
+        plan = _plan_for(plans, "LIKE")
+        assert any(step.startswith("SCAN r") for step in plan), plan
+
+    async def test_offset_paging_is_deterministic_for_equal_created_at(
+        self, setup_test_db: Path
+    ) -> None:
+        """Rows sharing created_at tie-break on rowid, so OFFSET paging is stable."""
+        await self._seed(setup_test_db, count=12)
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            async with aiosqlite.connect(setup_test_db) as db:
+                await db.execute(
+                    "UPDATE results SET created_at = '2026-01-01 00:00:00'"
+                )
+                await db.commit()
+
+            pages = [
+                await storage.list_results_for_dashboard(limit=5, offset=offset)
+                for offset in (0, 5, 10)
+            ]
+            first_page_again = await storage.list_results_for_dashboard(
+                limit=5, offset=0
+            )
+
+        ids = [job["job_id"] for page in pages for job in page]
+        assert len(ids) == len(set(ids)) == 12
+        assert [job["job_id"] for job in first_page_again] == [
+            job["job_id"] for job in pages[0]
+        ]
+
+
+class TestDashboardJobNamePredicates:
+    """Job-name filters read the denormalized column, keeping the same sets."""
+
+    async def _seed(self, db_path: Path) -> None:
+        with patch.object(storage, "DB_PATH", db_path):
+            for job_id, job_name in [
+                ("job-ocp16", "ocp-4.16-e2e"),
+                ("job-ocp17", "ocp-4.17-e2e"),
+                ("job-storage", "storage-nightly"),
+                ("job-noname", ""),
+            ]:
+                await storage.save_result(
+                    job_id=job_id,
+                    jenkins_url="",
+                    status="completed",
+                    result={"job_name": job_name, "failures": []},
+                )
+
+    async def _job_ids(self, db_path: Path, **filters) -> set[str]:
+        with patch.object(storage, "DB_PATH", db_path):
+            result = await storage.list_results_for_dashboard_filtered(
+                limit=0, **filters
+            )
+        return {job["job_id"] for job in result["jobs"]}
+
+    async def test_search_matches_job_name_and_job_id(
+        self, setup_test_db: Path
+    ) -> None:
+        await self._seed(setup_test_db)
+        assert await self._job_ids(setup_test_db, search="ocp-4.1") == {
+            "job-ocp16",
+            "job-ocp17",
+        }
+        assert await self._job_ids(setup_test_db, search="job-storage") == {
+            "job-storage"
+        }
+
+    async def test_include_job_names(self, setup_test_db: Path) -> None:
+        await self._seed(setup_test_db)
+        assert await self._job_ids(
+            setup_test_db, job_names={"ocp-4.16-e2e", "storage-nightly"}
+        ) == {"job-ocp16", "job-storage"}
+
+    async def test_exclude_job_names_keeps_rows_without_a_job_name(
+        self, setup_test_db: Path
+    ) -> None:
+        await self._seed(setup_test_db)
+        assert await self._job_ids(
+            setup_test_db, exclude_job_names={"ocp-4.17-e2e"}
+        ) == {"job-ocp16", "job-storage", "job-noname"}
 
 
 class TestRBACMigration:
