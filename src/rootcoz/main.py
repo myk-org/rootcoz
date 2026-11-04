@@ -28,6 +28,7 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -232,6 +233,7 @@ from rootcoz.monitoring import (
     dispatch_alert,
     error_tracker,
     get_component_versions,
+    read_pvc_usage,
     record_audit_auth_suppression,
     record_audit_write_failure,
     render_prometheus_metrics,
@@ -12314,6 +12316,13 @@ async def admin_get_component_versions(request: Request) -> dict[str, Any]:
     return strip_sensitive_from_response({"components": await get_component_versions()})
 
 
+# Dedicated single-worker pool for the /metrics filesystem probe. A timeout cancels
+# the await, not the thread: a hung mount permanently parks this one probe thread, so
+# later scrapes each pay the 2 s timeout and abandoned work items accumulate in the dead
+# queue (~one small object per scrape) — but nothing else in the process is affected.
+_pvc_probe_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="pvc-probe")
+
+
 @app.get("/metrics", operation_id="prometheusMetrics")
 async def prometheus_metrics() -> Response:
     """Prometheus metrics endpoint."""
@@ -12339,11 +12348,27 @@ async def prometheus_metrics() -> Response:
     except Exception:
         logger.debug("Failed to compute active analyses for metrics", exc_info=True)
 
+    # Filesystem probe for the /data PVC. Never raises: a failing or timing-out
+    # probe leaves the gauges absent so the scrape still answers 200.
+    pvc_used_bytes: int | None = None
+    pvc_capacity_bytes: int | None = None
+    try:
+        async with asyncio.timeout(2):
+            pvc = await asyncio.get_running_loop().run_in_executor(
+                _pvc_probe_executor, read_pvc_usage, db_path
+            )
+        if pvc is not None:
+            pvc_used_bytes, pvc_capacity_bytes = pvc
+    except Exception:
+        logger.debug("Failed to read PVC usage for metrics", exc_info=True)
+
     return Response(
         content=render_prometheus_metrics(
             health_up=health_up,
             active_analyses=active_analyses,
             audit_write_failures=audit_health_check()["write_failures"],
+            pvc_used_bytes=pvc_used_bytes,
+            pvc_capacity_bytes=pvc_capacity_bytes,
         ),
         media_type="text/plain; version=0.0.4; charset=utf-8",
     )

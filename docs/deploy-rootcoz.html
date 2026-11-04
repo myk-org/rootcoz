@@ -426,6 +426,79 @@ helm<span class="w"> </span><span class="nb">test</span><span class="w"> </span>
 <li>If you changed external secrets out of band, follow with <code>kubectl rollout restart deployment/rootcoz -n rootcoz</code>.</li>
 <li>For first-login and first-analysis steps after the rollout, see <a href="quickstart.html">Quickstart</a>.</li>
 </ul>
+<h2 id="watch-disk-usage-and-alert-on-a-filling-volume">Watch disk usage and alert on a filling volume</h2>
+<p>RootCoz ships no alerting stack — the rule below is yours to install. What it does ship is the metric: <code>/metrics</code> exposes three unlabelled gauges for the filesystem backing the database directory, which is the <code>/data</code> PVC in every supported deployment (with <code>persistence.enabled=false</code> it measures the <code>emptyDir</code>'s node filesystem instead).</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Metric</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>rootcoz_pvc_used_bytes</code></td>
+<td>Bytes used on that filesystem</td>
+</tr>
+<tr>
+<td><code>rootcoz_pvc_capacity_bytes</code></td>
+<td>Capacity of that filesystem in bytes</td>
+</tr>
+<tr>
+<td><code>rootcoz_pvc_used_ratio</code></td>
+<td>Used / capacity (0-1), omitted when capacity is <code>0</code></td>
+</tr>
+</tbody>
+</table></div>
+<p>The probe is a single <code>statvfs</code> on the database's directory, so its cost does not grow with the number of files on the volume. When the probe fails the gauges are <strong>omitted for that scrape</strong> rather than reported as <code>0</code>, which is why an alert must use <code>absent()</code>/<code>&gt;=</code> on the ratio and never treat a missing series as an empty disk. The gauges carry no labels, so Prometheus adds <code>instance</code> and <code>job</code> for you.</p>
+<p>A complete <code>PrometheusRule</code> for a Prometheus that scrapes this server:</p>
+<div class="highlight"><pre><span></span><code><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">monitoring.coreos.com/v1</span>
+<span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">PrometheusRule</span>
+<span class="nt">metadata</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rootcoz-disk</span>
+<span class="nt">spec</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">groups</span><span class="p">:</span>
+<span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rootcoz.disk</span>
+<span class="w">      </span><span class="nt">rules</span><span class="p">:</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">alert</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">RootcozDataVolumeFilling</span>
+<span class="w">          </span><span class="nt">expr</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rootcoz_pvc_used_ratio &gt; 0.75</span>
+<span class="w">          </span><span class="nt">for</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">30m</span>
+<span class="w">          </span><span class="nt">labels</span><span class="p">:</span>
+<span class="w">            </span><span class="nt">severity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">warning</span>
+<span class="w">          </span><span class="nt">annotations</span><span class="p">:</span>
+<span class="w">            </span><span class="nt">summary</span><span class="p">:</span><span class="w"> </span><span class="s">"RootCoz</span><span class="nv"> </span><span class="s">/data</span><span class="nv"> </span><span class="s">is</span><span class="nv"> </span><span class="s">{{</span><span class="nv"> </span><span class="s">$value</span><span class="nv"> </span><span class="s">|</span><span class="nv"> </span><span class="s">humanizePercentage</span><span class="nv"> </span><span class="s">}}</span><span class="nv"> </span><span class="s">full"</span>
+<span class="w">            </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">"Clean</span><span class="nv"> </span><span class="s">up</span><span class="nv"> </span><span class="s">transcripts</span><span class="nv"> </span><span class="s">or</span><span class="nv"> </span><span class="s">grow</span><span class="nv"> </span><span class="s">the</span><span class="nv"> </span><span class="s">PVC;</span><span class="nv"> </span><span class="s">the</span><span class="nv"> </span><span class="s">SQLite</span><span class="nv"> </span><span class="s">database</span><span class="nv"> </span><span class="s">and</span><span class="nv"> </span><span class="s">pi-sidecar</span><span class="nv"> </span><span class="s">transcripts</span><span class="nv"> </span><span class="s">share</span><span class="nv"> </span><span class="s">this</span><span class="nv"> </span><span class="s">volume."</span>
+<span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">alert</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">RootcozDataVolumeFull</span>
+<span class="w">          </span><span class="nt">expr</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rootcoz_pvc_used_ratio &gt; 0.90</span>
+<span class="w">          </span><span class="nt">for</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5m</span>
+<span class="w">          </span><span class="nt">labels</span><span class="p">:</span>
+<span class="w">            </span><span class="nt">severity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">critical</span>
+<span class="w">          </span><span class="nt">annotations</span><span class="p">:</span>
+<span class="w">            </span><span class="nt">summary</span><span class="p">:</span><span class="w"> </span><span class="s">"RootCoz</span><span class="nv"> </span><span class="s">/data</span><span class="nv"> </span><span class="s">is</span><span class="nv"> </span><span class="s">{{</span><span class="nv"> </span><span class="s">$value</span><span class="nv"> </span><span class="s">|</span><span class="nv"> </span><span class="s">humanizePercentage</span><span class="nv"> </span><span class="s">}}</span><span class="nv"> </span><span class="s">full"</span>
+<span class="w">            </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">"Writes</span><span class="nv"> </span><span class="s">will</span><span class="nv"> </span><span class="s">start</span><span class="nv"> </span><span class="s">failing.</span><span class="nv"> </span><span class="s">Grow</span><span class="nv"> </span><span class="s">the</span><span class="nv"> </span><span class="s">PVC</span><span class="nv"> </span><span class="s">or</span><span class="nv"> </span><span class="s">delete</span><span class="nv"> </span><span class="s">transcripts</span><span class="nv"> </span><span class="s">now."</span>
+</code></pre></div>
+
+<p>If you also want to be told when the probe itself breaks, add one line: <code>absent_over_time(rootcoz_pvc_used_ratio[15m])</code> — a scrape target that has been up but has no ratio for 15 minutes has a probe that is failing every time.</p>
+<h3 id="the-chart-health-alert-cronjob-the-alternative-for-deployments-without-prometheus">The chart health-alert CronJob (the alternative for deployments without Prometheus)</h3>
+<p>For clusters that scrape nothing, the chart can run its own check: a CronJob that curls <code>/metrics</code> on a schedule and posts one Slack message listing every failing check (unhealthy, error rate above the threshold, <code>/data</code> above the warning or critical threshold with absolute sizes such as <code>5.4G / 6.0G (90%)</code>).</p>
+<div class="highlight"><pre><span></span><code><span class="nt">alerts</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<span class="w">  </span><span class="c1"># Adopt an existing cluster-only CronJob instead of creating a second one</span>
+<span class="w">  </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rootcoz-prod-health-alerts</span>
+<span class="w">  </span><span class="nt">envLabel</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">prod</span>
+<span class="w">  </span><span class="nt">schedule</span><span class="p">:</span><span class="w"> </span><span class="s">"*/5</span><span class="nv"> </span><span class="s">*</span><span class="nv"> </span><span class="s">*</span><span class="nv"> </span><span class="s">*</span><span class="nv"> </span><span class="s">*"</span>
+<span class="w">  </span><span class="nt">errorRatePercent</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5</span>
+<span class="w">  </span><span class="nt">diskWarnPercent</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">75</span>
+<span class="w">  </span><span class="nt">diskCritPercent</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">90</span>
+</code></pre></div>
+
+<p>The webhook is read from the release's credentials Secret under the key named by <code>alerts.slackSecretKey</code> (<code>SLACK_WEBHOOK_URL</code> by default). That key is optional: with it unset the job still schedules and prints the message into its own log instead of posting, so an alerting path that was never wired up stays quiet instead of crash-looping. <strong>A webhook saved in Server Settings does not reach this CronJob</strong> — the job runs outside the application and can only see the Secret, so the two must be configured separately.</p>
+<ul>
+<li><code>alerts.enabled</code> defaults to <code>false</code>; nothing renders unless you turn it on.</li>
+<li>Set <code>alerts.name</code> to the name of an existing CronJob to adopt it. Left empty, the chart creates <code>&lt;fullname&gt;-health-alerts</code>, which sits next to a cluster-only CronJob rather than replacing it.</li>
+<li>Pin <code>alerts.image</code> by digest for production. The default <code>curlimages/curl:8.12.1</code> is a tag, and the job runs with <code>automountServiceAccountToken: false</code> because it only needs to reach the application Service.</li>
+<li>Deploy the alert before or after the image that carries the PVC gauges: when the ratio line is absent the disk check is skipped silently, and the health and error-rate checks keep working.</li>
+</ul>
 <h2 id="troubleshooting">Troubleshooting</h2>
 <ul>
 <li>
@@ -498,6 +571,10 @@ helm<span class="w"> </span><span class="nb">test</span><span class="w"> </span>
 <li><a href="#install-on-kubernetes-with-tls-ingress">Install on Kubernetes with TLS Ingress</a></li>
 <li><a href="#run-a-private-clusterip-only-release-and-port-forward-it">Run a private ClusterIP-only release and port-forward it</a></li>
 <li><a href="#upgrade-and-smoke-test-a-helm-release">Upgrade and smoke-test a Helm release</a></li>
+<li><a href="#watch-disk-usage-and-alert-on-a-filling-volume">Watch disk usage and alert on a filling volume</a><ul>
+<li><a href="#the-chart-health-alert-cronjob-the-alternative-for-deployments-without-prometheus">The chart health-alert CronJob (the alternative for deployments without Prometheus)</a></li>
+</ul>
+</li>
 <li><a href="#troubleshooting">Troubleshooting</a></li>
 <li><a href="#related-pages">Related Pages</a></li>
 </ul>

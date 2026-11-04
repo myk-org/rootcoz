@@ -157,3 +157,31 @@ imageStream:
 # Helm test pod image (must include curl)
 tests:
   image: curlimages/curl:8.12.1
+
+# Health alert CronJob (optional): scrapes /metrics every `schedule` and posts
+# one Slack message per failing check. The script lives in
+# chart/files/health-alert.sh and is tested by tests/test_health_alert_script.py.
+alerts:
+  # Opt-in: enabling it creates the CronJob and its script ConfigMap.
+  enabled: false
+  # CronJob name override. Set it to adopt an existing cluster-only CronJob
+  # (e.g. rootcoz-prod-health-alerts) instead of creating a second one;
+  # empty means <fullname>-health-alerts.
+  name: ""
+  # Cron expression for the scrape
+  schedule: "*/5 * * * *"
+  # Label prefixed to every message; empty means <fullname>
+  envLabel: ""
+  # Metrics endpoint; empty means http://<fullname>:8000/metrics
+  metricsUrl: ""
+  # Must provide sh, awk and curl. Pin by digest for production deployments.
+  image: curlimages/curl:8.12.1
+  # Secret holding the Slack webhook; empty means the release credentials Secret
+  slackSecretName: ""
+  slackSecretKey: SLACK_WEBHOOK_URL  # pragma: allowlist secret
+  # Alert when the rolling-window error rate exceeds this percentage
+  errorRatePercent: 5
+  # /data volume usage warning threshold, in percent
+  diskWarnPercent: 75
+  # /data volume usage critical threshold, in percent
+  diskCritPercent: 90

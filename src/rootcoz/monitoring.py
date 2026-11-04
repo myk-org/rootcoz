@@ -195,6 +195,24 @@ async def check_db(db_path: str) -> dict[str, str]:
         return {"status": "error", "detail": str(exc)}
 
 
+def read_pvc_usage(db_path: str) -> tuple[int, int] | None:
+    """Return (used_bytes, capacity_bytes) for the filesystem backing db_path.
+
+    One statvfs on the directory that holds the database — the /data PVC in
+    every supported deployment. Never raises; returns None when the probe
+    fails so the caller can omit the gauges.
+    """
+    try:
+        usage = shutil.disk_usage(pathlib.Path(db_path).parent)
+    except OSError:
+        logger.debug("Failed to read PVC usage for %s", db_path, exc_info=True)
+        return None
+    logger.debug(
+        "PVC usage for %s: %d used of %d bytes", db_path, usage.used, usage.total
+    )
+    return (usage.used, usage.total)
+
+
 async def _check_http_service(
     url: str,
     *,
@@ -885,6 +903,8 @@ def render_prometheus_metrics(
     health_up: int | None = None,
     active_analyses: int | None = None,
     audit_write_failures: int | None = None,
+    pvc_used_bytes: int | None = None,
+    pvc_capacity_bytes: int | None = None,
 ) -> str:
     """Render metrics in Prometheus text exposition format.
 
@@ -895,6 +915,10 @@ def render_prometheus_metrics(
             analyses. When None the metric is omitted.
         audit_write_failures: Audit rows that could not be written since
             process start. When None the metric is omitted.
+        pvc_used_bytes: Bytes used on the filesystem backing the database
+            directory. When None the PVC gauges are omitted.
+        pvc_capacity_bytes: Capacity of that filesystem in bytes. When None
+            (or 0 for the ratio) the corresponding gauge is omitted.
 
     Returns a string ready to serve from /metrics.
     """
@@ -940,6 +964,31 @@ def render_prometheus_metrics(
         )
         lines.append("# TYPE rootcoz_audit_write_failures gauge")
         lines.append(f"rootcoz_audit_write_failures {audit_write_failures}")
+
+    if pvc_used_bytes is not None and pvc_capacity_bytes is not None:
+        lines.append(
+            "# HELP rootcoz_pvc_used_bytes Bytes used on the filesystem backing the "
+            "database directory — the /data PVC in supported deployments, not the node disk."
+        )
+        lines.append("# TYPE rootcoz_pvc_used_bytes gauge")
+        lines.append(f"rootcoz_pvc_used_bytes {pvc_used_bytes}")
+
+        lines.append(
+            "# HELP rootcoz_pvc_capacity_bytes Capacity of the filesystem backing the "
+            "database directory — the /data PVC in supported deployments, not the node disk."
+        )
+        lines.append("# TYPE rootcoz_pvc_capacity_bytes gauge")
+        lines.append(f"rootcoz_pvc_capacity_bytes {pvc_capacity_bytes}")
+
+        if pvc_capacity_bytes > 0:
+            lines.append(
+                "# HELP rootcoz_pvc_used_ratio Fraction of the filesystem backing the "
+                "database directory that is used (0-1)."
+            )
+            lines.append("# TYPE rootcoz_pvc_used_ratio gauge")
+            lines.append(
+                f"rootcoz_pvc_used_ratio {round(pvc_used_bytes / pvc_capacity_bytes, 4)}"
+            )
 
     lines.append("")
     return "\n".join(lines)

@@ -60,7 +60,7 @@ That single authenticated GET returns the stored analysis for one job, including
 | --- | --- | --- |
 | GET | `/health` | Liveness, returns immediately |
 | GET | `/api/health` | Detailed health including database and AI sidecar; returns 503 when the database or the sidecar (probed via its effective port) is unreachable. `checks.audit` reports `{status, write_failures}`: `degraded` once an audit row has failed to persist since process start |
-| GET | `/metrics` | Prometheus metrics, including `rootcoz_audit_write_failures` |
+| GET | `/metrics` | Prometheus metrics (text exposition format): `rootcoz_requests_total`, `rootcoz_errors_total`, `rootcoz_error_rate`, `rootcoz_errors_by_class`, `rootcoz_health_up`, `rootcoz_active_analyses`, `rootcoz_audit_write_failures`, and the unlabelled `rootcoz_pvc_used_bytes` / `rootcoz_pvc_capacity_bytes` / `rootcoz_pvc_used_ratio` for the filesystem backing the database directory (the `/data` PVC). The PVC gauges are **omitted when the filesystem probe fails**, never reported as `0`. The endpoint is unauthenticated, so the absolute used and capacity byte counts of the data volume are visible to anyone who can reach it — capacity numbers only, no content and no path label |
 | GET | `/api/releases/latest` | Proxies GitHub release metadata (version, changelog) plus `server_version` and `update_available` so clients can tell an update notice from a What's New popup |
 | GET | `/openapi.json`, `/docs`, `/redoc` | Schema and interactive API browsers |
 | POST | `/api/auth/register` | Create a user, returns the raw API key once |

@@ -221,6 +221,72 @@ This is the shortest safe path for normal Helm updates once your release is alre
 - If you changed external secrets out of band, follow with `kubectl rollout restart deployment/rootcoz -n rootcoz`.
 - For first-login and first-analysis steps after the rollout, see [Quickstart](quickstart.html).
 
+## Watch disk usage and alert on a filling volume
+
+RootCoz ships no alerting stack — the rule below is yours to install. What it does ship is the metric: `/metrics` exposes three unlabelled gauges for the filesystem backing the database directory, which is the `/data` PVC in every supported deployment (with `persistence.enabled=false` it measures the `emptyDir`'s node filesystem instead).
+
+| Metric | Meaning |
+| --- | --- |
+| `rootcoz_pvc_used_bytes` | Bytes used on that filesystem |
+| `rootcoz_pvc_capacity_bytes` | Capacity of that filesystem in bytes |
+| `rootcoz_pvc_used_ratio` | Used / capacity (0-1), omitted when capacity is `0` |
+
+The probe is a single `statvfs` on the database's directory, so its cost does not grow with the number of files on the volume. When the probe fails the gauges are **omitted for that scrape** rather than reported as `0`, which is why an alert must use `absent()`/`>=` on the ratio and never treat a missing series as an empty disk. The gauges carry no labels, so Prometheus adds `instance` and `job` for you.
+
+A complete `PrometheusRule` for a Prometheus that scrapes this server:
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: rootcoz-disk
+spec:
+  groups:
+    - name: rootcoz.disk
+      rules:
+        - alert: RootcozDataVolumeFilling
+          expr: rootcoz_pvc_used_ratio > 0.75
+          for: 30m
+          labels:
+            severity: warning
+          annotations:
+            summary: "RootCoz /data is {{ $value | humanizePercentage }} full"
+            description: "Clean up transcripts or grow the PVC; the SQLite database and pi-sidecar transcripts share this volume."
+        - alert: RootcozDataVolumeFull
+          expr: rootcoz_pvc_used_ratio > 0.90
+          for: 5m
+          labels:
+            severity: critical
+          annotations:
+            summary: "RootCoz /data is {{ $value | humanizePercentage }} full"
+            description: "Writes will start failing. Grow the PVC or delete transcripts now."
+```
+
+If you also want to be told when the probe itself breaks, add one line: `absent_over_time(rootcoz_pvc_used_ratio[15m])` — a scrape target that has been up but has no ratio for 15 minutes has a probe that is failing every time.
+
+### The chart health-alert CronJob (the alternative for deployments without Prometheus)
+
+For clusters that scrape nothing, the chart can run its own check: a CronJob that curls `/metrics` on a schedule and posts one Slack message listing every failing check (unhealthy, error rate above the threshold, `/data` above the warning or critical threshold with absolute sizes such as `5.4G / 6.0G (90%)`).
+
+```yaml
+alerts:
+  enabled: true
+  # Adopt an existing cluster-only CronJob instead of creating a second one
+  name: rootcoz-prod-health-alerts
+  envLabel: prod
+  schedule: "*/5 * * * *"
+  errorRatePercent: 5
+  diskWarnPercent: 75
+  diskCritPercent: 90
+```
+
+The webhook is read from the release's credentials Secret under the key named by `alerts.slackSecretKey` (`SLACK_WEBHOOK_URL` by default). That key is optional: with it unset the job still schedules and prints the message into its own log instead of posting, so an alerting path that was never wired up stays quiet instead of crash-looping. **A webhook saved in Server Settings does not reach this CronJob** — the job runs outside the application and can only see the Secret, so the two must be configured separately.
+
+- `alerts.enabled` defaults to `false`; nothing renders unless you turn it on.
+- Set `alerts.name` to the name of an existing CronJob to adopt it. Left empty, the chart creates `<fullname>-health-alerts`, which sits next to a cluster-only CronJob rather than replacing it.
+- Pin `alerts.image` by digest for production. The default `curlimages/curl:8.12.1` is a tag, and the job runs with `automountServiceAccountToken: false` because it only needs to reach the application Service.
+- Deploy the alert before or after the image that carries the PVC gauges: when the ratio line is absent the disk check is skipped silently, and the health and error-rate checks keep working.
+
 ## Troubleshooting
 
 - `route.enabled and ingress.enabled are mutually exclusive`

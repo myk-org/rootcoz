@@ -1,0 +1,73 @@
+{{- include "rootcoz.validate" . -}}
+{{- if .Values.alerts.enabled -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "rootcoz.fullname" . }}-health-alerts-script
+  labels:
+    {{- include "rootcoz.labels" . | nindent 4 }}
+data:
+  health-alert.sh: |
+{{ .Files.Get "files/health-alert.sh" | indent 4 }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ .Values.alerts.name | default (printf "%s-health-alerts" (include "rootcoz.fullname" .)) }}
+  labels:
+    {{- include "rootcoz.labels" . | nindent 4 }}
+spec:
+  schedule: {{ .Values.alerts.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 0
+      activeDeadlineSeconds: 60
+      template:
+        metadata:
+          labels:
+            {{- include "rootcoz.labels" . | nindent 12 }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "rootcoz.serviceAccountName" . }}
+          # The job only curls the application Service; it never calls the API
+          # server, so it is handed no cluster identity.
+          automountServiceAccountToken: false
+          securityContext:
+            {{- include "rootcoz.podSecurityContext" . | nindent 12 }}
+          containers:
+            - name: health-alert
+              image: {{ .Values.alerts.image | quote }}
+              securityContext:
+                {{- include "rootcoz.containerSecurityContext" . | nindent 16 }}
+              command: ["/bin/sh", "/scripts/health-alert.sh"]
+              env:
+                - name: METRICS_URL
+                  value: {{ .Values.alerts.metricsUrl | default (printf "http://%s:8000/metrics" (include "rootcoz.fullname" .)) | quote }}
+                - name: ENV_LABEL
+                  value: {{ .Values.alerts.envLabel | default (include "rootcoz.fullname" .) | quote }}
+                - name: ERROR_RATE_PERCENT
+                  value: {{ .Values.alerts.errorRatePercent | quote }}
+                - name: DISK_WARN_PERCENT
+                  value: {{ .Values.alerts.diskWarnPercent | quote }}
+                - name: DISK_CRIT_PERCENT
+                  value: {{ .Values.alerts.diskCritPercent | quote }}
+                - name: SLACK_WEBHOOK_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: {{ .Values.alerts.slackSecretName | default (include "rootcoz.credentialsSecretName" .) }}
+                      key: {{ .Values.alerts.slackSecretKey }}
+                      # Optional so the job still schedules (and logs) on a
+                      # deployment that never configured a webhook.
+                      optional: true
+              volumeMounts:
+                - name: script
+                  mountPath: /scripts
+                  readOnly: true
+          volumes:
+            - name: script
+              configMap:
+                name: {{ include "rootcoz.fullname" . }}-health-alerts-script
+{{- end }}

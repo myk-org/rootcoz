@@ -227,6 +227,42 @@ imageStream:
 
 When enabled, the deployment pulls from the internal registry ImageStream instead of GHCR directly.
 
+### Health alert CronJob
+
+An optional CronJob scrapes `/metrics` on a schedule and posts one Slack message listing every failing check: unhealthy (`rootcoz_health_up`), error rate above the threshold, and `/data` usage above the warning or critical threshold. The script lives in `chart/files/health-alert.sh` and is mounted from a ConfigMap, so the tested file is the deployed file.
+
+```yaml
+alerts:
+  enabled: true
+  name: rootcoz-prod-health-alerts  # adopt an existing cluster-only CronJob
+  envLabel: prod
+  schedule: "*/5 * * * *"
+  errorRatePercent: 5
+  diskWarnPercent: 75
+  diskCritPercent: 90
+```
+
+| Value | Default | Meaning |
+| --- | --- | --- |
+| `alerts.enabled` | `false` | Render the CronJob and its script ConfigMap |
+| `alerts.name` | `""` | CronJob name; empty means `<fullname>-health-alerts` |
+| `alerts.schedule` | `*/5 * * * *` | Cron expression |
+| `alerts.envLabel` | `""` | Message prefix; empty means `<fullname>` |
+| `alerts.metricsUrl` | `""` | Metrics URL; empty means `http://<fullname>:8000/metrics` |
+| `alerts.image` | `curlimages/curl:8.12.1` | Must provide `sh`, `awk` and `curl`; pin by digest for production |
+| `alerts.slackSecretName` | `""` | Secret holding the webhook; empty means the release credentials Secret |
+| `alerts.slackSecretKey` | `SLACK_WEBHOOK_URL` | Key inside that Secret |
+| `alerts.errorRatePercent` | `5` | Alert above this rolling-window error rate |
+| `alerts.diskWarnPercent` | `75` | `/data` warning threshold |
+| `alerts.diskCritPercent` | `90` | `/data` critical threshold |
+
+Things to know before turning it on:
+
+- **The webhook comes from the Secret, not from Server Settings.** `SLACK_WEBHOOK_URL` saved in the UI drives only the in-process alerts; the CronJob cannot read the database. Without the Secret key the job still schedules and prints the message into the job log — it never crash-loops, and it never posts.
+- **Naming.** The live `rootcoz-prod-health-alerts` / `rootcoz-dev-health-alerts` CronJobs predate this chart. Set `alerts.name` to the existing name to adopt it; leaving it empty creates `<fullname>-health-alerts` as a second CronJob.
+- **The disk check is the newest part.** When `/metrics` has no `rootcoz_pvc_used_ratio` (an image older than the gauges, or a failing filesystem probe) the disk check is skipped silently and the health and error-rate checks still run.
+- The job needs no cluster permissions: the pod sets `automountServiceAccountToken: false` and only curls the application Service.
+
 ## Validation
 
 ```bash
