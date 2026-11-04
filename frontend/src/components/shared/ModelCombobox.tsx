@@ -21,6 +21,8 @@ export interface ModelOption {
 interface ModelComboboxProps {
   value: string
   onChange: (value: string) => void
+  /** The value is final (pick, blur or Enter); onChange alone fires per keystroke. */
+  onCommit?: (value: string) => void
   options: ModelOption[]
   placeholder?: string
   className?: string
@@ -41,6 +43,7 @@ interface DropdownCoords {
 export function ModelCombobox({
   value,
   onChange,
+  onCommit,
   options,
   placeholder = 'Default model',
   className,
@@ -57,6 +60,12 @@ export function ModelCombobox({
   const inputRef = useRef<HTMLInputElement>(null)
   const listRef = useRef<HTMLUListElement>(null)
   const listboxId = useId()
+  // What a blur should commit: the user's latest intent. A pick or a keystroke knows
+  // it before React re-renders, and the blur fires before that render lands.
+  const committedValueRef = useRef(value)
+  useEffect(() => {
+    committedValueRef.current = value
+  }, [value])
   const hasDeniedServer = !canUseServer && options.some((model) => model.credential_sources?.includes('server') && !(canUseFree && model.free))
 
   // Fuzzy filter: case-insensitive substring match on id or name. When the
@@ -152,6 +161,7 @@ export function ModelCombobox({
 
   const selectModel = useCallback(
     (id: string) => {
+      committedValueRef.current = id
       onChange(id)
       setOpen(false)
       inputRef.current?.blur()
@@ -286,9 +296,11 @@ export function ModelCombobox({
           aria-describedby={hasDeniedServer ? `${listboxId}-server-help` : undefined}
           disabled={disabled}
           onChange={(e) => {
+            committedValueRef.current = e.target.value
             onChange(e.target.value)
             if (!open) setOpen(true)
           }}
+          onBlur={() => onCommit?.(committedValueRef.current)}
           onFocus={() => setOpen(true)}
           onClick={() => setOpen(true)}
           onKeyDown={handleKeyDown}

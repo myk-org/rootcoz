@@ -4,7 +4,7 @@ import { completeAiPairOverride } from '@/lib/analysisAi'
 import { getUsername } from '@/lib/cookies'
 import { useReportState, useReportDispatch } from '@/pages/report/reportState'
 import { reviewKey } from '@/lib/reviewKey'
-import { useAiSelection } from './useAiSelection'
+import { useAiSelection } from '@/lib/useAiSelection'
 
 /* ------------------------------------------------------------------ */
 /*  Hook                                                               */
@@ -20,7 +20,7 @@ interface UseReviewSuggestionOptions {
 export function useReviewSuggestion({ jobId, testName, childJobName, childBuildNumber }: UseReviewSuggestionOptions) {
   const { reviews } = useReportState()
   const dispatch = useReportDispatch()
-  // Report-scoped selection; empty = backend falls back to settings then the job's params.
+  // The user's remembered pair; empty = backend falls back to settings then the job's params.
   const { aiProvider, aiModel } = useAiSelection()
   const [showSuggestion, setShowSuggestion] = useState(false)
   const [loading, setLoading] = useState(false)

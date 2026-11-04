@@ -28,7 +28,7 @@ This asks the job's assistant for a cross-failure answer and leaves the evidence
 
 1. Open the result and start the chat.
 
-   From the report header, click `Chat`. The button is hidden for viewers, and the chat page opens at `/chat/{job_id}` for the job you came from. Pick a provider and model in the header, then click `Start Chat`. `Use server credentials` chooses whose AI key runs the session; the toggle is only available when your account may use server providers.
+   From the report header, click `Chat`. The button is hidden for viewers, and the chat page opens at `/chat/{job_id}` for the job you came from. The header preselects the provider and model you last used on this account — check they are the ones you want, or pick another pair — then click `Start Chat`. There is no reset to the analysed pair here: both fields are required to start, and a session you already started keeps the pair it was started with. `Use server credentials` chooses whose AI key runs the session; the toggle is only available when your account may use server providers.
 
    Starting a chat creates a per-user, per-job workspace and session. RootCoz clones the job's tests repo and any additional repositories, then copies CI build data into that workspace when the source provides it.
 

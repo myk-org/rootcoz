@@ -39,11 +39,11 @@ This confirms the CLI is using an admin identity, then asks a server-wide questi
 
 2. Choose how RootCoz should pick the model.
 
-   RootCoz can use the server default AI settings or a one-off override for the next question.
+   The header preselects the provider and model you last used on this account, so leaving it alone repeats your previous choice rather than the server default. To use a different pair, pick it — both a provider and a model are always required, because chat cannot start on an empty pair. A session that is already running keeps the pair it was started with, so its reply is always attributed to what it actually used.
 
    | If you want | Web UI | CLI |
    | --- | --- | --- |
-   | Use the server default | Leave the provider and model already loaded in the header. | Omit `--provider` and `--model`. |
+   | Use the pair already selected | It is loaded in the header — leave it. This is the pair you used last, not necessarily the server default. | Omit `--provider` and `--model`. |
    | Override for one question | Pick a different provider and model in the header before sending. | Add `--provider` and `--model` to `rootcoz admin-chat send`. |
    | Keep using the same override | Leave the header selection in place. | Repeat the same flags on the next `send` command. |
 

@@ -65,6 +65,7 @@ afterEach(() => {
   vi.useRealTimers()
   for (const id of liveTimers) rawClearTimeout(id)
   liveTimers.clear()
+  localStorage.clear()
   cleanup(); grant = true; act(() => resetProviderCatalogCache()); get.mockReset(); post.mockReset(); remove.mockReset()
 })
 
@@ -110,6 +111,24 @@ it('offers server models only with the grant, and pins the reported source in me
   await user.type(screen.getByPlaceholderText(/Ask a question/), 'hello')
   await user.click(screen.getByRole('button', { name: 'Send message' }))
   expect(post).toHaveBeenCalledWith('/api/chat/job', { message: 'hello', ai_provider: 'claude', ai_model: 'sonnet' })
+})
+
+it('opens on the remembered pair and offers no server-default reset', async () => {
+  setup()
+  localStorage.setItem('rootcoz_last_ai_pair:alice', JSON.stringify({ provider: 'claude', model: 'sonnet' }))
+  const user = userEvent.setup()
+  // The job analysed with openai/gpt; the user last chose claude/sonnet.
+  render(page('openai', 'gpt'))
+  await waitFor(() => expect(screen.getByRole('combobox', { name: 'AI Model' })).toHaveValue('sonnet'))
+
+  await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
+  expect(await screen.findByRole('option', { name: /claude.*Server/i })).toBeInTheDocument()
+  // Chat cannot start on an empty pair, so it must not offer the reset either.
+  expect(screen.queryByRole('option', { name: /server default/i })).not.toBeInTheDocument()
+  await user.keyboard('{Escape}')
+
+  await user.click(screen.getByRole('button', { name: 'Start Chat' }))
+  await waitFor(() => expect(post).toHaveBeenCalledWith('/api/chat/job/init', { ai_provider: 'claude', ai_model: 'sonnet' }))
 })
 
 it('does not POST init after a history load failure', async () => {

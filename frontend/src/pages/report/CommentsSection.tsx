@@ -11,7 +11,7 @@ import { LinkedText } from '@/components/shared/LinkedText'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { MentionTextarea } from './MentionTextarea'
 import { useReviewSuggestion } from './useReviewSuggestion'
-import { useAiSelection } from './useAiSelection'
+import { useAiSelection } from '@/lib/useAiSelection'
 import { AnalysisModelNotice, AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Trash2, MessageSquare } from 'lucide-react'
@@ -276,7 +276,7 @@ export function CommentsSection({ jobId, testNames, childJobName, childBuildNumb
               <AnalysisProviderSelect value={aiProvider} onChange={(v) => setAiPair(v, '')} forceServer={false} label="AI Provider for comment intent" />
             </div>
             <div className="w-[240px]">
-              <AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={(model) => setAiPair(aiProvider, model)} forceServer={false} label="AI Model for comment intent" hideNotice />
+              <AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={(model) => setAiPair(aiProvider, model, { commit: false })} onCommit={(model) => setAiPair(aiProvider, model)} forceServer={false} label="AI Model for comment intent" hideNotice />
             </div>
           </div>
           {/* Below the whole provider+model row, so it cannot distort the controls. */}

@@ -7,8 +7,8 @@ import { isAnalysisAiAvailable } from '@/lib/analysisAi'
 import { useProviderCatalog, useCursorAuthStatus } from '@/lib/useProviderOptions'
 import { CredentialAccessNotice } from '@/components/shared/CredentialAccessNotice'
 import { useAuth } from '@/lib/auth'
+import { useAiSelection } from '@/lib/useAiSelection'
 import { CursorAuthBanner } from '@/components/shared/CursorAuthBanner'
-import { normalizeProvider } from '@/lib/aiProviders'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Textarea } from '@/components/ui/textarea'
@@ -103,8 +103,9 @@ export function ChatUI({
   const [historyFailed, setHistoryFailed] = useState(false)
   const [historyRetry, setHistoryRetry] = useState(0)
 
-  const [aiProvider, setAiProvider] = useState(() => normalizeProvider(defaultProvider))
-  const [aiModel, setAiModel] = useState(defaultModel)
+  // Remembered pair; the props only seed the very first use. Chat has no
+  // "Server default" entry: an empty pair cannot start a session.
+  const { aiProvider, aiModel, setAiPair } = useAiSelection(defaultProvider, defaultModel)
   const { canUseServerProviders, canUseFreeProviders } = useAuth()
   const { providers, providerStatus } = useProviderCatalog()
   const cursorAuthStatus = useCursorAuthStatus()
@@ -163,16 +164,6 @@ export function ChatUI({
       : !input.trim()
         ? 'Type a message'
         : undefined
-
-  // Sync provider/model from props when they change (e.g., after job info loads)
-  useEffect(() => {
-    if (defaultProvider) setAiProvider(normalizeProvider(defaultProvider))
-  }, [defaultProvider])
-
-  useEffect(() => {
-    if (defaultModel) setAiModel(defaultModel)
-  }, [defaultModel])
-
 
   // Fetch messages with pagination (last 200); session metadata belongs to the first page.
   // Callers apply `preparing` themselves, after their generation check — an
@@ -549,8 +540,8 @@ export function ChatUI({
                 : 'Existing session · selection pinned by server'}</span>
             ) : <div className="flex flex-col items-end gap-1">
               <div className="flex items-center gap-3">
-                <div className="w-[160px]"><AnalysisProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel('') }} forceServer={false} /></div>
-                <div className="w-[240px]"><AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={false} hideNotice /></div>
+                <div className="w-[160px]"><AnalysisProviderSelect value={aiProvider} onChange={(v) => setAiPair(v, '')} forceServer={false} /></div>
+                <div className="w-[240px]"><AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={(model) => setAiPair(aiProvider, model, { commit: false })} onCommit={(model) => setAiPair(aiProvider, model)} forceServer={false} hideNotice /></div>
                 <Button size="sm" onClick={handleStart} disabled={!validPair || starting || clearing || loadingHistory || historyFailed}>
                   {starting ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Start Chat'}
                 </Button>
