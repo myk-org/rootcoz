@@ -154,17 +154,18 @@ describe('UsersPage pagination', () => {
 
   it('moves to the next window and back, and stops at both ends', async () => {
     mockServer(manyUsers(137))
-    const user1 = userEvent.setup()
     renderPage()
 
     expect(await screen.findByRole('button', { name: 'Previous' })).toBeDisabled()
 
-    await user1.click(screen.getByRole('button', { name: 'Next' }))
+    // fireEvent, not userEvent: under full-suite load userEvent's own machinery
+    // cost ~4.6 s for these two clicks and pushed the test past its 5 s budget.
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
     expect(await screen.findByText('user-026')).toBeInTheDocument()
     expect(get).toHaveBeenCalledWith('/api/admin/users?limit=25&offset=25')
     expect(screen.getByRole('status')).toHaveTextContent('26–50 of 137')
 
-    await user1.click(screen.getByRole('button', { name: 'Previous' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Previous' }))
     expect(await screen.findByText('user-001')).toBeInTheDocument()
     expect(get).toHaveBeenCalledWith('/api/admin/users?limit=25&offset=0')
     expect(screen.getByRole('status')).toHaveTextContent('1–25 of 137')
