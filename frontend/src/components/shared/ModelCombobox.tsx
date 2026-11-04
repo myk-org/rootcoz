@@ -193,6 +193,8 @@ export function ModelCombobox({
             selectModel(filtered[highlightIndex].id)
           } else {
             setOpen(false)
+            // Enter on a free-typed id commits it, same as blur.
+            onCommit?.(committedValueRef.current)
           }
           break
         case 'Escape':
@@ -204,7 +206,7 @@ export function ModelCombobox({
           break
       }
     },
-    [open, filtered, highlightIndex, selectModel, setHighlightIndex],
+    [open, filtered, highlightIndex, selectModel, setHighlightIndex, onCommit],
   )
 
   const dropdown =

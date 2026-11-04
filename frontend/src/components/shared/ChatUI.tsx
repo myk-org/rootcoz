@@ -104,8 +104,9 @@ export function ChatUI({
   const [historyRetry, setHistoryRetry] = useState(0)
 
   // Remembered pair; the props only seed the very first use. Chat has no
-  // "Server default" entry: an empty pair cannot start a session.
-  const { aiProvider, aiModel, setAiPair } = useAiSelection(defaultProvider, defaultModel)
+  // "Server default" entry: an empty pair cannot start a session, so a cleared
+  // entry elsewhere in the app falls back to the analysed pair instead.
+  const { aiProvider, aiModel, setAiPair } = useAiSelection(defaultProvider, defaultModel, { respectCleared: false })
   const { canUseServerProviders, canUseFreeProviders } = useAuth()
   const { providers, providerStatus } = useProviderCatalog()
   const cursorAuthStatus = useCursorAuthStatus()

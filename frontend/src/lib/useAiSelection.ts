@@ -12,8 +12,15 @@ import { readLastAiPair, subscribeLastAiPair, writeLastAiPair, type AiPair, type
  * cleared pair means the server default ('' — fallbacks ignored), and a remembered
  * pair is used as-is. A half pair (provider picked, model not yet, or a model still
  * being typed) is a draft local to this mount and is never persisted.
+ *
+ * `respectCleared: false` treats a cleared pair as "use my fallbacks" instead —
+ * for surfaces that cannot run on the server default (chat needs a concrete pair).
  */
-export function useAiSelection(fallbackProvider = '', fallbackModel = '') {
+export function useAiSelection(
+  fallbackProvider = '',
+  fallbackModel = '',
+  { respectCleared = true }: { respectCleared?: boolean } = {},
+) {
   const {
     username, canUseServerProviders, canUseFreeProviders, authenticated, loading: authLoading,
   } = useAuth()
@@ -27,7 +34,9 @@ export function useAiSelection(fallbackProvider = '', fallbackModel = '') {
   // this user (from here or another surface) and any username change drops it, so a
   // stale draft can never shadow the remembered pair.
   const [draft, setDraft] = useState<{ entry: AiPairEntry | null; pair: AiPair } | null>(null)
-  const sel = draft && draft.entry === entry ? draft.pair : (entry?.pair ?? null)
+  const remembered = entry?.pair ?? null
+  const clearedIgnored = !respectCleared && remembered?.provider === '' && remembered.model === ''
+  const sel = draft && draft.entry === entry ? draft.pair : (clearedIgnored ? null : remembered)
   // Writes go to the user this selection was read for, never to whatever username
   // is current — an in-tab logout→login must not copy a pair into the next account.
   const owner = entry?.owner ?? username

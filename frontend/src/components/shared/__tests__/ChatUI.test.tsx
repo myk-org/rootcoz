@@ -131,6 +131,15 @@ it('opens on the remembered pair and offers no server-default reset', async () =
   await waitFor(() => expect(post).toHaveBeenCalledWith('/api/chat/job/init', { ai_provider: 'claude', ai_model: 'sonnet' }))
 })
 
+it('ignores a cleared remembered pair so chat starts on the analysed pair', async () => {
+  setup()
+  // "Server default" picked in the issue or feedback dialog cannot start a chat.
+  localStorage.setItem('rootcoz_last_ai_pair:alice', JSON.stringify({ provider: '', model: '' }))
+  render(page('openai', 'gpt'))
+  await waitFor(() => expect(screen.getByRole('combobox', { name: 'AI Model' })).toHaveValue('gpt'))
+  expect(await screen.findByRole('button', { name: 'Start Chat' })).toBeEnabled()
+})
+
 it('does not POST init after a history load failure', async () => {
   setup()
   get.mockImplementation(async (path: string) => {

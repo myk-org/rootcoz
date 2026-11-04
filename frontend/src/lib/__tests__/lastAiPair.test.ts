@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it } from 'vitest'
-import { readLastAiPair, writeLastAiPair } from '@/lib/lastAiPair'
+import { readLastAiPair, subscribeLastAiPair, writeLastAiPair } from '@/lib/lastAiPair'
 
 afterEach(() => {
   localStorage.clear()
@@ -56,5 +56,24 @@ describe('lastAiPair store', () => {
     expect(readLastAiPair('alice')).toBeNull()
     localStorage.setItem(KEY('alice'), JSON.stringify({ provider: 'claude' }))
     expect(readLastAiPair('alice')).toBeNull()
+  })
+
+  it('follows a change made in another tab and notifies the mounted surfaces', () => {
+    writeLastAiPair('alice', { provider: 'claude', model: 'sonnet' })
+    const before = readLastAiPair('alice')
+    const changes: string[] = []
+    const unsubscribeAlice = subscribeLastAiPair('alice', () => changes.push('alice'))
+    const unsubscribeBob = subscribeLastAiPair('bob', () => changes.push('bob'))
+
+    const raw = JSON.stringify({ provider: 'openai', model: 'gpt-4o' })
+    localStorage.setItem(KEY('alice'), raw)
+    window.dispatchEvent(new StorageEvent('storage', { key: KEY('alice'), newValue: raw }))
+
+    expect(changes).toEqual(['alice'])
+    const after = readLastAiPair('alice')
+    expect(after).not.toBe(before)
+    expect(after?.pair).toEqual({ provider: 'openai', model: 'gpt-4o' })
+    unsubscribeAlice()
+    unsubscribeBob()
   })
 })

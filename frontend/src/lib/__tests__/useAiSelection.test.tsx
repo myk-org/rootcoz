@@ -74,6 +74,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  vi.restoreAllMocks()
   localStorage.clear()
   act(() => resetProviderCatalogCache())
 })
@@ -105,6 +106,18 @@ describe('useAiSelection', () => {
     await click('type model')
     await waitFor(() => expect(pair()).toBe('claude/sonn'))
     expect(readLastAiPair('alice')?.pair).toEqual({ provider: 'claude', model: 'sonnet' })
+  })
+
+  it('keeps a completed pick on screen when storage refuses the write', async () => {
+    const view = await mount()
+    vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+      throw new Error('storage blocked')
+    })
+    await click('pick complete')
+    await waitFor(() => expect(pair()).toBe('claude/sonnet'))
+    // The in-memory value is authoritative, so a re-render must not snap back.
+    view.rerender(<Harness />)
+    expect(pair()).toBe('claude/sonnet')
   })
 
   it('treats an explicitly cleared pair as a decision, not as a fallback', async () => {
