@@ -54,7 +54,7 @@ This asks the job's assistant for a cross-failure answer and leaves the evidence
 
 3. Ask your question.
 
-   Type in the `Ask a question...` box and press `Enter` to send, `Shift+Enter` for a newline. While the answer is being generated the thread shows `Thinking...` and a `Stop` button. Replies stream into the same conversation and are saved, so you can close the page and come back later.
+   Type in the `Ask a question...` box and press `Enter` to send, `Shift+Enter` for a newline. While the answer is being generated the thread shows `Thinking...` with the elapsed time and, for reviewers and above, a `Stop` button. The reply arrives as a single message when the turn ends and is saved, so you can close the page and come back later.
 
    > **Tip:** Because the assistant can read the cloned test code, questions like `Why does test_login assert on the old token format?` are often answered faster than asking for a re-analysis with a different model.
 

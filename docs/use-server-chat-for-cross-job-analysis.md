@@ -51,7 +51,7 @@ This confirms the CLI is using an admin identity, then asks a server-wide questi
 
 3. Ask a cross-job question and follow the reply.
 
-   In the web UI, type your question and press `Enter` to send it. Use `Shift+Enter` when you want a newline instead. While RootCoz is working, the thread shows `Thinking...` and keeps the response in the same conversation.
+   In the web UI, type your question and press `Enter` to send it. Use `Shift+Enter` when you want a newline instead. While RootCoz is working, the thread shows `Thinking...` with the elapsed time; the reply arrives as one message when the turn ends and stays in the same conversation.
 
    In the CLI, send the question directly:
 
@@ -65,7 +65,7 @@ This confirms the CLI is using an admin identity, then asks a server-wide questi
    rootcoz admin-chat history --limit 20
    ```
 
-   > **Tip:** Use the web UI when you want the clearest live experience. It shows the active reply immediately and gives you a `Stop` button while the assistant is still working.
+   > **Tip:** Use the web UI when you want the clearest live experience. It shows the busy state from the moment you send, tells you how long the turn has been running, and gives you a `Stop` button while the assistant is still working.
 
 4. Stop the current reply or start over.
 
