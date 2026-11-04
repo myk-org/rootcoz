@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { api, extractApiDetail } from '@/lib/api'
 import {
   Dialog,
@@ -51,11 +51,15 @@ export function ChatIssueDialog({ open, onOpenChange, message }: ChatIssueDialog
   const [submitting, setSubmitting] = useState(false)
   const [error, setError] = useState('')
   const [createdUrl, setCreatedUrl] = useState('')
+  // Bumped on every opening: a create from an earlier opening must not write here.
+  const openEpoch = useRef(0)
 
   useEffect(() => {
     if (!open) return
+    openEpoch.current += 1
     let ignore = false
     setLoading(true)
+    setSubmitting(false)
     setError('')
     setCreatedUrl('')
     // Opening for another answer must not show what the previous answer drafted.
@@ -90,6 +94,7 @@ export function ChatIssueDialog({ open, onOpenChange, message }: ChatIssueDialog
   }, [open, message])
 
   async function handleCreate() {
+    const run = openEpoch.current
     setSubmitting(true)
     setError('')
     try {
@@ -99,12 +104,15 @@ export function ChatIssueDialog({ open, onOpenChange, message }: ChatIssueDialog
         body: draft.body,
         ...(tracker === 'jira' && projectKey.trim() ? { jira_project_key: projectKey.trim() } : {}),
       })
+      if (run !== openEpoch.current) return
       setCreatedUrl(res.url)
     } catch (err) {
+      if (run !== openEpoch.current) return
       // The server's 400/403 detail names exactly what to fix.
       setError(extractApiDetail(err) ?? (err instanceof Error ? err.message : 'Failed to create the issue'))
     } finally {
-      setSubmitting(false)
+      // A reopening already reset this flag; do not clear the newer run's one.
+      if (run === openEpoch.current) setSubmitting(false)
     }
   }
 

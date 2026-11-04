@@ -1,4 +1,4 @@
-import { cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ChatIssueDialog } from '@/components/shared/ChatIssueDialog'
@@ -151,6 +151,38 @@ describe('ChatIssueDialog', () => {
     expect(screen.getByRole('button', { name: 'Jira' })).toBeDisabled()
     finish({ url: 'https://github.com/org/repo/issues/7' })
     await waitFor(() => expect(screen.getByRole('button', { name: 'Close' })).toBeInTheDocument())
+  })
+
+  it('ignores a create that settles after the dialog was reopened for another answer', async () => {
+    const SECOND = { title: 'Auth timeout', body: 'The auth service timed out on the second answer.' }
+    respond(CAPS, { github_token: 'ghp_stored', jira_token: '', jira_sa_token: '' })
+    let finish: (value: unknown) => void = () => {}
+    post.mockImplementation((path: string, body?: { text?: string }) => {
+      if (path === '/api/chat-issue/prefill') {
+        return Promise.resolve(body?.text === 'first answer' ? DRAFT : SECOND)
+      }
+      return new Promise(resolve => {
+        finish = resolve
+      })
+    })
+    const { rerender } = render(
+      <ChatIssueDialog open onOpenChange={() => {}} message="first answer" />,
+    )
+    expect(await screen.findByLabelText('Issue title')).toHaveValue(DRAFT.title)
+    await userEvent.setup().click(screen.getByRole('button', { name: 'Create GitHub issue' }))
+
+    // Reopen for another answer while the first create is still in flight.
+    rerender(<ChatIssueDialog open={false} onOpenChange={() => {}} message="first answer" />)
+    rerender(<ChatIssueDialog open onOpenChange={() => {}} message="second answer" />)
+    expect(await screen.findByLabelText('Issue title')).toHaveValue(SECOND.title)
+    await act(async () => {
+      finish({ url: 'https://github.com/org/repo/issues/7' })
+    })
+
+    expect(screen.getByLabelText('Issue title')).toHaveValue(SECOND.title)
+    expect(screen.getByLabelText('Issue body')).toHaveValue(SECOND.body)
+    expect(screen.queryByText('https://github.com/org/repo/issues/7')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Create GitHub issue' })).toBeEnabled()
   })
 
   it('does not submit twice', async () => {
