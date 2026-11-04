@@ -128,16 +128,31 @@
         "requests": {
           "type": "object",
           "additionalProperties": false,
-          "description": "Scheduling floor. Omit a key rather than setting it to an empty string — a Kubernetes quantity cannot be empty.",
+          "description": "Scheduling floor. Setting a key to \"\" omits it from the rendered pod.",
           "properties": {
-            "cpu": { "type": ["string", "number"], "minLength": 1 },
+            "cpu": {
+              "description": "Quantity or bare number. \"\" omits the key.",
+              "anyOf": [
+                { "type": "number" },
+                { "type": "string", "minLength": 1 },
+                { "const": "" }
+              ]
+            },
             "memory": {
+              "description": "Quantity with a unit. \"\" omits the key.",
               "type": "string",
-              "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)$"
+              "anyOf": [
+                { "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)$" },
+                { "const": "" }
+              ]
             },
             "ephemeral-storage": {
+              "description": "Quantity with a unit. \"\" omits the key.",
               "type": "string",
-              "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)$"
+              "anyOf": [
+                { "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)$" },
+                { "const": "" }
+              ]
             }
           },
           "patternProperties": {
@@ -150,14 +165,29 @@
           "additionalProperties": false,
           "description": "Eviction/throttle ceiling. An ephemeral-storage limit here also caps the /tmp emptyDir at the same sizeLimit.",
           "properties": {
-            "cpu": { "type": ["string", "number"], "minLength": 1 },
+            "cpu": {
+              "description": "Quantity or bare number. \"\" omits the key.",
+              "anyOf": [
+                { "type": "number" },
+                { "type": "string", "minLength": 1 },
+                { "const": "" }
+              ]
+            },
             "memory": {
+              "description": "Quantity with a unit. \"\" omits the key.",
               "type": "string",
-              "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)$"
+              "anyOf": [
+                { "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)$" },
+                { "const": "" }
+              ]
             },
             "ephemeral-storage": {
+              "description": "Quantity with a unit. \"\" omits the key.",
               "type": "string",
-              "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)$"
+              "anyOf": [
+                { "pattern": "^[0-9]+(\\.[0-9]+)?(Ki|Mi|Gi|Ti|Pi|Ei|k|M|G|T|P|E)$" },
+                { "const": "" }
+              ]
             }
           },
           "patternProperties": {

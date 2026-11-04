@@ -73,13 +73,15 @@ spec:
           resources:
             # Small but explicit: quota-enforced namespaces (LimitRange /
             # ResourceQuota without defaults) reject containers without
-            # requests.
+            # requests. requests == limits is deliberate — QoS is computed
+            # across init containers too, so any gap here makes the pod
+            # Burstable even when the app container is Guaranteed.
             requests:
               cpu: 10m
-              memory: 16Mi
+              memory: 32Mi
             limits:
-              cpu: 100m
-              memory: 128Mi
+              cpu: 10m
+              memory: 32Mi
           command:
             - /bin/sh
             - -c
@@ -183,7 +185,7 @@ spec:
             failureThreshold: 5
             successThreshold: 1
           resources:
-            {{- toYaml .Values.resources | nindent 12 }}
+            {{- include "rootcoz.containerResources" . | nindent 12 }}
           volumeMounts:
             - name: data
               mountPath: {{ .Values.env.xdgDataHome }}

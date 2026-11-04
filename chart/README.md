@@ -195,9 +195,11 @@ changing `persistence.size` either no-ops or triggers a PVC resize. Database gro
 
 **Why `requests == limits`:** the deployment is a single stateful replica, so predictable scheduling
 beats burst. Guaranteed QoS is computed from cpu and memory only (ephemeral-storage does not
-affect it); the third value is matched for a different reason — the request drives scheduling and the
-limit drives kubelet eviction, so one number describes both thresholds. The cost is a scheduling
-floor of 32Gi memory + 16Gi ephemeral: the node must have that allocatable. The repo's dev
+affect it) **and across init containers too** — the `copy-sidecar-agent` init container matches its own
+requests and limits for exactly that reason, so enabling `sidecar.agentDir` cannot quietly downgrade a
+Guaranteed pod to Burstable. The third value is matched for a different reason — the request drives
+scheduling and the limit drives kubelet eviction, so one number describes both thresholds. The cost is
+a scheduling floor of 32Gi memory + 16Gi ephemeral: the node must have that allocatable. The repo's dev
 deployment requests `16Gi` instead (`1000m` CPU) — Burstable, the fallback for smaller nodes.
 
 ### `/tmp` and ephemeral storage
@@ -236,8 +238,9 @@ instead of producing a pod the API server refuses.
 
 **Units:** `memory` and `ephemeral-storage` must be strings with a unit (`4Gi`, `512Mi`) — Kubernetes
 reads a bare number as **bytes**, so `memory: 4` is 4 bytes and an OOM-kill on start. `cpu` accepts a
-string or a bare number (`--set resources.requests.cpu=4` is valid). Omit a key rather than setting it
-to `""`: an empty quantity is invalid.
+string or a bare number (`--set resources.requests.cpu=4` is valid). Setting a key to `""` **omits**
+it — `--set resources.requests.memory=""` renders a pod with no `memory` request (an empty quantity
+is invalid, so the chart drops the key instead of emitting one).
 
 Full sizing guidance for operators: [Deploying rootcoz → Sizing](deploy-rootcoz.html#sizing).
 
@@ -350,7 +353,10 @@ The `chart` tox env lints the chart, renders every recipe and fixture, renders
 `chart/examples/values-production.yaml` and asserts its resources plus the quoted `/tmp` `sizeLimit`
 (and that the `/tmp` mount never reaches the init container), checks that the default render still has
 no `/tmp` volume, and asserts the schema negatives (`resources.limit.cpu`, `resources.requests.cpuu`,
-binary `ephemeral-storage`) plus the extended-resource and numeric-CPU positives.
+binary `memory` and `ephemeral-storage`) plus the extended-resource and numeric-CPU positives. Two
+further checks cover the pod-integrity rules: `--set resources.requests.memory=""` renders no `memory`
+request (empty means omit), and with the sidecar agent dir configured the init container's `requests`
+equal its `limits`, so a Guaranteed app container keeps Guaranteed QoS for the whole pod.
 
 ## Limitations
 

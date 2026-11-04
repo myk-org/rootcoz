@@ -127,6 +127,23 @@ commands = [
   [
     "sh",
     "-c",
+    "helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set resources.requests.memory=4 --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'resources.requests.memory: Invalid type. Expected: string, given: integer'",  # pragma: allowlist secret
+  ],
+  # "" means omit: the empty key must be dropped, not rendered as an invalid quantity.
+  [
+    "sh",
+    "-c",
+    "OUT=/tmp/rootcoz-empty-resource-$$.yaml && helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set 'resources.requests.memory=' --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render > $OUT && [ \"$(grep -c 'memory:' $OUT)\" = 1 ] && grep -q 'memory: 8Gi' $OUT && grep -q 'cpu: \"1\"' $OUT && ! grep -q 'memory: \"\"' $OUT && rm -f $OUT",  # pragma: allowlist secret
+  ],
+  # QoS is computed across init containers: a gap there makes a Guaranteed app Burstable.
+  [
+    "sh",
+    "-c",
+    "OUT=/tmp/rootcoz-init-qos-$$.yaml && helm template rootcoz chart/ -f chart/examples/values-openshift.yaml -f chart/examples/values-sidecar-agent-fixture.yaml > $OUT && awk '/^      initContainers:/,/^      containers:/' $OUT > $OUT.init && [ \"$(grep -cE '^              (cpu|memory):' $OUT.init)\" = 4 ] && REQ=$(sed -n '/^            requests:/,/^            limits:/p' $OUT.init | grep -E '^              (cpu|memory):' | sed 's/^ *//') && LIM=$(sed -n '/^            limits:/,/^          command:/p' $OUT.init | grep -E '^              (cpu|memory):' | sed 's/^ *//') && [ -n \"$REQ\" ] && [ \"$REQ\" = \"$LIM\" ] && rm -f $OUT $OUT.init",  # pragma: allowlist secret
+  ],
+  [
+    "sh",
+    "-c",
     "helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set 'resources.requests.nvidia\\.com/gpu=1' --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render | grep -q 'nvidia.com/gpu: 1' && helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set 'resources.limits.hugepages-2Mi=1Gi' --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render | grep -q 'hugepages-2Mi: 1Gi'",  # pragma: allowlist secret
   ],
   [
