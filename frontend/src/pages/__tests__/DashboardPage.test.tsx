@@ -212,6 +212,17 @@ describe('DashboardPage submitter filter', () => {
     expect(screen.queryByRole('button', { name: 'Remove alice' })).not.toBeInTheDocument()
   })
 
+  it('counts a name in characters, so emoji names survive', async () => {
+    // 33 emoji are 66 UTF-16 units but 33 characters — the server accepts them.
+    const emoji = '\u{1F600}'.repeat(33)
+    mockApi(5, [emoji])
+    renderPage(`/?submitted_by=${encodeURIComponent(emoji)}`)
+
+    await waitFor(() => expect(requests.length).toBeGreaterThan(0))
+    expect(requests.at(-1)?.getAll('submitted_by')).toEqual([emoji])
+    await rows()
+  })
+
   it('drops values the server rejects instead of failing the whole load', async () => {
     const long = 'x'.repeat(65)
     const many = Array.from({ length: 51 }, (_, i) => `user-${i}`)

@@ -185,6 +185,19 @@ class TestFilterPresetsCRUD:
         assert resp.status_code == 200, resp.text
         assert resp.json()["filters"] == {"submitted_by": ["yuval", "dana"]}
 
+    def test_dashboard_submitter_caps_apply_to_presets(self, client):
+        """A preset may only carry submitted_by values the endpoint accepts."""
+        cookies = _register(client, "alice")
+        resp = _create(client, cookies, filters={"submitted_by": ["x" * 65]})
+        assert resp.status_code == 422, resp.text
+        assert "too long" in resp.json()["detail"]
+
+        resp = _create(
+            client, cookies, filters={"submitted_by": [f"user-{i}" for i in range(51)]}
+        )
+        assert resp.status_code == 422, resp.text
+        assert "Too many submitted_by values" in resp.json()["detail"]
+
     def test_empty_and_whitespace_name_422(self, client):
         cookies = _register(client, "alice")
         resp = _create(client, cookies, name="   ")

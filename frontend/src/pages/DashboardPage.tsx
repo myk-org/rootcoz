@@ -136,7 +136,10 @@ function normalizeSubmitters(values: string[], options: string[]): string[] {
   for (const raw of values) {
     const value = spelling.get(raw.trim().toLowerCase()) ?? raw.trim()
     const key = value.toLowerCase()
-    if (!value || value.length > MAX_SUBMITTER_LENGTH || seen.has(key)) continue
+    // Code points, not UTF-16 units: the server counts characters, so an emoji
+    // name must not be dropped for a length the endpoint would have accepted.
+    const length = [...value].length
+    if (!value || length > MAX_SUBMITTER_LENGTH || seen.has(key)) continue
     if (picked.length === MAX_SUBMITTERS) break
     seen.add(key)
     picked.push(value)

@@ -961,6 +961,8 @@ async def init_db() -> None:
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_results_job_name ON results (job_name)"
         )
+        # Submitter enumeration goes through this expression index, never per-row JSON.
+        await db.execute(_SUBMITTED_BY_INDEX_SQL)
 
         # failure_history: denormalized table for fast history queries
         await db.execute("""
@@ -3100,20 +3102,35 @@ async def add_graft_estimated_tokens_saved(job_id: str, tokens: int) -> None:
 
 
 # Single source of the submitted_by JSON path. The json_valid guard lives inside the
-# constant so every use (filter, enumeration, ownership lookup) is safe on bad rows.
+# constant so every use (filter, enumeration, ownership lookup) is safe on bad rows,
+# and it stays table-alias free so the enumeration matches the expression index below.
 _SUBMITTED_BY_RAW_SQL = (
-    "CASE WHEN json_valid(r.result_json) "
-    "THEN trim(json_extract(r.result_json, '$.request_params.submitted_by')) END"
+    "CASE WHEN json_valid(result_json) "
+    "THEN trim(json_extract(result_json, '$.request_params.submitted_by')) END"
 )
 # Folding happens only in SQL: SQLite lower() is ASCII-only, so a Python lower()
 # would make a non-ASCII name unmatchable against its own rows.
 _SUBMITTED_BY_SQL = f"lower({_SUBMITTED_BY_RAW_SQL})"
-# The picker's name list is built from the newest rows only: a distinct over the
-# whole table scans every stored result JSON on each dashboard mount, while one
-# bounded rowid range costs the same for a small table and stays flat for a big
-# one. Older names remain matchable by typing them — the filter predicate runs on
-# every row, not on this window.
-_SUBMITTER_SCAN_ROWS = 5000
+# The picker lists every stored name, and this index lets it do so without decoding
+# result JSON per row: DISTINCT reads the index alone. Only the enumeration uses it —
+# a LIKE '%name%' filter cannot (no index can narrow an unanchored substring match).
+_SUBMITTED_BY_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_results_submitted_by "
+    f"ON results ({_SUBMITTED_BY_RAW_SQL})"
+)
+_SUBMITTER_LIST_SQL = (
+    f"SELECT DISTINCT {_SUBMITTED_BY_RAW_SQL} AS name FROM results "
+    f"WHERE {_SUBMITTED_BY_RAW_SQL} IS NOT NULL"
+)
+
+
+def _ascii_fold(value: str) -> str:
+    """Fold a name the way SQLite ``lower()`` does: ASCII only.
+
+    Python's ``str.lower()`` lowers non-ASCII too, which would merge ``Änne``
+    and ``änne`` — two names the SQL fold keeps apart — and hide one of them.
+    """
+    return "".join(chr(ord(ch) + 32) if "A" <= ch <= "Z" else ch for ch in value)
 
 
 def _submitted_by_predicate(values: set[str]) -> tuple[str, list[str]]:
@@ -4779,22 +4796,23 @@ async def list_results_for_dashboard_filtered(
 async def list_dashboard_submitters() -> list[str]:
     """Return the distinct submitted_by names shown on the dashboard.
 
-    Names are deduped on the SQL fold (so ``Yuli``/``yuli`` collapse to one
-    option), blank and over-long values are dropped, and the result is sorted
-    case-insensitively. Only the newest ``_SUBMITTER_SCAN_ROWS`` rows are read.
+    Every stored name is listed — no row window, so an old name is never dropped
+    from the picker. Names are deduped on the same ASCII fold the filter uses (so
+    ``Yuli``/``yuli`` collapse to one option), blank and over-long values are
+    dropped, and the result is sorted case-insensitively. DISTINCT is answered by
+    ``idx_results_submitted_by``, so no result JSON is decoded per row.
     """
     async with _connect_db() as db:
-        cursor = await db.execute(
-            f"SELECT MIN(name) AS name FROM ("
-            f"SELECT {_SUBMITTED_BY_RAW_SQL} AS name FROM results r "
-            f"WHERE r.rowid > (SELECT MAX(rowid) - ? FROM results)"
-            f") WHERE length(name) BETWEEN 1 AND 64 "
-            f"GROUP BY lower(name) "
-            f"ORDER BY name COLLATE NOCASE",
-            (_SUBMITTER_SCAN_ROWS,),
-        )
+        cursor = await db.execute(_SUBMITTER_LIST_SQL)
         rows = await cursor.fetchall()
-    return [row["name"] for row in rows]
+    picked: dict[str, str] = {}
+    for row in rows:
+        name = row["name"]
+        if not name or len(name) > 64:
+            continue
+        # First spelling in BINARY order wins, the same choice MIN() made.
+        picked.setdefault(_ascii_fold(name), name)
+    return sorted(picked.values(), key=_ascii_fold)
 
 
 async def get_parent_job_name_for_test(test_name: str, job_id: str = "") -> str:

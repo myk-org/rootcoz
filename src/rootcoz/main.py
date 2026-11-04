@@ -13654,6 +13654,15 @@ def _validate_filter_preset_filters(page: str, filters: dict[str, Any]) -> None:
             status_code=422,
             detail=f"Unknown filter key(s) for {page}: " + ", ".join(sorted(unknown)),
         )
+    submitters = filters.get("submitted_by")
+    if submitters is not None:
+        # A preset is replayed into the dashboard endpoint, so it must carry only
+        # submitted_by values that endpoint would accept (count and length caps).
+        values = [submitters] if isinstance(submitters, str) else list(submitters)
+        try:
+            _normalize_submitters([str(value) for value in values])
+        except HTTPException as exc:
+            raise HTTPException(status_code=422, detail=exc.detail) from exc
 
 
 # SQLite integers are signed 64-bit; an out-of-range preset id cannot exist.

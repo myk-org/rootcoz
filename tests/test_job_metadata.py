@@ -770,14 +770,11 @@ class TestDashboardSubmitterFilter:
             names = await storage.list_dashboard_submitters()
         assert names == ["avi", "Yuli"]
 
-    async def test_list_dashboard_submitters_reads_newest_rows_only(
+    async def test_list_dashboard_submitters_keeps_names_from_older_rows(
         self, setup_test_db
     ) -> None:
-        """The enumeration is bounded, so a long history cannot scan on mount."""
-        with (
-            patch.object(storage, "DB_PATH", setup_test_db),
-            patch.object(storage, "_SUBMITTER_SCAN_ROWS", 2),
-        ):
+        """No row window: a name that only older rows carry is still offered."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
             for job_id, submitted_by in [
                 ("job-old", "retired"),
                 ("job-mid", "yuval"),
@@ -788,8 +785,32 @@ class TestDashboardSubmitterFilter:
                     status="completed",
                     result={"request_params": {"submitted_by": submitted_by}},
                 )
+            for job_id in ["job-mid", "job-new"]:
+                await storage.delete_job(job_id)
             names = await storage.list_dashboard_submitters()
-        assert names == ["dana", "yuval"]
+        # Deleting the newest rows leaves rowid gaps; the surviving name stays.
+        assert names == ["retired"]
+
+    async def test_list_dashboard_submitters_enumeration_uses_the_index(
+        self, setup_test_db
+    ) -> None:
+        """Enumeration reads the expression index, not stored JSON per row.
+
+        The LIKE filter is deliberately not asserted here: no index can narrow
+        an unanchored substring match.
+        """
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                "job-1",
+                status="completed",
+                result={"request_params": {"submitted_by": "yuval"}},
+            )
+            async with storage._connect_db() as db:
+                cursor = await db.execute(
+                    f"EXPLAIN QUERY PLAN {storage._SUBMITTER_LIST_SQL}"
+                )
+                plan = " ".join(row["detail"] for row in await cursor.fetchall())
+        assert "idx_results_submitted_by" in plan
 
 
 # --- Non-admin access tests ---
