@@ -4547,7 +4547,20 @@ class TestAdminServerStatusCommand:
             "test_entries": 1,
         },
         "sidecar": {"reachable": True, "models": 7, "free_models": 1},
-        "activity": {"analyses_running": 1, "sse_clients": 2},
+        "activity": {
+            "analyses_running": 1,
+            "analyses": [
+                {
+                    "job_id": "j1",
+                    "job_name": "nightly",
+                    "build_number": 7,
+                    "status": "running",
+                    "elapsed_seconds": 3600,
+                }
+            ],
+            "chat_turns_in_flight": 2,
+            "sse_clients": 2,
+        },
         "warnings": [
             {
                 "level": "warn",
@@ -4565,6 +4578,11 @@ class TestAdminServerStatusCommand:
         assert "Disk: 75% used" in result.output
         assert "Sidecar: reachable" in result.output
         assert "Data directory is 75% full" in result.output
+        # The breakdown label names the database, not the whole data dir.
+        assert "(database 1.0 KiB" in result.output
+        # Each running analysis is listed with its own elapsed time.
+        assert "nightly #7 running for 3600s" in result.output
+        assert "2 chat turns in flight" in result.output
 
     def test_server_status_json(self, mock_client):
         mock_client.server_status.return_value = self._PAYLOAD

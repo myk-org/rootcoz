@@ -35,6 +35,7 @@ def _fake_roots(
     cpu_max: str | None = "200000 100000",
     memory_current: str | None = "50000000",
     memory_max: str | None = "100000000",
+    memory_stat: str | None = "inactive_file 0\nactive_file 0\n",
     rss_kb: str | None = "1234",
     cpu_ticks: tuple[int, int] | None = (100, 50),
 ) -> tuple[Path, Path]:
@@ -47,6 +48,8 @@ def _fake_roots(
         _write(cgroup / "memory.current", memory_current + "\n")
     if memory_max is not None:
         _write(cgroup / "memory.max", memory_max + "\n")
+    if memory_stat is not None:
+        _write(cgroup / "memory.stat", memory_stat)
 
     proc = tmp_path / "proc"
     proc.mkdir(exist_ok=True)
@@ -62,6 +65,19 @@ def _fake_roots(
     return cgroup, proc
 
 
+class _Clock:
+    """Stand-in for ``server_status.time``: sleeping advances a fake clock."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += seconds
+
+
 # ---------------------------------------------------------------------------
 # CPU
 # ---------------------------------------------------------------------------
@@ -75,17 +91,15 @@ class TestCpu:
         assert server_status._parse_cpu_max("garbage") == (None, None)
         assert server_status._parse_cpu_max("1000 notanint") == (None, None)
 
-    def test_process_percent_from_two_samples(self, tmp_path) -> None:
+    def test_process_percent_from_two_samples(self, tmp_path, monkeypatch) -> None:
         cgroup, proc = _fake_roots(tmp_path)
         samples = iter([10.0, 10.05])
+        monkeypatch.setattr(server_status, "time", _Clock())
 
-        with (
-            patch.object(
-                server_status,
-                "_parse_proc_stat_cpu",
-                lambda _text: next(samples),
-            ),
-            patch.object(server_status.time, "sleep"),
+        with patch.object(
+            server_status,
+            "_parse_proc_stat_cpu",
+            lambda _text: next(samples),
         ):
             block = server_status.read_cpu(cgroup, proc, sample_seconds=0.1)
 
@@ -93,7 +107,28 @@ class TestCpu:
         # 0.05 CPU-seconds over a 0.1 s window is half a core.
         assert block["process_percent"] == 50.0
         assert block["quota_cores"] == 2.0
+        assert block["quota_state"] == "set"
         assert block["period_us"] == 100000
+
+    def test_percent_divides_by_the_measured_window(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A late sample must not inflate the percentage."""
+        cgroup, proc = _fake_roots(tmp_path)
+        samples = iter([10.0, 10.1])
+
+        class _SlowClock(_Clock):
+            def sleep(self, seconds: float) -> None:
+                # The thread slept twice as long as asked.
+                self.now += seconds * 2
+
+        monkeypatch.setattr(server_status, "time", _SlowClock())
+        with patch.object(
+            server_status, "_parse_proc_stat_cpu", lambda _text: next(samples)
+        ):
+            block = server_status.read_cpu(cgroup, proc, sample_seconds=0.1)
+        # 0.1 CPU-seconds over the 0.2 s that actually elapsed.
+        assert block["process_percent"] == 50.0
 
     def test_parses_proc_stat_with_parentheses_in_comm(self, tmp_path) -> None:
         _cgroup, proc = _fake_roots(tmp_path, cpu_ticks=(100, 50))
@@ -106,19 +141,30 @@ class TestCpu:
         assert block["available"] is False
         assert "not readable" in block["reason"]
 
-    def test_missing_cpu_max_keeps_percent(self, tmp_path) -> None:
+    def test_missing_cpu_max_keeps_percent(self, tmp_path, monkeypatch) -> None:
         cgroup, proc = _fake_roots(tmp_path, cpu_max=None)
         samples = iter([1.0, 1.1])
-        with (
-            patch.object(
-                server_status, "_parse_proc_stat_cpu", lambda _text: next(samples)
-            ),
-            patch.object(server_status.time, "sleep"),
+        monkeypatch.setattr(server_status, "time", _Clock())
+        with patch.object(
+            server_status, "_parse_proc_stat_cpu", lambda _text: next(samples)
         ):
             block = server_status.read_cpu(cgroup, proc, sample_seconds=0.1)
         assert block["available"] is True
         assert block["quota_cores"] is None
+        # An unreadable cpu.max is unknown, never "no quota — unlimited".
+        assert block["quota_state"] == "unknown"
         assert block["period_us"] is None
+
+    def test_unlimited_cpu_max_is_unlimited(self, tmp_path, monkeypatch) -> None:
+        cgroup, proc = _fake_roots(tmp_path, cpu_max="max 100000")
+        samples = iter([1.0, 1.1])
+        monkeypatch.setattr(server_status, "time", _Clock())
+        with patch.object(
+            server_status, "_parse_proc_stat_cpu", lambda _text: next(samples)
+        ):
+            block = server_status.read_cpu(cgroup, proc, sample_seconds=0.1)
+        assert block["quota_cores"] is None
+        assert block["quota_state"] == "unlimited"
 
 
 # ---------------------------------------------------------------------------
@@ -134,15 +180,39 @@ class TestMemory:
         block = server_status.read_memory(cgroup, proc)
         assert block["available"] is True
         assert block["current_bytes"] == 90000000
+        assert block["working_set_bytes"] == 90000000
         assert block["limit_bytes"] == 100000000
+        assert block["limit_state"] == "set"
         assert block["percent_of_limit"] == 90.0
         assert block["rss_bytes"] == 1234 * 1024
+
+    def test_page_cache_is_not_part_of_the_working_set(self, tmp_path) -> None:
+        """Reclaimable page cache must not read as memory pressure."""
+        cgroup, proc = _fake_roots(
+            tmp_path,
+            memory_current="95000000",
+            memory_max="100000000",
+            memory_stat="inactive_file 50000000\n",
+        )
+        block = server_status.read_memory(cgroup, proc)
+        assert block["current_bytes"] == 95000000
+        assert block["working_set_bytes"] == 45000000
+        assert block["percent_of_limit"] == 45.0
 
     def test_unlimited_cgroup(self, tmp_path) -> None:
         cgroup, proc = _fake_roots(tmp_path, memory_max="max")
         block = server_status.read_memory(cgroup, proc)
         assert block["available"] is True
         assert block["limit_bytes"] is None
+        assert block["limit_state"] == "unlimited"
+        assert block["percent_of_limit"] is None
+
+    def test_unreadable_limit_is_unknown_not_unlimited(self, tmp_path) -> None:
+        cgroup, proc = _fake_roots(tmp_path, memory_max=None)
+        block = server_status.read_memory(cgroup, proc)
+        assert block["available"] is True
+        assert block["limit_bytes"] is None
+        assert block["limit_state"] == "unknown"
         assert block["percent_of_limit"] is None
 
     def test_missing_memory_current_degrades(self, tmp_path) -> None:
@@ -197,6 +267,37 @@ class TestDisk:
         block = server_status.read_disk(tmp_path / "results.db", tmp_path, None)
         assert block["available"] is False
         assert "not readable" in block["reason"]
+
+    def test_unreadable_subtree_reports_unknown_size(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A partial total must not be shown as the directory's real size."""
+        transcripts = tmp_path / "transcripts"
+        _write(transcripts / "a.jsonl", "y" * 40)
+        _write(transcripts / "b.jsonl", "y" * 10)
+        real_getsize = os.path.getsize
+
+        def _getsize(path):
+            if str(path).endswith("b.jsonl"):
+                raise OSError("permission denied")
+            return real_getsize(path)
+
+        monkeypatch.setattr(server_status.os.path, "getsize", _getsize)
+        block = server_status.read_disk(tmp_path / "results.db", transcripts, None)
+        assert block["transcripts_bytes"] is None
+
+    def test_database_size_includes_the_wal(self, tmp_path) -> None:
+        """Committed pages can live in -wal until a checkpoint."""
+        db_path = _write(tmp_path / "results.db", "x" * 100)
+        _write(Path(f"{db_path}-wal"), "w" * 40)
+        _write(Path(f"{db_path}-shm"), "s" * 10)
+        block = server_status.read_disk(db_path, tmp_path / "none", None)
+        assert block["database_bytes"] == 150
+
+    def test_note_states_the_contract(self) -> None:
+        note = server_status._FILESYSTEM_NOTE
+        assert "not a per-volume quota" in note
+        assert "other tenants" in note
 
 
 # ---------------------------------------------------------------------------
@@ -294,6 +395,29 @@ class TestDatabaseProbe:
         assert block["test_entries"] == 0
         assert block["size_bytes"] == temp_db_path.stat().st_size
 
+    def test_failures_counts_recorded_failures_not_review_flags(
+        self, temp_db_path
+    ) -> None:
+        async def _seed() -> None:
+            async with storage._connect_db() as db:
+                for test_name in ("t1", "t2"):
+                    await db.execute(
+                        "INSERT INTO failure_history "
+                        "(job_id, job_name, build_number, test_name) "
+                        "VALUES ('j1', 'job', 1, ?)",
+                        (test_name,),
+                    )
+                await db.execute(
+                    "INSERT INTO failure_reviews (job_id, test_name) VALUES ('j1', 't1')"
+                )
+                await db.commit()
+
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            asyncio.run(storage.init_db())
+            asyncio.run(_seed())
+            block = asyncio.run(server_status.read_database(temp_db_path))
+        assert block["failures"] == 2
+
     def test_missing_database_degrades(self, tmp_path) -> None:
         block = asyncio.run(server_status.read_database(tmp_path / "nope.db"))
         assert block["available"] is False
@@ -336,8 +460,10 @@ class TestProcessProbe:
         assert block["pid"] == os.getpid()
         assert block["uptime_seconds"] >= 0
         assert block["loop_lag_ms"] is None
+        # A container cannot read its own restart count: unknown, not zero.
+        assert block["restart_count"] is None
 
-        monkeypatch.setattr(server_status, "_loop_lag_ms", 42.0)
+        monkeypatch.setattr(server_status, "_loop_lag_peak", 42.0)
         assert server_status.read_process()["loop_lag_ms"] == 42.0
         server_status.reset_loop_lag()
 
@@ -381,8 +507,14 @@ class TestLoopLagWatchdog:
         loop.now = 1.5
         tick()
         assert server_status.loop_lag_ms() == 1500.0
+        # The next sample is on time; the stall stays reportable, so a status
+        # request every 30 s still sees it.
+        loop.now = 2.5
+        _delay, next_tick = loop.calls[1]
+        next_tick()
+        assert server_status.loop_lag_ms() == 1500.0
         # Re-armed for the next sample.
-        assert len(loop.calls) == 2
+        assert len(loop.calls) == 3
         server_status.reset_loop_lag()
 
 
@@ -405,11 +537,11 @@ class TestCollectServerStatus:
     def test_shape(self, tmp_path, monkeypatch) -> None:
         cgroup, proc = _fake_roots(tmp_path)
         monkeypatch.setattr("rootcoz.server_status.read_data_usage", lambda _p: (1, 4))
-        monkeypatch.setattr(storage, "count_active_analyses", _async(lambda: 3))
+        monkeypatch.setattr(storage, "list_active_analyses", _async(_running_rows))
         monkeypatch.setattr(server_status, "read_sidecar", _sidecar_up)
 
         status = self._status(
-            tmp_path, sse_clients=2, cgroup_root=cgroup, proc_self=proc
+            tmp_path, sse_clients=2, chat_turns=1, cgroup_root=cgroup, proc_self=proc
         )
 
         assert set(status) == {
@@ -423,12 +555,35 @@ class TestCollectServerStatus:
             "warnings",
         }
         assert status["disk"]["used_ratio"] == 0.25
-        assert status["activity"] == {"analyses_running": 3, "sse_clients": 2}
+        activity = status["activity"]
+        assert activity["analyses_running"] == 2
+        assert activity["sse_clients"] == 2
+        assert activity["chat_turns_in_flight"] == 1
+        # Each running analysis carries its own elapsed time.
+        assert [run["job_id"] for run in activity["analyses"]] == ["job-1", "job-2"]
+        assert activity["analyses"][0]["elapsed_seconds"] >= 3600
+        assert activity["analyses"][1]["elapsed_seconds"] is None
         assert status["warnings"] == []
         # No secrets, no credential material anywhere in the payload.
         dumped = json.dumps(status).lower()
         for needle in ("api_key", "token", "password", "secret"):
             assert needle not in dumped
+
+    def test_a_crashed_sidecar_probe_still_raises_the_warning(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        cgroup, proc = _fake_roots(tmp_path)
+
+        async def _boom() -> dict:
+            raise RuntimeError("sidecar exploded")
+
+        monkeypatch.setattr(server_status, "read_sidecar", _boom)
+
+        status = self._status(tmp_path, cgroup_root=cgroup, proc_self=proc)
+        assert status["sidecar"]["reachable"] is False
+        assert "sidecar_unreachable" in [
+            warning["code"] for warning in status["warnings"]
+        ]
 
     def test_a_crashing_probe_degrades_only_its_block(
         self, tmp_path, monkeypatch
@@ -449,19 +604,58 @@ class TestCollectServerStatus:
         assert status["memory"]["available"] is True
         assert status["sidecar"]["reachable"] is True
 
+    def test_a_hanging_probe_times_out(self, tmp_path, monkeypatch) -> None:
+        """A stalled filesystem degrades its block instead of the request."""
+        import time as _time
+
+        cgroup, proc = _fake_roots(tmp_path)
+        monkeypatch.setattr(server_status, "_PROBE_TIMEOUT_SECONDS", 0.01)
+        monkeypatch.setattr("rootcoz.server_status.read_data_usage", lambda _p: (1, 4))
+        monkeypatch.setattr(server_status, "read_sidecar", _sidecar_up)
+        monkeypatch.setattr(
+            server_status, "read_disk", lambda *_a, **_k: _time.sleep(0.3) or {}
+        )
+
+        status = self._status(tmp_path, cgroup_root=cgroup, proc_self=proc)
+        assert status["disk"]["available"] is False
+        assert "timed out" in status["disk"]["reason"]
+        assert status["memory"]["available"] is True
+
     def test_activity_omits_numbers_storage_cannot_give(
         self, tmp_path, monkeypatch
     ) -> None:
         cgroup, proc = _fake_roots(tmp_path)
 
-        async def _broken() -> int:
+        async def _broken():
             raise OSError("db gone")
 
-        monkeypatch.setattr(storage, "count_active_analyses", _broken)
+        monkeypatch.setattr(storage, "list_active_analyses", _broken)
         monkeypatch.setattr(server_status, "read_sidecar", _sidecar_up)
 
         status = self._status(tmp_path, cgroup_root=cgroup, proc_self=proc)
         assert status["activity"] == {}
+
+
+def _running_rows() -> list[dict]:
+    """Two active analyses: one with a start time, one without."""
+    return [
+        {
+            "job_id": "job-1",
+            "job_name": "nightly",
+            "build_number": 7,
+            "status": "running",
+            "created_at": "2020-01-01 00:00:00",
+            "analysis_started_at": "2020-01-01 00:00:00",
+        },
+        {
+            "job_id": "job-2",
+            "job_name": "gating",
+            "build_number": 8,
+            "status": "pending",
+            "created_at": "not a timestamp",
+            "analysis_started_at": None,
+        },
+    ]
 
 
 def _async(value):
@@ -565,6 +759,37 @@ class TestServerStatusEndpoint:
         assert data["database"]["results"] == 0
         assert [w["code"] for w in data["warnings"]] == ["disk_high"]
         assert "sse_clients" in data["activity"]
+        assert "chat_turns_in_flight" in data["activity"]
+
+    def test_operation_id_follows_the_handler_name(self, client) -> None:
+        from rootcoz.main import app
+
+        operation = app.openapi()["paths"]["/api/admin/server-status"]["get"]
+        assert operation["operationId"] == "adminServerStatus"
+
+    def test_response_goes_through_the_sensitive_filter(
+        self, client, stub_probes, monkeypatch
+    ) -> None:
+        """Same pattern as the sibling admin handlers: never returned raw."""
+        from rootcoz import main as main_module
+
+        seen: list[dict] = []
+
+        def _spy(payload):
+            seen.append(payload)
+            return payload
+
+        monkeypatch.setattr(main_module, "strip_sensitive_from_response", _spy)
+        cookies = client.post(
+            "/api/auth/login",
+            json={
+                "username": "admin",
+                "api_key": "test-admin-key-16chars",  # pragma: allowlist secret
+            },
+        ).cookies
+        resp = client.get("/api/admin/server-status", cookies=cookies)
+        assert resp.status_code == 200
+        assert seen and "disk" in seen[0]
 
     def test_anonymous_is_rejected(self, client, stub_probes) -> None:
         resp = client.get("/api/admin/server-status")

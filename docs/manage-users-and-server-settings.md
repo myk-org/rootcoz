@@ -165,6 +165,27 @@ That creates an active operator who can submit analyses, and one server setting 
    | --- | --- |
    | `Tokens` | Token usage broken down by provider, model, job, or day, with calls, input, output, cache read/write, cost, and average duration. Filter by date range and provider. |
    | `Logs` | The live server log tail, filterable by level and text, streamed over SSE. |
+   | `Server Status` | A live snapshot of the container this server runs in — see below. |
+
+   **Server Status answers "is anything wrong" before "what are the numbers".** The page renders warnings above the cards from the same numbers the cards show: the data directory at 75 % / 90 %, the container's memory working set at 90 % of its limit, an event-loop stall over 5 s, and an unreachable AI sidecar. Each one is a badge plus its text (`Critical` / `Warning`), never colour alone. The page refreshes every 30 s while the tab is visible and never runs two requests at once. The CLI mirrors it: `rootcoz admin server-status` (`--json` for the raw snapshot).
+
+   | Card | Shows |
+   | --- | --- |
+   | Disk | Used / capacity / percentage of the filesystem holding the data directory, plus the sizes of the database, the sidecar transcripts and the logs. |
+   | CPU | Process CPU as a percentage of one core over the sampled window, and the cgroup quota (`cpu.max`) when one is set. |
+   | Memory | Process RSS, container usage against `memory.max`, the working set, and the working set as a percentage of the limit. |
+   | Process | Version, build git SHA, uptime, PID, restart count, and the worst event-loop stall in the last minute. |
+   | Database | `results.db` size (main file plus its WAL), row counts for results, recorded failures and test entries, and the compression ratio. |
+   | AI sidecar | Reachable or not, models available, and free models declared. |
+   | Activity | Analyses running with how long each has been running, chat turns in flight, and SSE clients connected. |
+
+   **The disk figures describe a filesystem, not a quota.** `Disk` measures whichever filesystem holds the data directory — a PVC, a Docker volume, a bind mount or a plain directory — using the same probe the `rootcoz_data_*` metrics publish, so the page and your alerting can never disagree. It is **not** a per-volume quota, and on a shared node filesystem it includes other tenants' usage: 60 % there does not mean 40 % of your own headroom. The card says so.
+
+   **A value the container cannot read is shown as unreadable.** The CPU quota, memory limit, restart count and git SHA come from cgroup v2 files, `CGROUP_ROOT` (`/sys/fs/cgroup`) and `/proc/self`. Where those are absent — Docker without cgroup namespacing, a non-Linux dev box, an image built without `GIT_SHA` — the card says `not visible in this container` with the reason, never `0` and never a dash that reads as healthy. An unreadable `cpu.max` or `memory.max` is likewise `unknown`, which is deliberately different from an explicitly unlimited cgroup (`no quota — unlimited` / `no limit set`).
+
+   **Memory uses the working set.** `memory.current` includes reclaimable page cache, which a growing database and its logs can fill on a healthy container; the 90 % warning is therefore based on the working set (`memory.current` minus `inactive_file`), the number the kubelet evicts on, not on raw usage.
+
+   **Row counts and sizes are snapshot numbers.** The counts are cached for five minutes on the server, so a card can lag the database; the size is read fresh. The compression ratio is `—` until the feature behind it lands, never a placeholder number.
 
 13. **Review the audit log.**
 

@@ -46,24 +46,53 @@ function healthy(): ServerStatus {
       transcripts_bytes: 2048,
       logs_bytes: 512,
     },
-    cpu: { available: true, process_percent: 12.34, quota_cores: 2, period_us: 100000 },
+    cpu: {
+      available: true,
+      process_percent: 12.34,
+      quota_cores: 2,
+      quota_state: 'set',
+      period_us: 100000,
+    },
     memory: {
       available: true,
       rss_bytes: 200 * MiB,
       current_bytes: 300 * MiB,
+      working_set_bytes: 280 * MiB,
       limit_bytes: 1 * GiB,
-      percent_of_limit: 29.3,
+      limit_state: 'set',
+      percent_of_limit: 27.3,
     },
     process: {
       version: '1.2.3',
       git_sha: 'abc1234',
       uptime_seconds: 93784,
       pid: 42,
+      restart_count: null,
       loop_lag_ms: 1.5,
     },
-    database: { available: true, size_bytes: 4096, results: 12, failures: 3, test_entries: 40 },
+    database: {
+      available: true,
+      size_bytes: 4096,
+      results: 12,
+      failures: 3,
+      test_entries: 40,
+      compression_ratio: null,
+    },
     sidecar: { reachable: true, models: 5, free_models: 2 },
-    activity: { analyses_running: 1, sse_clients: 2 },
+    activity: {
+      analyses_running: 1,
+      analyses: [
+        {
+          job_id: 'j1',
+          job_name: 'nightly',
+          build_number: 7,
+          status: 'running',
+          elapsed_seconds: 3600,
+        },
+      ],
+      chat_turns_in_flight: 1,
+      sse_clients: 2,
+    },
     warnings: [],
   }
 }
@@ -176,12 +205,88 @@ describe('AdminServerStatusPage', () => {
     renderPage()
 
     expect(await screen.findByText('12.3%')).toBeInTheDocument()
-    expect(screen.getByText('29.3%')).toBeInTheDocument()
+    expect(screen.getByText('27.3%')).toBeInTheDocument()
     expect(screen.getByText('1d 2h')).toBeInTheDocument()
     expect(screen.getByText('abc1234')).toBeInTheDocument()
     expect(screen.getByText('1.5 ms')).toBeInTheDocument()
     expect(screen.getByText('Reachable')).toBeInTheDocument()
     expect(screen.getByText('updated just now')).toBeInTheDocument()
+  })
+
+  it('renders an unknown quota as not visible, never as unlimited', async () => {
+    const status = healthy()
+    status.cpu = {
+      available: true,
+      process_percent: 5,
+      quota_cores: null,
+      quota_state: 'unknown',
+      period_us: null,
+    }
+    status.memory = {
+      available: true,
+      current_bytes: 100,
+      limit_bytes: null,
+      limit_state: 'unknown',
+      percent_of_limit: null,
+    }
+    apiGet.mockResolvedValue(status)
+    renderPage()
+
+    expect((await screen.findAllByText(/not visible in this container/)).length).toBeGreaterThanOrEqual(2)
+    expect(screen.queryByText(/no quota — unlimited/)).toBeNull()
+    expect(screen.queryByText('no limit set')).toBeNull()
+  })
+
+  it('shows an explicit unlimited cgroup as unlimited', async () => {
+    const status = healthy()
+    status.cpu = { available: true, process_percent: 5, quota_cores: null, quota_state: 'unlimited', period_us: null }
+    status.memory = { available: true, current_bytes: 100, limit_bytes: null, limit_state: 'unlimited' }
+    apiGet.mockResolvedValue(status)
+    renderPage()
+
+    await screen.findByText('5.0%')
+    expect(screen.getByText(/no quota — unlimited/)).toBeInTheDocument()
+    expect(screen.getByText(/no limit set/)).toBeInTheDocument()
+  })
+
+  it('renders the activity card with per-analysis elapsed time', async () => {
+    apiGet.mockResolvedValue(healthy())
+    renderPage()
+
+    expect(await screen.findByText('nightly #7')).toBeInTheDocument()
+    expect(screen.getByText('1h 0m')).toBeInTheDocument()
+    expect(screen.getByText('Chat turns in flight')).toBeInTheDocument()
+  })
+
+  it('shows the database ratio placeholder and unavailable process fields', async () => {
+    apiGet.mockResolvedValue(healthy())
+    renderPage()
+
+    expect(await screen.findByText('Compression ratio')).toBeInTheDocument()
+    expect(screen.getByText('—')).toBeInTheDocument()
+    expect(screen.getByText('Restarts')).toBeInTheDocument()
+  })
+
+  it('keeps one request in flight at a time', async () => {
+    vi.useFakeTimers()
+    try {
+      let resolveFirst: (status: ServerStatus) => void = () => {}
+      apiGet.mockReturnValue(
+        new Promise<ServerStatus>((resolve) => {
+          resolveFirst = resolve
+        }),
+      )
+      renderPage()
+      // Two polling turns pass while the first request is still open.
+      await vi.advanceTimersByTimeAsync(65_000)
+      expect(apiGet).toHaveBeenCalledTimes(1)
+
+      resolveFirst(healthy())
+      await vi.advanceTimersByTimeAsync(31_000)
+      expect(apiGet).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('shows an error state instead of a blank page when the fetch fails', async () => {

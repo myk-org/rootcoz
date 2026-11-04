@@ -4541,6 +4541,23 @@ async def count_active_analyses() -> int:
         return row[0] if row else 0
 
 
+async def list_active_analyses(limit: int = 20) -> list[dict[str, Any]]:
+    """Active analyses with their start times, so elapsed time can be shown.
+
+    Lightweight like ``count_active_analyses``: no ``result_json`` is fetched.
+    """
+    placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            f"SELECT job_id, job_name, build_number, status, created_at, "
+            f"analysis_started_at FROM results "
+            f"WHERE status IN ({placeholders}) ORDER BY created_at LIMIT ?",
+            (*ACTIVE_STATUSES, limit),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
 async def list_distinct_job_names() -> set[str]:
     """Return distinct non-empty job names from results. Lightweight query for backfill."""
     async with _connect_db() as db:

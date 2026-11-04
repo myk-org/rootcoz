@@ -686,6 +686,7 @@ def server_status_cmd(json_output: bool = _JSON_OPTION) -> None:
         f"Process: rootcoz {process.get('version', 'unknown')} "
         f"(pid {process.get('pid', '?')}, "
         f"up {float(process.get('uptime_seconds') or 0):.0f}s, "
+        f"restarts {_status_value(process.get('restart_count'))}, "
         f"loop lag {_status_value(process.get('loop_lag_ms'))} ms)"
     )
     disk = data.get("disk", {})
@@ -695,7 +696,7 @@ def server_status_cmd(json_output: bool = _JSON_OPTION) -> None:
         f"{_status_ratio(disk.get('used_ratio'))}% used, "
         f"{_status_bytes(disk.get('used_bytes'))} of "
         f"{_status_bytes(disk.get('capacity_bytes'))} "
-        f"(data dir {_status_bytes(disk.get('database_bytes'))}, "
+        f"(database {_status_bytes(disk.get('database_bytes'))}, "
         f"transcripts {_status_bytes(disk.get('transcripts_bytes'))}, "
         f"logs {_status_bytes(disk.get('logs_bytes'))})",
     )
@@ -731,7 +732,18 @@ def server_status_cmd(json_output: bool = _JSON_OPTION) -> None:
     )
     activity = data.get("activity", {})
     if activity:
-        typer.echo("Activity: " + ", ".join(f"{k} {v}" for k, v in activity.items()))
+        typer.echo(
+            "Activity: "
+            f"{_status_value(activity.get('analyses_running'))} analyses running, "
+            f"{_status_value(activity.get('chat_turns_in_flight'))} chat turns in "
+            f"flight, {_status_value(activity.get('sse_clients'))} SSE clients"
+        )
+        for running in activity.get("analyses") or []:
+            typer.echo(
+                f"  {running.get('job_name') or running.get('job_id')} "
+                f"#{running.get('build_number')} {running.get('status')} "
+                f"for {_status_value(running.get('elapsed_seconds'))}s"
+            )
     for warning in data.get("warnings", []):
         typer.echo(f"[{warning.get('level', 'warn')}] {warning.get('message', '')}")
 

@@ -44,13 +44,19 @@ interface DiskBlock extends ProbeBlock {
 interface CpuBlock extends ProbeBlock {
   process_percent?: number
   quota_cores?: number | null
+  /** "unknown" is a cpu.max that could not be read — never "unlimited". */
+  quota_state?: 'set' | 'unlimited' | 'unknown'
   period_us?: number | null
 }
 
 interface MemoryBlock extends ProbeBlock {
   rss_bytes?: number | null
   current_bytes?: number
+  working_set_bytes?: number | null
   limit_bytes?: number | null
+  /** "unknown" is a memory.max that could not be read — never "no limit set". */
+  limit_state?: 'set' | 'unlimited' | 'unknown'
+  /** Working set as a share of the limit: what an OOM kill follows. */
   percent_of_limit?: number | null
 }
 
@@ -59,9 +65,12 @@ interface DatabaseBlock extends ProbeBlock {
   results?: number
   failures?: number
   test_entries?: number
+  /** Not reported until #409 lands; always shown as a placeholder. */
+  compression_ratio?: number | null
 }
 
 interface SidecarBlock {
+  available?: boolean
   reachable: boolean
   models: number | null
   free_models: number | null
@@ -73,11 +82,23 @@ interface ProcessBlock {
   git_sha: string
   uptime_seconds: number
   pid: number
+  /** Not readable from inside a container; null, never 0. */
+  restart_count?: number | null
   loop_lag_ms: number | null
+}
+
+interface RunningAnalysis {
+  job_id: string
+  job_name: string
+  build_number: number
+  status: string
+  elapsed_seconds: number | null
 }
 
 interface ActivityBlock {
   analyses_running?: number
+  analyses?: RunningAnalysis[]
+  chat_turns_in_flight?: number
   sse_clients?: number
 }
 
@@ -201,8 +222,13 @@ export function AdminServerStatusPage() {
   // Ticked every second so the "updated …" label stays true, not just at fetch.
   const [now, setNow] = useState(() => Date.now())
   const loadedAtRef = useRef(0)
+  // One request at a time: a slow response must not be followed by another
+  // request whose older snapshot could land last.
+  const inFlightRef = useRef(false)
 
   const load = useCallback(async () => {
+    if (inFlightRef.current) return
+    inFlightRef.current = true
     setLoading(true)
     setError('')
     try {
@@ -211,6 +237,7 @@ export function AdminServerStatusPage() {
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Failed to load server status')
     } finally {
+      inFlightRef.current = false
       loadedAtRef.current = Date.now()
       setLoading(false)
     }
@@ -335,10 +362,12 @@ export function AdminServerStatusPage() {
                 <dl>
                   <Field label="Process">{percentValue(cpu.process_percent)}</Field>
                   <Field label="CPU quota">
-                    {cpu.quota_cores == null ? (
+                    {cpu.quota_cores != null ? (
+                      `${cpu.quota_cores} cores`
+                    ) : cpu.quota_state === 'unlimited' ? (
                       <span className="text-text-tertiary">no quota — unlimited</span>
                     ) : (
-                      `${cpu.quota_cores} cores`
+                      <NotVisible reason="cpu.max not readable" />
                     )}
                   </Field>
                   <Field label="Period">
@@ -359,15 +388,15 @@ export function AdminServerStatusPage() {
                 <dl>
                   <Field label="Process RSS">{bytesValue(memory.rss_bytes)}</Field>
                   <Field label="Container usage">
-                    {bytesValue(memory.current_bytes)} of {bytesValue(memory.limit_bytes)}
+                    {bytesValue(memory.current_bytes)} of{' '}
+                    {memory.limit_state === 'unlimited'
+                      ? 'no limit set'
+                      : memory.limit_state === 'unknown'
+                        ? NOT_VISIBLE
+                        : bytesValue(memory.limit_bytes)}
                   </Field>
-                  <Field label="Of limit">
-                    {memory.limit_bytes == null ? (
-                      <span className="text-text-tertiary">no limit set</span>
-                    ) : (
-                      percentValue(memory.percent_of_limit)
-                    )}
-                  </Field>
+                  <Field label="Working set">{bytesValue(memory.working_set_bytes)}</Field>
+                  <Field label="Of limit">{percentValue(memory.percent_of_limit)}</Field>
                 </dl>
               ) : (
                 <NotVisible reason={memory?.reason} />
@@ -379,10 +408,13 @@ export function AdminServerStatusPage() {
                 <dl>
                   <Field label="Version">{process.version}</Field>
                   <Field label="Git SHA">
-                    {process.git_sha || <span className="text-text-tertiary">not set</span>}
+                    {process.git_sha || <NotVisible />}
                   </Field>
                   <Field label="Uptime">{formatUptime(process.uptime_seconds)}</Field>
                   <Field label="PID">{process.pid}</Field>
+                  <Field label="Restarts">
+                    {process.restart_count == null ? <NotVisible /> : process.restart_count}
+                  </Field>
                   <Field label="Loop lag">
                     {process.loop_lag_ms == null ? (
                       <span className="text-text-tertiary">no sample yet</span>
@@ -402,6 +434,13 @@ export function AdminServerStatusPage() {
                   <Field label="Failures">{countValue(database.failures, 'not counted')}</Field>
                   <Field label="Test entries">
                     {countValue(database.test_entries, 'not counted')}
+                  </Field>
+                  <Field label="Compression ratio">
+                    {database.compression_ratio == null ? (
+                      <span className="text-text-tertiary">—</span>
+                    ) : (
+                      `${database.compression_ratio.toFixed(2)}×`
+                    )}
                   </Field>
                 </dl>
               ) : (
@@ -433,14 +472,35 @@ export function AdminServerStatusPage() {
 
             <StatusCard title="Activity" icon={<Activity className="h-4 w-4" />}>
               {activity && (
-                <dl>
-                  <Field label="Analyses running">
-                    {countValue(activity.analyses_running, NOT_VISIBLE)}
-                  </Field>
-                  <Field label="SSE clients">
-                    {countValue(activity.sse_clients, NOT_VISIBLE)}
-                  </Field>
-                </dl>
+                <div className="space-y-2">
+                  <dl>
+                    <Field label="Analyses running">
+                      {countValue(activity.analyses_running, NOT_VISIBLE)}
+                    </Field>
+                    <Field label="Chat turns in flight">
+                      {countValue(activity.chat_turns_in_flight, NOT_VISIBLE)}
+                    </Field>
+                    <Field label="SSE clients">
+                      {countValue(activity.sse_clients, NOT_VISIBLE)}
+                    </Field>
+                  </dl>
+                  {activity.analyses && activity.analyses.length > 0 && (
+                    <ul className="space-y-1 text-xs text-text-secondary">
+                      {activity.analyses.map((run) => (
+                        <li key={run.job_id} className="flex justify-between gap-2">
+                          <span className="truncate">
+                            {run.job_name || run.job_id} #{run.build_number}
+                          </span>
+                          <span className="shrink-0 font-mono text-text-tertiary">
+                            {run.elapsed_seconds == null
+                              ? NOT_VISIBLE
+                              : formatUptime(run.elapsed_seconds)}
+                          </span>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
               )}
             </StatusCard>
           </div>

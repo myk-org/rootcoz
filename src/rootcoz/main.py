@@ -1009,34 +1009,31 @@ _token_usage_listeners: set[asyncio.Event] = set()
 # Per-job chat change notifications
 _chat_listeners: dict[str, set[asyncio.Event]] = {}
 
+# Live SSE connections: one increment per stream, so a client subscribed to ten
+# topics is one client, not ten.
+_sse_connections = 0
+
 # Regex for validating job IDs in multiplexed SSE topics — prevents
 # SSE header injection via control characters in the event prefix.
 _VALID_JOB_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 
 def _sse_client_count() -> int:
-    """Live SSE connections, from the per-connection listener registries.
+    """Live SSE connections, one per stream.
 
-    Only the registries that hold one entry per connection are counted; the
-    navbar auxiliary events (mentions, active/pending counts) ride existing
-    connections and would double-count them.
+    A multiplexed connection counts once however many topics it subscribed to;
+    the log and audit broadcasts each hold one listener per connection.
     """
-    per_key_registries = (
-        _job_status_listeners,
-        _comment_listeners,
-        _chat_listeners,
-    )
     return (
-        len(_dashboard_listeners)
-        + len(_token_usage_listeners)
-        + sum(
-            len(events)
-            for registry in per_key_registries
-            for events in registry.values()
-        )
+        _sse_connections
         + _log_broadcast.listener_count
         + _audit_broadcast.listener_count
     )
+
+
+def _chat_turns_in_flight() -> int:
+    """Chat init/message tasks running right now (one per turn)."""
+    return sum(len(tasks) for tasks in _chat_job_tasks.values())
 
 
 def notify_dashboard_changed() -> None:
@@ -1237,6 +1234,7 @@ def _make_sse_stream(
     """
 
     async def event_generator() -> AsyncIterator[str]:
+        global _sse_connections
         my_event = asyncio.Event()
         wait_task: asyncio.Task[Any] | None = None
 
@@ -1245,6 +1243,7 @@ def _make_sse_stream(
             per_key_listeners.setdefault(listener_key, set()).add(my_event)
         else:
             listeners.add(my_event)
+        _sse_connections += 1
 
         try:
             while True:
@@ -1272,6 +1271,7 @@ def _make_sse_stream(
                 if my_event.is_set():
                     yield f"event: {event_name}\ndata: refresh\n\n"
         finally:
+            _sse_connections -= 1
             if wait_task is not None:
                 wait_task.cancel()
             if per_key_listeners is not None:
@@ -11251,6 +11251,7 @@ async def stream_multiplexed(
         raise HTTPException(status_code=400, detail="No valid topics specified")
 
     async def event_generator() -> AsyncIterator[str]:
+        global _sse_connections
         # Register all events in their listener sets
         for _prefix, ev, global_set, per_key_dict, key in registrations:
             if per_key_dict is not None:
@@ -11277,6 +11278,7 @@ async def stream_multiplexed(
         pending_feed = _PendingFeed(pending_event, username, "navbar:pending-count")
 
         wait_tasks: list[asyncio.Task[Any]] = []
+        _sse_connections += 1
 
         try:
             # Send initial navbar data on connect
@@ -11389,6 +11391,7 @@ async def stream_multiplexed(
                         yield f"event: {prefix}:{event_name}\ndata: refresh\n\n"
 
         finally:
+            _sse_connections -= 1
             for task in wait_tasks:
                 task.cancel()
 
@@ -12384,7 +12387,7 @@ def _data_probe_worker() -> None:
 threading.Thread(target=_data_probe_worker, name="data-probe", daemon=True).start()
 
 
-@app.get("/api/admin/server-status", operation_id="getAdminServerStatus")
+@app.get("/api/admin/server-status", operation_id="adminServerStatus")
 async def admin_server_status(request: Request) -> dict[str, Any]:
     """Live server status for the admin page (admin only, read-only).
 
@@ -12393,11 +12396,14 @@ async def admin_server_status(request: Request) -> dict[str, Any]:
     read what it needs degrades that block, never the request.
     """
     _require_admin(request)
-    return await server_status.collect_server_status(
-        db_path=storage.DB_PATH,
-        transcripts_dir=sidecar_transcripts.TRANSCRIPTS_DIR,
-        log_dir=Path(_LOG_FILE).parent if _LOG_FILE else None,
-        sse_clients=_sse_client_count(),
+    return strip_sensitive_from_response(
+        await server_status.collect_server_status(
+            db_path=storage.DB_PATH,
+            transcripts_dir=sidecar_transcripts.TRANSCRIPTS_DIR,
+            log_dir=Path(_LOG_FILE).parent if _LOG_FILE else None,
+            sse_clients=_sse_client_count(),
+            chat_turns=_chat_turns_in_flight(),
+        )
     )
 
 

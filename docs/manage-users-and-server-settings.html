@@ -661,8 +661,55 @@
 <td><code>Logs</code></td>
 <td>The live server log tail, filterable by level and text, streamed over SSE.</td>
 </tr>
+<tr>
+<td><code>Server Status</code></td>
+<td>A live snapshot of the container this server runs in — see below.</td>
+</tr>
 </tbody>
 </table></div>
+<p><strong>Server Status answers "is anything wrong" before "what are the numbers".</strong> The page renders warnings above the cards from the same numbers the cards show: the data directory at 75 % / 90 %, the container's memory working set at 90 % of its limit, an event-loop stall over 5 s, and an unreachable AI sidecar. Each one is a badge plus its text (<code>Critical</code> / <code>Warning</code>), never colour alone. The page refreshes every 30 s while the tab is visible and never runs two requests at once. The CLI mirrors it: <code>rootcoz admin server-status</code> (<code>--json</code> for the raw snapshot).</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Card</th>
+<th>Shows</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>Disk</td>
+<td>Used / capacity / percentage of the filesystem holding the data directory, plus the sizes of the database, the sidecar transcripts and the logs.</td>
+</tr>
+<tr>
+<td>CPU</td>
+<td>Process CPU as a percentage of one core over the sampled window, and the cgroup quota (<code>cpu.max</code>) when one is set.</td>
+</tr>
+<tr>
+<td>Memory</td>
+<td>Process RSS, container usage against <code>memory.max</code>, the working set, and the working set as a percentage of the limit.</td>
+</tr>
+<tr>
+<td>Process</td>
+<td>Version, build git SHA, uptime, PID, restart count, and the worst event-loop stall in the last minute.</td>
+</tr>
+<tr>
+<td>Database</td>
+<td><code>results.db</code> size (main file plus its WAL), row counts for results, recorded failures and test entries, and the compression ratio.</td>
+</tr>
+<tr>
+<td>AI sidecar</td>
+<td>Reachable or not, models available, and free models declared.</td>
+</tr>
+<tr>
+<td>Activity</td>
+<td>Analyses running with how long each has been running, chat turns in flight, and SSE clients connected.</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>The disk figures describe a filesystem, not a quota.</strong> <code>Disk</code> measures whichever filesystem holds the data directory — a PVC, a Docker volume, a bind mount or a plain directory — using the same probe the <code>rootcoz_data_*</code> metrics publish, so the page and your alerting can never disagree. It is <strong>not</strong> a per-volume quota, and on a shared node filesystem it includes other tenants' usage: 60 % there does not mean 40 % of your own headroom. The card says so.</p>
+<p><strong>A value the container cannot read is shown as unreadable.</strong> The CPU quota, memory limit, restart count and git SHA come from cgroup v2 files, <code>CGROUP_ROOT</code> (<code>/sys/fs/cgroup</code>) and <code>/proc/self</code>. Where those are absent — Docker without cgroup namespacing, a non-Linux dev box, an image built without <code>GIT_SHA</code> — the card says <code>not visible in this container</code> with the reason, never <code>0</code> and never a dash that reads as healthy. An unreadable <code>cpu.max</code> or <code>memory.max</code> is likewise <code>unknown</code>, which is deliberately different from an explicitly unlimited cgroup (<code>no quota — unlimited</code> / <code>no limit set</code>).</p>
+<p><strong>Memory uses the working set.</strong> <code>memory.current</code> includes reclaimable page cache, which a growing database and its logs can fill on a healthy container; the 90 % warning is therefore based on the working set (<code>memory.current</code> minus <code>inactive_file</code>), the number the kubelet evicts on, not on raw usage.</p>
+<p><strong>Row counts and sizes are snapshot numbers.</strong> The counts are cached for five minutes on the server, so a card can lag the database; the size is read fresh. The compression ratio is <code>—</code> until the feature behind it lands, never a placeholder number.</p>
 <ol>
 <li><strong>Review the audit log.</strong></li>
 </ol>
