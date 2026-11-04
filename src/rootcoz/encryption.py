@@ -51,6 +51,8 @@ SENSITIVE_KEYS: frozenset[str] = frozenset(
         "datadog_app_key",
         "greenwave_api_token",
         "greenwave_waiver_token",
+        "greenwave_oidc_client_secret",
+        "greenwave_basic_password",
     }
 )
 

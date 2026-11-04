@@ -30,6 +30,9 @@ PROW_ARTIFACTS_MAX_OBJECTS = 5_000
 # Valid values for the explicit ``jira_auth_mode`` setting.
 JIRA_AUTH_MODES = ("oauth", "basic", "pat", "atst")
 
+# Valid values for the explicit ``greenwave_auth_mode`` setting.
+GREENWAVE_AUTH_MODES = ("bearer", "oidc", "kerberos", "mtls", "basic", "none")
+
 # Roles a new registration may default to (``admin`` is granted, never default).
 DEFAULT_USER_ROLES = ("viewer", "reviewer", "operator")
 
@@ -113,17 +116,24 @@ def parse_greenwave_waivable_classifications(
     return frozenset(parsed)
 
 
-def _validate_greenwave_url(value: str | None, env_name: str) -> None:
+def validate_greenwave_url(
+    value: str | None,
+    env_name: str,
+    *,
+    allow_http: bool = False,
+) -> None:
     """Validate a Greenwave ResultsDB/WaiverDB URL at Settings construction.
 
     These URLs are push targets for authenticated writes, so they must be
     strict HTTPS with a hostname and no userinfo, query, or fragment —
     credentials embedded in a URL would risk leaking into logs and errors.
-    The URL itself is intentionally NOT echoed in the error message for the
-    same reason.
+    ``allow_http`` is set for the ResultsDB URL in the credential-less
+    ``none`` auth mode (public ResultsDB instances).  The URL itself is
+    intentionally NOT echoed in the error message for the same reason.
 
     Raises:
-        ValueError: When *value* is set but not a valid bare HTTPS URL.
+        ValueError: When *value* is set but not a valid bare HTTPS URL
+            (or bare HTTP/HTTPS when *allow_http* is set).
     """
     if not value:
         return
@@ -134,8 +144,9 @@ def _validate_greenwave_url(value: str | None, env_name: str) -> None:
         _ = parts.port
     except ValueError as exc:
         raise ValueError(f"Invalid {env_name}: URL contains an invalid port") from exc
+    allowed_schemes = ("https", "http") if allow_http else ("https",)
     if (
-        parts.scheme != "https"
+        parts.scheme not in allowed_schemes
         or not parts.hostname
         or parts.username is not None
         or parts.password is not None
@@ -143,7 +154,8 @@ def _validate_greenwave_url(value: str | None, env_name: str) -> None:
         or parts.fragment
     ):
         raise ValueError(
-            f"Invalid {env_name}: must be an HTTPS URL with a hostname "
+            f"Invalid {env_name}: must be an "
+            f"{'HTTP(S)' if allow_http else 'HTTPS'} URL with a hostname "
             "(userinfo, query, and fragment are not allowed)"
         )
 
@@ -318,23 +330,6 @@ class ReportPortalConfig(NamedTuple):
     push_classifications: bool
     push_rootcoz_url: bool
     push_tracker_links: bool
-
-
-def _greenwave_allow_ai_waivers_description() -> str:
-    """Settings-UI description for ``greenwave_allow_ai_waivers``.
-
-    Reads the canonical identity from ``rootcoz.identity`` — a
-    dependency-free leaf module — because this runs while the ``Settings``
-    class body is being built, i.e. before ``rootcoz.storage`` has finished
-    importing (``storage`` -> ``comment_enrichment`` -> ``jira`` -> ``config``).
-    Importing ``rootcoz.storage`` here would close that cycle.
-    """
-    from rootcoz.identity import AI_SYSTEM_USERNAME
-
-    return (
-        f"Allow auto-reviewed failures ({AI_SYSTEM_USERNAME}) to generate "
-        "waivers. Default: only human-reviewed failures are waived."
-    )
 
 
 class Settings(BaseSettings):
@@ -591,12 +586,13 @@ class Settings(BaseSettings):
         dotenv_settings: PydanticBaseSettingsSource,
         file_secret_settings: PydanticBaseSettingsSource,
     ) -> tuple[PydanticBaseSettingsSource, ...]:
-        """Drop ``jira_auth_mode`` from the env/dotenv sources.
+        """Drop the DB-only auth-mode fields from the env/dotenv sources.
 
-        The auth method is selected ONLY in Server Settings (DB); the
-        ``JIRA_AUTH_MODE`` environment variable is deliberately ignored.
-        Init kwargs (DB-override merge in ``get_settings()``, admin PUT
-        validation) and ``model_copy`` pinning are unaffected.
+        The auth methods are selected ONLY in Server Settings (DB); the
+        ``JIRA_AUTH_MODE`` and ``GREENWAVE_AUTH_MODE`` environment
+        variables are deliberately ignored. Init kwargs (DB-override merge
+        in ``get_settings()``, admin PUT validation) and ``model_copy``
+        pinning are unaffected.
         """
 
         def _without_auth_mode(
@@ -605,6 +601,7 @@ class Settings(BaseSettings):
             def _load() -> dict[str, Any]:
                 data = source()
                 data.pop("jira_auth_mode", None)
+                data.pop("greenwave_auth_mode", None)
 
                 def _alias_value(alias: str) -> str | None:
                     # Aliases resolve from os.environ (the env source) AND
@@ -661,6 +658,19 @@ class Settings(BaseSettings):
         if mode and mode not in JIRA_AUTH_MODES:
             raise ValueError(
                 f"jira_auth_mode must be one of {', '.join(JIRA_AUTH_MODES)} "
+                f"(case-insensitive, got {value!r})"
+            )
+        return mode or None
+
+    @field_validator("greenwave_auth_mode")
+    @classmethod
+    def _validate_greenwave_auth_mode(cls, value: str | None) -> str | None:
+        """Accept only the six known methods (or empty — disabled)."""
+        mode = (value or "").strip().lower()
+        if mode and mode not in GREENWAVE_AUTH_MODES:
+            raise ValueError(
+                f"greenwave_auth_mode must be one of "
+                f"{', '.join(GREENWAVE_AUTH_MODES)} "
                 f"(case-insensitive, got {value!r})"
             )
         return mode or None
@@ -809,9 +819,9 @@ class Settings(BaseSettings):
     enable_greenwave: bool | None = Field(
         default=None,
         description=(
-            "Enable the Greenwave exporter."
-            " When None, enabled if GREENWAVE_URL and GREENWAVE_API_TOKEN"
-            " are configured."
+            "Enable the Greenwave exporter. Requires an explicit"
+            " GREENWAVE_AUTH_MODE selection; when None, enabled if a mode"
+            " is selected and its required fields are configured."
         ),
     )
     greenwave_url: str | None = Field(
@@ -820,7 +830,77 @@ class Settings(BaseSettings):
     )
     greenwave_api_token: SecretStr | None = Field(
         default=None,
-        description="ResultsDB API auth token.",
+        description="ResultsDB API auth token (bearer auth mode).",
+    )
+    # DB-only Greenwave auth method selection (Server Settings UI) —
+    # REQUIRED for the Greenwave exporter, mirroring jira_auth_mode. When
+    # set, ONLY that method's fields are used. Unset disables the exporter
+    # entirely: no credentials are read, no inference. Never read from the
+    # environment (see settings_customise_sources); set via
+    # PUT /api/admin/settings.
+    greenwave_auth_mode: str | None = Field(
+        default=None,
+        description=(
+            "Explicit Greenwave auth method: 'bearer', 'oidc', 'kerberos',"
+            " 'mtls', 'basic', or 'none' (Server Settings only). Unset"
+            " disables the Greenwave exporter (no auto-detection)."
+        ),
+    )
+    # oidc mode: client-credentials grant against the token URL.
+    greenwave_oidc_token_url: str | None = Field(
+        default=None,
+        description="OIDC token endpoint URL for the oidc auth mode.",
+    )
+    greenwave_oidc_client_id: str | None = Field(
+        default=None,
+        description="OIDC client ID for the oidc auth mode.",
+    )
+    greenwave_oidc_client_secret: SecretStr | None = Field(
+        default=None,
+        description="OIDC client secret for the oidc auth mode.",
+    )
+    # kerberos mode: SPNEGO/Negotiate with a client keytab.
+    greenwave_keytab_path: str | None = Field(
+        default=None,
+        description="Kerberos keytab file path for the kerberos auth mode.",
+    )
+    greenwave_keytab_principal: str | None = Field(
+        default=None,
+        description="Kerberos client principal (user@REALM) for the keytab.",
+    )
+    greenwave_krb5_realm: str | None = Field(
+        default=None,
+        description=(
+            "Kerberos service realm for the SPN (e.g. 'EXAMPLE.COM'). Unset "
+            "uses the keytab principal's realm; leave both unset to resolve "
+            "the realm from krb5.conf [domain_realm]."
+        ),
+    )
+    greenwave_krb5_service: str = Field(
+        default="HTTP",
+        description="Kerberos service class for the target SPN (default HTTP).",
+    )
+    # mtls mode: client certificate authentication at the TLS layer.
+    greenwave_client_cert: str | None = Field(
+        default=None,
+        description="Client certificate (PEM) path for the mtls auth mode.",
+    )
+    greenwave_client_key: str | None = Field(
+        default=None,
+        description="Client key (PEM) path for the mtls auth mode.",
+    )
+    greenwave_ca_bundle: str | None = Field(
+        default=None,
+        description="CA bundle path for the mtls auth mode (optional).",
+    )
+    # basic mode: HTTP Basic authentication.
+    greenwave_basic_user: str | None = Field(
+        default=None,
+        description="Username for the basic auth mode.",
+    )
+    greenwave_basic_password: SecretStr | None = Field(
+        default=None,
+        description="Password for the basic auth mode.",
     )
     greenwave_waiver_url: str | None = Field(
         default=None,
@@ -848,10 +928,6 @@ class Settings(BaseSettings):
             "(e.g. 'INFRASTRUCTURE,CODE ISSUE'). Matched case-insensitively "
             "against rootcoz classifications."
         ),
-    )
-    greenwave_allow_ai_waivers: bool = Field(
-        default=False,
-        description=_greenwave_allow_ai_waivers_description(),
     )
     greenwave_outcome_map: str = Field(
         default=DEFAULT_GREENWAVE_OUTCOME_MAP,
@@ -1178,15 +1254,43 @@ class Settings(BaseSettings):
             "greenwave_url",
             "greenwave_waiver_url",
             "greenwave_product_version",
+            "greenwave_oidc_token_url",
+            "greenwave_oidc_client_id",
+            "greenwave_keytab_path",
+            "greenwave_keytab_principal",
+            "greenwave_client_cert",
+            "greenwave_client_key",
+            "greenwave_ca_bundle",
+            "greenwave_basic_user",
         ):
             value = getattr(self, field_name)
             if isinstance(value, str):
                 stripped = value.strip()
                 object.__setattr__(self, field_name, stripped or None)
         # Validate Greenwave push targets before anything can use them —
-        # a malformed or credential-bearing URL is a startup error.
-        _validate_greenwave_url(self.greenwave_url, "GREENWAVE_URL")
-        _validate_greenwave_url(self.greenwave_waiver_url, "GREENWAVE_WAIVER_URL")
+        # a malformed or credential-bearing URL is a startup error. The
+        # ResultsDB URL scheme check is mode-aware: the credential-less
+        # 'none' mode may target a plain-HTTP public instance. An UNSET mode
+        # leaves the exporter disabled, so its URL is inert and may also be
+        # plain HTTP — otherwise an env-configured http:// URL would crash
+        # startup against a mode that only the database can supply.
+        greenwave_mode = normalize_greenwave_auth_mode(self.greenwave_auth_mode)
+        validate_greenwave_url(
+            self.greenwave_url,
+            "GREENWAVE_URL",
+            allow_http=greenwave_mode in ("none", ""),
+        )
+        # Deliberately stricter than GREENWAVE_URL: the waiver write is the
+        # gating action, so it stays HTTPS-only even in the credential-less
+        # 'none' mode. A public ResultsDB may be read/written over plain HTTP;
+        # lifting a gate may not.
+        validate_greenwave_url(self.greenwave_waiver_url, "GREENWAVE_WAIVER_URL")
+        # The OIDC token endpoint receives the client secret on every push
+        # and its response supplies the bearer token, so it is always
+        # HTTPS-only — no mode makes it safe over plain HTTP.
+        validate_greenwave_url(
+            self.greenwave_oidc_token_url, "GREENWAVE_OIDC_TOKEN_URL"
+        )
         # Strip whitespace from string fields with empty-string defaults
         for field_name in (
             "jenkins_url",
@@ -1200,6 +1304,7 @@ class Settings(BaseSettings):
             "jira_cloud_url",
             "jira_server_url",
             "greenwave_subject_type",
+            "greenwave_krb5_service",
         ):
             value = getattr(self, field_name)
             if isinstance(value, str):
@@ -1222,6 +1327,8 @@ class Settings(BaseSettings):
             "datadog_app_key",
             "greenwave_api_token",
             "greenwave_waiver_token",
+            "greenwave_oidc_client_secret",
+            "greenwave_basic_password",
         ):
             secret = getattr(self, field_name)
             if secret is not None:
@@ -1439,22 +1546,31 @@ class Settings(BaseSettings):
 
     @property
     def greenwave_enabled(self) -> bool:
-        """Check if the Greenwave exporter is enabled and configured."""
+        """Whether the Greenwave exporter is enabled and fully configured.
+
+        Mirrors ``jira_enabled``: an unset ``greenwave_auth_mode`` disables
+        the exporter outright (no credential inference), and the selected
+        mode's required fields must all be configured.
+        """
         if self.enable_greenwave is False:
             return False
-        if not self.greenwave_url:
+        mode = normalize_greenwave_auth_mode(self.greenwave_auth_mode)
+        if not mode:
+            # No method selected: the exporter is disabled — no inference.
             if self.enable_greenwave is True:
                 logger.warning(
-                    "enable_greenwave is True but GREENWAVE_URL is not configured"
+                    "enable_greenwave is True but no Greenwave auth method is "
+                    "selected (choose one in Server Settings)"
                 )
             return False
-        if (
-            not self.greenwave_api_token
-            or not self.greenwave_api_token.get_secret_value()
-        ):
+        missing = greenwave_method_missing_fields(self)
+        if missing:
             if self.enable_greenwave is True:
                 logger.warning(
-                    "enable_greenwave is True but GREENWAVE_API_TOKEN is not configured"
+                    "enable_greenwave is True but Greenwave auth method '%s' "
+                    "is missing: %s",
+                    mode,
+                    ", ".join(missing),
                 )
             return False
         return True
@@ -1550,6 +1666,76 @@ def jira_method_missing_fields(settings: Settings) -> list[str]:
 # detection, pat/api-token fallback chain) was removed in #346:
 # jira_auth_mode is required — unset disables Jira entirely. Each
 # selected method's token is read directly by the resolver in jira.py.
+
+
+def normalize_greenwave_auth_mode(value: str | None) -> str:
+    """Canonical ``greenwave_auth_mode`` value; ``""`` when unset or invalid.
+
+    Lenient on purpose: ``Settings.model_copy`` (per-request overrides)
+    bypasses field validators, so resolve paths normalize instead of
+    crashing. Invalid values log a warning and disable the exporter
+    (empty mode).
+    """
+    mode = (value or "").strip().lower()
+    if mode and mode not in GREENWAVE_AUTH_MODES:
+        logger.warning(
+            "Ignoring invalid greenwave_auth_mode %r (expected one of: %s)",
+            value,
+            ", ".join(GREENWAVE_AUTH_MODES),
+        )
+        return ""
+    return mode
+
+
+def greenwave_method_missing_fields(settings: Settings) -> list[str]:
+    """Missing settings field names for the selected Greenwave auth method.
+
+    Returns [] when ``greenwave_auth_mode`` is unset (the exporter is
+    disabled then — ``greenwave_enabled`` short-circuits before field
+    checks) or when the selected method's fields are all configured.
+    WaiverDB prerequisites (``GREENWAVE_WAIVER_URL``/``_TOKEN``/
+    ``_PRODUCT_VERSION`` when ``GREENWAVE_PUSH_WAIVERS`` is on) are NOT
+    checked here — they stay in ``GreenwaveExporter.missing_waiver_settings``.
+    """
+    mode = normalize_greenwave_auth_mode(settings.greenwave_auth_mode)
+    if not mode:
+        return []
+    required: dict[str, list[tuple[str, Any]]] = {
+        "bearer": [
+            ("greenwave_url", settings.greenwave_url),
+            ("greenwave_api_token", settings.greenwave_api_token),
+        ],
+        "oidc": [
+            ("greenwave_url", settings.greenwave_url),
+            ("greenwave_oidc_token_url", settings.greenwave_oidc_token_url),
+            ("greenwave_oidc_client_id", settings.greenwave_oidc_client_id),
+            ("greenwave_oidc_client_secret", settings.greenwave_oidc_client_secret),
+        ],
+        "kerberos": [
+            ("greenwave_url", settings.greenwave_url),
+            ("greenwave_keytab_path", settings.greenwave_keytab_path),
+            ("greenwave_keytab_principal", settings.greenwave_keytab_principal),
+        ],
+        "mtls": [
+            ("greenwave_url", settings.greenwave_url),
+            ("greenwave_client_cert", settings.greenwave_client_cert),
+            ("greenwave_client_key", settings.greenwave_client_key),
+        ],
+        "basic": [
+            ("greenwave_url", settings.greenwave_url),
+            ("greenwave_basic_user", settings.greenwave_basic_user),
+            ("greenwave_basic_password", settings.greenwave_basic_password),
+        ],
+        "none": [
+            ("greenwave_url", settings.greenwave_url),
+        ],
+    }
+    return [name for name, value in required[mode] if not value]
+
+
+# Legacy auto-enablement (URL + token presence) was removed alongside the
+# greenwave_auth_mode addition, mirroring the Jira #346 change:
+# greenwave_auth_mode is required — unset disables the exporter entirely.
 
 
 # In-memory cache for DB settings overrides.

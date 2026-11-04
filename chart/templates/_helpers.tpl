@@ -72,6 +72,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-sidecar-agent" (include "rootcoz.fullname" .) }}
 {{- end }}
 
+{{- define "rootcoz.greenwaveSecretName" -}}
+{{- printf "%s-greenwave-auth" (include "rootcoz.fullname" .) }}
+{{- end }}
+
 {{/*
 Environment variable names that sidecar.agentDir.env entries must not shadow
 (comma-separated; splitList in consumers). Covers every variable the chart
@@ -347,6 +351,26 @@ PI_SIDECAR_AGENT_DIR and the volume mount on this being non-empty.
 {{- $secretName := include "rootcoz.sidecarAgentSecretName" . -}}
 {{- $files := list "models.json" "auth.json" "settings.json" -}}
 {{- $sources := dict "models.json" .Values.sidecar.agentDir.modelsJson "auth.json" .Values.sidecar.agentDir.authJson "settings.json" .Values.sidecar.agentDir.settingsJson -}}
+{{- range $file := $files -}}
+{{- $payload := include "rootcoz.resolveSecretPayload" (dict "value" (index $sources $file) "secretName" $secretName "secretKey" $file "Release" $.Release) -}}
+{{- if $payload }}
+{{ $file }}: {{ $payload | b64enc | quote }}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Greenwave auth-file secret data (keytab / mTLS cert / key / CA bundle) as
+`data:` lines — values override → existing secret fallback per file, so
+omitting a previously set file on upgrade preserves it (same semantics as the
+other mount secrets). Empty when no file is configured — the Deployment gates
+the volume mount on this being non-empty. Filenames are fixed so the
+Server Settings paths documented in values.yaml stay stable.
+*/}}
+{{- define "rootcoz.greenwaveSecretData" -}}
+{{- $secretName := include "rootcoz.greenwaveSecretName" . -}}
+{{- $files := list "keytab" "client.crt" "client.key" "ca.crt" -}}
+{{- $sources := dict "keytab" .Values.greenwave.keytab "client.crt" .Values.greenwave.clientCert "client.key" .Values.greenwave.clientKey "ca.crt" .Values.greenwave.caBundle -}}
 {{- range $file := $files -}}
 {{- $payload := include "rootcoz.resolveSecretPayload" (dict "value" (index $sources $file) "secretName" $secretName "secretKey" $file "Release" $.Release) -}}
 {{- if $payload }}

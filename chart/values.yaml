@@ -72,6 +72,27 @@ datadog:
   apiKey: ""
   appKey: ""
 
+# Greenwave exporter auth FILES (optional). Two greenwave_auth_mode values
+# (kerberos, mtls) need files that cannot be supplied through Server Settings,
+# which takes a path. Each value is file CONTENT (a keytab is binary — use
+# --set-file or a YAML block with base64/quoted content); empty renders nothing.
+# The files land in one Secret mounted read-only at greenwave.mountPath, and
+# the admin then sets the matching PATHS in Server Settings → Greenwave:
+#   keytab     → greenwave_keytab_path = <mountPath>/keytab
+#   clientCert → greenwave_client_cert = <mountPath>/client.crt
+#   clientKey  → greenwave_client_key  = <mountPath>/client.key
+#   caBundle   → greenwave_ca_bundle   = <mountPath>/ca.crt
+# The auth MODE itself (greenwave_auth_mode) is a DB-only Server Setting by
+# design (like jira_auth_mode) — only the files belong in the chart.
+greenwave:
+  keytab: ""
+  clientCert: ""
+  clientKey: ""
+  caBundle: ""
+  # Directory the Secret is mounted at. Change only to avoid collisions;
+# update the Server Settings paths accordingly.
+  mountPath: /var/run/secrets/rootcoz/greenwave
+
 # Pi SDK sidecar custom providers/settings (pi-sidecar >=4.9.0) via a persistent
 # agent dir. Files are read once at sidecar start; changing them rolls the
 # Deployment (checksum-tracked) so the sidecar restarts with the new content.

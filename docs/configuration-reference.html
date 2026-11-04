@@ -933,6 +933,102 @@ SECURE_COOKIES=false
 <td>yes</td>
 </tr>
 <tr>
+<td><code>GREENWAVE_OIDC_TOKEN_URL</code></td>
+<td>unset</td>
+<td>string</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>GREENWAVE_OIDC_CLIENT_ID</code></td>
+<td>unset</td>
+<td>string</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>GREENWAVE_OIDC_CLIENT_SECRET</code></td>
+<td>unset</td>
+<td>string</td>
+<td>yes</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>GREENWAVE_KEYTAB_PATH</code></td>
+<td>unset</td>
+<td>string</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>GREENWAVE_KEYTAB_PRINCIPAL</code></td>
+<td>unset</td>
+<td>string</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>GREENWAVE_KRB5_SERVICE</code></td>
+<td><code>HTTP</code></td>
+<td>string</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>GREENWAVE_KRB5_REALM</code></td>
+<td>unset</td>
+<td>string</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>GREENWAVE_CLIENT_CERT</code></td>
+<td>unset</td>
+<td>string</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>GREENWAVE_CLIENT_KEY</code></td>
+<td>unset</td>
+<td>string</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>GREENWAVE_CA_BUNDLE</code></td>
+<td>unset</td>
+<td>string</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>GREENWAVE_BASIC_USER</code></td>
+<td>unset</td>
+<td>string</td>
+<td>no</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
+<td><code>GREENWAVE_BASIC_PASSWORD</code></td>
+<td>unset</td>
+<td>string</td>
+<td>yes</td>
+<td>no</td>
+<td>yes</td>
+</tr>
+<tr>
 <td><code>GREENWAVE_WAIVER_URL</code></td>
 <td>unset</td>
 <td>string</td>
@@ -960,14 +1056,6 @@ SECURE_COOKIES=false
 <td><code>GREENWAVE_WAIVABLE_CLASSIFICATIONS</code></td>
 <td><code>INFRASTRUCTURE</code></td>
 <td>string</td>
-<td>no</td>
-<td>no</td>
-<td>yes</td>
-</tr>
-<tr>
-<td><code>GREENWAVE_ALLOW_AI_WAIVERS</code></td>
-<td><code>false</code></td>
-<td>boolean</td>
 <td>no</td>
 <td>no</td>
 <td>yes</td>
@@ -1006,10 +1094,24 @@ SECURE_COOKIES=false
 </tr>
 </tbody>
 </table></div>
-<p>Every Greenwave setting is editable at runtime through Server Settings — none are server-only or restart-required. With <code>ENABLE_GREENWAVE</code> unset, the exporter auto-enables when <code>GREENWAVE_URL</code> and <code>GREENWAVE_API_TOKEN</code> are both set.</p>
-<p>Both URLs are validated at startup: they must be HTTPS with a hostname, and must not embed userinfo, a query string, or a fragment. A malformed or credential-bearing URL is a configuration error, not a silent skip.</p>
+<p>Every Greenwave setting is editable at runtime through Server Settings — none are server-only or restart-required.</p>
+<p>The auth method is selected by the <strong>Server Settings</strong> <code>greenwave_auth_mode</code> row (UI: <code>Greenwave → Auth method</code>): <code>bearer</code>, <code>oidc</code>, <code>kerberos</code>, <code>mtls</code>, <code>basic</code>, or <code>none</code>. There is no <code>GREENWAVE_AUTH_MODE</code> environment variable — like <code>JIRA_AUTH_MODE</code>, the selection is deliberately database-only, and an env var of that name is ignored, so an operator who sets it will see nothing happen. <strong>An auth method selection is required for the Greenwave exporter</strong> — only the selected method's fields are used, with no credential sniffing and no fallback. When no method is selected, the exporter is disabled entirely regardless of which credentials are configured. Setting <code>ENABLE_GREENWAVE=false</code> forces it off; setting it to <code>true</code> without a selected method logs a warning and stays off.</p>
+<p>Each auth method owns its own credentials — <code>GREENWAVE_URL</code>, the waiver settings, and the outcome map are shared across methods:</p>
+<ul>
+<li><strong><code>bearer</code></strong> (static API token): <code>GREENWAVE_API_TOKEN</code></li>
+<li><strong><code>oidc</code></strong> (OIDC client-credentials grant): <code>GREENWAVE_OIDC_TOKEN_URL</code>, <code>GREENWAVE_OIDC_CLIENT_ID</code>, <code>GREENWAVE_OIDC_CLIENT_SECRET</code> — a token is minted at the token URL on demand, cached in-process until shortly before its reported expiry, and sent as the Bearer; a 401 forces one refresh and retry</li>
+<li><strong><code>kerberos</code></strong> (SPNEGO/Negotiate with a static client keytab): <code>GREENWAVE_KEYTAB_PATH</code>, <code>GREENWAVE_KEYTAB_PRINCIPAL</code>, <code>GREENWAVE_KRB5_SERVICE</code>, <code>GREENWAVE_KRB5_REALM</code></li>
+<li><strong><code>mtls</code></strong> (TLS client certificate): <code>GREENWAVE_CLIENT_CERT</code>, <code>GREENWAVE_CLIENT_KEY</code>, <code>GREENWAVE_CA_BUNDLE</code> (optional CA bundle; falls back to <code>GREENWAVE_VERIFY_SSL</code>)</li>
+<li><strong><code>basic</code></strong> (HTTP Basic): <code>GREENWAVE_BASIC_USER</code>, <code>GREENWAVE_BASIC_PASSWORD</code></li>
+<li><strong><code>none</code></strong> (no authentication): only <code>GREENWAVE_URL</code> — for public ResultsDB instances</li>
+</ul>
+<p><code>GREENWAVE_API_TOKEN</code> applies <strong>only</strong> in <code>bearer</code> mode; in every other mode it is neither required nor used.</p>
+<p><strong>Upgrade note (auth mode required):</strong> the Greenwave exporter no longer auto-enables from configured credentials — an auth method must now be selected in Server Settings (<code>Greenwave → Auth method</code>) or via <code>PUT /api/admin/settings</code>, and with no method selected the exporter is <strong>disabled</strong> no matter what is configured. A deployment that previously worked with only <code>GREENWAVE_URL</code> and <code>GREENWAVE_API_TOKEN</code> in the environment is silently disabled after upgrading until an admin selects <code>bearer</code> there. This is a breaking change: plan the Server Settings visit as part of the upgrade.</p>
+<p>The selected mode governs <strong>both</strong> push targets: the ResultsDB results write and the WaiverDB waiver write authenticate with the same strategy. The one exception is <code>bearer</code>, because ResultsDB and WaiverDB are separate services with separate tokens — in <code>bearer</code> mode the waiver write uses <code>GREENWAVE_WAIVER_TOKEN</code> instead of <code>GREENWAVE_API_TOKEN</code>. In every other mode <code>GREENWAVE_WAIVER_TOKEN</code> is neither required nor used.</p>
+<p>URL validation: <code>GREENWAVE_URL</code> must be HTTPS with a hostname, and must not embed userinfo, a query string, a fragment, or an invalid port — a malformed or credential-bearing URL is a configuration error, not a silent skip. <code>none</code> is the only mode permitting a plain <code>http://</code> <code>GREENWAVE_URL</code> (public ResultsDB instances); every other mode requires HTTPS, and <code>GREENWAVE_WAIVER_URL</code> and <code>GREENWAVE_OIDC_TOKEN_URL</code> are HTTPS-only in all modes.</p>
+<p>Kerberos operational setup: the keytab must be <strong>mounted into the container</strong> — <code>GREENWAVE_KEYTAB_PATH</code> points at the mounted file and <code>GREENWAVE_KEYTAB_PRINCIPAL</code> is the client principal it holds (<code>user@REALM</code>). <code>GREENWAVE_KRB5_SERVICE</code> is the service class of the target SPN (default <code>HTTP</code>), and the <strong>service realm</strong> comes from <code>GREENWAVE_KRB5_REALM</code> when set, otherwise from the realm of <code>GREENWAVE_KEYTAB_PRINCIPAL</code> — so <code>rootcoz@EXAMPLE.COM</code> against <code>resultsdb.example.com</code> yields <code>HTTP/resultsdb.example.com@EXAMPLE.COM</code>. Set <code>GREENWAVE_KRB5_REALM</code> when the service principal lives in a different realm than the client principal; leave both it and the principal's realm unset to let <code>krb5.conf</code> (<code>[domain_realm]</code>) resolve it, which is also the option that avoids <code>dns_canonicalize_hostname</code> touching a realm-qualified host. A <code>krb5.conf</code> describing your realm and KDC is required — set the standard <code>KRB5_CONFIG</code> environment variable to its path. The container image ships <code>pyspnego[kerberos]</code> and the krb5 runtime libraries, so no extra install is needed. A Kubernetes deployment mounts these files through the Helm chart (see <code>chart/README.md</code>; where the chart values differ from this description, follow the chart).</p>
 <p><code>GREENWAVE_OUTCOME_MAP</code> maps RootCoz classifications to ResultsDB outcomes, one <code>CLASS:OUTCOME</code> pair per comma-separated entry. Valid outcomes are <code>PASSED</code>, <code>FAILED</code>, <code>INFO</code>, and <code>NEEDS_INSPECTION</code>; anything else fails startup. Failures whose classification is not in the map are skipped (not exported). <code>GREENWAVE_WAIVABLE_CLASSIFICATIONS</code> is a comma-separated list, matched case-insensitively; unrecognized names log a warning but do not fail.</p>
-<p>Every push needs an explicit <code>subject_identifier</code> (the build or artifact the results and waivers apply to); a CI job name is never used instead. Waiver submission needs more than the server settings: <code>GREENWAVE_PUSH_WAIVERS=true</code> also requires <code>GREENWAVE_WAIVER_URL</code>, <code>GREENWAVE_WAIVER_TOKEN</code>, and <code>GREENWAVE_PRODUCT_VERSION</code>, plus a per-push <code>subject_identifier</code> (the artifact/build being gated) passed as a query parameter on the push request. Waivers are only submitted for failures reviewed by a human; failures reviewed only by <code>rootcoz-ai</code> are skipped unless <code>GREENWAVE_ALLOW_AI_WAIVERS=true</code>.</p>
+<p>Every push needs an explicit <code>subject_identifier</code> (the build or artifact the results and waivers apply to); a CI job name is never used instead. Waiver submission needs more than the server settings: <code>GREENWAVE_PUSH_WAIVERS=true</code> also requires <code>GREENWAVE_WAIVER_URL</code>, <code>GREENWAVE_PRODUCT_VERSION</code>, and — only in <code>bearer</code> mode — <code>GREENWAVE_WAIVER_TOKEN</code>, plus a per-push <code>subject_identifier</code> (the artifact/build being gated) passed as a query parameter on the push request. Waivers are only submitted for failures reviewed by a human; a failure reviewed only by <code>rootcoz-ai</code> is never waived — lifting a gate needs a human decision, and there is no setting that re-enables it.</p>
 <ol>
 <li><strong>Auth and Security category.</strong></li>
 </ol>
@@ -2541,8 +2643,8 @@ MYGATEWAY_API_KEY=your-gateway-api-key
 <h2 id="advanced-usage">Advanced Usage</h2>
 <p>Change settings after login without touching a restart. Open Server Settings, edit the field, and save. The value is validated against the same Pydantic constraints as the environment variable, encrypted if sensitive, and applied to the running process immediately. Setting a field to an empty string deletes the override.</p>
 <p>Sensitive values are returned masked as <code>••••••••</code>. <code>GET /api/admin/settings?reveal_key=ADMIN_KEY</code> unmasks one key, and <code>reveal_key=__all__</code> unmasks everything. Responses also report whether the value came from the database, the environment, or the code default, and flag when an environment variable of the same name also exists. See <a href="api-reference.html">API Endpoint Reference</a>.</p>
-<p>Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are <code>JENKINS_USER</code>, <code>JENKINS_PASSWORD</code>, <code>JIRA_EMAIL</code>, <code>JIRA_API_TOKEN</code>, <code>JIRA_PAT</code>, <code>JIRA_OAUTH_CLIENT_SECRET</code>, <code>JIRA_ATST_TOKEN</code>, <code>GITHUB_TOKEN</code>, <code>TESTS_REPO_TOKEN</code>, <code>REPORTPORTAL_API_TOKEN</code>, <code>DATADOG_API_KEY</code>, <code>DATADOG_APP_KEY</code>, <code>GREENWAVE_API_TOKEN</code>, <code>GREENWAVE_WAIVER_TOKEN</code>, <code>SMTP_PASSWORD</code>, <code>SLACK_WEBHOOK_URL</code>, <code>ADMIN_KEY</code>, and <code>VAPID_PRIVATE_KEY</code>. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: <code>GET /api/admin/settings</code> decrypts them and masks them by default, but returns them in full when called with <code>reveal_key</code>. Treat that response as secret-bearing.</p>
-<p>Blank strings normalise consistently: optional strings become unset, <code>AI_PROVIDER</code> is lowercased and normalised, <code>DEFAULT_USER_ROLE</code> is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only eleven of them: <code>GITHUB_TOKEN</code>, <code>TESTS_REPO_TOKEN</code>, <code>JIRA_API_TOKEN</code>, <code>JIRA_PAT</code>, <code>JIRA_OAUTH_CLIENT_SECRET</code>, <code>JIRA_ATST_TOKEN</code>, <code>REPORTPORTAL_API_TOKEN</code>, <code>DATADOG_API_KEY</code>, <code>DATADOG_APP_KEY</code>, <code>GREENWAVE_API_TOKEN</code>, and <code>GREENWAVE_WAIVER_TOKEN</code>. <code>ADMIN_KEY</code>, <code>VAPID_PRIVATE_KEY</code>, <code>SMTP_PASSWORD</code>, and <code>SLACK_WEBHOOK_URL</code> are <strong>not</strong> trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or <code>echo</code> — stays part of the value and will not match on comparison. Pass those without surrounding whitespace.</p>
+<p>Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are <code>JENKINS_USER</code>, <code>JENKINS_PASSWORD</code>, <code>JIRA_EMAIL</code>, <code>JIRA_API_TOKEN</code>, <code>JIRA_PAT</code>, <code>JIRA_OAUTH_CLIENT_SECRET</code>, <code>JIRA_ATST_TOKEN</code>, <code>GITHUB_TOKEN</code>, <code>TESTS_REPO_TOKEN</code>, <code>REPORTPORTAL_API_TOKEN</code>, <code>DATADOG_API_KEY</code>, <code>DATADOG_APP_KEY</code>, <code>GREENWAVE_API_TOKEN</code>, <code>GREENWAVE_WAIVER_TOKEN</code>, <code>GREENWAVE_OIDC_CLIENT_SECRET</code>, <code>GREENWAVE_BASIC_PASSWORD</code>, <code>SMTP_PASSWORD</code>, <code>SLACK_WEBHOOK_URL</code>, <code>ADMIN_KEY</code>, and <code>VAPID_PRIVATE_KEY</code>. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: <code>GET /api/admin/settings</code> decrypts them and masks them by default, but returns them in full when called with <code>reveal_key</code>. Treat that response as secret-bearing.</p>
+<p>Blank strings normalise consistently: optional strings become unset, <code>AI_PROVIDER</code> is lowercased and normalised, <code>DEFAULT_USER_ROLE</code> is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only thirteen of them: <code>GITHUB_TOKEN</code>, <code>TESTS_REPO_TOKEN</code>, <code>JIRA_API_TOKEN</code>, <code>JIRA_PAT</code>, <code>JIRA_OAUTH_CLIENT_SECRET</code>, <code>JIRA_ATST_TOKEN</code>, <code>REPORTPORTAL_API_TOKEN</code>, <code>DATADOG_API_KEY</code>, <code>DATADOG_APP_KEY</code>, <code>GREENWAVE_API_TOKEN</code>, <code>GREENWAVE_WAIVER_TOKEN</code>, <code>GREENWAVE_OIDC_CLIENT_SECRET</code>, and <code>GREENWAVE_BASIC_PASSWORD</code>. <code>ADMIN_KEY</code>, <code>VAPID_PRIVATE_KEY</code>, <code>SMTP_PASSWORD</code>, and <code>SLACK_WEBHOOK_URL</code> are <strong>not</strong> trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or <code>echo</code> — stays part of the value and will not match on comparison. Pass those without surrounding whitespace.</p>
 <h2 id="troubleshooting">Troubleshooting</h2>
 <ul>
 <li>

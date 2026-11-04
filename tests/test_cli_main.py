@@ -7,11 +7,13 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+from typer.main import get_command
 from typer.testing import CliRunner
 
-from rootcoz.cli.client import RootCozError
+from rootcoz.cli.client import RootCozClient, RootCozError
 from rootcoz.cli.config import ServerConfig
 from rootcoz.cli.main import app
+from rootcoz.exporters.greenwave_exporter import GreenwaveExporter
 from tests.conftest import host_env, make_test_client
 
 runner = CliRunner()
@@ -4182,6 +4184,39 @@ class TestPushRpCommand:
 
 
 class TestPushCommand:
+    def test_push_help_states_the_identifier_is_required(self):
+        """No surface may promise a job-name fallback the server refuses.
+
+        Every Greenwave push is a gating write keyed on the subject
+        identifier, so a bare ``push --plugin greenwave`` always fails with
+        422. Four places once claimed otherwise (CLI help, both docstrings,
+        the exporter docstring), so all four are pinned here. The option help
+        is read from the click command: the rendered panel is wrapped and
+        clipped to the terminal width, so asserting on it would test Rich's
+        layout instead of the wording.
+        """
+        command = get_command(app).commands["push"]
+        help_by_option = {param.name: param.help or "" for param in command.params}
+
+        identifier_help = " ".join(help_by_option["subject_identifier"].split())
+        assert "required for every Greenwave push" in identifier_help
+        assert "no job-name fallback" in identifier_help
+
+        plugin_help = help_by_option["plugin"]
+        for plugin in ("reportportal", "datadog", "greenwave"):
+            assert plugin in plugin_help
+
+        docstrings = {
+            "cli client": RootCozClient.push_to_exporter.__doc__ or "",
+            "exporter": GreenwaveExporter.push.__doc__ or "",
+        }
+        for where, doc in docstrings.items():
+            flattened = " ".join(doc.split())
+            # The wrong claim, in either wording it has appeared in.
+            assert "falls back to job_name" not in flattened, where
+            assert "Result pushes fall back" not in flattened, where
+            assert "required" in flattened, where
+
     def test_push(self, mock_client):
         mock_client.push_to_exporter.return_value = {
             "pushed": 3,

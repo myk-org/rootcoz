@@ -1484,8 +1484,8 @@ class RootCozClient:
             child_job_name: Optional child job name for scoped push.
             child_build_number: Optional child build number for scoped push.
             subject_identifier: Optional artifact identifier (e.g. build NVR);
-                required for Greenwave waiver submission (result pushes fall
-                back to job_name when omitted).
+                required for every Greenwave push — results and waivers are
+                both keyed on it, so there is no job-name fallback.
             waiver_comment: Optional comment recorded with submitted waivers
                 (Greenwave).
         """

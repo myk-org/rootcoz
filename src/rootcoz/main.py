@@ -105,17 +105,21 @@ from rootcoz.comment_enrichment import (
 )
 from rootcoz.config import (
     DEFAULT_USER_ROLES,
+    GREENWAVE_AUTH_MODES,
     JIRA_AUTH_MODES,
     Settings,
     atlassian_cloud_id_error,
     get_settings,
+    greenwave_method_missing_fields,
     jira_method_missing_fields,
+    normalize_greenwave_auth_mode,
     normalize_jira_auth_mode,
     parse_additional_repos,
     parse_peer_configs,
     parse_repo_ref,
     remove_from_db_settings_cache,
     update_db_settings_cache,
+    validate_greenwave_url,
 )
 from rootcoz.encryption import (
     SENSITIVE_KEYS,
@@ -151,6 +155,10 @@ from rootcoz.exporters.datadog import (
     _auth_headers,
     normalize_datadog_site,
     validate_datadog_credentials,
+)
+from rootcoz.exporters.greenwave_auth import (
+    GreenwaveAuthError,
+    build_greenwave_auth,
 )
 from rootcoz.exporters.greenwave_exporter import GreenwaveExporter
 from rootcoz.exporters.reportportal import (
@@ -352,6 +360,8 @@ _SENSITIVE_SETTINGS: frozenset[str] = frozenset(
         "datadog_app_key",
         "greenwave_api_token",
         "greenwave_waiver_token",
+        "greenwave_oidc_client_secret",
+        "greenwave_basic_password",
         "admin_key",
         "vapid_private_key",
         "smtp_password",
@@ -508,6 +518,7 @@ def _log_level_error(value: object) -> str | None:
 _SETTING_CHOICES: dict[str, dict[str, Any]] = {
     "default_user_role": {"options": list(DEFAULT_USER_ROLES)},
     "jira_auth_mode": {"options": list(JIRA_AUTH_MODES)},
+    "greenwave_auth_mode": {"options": list(GREENWAVE_AUTH_MODES)},
     "log_level": {"options": list(_VALID_LOG_LEVELS)},
     # Datadog publishes a finite site list; the picker offers it and the
     # server canonicalises to the bare hostname. Custom stays allowed so a
@@ -595,13 +606,25 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "dd_allow_unreviewed_push",
     ],
     "Greenwave": [
+        "greenwave_auth_mode",
         "greenwave_url",
         "greenwave_api_token",
+        "greenwave_oidc_token_url",
+        "greenwave_oidc_client_id",
+        "greenwave_oidc_client_secret",
+        "greenwave_keytab_path",
+        "greenwave_keytab_principal",
+        "greenwave_krb5_realm",
+        "greenwave_krb5_service",
+        "greenwave_client_cert",
+        "greenwave_client_key",
+        "greenwave_ca_bundle",
+        "greenwave_basic_user",
+        "greenwave_basic_password",
         "greenwave_waiver_url",
         "greenwave_waiver_token",
         "greenwave_push_waivers",
         "greenwave_waivable_classifications",
-        "greenwave_allow_ai_waivers",
         "greenwave_outcome_map",
         "greenwave_subject_type",
         "greenwave_product_version",
@@ -862,8 +885,11 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
             {
                 "key": field_name,
                 "label": _setting_label(field_name),
-                # jira_auth_mode is DB-only (Server Settings) — no env var
-                "env_var": "" if field_name == "jira_auth_mode" else field_name.upper(),
+                # jira_auth_mode / greenwave_auth_mode are DB-only
+                # (Server Settings) — no env var
+                "env_var": ""
+                if field_name in ("jira_auth_mode", "greenwave_auth_mode")
+                else field_name.upper(),
                 "value": display_value,
                 "is_set": is_set,
                 "default": default_str,
@@ -9028,7 +9054,8 @@ def _greenwave_ready(settings: Settings) -> bool:
     :meth:`GreenwaveExporter.missing_waiver_settings` — the same source of
     truth the constructor uses — so :func:`_available_exporters` never
     advertises a plugin that cannot construct.  ``greenwave_enabled``
-    covers the ResultsDB side (enable flag + URL + API token).
+    covers the ResultsDB side (enable flag + selected auth mode's
+    fields).
     """
     if not settings.greenwave_enabled:
         return False
@@ -17562,6 +17589,59 @@ async def _normalize_enumerated_value(key: str, value: str) -> tuple[str, str | 
     return value, None
 
 
+# Greenwave settings whose save must re-check the selected auth mode's
+# prerequisites: the mode itself, the ResultsDB URL scheme, and every
+# per-mode credential field (fields that never gate mode completeness —
+# krb5 service class, CA bundle, waiver settings — are excluded).
+_GREENWAVE_AUTH_SETTING_KEYS: frozenset[str] = frozenset(
+    {
+        "greenwave_auth_mode",
+        "greenwave_url",
+        "greenwave_api_token",
+        "greenwave_oidc_token_url",
+        "greenwave_oidc_client_id",
+        "greenwave_oidc_client_secret",
+        "greenwave_keytab_path",
+        "greenwave_keytab_principal",
+        "greenwave_client_cert",
+        "greenwave_client_key",
+        "greenwave_basic_user",
+        "greenwave_basic_password",
+    }
+)
+
+
+def _effective_proposed_settings(
+    settings_updates: dict[str, Any],
+) -> Settings | None:
+    """Merge an admin update over the effective settings; None when invalid.
+
+    Shared by the cross-field save rules (Greenwave auth-mode
+    completeness, auto-push requires auto-review) so an update touching
+    only one side of a rule is still evaluated against the resulting
+    configuration. None/empty values reset to the model default, matching
+    the PUT semantics — an explicit empty override beats the env value.
+    """
+    effective = get_settings().model_dump()
+    valid_keys = set(Settings.model_fields.keys())
+    for key, value in settings_updates.items():
+        if key not in valid_keys:
+            continue
+        if value is None or value == "":
+            field = Settings.model_fields[key]
+            effective[key] = (
+                field.default_factory() if field.default_factory else field.default
+            )
+        else:
+            effective[key] = value
+    try:
+        return Settings.model_validate(effective)
+    except ValidationError:
+        # Per-field problems were already reported by the caller; skip the
+        # cross-field checks when the merged proposal cannot validate.
+        return None
+
+
 async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[str]:
     """Validate admin settings updates; return per-entry error messages.
 
@@ -17591,8 +17671,8 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
         "prow_url",
         "gcs_bucket",
         "jira_auth_mode",
+        "greenwave_auth_mode",
         "default_user_role",
-        "greenwave_url",
         "greenwave_waiver_url",
         "greenwave_outcome_map",
     ):
@@ -17720,6 +17800,47 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
                     f"{key}: {ctx_err if ctx_err else err.get('msg', str(err))}"
                 )
 
+    # Greenwave auth mode (#183): the selected mode's required fields must
+    # be complete, and the ResultsDB URL scheme must match the mode (plain
+    # HTTP is valid only for the credential-less 'none' mode).  Like the
+    # auto-push rule below, it runs only when the update touches one of
+    # the mode's keys, and is evaluated on the EFFECTIVE proposed values
+    # so an update touching only one key is caught too.  Mirrors the Jira
+    # mode-field gate ("auth method 'X' is selected but missing: ...").
+    if not _GREENWAVE_AUTH_SETTING_KEYS.isdisjoint(settings_updates):
+        current = get_settings()
+        url = settings_updates.get("greenwave_url")
+        if url in (None, ""):
+            url = current.greenwave_url
+        url = str(url).strip() if url is not None else ""
+        mode = settings_updates.get("greenwave_auth_mode")
+        if mode in (None, ""):
+            mode = current.greenwave_auth_mode
+        mode = str(mode) if mode is not None else ""
+        token_url = settings_updates.get("greenwave_oidc_token_url")
+        if token_url in (None, ""):
+            token_url = current.greenwave_oidc_token_url
+        token_url = str(token_url).strip() if token_url is not None else ""
+        try:
+            # Unset mode = exporter disabled, so its URL is inert (mirrors the
+            # Settings post-init check); the OIDC token endpoint is always
+            # HTTPS because the client secret is POSTed to it.
+            validate_greenwave_url(
+                url or None,
+                "GREENWAVE_URL",
+                allow_http=normalize_greenwave_auth_mode(mode) in ("none", ""),
+            )
+            validate_greenwave_url(token_url or None, "GREENWAVE_OIDC_TOKEN_URL")
+        except ValueError as exc:
+            errors.append(str(exc))
+        # A save is NOT rejected for an incomplete mode. The mode has to be
+        # storable first: the Server Settings UI renders a mode's fields only
+        # once that mode is persisted, so rejecting the switch would leave the
+        # admin unable to reach the inputs that complete it (Jira behaves the
+        # same way). An incomplete mode simply leaves the exporter disabled —
+        # `greenwave_enabled`, the exporters capability list and the Test
+        # connection button all name the missing fields.
+
     # Auto-push requires auto-review.  The Settings model only warns
     # (raising there would hard-fail env-var startups and, via
     # get_settings()'s fallback, wipe every DB override), so the
@@ -17737,23 +17858,7 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
     # the PUT semantics above.
     if {"auto_push_exporters", "enable_auto_review"}.isdisjoint(settings_updates):
         return errors
-    effective = get_settings().model_dump()
-    for key, value in settings_updates.items():
-        if key not in valid_keys:
-            continue
-        if value is None or value == "":
-            field = Settings.model_fields[key]
-            effective[key] = (
-                field.default_factory() if field.default_factory else field.default
-            )
-        else:
-            effective[key] = value
-    try:
-        proposed = Settings.model_validate(effective)
-    except ValidationError:
-        # Per-field problems were already reported above; skip the
-        # cross-field check when the merged proposal cannot validate.
-        proposed = None
+    proposed = _effective_proposed_settings(settings_updates)
     if (
         proposed is not None
         and proposed.auto_push_exporters.strip()
@@ -17785,6 +17890,9 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         )
 
     username = request.state.username or "admin"
+    # Read the old mode before the save — the audit row names old/new mode
+    # only, never credential values.
+    greenwave_mode_change = _greenwave_auth_mode_audit_detail(settings_updates)
     warnings = await _save_settings_to_db(settings_updates, username)
     changed_keys = list(settings_updates.keys())
 
@@ -17805,6 +17913,7 @@ async def update_admin_settings(request: Request) -> JSONResponse:
             ],
             # Kept for consumers of the original shape.
             "keys": changed_keys,
+            **greenwave_mode_change,
         },
         request=request,
     )
@@ -18075,12 +18184,16 @@ async def import_server_settings(request: Request) -> JSONResponse:
         return JSONResponse(content=content)
 
     username = request.state.username or "admin"
+    applied_updates = {key: value for key, value in updates.items() if key in applied}
+    # Read the previous auth mode BEFORE the save: _save_settings_to_db
+    # refreshes the settings cache synchronously, so afterwards
+    # get_settings() already returns the NEW mode and the audit row would
+    # report a mode change that never happened (new -> new).
+    greenwave_mode_change = _greenwave_auth_mode_audit_detail(applied_updates)
     # Only keys the diff marked as applied are written — unchanged keys
     # (including sanitized-equal ones whose credentials the target keeps)
     # must not be overwritten (#361 Qodo r2).
-    warnings = await _save_settings_to_db(
-        {key: value for key, value in updates.items() if key in applied}, username
-    )
+    warnings = await _save_settings_to_db(applied_updates, username)
     if warnings:
         content["warnings"] = warnings
     logger.info(
@@ -18090,7 +18203,9 @@ async def import_server_settings(request: Request) -> JSONResponse:
         username,
     )
     # Key names only — ``applied`` carries the old/new values of every change,
-    # which must not be copied into the audit trail.
+    # which must not be copied into the audit trail. The one exception is
+    # the non-secret Greenwave auth mode, whose old/new values are named
+    # explicitly (read before the save).
     changed_keys = list(applied)
     await record_audit(
         action="settings.import",
@@ -18107,6 +18222,7 @@ async def import_server_settings(request: Request) -> JSONResponse:
             ],
             # Kept for consumers of the original shape.
             "keys": changed_keys,
+            **greenwave_mode_change,
         },
         request=request,
     )
@@ -18159,6 +18275,26 @@ def _empty_override_error(key: str) -> str | None:
             "empty value. Use Reset to fall back to the env/default value."
         )
     return None
+
+
+def _greenwave_auth_mode_audit_detail(
+    settings_updates: dict[str, Any],
+) -> dict[str, Any]:
+    """Audit detail for a greenwave_auth_mode change: old/new mode only.
+
+    The mode value is a non-secret enum (like default_user_role); every
+    other changed setting stays key-names-only in the audit trail. Must be
+    read BEFORE the update is saved. Returns {} when the mode is unchanged
+    by this update.
+    """
+    if "greenwave_auth_mode" not in settings_updates:
+        return {}
+    return {
+        "greenwave_auth_mode_change": {
+            "old": get_settings().greenwave_auth_mode or "",
+            "new": str(settings_updates.get("greenwave_auth_mode") or ""),
+        }
+    }
 
 
 async def _save_settings_to_db(
@@ -18409,23 +18545,33 @@ async def _integration_test_request(
     url: str,
     *,
     headers: dict[str, str] | None = None,
-    auth: tuple[str, str] | None = None,
+    auth: tuple[str, str] | httpx.Auth | None = None,
     verify: bool = True,
     params: dict[str, Any] | None = None,
+    client_kwargs: dict[str, Any] | None = None,
 ) -> httpx.Response:
     """GET a URL for a connection test; never follows redirects into errors.
+
+    ``auth`` accepts an :class:`httpx.Auth` strategy as well as basic-auth
+    credentials, and ``client_kwargs`` carries transport-level settings
+    (``cert``, a CA bundle via ``verify``) so strategy-based integrations
+    reuse this transport instead of hand-rolling a client.
 
     Raises :class:`_IntegrationTestError` with a human-readable, secret-free
     message on transport failure — the caller turns that into ``ok: false``.
     """
+    # Merged rather than splatted: a strategy may itself supply ``verify``
+    # (a CA bundle), which would otherwise be a duplicate keyword.
+    options: dict[str, Any] = {
+        "verify": verify,
+        "timeout": _INTEGRATION_TEST_TIMEOUT,
+        "auth": auth,
+        "headers": headers,
+        "follow_redirects": True,
+    }
+    options.update(client_kwargs or {})
     try:
-        async with httpx.AsyncClient(
-            verify=verify,
-            timeout=_INTEGRATION_TEST_TIMEOUT,
-            auth=auth,
-            headers=headers,
-            follow_redirects=True,
-        ) as client:
+        async with httpx.AsyncClient(**options) as client:
             return await client.get(url, params=params)
     except httpx.HTTPError as exc:
         raise _IntegrationTestError(
@@ -18769,36 +18915,95 @@ async def _test_datadog_connection(settings: Settings) -> dict[str, Any]:
 
 
 async def _test_greenwave_connection(settings: Settings) -> dict[str, Any]:
-    """Authenticated ResultsDB ping against the effective Greenwave settings."""
-    if not settings.greenwave_enabled:
+    """Authenticated ResultsDB ping against the effective Greenwave settings.
+
+    Exercises the SELECTED auth mode end-to-end: builds the auth strategy
+    and performs the authenticated ``GET {url}/results?limit=1`` through
+    it, so the test proves the same code path a push uses. The mode is
+    reported in the details; secrets and tokens never are.
+    """
+    mode = normalize_greenwave_auth_mode(settings.greenwave_auth_mode)
+    if not mode:
         return _test_result(
             False,
-            "Greenwave is not configured (missing GREENWAVE_URL or "
-            "GREENWAVE_API_TOKEN)",
+            "No Greenwave auth method selected — choose one in Server Settings",
         )
+    missing = greenwave_method_missing_fields(settings)
+    if missing:
+        return _test_result(
+            False,
+            f"Greenwave auth method '{mode}' is selected "
+            f"but missing: {', '.join(missing)}",
+        )
+    # Report EVERY missing waiver prerequisite at once, not just the one the
+    # exporter's constructor trips over first (waiver URL, token, version).
+    if settings.greenwave_push_waivers:
+        waiver_missing = GreenwaveExporter.missing_waiver_settings(settings)
+        if waiver_missing:
+            return _test_result(
+                False,
+                "Greenwave waivers are enabled but missing: "
+                f"{', '.join(waiver_missing)}",
+            )
     try:
-        # The exporter's own prerequisite check — single source of truth for
-        # the ResultsDB settings and the waiver settings when waivers are on.
-        GreenwaveExporter(settings=settings)
+        # Built ONCE — this also fails fast on a missing optional pyspnego
+        # dependency for the kerberos mode. The prerequisite checks above
+        # (mode fields + waiver settings) already cover what constructing the
+        # exporter would have re-checked.
+        auth = build_greenwave_auth(settings)
     except ExporterPrerequisiteError as exc:
         return _test_result(False, str(exc))
-    api_token = settings.greenwave_api_token
-    assert api_token is not None  # guaranteed by greenwave_enabled above
     url = str(settings.greenwave_url).rstrip("/")
     try:
-        await _integration_test_get_json(
+        # The shared integration transport, not a hand-rolled client: one
+        # timeout/redirect/error policy for every connection test.
+        response = await _integration_test_request(
             f"{url}/results",
+            auth=auth.auth,
             params={"limit": 1},
-            headers={"Authorization": f"Bearer {api_token.get_secret_value()}"},
-            verify=settings.greenwave_verify_ssl,
+            client_kwargs=auth.client_kwargs(),
         )
-    except _IntegrationTestError as exc:
-        return _test_result(False, f"ResultsDB connection failed: {exc}")
-    message = (
-        f"ResultsDB at {redact_urls_in_text(url)} is reachable and "
-        f"authenticated (subject_type: {settings.greenwave_subject_type})"
-    )
-    details: dict[str, Any] = {"subject_type": settings.greenwave_subject_type}
+        if response.status_code >= 400:
+            return _test_result(
+                False,
+                f"ResultsDB connection failed: HTTP {response.status_code}",
+                auth_mode=mode,
+            )
+    except GreenwaveAuthError as exc:
+        return _test_result(
+            False, f"ResultsDB connection failed: {exc}", auth_mode=mode
+        )
+    except httpx.HTTPError as exc:
+        return _test_result(
+            False,
+            "ResultsDB connection failed: "
+            f"{redact_urls_in_text(f'connection failed ({type(exc).__name__}): {exc}')}",
+            auth_mode=mode,
+        )
+    # Report the mode from the built strategy — the single source of truth
+    # for what was actually exercised — rather than the value re-derived
+    # above for the prerequisite messages.
+    mode = auth.mode
+    # Kerberos only authenticates when the server issues a 401 challenge, so
+    # a 200 on the first request means the credentials were never exercised —
+    # claiming "authenticated" there would green-light an unauthenticated
+    # endpoint. Every other mode attaches its credentials to that request.
+    if mode == "kerberos":
+        message = (
+            f"ResultsDB at {redact_urls_in_text(url)} is reachable; the endpoint "
+            "did not request Negotiate authentication, so the keytab was not "
+            "exercised by this check"
+        )
+    else:
+        message = (
+            f"ResultsDB at {redact_urls_in_text(url)} is reachable and "
+            f"authenticated via {mode}"
+        )
+    message += f" (subject_type: {settings.greenwave_subject_type})"
+    details: dict[str, Any] = {
+        "auth_mode": mode,
+        "subject_type": settings.greenwave_subject_type,
+    }
     if settings.greenwave_push_waivers:
         assert not GreenwaveExporter.missing_waiver_settings(settings)
         details["waivers"] = "Greenwave waiver prerequisites are satisfied"

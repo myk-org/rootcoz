@@ -15,15 +15,16 @@ Push flow:
 3. When ``GREENWAVE_PUSH_WAIVERS`` is enabled and the failure's
    classification is listed in ``GREENWAVE_WAIVABLE_CLASSIFICATIONS``,
    submit a waiver to WaiverDB for failures that were reviewed by a
-   human.  Waivers are never auto-submitted for reviews recorded by the
-   AI system identity (``storage.AI_SYSTEM_USERNAME``) unless
-   ``GREENWAVE_ALLOW_AI_WAIVERS`` is set.
+   human.  A review recorded by the AI system identity
+   (``storage.AI_SYSTEM_USERNAME``) never produces a waiver: lifting a
+   gate requires a human decision, not the AI reviewing its own
+   analysis.  There is no setting that re-enables it.
 
 Deployment prerequisites (documented per issue #183):
 
 * WaiverDB write permissions for ``rootcoz.*`` testcases — without them
   waiver submissions fail with HTTP 403 (result pushes still succeed).
-* ``GREENWAVE_WAIVER_TOKEN`` must be an OIDC bearer / service-account
+* ``GREENWAVE_WAIVER_TOKEN`` (bearer auth mode only) must be an OIDC bearer / service-account
   token accepted by WaiverDB; the ResultsDB token is separate
   (``GREENWAVE_API_TOKEN``).
 
@@ -41,12 +42,17 @@ import httpx
 from pydantic import ValidationError
 from simple_logger.logger import get_logger
 
-from rootcoz.config import Settings
+from rootcoz.config import Settings, normalize_greenwave_auth_mode
 from rootcoz.exporters.base import (
     ExportContext,
     Exporter,
     ExporterPrerequisiteError,
     ExporterResult,
+)
+from rootcoz.exporters.greenwave_auth import (
+    GreenwaveAuth,
+    build_greenwave_auth,
+    build_greenwave_waiver_auth,
 )
 from rootcoz.models import FailureAnalysis
 from rootcoz.storage import AI_SYSTEM_USERNAME
@@ -189,19 +195,20 @@ class GreenwaveExporter(Exporter):
 
     Args:
         settings: Application settings.  Construction validates the
-            required Greenwave configuration (ResultsDB URL + API token,
-            plus the waiver settings when ``GREENWAVE_PUSH_WAIVERS`` is
-            enabled) and raises :class:`ExporterPrerequisiteError` when
-            anything is missing; enablement gating (``enable_greenwave``)
-            is handled by ``_create_exporter()``.
+            required Greenwave configuration (ResultsDB URL + the selected
+            auth method's fields, plus the waiver settings when
+            ``GREENWAVE_PUSH_WAIVERS`` is enabled) and raises
+            :class:`ExporterPrerequisiteError` when anything is missing;
+            enablement gating (``enable_greenwave``) is handled by
+            ``_create_exporter()``.
 
     Raises:
-        ExporterPrerequisiteError: ``GREENWAVE_URL`` or ``GREENWAVE_API_TOKEN``
-            is missing, or ``GREENWAVE_PUSH_WAIVERS`` is enabled but the
-            waiver settings are incomplete (missing waiver URL, waiver
-            token, or ``GREENWAVE_PRODUCT_VERSION``).  Mapped to HTTP 422 by
-            the push endpoint — the server configuration itself is the
-            missing input.
+        ExporterPrerequisiteError: ``GREENWAVE_URL`` or the selected
+            ``greenwave_auth_mode``'s fields are missing, or
+            ``GREENWAVE_PUSH_WAIVERS`` is enabled but the waiver settings
+            are incomplete (missing waiver URL, waiver token, or
+            ``GREENWAVE_PRODUCT_VERSION``).  Mapped to HTTP 422 by the push
+            endpoint — the server configuration itself is the missing input.
     """
 
     NAME = "greenwave"
@@ -229,7 +236,13 @@ class GreenwaveExporter(Exporter):
         missing: list[str] = []
         if not settings.greenwave_waiver_url:
             missing.append("GREENWAVE_WAIVER_URL")
-        if not (
+        # WaiverDB carries its own token only in bearer mode; every other
+        # mode authenticates the waiver write with the selected strategy
+        # (see build_greenwave_waiver_auth), so a token is neither required
+        # nor used there.
+        if normalize_greenwave_auth_mode(
+            settings.greenwave_auth_mode
+        ) == "bearer" and not (
             settings.greenwave_waiver_token
             and settings.greenwave_waiver_token.get_secret_value()
         ):
@@ -243,31 +256,38 @@ class GreenwaveExporter(Exporter):
             raise ExporterPrerequisiteError(
                 "Greenwave requires GREENWAVE_URL (ResultsDB API URL) to be configured"
             )
-        if not (
-            settings.greenwave_api_token
-            and settings.greenwave_api_token.get_secret_value()
-        ):
-            raise ExporterPrerequisiteError(
-                "Greenwave requires GREENWAVE_API_TOKEN to be configured"
-            )
+        # Single source of truth for the selected auth method's fields —
+        # the same check Settings.greenwave_enabled and the admin test
+        # connection use. Also fails fast on a missing optional pyspnego
+        # dependency (kerberos mode).
+        self._auth: GreenwaveAuth = build_greenwave_auth(settings)
         self._url = settings.greenwave_url.rstrip("/")
-        api_token = settings.greenwave_api_token
-        self._api_token = (
-            api_token.get_secret_value() if api_token is not None else None
-        )
         waiver_url = settings.greenwave_waiver_url
         self._waiver_url = waiver_url.rstrip("/") if waiver_url else None
-        waiver_token = settings.greenwave_waiver_token
-        self._waiver_token = (
-            waiver_token.get_secret_value() if waiver_token is not None else None
-        )
         self._push_waivers = settings.greenwave_push_waivers
+        # WaiverDB auth follows the selected mode (bearer mode uses its own
+        # waiver token) — built only when waivers are on, so a results-only
+        # deployment never needs waiver credentials.
+        # Share ONE strategy across both targets, except for the modes whose
+        # credentials are bound to the target host (kerberos SPN, mTLS
+        # transport) — WaiverDB is a different host, so reusing the ResultsDB
+        # strategy would present the wrong service principal. Sharing still
+        # matters for oidc/basic/none, where a second instance would run a
+        # second token flow and keep two caches for one client.
+        if not self._push_waivers:
+            self._waiver_auth: GreenwaveAuth | None = None
+        elif normalize_greenwave_auth_mode(settings.greenwave_auth_mode) in (
+            "bearer",
+            "kerberos",
+            "mtls",
+        ):
+            self._waiver_auth = build_greenwave_waiver_auth(settings)
+        else:
+            self._waiver_auth = self._auth
         self._waivable_classifications = settings.greenwave_waivable_set
-        self._allow_ai_waivers = settings.greenwave_allow_ai_waivers
         self._outcome_by_classification = settings.greenwave_outcome_map_parsed
         self._subject_type = settings.greenwave_subject_type
         self._product_version = settings.greenwave_product_version
-        self._verify_ssl = settings.greenwave_verify_ssl
 
         if self._push_waivers:
             missing = self.missing_waiver_settings(settings)
@@ -304,25 +324,32 @@ class GreenwaveExporter(Exporter):
 
     def _client_kwargs(self) -> dict[str, Any]:
         """Shared httpx.AsyncClient constructor arguments."""
-        return {"timeout": _DEFAULT_TIMEOUT, "verify": self._verify_ssl}
+        kwargs = self._auth.client_kwargs()
+        kwargs["timeout"] = _DEFAULT_TIMEOUT
+        return kwargs
 
     async def _post(
         self,
         client: httpx.AsyncClient,
         url: str,
         *,
-        token: str | None,
         json: dict[str, Any],
         label: str = "",
+        auth: httpx.Auth | None = None,
     ) -> httpx.Response:
-        """POST JSON with an optional bearer token and shared timeouts.
+        """POST JSON with the selected auth strategy and shared timeouts.
 
         Successful and failed writes are logged at debug level (label,
         URL, status code) so pushes — including auto-pushes — can be
-        traced.  Tokens and payloads are never logged.
+        traced.  Tokens and payloads are never logged.  ResultsDB writes
+        pass the mode's strategy; WaiverDB writes pass the waiver strategy,
+        which is the same one except in bearer mode (separate token).
         """
-        headers = {"Authorization": f"Bearer {token}"} if token else {}
-        response = await client.post(url, json=json, headers=headers)
+        response = await client.post(
+            url,
+            json=json,
+            auth=auth if auth is not None else httpx.USE_CLIENT_DEFAULT,
+        )
         logger.debug(
             "Greenwave %s: POST %s -> HTTP %s",
             label or "request",
@@ -336,16 +363,11 @@ class GreenwaveExporter(Exporter):
     async def push(self, context: ExportContext) -> ExporterResult:
         """Push analysis results to ResultsDB and optionally WaiverDB.
 
-        Waiver submissions require an explicit ``subject_identifier`` (build
-        NVR or artifact identifier) — they never fall back to ``job_name``,
-        because a waiver keyed on a CI job name is a malformed gating write.
-        Result pushes fall back to ``job_name`` only on the manual
-        results-only path; automatic pushes never reach that fallback —
-        the auto-push pipeline skips this exporter (see
-        ``requires_subject_identifier``).
-
         An explicit ``subject_identifier`` is required for every push — results
-        and waivers are both gating writes, keyed on that subject.
+        and waivers are both gating writes, keyed on that subject. There is no
+        ``job_name`` fallback: a write keyed on a CI job name is a malformed
+        gating write, and the automatic push pipeline skips this exporter for
+        the same reason (see ``requires_subject_identifier``).
 
         Each failure's classification is resolved via
         :func:`_effective_classification` — a human override in
@@ -439,7 +461,7 @@ class GreenwaveExporter(Exporter):
                     group_resp = await self._post(
                         client,
                         f"{self._url}/groups",
-                        token=self._api_token,
+                        auth=self._auth.auth,
                         json=group_payload,
                         label="ResultsDB group creation",
                     )
@@ -648,7 +670,7 @@ class GreenwaveExporter(Exporter):
                 result_resp = await self._post(
                     client,
                     f"{self._url}/results",
-                    token=self._api_token,
+                    auth=self._auth.auth,
                     json=payload,
                     label=f"ResultsDB result {testcase_name}",
                 )
@@ -680,7 +702,7 @@ class GreenwaveExporter(Exporter):
                 testcase_name,
             )
 
-        # Optional waiver for human-reviewed failures.
+        # Optional waiver for HUMAN-reviewed failures only.
         if not self._push_waivers:
             return
         if classification not in self._waivable_classifications:
@@ -688,7 +710,20 @@ class GreenwaveExporter(Exporter):
         reviewer = context.reviewed_by.get(failure.test_name, "")
         if not reviewer:
             return
-        if reviewer == AI_SYSTEM_USERNAME and not self._allow_ai_waivers:
+        if reviewer == AI_SYSTEM_USERNAME:
+            # Never waive an auto-review. A waiver is a gating write that
+            # lifts a gate, so its justification must be a human decision;
+            # rootcoz auto-reviewing its own analysis is not one. There is
+            # deliberately no setting to re-enable this — the results push
+            # above still records the failure, it is only the waiver that
+            # needs a person.
+            logger.info(
+                "Greenwave waiver skipped for job_id=%s testcase=%s: "
+                "reviewed by %s (auto-review), not a human",
+                context.job_id,
+                testcase_name,
+                AI_SYSTEM_USERNAME,
+            )
             return
 
         assert self._waiver_url is not None
@@ -712,7 +747,7 @@ class GreenwaveExporter(Exporter):
                 waiver_resp = await self._post(
                     client,
                     f"{self._waiver_url}/waivers/",
-                    token=self._waiver_token,
+                    auth=self._waiver_auth.auth if self._waiver_auth else None,
                     json=waiver_payload,
                     label=f"WaiverDB waiver {testcase_name}",
                 )

@@ -150,6 +150,45 @@ sidecar:
 Custom providers appear in the model catalog (`GET /api/ai-models`, or `rootcoz ai-models`)
 and are selectable as `ai.provider` / `ai.model` like any built-in provider.
 
+### Greenwave exporter auth files (Kerberos / mTLS)
+
+The Greenwave exporter's auth mode (`greenwave_auth_mode`, Server Settings →
+Greenwave, DB-only like `jira_auth_mode`) selects `bearer | oidc | kerberos |
+mtls | basic | none`. Two of those modes need **files** that Server Settings
+cannot hold — it takes a path. The chart mounts them:
+
+```yaml
+greenwave:
+  keytab: ""        # Kerberos keytab (binary — use --set-file greenwave.keytab=./my.keytab)
+  clientCert: ""    # mTLS client certificate (PEM)
+  clientKey: ""     # mTLS client private key (PEM)
+  caBundle: ""      # custom CA bundle (PEM) for the Greenwave endpoint
+  mountPath: /var/run/secrets/rootcoz/greenwave
+```
+
+All values are optional; unset values render nothing (no Secret, no volume).
+Files land in one Secret (`<release>-greenwave-auth`) mounted read-only at
+`greenwave.mountPath` with file names `keytab`, `client.crt`, `client.key`,
+`ca.crt`, mode `0440` (group-readable, never world-readable). The container
+runs in GID 0 (OpenShift arbitrary-UID convention), so no `fsGroup` or
+`runAsUser` override is needed — the same ownership model as the Cursor
+auth secret. If you run with a custom `podSecurityContext` that changes the
+pod's group, ensure the container user can still read the mounted files.
+
+After install, set the **paths** in Server Settings → Greenwave:
+
+| Server Setting | Value |
+|----------------|-------|
+| `greenwave_keytab_path` | `/var/run/secrets/rootcoz/greenwave/keytab` |
+| `greenwave_client_cert` | `/var/run/secrets/rootcoz/greenwave/client.crt` |
+| `greenwave_client_key` | `/var/run/secrets/rootcoz/greenwave/client.key` |
+| `greenwave_ca_bundle` | `/var/run/secrets/rootcoz/greenwave/ca.crt` |
+
+The auth mode itself is **not** a chart value — set `greenwave_auth_mode` in
+Server Settings. Omitting a previously set file on upgrade preserves the
+existing Secret value (Helm `lookup`), same as Vertex SA JSON and Cursor
+`auth.json`.
+
 ## Bootstrap Secrets
 
 The interactive setup script **requires** an `admin.key` (bootstrap admin API key / first-login password). Manual installs may omit `admin.key` and `encryptionKey` — both are auto-generated on first install and preserved across upgrades (Helm `lookup`).

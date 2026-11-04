@@ -45,10 +45,14 @@ def _greenwave_env(**overrides: str) -> dict[str, str]:
     return env
 
 
-def _make_settings(**env_overrides: str) -> Settings:
-    """Build Settings under a patched environment."""
+def _make_settings(mode: str = "bearer", **env_overrides: str) -> Settings:
+    """Build Settings under a patched environment.
+
+    The auth mode is DB-only (the env var is ignored), so it is passed as
+    an init kwarg — the same way ``get_settings()`` merges DB overrides.
+    """
     with patch.dict(os.environ, _greenwave_env(**env_overrides), clear=True):
-        return Settings(_env_file=None)
+        return Settings(_env_file=None, greenwave_auth_mode=mode)
 
 
 def _failure(
@@ -109,6 +113,18 @@ def _run_push(exporter: GreenwaveExporter, context: ExportContext):
     return asyncio.run(exporter.push(context))
 
 
+def _rendered_authorization(auth: httpx.Auth | None) -> str | None:
+    """The Authorization header an ``httpx.Auth`` attaches to a request."""
+    if auth is None:
+        return None
+    request = httpx.Request("POST", f"{WAIVERDB_URL}/waivers/")
+    flow = auth.sync_auth_flow(request) if hasattr(auth, "sync_auth_flow") else None
+    if flow is None:
+        return None
+    sent = next(flow)
+    return sent.headers.get("Authorization")
+
+
 class TestGreenwaveSettings:
     """Settings-level configuration for the Greenwave exporter."""
 
@@ -117,21 +133,42 @@ class TestGreenwaveSettings:
             settings = Settings(_env_file=None)
             assert not settings.greenwave_enabled
 
-    def test_enabled_when_url_and_token_configured(self):
+    def test_enabled_when_mode_fields_configured(self):
         settings = _make_settings()
         assert settings.greenwave_enabled
+
+    def test_unset_mode_disables_even_with_url_and_token(self):
+        """No mode selected → disabled, regardless of stored credentials."""
+        env = _greenwave_env()
+        with patch.dict(os.environ, env, clear=True):
+            settings = Settings(_env_file=None)
+        assert not settings.greenwave_enabled
+
+    def test_env_var_auth_mode_is_ignored(self):
+        """GREENWAVE_AUTH_MODE is DB-only — the env var never selects a mode."""
+        env = _greenwave_env(GREENWAVE_AUTH_MODE="bearer")
+        with patch.dict(os.environ, env, clear=True):
+            settings = Settings(_env_file=None)
+        assert settings.greenwave_auth_mode is None
+        assert not settings.greenwave_enabled
 
     def test_disabled_when_url_missing(self):
         env = _build_env(GREENWAVE_API_TOKEN="rdb-token")  # pragma: allowlist secret
         with patch.dict(os.environ, env, clear=True):
-            settings = Settings(_env_file=None)
+            settings = Settings(_env_file=None, greenwave_auth_mode="bearer")
             assert not settings.greenwave_enabled
 
-    def test_disabled_when_token_missing(self):
+    def test_disabled_when_bearer_token_missing(self):
         env = _build_env(GREENWAVE_URL=RESULTSDB_URL)
         with patch.dict(os.environ, env, clear=True):
-            settings = Settings(_env_file=None)
+            settings = Settings(_env_file=None, greenwave_auth_mode="bearer")
             assert not settings.greenwave_enabled
+
+    def test_none_mode_needs_only_url(self):
+        env = _build_env(GREENWAVE_URL="http://resultsdb.example.com")
+        with patch.dict(os.environ, env, clear=True):
+            settings = Settings(_env_file=None, greenwave_auth_mode="none")
+        assert settings.greenwave_enabled
 
     def test_explicitly_disabled_overrides_config(self):
         settings = _make_settings(ENABLE_GREENWAVE="false")
@@ -143,9 +180,22 @@ class TestGreenwaveSettings:
             patch.dict(os.environ, env, clear=True),
             patch("rootcoz.config.logger") as mock_logger,
         ):
-            settings = Settings(_env_file=None)
+            settings = Settings(_env_file=None, greenwave_auth_mode="bearer")
             assert not settings.greenwave_enabled
             assert mock_logger.warning.called
+
+    def test_explicitly_enabled_without_mode_warns(self):
+        env = _greenwave_env(ENABLE_GREENWAVE="true")
+        with (
+            patch.dict(os.environ, env, clear=True),
+            patch("rootcoz.config.logger") as mock_logger,
+        ):
+            settings = Settings(_env_file=None)
+            assert not settings.greenwave_enabled
+            assert any(
+                "no Greenwave auth method" in str(c.args[0])
+                for c in mock_logger.warning.call_args_list
+            )
 
     def test_blank_url_becomes_none(self):
         settings = _make_settings(GREENWAVE_URL="   ")
@@ -155,7 +205,9 @@ class TestGreenwaveSettings:
     @pytest.mark.parametrize(
         ("env_name", "bad_url"),
         [
-            ("GREENWAVE_URL", "http://resultsdb.example.com"),
+            # http is only tolerated while no mode is selected (exporter
+            # disabled, URL inert); a credential mode must be HTTPS. The
+            # explicit http-with-mode case is covered separately.
             (
                 "GREENWAVE_URL",
                 "https://user:pass@resultsdb.example.com",  # pragma: allowlist secret
@@ -173,6 +225,59 @@ class TestGreenwaveSettings:
             pytest.raises(ValueError, match=env_name),
         ):
             Settings(_env_file=None)
+
+    def test_http_url_allowed_only_without_credentials(self):
+        """Plain http is accepted only for an inert (unset) or 'none' mode.
+
+        The mode is DB-only, so at startup the env-only Settings sees it
+        unset: an env-configured http:// ResultsDB URL must not crash the
+        process for a mode only the database can supply. Once a credential
+        mode is selected the same URL is rejected.
+        """
+        env = _greenwave_env(GREENWAVE_URL="http://resultsdb.example.com")
+        with patch.dict(os.environ, env, clear=True):
+            # Unset mode: exporter disabled, URL inert — construction succeeds.
+            assert Settings(_env_file=None).greenwave_enabled is False
+            # none mode: credential-less, so http stays legal.
+            assert Settings(_env_file=None, greenwave_auth_mode="none")
+            # bearer mode sends a token: http is refused.
+            with pytest.raises(ValueError, match="GREENWAVE_URL"):
+                Settings(_env_file=None, greenwave_auth_mode="bearer")
+
+    def test_waiver_url_stays_https_even_in_none_mode(self):
+        """The gating write is never downgraded to plain HTTP.
+
+        ``none`` may target a public ResultsDB over http (no credentials are
+        sent), but a waiver lifts a gate, so its endpoint stays HTTPS-only.
+        """
+        env = _greenwave_env(
+            GREENWAVE_URL="http://resultsdb.example.com",
+            GREENWAVE_WAIVER_URL="http://waiverdb.example.com",
+            GREENWAVE_PUSH_WAIVERS="true",
+            GREENWAVE_PRODUCT_VERSION="el10",
+        )
+        with (
+            patch.dict(os.environ, env, clear=True),
+            pytest.raises(ValueError, match="GREENWAVE_WAIVER_URL"),
+        ):
+            Settings(_env_file=None, greenwave_auth_mode="none")
+
+    def test_oidc_token_url_must_be_https(self):
+        """The client secret is POSTed to the token endpoint — HTTPS only.
+
+        Regression: the token URL was never validated, so a plain-http token
+        endpoint would receive ``greenwave_oidc_client_secret`` in clear text.
+        """
+        for bad in ("http://sso.example.com/token", "https://u:p@sso.example.com"):
+            env = _greenwave_env(
+                GREENWAVE_AUTH_MODE="oidc",
+                GREENWAVE_OIDC_TOKEN_URL=bad,
+            )
+            with (
+                patch.dict(os.environ, env, clear=True),
+                pytest.raises(ValueError, match="GREENWAVE_OIDC_TOKEN_URL"),
+            ):
+                Settings(_env_file=None, greenwave_auth_mode="oidc")
 
     def test_invalid_greenwave_port_rejected(self):
         """Syntactically invalid ports fail at Settings construction."""
@@ -414,6 +519,24 @@ class TestGreenwaveExporterConstructor:
         )
         assert GreenwaveExporter.missing_waiver_settings(settings) == []
 
+    def test_non_bearer_mode_does_not_require_a_waiver_token(self):
+        """The selected mode authenticates the waiver write, so no token.
+
+        Only bearer mode splits WaiverDB onto its own token; requiring one in
+        kerberos/mtls/oidc/basic/none mode would force a credential the
+        deployment deliberately does not use.
+        """
+        settings = _make_settings(
+            "basic",
+            GREENWAVE_BASIC_USER="greenwave-user",
+            GREENWAVE_BASIC_PASSWORD="greenwave-pass",  # pragma: allowlist secret
+            GREENWAVE_PUSH_WAIVERS="true",
+            GREENWAVE_WAIVER_URL=WAIVERDB_URL,
+            GREENWAVE_PRODUCT_VERSION="el10",
+        )
+        assert GreenwaveExporter.missing_waiver_settings(settings) == []
+        GreenwaveExporter(settings)  # constructs without a waiver token
+
     def test_waivers_require_waiver_url(self):
         env = _greenwave_env(
             GREENWAVE_PUSH_WAIVERS="true",
@@ -424,7 +547,7 @@ class TestGreenwaveExporterConstructor:
             patch.dict(os.environ, env, clear=True),
             pytest.raises(ExporterPrerequisiteError, match="GREENWAVE_WAIVER_URL"),
         ):
-            GreenwaveExporter(Settings(_env_file=None))
+            GreenwaveExporter(Settings(_env_file=None, greenwave_auth_mode="bearer"))
 
     def test_waivers_require_waiver_token(self):
         env = _greenwave_env(
@@ -436,7 +559,7 @@ class TestGreenwaveExporterConstructor:
             patch.dict(os.environ, env, clear=True),
             pytest.raises(ExporterPrerequisiteError, match="GREENWAVE_WAIVER_TOKEN"),
         ):
-            GreenwaveExporter(Settings(_env_file=None))
+            GreenwaveExporter(Settings(_env_file=None, greenwave_auth_mode="bearer"))
 
     def test_waivers_require_product_version(self):
         env = _greenwave_env(
@@ -448,7 +571,7 @@ class TestGreenwaveExporterConstructor:
             patch.dict(os.environ, env, clear=True),
             pytest.raises(ExporterPrerequisiteError, match="GREENWAVE_PRODUCT_VERSION"),
         ):
-            GreenwaveExporter(Settings(_env_file=None))
+            GreenwaveExporter(Settings(_env_file=None, greenwave_auth_mode="bearer"))
 
     def test_waivers_with_full_config(self):
         settings = _make_settings(
@@ -512,7 +635,7 @@ class TestGreenwaveExporterPush:
         # group request
         group_call = post.call_args_list[0]
         assert group_call.args[1] == f"{RESULTSDB_URL}/groups"
-        assert group_call.kwargs["token"] == "rdb-token"
+        assert group_call.kwargs["auth"] is exporter._auth.auth
         assert group_call.kwargs["json"]["description"] == "rootcoz analysis job-123"
 
         # result requests: testcase names, outcome mapping, subject fallback
@@ -716,7 +839,9 @@ class TestGreenwaveExporterPush:
 
         state = {"active": 0, "max_active": 0}
 
-        async def tracked_post(client, url, *, token, json, label=""):
+        async def tracked_post(
+            client, url, *, auth=None, headers=None, json=None, label=""
+        ):
             state["active"] += 1
             state["max_active"] = max(state["max_active"], state["active"])
             try:
@@ -757,6 +882,86 @@ class TestGreenwaveExporterPush:
             )
         exporter._post.assert_not_called()
 
+    def test_waiver_push_uses_the_selected_mode_not_a_bearer_token(self):
+        """A non-bearer mode authenticates ResultsDB *and* WaiverDB.
+
+        Regression: the waiver write used to send a static bearer token
+        regardless of the mode (and nothing at all when that token was
+        unset), so selecting kerberos/mtls/oidc had no effect on waivers —
+        the one write that actually lifts a gate.
+        """
+        settings = _make_settings(
+            "basic",
+            GREENWAVE_BASIC_USER="greenwave-user",
+            GREENWAVE_BASIC_PASSWORD="greenwave-pass",  # pragma: allowlist secret
+            GREENWAVE_PUSH_WAIVERS="true",
+            GREENWAVE_WAIVER_URL=WAIVERDB_URL,
+            GREENWAVE_PRODUCT_VERSION="el10",
+        )
+        exporter = GreenwaveExporter(settings)
+        post = self._mock_post(
+            exporter,
+            [
+                _response({"uuid": "550e8400-e29b-41d4-a716-446655440000"}),
+                _response({"id": 101}),
+                _response({"id": 201}),
+            ],
+        )
+        result = _run_push(
+            exporter,
+            _make_context(
+                [_failure("test_a", "INFRASTRUCTURE")],
+                subject_identifier="pkg-1.0-1.el10",
+                waiver_comment="known flake",
+                reviewed_by={"test_a": "reviewer"},
+            ),
+        )
+        assert result.success is True
+        assert result.details["waived"] == 1
+
+        waiver_call = post.call_args_list[2]
+        assert waiver_call.args[1] == f"{WAIVERDB_URL}/waivers/"
+        rendered = _rendered_authorization(waiver_call.kwargs["auth"])
+        assert rendered is not None
+        assert rendered.startswith("Basic ")
+        assert "wdb-token" not in rendered
+
+    def test_auto_reviewed_failure_is_never_waived(self):
+        """rootcoz auto-review must never produce a waiver — no escape hatch.
+
+        The results row is still written (it records the failure); only the
+        gating write is withheld, because lifting a gate needs a human
+        decision, not an AI reviewing its own analysis.
+        """
+        settings = _make_settings(
+            GREENWAVE_PUSH_WAIVERS="true",
+            GREENWAVE_WAIVER_URL=WAIVERDB_URL,
+            GREENWAVE_WAIVER_TOKEN="wdb-token",  # pragma: allowlist secret
+            GREENWAVE_PRODUCT_VERSION="el10",
+        )
+        exporter = GreenwaveExporter(settings)
+        post = self._mock_post(
+            exporter,
+            [
+                _response({"uuid": "550e8400-e29b-41d4-a716-446655440000"}),
+                _response({"id": 101}),
+            ],
+        )
+        result = _run_push(
+            exporter,
+            _make_context(
+                [_failure("test_a", "INFRASTRUCTURE")],
+                subject_identifier="pkg-1.0-1.el10",
+                waiver_comment="known flake",
+                reviewed_by={"test_a": AI_SYSTEM_USERNAME},
+            ),
+        )
+        assert result.success is True
+        assert result.details["pushed"] == 1
+        assert result.details["waived"] == 0
+        urls = [call.args[1] for call in post.call_args_list]
+        assert not any(url.endswith("/waivers/") for url in urls), urls
+
     def test_push_waiver_submitted_for_human_review(self):
         settings = _make_settings(
             GREENWAVE_PUSH_WAIVERS="true",
@@ -788,7 +993,9 @@ class TestGreenwaveExporterPush:
 
         waiver_call = post.call_args_list[2]
         assert waiver_call.args[1] == f"{WAIVERDB_URL}/waivers/"
-        assert waiver_call.kwargs["token"] == "wdb-token"
+        # The token is applied by the auth strategy, not a raw header, so
+        # assert the header it actually renders.
+        assert _rendered_authorization(waiver_call.kwargs["auth"]) == "Bearer wdb-token"
         payload = waiver_call.kwargs["json"]
         assert payload["subject_identifier"] == "pkg-1.0-1.el10"
         assert payload["testcase"] == "rootcoz.my-job.test_a"
@@ -874,7 +1081,13 @@ class TestGreenwaveExporterPush:
         assert result.details["waived"] == 0
         assert post.call_count == 2
 
-    def test_push_waiver_allowed_for_ai_reviewer_when_enabled(self):
+    def test_ai_waiver_switch_is_gone_not_merely_defaulted(self):
+        """The old GREENWAVE_ALLOW_AI_WAIVERS escape hatch no longer exists.
+
+        A deployment that still sets it must not be able to waive
+        auto-reviews: the setting is not a field any more (``extra="ignore"``
+        drops the env var), so the behaviour cannot be re-enabled by config.
+        """
         settings = _make_settings(
             GREENWAVE_PUSH_WAIVERS="true",
             GREENWAVE_WAIVER_URL=WAIVERDB_URL,
@@ -882,13 +1095,13 @@ class TestGreenwaveExporterPush:
             GREENWAVE_PRODUCT_VERSION="el10",
             GREENWAVE_ALLOW_AI_WAIVERS="true",
         )
+        assert not hasattr(settings, "greenwave_allow_ai_waivers")
         exporter = GreenwaveExporter(settings)
-        self._mock_post(
+        post = self._mock_post(
             exporter,
             [
                 _response({"uuid": "550e8400-e29b-41d4-a716-446655440000"}),
                 _response({"id": 101}),
-                _response({"id": 201}),
             ],
         )
         result = _run_push(
@@ -899,7 +1112,10 @@ class TestGreenwaveExporterPush:
                 reviewed_by={"test_a": AI_SYSTEM_USERNAME},
             ),
         )
-        assert result.details["waived"] == 1
+        assert result.details["waived"] == 0
+        assert not any(
+            call.args[1].endswith("/waivers/") for call in post.call_args_list
+        )
 
     def test_push_result_error_isolated(self):
         exporter = self._make_exporter()
@@ -1344,12 +1560,21 @@ class TestGreenwaveExporterFactory:
         settings = MagicMock()
         settings.greenwave_enabled = True
         settings.greenwave_url = RESULTSDB_URL
+        settings.greenwave_auth_mode = "bearer"
         settings.greenwave_api_token.get_secret_value.return_value = "rdb-token"
+        settings.greenwave_oidc_token_url = None
+        settings.greenwave_oidc_client_id = None
+        settings.greenwave_oidc_client_secret = None
+        settings.greenwave_keytab_path = None
+        settings.greenwave_keytab_principal = None
+        settings.greenwave_client_cert = None
+        settings.greenwave_client_key = None
+        settings.greenwave_basic_user = None
+        settings.greenwave_basic_password = None
         settings.greenwave_waiver_url = None
         settings.greenwave_waiver_token = None
         settings.greenwave_push_waivers = False
         settings.greenwave_waivable_set = frozenset()
-        settings.greenwave_allow_ai_waivers = False
         settings.greenwave_outcome_map_parsed = {}
         settings.greenwave_subject_type = "koji_build"
         settings.greenwave_product_version = None
@@ -1381,8 +1606,9 @@ class TestGreenwaveExporterFactory:
         settings = MagicMock()
         settings.greenwave_enabled = True
         settings.greenwave_url = RESULTSDB_URL
+        settings.greenwave_auth_mode = "bearer"
         settings.greenwave_api_token = None
-        with pytest.raises(ExporterPrerequisiteError, match="GREENWAVE_API_TOKEN"):
+        with pytest.raises(ExporterPrerequisiteError, match="greenwave_api_token"):
             _create_exporter("greenwave", settings)
 
     def test_exporter_classes_registry_contains_greenwave(self):
@@ -1395,6 +1621,8 @@ class TestGreenwaveExporterFactory:
 
         assert "greenwave_api_token" in _SENSITIVE_SETTINGS
         assert "greenwave_waiver_token" in _SENSITIVE_SETTINGS
+        assert "greenwave_oidc_client_secret" in _SENSITIVE_SETTINGS
+        assert "greenwave_basic_password" in _SENSITIVE_SETTINGS
 
 
 class TestGreenwaveExporterEndpoints:

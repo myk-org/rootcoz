@@ -41,24 +41,33 @@ FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim AS builder
 
 WORKDIR /app
 
-# Install git (needed for gitpython dependency)
+# Install git (needed for gitpython dependency), plus the krb5 headers and
+# a C toolchain required to build python-gssapi for the kerberos auth-mode
+# extra (it has no wheels — it links against the system krb5 ABI).
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
+    gcc \
+    libc6-dev \
+    libkrb5-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy project files
 COPY pyproject.toml uv.lock ./
 COPY src/ src/
 
-# Create venv and install dependencies
-RUN uv sync --frozen --no-dev
+# Create venv and install dependencies (kerberos extra: the Greenwave
+# exporter's kerberos auth mode must work in the shipped image)
+RUN uv sync --frozen --no-dev --extra kerberos
 
 # Production stage
 FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
 
 WORKDIR /app
 
-# Install bash, git (runtime for gitpython), curl (for Cursor CLI + NodeSource setup)
+# Install bash, git (runtime for gitpython), curl (for Cursor CLI + NodeSource setup),
+# and the krb5 runtime libraries the Greenwave kerberos auth mode links
+# against (libgssapi-krb5-2/libkrb5-3 are pulled in transitively by curl,
+# but the requirement is declared here so it cannot break on a base change)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
     git \
@@ -66,6 +75,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     gnupg \
     tini \
+    libgssapi-krb5-2 \
+    libkrb5-3 \
     && rm -rf /var/lib/apt/lists/*
 
 # Keep current: the Node 22.23.0 keep-alive regression

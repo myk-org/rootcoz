@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor } from '@testing-library/react'
 import { api, ApiError } from '@/lib/api'
-import { useExporterPush } from '../useExporterPush'
+import { pushToExporter, useExporterPush } from '../useExporterPush'
 
 /* ------------------------------------------------------------------ */
 /*  Harness                                                            */
@@ -27,6 +27,19 @@ function HookHarness(props: Parameters<typeof useExporterPush>[0] & {
 
 beforeEach(() => {
   postSpy.mockReset()
+})
+
+describe('pushToExporter', () => {
+  it('builds the generic URL for any plugin and scope, never the legacy one', async () => {
+    postSpy.mockResolvedValue({ pushed: 1, unmatched: [], errors: [], launch_id: 4 } as never)
+    await pushToExporter('job-9', 'reportportal', { childJobName: 'c', childBuildNumber: 3 })
+
+    expect(postSpy).toHaveBeenCalledWith(
+      '/results/job-9/push/reportportal?child_job_name=c&child_build_number=3',
+    )
+    // Guard: reintroducing a direct legacy `push-reportportal` call must fail
+    expect(postSpy.mock.calls.some((c) => String(c[0]).includes('push-reportportal'))).toBe(false)
+  })
 })
 
 describe('useExporterPush', () => {

@@ -1,5 +1,4 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
-import { api } from '@/lib/api'
 import { collectAllTestKeys, unreviewedKeyCount } from '@/lib/failureKeys'
 import { collectPushScopes, pushScopeQuery } from '@/lib/pushScopes'
 import {
@@ -15,7 +14,7 @@ import { useAuth } from '@/lib/auth'
 import { resolveBuildDisplayId } from '@/lib/utils'
 import { exporterEnabled, useReportState } from '@/pages/report/reportState'
 import { pushRejectionDetail } from '@/lib/pushGate'
-import { pushFullySucceeded } from './useExporterPush'
+import { pushFullySucceeded, pushToExporter } from './useExporterPush'
 import { GreenwavePushForm } from './GreenwavePushForm'
 
 interface AllReviewedPromptProps {
@@ -71,6 +70,17 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
   // late completion from an old job must not write state (same guard the
   // page uses for test-result generations).
   const pushRunRef = useRef(0)
+  // Monotonic Greenwave dialog-session id. Bumped wherever the section
+  // restarts (navigation, fresh prompt, dialog close): a push that lands
+  // after that point belongs to a dead session and must not mark the live
+  // one complete, or its form would vanish unanswered.
+  const greenwaveSessionRef = useRef(0)
+
+  /** Restart the Greenwave section: forget any completed push. */
+  const resetGreenwaveSession = useCallback(() => {
+    greenwaveSessionRef.current++
+    setGreenwaveDone(false)
+  }, [])
 
   const greenwaveEnabled = exporterEnabled(exporters, 'greenwave')
   // The Greenwave section pushes the root result only, so it is not offered
@@ -78,6 +88,9 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
   const hasRootFailures = (result?.failures ?? []).length > 0
   const greenwaveOffered = greenwaveEnabled && hasRootFailures
   const eventExportersOffered = reportportalAvailable || datadogAvailable
+  // The Greenwave session the form rendered below belongs to, captured during
+  // render so a callback arriving after a reset can tell it is stale.
+  const gwSession = greenwaveSessionRef.current
 
   const allKeys = useMemo(
     () =>
@@ -142,14 +155,14 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
           pushRunRef.current++
           setEventPushStatus(null)
           setPushError(null)
-          setGreenwaveDone(false)
+          resetGreenwaveSession()
           setDialogOpen(true)
         }
       })
     }
     window.addEventListener('rootcoz:review-changed', onReviewChanged)
     return () => window.removeEventListener('rootcoz:review-changed', onReviewChanged)
-  }, [jobId]) // re-subscribe when jobId changes
+  }, [jobId, resetGreenwaveSession]) // re-subscribe when jobId changes
 
   // Reset on navigation
   useEffect(() => {
@@ -159,17 +172,21 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
     setEventPushStatus(null)
     succeededRef.current = new Set()
     pushRunRef.current++
-  }, [jobId])
+    resetGreenwaveSession()
+  }, [jobId, resetGreenwaveSession]) // re-run when jobId changes
 
-  const handleOpenChange = useCallback((open: boolean) => {
-    setDialogOpen(open)
-    // A closed dialog must not resurrect a stale error on reopen
-    if (!open) {
-      setPushError(null)
-      setEventPushStatus(null)
-      setGreenwaveDone(false)
-    }
-  }, [])
+  const handleOpenChange = useCallback(
+    (open: boolean) => {
+      setDialogOpen(open)
+      // A closed dialog must not resurrect a stale error on reopen
+      if (!open) {
+        setPushError(null)
+        setEventPushStatus(null)
+        resetGreenwaveSession()
+      }
+    },
+    [resetGreenwaveSession],
+  )
 
   /**
    * Push to Report Portal and/or Datadog: one push per scope (parent + each
@@ -196,11 +213,7 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
         for (const exporter of targets) {
           const key = `${exporter}${qs}`
           if (succeededRef.current.has(key)) continue
-          const path =
-            exporter === 'reportportal'
-              ? `/results/${jobId}/push-reportportal${qs}`
-              : `/results/${jobId}/push/datadog${qs}`
-          pushes.push({ key, label, promise: api.post(path) })
+          pushes.push({ key, label, promise: pushToExporter(jobId, exporter, scope) })
         }
       }
       const settled = await Promise.allSettled(pushes.map((p) => p.promise))
@@ -321,6 +334,10 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
                     onPushed={(res) => {
                       // A failed or partial push must stay visible in the result view.
                       if (!pushFullySucceeded(res)) return
+                      // Only the live session may complete: a push from a
+                      // closed dialog (or a previous job) must not hide the
+                      // form of the session now on screen.
+                      if (gwSession !== greenwaveSessionRef.current) return
                       setGreenwaveDone(true)
                       // The event question may still be unanswered: keep the
                       // dialog so answering it is still possible.

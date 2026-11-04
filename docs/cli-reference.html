@@ -1161,6 +1161,11 @@
 <td>Drop the DB override and fall back to env or default.</td>
 </tr>
 <tr>
+<td><code>settings test INTEGRATION</code></td>
+<td>—</td>
+<td>Test a connection (<code>jenkins</code>, <code>jira</code>, <code>github</code>, <code>reportportal</code>, <code>datadog</code>, <code>greenwave</code>, <code>prow</code>) with the current effective settings; prints <code>OK</code>/<code>FAILED</code> plus per-detail lines and exits <code>1</code> on failure. The <code>greenwave</code> test exercises the selected auth mode and reports it. Admin only.</td>
+</tr>
+<tr>
 <td><code>settings export</code></td>
 <td><code>--include-sensitive</code>, <code>--output</code>/<code>-o</code></td>
 <td>Write the DB-stored settings to a JSON document (stdout without <code>--output</code>). Secrets are excluded unless <code>--include-sensitive</code>; without it, embedded credentials (repo <code>@token</code>s, URL userinfo) are stripped from the export. An <code>--output</code> file is written with owner-only <code>0600</code> permissions.</td>
