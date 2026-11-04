@@ -11,6 +11,7 @@ import sqlite3
 import time
 import uuid
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Sequence
+from compression import zstd
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -282,23 +283,64 @@ def _hash_session_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def parse_result_json(raw: str | None, *, job_id: str = "") -> dict[str, Any] | None:
-    """Decode and validate a ``result_json`` blob.
+# --- result_json storage format ---------------------------------------------
+#
+# The payload is the whole column's size (its bulk is the per-child analysis
+# text), and it is always read back whole, so it is stored compressed:
+#
+#   TEXT   inline JSON — every row written before compression, and any payload
+#          the codec cannot shrink
+#   BLOB   zstd frame — every new row >= 1 KB that shrinks
+#
+# There is no marker column and no header byte: SQLite hands back ``str`` or
+# ``bytes`` and ``typeof(result_json)`` says which in SQL. Every reader goes
+# through :func:`parse_result_json`, so nothing else understands the two shapes.
+# ``compression.zstd`` is stdlib from Python 3.14 on (PEP 784) — no dependency.
+_RESULT_ZSTD_MIN_BYTES = 1024  # below this a frame is never smaller
+_RESULT_ZSTD_LEVEL = 3  # 9.1x at 0.21 ms/row; level 9 buys 8% for 3x the CPU
+
+
+def _encode_result_text(raw: str) -> bytes | str:
+    """Return *raw* as a zstd frame when that is smaller, else *raw* unchanged."""
+    data = raw.encode()
+    if len(data) < _RESULT_ZSTD_MIN_BYTES:
+        return raw
+    frame = zstd.compress(data, _RESULT_ZSTD_LEVEL)
+    # min(frame, raw): a row can never grow. The size gate is only a CPU shortcut.
+    return frame if len(frame) < len(data) else raw
+
+
+def _dump_result_json(result: dict[str, Any] | None) -> bytes | str | None:
+    """Serialise *result* for the ``result_json`` column (compressed when smaller)."""
+    return None if result is None else _encode_result_text(json.dumps(result))
+
+
+def parse_result_json(
+    raw: bytes | bytearray | str | None, *, job_id: str = ""
+) -> dict[str, Any] | None:
+    """Decode and validate a ``result_json`` column value.
 
     Args:
-        raw: The raw JSON string from the database, or None.
+        raw: The raw column value — JSON text, or a zstd frame written by
+            :func:`_encode_result_text` — or None.
         job_id: Optional job_id for log messages.
 
     Returns:
-        Parsed dict when valid, None when *raw* is empty/malformed.
+        Parsed dict when valid, None when *raw* is empty/unreadable.
     """
     if not raw:
         return None
+    stored = raw
     try:
+        if isinstance(raw, (bytes, bytearray)):
+            raw = zstd.decompress(raw)
         data = json.loads(raw)
-    except json.JSONDecodeError, TypeError:
-        logger.warning(
-            f"parse_result_json: malformed JSON for job_id={job_id}, skipping"
+    except zstd.ZstdError, UnicodeDecodeError, json.JSONDecodeError, TypeError:
+        # A bad frame degrades exactly like malformed JSON: every read path sees
+        # None instead of an exception, and no writer overwrites the row.
+        logger.error(
+            f"parse_result_json: unreadable result_json for job_id={job_id} "
+            f"(stored {type(stored).__name__}, {len(stored)} chars/bytes), skipping"
         )
         return None
     if not isinstance(data, dict):
@@ -419,6 +461,210 @@ async def _claim_migration(db: aiosqlite.Connection, key: str) -> bool:
     cursor = await db.execute("SELECT changes()")
     row = await cursor.fetchone()
     return row is not None and row[0] == 1
+
+
+# Job_name/build_number/build_id, derived in SQL from a payload that was still
+# inline JSON. Kept for the one-shot ``backfill_results_denorm_v1`` claim; the
+# ``typeof`` guard is the only reason it still mentions result_json at all.
+# No compressed row can reach it: this runs in init_db, before the background
+# compression task starts (allowlisted in tests/test_storage_compression.py).
+_RESULTS_DENORM_V1_SQL = """
+    UPDATE results
+    SET job_name = COALESCE(json_extract(result_json, '$.job_name'), ''),
+        build_number = CASE
+            WHEN json_type(result_json, '$.build_number') = 'integer'
+                 AND json_extract(result_json, '$.build_number') >= 0
+                 AND json_extract(result_json, '$.build_number') <= 9223372036854775807
+            THEN json_extract(result_json, '$.build_number')
+            WHEN json_type(result_json, '$.build_number') = 'text'
+                 AND json_extract(result_json, '$.build_number') NOT GLOB '*[^0-9]*'
+                 AND json_extract(result_json, '$.build_number') != ''
+                 AND (
+                     ltrim(json_extract(result_json, '$.build_number'), '0') = ''
+                     OR length(ltrim(json_extract(result_json, '$.build_number'), '0')) < 19
+                     OR (length(ltrim(json_extract(result_json, '$.build_number'), '0')) = 19
+                         AND ltrim(json_extract(result_json, '$.build_number'), '0') <= '9223372036854775807')
+                 )
+            THEN CAST(json_extract(result_json, '$.build_number') AS INTEGER)
+            ELSE 0
+        END,
+        build_id = COALESCE(CAST(json_extract(result_json, '$.build_id') AS TEXT), '')
+    WHERE result_json IS NOT NULL AND json_valid(result_json) AND job_name = ''
+      AND typeof(result_json) = 'text'
+"""
+
+# Claim key for "the denormalized columns have been derived at least once".
+_RESULTS_DENORM_KEY = "backfill_results_denorm_v2"
+
+
+async def _backfill_results_denorm(
+    db: aiosqlite.Connection, batch_size: int = 200
+) -> None:
+    """Derive every denormalized ``results`` column from the stored payload.
+
+    Gated per row on ``denorm_version`` instead of claimed once: a build that
+    does not know a column keeps writing rows without it during a mixed-version
+    window, and only a re-runnable sweep makes that converge. Rows already at
+    the current version are never rewritten. Only TEXT payloads are read — a
+    compressed row was derived before it was compressed.
+
+    Args:
+        db: Open connection inside ``init_db``.
+        batch_size: Rows per keyset page.
+    """
+    if batch_size <= 0:
+        raise ValueError("batch_size must be > 0")
+    cursor = await db.execute(
+        "SELECT COUNT(*) FROM results WHERE typeof(result_json) = 'text'"
+        " AND COALESCE(denorm_version, 0) < ?",
+        (_RESULTS_DENORM_VERSION,),
+    )
+    pending = (await cursor.fetchone())[0]
+    if not pending:
+        return
+    logger.info(
+        "Migration: deriving denormalized columns for %d results row(s)", pending
+    )
+    rowid = 0
+    done = 0
+    while True:
+        cursor = await db.execute(
+            "SELECT rowid AS rid, job_id, result_json FROM results"
+            " WHERE rowid > ? AND typeof(result_json) = 'text'"
+            " AND COALESCE(denorm_version, 0) < ?"
+            " ORDER BY rowid LIMIT ?",
+            (rowid, _RESULTS_DENORM_VERSION, batch_size),
+        )
+        rows = await cursor.fetchall()
+        if not rows:
+            break
+        for row in rows:
+            rowid = row["rid"]
+            fields = _extract_denormalized_fields(
+                parse_result_json(row["result_json"], job_id=row["job_id"])
+            )
+            await db.execute(
+                "UPDATE results SET job_name = ?, build_number = ?, build_id = ?,"
+                " submitted_by = ?, summary = ?, display_name = ?, failure_ids = ?,"
+                " denorm_version = ? WHERE rowid = ?",
+                (*fields, _RESULTS_DENORM_VERSION, rowid),
+            )
+            done += 1
+    logger.info("Migration: derived denormalized columns for %d results row(s)", done)
+
+
+# The rows the writer would have compressed: still inline JSON, denormalized
+# columns already derived, big enough for a frame to win. Also the size scope
+# of the before/after report, so the sweep never reads the whole column twice.
+_RESULT_JSON_COMPRESSION_WHERE = (
+    "typeof(result_json) = 'text'"
+    " AND COALESCE(denorm_version, 0) >= ?"
+    " AND length(CAST(result_json AS BLOB)) >= ?"
+)
+_RESULT_JSON_COMPRESSION_SELECT = (
+    "SELECT rowid AS rid, result_json FROM results"
+    f" WHERE rowid > ? AND {_RESULT_JSON_COMPRESSION_WHERE}"
+    " ORDER BY rowid LIMIT ?"
+)
+
+
+async def _eligible_result_bytes(db: aiosqlite.Connection) -> int:
+    """Stored size of the rows this sweep would compress."""
+    cursor = await db.execute(
+        "SELECT COALESCE(SUM(length(CAST(result_json AS BLOB))), 0) FROM results"
+        f" WHERE {_RESULT_JSON_COMPRESSION_WHERE}",
+        (_RESULTS_DENORM_VERSION, _RESULT_ZSTD_MIN_BYTES),
+    )
+    return (await cursor.fetchone())[0]
+
+
+def _compress_result_rows(
+    rows: Sequence[aiosqlite.Row],
+) -> list[tuple[int, bytes, int]]:
+    """Compress one batch's stored text as-is.
+
+    Returns:
+        ``(rowid, frame, text bytes it replaces)``; a row a frame would grow is
+        left out, so it stays TEXT and is retried on the next boot.
+    """
+    pairs: list[tuple[int, bytes, int]] = []
+    for row in rows:
+        encoded = _encode_result_text(row["result_json"])
+        if isinstance(encoded, bytes):
+            pairs.append((row["rid"], encoded, len(row["result_json"].encode())))
+    return pairs
+
+
+async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, int]:
+    """Compress legacy TEXT ``result_json`` rows in resumable batches.
+
+    Keyset pagination, so it always terminates and a killed run resumes where it
+    stopped. It stores the frame of the bytes already in the row (no parse, no
+    re-dump), so decoding returns the payload byte for byte. A row a frame would
+    grow stays TEXT and is retried on the next boot; a row whose denormalized
+    columns are not derived yet is skipped until they are.
+
+    Args:
+        batch_size: Rows per batch.
+
+    Returns:
+        ``rows`` compressed and the migrated rows' ``bytes_before``/``bytes_after``.
+    """
+    if batch_size <= 0:
+        raise ValueError("batch_size must be > 0")
+    stats = {"rows": 0, "bytes_before": 0, "bytes_after": 0}
+    async with _connect_db() as db:
+        if not await _migration_applied(db, _RESULTS_DENORM_KEY):
+            logger.warning(
+                "result_json compression skipped: denormalized columns not derived"
+            )
+            return stats
+        stats["bytes_before"] = await _eligible_result_bytes(db)
+    stats["bytes_after"] = stats["bytes_before"]
+    logger.info(
+        "result_json compression: starting (%d bytes of legacy results)",
+        stats["bytes_before"],
+    )
+    rowid = 0
+    while True:
+        async with _connect_db() as db:
+            cursor = await db.execute(
+                _RESULT_JSON_COMPRESSION_SELECT,
+                (rowid, _RESULTS_DENORM_VERSION, _RESULT_ZSTD_MIN_BYTES, batch_size),
+            )
+            rows = await cursor.fetchall()
+        if not rows:
+            break
+        rowid = rows[-1]["rid"]
+        # Encode off the event loop (#402): /health must answer between batches.
+        pairs = await asyncio.to_thread(_compress_result_rows, rows)
+        if not pairs:
+            continue
+        async with _connect_db() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            for rid, frame, text_bytes in pairs:
+                # The typeof guard lets a concurrent patch_result_json win.
+                cursor = await db.execute(
+                    "UPDATE results SET result_json = ?"
+                    " WHERE rowid = ? AND typeof(result_json) = 'text'",
+                    (frame, rid),
+                )
+                if cursor.rowcount:
+                    stats["rows"] += 1
+                    stats["bytes_after"] += len(frame) - text_bytes
+            await db.commit()
+        logger.debug(
+            "result_json compression: %d row(s) so far, cursor rowid=%d",
+            stats["rows"],
+            rowid,
+        )
+    logger.info(
+        "result_json compression: done, %d row(s) compressed, %d -> %d bytes",
+        stats["rows"],
+        stats["bytes_before"],
+        stats["bytes_after"],
+    )
+    return stats
 
 
 _ROLE_PRIORITY = {"viewer": 0, "reviewer": 1, "operator": 2, "admin": 3}
@@ -587,7 +833,10 @@ candidates AS (
         SELECT
             job_id,
             CASE
-                WHEN json_valid(result_json) THEN result_json
+                -- typeof guard: a compressed frame is not JSON, and this runs
+                -- before the background compression on every boot.
+                WHEN json_valid(result_json) AND typeof(result_json) = 'text'
+                THEN result_json
                 ELSE NULL
             END AS safe_rj
         FROM results
@@ -920,39 +1169,36 @@ async def init_db() -> None:
             "analysis_state",
             "TEXT NOT NULL DEFAULT 'analyzed'",
         )
+        # Columns the SQL filters read now that result_json may be a zstd frame:
+        # a compressed payload cannot be json_extract'ed (#409).
+        await _migrate_add_column(
+            db, "results", "submitted_by", "TEXT NOT NULL DEFAULT ''"
+        )
+        await _migrate_add_column(db, "results", "summary", "TEXT NOT NULL DEFAULT ''")
+        await _migrate_add_column(
+            db, "results", "display_name", "TEXT NOT NULL DEFAULT ''"
+        )
+        await _migrate_add_column(
+            db, "results", "failure_ids", "TEXT NOT NULL DEFAULT ''"
+        )
+        await _migrate_add_column(
+            db, "results", "denorm_version", "INTEGER NOT NULL DEFAULT 0"
+        )
 
         # Backfill job_name/build_number/build_id from result_json.
         # Uses atomic claim so only one concurrent init_db() runs the scan.
         _results_denorm_key = "backfill_results_denorm_v1"
         if await _claim_migration(db, _results_denorm_key):
-            cursor = await db.execute("""
-                UPDATE results
-                SET job_name = COALESCE(json_extract(result_json, '$.job_name'), ''),
-                    build_number = CASE
-                        WHEN json_type(result_json, '$.build_number') = 'integer'
-                             AND json_extract(result_json, '$.build_number') >= 0
-                             AND json_extract(result_json, '$.build_number') <= 9223372036854775807
-                        THEN json_extract(result_json, '$.build_number')
-                        WHEN json_type(result_json, '$.build_number') = 'text'
-                             AND json_extract(result_json, '$.build_number') NOT GLOB '*[^0-9]*'
-                             AND json_extract(result_json, '$.build_number') != ''
-                             AND (
-                                 ltrim(json_extract(result_json, '$.build_number'), '0') = ''
-                                 OR length(ltrim(json_extract(result_json, '$.build_number'), '0')) < 19
-                                 OR (length(ltrim(json_extract(result_json, '$.build_number'), '0')) = 19
-                                     AND ltrim(json_extract(result_json, '$.build_number'), '0') <= '9223372036854775807')
-                             )
-                        THEN CAST(json_extract(result_json, '$.build_number') AS INTEGER)
-                        ELSE 0
-                    END,
-                    build_id = COALESCE(CAST(json_extract(result_json, '$.build_id') AS TEXT), '')
-                WHERE result_json IS NOT NULL AND json_valid(result_json) AND job_name = ''
-            """)
+            cursor = await db.execute(_RESULTS_DENORM_V1_SQL)
             if cursor.rowcount:
                 logger.info(
                     "Migration: backfilled job_name/build_number/build_id on %d results row(s)",
                     cursor.rowcount,
                 )
+        # Must finish before the background compression, so no compressed row can
+        # exist with columns missing (the compression predicate skips such rows).
+        await _backfill_results_denorm(db)
+        await _mark_migration_applied(db, _RESULTS_DENORM_KEY)
 
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_results_status_created "
@@ -967,7 +1213,10 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_results_created_at "
             "ON results (created_at DESC)"
         )
-        # Submitter enumeration goes through this expression index, never per-row JSON.
+        # Submitter enumeration goes through the plain-column index, never per-row JSON.
+        # The plain column replaced an expression index of the same name, and
+        # CREATE INDEX IF NOT EXISTS would keep the old one silently: drop it first.
+        await db.execute("DROP INDEX IF EXISTS idx_results_submitted_by")
         await db.execute(_SUBMITTED_BY_INDEX_SQL)
 
         # failure_history: denormalized table for fast history queries
@@ -2262,18 +2511,71 @@ async def get_historical_comments(
         return result
 
 
-def _extract_denormalized_fields(result: dict[str, Any] | None) -> tuple[str, int, str]:
-    """Extract job_name, build_number, build_id from a result dict.
+# Bumped whenever the denormalized columns change shape: a row written by a
+# build that does not know a column keeps its default, and _backfill_results_denorm
+# re-derives every row still below this version. That makes the backfill
+# idempotent and re-runnable instead of a one-shot claim, so a mixed-version
+# window (an old build writing after the sweep) converges on the next boot.
+_RESULTS_DENORM_VERSION = 2
+
+
+def _collect_failure_ids(result: dict[str, Any]) -> list[str]:
+    """Every failure and child-analysis UUID in a result, in payload order."""
+    ids: list[str] = []
+
+    def walk_failures(failures: Any) -> None:
+        for failure in failures if isinstance(failures, list) else []:
+            if not isinstance(failure, dict):
+                continue
+            failure_id = failure.get("id")
+            if isinstance(failure_id, str) and failure_id:
+                ids.append(failure_id)
+
+    def walk_children(children: Any) -> None:
+        for child in children if isinstance(children, list) else []:
+            if not isinstance(child, dict):
+                continue
+            child_id = child.get("id")
+            if isinstance(child_id, str) and child_id:
+                ids.append(child_id)
+            walk_failures(child.get("failures"))
+            walk_children(child.get("failed_children"))
+
+    walk_failures(result.get("failures"))
+    walk_children(result.get("child_job_analyses"))
+    return ids
+
+
+def _extract_denormalized_fields(
+    result: dict[str, Any] | None,
+) -> tuple[str, int, str, str, str, str, str]:
+    """Extract the denormalized columns from a result dict.
+
+    ``submitted_by`` is the one ``request_params`` scalar lifted out: the
+    dashboard picker and filter cannot read a compressed payload in SQL.
 
     Returns:
-        Tuple of (job_name, build_number, build_id).
+        Tuple of (job_name, build_number, build_id, submitted_by, summary,
+        display_name, failure_ids).
     """
     if result is None:
-        return ("", 0, "")
+        return ("", 0, "", "", "", "", "")
     job_name = str(result.get("job_name") or "")
     build_number = _coerce_sqlite_build_number(result.get("build_number"))
     build_id = str(result.get("build_id") or "")
-    return (job_name, build_number, build_id)
+    request_params = result.get("request_params")
+    submitted_by = ""
+    if isinstance(request_params, dict):
+        submitted_by = str(request_params.get("submitted_by") or "").strip()
+    return (
+        job_name,
+        build_number,
+        build_id,
+        submitted_by,
+        str(result.get("summary") or ""),
+        str(result.get("display_name") or ""),
+        " ".join(dict.fromkeys(_collect_failure_ids(result))),
+    )
 
 
 def _coerce_analysis_state(value: Any) -> str:
@@ -2303,11 +2605,18 @@ def _append_denormalized_set_parts(
 ) -> None:
     """Append denormalized column SET fragments for keys present in *result*.
 
-    Only includes ``job_name``, ``build_number``, or ``build_id`` when the
-    corresponding key exists in *result* — partial payloads must not clobber
-    existing column values.
+    Only includes a denormalized column when *result* carries what it is
+    derived from — partial payloads must not clobber existing column values.
     """
-    job_name, build_number, build_id = _extract_denormalized_fields(result)
+    (
+        job_name,
+        build_number,
+        build_id,
+        submitted_by,
+        summary,
+        display_name,
+        failure_ids,
+    ) = _extract_denormalized_fields(result)
     if "job_name" in result:
         set_parts.append("job_name = ?")
         params.append(job_name)
@@ -2317,6 +2626,21 @@ def _append_denormalized_set_parts(
     if "build_id" in result:
         set_parts.append("build_id = ?")
         params.append(build_id)
+    if (
+        isinstance(result.get("request_params"), dict)
+        and "submitted_by" in result["request_params"]
+    ):
+        set_parts.append("submitted_by = ?")
+        params.append(submitted_by)
+    if "summary" in result:
+        set_parts.append("summary = ?")
+        params.append(summary)
+    if "display_name" in result:
+        set_parts.append("display_name = ?")
+        params.append(display_name)
+    if "failures" in result or "child_job_analyses" in result:
+        set_parts.append("failure_ids = ?")
+        params.append(failure_ids)
     if "analysis_state" in result:
         set_parts.append("analysis_state = ?")
         params.append(_coerce_analysis_state(result.get("analysis_state")))
@@ -2324,7 +2648,7 @@ def _append_denormalized_set_parts(
 
 def _build_status_update_clause(
     status: str,
-    result_json: str | None = None,
+    result_json: bytes | str | None = None,
     result: dict[str, Any] | None = None,
 ) -> tuple[list[str], list[Any]]:
     """Build the SET clause parts and params for a status update.
@@ -2336,7 +2660,7 @@ def _build_status_update_clause(
         status: New status value.
         result_json: Serialized result JSON. When not None, ``result_json``
             is included in the update.
-        result: Optional result dict used to denormalize job_name/build_number/build_id.
+        result: Optional result dict used to denormalize the derived columns.
             When provided, denormalized columns are updated only for keys
             present in *result* — omitted identity keys leave existing column
             values unchanged (key-presence semantics).
@@ -2353,6 +2677,9 @@ def _build_status_update_clause(
 
     if result is not None:
         _append_denormalized_set_parts(result, set_parts, params)
+        # This payload IS the stored one, so every column is now derived from it.
+        set_parts.append("denorm_version = ?")
+        params.append(_RESULTS_DENORM_VERSION)
 
     if status == "running":
         set_parts.append(
@@ -2446,7 +2773,7 @@ async def save_result(
     if jenkins_url is not None:
         build_url = jenkins_url
     logger.debug(f"Saving result for job_id: {job_id} (status: {status})")
-    result_json = json.dumps(result) if result is not None else None
+    result_json = _dump_result_json(result)
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         if result is not None:
@@ -2456,15 +2783,25 @@ async def save_result(
             if previous:
                 _preserve_reanalysis_forward_links(previous, result)
             await _sync_result_token_usage(db, job_id, result)
-            result_json = json.dumps(result)
+            result_json = _dump_result_json(result)
         # Insert the row if it doesn't exist yet (preserves created_at / analysis_started_at).
-        job_name, build_number, build_id_val = _extract_denormalized_fields(result)
+        (
+            job_name,
+            build_number,
+            build_id_val,
+            submitted_by,
+            summary,
+            display_name,
+            failure_ids,
+        ) = _extract_denormalized_fields(result)
         insert_state = _coerce_analysis_state((result or {}).get("analysis_state"))
         await db.execute(
             """
             INSERT OR IGNORE INTO results (job_id, build_url, status, result_json,
-                                           job_name, build_number, build_id, analysis_state)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                           job_name, build_number, build_id,
+                                           analysis_state, submitted_by, summary,
+                                           display_name, failure_ids, denorm_version)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 job_id,
@@ -2475,6 +2812,11 @@ async def save_result(
                 build_number,
                 build_id_val,
                 insert_state,
+                submitted_by,
+                summary,
+                display_name,
+                failure_ids,
+                _RESULTS_DENORM_VERSION,
             ),
         )
         # Update the row (handles both fresh inserts and existing rows).
@@ -2593,7 +2935,7 @@ async def update_status(
                 if status != "completed":
                     result["progress_phase"] = status
             await _sync_result_token_usage(db, job_id, result)
-        result_json = json.dumps(result) if result is not None else None
+        result_json = _dump_result_json(result)
         set_parts, params = _build_status_update_clause(status, result_json, result)
         params.append(job_id)
         sql = f"UPDATE results SET {', '.join(set_parts)} WHERE job_id = ?"
@@ -2899,7 +3241,7 @@ async def patch_result_json(
                     return
             patch_fn(result_data)
             set_parts = ["result_json = ?"]
-            params: list[Any] = [json.dumps(result_data)]
+            params: list[Any] = [_dump_result_json(result_data)]
             _append_denormalized_set_parts(result_data, set_parts, params)
             params.append(job_id)
             await db.execute(
@@ -2970,10 +3312,15 @@ async def _backfill_failure_uuids(job_id: str, result_data: dict[str, Any]) -> b
         if _backfill_child_uuids(child):
             changed = True
     if changed:
+        set_parts = ["result_json = ?"]
+        params: list[Any] = [_dump_result_json(result_data)]
+        # The payload itself changed, so its derived columns move with it.
+        _append_denormalized_set_parts(result_data, set_parts, params)
+        params.append(job_id)
         async with _connect_db() as db:
             await db.execute(
-                "UPDATE results SET result_json = ? WHERE job_id = ?",
-                (json.dumps(result_data), job_id),
+                f"UPDATE results SET {', '.join(set_parts)} WHERE job_id = ?",
+                params,
             )
             await db.commit()
         logger.info(f"Backfilled missing failure UUIDs for job_id={job_id}")
@@ -3107,26 +3454,22 @@ async def add_graft_estimated_tokens_saved(job_id: str, tokens: int) -> None:
         await db.commit()
 
 
-# Single source of the submitted_by JSON path. The json_valid guard lives inside the
-# constant so every use (filter, enumeration, ownership lookup) is safe on bad rows,
-# and it stays table-alias free so the enumeration matches the expression index below.
-_SUBMITTED_BY_RAW_SQL = (
-    "CASE WHEN json_valid(result_json) "
-    "THEN trim(json_extract(result_json, '$.request_params.submitted_by')) END"
-)
+# Single source of submitted_by. It is a denormalized column, because a compressed
+# result_json cannot be json_extract'ed in SQL (#409) — every use (filter,
+# enumeration, ownership lookup) reads it, and it stays table-alias free so the
+# enumeration matches the index below. Empty reads as NULL, never as a name.
+_SUBMITTED_BY_RAW_SQL = "NULLIF(submitted_by, '')"
 # Folding happens only in SQL: SQLite lower() is ASCII-only, so a Python lower()
 # would make a non-ASCII name unmatchable against its own rows.
 _SUBMITTED_BY_SQL = f"lower({_SUBMITTED_BY_RAW_SQL})"
-# The picker lists every stored name, and this index lets it do so without decoding
-# result JSON per row: DISTINCT reads the index alone. Only the enumeration uses it —
+# The picker lists every stored name, and this index lets it do so without touching
+# result_json per row: DISTINCT reads the index alone. Only the enumeration uses it —
 # a LIKE '%name%' filter cannot (no index can narrow an unanchored substring match).
 _SUBMITTED_BY_INDEX_SQL = (
-    "CREATE INDEX IF NOT EXISTS idx_results_submitted_by "
-    f"ON results ({_SUBMITTED_BY_RAW_SQL})"
+    "CREATE INDEX IF NOT EXISTS idx_results_submitted_by ON results (submitted_by)"
 )
 _SUBMITTER_LIST_SQL = (
-    f"SELECT DISTINCT {_SUBMITTED_BY_RAW_SQL} AS name FROM results "
-    f"WHERE {_SUBMITTED_BY_RAW_SQL} IS NOT NULL"
+    "SELECT DISTINCT submitted_by AS name FROM results WHERE submitted_by != ''"
 )
 
 
@@ -3211,8 +3554,9 @@ async def find_failure_by_uuid(
 ) -> dict[str, Any] | None:
     """Search all stored results for a failure with the given UUID.
 
-    Uses SQLite ``INSTR`` to pre-filter rows that *might* contain the UUID,
-    then verifies in Python.
+    Uses SQLite ``INSTR`` on the derived ``failure_ids`` column to pre-filter
+    rows that *might* contain the UUID (a compressed payload cannot be
+    scanned), then verifies in Python.
 
     Returns:
         Dict with ``job_id``, ``failure``, ``child_job_name``,
@@ -3220,8 +3564,7 @@ async def find_failure_by_uuid(
     """
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT job_id, result_json FROM results "
-            "WHERE result_json IS NOT NULL AND INSTR(result_json, ?) > 0",
+            "SELECT job_id, result_json FROM results WHERE INSTR(failure_ids, ?) > 0",
             (failure_uuid,),
         )
         async for row in cursor:
@@ -4713,8 +5056,8 @@ async def list_results_for_dashboard_filtered(
                 "(r.status = 'failed' AND ("
                 "lower(r.error) LIKE '%timed out%' OR "
                 "lower(r.error) LIKE '%timeout%' OR "
-                "lower(json_extract(r.result_json, '$.summary')) LIKE '%timed out%' OR "
-                "lower(json_extract(r.result_json, '$.summary')) LIKE '%timeout%'"
+                "lower(r.summary) LIKE '%timed out%' OR "
+                "lower(r.summary) LIKE '%timeout%'"
                 "))"
             )
         conditions.append(f"({' OR '.join(status_parts)})")
@@ -10455,28 +10798,27 @@ async def _audit_target_jobs(
     A reference is a job id or any of the job's names, so the query matches all
     of them and the result is keyed by every shape: either resolves without a
     second round trip. The label prefers ``display_name`` — the name a human
-    reads — then ``job_name``, then ``origin_job_name``. The newest row wins
-    when a job name was analyzed more than once.
+    reads — then ``job_name``. The newest row wins when a job name was analyzed
+    more than once.
 
-    Read at list time, never stored: neither value is a column and neither
-    enters ``entry_hash``. A missing job simply has no entry, so the caller
-    reports ``None`` rather than an error or an empty string.
+    Reads at list time, never stored, and read from the denormalized columns so
+    a compressed payload is never decoded for it. ``origin_job_name`` is not a
+    name form here: it is computed per response (``main._attach_origin_job_info``)
+    and never stored, so matching it could only ever match nothing.
     """
     if not refs:
         return {}
     marks = ", ".join("?" * len(refs))
     # Every name is optional and none is unique, so the label is the first one
     # that is set while the match is any of them.
-    names = ("display_name", "job_name", "origin_job_name")
-    name_expr = {
-        name: f"NULLIF(json_extract(result_json, '$.{name}'), '')" for name in names
-    }
+    names = ("display_name", "job_name")
+    name_expr = {name: f"NULLIF({name}, '')" for name in names}
     label_expr = "COALESCE(" + ", ".join(name_expr[name] for name in names) + ")"
     cursor = await db.execute(
         f"SELECT job_id, {label_expr} AS label,"
         f" {', '.join(name_expr[name] + ' AS ' + name for name in names)}"
-        " FROM results WHERE result_json IS NOT NULL AND json_valid(result_json)"
-        f" AND (job_id IN ({marks})"
+        " FROM results"
+        f" WHERE (job_id IN ({marks})"
         f" OR {' OR '.join(name_expr[name] + f' IN ({marks})' for name in names)})"
         " ORDER BY created_at, rowid",
         [*refs] * (len(names) + 1),

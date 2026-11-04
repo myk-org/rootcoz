@@ -281,6 +281,7 @@ from rootcoz.storage import (
     ANALYSIS_STATE_ANALYZED,
     ANALYSIS_STATE_SUBMITTED,
     DB_PATH,
+    backfill_result_json_compression,
     claim_submitted_job_for_analyze,
     copy_stable_analysis_ids,
     get_effective_classification,
@@ -291,6 +292,7 @@ from rootcoz.storage import (
     list_results,
     list_results_for_dashboard,
     list_results_for_dashboard_filtered,
+    parse_result_json,
     patch_result_json,
     populate_failure_history,
     release_submitted_job_analyze_claim,
@@ -2453,6 +2455,14 @@ async def _backfill_job_metadata(rules: list[dict[str, Any]]) -> None:
         logger.debug("Failed to backfill job metadata", exc_info=True)
 
 
+async def _compress_stored_results() -> None:
+    """Compress pre-compression result_json rows in the background. Best-effort."""
+    try:
+        await backfill_result_json_compression()
+    except Exception:
+        logger.exception("Failed to compress stored result_json rows")
+
+
 async def _deferred_resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> None:
     """Resume waiting jobs after startup is complete.
 
@@ -2653,6 +2663,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             task = asyncio.create_task(_backfill_job_metadata(settings.metadata_rules))
             _background_tasks.add(task)
             task.add_done_callback(_background_tasks.discard)
+
+        # Compress legacy result_json rows written before they were stored
+        # compressed (#409). Background, chunked and off the event loop: a
+        # multi-GB sweep must not delay startup or /health.
+        task = asyncio.create_task(_compress_stored_results())
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
 
         waiting_jobs, recovered_jobs = await storage.mark_stale_results_failed()
         for rj in recovered_jobs:
@@ -20913,6 +20930,19 @@ async def admin_db_schema(request: Request) -> dict[str, Any]:
         conn.close()
 
 
+def _admin_row_value(value: Any) -> Any:
+    """Render one queried row value for the admin query response (#409).
+
+    A compressed ``result_json`` comes back as ``bytes``, which the JSON encoder
+    cannot serialise: show the payload the frame holds, and say so when it is
+    unreadable instead of failing the whole query.
+    """
+    if not isinstance(value, (bytes, bytearray)):
+        return value
+    decoded = parse_result_json(value)
+    return decoded if decoded is not None else f"<{len(value)} undecodable frame>"
+
+
 @app.post("/api/admin/db/query", operation_id="adminDbQuery")
 async def admin_db_query(request: Request) -> dict[str, Any]:
     """Execute a read-only SQL query. Admin only."""
@@ -20962,7 +20992,10 @@ async def admin_db_query(request: Request) -> dict[str, Any]:
         cursor = conn.execute(sql)
         rows = cursor.fetchall()
         columns = [desc[0] for desc in cursor.description] if cursor.description else []
-        results = [dict(row) for row in rows]
+        results = [
+            {key: _admin_row_value(value) for key, value in dict(row).items()}
+            for row in rows
+        ]
         await record_audit(
             action="admin.db_query",
             actor=username,

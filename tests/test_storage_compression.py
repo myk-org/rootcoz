@@ -1,0 +1,471 @@
+"""Tests for the compressed ``result_json`` column (#409).
+
+The column carries the whole payload, so these tests are end-to-end at the
+storage layer: what the writer stores, what the backfill rewrites, and every SQL
+site that used to read the payload with JSON functions — which cannot read a frame.
+"""
+
+import asyncio
+import json
+import re
+import time
+from compression import zstd
+from pathlib import Path
+from unittest.mock import patch
+
+import pytest
+
+from rootcoz import storage
+
+# --- fixtures ---------------------------------------------------------------
+
+
+@pytest.fixture
+def _db(temp_db_path: Path):
+    """A migrated database the storage functions use."""
+    with patch.object(storage, "DB_PATH", temp_db_path):
+        asyncio.run(storage.init_db())
+        yield temp_db_path
+
+
+@pytest.fixture
+def _storage(_db: Path):
+    """Patch ``DB_PATH`` for every call in the test."""
+    with patch.object(storage, "DB_PATH", _db):
+        yield _db
+
+
+def _payload(
+    failure_count: int = 414,
+    *,
+    job_name: str = "big-job",
+    summary: str = "many failures",
+    distinct_analyses: int = 2,
+    analysis_size: int = 300,
+) -> dict:
+    """A report-shaped payload: many failures, few distinct analysis texts."""
+    analyses = [
+        {
+            "classification": "CODE ISSUE",
+            "pattern": "NEW",
+            "analysis": f"analysis {index} " + "detail " * analysis_size,
+        }
+        for index in range(distinct_analyses)
+    ]
+    return {
+        "job_name": job_name,
+        "build_number": 42,
+        "build_id": "4242",
+        "display_name": "Human Name",
+        "summary": summary,
+        "request_params": {"submitted_by": "yuval", "build_id": "4242"},
+        "passed_count": 10,
+        "failed_count": failure_count,
+        "failures": [
+            {
+                "id": f"failure-{index}",
+                "test_name": f"test_{index}",
+                "error": f"AssertionError: boom {index} " + "x" * 120,
+                "error_signature": f"sig-{index}",
+                "analysis": analyses[index % distinct_analyses],
+            }
+            for index in range(failure_count)
+        ],
+        "child_job_analyses": [
+            {
+                "id": "child-1",
+                "job_name": "child-job",
+                "build_number": 7,
+                "failures": [
+                    {
+                        "id": "child-failure-1",
+                        "test_name": "test_child",
+                        "error": "child crash",
+                        "analysis": analyses[0],
+                    }
+                ],
+                "failed_children": [],
+            }
+        ],
+        "token_usage": {"total": {"input": 1, "output": 2}},
+    }
+
+
+async def _stored(db_path: Path, job_id: str):
+    """Return the raw stored row for *job_id*."""
+    async with storage._connect_db() as db:
+        return await (
+            await db.execute(
+                "SELECT typeof(result_json) AS kind, length(result_json) AS size,"
+                " result_json, submitted_by, summary, display_name, failure_ids,"
+                " denorm_version FROM results WHERE job_id = ?",
+                (job_id,),
+            )
+        ).fetchone()
+
+
+async def _insert_legacy(job_id: str, payload: dict) -> str:
+    """Insert a row the way a pre-compression build wrote it (inline JSON, no columns)."""
+    text = json.dumps(payload)
+    async with storage._connect_db() as db:
+        await db.execute(
+            "INSERT INTO results (job_id, status, result_json) VALUES (?, ?, ?)",
+            (job_id, "completed", text),
+        )
+        await db.commit()
+    return text
+
+
+# --- the writer -------------------------------------------------------------
+
+
+async def test_full_size_roundtrip_is_content_identical(_storage) -> None:
+    """414 failures / 2 analyses: identical payload after a compressed write."""
+    payload = _payload()
+    await storage.save_result("job-roundtrip", "http://ci", "completed", payload)
+
+    row = await _stored(_storage, "job-roundtrip")
+    assert row["kind"] == "blob", "a payload this size must be stored compressed"
+
+    # Exact round-trip through the frame -> decompress -> json.loads path. The
+    # read-side enrichment get_result adds (token usage) is asserted below.
+    assert (
+        storage.parse_result_json(row["result_json"], job_id="job-roundtrip") == payload
+    )
+
+    stored = await storage.get_result("job-roundtrip")
+    assert stored["result"]["summary"] == payload["summary"]
+    assert stored["result"]["request_params"] == payload["request_params"]
+    assert stored["result"]["child_job_analyses"] == payload["child_job_analyses"]
+    failures = stored["result"]["failures"]
+    assert len(failures) == 414
+    # No truncation and no deduplication of the per-signature analysis text.
+    assert len({failure["analysis"]["analysis"] for failure in failures}) == 2
+    assert (
+        failures[0]["analysis"]["analysis"]
+        == payload["failures"][0]["analysis"]["analysis"]
+    )
+
+
+async def test_size_gate_never_grows_a_row(_storage, monkeypatch) -> None:
+    """Small payloads stay TEXT, and a frame that would be bigger is never used."""
+    await storage.save_result(
+        "job-small", "", "completed", {"job_name": "tiny", "summary": "ok"}
+    )
+    assert (await _stored(_storage, "job-small"))["kind"] == "text"
+
+    await storage.save_result("job-compressible", "", "completed", _payload())
+    assert (await _stored(_storage, "job-compressible"))["kind"] == "blob"
+
+    raw = json.dumps(_payload(failure_count=1))
+    assert len(storage._encode_result_text(raw)) <= len(raw)
+
+    # Even when the codec returns a larger frame, the row keeps the text.
+    monkeypatch.setattr(
+        storage.zstd, "compress", lambda data, level=0: b"\x00" * (len(data) + 64)
+    )
+    assert storage._encode_result_text(raw) == raw
+    await storage.save_result("job-no-gain", "", "completed", {"raw": raw})
+    row = await _stored(_storage, "job-no-gain")
+    assert row["kind"] == "text"
+    assert row["size"] == len(json.dumps({"raw": raw}))
+
+
+async def test_legacy_text_row_reads_and_patch_upgrades_it(_storage) -> None:
+    """A row written by today's writer keeps working, and a patch upgrades it lazily."""
+    payload = _payload(failure_count=3)
+    await _insert_legacy("job-legacy", payload)
+
+    row = await _stored(_storage, "job-legacy")
+    assert row["kind"] == "text"
+    assert storage.parse_result_json(row["result_json"]) == payload
+
+    await storage.patch_result_json(
+        "job-legacy", lambda data: data.update({"summary": "patched"})
+    )
+    row = await _stored(_storage, "job-legacy")
+    patched = storage.parse_result_json(row["result_json"])
+    assert patched["summary"] == "patched"
+    assert patched["failures"] == payload["failures"]
+    assert (await storage.get_result("job-legacy"))["result"]["summary"] == "patched"
+
+
+# --- reads degrade instead of raising (corrupt frames) ----------------------
+
+
+async def test_unreadable_frames_degrade_to_none(_storage) -> None:
+    """A truncated frame and a frame of non-UTF-8 bytes are a read miss, not an error."""
+    frame = zstd.compress(json.dumps(_payload(failure_count=20)).encode())
+    bad_values = (
+        frame[: len(frame) // 2],  # truncated frame
+        zstd.compress(b"\xff\xfe\x00\x00not utf-8"),  # decodes to non-UTF-8 bytes
+        b"not a frame",
+    )
+    for bad in bad_values:
+        assert storage.parse_result_json(bad, job_id="job-bad") is None
+
+    async with storage._connect_db() as db:
+        await db.execute(
+            "INSERT INTO results (job_id, status, result_json) VALUES (?, ?, ?)",
+            ("job-bad", "completed", b"not a frame"),
+        )
+        await db.commit()
+
+    # No exception reaches the caller: the payload reads as empty, the row stays.
+    assert (await storage.get_result("job-bad"))["result"] is None
+    assert (await _stored(_storage, "job-bad"))["result_json"] == b"not a frame"
+
+    # And no writer may overwrite a row it cannot read.
+    await storage.patch_result_json("job-bad", lambda data: data.update({"x": 1}))
+    assert (await _stored(_storage, "job-bad"))["result_json"] == b"not a frame"
+
+
+# --- the backfill -----------------------------------------------------------
+
+
+async def test_backfill_is_byte_identical(_storage) -> None:
+    """The frame decompresses to exactly the bytes the old build stored."""
+    text = await _insert_legacy("job-bytes", _payload(failure_count=30))
+    async with storage._connect_db() as db:
+        await storage._backfill_results_denorm(db)
+        await db.commit()
+
+    stats = await storage.backfill_result_json_compression()
+    assert stats["rows"] == 1
+
+    row = await _stored(_storage, "job-bytes")
+    assert row["kind"] == "blob"
+    assert zstd.decompress(row["result_json"]) == text.encode()
+
+
+async def test_backfill_shrinks_the_column(_storage) -> None:
+    """The acceptance factor measured locally: the column is a fraction of itself."""
+    for index in range(20):
+        await _insert_legacy(f"job-compress-{index}", _payload(failure_count=40))
+    async with storage._connect_db() as db:
+        await storage._backfill_results_denorm(db)
+        await db.commit()
+        before = (
+            await (
+                await db.execute(
+                    "SELECT SUM(length(CAST(result_json AS BLOB))) FROM results"
+                )
+            ).fetchone()
+        )[0]
+
+    stats = await storage.backfill_result_json_compression()
+    assert stats["rows"] == 20
+    async with storage._connect_db() as db:
+        after = (
+            await (
+                await db.execute(
+                    "SELECT SUM(length(CAST(result_json AS BLOB))) FROM results"
+                )
+            ).fetchone()
+        )[0]
+    assert after == stats["bytes_after"] < stats["bytes_before"] == before
+    assert after <= before / 5  # measured ~9x on the dev DB
+
+    # Idempotent and resumable by construction: a second pass has nothing to do.
+    assert (await storage.backfill_result_json_compression())["rows"] == 0
+
+
+async def test_backfill_does_not_block_the_event_loop(_storage) -> None:
+    """Encode runs in a thread, so a ticker keeps firing between batches (#402)."""
+    for index in range(120):
+        await _insert_legacy(f"job-loop-{index}", _payload(failure_count=60))
+    async with storage._connect_db() as db:
+        await storage._backfill_results_denorm(db)
+        await db.commit()
+
+    ticks = 0
+    stop = False
+
+    async def ticker() -> None:
+        nonlocal ticks
+        while not stop:
+            ticks += 1
+            await asyncio.sleep(0)
+
+    task = asyncio.create_task(ticker())
+    await asyncio.sleep(0)
+    started = time.monotonic()
+    stats = await storage.backfill_result_json_compression(batch_size=10)
+    elapsed = time.monotonic() - started
+    stop = True
+    await task
+
+    assert stats["rows"] == 120
+    assert elapsed > 0.01, "the run must be long enough for the ticker to matter"
+    # One tick per batch at minimum; a blocking encode would allow at most one.
+    assert ticks > stats["rows"] // 10
+
+
+# --- the denormalized columns ----------------------------------------------
+
+
+async def test_denorm_backfill_repairs_a_late_old_build_row(_storage) -> None:
+    """A row an old build writes after the sweep is repaired, then compressed.
+
+    The sweep is per-row version gated, not claimed once: otherwise every row a
+    pre-compression binary writes during a mixed-version window keeps empty
+    columns forever and the compression predicate skips it.
+    """
+    payload = _payload(failure_count=20)
+    await _insert_legacy("job-late", payload)
+    row = await _stored(_storage, "job-late")
+    assert row["submitted_by"] == row["summary"] == row["failure_ids"] == ""
+
+    # This boot's sweep was already marked applied by init_db.
+    async with storage._connect_db() as db:
+        assert await storage._migration_applied(db, storage._RESULTS_DENORM_KEY)
+        await storage._backfill_results_denorm(db)
+        await db.commit()
+
+    row = await _stored(_storage, "job-late")
+    assert (row["submitted_by"], row["summary"], row["display_name"]) == (
+        "yuval",
+        "many failures",
+        "Human Name",
+    )
+    assert "failure-0" in row["failure_ids"]
+    assert "child-failure-1" in row["failure_ids"]
+    assert row["denorm_version"] == storage._RESULTS_DENORM_VERSION
+
+    # Only now is it eligible for compression.
+    assert (await storage.backfill_result_json_compression())["rows"] == 1
+    row = await _stored(_storage, "job-late")
+    assert row["kind"] == "blob"
+    assert storage.parse_result_json(row["result_json"]) == payload
+
+
+async def test_compression_skips_a_row_whose_columns_are_not_derived(_storage) -> None:
+    """Ordering guard: a row below the current denorm version is never compressed."""
+    payload = _payload(failure_count=20)
+    await _insert_legacy("job-not-derived", payload)
+
+    assert (await storage.backfill_result_json_compression())["rows"] == 0
+    assert (await _stored(_storage, "job-not-derived"))["kind"] == "text"
+
+
+async def test_submitted_by_index_is_a_plain_column_index(_storage) -> None:
+    """The old expression index must be replaced, not kept by IF NOT EXISTS."""
+    async with storage._connect_db() as db:
+        await db.execute("DROP INDEX IF EXISTS idx_results_submitted_by")
+        await db.execute(
+            "CREATE INDEX idx_results_submitted_by ON results "
+            "(json_extract(result_json, '$.request_params.submitted_by'))"
+        )
+        await db.commit()
+
+    await storage.init_db()
+
+    async with storage._connect_db() as db:
+        columns = [
+            row["name"]
+            for row in await (
+                await db.execute("PRAGMA index_info(idx_results_submitted_by)")
+            ).fetchall()
+        ]
+        plan = " ".join(
+            row["detail"]
+            for row in await (
+                await db.execute(f"EXPLAIN QUERY PLAN {storage._SUBMITTER_LIST_SQL}")
+            ).fetchall()
+        )
+    assert columns == ["submitted_by"]
+    assert "idx_results_submitted_by" in plan
+
+
+# --- the six SQL sites that used to read JSON inside SQLite -----------------
+
+
+async def test_submitter_picker_and_filter_read_a_compressed_row(_storage) -> None:
+    payload = _payload(failure_count=5)
+    await storage.save_result("job-submitter", "", "completed", payload)
+    assert (await _stored(_storage, "job-submitter"))["kind"] == "blob"
+
+    assert await storage.list_dashboard_submitters() == ["yuval"]
+    listed = await storage.list_results_for_dashboard_filtered(submitters={"yuval"})
+    assert [job["job_id"] for job in listed["jobs"]] == ["job-submitter"]
+    assert (await storage.get_job_submitters(["job-submitter"])) == {
+        "job-submitter": "yuval"
+    }
+    # A different name matches nothing — the column is not a LIKE attack surface.
+    other = await storage.list_results_for_dashboard_filtered(submitters={"someone"})
+    assert other["jobs"] == []
+
+
+async def test_timeout_filter_matches_a_compressed_row(_storage) -> None:
+    await storage.save_result(
+        "job-timeout", "", "failed", _payload(summary="analysis timed out after 600s")
+    )
+    await storage.save_result(
+        "job-timeout-plain", "", "failed", _payload(summary="all good")
+    )
+    assert (await _stored(_storage, "job-timeout"))["kind"] == "blob"
+
+    listed = await storage.list_results_for_dashboard_filtered(status=["timeout"])
+    assert [job["job_id"] for job in listed["jobs"]] == ["job-timeout"]
+
+
+async def test_audit_labels_a_compressed_row(_storage) -> None:
+    await storage.save_result("job-audit", "", "completed", _payload(failure_count=5))
+    async with storage._connect_db() as db:
+        resolved = await storage._audit_target_jobs(
+            db, ["job-audit", "Human Name", "big-job", "origin-only"]
+        )
+    assert resolved["job-audit"] == ("job-audit", "Human Name")
+    assert resolved["Human Name"] == ("job-audit", "Human Name")
+    assert resolved["big-job"] == ("job-audit", "Human Name")
+    assert "origin-only" not in resolved
+
+
+async def test_find_failure_by_uuid_reads_a_compressed_row(_storage) -> None:
+    await storage.save_result("job-uuid", "", "completed", _payload(failure_count=5))
+    assert (await _stored(_storage, "job-uuid"))["kind"] == "blob"
+
+    top = await storage.find_failure_by_uuid("failure-3")
+    assert top is not None
+    assert top["job_id"] == "job-uuid"
+    assert top["failure"]["test_name"] == "test_3"
+
+    child = await storage.find_failure_by_uuid("child-failure-1")
+    assert child is not None
+    assert child["child_job_name"] == "child-job"
+    assert child["child_build_number"] == 7
+
+    assert await storage.find_failure_by_uuid("not-a-uuid-at-all") is None
+
+
+async def test_no_sql_site_still_parses_result_json(_storage) -> None:
+    """Every site that reads the payload must go through parse_result_json.
+
+    Two maintenance-only blocks are allowlisted: the one-shot
+    ``backfill_results_denorm_v1`` UPDATE and the build-id candidate CTE. Both
+    run inside ``init_db``, before the background compression task exists, and
+    both carry a ``typeof(...) = 'text'`` guard for the boot after it.
+    """
+    source = Path(storage.__file__).read_text()
+    for allowed in (
+        storage._RESULTS_DENORM_V1_SQL,
+        storage._FH_BUILD_ID_CANDIDATES_CTE,
+    ):
+        assert source.count(allowed) == 1
+        source = source.replace(allowed, "")
+
+    patterns = (
+        r"json_extract\(\s*\w*\.?result_json",
+        r"json_valid\(result_json",
+        r"json_type\(result_json",
+        r"INSTR\(result_json",
+    )
+    for pattern in patterns:
+        assert not re.search(pattern, source), pattern
+
+    for module in Path(storage.__file__).parent.glob("*.py"):
+        if module.name == "storage.py":
+            continue  # its allowlisted blocks were removed from ``source`` above
+        text = module.read_text()
+        for pattern in patterns:
+            assert not re.search(pattern, text), f"{module.name}: {pattern}"

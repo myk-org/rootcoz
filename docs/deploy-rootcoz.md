@@ -297,6 +297,34 @@ kubectl -n rootcoz annotate cronjob rootcoz-prod-health-alerts \
 - Pin `alerts.image` by digest for production. The default `curlimages/curl:8.12.1` is a tag, and the job runs with `automountServiceAccountToken: false` because it only needs to reach the application Service. The pod pulls the image with the release's `imagePullSecrets`, the same ones the application Deployment uses.
 - Deploy the alert before or after the image that carries the data-directory gauges: when the ratio line is absent the disk check is skipped silently, and the health and error-rate checks keep working.
 
+## Database size and compaction
+
+Analysis results are stored compressed: every new `result_json` payload of 1 KB
+or more is a zstd frame inside the same column, and a payload a frame would
+grow stays plain text. SQLite reports which shape a row has (`typeof(result_json)`
+is `blob` or `text`), and the application decodes both transparently — no
+migration step, no setting to turn it on.
+
+- Rows written before the upgrade compact themselves in the background after the
+  next start. The sweep runs in batches, is safe to interrupt, and resumes where
+  it stopped on the following boot; `result_json compression: ... N -> M bytes`
+  in the log reports what it did.
+- The database **file** only shrinks after a rewrite plus `VACUUM`, which takes
+  the write lock and needs free space roughly equal to the file size. That is an
+  operator step, deliberately not automated on a live single-replica deployment:
+
+  ```bash
+  kubectl exec -n rootcoz deploy/rootcoz -- \
+    sqlite3 /data/results.db 'VACUUM;'
+  ```
+
+  Stop the deployment first if the volume has no headroom for a second copy of
+  the file.
+- Rows written by a pre-compression build are still readable by that build as
+  long as they are plain text; a build from before this change reads a
+  compressed row as an empty payload but never destroys it. Upgrade all
+  replicas together.
+
 ## Troubleshooting
 
 - `route.enabled and ingress.enabled are mutually exclusive`

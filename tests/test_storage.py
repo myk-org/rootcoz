@@ -2335,36 +2335,70 @@ class TestExtractDenormalizedFields:
     def test_none_input(self):
         from rootcoz.storage import _extract_denormalized_fields
 
-        assert _extract_denormalized_fields(None) == ("", 0, "")
+        assert _extract_denormalized_fields(None) == (
+            "",
+            0,
+            "",
+            "",
+            "",
+            "",
+            "",
+        )
 
     def test_empty_dict(self):
         from rootcoz.storage import _extract_denormalized_fields
 
-        assert _extract_denormalized_fields({}) == ("", 0, "")
+        assert _extract_denormalized_fields({}) == ("", 0, "", "", "", "", "")
 
     def test_valid_fields(self):
         from rootcoz.storage import _extract_denormalized_fields
 
-        result = {"job_name": "my-job", "build_number": 42, "build_id": "999"}
-        assert _extract_denormalized_fields(result) == ("my-job", 42, "999")
+        result = {
+            "job_name": "my-job",
+            "build_number": 42,
+            "build_id": "999",
+            "request_params": {"submitted_by": "  yuval  "},
+            "summary": "two failures",
+            "display_name": "Human Name",
+            "failures": [{"id": "f-1"}, {"id": "f-2"}],
+            "child_job_analyses": [
+                {"id": "c-1", "failures": [{"id": "f-3"}]},
+                {"failed_children": [{"failures": [{"id": "f-4"}]}]},
+            ],
+        }
+        assert _extract_denormalized_fields(result) == (
+            "my-job",
+            42,
+            "999",
+            "yuval",
+            "two failures",
+            "Human Name",
+            "f-1 f-2 c-1 f-3 f-4",
+        )
+
+    def test_failure_ids_are_unique_and_ordered(self):
+        from rootcoz.storage import _extract_denormalized_fields
+
+        result = {"failures": [{"id": "f-1"}, {"id": "f-1"}, {"no_id": 1}]}
+        assert _extract_denormalized_fields(result)[6] == "f-1"
 
     def test_invalid_build_number(self):
         from rootcoz.storage import _extract_denormalized_fields
 
         result = {"job_name": "x", "build_number": "not-a-number", "build_id": "1"}
-        assert _extract_denormalized_fields(result) == ("x", 0, "1")
+        assert _extract_denormalized_fields(result)[:3] == ("x", 0, "1")
 
     def test_numeric_build_id_coerced_to_string(self):
         from rootcoz.storage import _extract_denormalized_fields
 
         result = {"job_name": "x", "build_number": 1, "build_id": 12345}
-        assert _extract_denormalized_fields(result) == ("x", 1, "12345")
+        assert _extract_denormalized_fields(result)[:3] == ("x", 1, "12345")
 
     def test_missing_fields_default(self):
         from rootcoz.storage import _extract_denormalized_fields
 
         result = {"other_key": "value"}
-        assert _extract_denormalized_fields(result) == ("", 0, "")
+        assert _extract_denormalized_fields(result) == ("", 0, "", "", "", "", "")
 
 
 @pytest.mark.asyncio

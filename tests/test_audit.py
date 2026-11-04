@@ -3978,7 +3978,7 @@ def test_audit_list_label_prefers_display_name(audit_db: Path) -> None:
             },
         )
     )
-    refs = (JOB_ID, "Human Name", "machine-name", "origin-name")
+    refs = (JOB_ID, "Human Name", "machine-name")
     for ref in refs:
         asyncio.run(
             storage.insert_audit_event(
@@ -3993,6 +3993,34 @@ def test_audit_list_label_prefers_display_name(audit_db: Path) -> None:
     assert [(event["target_job_id"], event["target_label"]) for event in events] == [
         (JOB_ID, "Human Name")
     ] * len(refs)
+
+
+def test_audit_list_does_not_resolve_origin_job_name(audit_db: Path) -> None:
+    """``origin_job_name`` is response-only, so it is not a name a job is stored by.
+
+    It is computed per response by ``main._attach_origin_job_info`` and never
+    stored, so matching it in SQL could only ever match nothing — the ref stays
+    its own label with no job link instead of a lucky half-match.
+    """
+    asyncio.run(
+        storage.save_result(
+            JOB_ID,
+            status="completed",
+            result={"display_name": "Human Name", "job_name": "machine-name"},
+        )
+    )
+    asyncio.run(
+        storage.insert_audit_event(
+            action="job.metadata_set",
+            actor="alice",
+            target_type="job",
+            target_id="origin-name",
+        )
+    )
+    events = asyncio.run(storage.list_audit_events())["events"]
+    assert [(event["target_job_id"], event["target_label"]) for event in events] == [
+        (None, "origin-name")
+    ]
 
 
 @pytest.mark.parametrize("target_type", _NO_PRESENCE_TARGETS)

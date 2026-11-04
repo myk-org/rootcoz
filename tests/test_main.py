@@ -13766,6 +13766,118 @@ class TestGetJobResultFullEndpoint:
         assert data["summary"]["classifications"] == {}
 
     @pytest.mark.asyncio
+    async def test_compressed_row_serves_the_complete_payload(
+        self, test_client
+    ) -> None:
+        """A BLOB result_json reads exactly like an inline one over the API (#409)."""
+        analysis = {"classification": "CODE ISSUE", "pattern": "NEW", "analysis": "x"}
+        result_data = {
+            "status": "completed",
+            "summary": "2 failures",
+            "job_name": "zstd-job",
+            "build_number": 11,
+            "passed_count": 1,
+            "skipped_count": 0,
+            "failed_count": 2,
+            "request_params": {"submitted_by": "yuval", "build_id": "11"},
+            "token_usage": {"total": {"input": 3, "output": 4}},
+            "failures": [
+                {
+                    "id": f"zstd-failure-{index}",
+                    "test_name": f"test_zstd_{index}",
+                    "error": "boom " + "detail " * 200,
+                    "analysis": analysis,
+                }
+                for index in range(2)
+            ],
+            "child_job_analyses": [
+                {
+                    "job_name": "child-job",
+                    "build_number": 3,
+                    "failures": [
+                        {
+                            "id": "zstd-child-failure",
+                            "test_name": "test_child",
+                            "error": "child boom " + "detail " * 200,
+                            "analysis": analysis,
+                        }
+                    ],
+                    "failed_children": [],
+                }
+            ],
+        }
+        await storage.save_result(
+            "job-zstd-full", "http://jenkins", "completed", result_data
+        )
+        async with storage._connect_db() as db:
+            row = await (
+                await db.execute(
+                    "SELECT typeof(result_json) FROM results WHERE job_id = ?",
+                    ("job-zstd-full",),
+                )
+            ).fetchone()
+        assert row[0] == "blob", "the payload must be stored compressed for this test"
+
+        response = test_client.get("/api/results/job-zstd-full/full")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["job"]["job_name"] == "zstd-job"
+        assert data["job"]["build_number"] == 11
+        assert data["summary"]["total_failures"] == 3
+        assert [
+            (failure["test_name"], failure["classification"])
+            for failure in data["failures"]
+        ] == [
+            ("test_zstd_0", "CODE ISSUE"),
+            ("test_zstd_1", "CODE ISSUE"),
+            ("test_child", "CODE ISSUE"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_compressed_row_sparse_fields_projection_is_complete(
+        self, test_client
+    ) -> None:
+        """A ``fields=`` projection returns full-length values from a compressed row."""
+        long_analysis = "root cause: " + "detail " * 400
+        result_data = {
+            "status": "completed",
+            "summary": "one failure",
+            "job_name": "zstd-sparse",
+            "build_number": 5,
+            "failures": [
+                {
+                    "test_name": "test_sparse",
+                    "error": "boom",
+                    "analysis": {
+                        "classification": "PRODUCT BUG",
+                        "pattern": "NEW",
+                        "analysis": long_analysis,
+                    },
+                }
+            ],
+        }
+        await storage.save_result(
+            "job-zstd-sparse", "http://jenkins", "completed", result_data
+        )
+        async with storage._connect_db() as db:
+            row = await (
+                await db.execute(
+                    "SELECT typeof(result_json) FROM results WHERE job_id = ?",
+                    ("job-zstd-sparse",),
+                )
+            ).fetchone()
+        assert row[0] == "blob"
+
+        response = test_client.get(
+            "/results/job-zstd-sparse",
+            params={"fields": "result.failures.analysis,result.summary,status"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["result"]["summary"] == "one failure"
+        assert data["result"]["failures"][0]["analysis"]["analysis"] == long_analysis
+
+    @pytest.mark.asyncio
     async def test_cli_parity_with_endpoint_response(self, test_client) -> None:
         """Client and CLI JSON output preserve the exact endpoint payload.
 
