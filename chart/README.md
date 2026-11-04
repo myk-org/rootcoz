@@ -270,7 +270,7 @@ Things to know before turning it on:
   Both names are bounded — CronJob 52 characters (the Job controller appends an 11-character suffix), script ConfigMap 63 — and carry an 8-character hash of the fullname, so a long release name cannot produce an object the API server rejects and two releases sharing a long prefix cannot collide.
 - **The image is pulled with `imagePullSecrets`.** The CronJob pod uses the same `imagePullSecrets` as the application Deployment, so a mirrored alert image in a private registry pulls with the credentials already configured for the app.
 - **A wrong URL fails loudly.** A non-empty response that is not rootcoz metrics (a login page, a proxy error page) is reported as `metrics endpoint returned no rootcoz metrics` instead of silencing every check.
-- **The disk check is the newest part.** When `/metrics` has no `rootcoz_pvc_used_ratio` (an image older than the gauges, or a failing filesystem probe) the disk check is skipped silently and the health and error-rate checks still run.
+- **The disk check is the newest part.** When `/metrics` has no `rootcoz_data_used_ratio` (an image older than the gauges, or a failing filesystem probe) the disk check is skipped silently and the health and error-rate checks still run. The gauges measure the filesystem holding the data directory, so they work unchanged for a PVC, a Docker volume, a bind mount or a plain directory.
 - The job needs no cluster permissions: the pod sets `automountServiceAccountToken: false` and only curls the application Service.
 
 ## Validation

@@ -56,9 +56,9 @@ class TestHealthAlertScript:
         # The critical branch must not have been served by the warning numbers.
         assert "4.5G" not in result.stdout
 
-    def test_missing_pvc_gauges_skip_the_disk_check(self):
+    def test_missing_data_gauges_skip_the_disk_check(self):
         """Pre-rollout case: an image without the gauges must stay silent on disk."""
-        result = run_script(metrics_file=str(FIXTURES / "no-pvc-gauges.metrics"))
+        result = run_script(metrics_file=str(FIXTURES / "no-data-gauges.metrics"))
         assert result.returncode == 0
         assert "disk" not in result.stdout
 

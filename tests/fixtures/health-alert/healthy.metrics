@@ -4,10 +4,10 @@ rootcoz_health_up 1
 # HELP rootcoz_error_rate Error rate in the rolling window (0-1).
 # TYPE rootcoz_error_rate gauge
 rootcoz_error_rate 0
-# HELP rootcoz_pvc_used_bytes Bytes used on the filesystem backing the database directory.
-# TYPE rootcoz_pvc_used_bytes gauge
-rootcoz_pvc_used_bytes 644245094
-# TYPE rootcoz_pvc_capacity_bytes gauge
-rootcoz_pvc_capacity_bytes 6442450944
-# TYPE rootcoz_pvc_used_ratio gauge
-rootcoz_pvc_used_ratio 0.1000
+# HELP rootcoz_data_used_bytes Bytes used on the filesystem backing the database directory.
+# TYPE rootcoz_data_used_bytes gauge
+rootcoz_data_used_bytes 644245094
+# TYPE rootcoz_data_capacity_bytes gauge
+rootcoz_data_capacity_bytes 6442450944
+# TYPE rootcoz_data_used_ratio gauge
+rootcoz_data_used_ratio 0.1000

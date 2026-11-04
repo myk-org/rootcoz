@@ -427,7 +427,7 @@ helm<span class="w"> </span><span class="nb">test</span><span class="w"> </span>
 <li>For first-login and first-analysis steps after the rollout, see <a href="quickstart.html">Quickstart</a>.</li>
 </ul>
 <h2 id="watch-disk-usage-and-alert-on-a-filling-volume">Watch disk usage and alert on a filling volume</h2>
-<p>RootCoz ships no alerting stack — the rule below is yours to install. What it does ship is the metric: <code>/metrics</code> exposes three unlabelled gauges for the filesystem backing the database directory, which is the <code>/data</code> PVC in every supported deployment (with <code>persistence.enabled=false</code> it measures the <code>emptyDir</code>'s node filesystem instead).</p>
+<p>RootCoz ships no alerting stack — the rule below is yours to install. What it does ship is the metric: <code>/metrics</code> exposes three unlabelled gauges for the filesystem that holds the data directory. The probe is a <code>statvfs</code> on that directory, so it is storage-agnostic — the same gauges work for an OpenShift PVC, a Docker Compose volume, a bind mount or a plain directory, because they measure whichever filesystem backs the data dir. On a shared node filesystem the numbers can include other tenants' usage: read them as free/used space on that filesystem, not as a per-volume quota.</p>
 <div class="table-wrap"><table>
 <thead>
 <tr>
@@ -437,20 +437,20 @@ helm<span class="w"> </span><span class="nb">test</span><span class="w"> </span>
 </thead>
 <tbody>
 <tr>
-<td><code>rootcoz_pvc_used_bytes</code></td>
+<td><code>rootcoz_data_used_bytes</code></td>
 <td>Bytes used on that filesystem</td>
 </tr>
 <tr>
-<td><code>rootcoz_pvc_capacity_bytes</code></td>
+<td><code>rootcoz_data_capacity_bytes</code></td>
 <td>Capacity of that filesystem in bytes</td>
 </tr>
 <tr>
-<td><code>rootcoz_pvc_used_ratio</code></td>
+<td><code>rootcoz_data_used_ratio</code></td>
 <td>Used / capacity (0-1), omitted when capacity is <code>0</code></td>
 </tr>
 </tbody>
 </table></div>
-<p>The probe is a single <code>statvfs</code> on the database's directory, so its cost does not grow with the number of files on the volume. When the probe fails the gauges are <strong>omitted for that scrape</strong> rather than reported as <code>0</code>, which is why an alert must use <code>absent()</code>/<code>&gt;=</code> on the ratio and never treat a missing series as an empty disk. The gauges carry no labels, so Prometheus adds <code>instance</code> and <code>job</code> for you.</p>
+<p>The probe's cost does not grow with the number of files on the filesystem. When the probe fails the gauges are <strong>omitted for that scrape</strong> rather than reported as <code>0</code>, which is why an alert must use <code>absent()</code>/<code>&gt;=</code> on the ratio and never treat a missing series as an empty disk. The gauges carry no labels, so Prometheus adds <code>instance</code> and <code>job</code> for you.</p>
 <p>A complete <code>PrometheusRule</code> for a Prometheus that scrapes this server:</p>
 <div class="highlight"><pre><span></span><code><span class="nt">apiVersion</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">monitoring.coreos.com/v1</span>
 <span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">PrometheusRule</span>
@@ -461,26 +461,26 @@ helm<span class="w"> </span><span class="nb">test</span><span class="w"> </span>
 <span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rootcoz.disk</span>
 <span class="w">      </span><span class="nt">rules</span><span class="p">:</span>
 <span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">alert</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">RootcozDataVolumeFilling</span>
-<span class="w">          </span><span class="nt">expr</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rootcoz_pvc_used_ratio &gt; 0.75</span>
+<span class="w">          </span><span class="nt">expr</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rootcoz_data_used_ratio &gt; 0.75</span>
 <span class="w">          </span><span class="nt">for</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">30m</span>
 <span class="w">          </span><span class="nt">labels</span><span class="p">:</span>
 <span class="w">            </span><span class="nt">severity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">warning</span>
 <span class="w">          </span><span class="nt">annotations</span><span class="p">:</span>
-<span class="w">            </span><span class="nt">summary</span><span class="p">:</span><span class="w"> </span><span class="s">"RootCoz</span><span class="nv"> </span><span class="s">/data</span><span class="nv"> </span><span class="s">is</span><span class="nv"> </span><span class="s">{{</span><span class="nv"> </span><span class="s">$value</span><span class="nv"> </span><span class="s">|</span><span class="nv"> </span><span class="s">humanizePercentage</span><span class="nv"> </span><span class="s">}}</span><span class="nv"> </span><span class="s">full"</span>
-<span class="w">            </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">"Clean</span><span class="nv"> </span><span class="s">up</span><span class="nv"> </span><span class="s">transcripts</span><span class="nv"> </span><span class="s">or</span><span class="nv"> </span><span class="s">grow</span><span class="nv"> </span><span class="s">the</span><span class="nv"> </span><span class="s">PVC;</span><span class="nv"> </span><span class="s">the</span><span class="nv"> </span><span class="s">SQLite</span><span class="nv"> </span><span class="s">database</span><span class="nv"> </span><span class="s">and</span><span class="nv"> </span><span class="s">pi-sidecar</span><span class="nv"> </span><span class="s">transcripts</span><span class="nv"> </span><span class="s">share</span><span class="nv"> </span><span class="s">this</span><span class="nv"> </span><span class="s">volume."</span>
+<span class="w">            </span><span class="nt">summary</span><span class="p">:</span><span class="w"> </span><span class="s">"RootCoz</span><span class="nv"> </span><span class="s">data</span><span class="nv"> </span><span class="s">directory</span><span class="nv"> </span><span class="s">is</span><span class="nv"> </span><span class="s">{{</span><span class="nv"> </span><span class="s">$value</span><span class="nv"> </span><span class="s">|</span><span class="nv"> </span><span class="s">humanizePercentage</span><span class="nv"> </span><span class="s">}}</span><span class="nv"> </span><span class="s">full"</span>
+<span class="w">            </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">"Clean</span><span class="nv"> </span><span class="s">up</span><span class="nv"> </span><span class="s">transcripts</span><span class="nv"> </span><span class="s">or</span><span class="nv"> </span><span class="s">grow</span><span class="nv"> </span><span class="s">the</span><span class="nv"> </span><span class="s">storage;</span><span class="nv"> </span><span class="s">the</span><span class="nv"> </span><span class="s">SQLite</span><span class="nv"> </span><span class="s">database</span><span class="nv"> </span><span class="s">and</span><span class="nv"> </span><span class="s">pi-sidecar</span><span class="nv"> </span><span class="s">transcripts</span><span class="nv"> </span><span class="s">share</span><span class="nv"> </span><span class="s">this</span><span class="nv"> </span><span class="s">filesystem."</span>
 <span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">alert</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">RootcozDataVolumeFull</span>
-<span class="w">          </span><span class="nt">expr</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rootcoz_pvc_used_ratio &gt; 0.90</span>
+<span class="w">          </span><span class="nt">expr</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">rootcoz_data_used_ratio &gt; 0.90</span>
 <span class="w">          </span><span class="nt">for</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">5m</span>
 <span class="w">          </span><span class="nt">labels</span><span class="p">:</span>
 <span class="w">            </span><span class="nt">severity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">critical</span>
 <span class="w">          </span><span class="nt">annotations</span><span class="p">:</span>
-<span class="w">            </span><span class="nt">summary</span><span class="p">:</span><span class="w"> </span><span class="s">"RootCoz</span><span class="nv"> </span><span class="s">/data</span><span class="nv"> </span><span class="s">is</span><span class="nv"> </span><span class="s">{{</span><span class="nv"> </span><span class="s">$value</span><span class="nv"> </span><span class="s">|</span><span class="nv"> </span><span class="s">humanizePercentage</span><span class="nv"> </span><span class="s">}}</span><span class="nv"> </span><span class="s">full"</span>
-<span class="w">            </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">"Writes</span><span class="nv"> </span><span class="s">will</span><span class="nv"> </span><span class="s">start</span><span class="nv"> </span><span class="s">failing.</span><span class="nv"> </span><span class="s">Grow</span><span class="nv"> </span><span class="s">the</span><span class="nv"> </span><span class="s">PVC</span><span class="nv"> </span><span class="s">or</span><span class="nv"> </span><span class="s">delete</span><span class="nv"> </span><span class="s">transcripts</span><span class="nv"> </span><span class="s">now."</span>
+<span class="w">            </span><span class="nt">summary</span><span class="p">:</span><span class="w"> </span><span class="s">"RootCoz</span><span class="nv"> </span><span class="s">data</span><span class="nv"> </span><span class="s">directory</span><span class="nv"> </span><span class="s">is</span><span class="nv"> </span><span class="s">{{</span><span class="nv"> </span><span class="s">$value</span><span class="nv"> </span><span class="s">|</span><span class="nv"> </span><span class="s">humanizePercentage</span><span class="nv"> </span><span class="s">}}</span><span class="nv"> </span><span class="s">full"</span>
+<span class="w">            </span><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="s">"Writes</span><span class="nv"> </span><span class="s">will</span><span class="nv"> </span><span class="s">start</span><span class="nv"> </span><span class="s">failing.</span><span class="nv"> </span><span class="s">Grow</span><span class="nv"> </span><span class="s">the</span><span class="nv"> </span><span class="s">storage</span><span class="nv"> </span><span class="s">or</span><span class="nv"> </span><span class="s">delete</span><span class="nv"> </span><span class="s">transcripts</span><span class="nv"> </span><span class="s">now."</span>
 </code></pre></div>
 
-<p>If you also want to be told when the probe itself breaks, add one line: <code>absent_over_time(rootcoz_pvc_used_ratio[15m])</code> — a scrape target that has been up but has no ratio for 15 minutes has a probe that is failing every time.</p>
+<p>If you also want to be told when the probe itself breaks, add one line: <code>absent_over_time(rootcoz_data_used_ratio[15m])</code> — a scrape target that has been up but has no ratio for 15 minutes has a probe that is failing every time.</p>
 <h3 id="the-chart-health-alert-cronjob-the-alternative-for-deployments-without-prometheus">The chart health-alert CronJob (the alternative for deployments without Prometheus)</h3>
-<p>For clusters that scrape nothing, the chart can run its own check: a CronJob that curls <code>/metrics</code> on a schedule and posts one Slack message listing every failing check (unhealthy, error rate above the threshold, <code>/data</code> above the warning or critical threshold with absolute sizes such as <code>5.4G / 6.0G (90%)</code>).</p>
+<p>For clusters that scrape nothing, the chart can run its own check: a CronJob that curls <code>/metrics</code> on a schedule and posts one Slack message listing every failing check (unhealthy, error rate above the threshold, the data directory's filesystem above the warning or critical threshold with absolute sizes such as <code>5.4G / 6.0G (90%)</code>).</p>
 <div class="highlight"><pre><span></span><code><span class="nt">alerts</span><span class="p">:</span>
 <span class="w">  </span><span class="nt">enabled</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
 <span class="w">  </span><span class="c1"># Reuse the existing name you are adopting (see the naming note below)</span>
@@ -506,7 +506,7 @@ kubectl<span class="w"> </span>-n<span class="w"> </span>rootcoz<span class="w">
 <ul>
 <li>Left empty, the chart creates <code>&lt;fullname&gt;-&lt;hash&gt;-health-alerts</code>, which sits next to a cluster-only CronJob rather than replacing it. Both names are bounded (CronJob 52 characters, script ConfigMap 63) and carry an 8-character hash of the fullname, so a long release name cannot produce an object the API server rejects and two releases sharing a long prefix cannot collide.</li>
 <li>Pin <code>alerts.image</code> by digest for production. The default <code>curlimages/curl:8.12.1</code> is a tag, and the job runs with <code>automountServiceAccountToken: false</code> because it only needs to reach the application Service. The pod pulls the image with the release's <code>imagePullSecrets</code>, the same ones the application Deployment uses.</li>
-<li>Deploy the alert before or after the image that carries the PVC gauges: when the ratio line is absent the disk check is skipped silently, and the health and error-rate checks keep working.</li>
+<li>Deploy the alert before or after the image that carries the data-directory gauges: when the ratio line is absent the disk check is skipped silently, and the health and error-rate checks keep working.</li>
 </ul>
 <h2 id="troubleshooting">Troubleshooting</h2>
 <ul>

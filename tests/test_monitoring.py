@@ -21,7 +21,7 @@ from rootcoz.monitoring import (
     check_jenkins,
     check_reportportal,
     dispatch_alert,
-    read_pvc_usage,
+    read_data_usage,
     render_prometheus_metrics,
     send_email_alert,
     send_slack_alert,
@@ -672,35 +672,35 @@ class TestPrometheusMetrics:
         assert "rootcoz_errors_by_class" in text
         assert "5xx" in text
 
-    def test_pvc_gauges_rendered_unlabelled(self):
+    def test_data_gauges_rendered_unlabelled(self):
         text = render_prometheus_metrics(
-            pvc_used_bytes=2_400_000_000, pvc_capacity_bytes=6_442_450_944
+            data_used_bytes=2_400_000_000, data_capacity_bytes=6_442_450_944
         )
-        assert "\nrootcoz_pvc_used_bytes 2400000000\n" in text
-        assert "\nrootcoz_pvc_capacity_bytes 6442450944\n" in text
-        assert "\nrootcoz_pvc_used_ratio 0.3725\n" in text
-        # Cardinality is fixed at three series: no labels on any PVC gauge.
-        pvc_sample_lines = [
-            line for line in text.splitlines() if line.startswith("rootcoz_pvc_")
+        assert "\nrootcoz_data_used_bytes 2400000000\n" in text
+        assert "\nrootcoz_data_capacity_bytes 6442450944\n" in text
+        assert "\nrootcoz_data_used_ratio 0.3725\n" in text
+        # Cardinality is fixed at three series: no labels on any data gauge.
+        data_sample_lines = [
+            line for line in text.splitlines() if line.startswith("rootcoz_data_")
         ]
-        assert len(pvc_sample_lines) == 3
-        assert not any("{" in line for line in pvc_sample_lines)
+        assert len(data_sample_lines) == 3
+        assert not any("{" in line for line in data_sample_lines)
 
     def test_zero_capacity_omits_the_ratio(self):
-        text = render_prometheus_metrics(pvc_used_bytes=10, pvc_capacity_bytes=0)
-        assert "rootcoz_pvc_used_bytes 10" in text
-        assert "rootcoz_pvc_capacity_bytes 0" in text
-        assert "rootcoz_pvc_used_ratio" not in text
+        text = render_prometheus_metrics(data_used_bytes=10, data_capacity_bytes=0)
+        assert "rootcoz_data_used_bytes 10" in text
+        assert "rootcoz_data_capacity_bytes 0" in text
+        assert "rootcoz_data_used_ratio" not in text
 
-    def test_missing_pvc_values_omit_every_pvc_gauge(self):
+    def test_missing_data_values_omit_every_data_gauge(self):
         text = render_prometheus_metrics(
             health_up=1,
             active_analyses=0,
             audit_write_failures=0,
-            pvc_used_bytes=None,
-            pvc_capacity_bytes=None,
+            data_used_bytes=None,
+            data_capacity_bytes=None,
         )
-        assert "rootcoz_pvc_" not in text
+        assert "rootcoz_data_" not in text
         for family in (
             "rootcoz_requests_total",
             "rootcoz_error_rate",
@@ -711,19 +711,19 @@ class TestPrometheusMetrics:
             assert family in text
 
 
-class TestReadPvcUsage:
-    """Tests for the statvfs probe behind the PVC gauges."""
+class TestReadDataUsage:
+    """Tests for the statvfs probe behind the data gauges."""
 
     def test_probe_failure_returns_none(self):
         with patch("rootcoz.monitoring.shutil.disk_usage", side_effect=OSError("boom")):
-            assert read_pvc_usage("/data/results.db") is None
+            assert read_data_usage("/data/results.db") is None
 
     def test_reads_the_database_directory(self):
         stub = MagicMock(used=1000, total=4000)
         with patch(
             "rootcoz.monitoring.shutil.disk_usage", return_value=stub
         ) as disk_usage:
-            assert read_pvc_usage("/data/results.db") == (1000, 4000)
+            assert read_data_usage("/data/results.db") == (1000, 4000)
         disk_usage.assert_called_once_with(Path("/data"))
 
 
@@ -808,20 +808,20 @@ class TestHealthEndpointIntegration:
         def raising_probe(db_path):
             raise OSError("boom")
 
-        with patch("rootcoz.main.read_pvc_usage", raising_probe):
+        with patch("rootcoz.main.read_data_usage", raising_probe):
             response = test_client.get("/metrics")
 
         assert response.status_code == 200
-        assert "rootcoz_pvc_" not in response.text
+        assert "rootcoz_data_" not in response.text
         assert "rootcoz_requests_total" in response.text
         assert "rootcoz_active_analyses" in response.text
 
     def test_metrics_probe_absent_value_keeps_the_scrape_healthy(self, test_client):
-        with patch("rootcoz.main.read_pvc_usage", return_value=None):
+        with patch("rootcoz.main.read_data_usage", return_value=None):
             response = test_client.get("/metrics")
 
         assert response.status_code == 200
-        assert "rootcoz_pvc_" not in response.text
+        assert "rootcoz_data_" not in response.text
 
     def test_metrics_probe_runs_outside_the_event_loop(self, test_client):
         observed: dict[str, bool] = {}
@@ -835,12 +835,12 @@ class TestHealthEndpointIntegration:
             observed["off_loop"] = False
             return (1000, 4000)
 
-        with patch("rootcoz.main.read_pvc_usage", probe):
+        with patch("rootcoz.main.read_data_usage", probe):
             response = test_client.get("/metrics")
 
         assert observed.get("off_loop") is True
         assert response.status_code == 200
-        assert "rootcoz_pvc_used_ratio 0.2500" in response.text
+        assert "rootcoz_data_used_ratio 0.2500" in response.text
 
     def test_stuck_probe_times_out_and_leaves_the_shared_pool_free(self, test_client):
         # Bound the wait: the probe runs on its own daemon thread, which is never
@@ -862,15 +862,15 @@ class TestHealthEndpointIntegration:
 
         try:
             with (
-                patch("rootcoz.main._PVC_PROBE_TIMEOUT_SECONDS", 0.2),
-                patch("rootcoz.main.read_pvc_usage", stuck_probe),
+                patch("rootcoz.main._DATA_PROBE_TIMEOUT_SECONDS", 0.2),
+                patch("rootcoz.main.read_data_usage", stuck_probe),
             ):
                 started = time.monotonic()
                 response = test_client.get("/metrics")
                 elapsed = time.monotonic() - started
 
                 assert response.status_code == 200
-                assert "rootcoz_pvc_" not in response.text
+                assert "rootcoz_data_" not in response.text
                 # The probe timeout, not the probe's own 5 s block, ended the scrape.
                 assert elapsed < 1
                 # The hung probe is parked on its own daemon thread; the shared default
@@ -879,18 +879,18 @@ class TestHealthEndpointIntegration:
 
                 # Two more scrapes abandon their probes while the mount is still hung.
                 for _ in range(2):
-                    assert "rootcoz_pvc_" not in test_client.get("/metrics").text
+                    assert "rootcoz_data_" not in test_client.get("/metrics").text
 
                 calls.clear()
                 release.set()
                 started = time.monotonic()
-                with patch("rootcoz.main.read_pvc_usage", healthy_probe):
+                with patch("rootcoz.main.read_data_usage", healthy_probe):
                     response = test_client.get("/metrics")
                 elapsed = time.monotonic() - started
 
             # The mount is back: the next scrape reports real gauges promptly, and the
             # abandoned probes were overwritten in the mailbox instead of replayed.
-            assert "rootcoz_pvc_used_ratio 0.2500" in response.text
+            assert "rootcoz_data_used_ratio 0.2500" in response.text
             assert elapsed < 1
             assert calls == ["healthy"]
         finally:

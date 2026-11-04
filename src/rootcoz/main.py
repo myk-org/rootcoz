@@ -233,7 +233,7 @@ from rootcoz.monitoring import (
     dispatch_alert,
     error_tracker,
     get_component_versions,
-    read_pvc_usage,
+    read_data_usage,
     record_audit_auth_suppression,
     record_audit_write_failure,
     render_prometheus_metrics,
@@ -12324,18 +12324,18 @@ async def admin_get_component_versions(request: Request) -> dict[str, Any]:
 # overwrites the pending request, so the worker only ever runs the most recent one. A
 # timeout cancels the wait, not the probe, so later scrapes each pay the 2 s timeout
 # until the hung call returns.
-_PVC_PROBE_TIMEOUT_SECONDS = 2.0
-_pvc_probe_mailbox: deque[tuple[Callable[[], Any], list[Any]]] = deque(maxlen=1)
+_DATA_PROBE_TIMEOUT_SECONDS = 2.0
+_data_probe_mailbox: deque[tuple[Callable[[], Any], list[Any]]] = deque(maxlen=1)
 # Wakes the worker; deque.append/popleft are atomic, so no other lock is needed.
-_pvc_probe_ready = threading.Event()
+_data_probe_ready = threading.Event()
 
 
-def _pvc_probe_worker() -> None:
+def _data_probe_worker() -> None:
     while True:
-        _pvc_probe_ready.wait()
-        _pvc_probe_ready.clear()
+        _data_probe_ready.wait()
+        _data_probe_ready.clear()
         try:
-            func, box = _pvc_probe_mailbox.popleft()
+            func, box = _data_probe_mailbox.popleft()
         except IndexError:
             continue
         try:
@@ -12344,10 +12344,10 @@ def _pvc_probe_worker() -> None:
             # A result must land in the box either way, or the scrape waits out its
             # whole timeout for a worker that is already done.
             box.append(None)
-            logger.debug("PVC usage probe failed", exc_info=True)
+            logger.debug("Data usage probe failed", exc_info=True)
 
 
-threading.Thread(target=_pvc_probe_worker, name="pvc-probe", daemon=True).start()
+threading.Thread(target=_data_probe_worker, name="data-probe", daemon=True).start()
 
 
 @app.get("/metrics", operation_id="prometheusMetrics")
@@ -12375,36 +12375,36 @@ async def prometheus_metrics() -> Response:
     except Exception:
         logger.debug("Failed to compute active analyses for metrics", exc_info=True)
 
-    # Filesystem probe for the /data PVC. Never raises: a failing or timing-out
+    # Filesystem probe for the data directory. Never raises: a failing or timing-out
     # probe leaves the gauges absent so the scrape still answers 200.
-    pvc_used_bytes: int | None = None
-    pvc_capacity_bytes: int | None = None
+    data_used_bytes: int | None = None
+    data_capacity_bytes: int | None = None
     try:
         box: list[Any] = []
-        request = (partial(read_pvc_usage, db_path), box)
-        _pvc_probe_mailbox.append(request)
-        _pvc_probe_ready.set()
+        request = (partial(read_data_usage, db_path), box)
+        _data_probe_mailbox.append(request)
+        _data_probe_ready.set()
         try:
-            async with asyncio.timeout(_PVC_PROBE_TIMEOUT_SECONDS):
+            async with asyncio.timeout(_DATA_PROBE_TIMEOUT_SECONDS):
                 while not box:
                     await asyncio.sleep(0.05)
         finally:
             # Withdraw an abandoned request so the worker does not run it later.
             with contextlib.suppress(ValueError):
-                _pvc_probe_mailbox.remove(request)
-        pvc = box[0]
-        if pvc is not None:
-            pvc_used_bytes, pvc_capacity_bytes = pvc
+                _data_probe_mailbox.remove(request)
+        probe_result = box[0]
+        if probe_result is not None:
+            data_used_bytes, data_capacity_bytes = probe_result
     except Exception:
-        logger.debug("Failed to read PVC usage for metrics", exc_info=True)
+        logger.debug("Failed to read data usage for metrics", exc_info=True)
 
     return Response(
         content=render_prometheus_metrics(
             health_up=health_up,
             active_analyses=active_analyses,
             audit_write_failures=audit_health_check()["write_failures"],
-            pvc_used_bytes=pvc_used_bytes,
-            pvc_capacity_bytes=pvc_capacity_bytes,
+            data_used_bytes=data_used_bytes,
+            data_capacity_bytes=data_capacity_bytes,
         ),
         media_type="text/plain; version=0.0.4; charset=utf-8",
     )

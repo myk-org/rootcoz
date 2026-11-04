@@ -114,11 +114,11 @@ if gt "$rate" "$(percent "$ERROR_RATE_PERCENT")"; then
 fi
 
 # The disk check is skipped silently when the ratio is absent, so this alert can
-# be deployed before the image that carries the PVC gauges has rolled out.
-ratio=$(metric "$metrics" rootcoz_pvc_used_ratio)
+# be deployed before the image that carries the data-directory gauges has rolled out.
+ratio=$(metric "$metrics" rootcoz_data_used_ratio)
 if [ -n "$ratio" ]; then
-  used=$(metric "$metrics" rootcoz_pvc_used_bytes)
-  capacity=$(metric "$metrics" rootcoz_pvc_capacity_bytes)
+  used=$(metric "$metrics" rootcoz_data_used_bytes)
+  capacity=$(metric "$metrics" rootcoz_data_capacity_bytes)
   sizes="$(human "${used:-0}") / $(human "${capacity:-0}") ($(awk -v r="$ratio" 'BEGIN { printf "%.0f", r * 100 }')%)"
   if ge "$ratio" "$(percent "$DISK_CRIT_PERCENT")"; then
     add_line "🔴 disk $sizes"
