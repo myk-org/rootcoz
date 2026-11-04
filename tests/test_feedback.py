@@ -932,9 +932,14 @@ class TestFeedbackEndpoint:
     # -- Create endpoint tests ------------------------------------------------
 
     def test_create_without_user_github_token_returns_400(self, _init_db, temp_db_path):
-        """User without a stored GitHub token gets 400 on create."""
+        """Registered user without a stored GitHub token gets 400 on create."""
         for client in self._make_client(temp_db_path):
-            with patch.object(storage, "get_user_tokens", return_value={}):
+            with (
+                patch.object(storage, "get_user_tokens", return_value={}),
+                patch.object(
+                    storage, "get_user_by_username", return_value={"username": "u"}
+                ),
+            ):
                 resp = client.post(
                     "/api/feedback/create",
                     json={
@@ -946,6 +951,35 @@ class TestFeedbackEndpoint:
             assert resp.status_code == 400
             assert "GitHub token is required" in resp.json()["detail"]
             assert "Profile Settings" in resp.json()["detail"]
+
+    def test_create_without_a_profile_does_not_point_at_profile_settings(
+        self, _init_db, temp_db_path
+    ):
+        """#400: the bootstrap ``admin`` has no row, so PUT /api/user/tokens 404s.
+
+        Sending that account to Profile Settings is a dead end — the refusal has
+        to name a path it can actually take, and it must still not fall back to
+        the server token.
+        """
+        for client in self._make_client(temp_db_path, github_token=_TEST_GITHUB_TOKEN):
+            with (
+                patch.object(storage, "get_user_tokens", return_value={}),
+                patch("rootcoz.feedback.create_github_issue") as mock_create,
+            ):
+                resp = client.post(
+                    "/api/feedback/create",
+                    json={
+                        "title": "Test title",
+                        "body": "Test body",
+                        "labels": ["bug"],
+                    },
+                )
+            assert resp.status_code == 400
+            detail = resp.json()["detail"]
+            assert "GitHub token is required" in detail
+            assert "no profile to store one" in detail
+            assert "Set up your token in Profile Settings" not in detail
+            mock_create.assert_not_called()
 
     def test_create_never_falls_back_to_the_server_github_token(
         self, _init_db, temp_db_path

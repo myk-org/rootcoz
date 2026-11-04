@@ -477,7 +477,7 @@ rootcoz<span class="w"> </span>push<span class="w"> </span>JOB_ID<span class="w"
 </li>
 <li>
 <p>Creation fails with <code>GitHub token is required</code> or <code>Jira token is required</code>.<br>
-  Issue creation uses only your own credentials and is refused with <code>400</code> before anything is filed when you have none. A server-configured <code>GITHUB_TOKEN</code> or Jira credential is never used on your behalf — that includes the bootstrap <code>admin</code> account, which has no profile tokens of its own. Add the token on your profile settings page and try again.</p>
+  Issue creation uses only your own credentials and is refused with <code>400</code> before anything is filed when you have none. A server-configured <code>GITHUB_TOKEN</code> or Jira credential is never used on your behalf — that includes the bootstrap <code>admin</code> account, which has no profile tokens of its own. Add the token on your profile settings page and try again. The bootstrap <code>admin</code> has no profile to save a token into, so that account is instead told to sign in with its own registered account — the <code>400</code> it gets never points at a page it cannot use.</p>
 </li>
 <li>
 <p>The preview has no <code>Include links</code> effect.<br>
