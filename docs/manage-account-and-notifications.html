@@ -346,7 +346,7 @@
 <tbody>
 <tr>
 <td><code>GitHub Token</code></td>
-<td>Personal access token with <code>repo</code> scope. Used to create GitHub issues. It is <strong>not</strong> what enriches comment badges: <code>enrich_comments</code> reads the server's <code>GITHUB_TOKEN</code> from Server Settings, so status badges resolve against the server-wide credential, not yours.</td>
+<td>Personal access token with <code>repo</code> scope. Required to create GitHub issues — they are always filed with this, never with the server's <code>GITHUB_TOKEN</code>, and without it issue creation is refused with <code>400</code>. It is <strong>not</strong> what enriches comment badges: <code>enrich_comments</code> reads the server's <code>GITHUB_TOKEN</code> from Server Settings, so status badges resolve against the server-wide credential, not yours.</td>
 </tr>
 <tr>
 <td><code>Jira Email</code></td>
@@ -354,7 +354,7 @@
 </tr>
 <tr>
 <td><code>Jira Token</code></td>
-<td>Jira Cloud API token, or a personal access token on Jira Server/Data Center.</td>
+<td>Jira Cloud API token, or a personal access token on Jira Server/Data Center. Required to create Jira tickets — they are always filed with your token (or your service-account token), never with the server's Jira credential, and without one ticket creation is refused with <code>400</code>.</td>
 </tr>
 </tbody>
 </table></div>

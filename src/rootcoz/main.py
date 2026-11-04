@@ -19745,12 +19745,6 @@ async def create_feedback(
         user_tokens = await storage.get_user_tokens(username)
         github_token = user_tokens.get("github_token", "")
 
-        # Bootstrap admin (ADMIN_KEY auth) has no DB entry, so get_user_tokens
-        # returns empty. Fall back to the server-level token for this special user
-        # only — regular users must configure their own GitHub token.
-        if not github_token and username == "admin" and settings.github_token:
-            github_token = settings.github_token.get_secret_value()
-
         if not github_token:
             raise HTTPException(
                 status_code=400,
