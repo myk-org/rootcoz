@@ -214,14 +214,14 @@ class TestIncompleteListingEndpoint:
         )
         assert resp.status_code == 422
 
-        assert (
-            client.get(
-                "/api/results/incomplete",
-                params={"limit": storage.MAX_INCOMPLETE_LIST_LIMIT + 1},
-                headers=_ADMIN_HEADERS,
-            ).status_code
-            == 422
+        # Above the cap the server clamps, it does not fail the request.
+        resp = client.get(
+            "/api/results/incomplete",
+            params={"limit": storage.MAX_INCOMPLETE_LIST_LIMIT + 1000},
+            headers=_ADMIN_HEADERS,
         )
+        assert resp.status_code == 200
+        assert {j["job_id"] for j in resp.json()} == {"job-a", "job-b"}
 
         resp = client.get(
             "/api/results/incomplete", params={"limit": 1}, headers=_ADMIN_HEADERS

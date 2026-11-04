@@ -6676,10 +6676,9 @@ async def api_incomplete_analyses(
     limit: int = Query(
         default=100,
         ge=1,
-        le=MAX_INCOMPLETE_LIST_LIMIT,
         description=(
-            "Max jobs to return. Capped: this listing reads result_json, so an "
-            "unbounded response would be an unbounded scan (see #392)."
+            "Max jobs to return; values above the cap are clamped to it, since "
+            "this listing reads result_json (see #392)."
         ),
     ),
 ) -> list[dict[str, Any]]:
@@ -6688,7 +6687,9 @@ async def api_incomplete_analyses(
     Read-only: identifies analyses that were never classified (or whose AI
     answer carried nothing classifiable) so they can be re-analyzed.
     """
-    return await storage.list_incomplete_analyses(limit=limit)
+    return await storage.list_incomplete_analyses(
+        limit=min(limit, MAX_INCOMPLETE_LIST_LIMIT)
+    )
 
 
 @app.get("/results/{job_id}", response_model=None, operation_id="getJobResult")
