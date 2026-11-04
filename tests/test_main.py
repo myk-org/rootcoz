@@ -7486,6 +7486,73 @@ class TestReAnalyzeFailure:
         assert "analysis_error" not in failure
 
     @pytest.mark.asyncio
+    async def test_reanalysis_that_stays_unclassified_keeps_its_new_reason(
+        self, test_client
+    ) -> None:
+        """A pass that still has no diagnosis must keep the reason it produced."""
+        job_id = "job-reanalyze-still-incomplete"
+        old = FailureAnalysis(
+            test_name="tests.TestReAnalyze.test_incomplete",
+            error="ValueError",
+            analysis=AnalysisDetail(),
+            analysis_error="old reason",
+        ).model_dump(mode="json")
+        await storage.save_result(
+            job_id,
+            "",
+            "completed",
+            {
+                "summary": "1 failure",
+                "failures": [old],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "ai_provider": "claude",
+                        "ai_model": "opus",
+                        "submitted_by": "admin",
+                    }
+                ),
+            },
+        )
+
+        new_analysis = FailureAnalysis(
+            test_name=old["test_name"],
+            error="ValueError",
+            analysis=AnalysisDetail(),
+            analysis_error="peers could not classify: new reason",
+        )
+        with (
+            patch(
+                "rootcoz.main.analyze_failure_group",
+                new_callable=AsyncMock,
+                return_value=[new_analysis],
+            ),
+            patch(
+                "rootcoz.main._create_ai_auth_header",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            patch("rootcoz.main.RepositoryManager"),
+        ):
+            response = test_client.post(f"/api/failures/{old['id']}/re-analyze")
+            assert response.status_code == 202
+
+            import asyncio
+
+            for _ in range(50):
+                await asyncio.sleep(0.1)
+                stored = await storage.get_result(job_id)
+                failures = (stored or {}).get("result", {}).get("failures", [])
+                if failures and failures[0].get("analysis_error") == (
+                    "peers could not classify: new reason"
+                ):
+                    break
+
+        stored = await storage.get_result(job_id)
+        failure = stored["result"]["failures"][0]
+        assert failure["analysis_error"] == "peers could not classify: new reason"
+        assert "reanalysis_status" not in failure
+
+    @pytest.mark.asyncio
     async def test_reanalyze_usage_isolated_by_attempt_and_child(
         self, test_client
     ) -> None:

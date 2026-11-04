@@ -7391,9 +7391,12 @@ async def _reanalyze_failure_background(
             # Remove running status and any previous error
             failure.pop("reanalysis_status", None)
             failure.pop("reanalysis_error", None)
-            # A successful re-analysis is a real diagnosis; the reason the row
-            # had none no longer applies.
-            failure.pop("analysis_error", None)
+            # The reason tracks the new analysis: a pass that still has no
+            # classification carries its own explanation, a classified row none.
+            if new_data.get("analysis_error"):
+                failure["analysis_error"] = new_data["analysis_error"]
+            else:
+                failure.pop("analysis_error", None)
 
         await patch_result_json(job_id, _patch_success)
         logger.info(
