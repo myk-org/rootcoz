@@ -182,8 +182,8 @@ Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pat
 | GET | `/results/{job_id}/issue-prompt` | viewer | Custom `.rootcoz/ROOTCOZ_ISSUE_PROMPT.md` for the repo |
 | POST | `/results/{job_id}/preview-github-issue` | reviewer | `test_name`, `include_links`, AI overrides; returns preview content |
 | POST | `/results/{job_id}/preview-jira-bug` | reviewer | Same shape, Jira flavour |
-| POST | `/results/{job_id}/create-github-issue` | reviewer | `test_name`, `title`, `body`; returns `201` |
-| POST | `/results/{job_id}/create-jira-bug` | reviewer | Adds `jira_issue_type`; returns `201` |
+| POST | `/results/{job_id}/create-github-issue` | reviewer | `test_name`, `title`, `body`; returns `201`. Same refusal classes as `POST /api/feedback/create` — `502` when GitHub is unreachable or failing, `403` when the token cannot see `TESTS_REPO_URL` or lacks the `repo` scope, `401` for an invalid token, `429` when rate limited |
+| POST | `/results/{job_id}/create-jira-bug` | reviewer | Adds `jira_issue_type`; returns `201`. `401` for an invalid or expired Jira token, `403` when the token cannot access the Jira project (Jira answers `404` for that), `502` with a retryable `Jira is unavailable right now…` detail on an upstream `5xx`, `502 Jira API error: <status>` for anything else |
 | POST | `/api/chat-issue` | reviewer | `target` (`github`/`jira`), `title`, `body`, optional `jira_project_key`, `jira_security_level`, `jira_issue_type`; returns `201` |
 | POST | `/api/chat-issue/prefill` | reviewer | `text`; returns the scrubbed `title` and `body` an issue created from that chat answer would carry |
 | PUT | `/results/{job_id}/tracked-in` | reviewer | `test_name`, `url`, `type` |
@@ -274,7 +274,13 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | GET | `/api/capabilities` | viewer | Feature toggles and whether server credentials exist |
 | GET | `/api/default-server-settings` | viewer | Non-sensitive settings and defaults only |
 | POST | `/api/feedback/preview` | viewer | AI-drafted feedback issue |
-| POST | `/api/feedback/create` | viewer | Creates the GitHub issue; returns `201` |
+| POST | `/api/feedback/create` | viewer | Creates the GitHub issue; returns `201`. `503` when feedback is disabled, `400` when no GitHub token is stored, `429` when GitHub rate-limited, `403` when the token is invalid, lacks the `repo` scope, or cannot see the repository, `502` when GitHub is unreachable or failing |
+
+> **Note:** `POST /api/feedback/create` and `POST /results/{job_id}/create-github-issue` share one refusal helper, so both keep `502` for GitHub trouble (unreachable, timeout, any `5xx`) and `403` for credential trouble, including a `404` from GitHub — that is how GitHub answers a repository the token cannot see, and reporting it as `403` keeps it away from the gateway-failure class. The two are separated on purpose: `502` means retry, `403` means fix the token. Only the subject differs — a refused feedback submission says the feedback was not filed, a refused failure issue says the bug report was not filed. Each refusal is logged at `WARNING` — the upstream status and the tracker's own `message` when there was an answer, the exception type and text when the call never landed — never the token and never the submitted body.
+>
+> `POST /results/{job_id}/create-jira-bug` applies the same split to Jira: `401` for an invalid or expired token, `403` for a project the token cannot access — Jira hides it behind a `404`, the same trick GitHub plays — and `502` with a retryable outage detail on an upstream `5xx`. Anything else stays `502 Jira API error: <status>`, with no rate-limit wording invented. Its refusals are logged the same way, including Jira's own `errorMessages`.
+>
+> Auditing is narrower than that: a refused `feedback.create` is recorded as a failed event whose `details` carries `upstream_status` whenever GitHub answered — the number an operator uses to tell an outage from a lost token. Refusals on `create-github-issue` are not audited at all; only a successful create writes an `issue.create` row, so that path has no `upstream_status` to read.
 
 ### Admin
 

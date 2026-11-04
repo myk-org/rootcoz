@@ -254,7 +254,7 @@ rootcoz<span class="w"> </span>push<span class="w"> </span>JOB_ID<span class="w"
 </ol>
 <p>Expand a failure, then use <code>GitHub Issue</code> or <code>Jira Ticket</code> in the <code>Actions</code> row. RootCoz opens the issue prompt, which comes from the <code>issue_prompt</code> stored with the job or from <code>.rootcoz/ROOTCOZ_ISSUE_PROMPT.md</code> in the test repository. Edit it if you want to steer the title and body, then click <code>Continue</code>.</p>
 <p>RootCoz calls <code>POST /results/{job_id}/preview-github-issue</code> or <code>POST /results/{job_id}/preview-jira-bug</code>, which draft a title and body, and search for issues that look like duplicates of the same bug.</p>
-<p><code>Include links</code> adds clickable report and build URLs. <code>AI for issue generation</code> lets you pick a different provider or model for the draft. On first use the picker starts on the pair that analysed this job. The pair you pick is remembered for your account and reused by later issue drafts and by chat; <code>Server default</code> forgets it and goes back to the server's configured model, and that choice is remembered too. The preview also lists any similar issues it found, so you can link existing work instead of filing a duplicate.</p>
+<p><code>Include links</code> adds clickable report and build URLs. <code>AI for issue generation</code> lets you pick a different provider or model for the draft. The preview also lists any similar issues it found, so you can link existing work instead of filing a duplicate.</p>
 <blockquote>
 <p><strong>Note:</strong> <code>Include links</code> only has an effect when the server has a public base URL configured, because relative links would resolve against the tracker instead of RootCoz. See <a href="configuration-reference.html">Configuration Reference</a> for details.</p>
 </blockquote>
@@ -272,6 +272,87 @@ rootcoz<span class="w"> </span>push<span class="w"> </span>JOB_ID<span class="w"
 <li>adds a tracked-in link for that issue, shown as a <code>GitHub</code> or <code>Jira</code> badge under the failure, which you can remove later like any other tracked link.</li>
 </ul>
 <p>Creation uses your own credentials. A missing or expired token returns an error that points back to your profile settings.</p>
+<p>If creation fails, the dialog stays on the preview with the generated <code>Title</code> and <code>Body</code> — and the repository, Jira project, issue type, and security level you chose — still filled in and editable. The primary action becomes <code>Retry</code>, which resubmits that same content; the model is not called again, so a retry neither costs AI tokens nor rewrites the draft. Retrying is the whole fix for a transient failure. A credential problem is refused again with the same message until the token is corrected, and any message mentioning a token gets a link to <code>Profile Settings</code> next to it.</p>
+<p>A failure is refused with a fixed detail instead of a generic string, and the dialog shows that wording verbatim. GitHub uses one shared set of refusals for both entry points — <code>Create GitHub Issue</code> on a failure and the <code>Feedback</code> form — and only the word changes: your <em>bug report</em> was not filed on a failure, your <em>feedback</em> was not filed on the feedback form.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>GitHub answered</th>
+<th>Detail shown</th>
+<th>What it means for you</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>5xx</code></td>
+<td><code>GitHub is unavailable right now, so your bug report was not filed. Try again in a few minutes.</code> (or <code>feedback</code>) — a <code>502</code></td>
+<td>An outage. Nothing is wrong with your draft or your token: <code>Retry</code> later.</td>
+</tr>
+<tr>
+<td>timeout, or no connection at all</td>
+<td><code>GitHub API unreachable: &lt;error&gt;</code> — the same <code>502</code> class</td>
+<td>Also worth a <code>Retry</code>; the request never reached GitHub.</td>
+</tr>
+<tr>
+<td><code>404</code></td>
+<td><code>GitHub token cannot access the bug report repository. Regenerate it in Profile Settings with access to that repository.</code> — a <code>403</code></td>
+<td>GitHub answers <code>404</code>, not <code>403</code>, for a repository the token cannot see. The token may be valid but cannot reach <code>TESTS_REPO_URL</code>, and a retry will not change that.</td>
+</tr>
+<tr>
+<td><code>401</code></td>
+<td><code>GitHub token is invalid or expired. Generate a new token in Profile Settings.</code></td>
+<td>The token is dead. Generate a new one before retrying.</td>
+</tr>
+<tr>
+<td><code>403</code> without rate-limit evidence</td>
+<td><code>GitHub token is missing the 'repo' scope. Regenerate it in Profile Settings with repo access.</code></td>
+<td>The token authenticates but is under-scoped.</td>
+</tr>
+<tr>
+<td><code>429</code>, or <code>403</code> with rate-limit headers or body</td>
+<td><code>GitHub API rate limit reached. Try again later.</code></td>
+<td>A spent quota: a new token cannot fix it, so wait.</td>
+</tr>
+<tr>
+<td>anything else</td>
+<td><code>GitHub API error: &lt;status&gt;</code>, reported as <code>502</code></td>
+<td>Read the status; the draft is still safe to retry.</td>
+</tr>
+</tbody>
+</table></div>
+<p>Jira bug creation splits the same way with its own wording:</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Jira answered</th>
+<th>Detail shown</th>
+<th>What it means for you</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>401</code> or <code>403</code></td>
+<td><code>Jira token is invalid or expired. Update your token in settings.</code> — a <code>401</code></td>
+<td>The credential or its project permission is the problem, so fix the token before retrying.</td>
+</tr>
+<tr>
+<td><code>5xx</code></td>
+<td><code>Jira is unavailable right now, so the bug was not filed. Try again in a few minutes.</code> — a <code>502</code></td>
+<td>An outage. <code>Retry</code> later with the draft still on screen.</td>
+</tr>
+<tr>
+<td><code>404</code></td>
+<td><code>Jira token cannot access that Jira project. Check the project key and update your token in settings so it can see the project.</code> — a <code>403</code></td>
+<td>Jira answers <code>404</code>, not <code>403</code>, for a project the token cannot see — and also for a project key that does not exist, and the two are indistinguishable from the status alone, which is why the wording names both. A retry will not change either: fix the project key or the token first.</td>
+</tr>
+<tr>
+<td>anything else</td>
+<td><code>Jira API error: &lt;status&gt;</code>, reported as <code>502</code></td>
+<td>Read the status; no wording is invented for it.</td>
+</tr>
+</tbody>
+</table></div>
+<p>Jira has no separate rate-limit detail: a throttled request arrives under <code>Jira API error: &lt;status&gt;</code> like any other unclassified status.</p>
 <blockquote>
 <p><strong>Warning:</strong> GitHub and Jira issue creation can be disabled per server with <code>ENABLE_GITHUB_ISSUES</code> and <code>ENABLE_JIRA_ISSUES</code>. When disabled, the buttons are greyed out and the endpoints refuse the request.</p>
 <p><strong>From chat:</strong> a chat answer can become an issue too. In job chat or admin chat, click <code>Create issue</code> above the conversation and RootCoz opens the same kind of dialog, prefilled with the title and body drafted from the <strong>last completed answer</strong>. Review and edit them, then click <code>Create GitHub issue</code> or <code>Create Jira ticket</code>. The dialog only offers a tracker when the server enables it <strong>and</strong> your account holds that tracker's token, so a token saved in Profile Settings works even on a fresh browser. Nothing is sent until you click Create — the AI has no tool that can write to a tracker. If a credential is missing, the dialog says so and points at Profile Settings; the server's refusal (<code>400</code>, <code>403</code>, <code>401</code>, <code>502</code>) is shown verbatim. The same thing from a terminal, with the same account credential and no token flags:</p>
@@ -386,8 +467,7 @@ rootcoz<span class="w"> </span>push<span class="w"> </span>JOB_ID<span class="w"
 </code></pre></div>
 
 <p>Tracker flags fall back to the values in your CLI server profile, so pass them explicitly only when you need to override. See <a href="cli-reference.html">CLI Command Reference</a> for details.</p>
-<p>Send feedback about RootCoz itself through the <code>Feedback</code> button in the application header. You describe the problem, RootCoz collects browser context and recent console and API errors automatically, then drafts a GitHub issue you can edit before it is created. This flow is separate from failure issues and requires feedback to be enabled on the server.</p>
-<p>There is no analysed job behind feedback, so its <code>AI for issue generation</code> picker starts on the server default. The pair you pick is remembered for your account and reused by later feedback and issue drafts, and <code>Server default</code> stores that choice explicitly, so it survives a reload instead of quietly reverting.</p>
+<p>Send feedback about RootCoz itself through the <code>Feedback</code> button in the application header. You describe the problem, RootCoz collects browser context and recent console and API errors automatically, then drafts a GitHub issue you can edit before it is created. This flow is separate from failure issues and requires feedback to be enabled on the server. A failed submission keeps the draft on screen with <code>Retry</code> as the primary action, and reports the server's own reason — the same error classes as in step 4.</p>
 <p>For raw endpoints, see <a href="api-reference.html">API Endpoint Reference</a> for details.</p>
 <h2 id="troubleshooting">Troubleshooting</h2>
 <ul>

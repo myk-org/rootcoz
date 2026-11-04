@@ -1,6 +1,8 @@
 """Tests for user feedback endpoint and scrubbing logic."""
 
+import contextlib
 import json
+import logging
 import os
 from typing import ClassVar
 from unittest.mock import AsyncMock, patch
@@ -43,6 +45,19 @@ _TEST_HMAC_KEY = "test-encryption-key-for-hmac"  # pragma: allowlist secret
 _GITHUB_FOOTER_MARKER = (
     "Generated using AI with [rootcoz](https://github.com/myk-org/rootcoz)"
 )
+
+
+@contextlib.contextmanager
+def _capture_main_logs(caplog):
+    """Capture rootcoz.main logs (python-simple-logger sets propagate=False)."""
+    logger = logging.getLogger("rootcoz.main")
+    with caplog.at_level(logging.WARNING, logger="rootcoz.main"):
+        logger.propagate = True
+        try:
+            yield
+        finally:
+            logger.propagate = False
+
 
 # The host variables the app-under-test may legitimately see now come from
 # conftest.host_env(), shared with every other test module that hands an
@@ -1193,12 +1208,55 @@ class TestFeedbackEndpoint:
         assert resp.status_code == 502
         assert "GitHub API error: 422" in resp.json()["detail"]
 
-    def test_create_unreachable_github_stays_502(self, _init_db, temp_db_path):
+    def test_create_github_outage_is_retryable_and_logged(
+        self, _init_db, temp_db_path, caplog
+    ):
+        """A GitHub 5xx is an outage: retryable detail, reason in the log."""
+        exc = self._raise_status(
+            503,
+            json={
+                "message": "Server Error",
+                "documentation_url": "https://docs.github.com/rest",
+            },
+        )
+        with _capture_main_logs(caplog):
+            resp = self._create_with_github_failure(temp_db_path, exc)
+
+        assert resp.status_code == 502
+        detail = resp.json()["detail"]
+        assert detail == (
+            "GitHub is unavailable right now, so your feedback was not filed. "
+            "Try again in a few minutes."
+        )
+        assert "503" not in detail
+        assert "status=503" in caplog.text
+        assert "Server Error" in caplog.text
+        assert _TEST_GITHUB_TOKEN not in caplog.text
+
+    def test_create_github_404_names_repository_access(
+        self, _init_db, temp_db_path, caplog
+    ):
+        """GitHub hides a repository the token cannot see behind a 404."""
+        exc = self._raise_status(404, json={"message": "Not Found"})
+        with _capture_main_logs(caplog):
+            resp = self._create_with_github_failure(temp_db_path, exc)
+
+        assert resp.status_code == 403
+        detail = resp.json()["detail"]
+        assert "cannot access the feedback repository" in detail
+        assert "Regenerate" in detail
+        assert "unavailable" not in detail.lower()
+        assert "404" not in detail
+        assert "status=404" in caplog.text
+
+    def test_create_unreachable_github_stays_502(self, _init_db, temp_db_path, caplog):
         """502 remains reserved for a genuinely unreachable GitHub API."""
         exc = httpx.RequestError("connection refused")
-        resp = self._create_with_github_failure(temp_db_path, exc)
+        with _capture_main_logs(caplog):
+            resp = self._create_with_github_failure(temp_db_path, exc)
         assert resp.status_code == 502
         assert "unreachable" in resp.json()["detail"]
+        assert "RequestError" in caplog.text
 
 
 # ---------------------------------------------------------------------------

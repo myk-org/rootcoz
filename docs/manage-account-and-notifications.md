@@ -73,6 +73,8 @@ The registration key is the only credential that signs you in; the tracker token
 
    > **Tip:** Without a tracker token you can still preview generated issue content, but you cannot submit it. See [Creating Follow-Up Issues and Pushing Results](create-follow-up-issues-and-push-results.html) for details.
 
+   > **Tip:** A token that cannot reach the target is reported as a credential problem, not a server failure: GitHub answers `404` for a repository the token cannot see, and RootCoz passes that on as a repository-access error pointing back here. A Jira project the token cannot see fails the same way, refused as a project-access error that names both a wrong project key and a token without access — because Jira's `404` does not say which it is. Both mean the token needs access to that repository or project — not that RootCoz is down.
+
 5. **Rotate your own API key.**
 
    In `Settings`, under `API Key`, click `Rotate API Key`. The old key stops working immediately, all your other sessions are signed out, and the new key is shown once with a `Copy` button.

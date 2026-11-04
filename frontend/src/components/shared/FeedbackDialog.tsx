@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react'
-import { api, extractApiDetail } from '@/lib/api'
+import { ApiError, api, extractApiDetail } from '@/lib/api'
 import { getRecentFailedCalls } from '@/lib/api'
 import { getRecentErrors } from '@/lib/errorCapture'
 import { getGithubToken } from '@/lib/cookies'
@@ -41,7 +41,10 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
   const [phase, setPhase] = useState<Phase>('form')
   const [issueUrl, setIssueUrl] = useState('')
   const [errorMsg, setErrorMsg] = useState('')
-  const [errorSource, setErrorSource] = useState<'preview' | 'create'>('preview')
+  // A failed create keeps the generated issue in the preview so it can be retried
+  // as-is; only a failed preview sends the user back to the form.
+  const [createError, setCreateError] = useState('')
+  const submittingRef = useRef(false)
   const generationRef = useRef(0)
   const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -128,14 +131,17 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
         setPhase('ai-not-configured')
       } else {
         setErrorMsg(msg)
-        setErrorSource('preview')
         setPhase('error')
       }
     }
   }
 
   async function handleCreate() {
+    // Guards a double click that lands before the creating phase re-renders.
+    if (submittingRef.current) return
+    submittingRef.current = true
     const gen = generationRef.current
+    setCreateError('')
     setPhase('creating')
     try {
       const payload: FeedbackCreateRequest = {
@@ -150,9 +156,14 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
       setPhase('success')
     } catch (err) {
       if (gen !== generationRef.current) return
-      setErrorMsg(extractApiDetail(err) ?? (err instanceof Error ? err.message : 'Failed to create issue'))
-      setErrorSource('create')
-      setPhase('error')
+      // The server's own wording when it sent one; the generic copy otherwise.
+      setCreateError(
+        extractApiDetail(err)
+        ?? (err instanceof ApiError ? 'Failed to create issue' : err instanceof Error ? err.message : 'Failed to create issue'),
+      )
+      setPhase('preview')
+    } finally {
+      submittingRef.current = false
     }
   }
 
@@ -172,6 +183,7 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
       setDescription('')
       setIssueUrl('')
       setErrorMsg('')
+      setCreateError('')
       setPreviewTitle('')
       setPreviewBody('')
       setPreviewLabels([])
@@ -267,6 +279,14 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
         {/* Phase 2: Preview */}
         {phase === 'preview' && (
           <div className="space-y-4">
+            {createError && (
+              <div role="alert" className="space-y-1">
+                <p className="text-sm text-signal-red">{createError}</p>
+                {createError.toLowerCase().includes('token') && (
+                  <p className="text-xs text-text-tertiary">You can update your tokens in <a href="/settings" target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline">Profile Settings</a>.</p>
+                )}
+              </div>
+            )}
             <div className="rounded-md border border-border-muted bg-surface-elevated px-3 py-2 text-xs text-text-secondary">
               {previewAi.generated
                 ? `Generated using AI with ${previewAi.provider}/${previewAi.model}`
@@ -367,13 +387,13 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
               <Button
                 onClick={handleCreate}
                 disabled={!previewTitle.trim() || !previewBody.trim() || !hasGithubToken}
-              >Create Issue</Button>
+              >{createError ? 'Retry' : 'Create Issue'}</Button>
             </div>
           )}
           {phase === 'error' && (
             <div className="flex gap-2 sm:ml-auto">
               <Button variant="outline" onClick={() => handleClose(false)}>Close</Button>
-              <Button onClick={() => setPhase(errorSource === 'preview' ? 'form' : 'preview')}>Try Again</Button>
+              <Button onClick={() => setPhase('form')}>Try Again</Button>
             </div>
           )}
           {phase === 'ai-not-configured' && (

@@ -362,6 +362,7 @@
 <blockquote>
 <p><strong>Clearing a token:</strong> clear the field and save. An empty field in the body of <code>PUT /api/user/tokens</code> clears that one credential on the server; the fields you do not send keep their stored values, so clearing your GitHub token leaves your Jira credentials alone. Sending <code>null</code> for a field clears it the same way an empty string does, and a request that omits every field changes nothing and reports <code>"saved": false</code>. There is no separate <code>DELETE</code> route — an empty or <code>null</code> field is the clear.</p>
 <p><strong>Tip:</strong> Without a tracker token you can still preview generated issue content, but you cannot submit it. See <a href="create-follow-up-issues-and-push-results.html">Creating Follow-Up Issues and Pushing Results</a> for details.</p>
+<p><strong>Tip:</strong> A token that cannot reach the target is reported as a credential problem, not a server failure: GitHub answers <code>404</code> for a repository the token cannot see, and RootCoz passes that on as a repository-access error pointing back here. A Jira project the token cannot see fails the same way, refused as a project-access error that names both a wrong project key and a token without access — because Jira's <code>404</code> does not say which it is. Both mean the token needs access to that repository or project — not that RootCoz is down.</p>
 </blockquote>
 <ol>
 <li><strong>Rotate your own API key.</strong></li>

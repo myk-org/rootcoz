@@ -54,6 +54,31 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    Creation uses your own credentials. A missing or expired token returns an error that points back to your profile settings.
 
+   If creation fails, the dialog stays on the preview with the generated `Title` and `Body` — and the repository, Jira project, issue type, and security level you chose — still filled in and editable. The primary action becomes `Retry`, which resubmits that same content; the model is not called again, so a retry neither costs AI tokens nor rewrites the draft. Retrying is the whole fix for a transient failure. A credential problem is refused again with the same message until the token is corrected, and any message mentioning a token gets a link to `Profile Settings` next to it.
+
+   A failure is refused with a fixed detail instead of a generic string, and the dialog shows that wording verbatim. GitHub uses one shared set of refusals for both entry points — `Create GitHub Issue` on a failure and the `Feedback` form — and only the word changes: your *bug report* was not filed on a failure, your *feedback* was not filed on the feedback form.
+
+   | GitHub answered | Detail shown | What it means for you |
+   | --- | --- | --- |
+   | `5xx` | `GitHub is unavailable right now, so your bug report was not filed. Try again in a few minutes.` (or `feedback`) — a `502` | An outage. Nothing is wrong with your draft or your token: `Retry` later. |
+   | timeout, or no connection at all | `GitHub API unreachable: <error>` — the same `502` class | Also worth a `Retry`; the request never reached GitHub. |
+   | `404` | `GitHub token cannot access the bug report repository. Regenerate it in Profile Settings with access to that repository.` — a `403` | GitHub answers `404`, not `403`, for a repository the token cannot see. The token may be valid but cannot reach `TESTS_REPO_URL`, and a retry will not change that. |
+   | `401` | `GitHub token is invalid or expired. Generate a new token in Profile Settings.` | The token is dead. Generate a new one before retrying. |
+   | `403` without rate-limit evidence | `GitHub token is missing the 'repo' scope. Regenerate it in Profile Settings with repo access.` | The token authenticates but is under-scoped. |
+   | `429`, or `403` with rate-limit headers or body | `GitHub API rate limit reached. Try again later.` | A spent quota: a new token cannot fix it, so wait. |
+   | anything else | `GitHub API error: <status>`, reported as `502` | Read the status; the draft is still safe to retry. |
+
+   Jira bug creation splits the same way with its own wording:
+
+   | Jira answered | Detail shown | What it means for you |
+   | --- | --- | --- |
+   | `401` or `403` | `Jira token is invalid or expired. Update your token in settings.` — a `401` | The credential or its project permission is the problem, so fix the token before retrying. |
+   | `5xx` | `Jira is unavailable right now, so the bug was not filed. Try again in a few minutes.` — a `502` | An outage. `Retry` later with the draft still on screen. |
+   | `404` | `Jira token cannot access that Jira project. Check the project key and update your token in settings so it can see the project.` — a `403` | Jira answers `404`, not `403`, for a project the token cannot see — and also for a project key that does not exist, and the two are indistinguishable from the status alone, which is why the wording names both. A retry will not change either: fix the project key or the token first. |
+   | anything else | `Jira API error: <status>`, reported as `502` | Read the status; no wording is invented for it. |
+
+   Jira has no separate rate-limit detail: a throttled request arrives under `Jira API error: <status>` like any other unclassified status.
+
    > **Warning:** GitHub and Jira issue creation can be disabled per server with `ENABLE_GITHUB_ISSUES` and `ENABLE_JIRA_ISSUES`. When disabled, the buttons are greyed out and the endpoints refuse the request.
 
    > **From chat:** a chat answer can become an issue too. In job chat or admin chat, click `Create issue` above the conversation and RootCoz opens the same kind of dialog, prefilled with the title and body drafted from the **last completed answer**. Review and edit them, then click `Create GitHub issue` or `Create Jira ticket`. The dialog only offers a tracker when the server enables it **and** your account holds that tracker's token, so a token saved in Profile Settings works even on a fresh browser. Nothing is sent until you click Create — the AI has no tool that can write to a tracker. If a credential is missing, the dialog says so and points at Profile Settings; the server's refusal (`400`, `403`, `401`, `502`) is shown verbatim. The same thing from a terminal, with the same account credential and no token flags:
@@ -161,7 +186,7 @@ rootcoz push JOB_ID --plugin reportportal --json
 
 Tracker flags fall back to the values in your CLI server profile, so pass them explicitly only when you need to override. See [CLI Command Reference](cli-reference.html) for details.
 
-Send feedback about RootCoz itself through the `Feedback` button in the application header. You describe the problem, RootCoz collects browser context and recent console and API errors automatically, then drafts a GitHub issue you can edit before it is created. This flow is separate from failure issues and requires feedback to be enabled on the server.
+Send feedback about RootCoz itself through the `Feedback` button in the application header. You describe the problem, RootCoz collects browser context and recent console and API errors automatically, then drafts a GitHub issue you can edit before it is created. This flow is separate from failure issues and requires feedback to be enabled on the server. A failed submission keeps the draft on screen with `Retry` as the primary action, and reports the server's own reason — the same error classes as in step 4.
 
 There is no analysed job behind feedback, so its `AI for issue generation` picker starts on the server default. The pair you pick is remembered for your account and reused by later feedback and issue drafts, and `Server default` stores that choice explicitly, so it survives a reload instead of quietly reverting.
 
