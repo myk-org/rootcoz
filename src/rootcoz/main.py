@@ -280,6 +280,7 @@ from rootcoz.storage import (
     ANALYSIS_STATE_ANALYZED,
     ANALYSIS_STATE_SUBMITTED,
     DB_PATH,
+    MAX_INCOMPLETE_LIST_LIMIT,
     claim_submitted_job_for_analyze,
     copy_stable_analysis_ids,
     get_effective_classification,
@@ -6673,7 +6674,13 @@ async def list_result_fields() -> dict[str, Any]:
 @app.get("/api/results/incomplete", operation_id="apiIncompleteAnalyses")
 async def api_incomplete_analyses(
     limit: int = Query(
-        default=100, ge=0, description="Max jobs to return (0 = no limit)"
+        default=100,
+        ge=1,
+        le=MAX_INCOMPLETE_LIST_LIMIT,
+        description=(
+            "Max jobs to return. Capped: this listing reads result_json, so an "
+            "unbounded response would be an unbounded scan (see #392)."
+        ),
     ),
 ) -> list[dict[str, Any]]:
     """List jobs whose stored failures have no usable classification (viewer+).

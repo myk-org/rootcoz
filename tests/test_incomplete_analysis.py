@@ -202,17 +202,26 @@ class TestIncompleteListingEndpoint:
         assert jobs[0]["incomplete_count"] == 1
         assert jobs[0]["test_names"] == ["t1"]
 
-    async def test_limit_zero_lists_all_and_limit_caps(
+    async def test_zero_limit_is_rejected_and_limit_caps(
         self, client: TestClient, temp_db_path: Path
     ) -> None:
+        """No "no limit": an unbounded request would be an unbounded scan."""
         await self._seed(temp_db_path, "job-a", _failure("t-a"))
         await self._seed(temp_db_path, "job-b", _failure("t-b"))
 
         resp = client.get(
             "/api/results/incomplete", params={"limit": 0}, headers=_ADMIN_HEADERS
         )
-        assert resp.status_code == 200
-        assert {j["job_id"] for j in resp.json()} == {"job-a", "job-b"}
+        assert resp.status_code == 422
+
+        assert (
+            client.get(
+                "/api/results/incomplete",
+                params={"limit": storage.MAX_INCOMPLETE_LIST_LIMIT + 1},
+                headers=_ADMIN_HEADERS,
+            ).status_code
+            == 422
+        )
 
         resp = client.get(
             "/api/results/incomplete", params={"limit": 1}, headers=_ADMIN_HEADERS
@@ -392,7 +401,7 @@ class TestListingScanIsBounded:
         assert len(resp.json()) == 1
         assert len(visited) <= 1 + batch
 
-    async def test_limit_zero_scans_every_batch(
+    async def test_storage_zero_limit_is_unreachable_from_the_api(
         self, client: TestClient, temp_db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         await self._seed(temp_db_path, 5)
@@ -401,8 +410,7 @@ class TestListingScanIsBounded:
         resp = client.get(
             "/api/results/incomplete", params={"limit": 0}, headers=_ADMIN_HEADERS
         )
-        assert resp.status_code == 200
-        assert len(resp.json()) == 5
+        assert resp.status_code == 422
 
 
 class TestOperationId:

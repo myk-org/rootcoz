@@ -867,7 +867,9 @@ def results_fields(
 
 @results_app.command("incomplete")
 def results_incomplete(
-    limit: int = typer.Option(100, "--limit", help="Max jobs to list (0 = no limit)."),
+    limit: int = typer.Option(
+        100, "--limit", min=1, help="Max jobs to list (the server caps it)."
+    ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """List jobs with failures that have no usable classification."""

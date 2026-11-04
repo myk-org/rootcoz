@@ -123,7 +123,7 @@ Related lifecycle commands:
 | `dashboard` | `--label`/`-l` (repeatable), `--exclude-tag` (repeatable), `--search`/`-s`, `--review-status` (`all`, `reviewed`, `not_reviewed`), `--analysis-state`, `--limit` (500) | Jobs with failure counts and review progress. |
 | `show JOB_ID` | `--full`/`-f`, `--fields` | Summary by default, full JSON with `--full`, or a sparse projection with `--fields`. |
 | `fields` | — | Print the allowlist of field paths accepted by `--fields`. |
-| `incomplete` | `--limit` (100, `0` = no limit) | Jobs with failures that have no usable classification: job, build, and the count. `--json` also carries `test_names`. |
+| `incomplete` | `--limit` (100, min 1, server caps at 500) | Jobs with failures that have no usable classification: job, build, and the count. `--json` also carries `test_names`. |
 | `tests JOB_ID` | `--status`/`-s` (`passed`, `skipped`, `failed`, repeatable), `--child-job`, `--child-build`, `--offset` (0), `--limit` (50, max 200) | Paginated test entries with `total` and `has_more`. |
 | `full JOB_ID` | `--status`/`-s`, `--child-job`, `--child-build`, `--offset` (0), `--limit` (50, max 200) — all scope the `tests` section | Complete job data in one call: failures with review state and effective classifications, summary, tests page, comments, tracked-in links. |
 | `review-status JOB_ID` | — | Failure, reviewed, and comment counts. |

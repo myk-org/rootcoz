@@ -4704,6 +4704,10 @@ async def list_results_for_dashboard(
 #: how much work one fetched batch can do.
 _INCOMPLETE_SCAN_BATCH = 100
 
+#: The API never asks for more matching jobs than this. The predicate reads
+#: ``result_json``, so an unbounded request is an unbounded scan (#392).
+MAX_INCOMPLETE_LIST_LIMIT = 500
+
 
 async def list_incomplete_analyses(limit: int = 100) -> list[dict[str, Any]]:
     """List jobs holding failures with no usable classification.
