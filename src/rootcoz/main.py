@@ -148,6 +148,7 @@ from rootcoz.exporters.base import (
     ExportContext,
     Exporter,
     ExporterPrerequisiteError,
+    ReviewersUnavailable,
 )
 from rootcoz.exporters.datadog import (
     DATADOG_SITES,
@@ -10140,6 +10141,10 @@ async def push_to_exporter(
         try:
             with exporter:
                 result = await exporter.push(context)
+        except ReviewersUnavailable as exc:
+            # 503, not 422: the request is fine, the server could not read the
+            # reviewer table a gating write needs. Retryable.
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except ExporterPrerequisiteError as exc:
             # Missing push input (e.g. Greenwave waivers without an explicit
             # subject_identifier) — the client request, not the server, is wrong.

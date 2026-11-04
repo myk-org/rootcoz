@@ -48,6 +48,7 @@ from rootcoz.exporters.base import (
     Exporter,
     ExporterPrerequisiteError,
     ExporterResult,
+    ReviewersUnavailable,
 )
 from rootcoz.exporters.greenwave_auth import (
     GreenwaveAuth,
@@ -142,6 +143,26 @@ def _build_waiver_comment(
     if reviewer:
         comment += f", reviewed by {reviewer}"
     return comment
+
+
+def _coerce_failure(raw: Any) -> tuple[FailureAnalysis | None, str]:
+    """Parse one stored failure entry.
+
+    Single place that turns the raw result-JSON entries into models — used by
+    the push loop and by the pre-flight waiver check, so the two can never
+    disagree about which failures this push will act on.
+
+    Returns:
+        ``(failure, "")`` on success, or ``(None, reason)`` when the entry is
+        not a usable object; ``reason`` is a field-location summary that never
+        echoes the rejected input.
+    """
+    if not isinstance(raw, dict):
+        return None, "entry is not an object"
+    try:
+        return FailureAnalysis(**raw), ""
+    except ValidationError as exc:
+        return None, _validation_error_summary(exc)
 
 
 def _effective_classification(failure: FailureAnalysis, context: ExportContext) -> str:
@@ -360,6 +381,20 @@ class GreenwaveExporter(Exporter):
 
     # -- Push ------------------------------------------------------------------
 
+    def _has_waivable_failure(self, context: ExportContext) -> bool:
+        """Whether any failure in this push would have been waived.
+
+        Used to keep a reviewer-table outage from blocking a push that never
+        intended a waiver: the refusal is only justified when the missing
+        reviewer identity could have changed the outcome.
+        """
+        return any(
+            parsed is not None
+            and _effective_classification(parsed, context)
+            in self._waivable_classifications
+            for parsed, _reason in (_coerce_failure(raw) for raw in context.failures)
+        )
+
     async def push(self, context: ExportContext) -> ExporterResult:
         """Push analysis results to ResultsDB and optionally WaiverDB.
 
@@ -400,15 +435,25 @@ class GreenwaveExporter(Exporter):
                 },
             )
 
-        if self._push_waivers and context.reviews_unavailable:
-            # "Reviewers unknown" is not "nobody reviewed this". Writing the
-            # ResultsDB rows and quietly dropping the waivers the caller asked
-            # for would report success for a gate that was never lifted.
-            raise ExporterPrerequisiteError(
-                "Greenwave refused the push: waiver submission is enabled but "
-                "the reviewer lookup failed, so human-reviewed failures cannot "
-                "be identified. No results or waivers were written; retry once "
-                "the review data is readable."
+        # "Reviewers unknown" is not "nobody reviewed this": with an empty
+        # reviewed_by map the waiver gate cannot tell a human review from no
+        # review at all. Refuse — but only when this push would actually have
+        # tried to waive something (waivable classification present); a
+        # results-only push has nothing to lose from the outage and must not
+        # be blocked by it. ``ReviewersUnavailable`` maps to 503: the request
+        # and the configuration are fine, the server could not read its own
+        # data, so a retry is the right response.
+        if (
+            self._push_waivers
+            and context.reviews_unavailable
+            and self._has_waivable_failure(context)
+        ):
+            raise ReviewersUnavailable(
+                "Greenwave refused the push: waiver submission is enabled and "
+                "this push contains waivable failures, but the reviewer lookup "
+                "failed, so human-reviewed failures cannot be identified. No "
+                "results or waivers were written; retry once the review data "
+                "is readable."
             )
 
         subject_identifier = normalize_identifier(context.subject_identifier) or ""
@@ -438,20 +483,15 @@ class GreenwaveExporter(Exporter):
         # an empty ResultsDB group.
         items: list[tuple[int, FailureAnalysis, str, str]] = []
         for index, raw_failure in enumerate(context.failures):
-            if not isinstance(raw_failure, dict):
-                errors.append(f"failure[{index}]: entry is not an object")
-                continue
-            try:
-                failure = FailureAnalysis(**raw_failure)
-            except ValidationError as exc:
+            failure, reason = _coerce_failure(raw_failure)
+            if failure is None:
+                errors.append(f"failure[{index}]: {reason}")
                 logger.warning(
-                    "Greenwave push: failure[%d] for job_id=%s failed schema "
-                    "validation: %s",
+                    "Greenwave push: failure[%d] for job_id=%s is not usable: %s",
                     index,
                     context.job_id,
-                    _validation_error_summary(exc),
+                    reason,
                 )
-                errors.append(f"failure[{index}]: validation failed")
                 continue
             classification = _effective_classification(failure, context)
             if not classification:

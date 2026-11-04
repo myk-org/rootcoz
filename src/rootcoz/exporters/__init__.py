@@ -5,6 +5,7 @@ from rootcoz.exporters.base import (
     Exporter,
     ExporterPrerequisiteError,
     ExporterResult,
+    ReviewersUnavailable,
 )
 from rootcoz.exporters.datadog import DatadogExporter
 from rootcoz.exporters.greenwave_exporter import GreenwaveExporter
@@ -16,4 +17,5 @@ __all__ = [
     "ExporterPrerequisiteError",
     "ExporterResult",
     "GreenwaveExporter",
+    "ReviewersUnavailable",
 ]

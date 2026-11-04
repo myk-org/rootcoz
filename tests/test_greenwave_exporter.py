@@ -802,7 +802,13 @@ class TestGreenwaveExporterPush:
         )
         result = _run_push(exporter, _make_context([{"unexpected": "shape"}]))
         assert result.success is False
-        assert result.details["errors"] == ["failure[0]: validation failed"]
+        # The reason is now the pydantic field summary (input values are never
+        # echoed), which is what an operator can act on.
+        expected_reason = (
+            "failure[0]: test_name: Field required; error: Field required; "
+            "analysis: Field required"
+        )
+        assert result.details["errors"] == [expected_reason]
 
     def test_push_waiver_requires_subject_identifier(self):
         settings = _make_settings(
@@ -1003,7 +1009,7 @@ class TestGreenwaveExporterPush:
         matters: pushing results and omitting the requested waivers would
         report success for a gate that was never lifted.
         """
-        from rootcoz.exporters import ExporterPrerequisiteError
+        from rootcoz.exporters import ReviewersUnavailable
 
         settings = _make_settings(
             GREENWAVE_PUSH_WAIVERS="true",
@@ -1013,7 +1019,9 @@ class TestGreenwaveExporterPush:
         )
         exporter = GreenwaveExporter(settings)
         post = self._mock_post(exporter, [])
-        with pytest.raises(ExporterPrerequisiteError, match="reviewer lookup failed"):
+        # 503-mapped, not ExporterPrerequisiteError: the server could not read
+        # its own data, the caller did nothing wrong.
+        with pytest.raises(ReviewersUnavailable, match="reviewer lookup failed"):
             _run_push(
                 exporter,
                 replace(
@@ -1025,6 +1033,41 @@ class TestGreenwaveExporterPush:
                 ),
             )
         post.assert_not_called()
+
+    def test_outage_does_not_block_a_push_with_nothing_waivable(self):
+        """No waivable failure ⇒ nothing to lose from the outage ⇒ push it.
+
+        Refusing here would only withhold the informational ResultsDB rows.
+        """
+        settings = _make_settings(
+            GREENWAVE_PUSH_WAIVERS="true",
+            GREENWAVE_WAIVER_URL=WAIVERDB_URL,
+            GREENWAVE_WAIVER_TOKEN="wdb-token",  # pragma: allowlist secret
+            GREENWAVE_PRODUCT_VERSION="el10",
+            # PRODUCT BUG is classified FAILED and is not waivable here.
+            GREENWAVE_WAIVABLE_CLASSIFICATIONS="INFRASTRUCTURE",
+        )
+        exporter = GreenwaveExporter(settings)
+        post = self._mock_post(
+            exporter,
+            [
+                _response({"uuid": "550e8400-e29b-41d4-a716-446655440000"}),
+                _response({"id": 101}),
+            ],
+        )
+        context = replace(
+            _make_context(
+                [_failure("test_a", "PRODUCT BUG")],
+                subject_identifier="pkg-1.0-1.el10",
+            ),
+            reviews_unavailable=True,
+        )
+        result = _run_push(exporter, context)
+        assert result.success is True
+        assert result.details["pushed"] == 1
+        assert not any(
+            call.args[1].endswith("/waivers/") for call in post.call_args_list
+        )
 
     def test_unavailable_reviewer_lookup_still_pushes_results_only(self):
         """Results are informational: they do not need reviewer identity."""
@@ -1799,6 +1842,43 @@ class TestGreenwaveExporterEndpoints:
                 response = client.post("/results/job-1/push/greenwave")
             assert response.status_code == 400
             assert "disabled" in response.json()["detail"]
+
+    def test_push_greenwave_reviewer_outage_returns_503(self, _init_db, temp_db_path):
+        """A reviewer-table outage is 503, never 422.
+
+        422 tells the caller their request is wrong; a failed internal read is
+        the server's problem and retryable. Mirrors the
+        EffectiveClassificationsUnavailable -> 503 split for the override table.
+        """
+        from rootcoz.exporters import ReviewersUnavailable
+        from tests.conftest import admin_login, make_app_client
+
+        exporter = MagicMock()
+        exporter.__enter__.return_value = exporter
+        exporter.push = AsyncMock(
+            side_effect=ReviewersUnavailable("reviewer lookup failed")
+        )
+
+        for client in make_app_client(temp_db_path):
+            admin_login(client)
+            with (
+                patch("rootcoz.main.get_result", new_callable=AsyncMock) as mock_get,
+                patch(
+                    "rootcoz.main._unreviewed_failure_count",
+                    new_callable=AsyncMock,
+                    return_value=0,
+                ),
+                patch(
+                    "rootcoz.main._build_export_context",
+                    new_callable=AsyncMock,
+                    return_value=self._context(),
+                ),
+                patch("rootcoz.main._create_exporter", return_value=exporter),
+            ):
+                mock_get.return_value = {"result": {"failures": [{"test_name": "t"}]}}
+                response = client.post("/results/job-1/push/greenwave")
+            assert response.status_code == 503
+            assert "reviewer lookup failed" in response.json()["detail"]
 
     def test_push_greenwave_prerequisite_returns_422(self, _init_db, temp_db_path):
         """POST /push/greenwave maps ExporterPrerequisiteError to 422."""

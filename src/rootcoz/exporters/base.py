@@ -11,6 +11,17 @@ from dataclasses import dataclass, field
 from typing import Any, Self
 
 
+class ReviewersUnavailable(RuntimeError):
+    """The reviewer table could not be read, so a gating write cannot be judged.
+
+    Distinct from :class:`ExporterPrerequisiteError` on purpose: the request
+    and the configuration are fine, the SERVER could not read what it needs.
+    Callers map this to HTTP 503 (retryable), never 422 (client's fault) —
+    the same split :class:`rootcoz.main.EffectiveClassificationsUnavailable`
+    makes for the classification-override table.
+    """
+
+
 @dataclass
 class ExportContext:
     """Shared metadata that any exporter needs to push results.
