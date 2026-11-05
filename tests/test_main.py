@@ -5031,18 +5031,19 @@ class TestChatIssueEndpoint:
         mock_create.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_github_404_names_the_repo_scope_on_the_chat_path(self, test_client):
-        """#398's mapping wins: a 404 is a repository the token cannot see.
+    async def test_github_404_names_the_repo_the_chat_files_into(self, test_client):
+        """#398's mapping wins, but it names the repository that actually failed.
 
         GitHub answers 404 instead of 403 for an invisible repository, so the
-        chat path must send the user to TESTS_REPO_URL and their token — a 502
-        would blame the upstream and hide the fix.
+        chat path must send the user to their token — and to the repository the
+        request used, not to a deployment setting that had nothing to do with
+        it.
         """
         import httpx
 
         headers = await self._user("chat-gh-404", github_token="ghp_row_token")
         job_id = await self._run(
-            "chat-gh-404-run", tests_repo_url="https://github.com/org/repo"
+            "chat-gh-404-run", tests_repo_url="https://github.com/org/run-repo"
         )
         draft = await self._propose(test_client, "github", headers, job_id=job_id)
         with patch("rootcoz.main.create_github_issue") as mock_create:
@@ -5056,6 +5057,35 @@ class TestChatIssueEndpoint:
                     "/api/chat-issue",
                     json={**draft, "job_id": job_id},
                     headers=headers,
+                )
+        assert response.status_code == 403
+        detail = response.json()["detail"]
+        assert detail == (
+            "GitHub cannot see the repository org/run-repo, so your issue was "
+            "not filed. Check that the repository exists and that your token "
+            "can access it in Profile Settings."
+        )
+        # The deployment setting was not the repository this request used.
+        assert "TESTS_REPO_URL" not in detail
+
+    @pytest.mark.asyncio
+    async def test_github_404_names_tests_repo_url_when_it_is_the_repo(
+        self, test_client
+    ):
+        """A chat with no run files in the deployment's repo — so name the setting."""
+        import httpx
+
+        headers = await self._admin("chat-gh-404-default", github_token="ghp_row_token")
+        draft = await self._propose(test_client, "github", headers)
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.side_effect = httpx.HTTPStatusError(
+                "Not Found",
+                request=httpx.Request("POST", "https://api.github.com"),
+                response=httpx.Response(404),
+            )
+            with _with_github_issue_config():
+                response = test_client.post(
+                    "/api/chat-issue", json=draft, headers=headers
                 )
         assert response.status_code == 403
         assert response.json()["detail"] == (
@@ -5698,6 +5728,211 @@ class TestChatIssueEndpoint:
             for draft in main_mod._chat_issue_drafts.values()
             if draft["username"] == "chat-full"
         ]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_store_evicts_nothing(self, test_client):
+        """The caps are applied only once nothing can fail any more.
+
+        A proposal at the per-account cap whose watermark read fails must not
+        cost the user the draft the old ordering evicted before that read.
+        """
+        from rootcoz import main as main_mod
+
+        headers = await self._admin("chat-insert-fail", github_token="ghp_row_token")
+        drafts = [
+            await self._propose_only(test_client, "github", headers)
+            for _ in range(main_mod._ISSUE_DRAFTS_PER_USER)
+        ]
+        with (
+            patch(
+                "rootcoz.main._chat_last_message_id",
+                side_effect=RuntimeError("storage is down"),
+            ),
+            _with_github_issue_config(),
+            pytest.raises(RuntimeError),
+        ):
+            test_client.post(
+                "/api/chat-issue/propose",
+                json={
+                    **self._CHAT,
+                    "target": "github",
+                    "conversation": self._ADMIN_CHAT,
+                },
+                headers=headers,
+            )
+        live = {
+            draft_id
+            for draft_id, draft in main_mod._chat_issue_drafts.items()
+            if draft["username"] == "chat-insert-fail"
+        }
+        assert live == {draft["confirmation_id"] for draft in drafts}
+
+    @pytest.mark.asyncio
+    async def test_a_released_draft_cannot_exceed_the_cap(self, test_client):
+        """The claim freed a slot and a new proposal took it: the caps win."""
+        from rootcoz import main as main_mod
+
+        headers = await self._admin("chat-release", github_token="ghp_row_token")
+        drafts = [
+            await self._propose_only(test_client, "github", headers)
+            for _ in range(main_mod._ISSUE_DRAFTS_PER_USER)
+        ]
+        claimed = main_mod._chat_issue_drafts.pop(drafts[0]["confirmation_id"])
+        await self._propose_only(test_client, "github", headers)
+        main_mod._release_issue_draft(drafts[0]["confirmation_id"], claimed)
+        live = [
+            draft
+            for draft in main_mod._chat_issue_drafts.values()
+            if draft["username"] == "chat-release"
+        ]
+        assert len(live) == main_mod._ISSUE_DRAFTS_PER_USER
+        assert drafts[0]["confirmation_id"] not in main_mod._chat_issue_drafts
+
+    @pytest.mark.asyncio
+    async def test_parallel_proposals_cannot_exceed_the_per_account_cap(
+        self, test_client
+    ):
+        """The check and the insert are one step, so N proposals keep five drafts.
+
+        Every proposal is held inside the watermark read together: the caps used
+        to be checked before that read and the insert after it, so all of them
+        passed and all of them inserted.
+        """
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        from rootcoz import main as main_mod
+
+        headers = await self._admin("chat-propose-race", github_token="ghp_row_token")
+        start = threading.Barrier(8, timeout=5)
+
+        async def _slow_watermark(_conversation: str, _username: str) -> int:
+            await asyncio.sleep(0.2)
+            return 0
+
+        def _propose() -> int:
+            start.wait()
+            return test_client.post(
+                "/api/chat-issue/propose",
+                json={
+                    **self._CHAT,
+                    "target": "github",
+                    "conversation": self._ADMIN_CHAT,
+                },
+                headers=headers,
+            ).status_code
+
+        with (
+            patch("rootcoz.main._chat_last_message_id", new=_slow_watermark),
+            _with_github_issue_config(),
+            ThreadPoolExecutor(max_workers=8) as pool,
+        ):
+            statuses = [
+                future.result(timeout=30)
+                for future in [pool.submit(_propose) for _ in range(8)]
+            ]
+
+        assert statuses == [201] * 8, statuses
+        live = [
+            draft
+            for draft in main_mod._chat_issue_drafts.values()
+            if draft["username"] == "chat-propose-race"
+        ]
+        assert len(live) == main_mod._ISSUE_DRAFTS_PER_USER
+
+    @pytest.mark.asyncio
+    async def test_parallel_proposals_cannot_exceed_the_global_cap(
+        self, test_client, monkeypatch
+    ):
+        """A full store refuses the parallel proposals instead of growing."""
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        from rootcoz import main as main_mod
+
+        monkeypatch.setattr(main_mod, "_ISSUE_DRAFTS_MAX", 2)
+        headers = await self._admin("chat-global-race", github_token="ghp_row_token")
+        start = threading.Barrier(6, timeout=5)
+
+        async def _slow_watermark(_conversation: str, _username: str) -> int:
+            await asyncio.sleep(0.2)
+            return 0
+
+        def _propose() -> int:
+            start.wait()
+            return test_client.post(
+                "/api/chat-issue/propose",
+                json={
+                    **self._CHAT,
+                    "target": "github",
+                    "conversation": self._ADMIN_CHAT,
+                },
+                headers=headers,
+            ).status_code
+
+        with (
+            patch("rootcoz.main._chat_last_message_id", new=_slow_watermark),
+            _with_github_issue_config(),
+            ThreadPoolExecutor(max_workers=6) as pool,
+        ):
+            statuses = [
+                future.result(timeout=30)
+                for future in [pool.submit(_propose) for _ in range(6)]
+            ]
+
+        assert sorted(statuses) == [201, 201, 503, 503, 503, 503], statuses
+        assert len(main_mod._chat_issue_drafts) == 2
+
+    @pytest.mark.asyncio
+    async def test_a_consent_read_error_leaves_the_draft_usable(self, test_client):
+        """A storage error is not a decision: no new approval is needed."""
+        from rootcoz import main as main_mod
+
+        headers = await self._admin("chat-read-error", github_token="ghp_row_token")
+        draft = await self._propose(test_client, "github", headers)
+        with (
+            patch(
+                "rootcoz.storage.get_chat_user_messages_since",
+                side_effect=RuntimeError("storage is down"),
+            ),
+            _with_github_issue_config(),
+            pytest.raises(RuntimeError),
+        ):
+            test_client.post("/api/chat-issue", json=draft, headers=headers)
+        # The claim was handed back with the error, not swallowed by it.
+        assert draft["confirmation_id"] in main_mod._chat_issue_drafts
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/22",
+                "number": 22,
+            }
+            with _with_github_issue_config():
+                retried = test_client.post(
+                    "/api/chat-issue", json=draft, headers=headers
+                )
+        assert retried.status_code == 201, retried.text
+
+    @pytest.mark.asyncio
+    async def test_a_confirmation_buried_under_later_replies_still_counts(
+        self, test_client
+    ):
+        """Later chat cannot hide the user's confirmation from the scan."""
+        from rootcoz import main as main_mod
+
+        headers = await self._admin("chat-buried", github_token="ghp_row_token")
+        draft = await self._propose(test_client, "github", headers)
+        for _ in range(main_mod._CONFIRM_SCAN_MESSAGES + 5):
+            await self._user_reply(headers, "no code in this one")
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/23",
+                "number": 23,
+            }
+            with _with_github_issue_config():
+                response = test_client.post(
+                    "/api/chat-issue", json=draft, headers=headers
+                )
+        assert response.status_code == 201, response.text
 
     @pytest.mark.asyncio
     async def test_an_upstream_outage_leaves_the_confirmation_usable(self, test_client):

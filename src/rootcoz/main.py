@@ -9199,6 +9199,7 @@ def _map_create_refusal(
     exc: Exception,
     *,
     subject: str = "bug report",
+    repo: str = "",
 ) -> HTTPException:
     """The refusal a failed tracker create answers with.
 
@@ -9209,7 +9210,9 @@ def _map_create_refusal(
     ``JiraOAuthMintError`` is caught by none of those branches — it subclasses
     ``RuntimeError`` — so dropping it would turn the likeliest chat-path
     failure into a 500. ``subject`` names what the caller submitted, which is
-    what the vocabulary of the refusal helpers turns on.
+    what the vocabulary of the refusal helpers turns on; ``repo`` is the
+    repository the call actually used, ``""`` when it is the deployment's own
+    ``TESTS_REPO_URL``.
     """
     github = target == "github"
     label = "GitHub" if github else "Jira"
@@ -9221,7 +9224,7 @@ def _map_create_refusal(
             detail=f"Invalid TESTS_REPO_URL: {exc}" if github else str(exc),
         )
     if github and isinstance(exc, (httpx.HTTPStatusError, httpx.RequestError)):
-        return _github_issue_refusal(exc, subject=subject)
+        return _github_issue_refusal(exc, subject=subject, repo=repo)
     if not github and isinstance(exc, httpx.HTTPStatusError):
         return _jira_bug_refusal(exc)
     if isinstance(exc, httpx.RequestError):
@@ -9567,9 +9570,26 @@ def _release_issue_draft(confirmation_id: str, draft: dict[str, Any]) -> None:
     something uses the draft up. An outage, an upstream refusal or a bad
     request leaves the user's confirmation intact instead of asking them to
     approve the same text again.
+
+    Bounded like a proposal: the claim freed a slot, and a proposal made since
+    then keeps it. Restoring on top of that one would hold more drafts than the
+    caps allow, so the caps win and this draft is dropped instead.
     """
-    if draft["expires_at"] > _time.monotonic():
-        _chat_issue_drafts.setdefault(confirmation_id, draft)
+    now = _time.monotonic()
+    if draft["expires_at"] <= now or confirmation_id in _chat_issue_drafts:
+        return
+    _prune_issue_drafts(now)
+    mine = [
+        held
+        for held in _chat_issue_drafts.values()
+        if held["username"] == draft["username"]
+    ]
+    if (
+        len(_chat_issue_drafts) >= _ISSUE_DRAFTS_MAX
+        or len(mine) >= _ISSUE_DRAFTS_PER_USER
+    ):
+        return
+    _chat_issue_drafts[confirmation_id] = draft
 
 
 def _prune_issue_drafts(now: float) -> None:
@@ -9657,10 +9677,9 @@ async def _chat_last_message_id(conversation: str, username: str) -> int:
     return await storage.get_chat_message_max_id(conversation, username)
 
 
-#: How many of the user's OWN messages a confirmation is looked for in after the
-#: draft's watermark, newest first. A confirmation always arrives within a few
-#: replies, and the fixed window keeps this one small query per create attempt
-#: however long the conversation grows.
+#: How many of the user's OWN messages one consent page reads, newest first.
+#: The page is the smallest read per create attempt; a confirmation older than
+#: it is looked for in the next page rather than read past.
 _CONFIRM_SCAN_MESSAGES = 50
 
 
@@ -9671,25 +9690,33 @@ async def _user_replied_with_code(
 
     Only the persisted chat row counts: the model writes assistant messages and
     tool calls, never user rows, so the model cannot confirm its own draft.
-    Bounded query: only the newest ``_CONFIRM_SCAN_MESSAGES`` user messages in
-    this chat newer than the watermark are read (the storage query filters on
-    ``id > after_id``, the role and the username), and the scan stops at the
-    first match.
+    Bounded query: only this user's user-role messages newer than the watermark
+    are read (the storage query filters on ``id > after_id``, the role and the
+    username), ``_CONFIRM_SCAN_MESSAGES`` at a time, and the scan stops at the
+    first page that holds the code or is shorter than the page size — so a
+    confirmation followed by any number of later replies still counts.
     """
     if not conversation:
         return False
-    messages = await storage.get_chat_user_messages_since(
-        conversation,
-        after_id=after_id,
-        limit=_CONFIRM_SCAN_MESSAGES,
-        username=username,
-    )
-    return any(
-        # Spelled out again: an empty username's query returns every user.
-        message["username"] == username
-        and _message_confirms_code(message["content"], code)
-        for message in messages
-    )
+    limit = _CONFIRM_SCAN_MESSAGES
+    while True:
+        messages = await storage.get_chat_user_messages_since(
+            conversation,
+            after_id=after_id,
+            limit=limit,
+            username=username,
+        )
+        if any(
+            # Spelled out again: an empty username's query returns every user.
+            message["username"] == username
+            and _message_confirms_code(message["content"], code)
+            for message in messages
+        ):
+            return True
+        # A short page means every message after the watermark was read.
+        if len(messages) < limit:
+            return False
+        limit *= 2
 
 
 async def _store_issue_draft(
@@ -9716,6 +9743,12 @@ async def _store_issue_draft(
     refuses the new draft instead of growing.
     """
     now = _time.monotonic()
+    # Read the watermark FIRST: everything that can fail or wait happens before
+    # the caps are applied, so a failed read evicts nothing — and the check,
+    # the eviction and the insert below are one block with no ``await`` between
+    # them, which the event loop cannot interleave. Two concurrent proposals
+    # therefore cannot both pass the checks (#416).
+    watermark = await _chat_last_message_id(conversation, username)
     _prune_issue_drafts(now)
     if len(_chat_issue_drafts) >= _ISSUE_DRAFTS_MAX:
         # Checked before evicting: a full store must not cost this user a draft.
@@ -9749,7 +9782,7 @@ async def _store_issue_draft(
         "destination": destination,
         "conversation": conversation,
         "code": code,
-        "watermark": await _chat_last_message_id(conversation, username),
+        "watermark": watermark,
         "expires_at": now + _ISSUE_DRAFT_TTL_SECONDS,
     }
     kind = "GitHub" if target == "github" else "Jira"
@@ -9799,10 +9832,10 @@ async def _consume_issue_draft(
 
     The claim is atomic: the draft is popped before the first ``await``, so of
     two concurrent creates with the same id exactly one wins it and the other
-    reads it as already used. A refusal hands the claim back
-    (:func:`_release_issue_draft`) — only a create that files something, or a
-    failure after it (:func:`create_chat_issue`), spends it. Returns the claimed
-    draft.
+    reads it as already used. A refusal OR a failure while checking the claim
+    hands it back (:func:`_release_issue_draft`) — only a create that files
+    something, or a failure after it (:func:`create_chat_issue`), spends it.
+    Returns the claimed draft.
     """
     propose = (
         "call propose_tracker_issue first, show the user the preview and file "
@@ -9856,8 +9889,11 @@ async def _consume_issue_draft(
                     "it for them."
                 ),
             )
-    except HTTPException:
-        # A refused attempt is not a use: the user's confirmation still works.
+    except BaseException:
+        # A refused or failed attempt is not a use: a code mismatch, an
+        # unanswered confirmation and a storage read that raised all hand the
+        # draft back, so it is still retryable and the user need not approve
+        # the same text again. Re-raised unchanged either way.
         _release_issue_draft(confirmation_id, draft)
         raise
     return draft
@@ -10011,6 +10047,10 @@ async def _create_issue_from_text(
                     "tests_repo_url, so there is nowhere to file the issue."
                 ),
             )
+    # The repository a 404 names: the one the caller picked, or "" when the
+    # deployment's TESTS_REPO_URL is the one in play (a bug report always is;
+    # a chat issue when neither the run nor the caller named a repo).
+    named_repo = _github_repo_slug(github_repo_url)
 
     try:
         if github:
@@ -10042,7 +10082,9 @@ async def _create_issue_from_text(
                 issue_type=jira_issue_type,
             )
     except _ISSUE_CREATE_REFUSALS as exc:
-        raise _map_create_refusal(target, exc, subject=subject) from exc
+        raise _map_create_refusal(
+            target, exc, subject=subject, repo=named_repo
+        ) from exc
 
     issue_url = _require_tracker_url(result, label)
     if github:
@@ -10213,8 +10255,10 @@ async def _chat_issue_resolved_destination(
     """
     if body.target == "github":
         repo_url = await _chat_issue_github_repo(request, body, settings)
-        repo_url = repo_url or _resolve_github_repo_url(settings)
-        slug = _github_repo_slug(repo_url)
+        # An empty ``repo_url`` stays empty: the create call falls back to
+        # ``TESTS_REPO_URL`` itself, which is how a 404 knows that setting is the
+        # repository in play and can name it.
+        slug = _github_repo_slug(repo_url or _resolve_github_repo_url(settings))
         if not slug:
             raise HTTPException(status_code=400, detail=_CHAT_NO_REPO_DETAIL)
         return (
@@ -20482,12 +20526,15 @@ def _upstream_status(exc: BaseException) -> int | None:
 
 
 def _github_issue_refusal(
-    exc: Exception, *, subject: str = "feedback"
+    exc: Exception, *, subject: str = "feedback", repo: str = ""
 ) -> HTTPException:
     """The refusal a failed GitHub issue creation answers with.
 
     ``subject`` names what the user submitted (the feedback form or a report's
-    bug report) so the same wording is not claimed for both.
+    bug report) so the same wording is not claimed for both. ``repo`` is the
+    ``owner/name`` the call actually used, or ``""`` when it used the
+    deployment's ``TESTS_REPO_URL`` — which is what a 404 names, so the user is
+    pointed at the repository that failed and not at an unrelated setting.
 
     401 means the token is bad; 403 means it is valid but either lacks the repo
     scope or is rate limited. A classic PAT authenticates fine without `repo`,
@@ -20551,11 +20598,19 @@ def _github_issue_refusal(
                     detail=f"GitHub token cannot access the {subject} repository. "
                     "Regenerate it in Profile Settings with access to that repository.",
                 )
+            # The repository that actually failed: chat files into a run's repo
+            # or one the caller named, and only an unnamed deployment default is
+            # TESTS_REPO_URL.
+            unseen = (
+                f"GitHub cannot see the repository {repo}"
+                if repo
+                else "GitHub cannot see the repository in TESTS_REPO_URL"
+            )
             return HTTPException(
                 status_code=403,
-                detail="GitHub cannot see the repository in TESTS_REPO_URL, so your "
-                f"{subject} was not filed. Check that the repository exists and that "
-                "your token can access it in Profile Settings.",
+                detail=f"{unseen}, so your {subject} was not filed. Check that "
+                "the repository exists and that your token can access it in "
+                "Profile Settings.",
             )
         if response.status_code >= 500:
             return HTTPException(
