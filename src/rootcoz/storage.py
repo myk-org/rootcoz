@@ -320,18 +320,45 @@ def _dump_result_json(result: dict[str, Any] | None) -> bytes | str | None:
 
 _ZSTD_FRAME_MAGIC = b"\x28\xb5\x2f\xfd"
 
-# What an operator can actually do about a row this build cannot decode.
+# What an operator can actually do about a row this build has no codec for.
 _RESULT_ENCODING_REMEDY = (
     "Run a rootcoz build that has the result_json codec to read it, "
     "or restore a pre-compression copy of the database."
 )
 
+# A frame this build's codec refuses cannot be decoded by upgrading: the bytes
+# are damaged, so only a good copy (or a later write) brings the row back.
+_DAMAGED_RESULT_REMEDY = (
+    "Nothing in this build can repair it: restore a pre-compression copy of the "
+    "database, or let the job's next write replace the unreadable payload."
+)
 
-class UnsupportedResultEncoding(Exception):
-    """Stored ``result_json`` uses an encoding this build cannot decode.
 
-    Not corruption: the payload is intact, it was written by a newer build
-    (result_json compression) and this build simply predates the codec.
+class UnreadableResultJson(Exception):
+    """Stored ``result_json`` content this build cannot decode.
+
+    Never fatal on a read path: readers use ``parse_result_json_lenient`` or
+    catch this and report the row. Two causes, kept apart because the operator
+    action differs: :class:`UnsupportedResultEncoding` (no codec here) and
+    :class:`DamagedResultEncoding` (our codec refused the bytes).
+    """
+
+
+class UnsupportedResultEncoding(UnreadableResultJson):
+    """Stored ``result_json`` uses an encoding this build has no codec for.
+
+    Not corruption: the payload is intact, a newer build (another result_json
+    codec) wrote it and this build simply predates that codec. Upgrading fixes
+    it, which is why it is not :class:`DamagedResultEncoding`.
+    """
+
+
+class DamagedResultEncoding(UnreadableResultJson):
+    """Stored ``result_json`` is a frame this build's codec will not inflate.
+
+    The bytes carry this build's zstd frame magic, so the codec is present and
+    a valid frame would decompress: refusing them means the stored bytes are
+    truncated or corrupt. Damage, not a missing encoding.
     """
 
 
@@ -346,9 +373,20 @@ def undecodable_result_count() -> int:
     return len(_undecodable_result_ids)
 
 
-def _note_undecodable_result(job_id: str) -> None:
-    """Warn once for a skipped row, naming it, and count it for health."""
+def _note_undecodable_result(job_id: str, *, damaged: bool = False) -> None:
+    """Warn once for a skipped row, naming it, and count it for health.
+
+    *damaged* says which of the two causes: a frame this build's own codec
+    refused (truncated or corrupt) is not a payload that is still intact.
+    """
     _undecodable_result_ids.add(job_id)
+    if damaged:
+        logger.warning(
+            f"Startup skipped job_id={job_id}: result_json is a damaged "
+            "(truncated or corrupt) compressed frame, which this build cannot "
+            "inflate. The row was not modified."
+        )
+        return
     logger.warning(
         f"Startup skipped job_id={job_id}: result_json uses an encoding this "
         "build cannot decode (a compressed frame or a newer encoding). The row "
@@ -357,25 +395,19 @@ def _note_undecodable_result(job_id: str) -> None:
 
 
 def _unsupported_result_encoding(raw: str | bytes) -> str | None:
-    """Describe why *raw* cannot be decoded here, or return None if it can.
+    """Describe why *raw* needs a codec this build lacks, or None if it does not.
 
     A ``result_json`` comes back as bytes holding a zstd frame when the row was
-    written by a build with result_json compression. Without this check the
-    frame reaches ``json.loads``, which raises a bare ``UnicodeDecodeError``
-    that says nothing about the cause. Single source of that message.
+    written by a build with result_json compression. Without this check non-frame
+    bytes reach ``json.loads``, which raises a bare ``UnicodeDecodeError`` that
+    says nothing about the cause. Single source of that message.
 
-    Only ever asked after ``zstd.decompress`` refused *raw*: a frame this build
-    can inflate is not unsupported, and :func:`parse_result_json` decodes it.
+    Only ever asked after ``zstd.decompress`` refused *raw* and *raw* is not a
+    frame of ours: our own magic that will not inflate is damage, which
+    :func:`parse_result_json` reports as ``DamagedResultEncoding`` instead.
     """
     if not isinstance(raw, bytes):
         return None
-    if raw.startswith(_ZSTD_FRAME_MAGIC):
-        return (
-            "result_json is a zstd frame "
-            f"({_ZSTD_FRAME_MAGIC.hex(' ')}): the row was written by a build with "
-            "result_json compression, which this build cannot decode. "
-            f"The row is intact. {_RESULT_ENCODING_REMEDY}"
-        )
     try:
         raw.decode("utf-8")
     except UnicodeDecodeError:
@@ -401,9 +433,12 @@ def parse_result_json(
         Parsed dict when valid, None when *raw* is empty/malformed.
 
     Raises:
-        UnsupportedResultEncoding: *raw* is framed by an encoding this build
-            cannot decode. Callers that must not die on it (startup scans) use
-            ``parse_result_json_lenient``.
+        DamagedResultEncoding: *raw* is a zstd frame this build's codec refuses
+            (truncated or corrupt).
+        UnsupportedResultEncoding: *raw* is encoded with something this build
+            has no codec for. Callers that must not die on either (startup
+            scans) use ``parse_result_json_lenient``, or catch
+            ``UnreadableResultJson``.
     """
     if not raw:
         return None
@@ -411,15 +446,25 @@ def parse_result_json(
     if isinstance(raw, (bytes, bytearray)):
         try:
             raw = zstd.decompress(raw)
-        except zstd.ZstdError:
-            # Not a frame this build can inflate: either a compressed row from a
-            # build whose codec differs, or bytes that were never a frame.
-            unsupported = _unsupported_result_encoding(bytes(raw))
+        except zstd.ZstdError as exc:
+            blob = bytes(raw)
+            if blob.startswith(_ZSTD_FRAME_MAGIC):
+                # Our magic, our codec: a valid zstd frame always decompresses,
+                # so a refusal is damage -- not an encoding to go and install.
+                raise DamagedResultEncoding(
+                    f"job_id={job_id or '?'}: result_json is a zstd frame "
+                    f"({_ZSTD_FRAME_MAGIC.hex(' ')}): the row was written by a "
+                    "build with result_json compression, but the frame is "
+                    f"truncated or corrupt ({exc}). {_DAMAGED_RESULT_REMEDY}"
+                ) from None
+            # Not a frame of ours: bytes from a codec this build lacks, or plain
+            # JSON text stored as bytes.
+            unsupported = _unsupported_result_encoding(blob)
             if unsupported is not None:
                 raise UnsupportedResultEncoding(
                     f"job_id={job_id or '?'}: {unsupported}"
                 ) from None
-            raw = bytes(raw).decode("utf-8")  # plain JSON bytes, no frame
+            raw = blob.decode("utf-8")  # plain JSON bytes, no frame
     try:
         data = json.loads(raw)
     except UnicodeDecodeError, json.JSONDecodeError, TypeError:
@@ -446,11 +491,11 @@ def parse_result_json_lenient(
     Only an undecodable *payload* degrades to None. Programming errors inside
     parsing still raise. Callers that must know a row was skipped (the
     failure-history backfill, the waiting-job rollback, the migrations) call
-    ``parse_result_json`` and handle ``UnsupportedResultEncoding`` themselves.
+    ``parse_result_json`` and handle ``UnreadableResultJson`` themselves.
     """
     try:
         return parse_result_json(raw, job_id=job_id)
-    except UnsupportedResultEncoding as exc:
+    except UnreadableResultJson as exc:
         logger.debug(f"Startup scan skipped a stored result: {exc}")
         return None
 
@@ -2313,10 +2358,13 @@ async def _migrate_restore_ai_classifications() -> None:
             continue
         try:
             result_data = parse_result_json(row["result_json"], job_id=job_id)
-        except UnsupportedResultEncoding:
+        except UnreadableResultJson as exc:
             # This job's classifications stay wrong. Count it for health and
-            # leave the migration unapplied so a build with the codec retries.
-            _note_undecodable_result(job_id)
+            # leave the migration unapplied so a build that can read it retries
+            # (a damaged row never becomes readable and keeps it deferred).
+            _note_undecodable_result(
+                job_id, damaged=isinstance(exc, DamagedResultEncoding)
+            )
             deferred.append(job_id)
             continue
         if not result_data:
@@ -2417,12 +2465,14 @@ async def _migrate_backfill_pattern_axis() -> None:
             continue
         try:
             result_data = parse_result_json(row[0], job_id=job_id)
-        except UnsupportedResultEncoding:
+        except UnreadableResultJson as exc:
             # Cannot restore this row's root cause here, so its classification
             # keeps a pattern label. Do not record the migration as done --
             # every step below is idempotent and only touches affected jobs, so
-            # a build with the codec re-runs it and finishes the job.
-            _note_undecodable_result(job_id)
+            # a build that can read it re-runs it and finishes the job.
+            _note_undecodable_result(
+                job_id, damaged=isinstance(exc, DamagedResultEncoding)
+            )
             deferred.append(job_id)
             continue
         if not result_data:
@@ -3044,12 +3094,27 @@ async def _row_exists(db: aiosqlite.Connection, job_id: str) -> bool:
 async def _read_stored_result(
     db: aiosqlite.Connection, job_id: str
 ) -> dict[str, Any] | None:
-    """Return the result currently stored for *job_id* (``None`` if absent)."""
+    """Return the result currently stored for *job_id* (``None`` if absent).
+
+    A payload this build cannot decode reads as "no previous payload", so a
+    damaged row can never block its own job's updates: the write that follows
+    replaces it. The one warning names the job, so the damage is still
+    reportable after the payload is gone.
+    """
     cursor = await db.execute(
         "SELECT result_json FROM results WHERE job_id = ?", (job_id,)
     )
     row = await cursor.fetchone()
-    return parse_result_json(row[0], job_id=job_id) if row and row[0] else None
+    if not row or not row[0]:
+        return None
+    try:
+        return parse_result_json(row[0], job_id=job_id)
+    except UnreadableResultJson as exc:
+        logger.warning(
+            f"job_id={job_id}: previous result_json is unreadable "
+            f"({type(exc).__name__}) and is replaced by this write"
+        )
+        return None
 
 
 async def save_result(
@@ -3535,7 +3600,17 @@ async def patch_result_json(
             ):
                 await db.execute("ROLLBACK")
                 return
-            result_data = parse_result_json(row[0], job_id=job_id)
+            try:
+                result_data = parse_result_json(row[0], job_id=job_id)
+            except UnreadableResultJson as exc:
+                # A patch is applied to the stored payload; with none readable
+                # the patch starts from an empty result instead of failing, and
+                # its keys become the new payload. Warned once, naming the job.
+                logger.warning(
+                    f"job_id={job_id}: previous result_json is unreadable "
+                    f"({type(exc).__name__}) and is replaced by this patch"
+                )
+                result_data = {}
             if result_data is None:
                 await db.execute("ROLLBACK")
                 return
@@ -4568,18 +4643,21 @@ async def backfill_failure_history() -> None:
 
     logger.info(f"Backfilling failure_history from {len(rows)} missing results")
     backfilled = 0
-    compressed: list[str] = []
+    damaged: list[str] = []
     undecodable: list[str] = []
     malformed: list[str] = []
     for job_id, result_json_str, created_at in rows:
         try:
             result_data = parse_result_json(result_json_str, job_id=job_id)
-        except UnsupportedResultEncoding:
-            # Not corruption, and not a reason to have no service: this build
-            # predates the codec that wrote the row. Row is left untouched.
-            _note_undecodable_result(job_id)
-            if result_json_str.startswith(_ZSTD_FRAME_MAGIC):
-                compressed.append(job_id)
+        except UnreadableResultJson as exc:
+            # Not a reason to have no service: one row is unreadable here, the
+            # row itself is left untouched. The type says which of the two
+            # causes, so the aggregate warning can name the right one.
+            _note_undecodable_result(
+                job_id, damaged=isinstance(exc, DamagedResultEncoding)
+            )
+            if isinstance(exc, DamagedResultEncoding):
+                damaged.append(job_id)
             else:
                 undecodable.append(job_id)
             continue
@@ -4597,7 +4675,7 @@ async def backfill_failure_history() -> None:
         )
         backfilled += 1
 
-    _warn_unreadable_results(compressed, undecodable, malformed)
+    _warn_unreadable_results(damaged, undecodable, malformed)
     logger.info(f"Backfill complete: processed {backfilled}/{len(rows)} results")
 
 
@@ -4609,26 +4687,28 @@ def _sample_job_ids(job_ids: list[str], limit: int = 5) -> str:
 
 
 def _warn_unreadable_results(
-    compressed: list[str], undecodable: list[str], malformed: list[str]
+    damaged: list[str], undecodable: list[str], malformed: list[str]
 ) -> None:
     """One aggregated warning per reason for rows the backfill had to skip.
 
-    *compressed* holds the rows whose payload is a zstd frame — the diagnosis
-    is certain there. *undecodable* holds the rest, where the only fact known
-    is that this build cannot decode the bytes.
+    *damaged* holds rows stored as a zstd frame this build's own codec refused:
+    the diagnosis is certain there (truncated or corrupt). *undecodable* holds
+    the rest, where the only fact known is that this build has no codec for the
+    bytes.
     """
-    if compressed:
+    if damaged:
         logger.warning(
-            f"Backfill skipped {len(compressed)} result(s) whose result_json was "
-            "written by a build with result_json compression, which this build "
-            f"cannot decode. Those rows are intact and untouched. "
-            f"{_RESULT_ENCODING_REMEDY} Job ids: {_sample_job_ids(compressed)}"
+            f"Backfill skipped {len(damaged)} result(s) whose result_json was "
+            "written by a build with result_json compression, but is truncated or "
+            "corrupt, so this build cannot inflate its frame. Those rows were "
+            f"left untouched. {_DAMAGED_RESULT_REMEDY} "
+            f"Job ids: {_sample_job_ids(damaged)}"
         )
     if undecodable:
         logger.warning(
             f"Backfill skipped {len(undecodable)} result(s) whose result_json "
-            "uses an encoding this build cannot decode -- a compressed frame or a "
-            f"newer encoding. Those rows are intact and untouched. "
+            "uses an encoding this build cannot decode -- a newer codec than this "
+            f"build has. Those rows are intact and untouched. "
             f"{_RESULT_ENCODING_REMEDY} Job ids: {_sample_job_ids(undecodable)}"
         )
     if malformed:
@@ -6464,11 +6544,13 @@ async def mark_stale_results_failed() -> tuple[
                     result_data = parse_result_json(
                         row["result_json"], job_id=row["job_id"]
                     )
-                except UnsupportedResultEncoding:
+                except UnreadableResultJson as exc:
                     # Nothing proves this job is unrecoverable: leave the row
-                    # alone (still 'waiting', payload intact) so a build with
-                    # the codec resumes it after rolling forward.
-                    _note_undecodable_result(row["job_id"])
+                    # alone (still 'waiting', payload intact) so a build that
+                    # can read it resumes it after rolling forward.
+                    _note_undecodable_result(
+                        row["job_id"], damaged=isinstance(exc, DamagedResultEncoding)
+                    )
                     continue
                 stored_params = (
                     result_data.get("request_params") if result_data else None

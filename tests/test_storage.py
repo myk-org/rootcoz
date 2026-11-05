@@ -2978,9 +2978,10 @@ class TestJiraUrlPerMethodSplitMigration:
                 assert await storage.get_server_setting(key) is None
 
 
-# A zstd frame header, as written into result_json by a build with compression.
-# 0xB5 in position 1 is the byte that used to blow up json.loads in a downgrade.
-_ZSTD_FRAME = b"\x28\xb5\x2f\xfd" + b"\x00\x01\x02\x03rest-of-frame"
+# A zstd frame header followed by bytes that never inflate: damage, the state a
+# truncated or corrupt stored row is in. 0xB5 in position 1 is the byte that used
+# to blow up json.loads in a downgrade.
+_DAMAGED_FRAME = b"\x28\xb5\x2f\xfd" + b"\x00\x01\x02\x03rest-of-frame"
 
 
 @pytest.fixture
@@ -3101,14 +3102,17 @@ class TestUnreadableResultJson:
     """A result_json this build cannot decode must not abort startup."""
 
     def test_frame_raises_actionable_error(self) -> None:
-        """The error names compression and tells the operator what to do."""
-        with pytest.raises(storage.UnsupportedResultEncoding) as excinfo:
-            storage.parse_result_json(_ZSTD_FRAME, job_id="frame-1")
+        """A frame our own codec refuses is damage, and says so."""
+        with pytest.raises(storage.DamagedResultEncoding) as excinfo:
+            storage.parse_result_json(_DAMAGED_FRAME, job_id="frame-1")
         message = str(excinfo.value)
         assert "frame-1" in message
         assert "zstd frame" in message
         assert "result_json compression" in message
+        assert "truncated or corrupt" in message
         assert "restore a pre-compression copy of the database" in message
+        # Damage is not an encoding this build lacks: those get their own error.
+        assert not isinstance(excinfo.value, storage.UnsupportedResultEncoding)
 
     def test_non_utf8_bytes_also_raise(self) -> None:
         """Bytes that are neither text nor a frame are an encoding problem too."""
@@ -3125,22 +3129,29 @@ class TestUnreadableResultJson:
         self, temp_db_path: Path, storage_logs: Any
     ) -> None:
         """init_db completes, counts the row, names the cause, leaves it alone."""
+        storage._undecodable_result_ids.clear()
         with patch.object(storage, "DB_PATH", temp_db_path):
             await storage.init_db()
-            await _insert_completed_result(temp_db_path, "frame-1", _ZSTD_FRAME)
+            await _insert_completed_result(temp_db_path, "frame-1", _DAMAGED_FRAME)
 
             await storage.init_db()  # must not raise
 
-            assert await _raw_result_json(temp_db_path, "frame-1") == _ZSTD_FRAME
+            assert await _raw_result_json(temp_db_path, "frame-1") == _DAMAGED_FRAME
             assert await _failure_history_job_ids(temp_db_path) == set()
             # Reads degrade to an empty result instead of failing.
             detail = await storage.get_result("frame-1")
             assert detail is not None
             assert detail["result"] is None
+            # Degraded data is counted for /api/health, which stays 200.
+            assert storage.undecodable_result_count() == 1
 
         assert "Backfill skipped 1 result(s)" in storage_logs.text
         assert "result_json compression" in storage_logs.text
         assert "restore a pre-compression copy of the database" in storage_logs.text
+        # A frame our own codec refuses is reported as damage, not as a missing
+        # encoding: the row is not intact and upgrading rootcoz will not fix it.
+        assert "truncated or corrupt" in storage_logs.text
+        assert "The row is intact" not in storage_logs.text
 
     async def test_backfill_processes_good_rows_and_counts_bad_ones(
         self, temp_db_path: Path, storage_logs: Any
@@ -3150,7 +3161,7 @@ class TestUnreadableResultJson:
             await storage.init_db()
             for index in range(2):
                 await _insert_completed_result(
-                    temp_db_path, f"frame-{index}", _ZSTD_FRAME
+                    temp_db_path, f"frame-{index}", _DAMAGED_FRAME
                 )
             for index in range(3):
                 await _insert_completed_result(
@@ -3168,7 +3179,7 @@ class TestUnreadableResultJson:
             for index in range(2):
                 assert (
                     await _raw_result_json(temp_db_path, f"frame-{index}")
-                    == _ZSTD_FRAME
+                    == _DAMAGED_FRAME
                 )
                 detail = await storage.get_result(f"frame-{index}")
                 assert detail is not None
@@ -3182,7 +3193,7 @@ class TestUnreadableResultJson:
         """Corruption keeps its own counter and message."""
         with patch.object(storage, "DB_PATH", temp_db_path):
             await storage.init_db()
-            await _insert_completed_result(temp_db_path, "frame-1", _ZSTD_FRAME)
+            await _insert_completed_result(temp_db_path, "frame-1", _DAMAGED_FRAME)
             await _insert_completed_result(temp_db_path, "corrupt-1", b"not json")
 
             await storage.backfill_failure_history()
@@ -3223,7 +3234,7 @@ class TestUnreadableResultJson:
                 await db.execute(
                     "INSERT INTO results (job_id, build_url, status, result_json) "
                     "VALUES (?, ?, 'waiting', ?)",
-                    ("waiting-frame", "http://j/1", _ZSTD_FRAME),
+                    ("waiting-frame", "http://j/1", _DAMAGED_FRAME),
                 )
                 await db.commit()
 
@@ -3242,7 +3253,7 @@ class TestUnreadableResultJson:
             assert row[0] == "waiting"
             assert row[1] == ""
             assert row[2] is None
-            assert row[3] == _ZSTD_FRAME
+            assert row[3] == _DAMAGED_FRAME
 
         assert "Startup skipped job_id=waiting-frame" in storage_logs.text
         assert "Marking unrecoverable waiting job waiting-frame" not in (
@@ -3276,7 +3287,7 @@ class TestUnreadableResultJson:
             await storage.init_db()
             for index in range(2):
                 await _insert_completed_result(
-                    temp_db_path, f"frame-{index}", _ZSTD_FRAME
+                    temp_db_path, f"frame-{index}", _DAMAGED_FRAME
                 )
 
             await storage.backfill_failure_history()
@@ -3307,7 +3318,7 @@ class TestUnreadableResultJson:
                     "datetime('now'))"
                 )
                 await db.commit()
-            await _insert_completed_result(temp_db_path, "frame-1", _ZSTD_FRAME)
+            await _insert_completed_result(temp_db_path, "frame-1", _DAMAGED_FRAME)
 
             await storage._migrate_backfill_pattern_axis()
 
@@ -3349,7 +3360,7 @@ class TestUnreadableResultJson:
                     "VALUES ('t', 'j', 'CODE ISSUE', 'user', 'frame-1')"
                 )
                 await db.commit()
-            await _insert_completed_result(temp_db_path, "frame-1", _ZSTD_FRAME)
+            await _insert_completed_result(temp_db_path, "frame-1", _DAMAGED_FRAME)
 
             await storage._migrate_restore_ai_classifications()
 
@@ -3380,7 +3391,7 @@ class TestUnreadableResultJson:
                     temp_db_path, job_id, _one_failure_result(job_id)
                 )
                 await _seed_mirrored_override(temp_db_path, job_id)
-            await _insert_completed_result(temp_db_path, "frame-1", _ZSTD_FRAME)
+            await _insert_completed_result(temp_db_path, "frame-1", _DAMAGED_FRAME)
             await _seed_mirrored_override(temp_db_path, "frame-1")
 
             # Run 1: the readable jobs are restored, the frame stays deferred.

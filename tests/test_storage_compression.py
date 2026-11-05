@@ -7,12 +7,14 @@ site that used to read the payload with JSON functions — which cannot read a f
 
 import asyncio
 import json
+import logging
 import re
 import sqlite3
 import threading
 import time
 from compression import zstd
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import pytest
@@ -119,6 +121,28 @@ async def _insert_legacy(job_id: str, payload: dict) -> str:
         )
         await db.commit()
     return text
+
+
+async def _insert_damaged(job_id: str) -> None:
+    """Insert a row whose stored frame is truncated: unreadable, not absent."""
+    frame = zstd.compress(json.dumps(_payload(failure_count=20)).encode())
+    async with storage._connect_db() as db:
+        await db.execute(
+            "INSERT INTO results (job_id, status, result_json) VALUES (?, ?, ?)",
+            (job_id, "running", frame[: len(frame) // 2]),
+        )
+        await db.commit()
+
+
+@pytest.fixture
+def storage_logs(caplog: pytest.LogCaptureFixture) -> Any:
+    """Attach caplog to the storage logger (simple_logger sets propagate=False)."""
+    storage.logger.setLevel(logging.DEBUG)
+    storage.logger.addHandler(caplog.handler)
+    try:
+        yield caplog
+    finally:
+        storage.logger.removeHandler(caplog.handler)
 
 
 # --- the writer -------------------------------------------------------------
@@ -267,7 +291,11 @@ async def test_legacy_text_row_reads_and_patch_upgrades_it(_storage) -> None:
 
 
 async def test_unreadable_frames_degrade_to_none(_storage) -> None:
-    """A truncated frame and a frame of non-UTF-8 bytes are a read miss, not an error."""
+    """A truncated frame and a frame of non-UTF-8 bytes are a read miss, not an error.
+
+    ``parse_result_json`` names the cause with a typed error; every read path
+    goes through the lenient wrapper, so nothing raises at the caller.
+    """
     frame = zstd.compress(json.dumps(_payload(failure_count=20)).encode())
     bad_values = (
         frame[: len(frame) // 2],  # truncated frame
@@ -275,7 +303,17 @@ async def test_unreadable_frames_degrade_to_none(_storage) -> None:
         b"not a frame",
     )
     for bad in bad_values:
-        assert storage.parse_result_json(bad, job_id="job-bad") is None
+        assert storage.parse_result_json_lenient(bad, job_id="job-bad") is None
+    # Our own magic that will not inflate is damage...
+    with pytest.raises(storage.DamagedResultEncoding, match="truncated or corrupt"):
+        storage.parse_result_json(bad_values[0], job_id="job-bad")
+    # ...not the missing codec a newer encoding gets, so the two never collapse.
+    with pytest.raises(storage.UnsupportedResultEncoding, match="not UTF-8 text"):
+        storage.parse_result_json(b"\xff\xfe\x00not text", job_id="job-bad")
+    # Bytes that are not a frame keep the codec's degrade-to-None: inflated to
+    # non-UTF-8, or text that is not JSON.
+    for not_a_frame in (bad_values[1], bad_values[2]):
+        assert storage.parse_result_json(not_a_frame, job_id="job-bad") is None
 
     async with storage._connect_db() as db:
         await db.execute(
@@ -288,9 +326,49 @@ async def test_unreadable_frames_degrade_to_none(_storage) -> None:
     assert (await storage.get_result("job-bad"))["result"] is None
     assert (await _stored(_storage, "job-bad"))["result_json"] == b"not a frame"
 
-    # And no writer may overwrite a row it cannot read.
+    # And a payload that decodes to nothing is still not overwritten by a patch
+    # (that is the malformed-JSON path, which may be a bug rather than damage).
     await storage.patch_result_json("job-bad", lambda data: data.update({"x": 1}))
     assert (await _stored(_storage, "job-bad"))["result_json"] == b"not a frame"
+
+
+async def test_writes_replace_a_damaged_row(_storage, storage_logs) -> None:
+    """A damaged frame never blocks its own job's writes.
+
+    Each writer reads the stored payload to merge into it. Unreadable reads as
+    "no previous payload": the new payload lands, and one warning per write names
+    the job so the damage stays reportable after the bytes are gone.
+    """
+    for job_id in ("damaged-save", "damaged-status", "damaged-patch"):
+        await _insert_damaged(job_id)
+
+    payload = _payload(failure_count=20)
+    await storage.save_result("damaged-save", "http://ci", "completed", payload)
+    saved = storage.parse_result_json(
+        (await _stored(_storage, "damaged-save"))["result_json"]
+    )
+    assert saved == payload, "save_result must store the new payload, not nothing"
+
+    await storage.update_status("damaged-status", "completed", payload)
+    assert (await storage.get_result("damaged-status"))["result"]["summary"] == (
+        payload["summary"]
+    )
+
+    await storage.patch_result_json(
+        "damaged-patch", lambda data: data.update({"summary": "patched"})
+    )
+    patched = await storage.get_result("damaged-patch")
+    assert patched["result"]["summary"] == "patched", "the patch was discarded"
+
+    for job_id in ("damaged-save", "damaged-status", "damaged-patch"):
+        assert [
+            record.getMessage()
+            for record in storage_logs.records
+            if record.levelname == "WARNING" and job_id in record.getMessage()
+        ], f"no warning named {job_id}"
+    assert "unreadable" in storage_logs.text
+    assert "is replaced by this write" in storage_logs.text
+    assert "is replaced by this patch" in storage_logs.text
 
 
 # --- the backfill -----------------------------------------------------------
