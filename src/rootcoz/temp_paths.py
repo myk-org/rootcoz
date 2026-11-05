@@ -125,11 +125,16 @@ def delete_tree(path: Path) -> tuple[int, int]:
     planted link cannot turn a workspace delete into its target's delete. Every
     directory is opened ``O_NOFOLLOW`` and its children are unlinked **relative to
     that descriptor**, so replacing a directory with a symlink mid-walk cannot
-    redirect the deletes outside the tree. An unreadable entry is recorded once per
-    distinct errno and skipped; the rest of the tree is still deleted, where
-    ``shutil.rmtree`` aborts at the first error and silently leaks everything after
-    it. Only what was really removed is counted, so a failed entry is never
-    reported as reclaimed.
+    redirect the deletes outside the tree. An unreadable entry is counted and
+    skipped; the rest of the tree is still deleted, where ``shutil.rmtree`` aborts
+    at the first error and silently leaks everything after it. Only what was really
+    removed is counted, so a failed entry is never reported as reclaimed.
+
+    Failures are aggregated into **one** warning per walk, carrying every errno with
+    its count and one example path. One line per errno is not enough: simple_logger's
+    ``DuplicateFilter`` keys on ``(module, level, msg)`` — the *format string* — so a
+    second errno logged through the same template was dropped and only surfaced as
+    ``repeated N times`` on the next record (#402).
 
     No second pass and no ``statvfs``: the size is accumulated by the walk itself,
     so it is attributable to this tree even on a shared volume.
@@ -139,20 +144,15 @@ def delete_tree(path: Path) -> tuple[int, int]:
         return (0, 0)
     size = 0
     entries = 0
-    reported: set[int] = set()
+    # errno -> (count, strerror, one example path)
+    failures: dict[int, tuple[int, str, str]] = {}
 
     def record(p: str, exc: OSError) -> None:
         code = exc.errno or 0
-        if code in reported:
-            return
-        reported.add(code)
-        logger.warning(
-            "cleanup: %s error=%s errno=%s (%s)",
-            p,
-            type(exc).__name__,
-            code,
-            exc.strerror,
-        )
+        # The OS reason, not ``exc.strerror``: the raiser may have replaced it.
+        reason = os.strerror(code) if code else exc.strerror or type(exc).__name__
+        count, first_reason, example = failures.get(code, (0, reason, p))
+        failures[code] = (count + 1, first_reason, example)
 
     def remove(name: str, parent_fd: int | None, display: str) -> None:
         """Remove ``name`` from ``parent_fd`` (``None``: the absolute root path)."""
@@ -202,6 +202,15 @@ def delete_tree(path: Path) -> tuple[int, int]:
         entries += 1
 
     remove(top, None, top)
+    if failures:
+        # Formatted inline, not %-args: the content must be in ``record.msg`` or a
+        # template-keyed dedupe filter swallows the whole line.
+        detail = ", ".join(
+            f"errno={code} {reason}: {count} e.g. {example}"
+            for code, (count, reason, example) in sorted(failures.items())
+        )
+        total = sum(count for count, _, _ in failures.values())
+        logger.warning(f"cleanup: {total} entries not deleted ({detail})")
     return (size, entries)
 
 

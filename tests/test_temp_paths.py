@@ -498,6 +498,86 @@ def test_a_scan_error_does_not_abandon_the_rest_of_the_tree(
     assert not root.exists()
 
 
+def _fail_unlink_of(names: set[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    real_unlink = os.unlink
+
+    def unlink(name, *args, **kwargs):
+        if os.path.basename(os.fspath(name)) in names:
+            raise PermissionError(errno.EACCES, "denied", str(name))
+        return real_unlink(name, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", unlink)
+
+
+def _cleanup_warnings(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage()
+        for record in caplog.records
+        if record.levelno >= logging.WARNING
+    ]
+
+
+def test_two_distinct_errnos_are_one_aggregated_warning(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """EACCES then ENOTEMPTY in one walk: one line naming both, not one each.
+
+    A line per errno goes through one format string, so simple_logger's
+    ``DuplicateFilter`` (keyed on the message template) drops every errno after the
+    first — the second then only shows up as ``repeated N times`` elsewhere (#402).
+    """
+    root = tmp_path / "tree"
+    (root / "good").mkdir(parents=True)
+    (root / "good" / "file.txt").write_text("x" * 100)
+    (root / "stuck.txt").write_text("y" * 7)
+    _fail_unlink_of({"stuck.txt"}, monkeypatch)
+
+    nbytes, entries = delete_tree(root)
+    monkeypatch.undo()
+
+    # Accounting is unchanged: only what is really gone is counted.
+    assert (nbytes, entries) == (100, 2)
+    warnings = _cleanup_warnings(caplog)
+    assert len(warnings) == 1, warnings
+    line = warnings[0]
+    assert line.startswith("cleanup: 2 entries not deleted ("), line
+    assert f"errno={errno.EACCES} {os.strerror(errno.EACCES)}: 1" in line, line
+    assert f"errno={errno.ENOTEMPTY} {os.strerror(errno.ENOTEMPTY)}: 1" in line, line
+    assert "stuck.txt" in line, line
+
+
+def test_repeated_errnos_are_counted_not_logged_per_entry(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    root = tmp_path / "tree"
+    root.mkdir()
+    (root / "stuck-a.txt").write_text("a")
+    (root / "stuck-b.txt").write_text("b")
+    _fail_unlink_of({"stuck-a.txt", "stuck-b.txt"}, monkeypatch)
+
+    nbytes, entries = delete_tree(root)
+    monkeypatch.undo()
+
+    assert (nbytes, entries) == (0, 0)
+    warnings = _cleanup_warnings(caplog)
+    assert len(warnings) == 1, warnings
+    assert warnings[0].startswith("cleanup: 3 entries not deleted ("), warnings[0]
+    assert f"errno={errno.EACCES} {os.strerror(errno.EACCES)}: 2" in warnings[0], (
+        warnings[0]
+    )
+    assert f"errno={errno.ENOTEMPTY} {os.strerror(errno.ENOTEMPTY)}: 1" in warnings[0]
+    assert caplog.text.count("entries not deleted") == 1
+
+
+def test_a_clean_walk_logs_nothing(tmp_path, caplog) -> None:
+    root = tmp_path / "tree"
+    (root / "dir").mkdir(parents=True)
+    (root / "dir" / "file.txt").write_text("x" * 10)
+
+    assert delete_tree(root) == (10, 3)  # dirs report 0 bytes on this fs
+    assert caplog.records == []
+
+
 def test_delete_tree_on_a_missing_path_is_a_no_op(tmp_path) -> None:
     assert delete_tree(tmp_path / "never-existed") == (0, 0)
 
