@@ -19,6 +19,8 @@ import pytest
 
 from rootcoz import storage
 
+_ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"  # little-endian frame magic (RFC 8878)
+
 # --- fixtures ---------------------------------------------------------------
 
 
@@ -148,6 +150,74 @@ async def test_full_size_roundtrip_is_content_identical(_storage) -> None:
         failures[0]["analysis"]["analysis"]
         == payload["failures"][0]["analysis"]["analysis"]
     )
+
+
+async def test_save_does_not_block_the_event_loop(_storage, monkeypatch) -> None:
+    """Both result writers encode in a thread: the loop serves other work meanwhile."""
+    real_compress = zstd.compress
+    ticks = 0
+    ticks_per_encode: list[int] = []
+
+    def slow_compress(data: bytes, level: int = 0) -> bytes:
+        before = ticks
+        time.sleep(0.1)  # stands in for a report-sized encode
+        ticks_per_encode.append(ticks - before)
+        return real_compress(data, level)
+
+    monkeypatch.setattr(storage.zstd, "compress", slow_compress)
+    stop = False
+
+    async def ticker() -> None:
+        nonlocal ticks
+        while not stop:
+            ticks += 1
+            await asyncio.sleep(0)
+
+    task = asyncio.create_task(ticker())
+    await asyncio.sleep(0)
+    payload = _payload()
+    await storage.save_result("job-save-loop", "http://ci", "completed", payload)
+    await storage.update_status("job-save-loop", "completed", payload)
+    stop = True
+    await task
+
+    # An encode on the loop would let the ticker advance zero times while it ran.
+    assert len(ticks_per_encode) == 2, "both writers must encode exactly once"
+    assert min(ticks_per_encode) > 10, "a save blocked the event loop while encoding"
+    assert (await _stored(_storage, "job-save-loop"))["kind"] == "blob"
+
+
+async def test_save_encodes_the_payload_once(_storage, monkeypatch) -> None:
+    """One save compresses once and stores one frame, not a frame of a frame."""
+    calls = 0
+    real_compress = zstd.compress
+
+    def counting_compress(data: bytes, level: int = 0) -> bytes:
+        nonlocal calls
+        calls += 1
+        return real_compress(data, level)
+
+    monkeypatch.setattr(storage.zstd, "compress", counting_compress)
+    payload = _payload(failure_count=40)
+    await storage.save_result("job-once", "http://ci", "completed", payload)
+    assert calls == 1, "the save encoded a payload it then discarded"
+
+    async def stored_frame() -> bytes:
+        row = await _stored(_storage, "job-once")
+        assert row["kind"] == "blob"
+        return row["result_json"]
+
+    frame = await stored_frame()
+    # One hop to the JSON, and exactly one frame magic in the column.
+    assert frame.count(_ZSTD_MAGIC) == 1
+    assert json.loads(zstd.decompress(frame)) == payload
+    assert storage.parse_result_json(frame, job_id="job-once") == payload
+
+    # A re-save of the same row (read-modify-write) stays single-framed too.
+    await storage.save_result("job-once", "http://ci", "completed", payload)
+    again = await stored_frame()
+    assert again.count(_ZSTD_MAGIC) == 1
+    assert storage.parse_result_json(again, job_id="job-once") == payload
 
 
 async def test_size_gate_never_grows_a_row(_storage, monkeypatch) -> None:

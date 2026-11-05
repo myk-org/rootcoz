@@ -2913,7 +2913,7 @@ async def save_result(
     if jenkins_url is not None:
         build_url = jenkins_url
     logger.debug(f"Saving result for job_id: {job_id} (status: {status})")
-    result_json = _dump_result_json(result)
+    result_json: bytes | str | None = None
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         if result is not None:
@@ -2923,7 +2923,14 @@ async def save_result(
             if previous:
                 _preserve_reanalysis_forward_links(previous, result)
             await _sync_result_token_usage(db, job_id, result)
-            result_json = _dump_result_json(result)
+            # Encode once, off the event loop. It has to happen after the merge
+            # above, and serialising plus compressing a report-sized payload on
+            # the loop would stall every other request for its duration.
+            # shortcut: the write lock is held across the encode, which stays in
+            # the tens of ms for report-sized payloads; encode before the
+            # transaction with a compare-and-swap re-check if that ever reaches
+            # seconds.
+            result_json = await asyncio.to_thread(_dump_result_json, result)
         # Insert the row if it doesn't exist yet (preserves created_at / analysis_started_at).
         (
             job_name,
@@ -3075,7 +3082,13 @@ async def update_status(
                 if status != "completed":
                     result["progress_phase"] = status
             await _sync_result_token_usage(db, job_id, result)
-        result_json = _dump_result_json(result)
+        # Same off-loop encode as save_result: this payload is the whole report,
+        # and a status-only update has nothing to encode.
+        result_json = (
+            None
+            if result is None
+            else await asyncio.to_thread(_dump_result_json, result)
+        )
         set_parts, params = _build_status_update_clause(status, result_json, result)
         params.append(job_id)
         sql = f"UPDATE results SET {', '.join(set_parts)} WHERE job_id = ?"
