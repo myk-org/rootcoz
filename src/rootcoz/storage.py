@@ -373,25 +373,30 @@ def undecodable_result_count() -> int:
     return len(_undecodable_result_ids)
 
 
-def _note_undecodable_result(job_id: str, *, damaged: bool = False) -> None:
+def _note_unreadable_result(job_id: str, exc: UnreadableResultJson) -> bool:
     """Warn once for a skipped row, naming it, and count it for health.
 
-    *damaged* says which of the two causes: a frame this build's own codec
+    The one place that tells the two causes apart: a frame this build's own codec
     refused (truncated or corrupt) is not a payload that is still intact.
+
+    Returns:
+        ``True`` when *exc* is damage, so a scan reporting the causes apart does
+        not repeat the classification its callers must otherwise duplicate.
     """
     _undecodable_result_ids.add(job_id)
-    if damaged:
+    if isinstance(exc, DamagedResultEncoding):
         logger.warning(
             f"Startup skipped job_id={job_id}: result_json is a damaged "
             "(truncated or corrupt) compressed frame, which this build cannot "
             "inflate. The row was not modified."
         )
-        return
+        return True
     logger.warning(
         f"Startup skipped job_id={job_id}: result_json uses an encoding this "
         "build cannot decode (a compressed frame or a newer encoding). The row "
         "is intact and was not modified."
     )
+    return False
 
 
 def _unsupported_result_encoding(raw: str | bytes) -> str | None:
@@ -721,7 +726,13 @@ def _denorm_row_params(rows: Sequence[aiosqlite.Row]) -> list[dict[str, Any]]:
     """
     params: list[dict[str, Any]] = []
     for row in rows:
-        payload = parse_result_json(row["result_json"], job_id=row["job_id"])
+        try:
+            payload = parse_result_json(row["result_json"], job_id=row["job_id"])
+        except UnreadableResultJson as exc:
+            # A payload this build cannot decode must not abort the pass, and its
+            # columns must not be derived from it: the row stays pending.
+            _note_unreadable_result(row["job_id"], exc)
+            continue
         values = dict(zip(_DENORM_COLUMNS, _extract_denormalized_fields(payload)))
         present = _denorm_presence(payload)
         params.append(
@@ -2362,9 +2373,7 @@ async def _migrate_restore_ai_classifications() -> None:
             # This job's classifications stay wrong. Count it for health and
             # leave the migration unapplied so a build that can read it retries
             # (a damaged row never becomes readable and keeps it deferred).
-            _note_undecodable_result(
-                job_id, damaged=isinstance(exc, DamagedResultEncoding)
-            )
+            _note_unreadable_result(job_id, exc)
             deferred.append(job_id)
             continue
         if not result_data:
@@ -2470,9 +2479,7 @@ async def _migrate_backfill_pattern_axis() -> None:
             # keeps a pattern label. Do not record the migration as done --
             # every step below is idempotent and only touches affected jobs, so
             # a build that can read it re-runs it and finishes the job.
-            _note_undecodable_result(
-                job_id, damaged=isinstance(exc, DamagedResultEncoding)
-            )
+            _note_unreadable_result(job_id, exc)
             deferred.append(job_id)
             continue
         if not result_data:
@@ -3096,10 +3103,15 @@ async def _read_stored_result(
 ) -> dict[str, Any] | None:
     """Return the result currently stored for *job_id* (``None`` if absent).
 
-    A payload this build cannot decode reads as "no previous payload", so a
-    damaged row can never block its own job's updates: the write that follows
-    replaces it. The one warning names the job, so the damage is still
-    reportable after the payload is gone.
+    A damaged frame reads as "no previous payload", so a damaged row can never
+    block its own job's updates: the write that follows repairs it. The one
+    warning names the job, so the damage is still reportable after the payload is
+    gone.
+
+    Raises:
+        UnsupportedResultEncoding: the row holds an intact payload written by a
+            build with a result_json codec this one lacks. That is not damage to
+            repair but data to leave alone -- see :func:`_abandon_write`.
     """
     cursor = await db.execute(
         "SELECT result_json FROM results WHERE job_id = ?", (job_id,)
@@ -3109,12 +3121,30 @@ async def _read_stored_result(
         return None
     try:
         return parse_result_json(row[0], job_id=job_id)
-    except UnreadableResultJson as exc:
+    except DamagedResultEncoding as exc:
         logger.warning(
-            f"job_id={job_id}: previous result_json is unreadable "
+            f"job_id={job_id}: previous result_json is damaged "
             f"({type(exc).__name__}) and is replaced by this write"
         )
         return None
+
+
+async def _abandon_write(
+    db: aiosqlite.Connection, job_id: str, exc: UnsupportedResultEncoding
+) -> None:
+    """Roll back a write whose stored payload this build cannot decode.
+
+    An ``UnsupportedResultEncoding`` row is an intact report from a build with a
+    newer result_json codec: writing over it would destroy data that build can
+    still recover, so the writer leaves the row exactly as it found it and its
+    caller returns.
+    """
+    logger.warning(
+        f"job_id={job_id}: stored result_json uses an encoding this build cannot "
+        f"decode ({type(exc).__name__}), so nothing was written over it -- a "
+        "build with the result_json codec still has the payload."
+    )
+    await db.execute("ROLLBACK")
 
 
 async def save_result(
@@ -3133,6 +3163,9 @@ async def save_result(
         status: Current status of the analysis.
         result: Optional result data to store.
         jenkins_url: Deprecated alias for ``build_url``.
+
+    Nothing is written when the row already holds a payload this build cannot
+    decode but a newer one can (a rollback): see :func:`_abandon_write`.
     """
     if jenkins_url is not None:
         build_url = jenkins_url
@@ -3141,9 +3174,13 @@ async def save_result(
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         if result is not None:
-            # Merge the stored forward links inside this same transaction so a
-            # link appended after the caller read the job cannot be dropped.
-            previous = await _read_stored_result(db, job_id)
+            try:
+                # Merge the stored forward links inside this same transaction so a
+                # link appended after the caller read the job cannot be dropped.
+                previous = await _read_stored_result(db, job_id)
+            except UnsupportedResultEncoding as exc:
+                await _abandon_write(db, job_id, exc)
+                return
             if previous:
                 _preserve_reanalysis_forward_links(previous, result)
             await _sync_result_token_usage(db, job_id, result)
@@ -3241,12 +3278,19 @@ async def update_status(
         job_id: Unique identifier for the analysis job.
         status: New status for the analysis.
         result: Optional result data to store. When None, result_json is not modified.
+
+    As in :func:`save_result`, a stored payload a newer build can decode but this
+    one cannot is left untouched instead of being replaced.
     """
     logger.debug(f"Updating status for job_id: {job_id} (status: {status})")
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
         if result is not None:
-            previous = await _read_stored_result(db, job_id)
+            try:
+                previous = await _read_stored_result(db, job_id)
+            except UnsupportedResultEncoding as exc:
+                await _abandon_write(db, job_id, exc)
+                return
             if previous:
                 for key in ("progress_phase", "progress_log", "cloning_repos"):
                     if key in previous:
@@ -3573,6 +3617,9 @@ async def patch_result_json(
         ``require_job_id`` makes the patch conditional: when set and that job row no
         longer exists, the patch is skipped, so a link can never be created for an
         already-deleted result.
+
+    A damaged frame is replaced by the patched result; a payload a newer build can
+    decode but this one cannot is left untouched and the patch is skipped.
     """
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
@@ -3602,15 +3649,18 @@ async def patch_result_json(
                 return
             try:
                 result_data = parse_result_json(row[0], job_id=job_id)
-            except UnreadableResultJson as exc:
-                # A patch is applied to the stored payload; with none readable
-                # the patch starts from an empty result instead of failing, and
-                # its keys become the new payload. Warned once, naming the job.
+            except DamagedResultEncoding as exc:
+                # A patch is applied to the stored payload; with a damaged frame
+                # there is none readable, so the patch starts from an empty
+                # result instead of failing. Warned once, naming the job.
                 logger.warning(
-                    f"job_id={job_id}: previous result_json is unreadable "
+                    f"job_id={job_id}: previous result_json is damaged "
                     f"({type(exc).__name__}) and is replaced by this patch"
                 )
                 result_data = {}
+            except UnsupportedResultEncoding as exc:
+                await _abandon_write(db, job_id, exc)
+                return
             if result_data is None:
                 await db.execute("ROLLBACK")
                 return
@@ -4651,12 +4701,8 @@ async def backfill_failure_history() -> None:
             result_data = parse_result_json(result_json_str, job_id=job_id)
         except UnreadableResultJson as exc:
             # Not a reason to have no service: one row is unreadable here, the
-            # row itself is left untouched. The type says which of the two
-            # causes, so the aggregate warning can name the right one.
-            _note_undecodable_result(
-                job_id, damaged=isinstance(exc, DamagedResultEncoding)
-            )
-            if isinstance(exc, DamagedResultEncoding):
+            # row itself is left untouched.
+            if _note_unreadable_result(job_id, exc):
                 damaged.append(job_id)
             else:
                 undecodable.append(job_id)
@@ -6548,9 +6594,7 @@ async def mark_stale_results_failed() -> tuple[
                     # Nothing proves this job is unrecoverable: leave the row
                     # alone (still 'waiting', payload intact) so a build that
                     # can read it resumes it after rolling forward.
-                    _note_undecodable_result(
-                        row["job_id"], damaged=isinstance(exc, DamagedResultEncoding)
-                    )
+                    _note_unreadable_result(row["job_id"], exc)
                     continue
                 stored_params = (
                     result_data.get("request_params") if result_data else None

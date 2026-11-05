@@ -294,7 +294,7 @@ from rootcoz.storage import (
     list_results,
     list_results_for_dashboard,
     list_results_for_dashboard_filtered,
-    parse_result_json,
+    parse_result_json_lenient,
     patch_result_json,
     populate_failure_history,
     release_submitted_job_analyze_claim,
@@ -21024,8 +21024,10 @@ def _admin_row_value(value: Any) -> Any:
             f"<{len(value)}-byte frame, decoded payload over"
             f" {_ADMIN_PREVIEW_MAX_BYTES} bytes: not shown>"
         )
-    # Now known to fit the cap, so the shared parser stays bounded here.
-    decoded = parse_result_json(value)
+    # Now known to fit the cap, so the shared parser stays bounded here. The
+    # lenient wrapper keeps this read-only preview from failing the query, whatever
+    # a stored payload turns out to be.
+    decoded = parse_result_json_lenient(value)
     return decoded if decoded is not None else f"<{len(value)} undecodable frame>"
 
 

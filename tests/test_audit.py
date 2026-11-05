@@ -2795,6 +2795,10 @@ def test_admin_db_query_preview_bounds_a_crafted_frame() -> None:
         "job_name": "j"
     }
     assert main._admin_row_value(b"not a frame") == "<11 undecodable frame>"
+    # A frame our own codec refuses is a marker, never an exception: the preview is
+    # a read path, so a damaged stored row must not fail the admin query.
+    damaged = b"\x28\xb5\x2f\xfd" + b"\x00\x01\x02\x03rest-of-frame"
+    assert main._admin_row_value(damaged) == f"<{len(damaged)} undecodable frame>"
 
 
 def test_admin_db_query_rejection_is_audited_as_denied(

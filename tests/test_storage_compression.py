@@ -134,6 +134,19 @@ async def _insert_damaged(job_id: str) -> None:
         await db.commit()
 
 
+async def _insert_newer_encoding(job_id: str, blob: bytes) -> None:
+    """Insert a row as a build with a result_json codec this one lacks wrote it."""
+    async with storage._connect_db() as db:
+        await db.execute(
+            "INSERT INTO results (job_id, status, result_json, job_name,"
+            " build_number, submitted_by, summary, display_name, failure_ids,"
+            " denorm_version) VALUES (?, 'running', ?, 'newer-job', 7, 'dana',"
+            " 'newer summary', 'Newer Name', 'failure-x', ?)",
+            (job_id, blob, storage._RESULTS_DENORM_VERSION),
+        )
+        await db.commit()
+
+
 @pytest.fixture
 def storage_logs(caplog: pytest.LogCaptureFixture) -> Any:
     """Attach caplog to the storage logger (simple_logger sets propagate=False)."""
@@ -366,9 +379,72 @@ async def test_writes_replace_a_damaged_row(_storage, storage_logs) -> None:
             for record in storage_logs.records
             if record.levelname == "WARNING" and job_id in record.getMessage()
         ], f"no warning named {job_id}"
-    assert "unreadable" in storage_logs.text
+    assert "previous result_json is damaged" in storage_logs.text
     assert "is replaced by this write" in storage_logs.text
     assert "is replaced by this patch" in storage_logs.text
+
+
+async def test_older_build_never_overwrites_a_newer_builds_payload(
+    _storage, storage_logs
+) -> None:
+    """A rolled-back build must not write over a payload a newer build stored.
+
+    ``UnsupportedResultEncoding`` is an *intact* report: a build with a result_json
+    codec this one lacks wrote it. Every writer reads before it writes, so every
+    writer has to leave that row byte-identical -- a save, a status update and a
+    patch alike. Only a damaged frame is a row a write repairs.
+    """
+    blob = b"\xff\xfe\x00a payload from a newer build"
+    job_ids = ("newer-save", "newer-status", "newer-patch")
+    for job_id in job_ids:
+        await _insert_newer_encoding(job_id, blob)
+
+    payload = _payload(failure_count=20)
+    await storage.save_result("newer-save", "http://ci", "completed", payload)
+    await storage.update_status("newer-status", "completed", payload)
+    await storage.patch_result_json(
+        "newer-patch", lambda data: data.update({"summary": "patched"})
+    )
+
+    for job_id in job_ids:
+        row = await _stored(_storage, job_id)
+        assert row["result_json"] == blob, f"{job_id} wrote over a newer payload"
+        # Not even the columns derived from that payload: it stays preview-only.
+        assert (
+            row["job_name"],
+            row["summary"],
+            row["submitted_by"],
+            row["failure_ids"],
+            row["denorm_version"],
+        ) == (
+            "newer-job",
+            "newer summary",
+            "dana",
+            "failure-x",
+            storage._RESULTS_DENORM_VERSION,
+        )
+        assert any(
+            record.levelname == "WARNING" and job_id in record.getMessage()
+            for record in storage_logs.records
+        ), f"no warning named {job_id}"
+    # A status update is a write too, so it rolled back instead of half-applying.
+    assert (await storage.get_result("newer-status"))["status"] == "running"
+    assert "so nothing was written over it" in storage_logs.text
+
+    # The same bytes are what a build with the codec reads back, untouched.
+    async with storage._connect_db() as db:
+        await db.execute(
+            "UPDATE results SET result_json = ? WHERE job_id = 'newer-save'",
+            (json.dumps(payload),),
+        )
+        await db.commit()
+    await storage.save_result("newer-save", "http://ci", "completed", payload)
+    assert (
+        storage.parse_result_json(
+            (await _stored(_storage, "newer-save"))["result_json"]
+        )
+        == payload
+    )
 
 
 # --- the backfill -----------------------------------------------------------
@@ -597,6 +673,34 @@ async def test_denorm_sweep_repairs_a_row_an_old_build_rewrote(_storage) -> None
 
     # Converged: a further pass parses the row but no longer writes it.
     assert await storage.backfill_results_denorm() == 0
+
+
+async def test_denorm_sweep_survives_an_undecodable_row(_storage, storage_logs) -> None:
+    """One row this build cannot decode must not abort the derive pass.
+
+    The pending sets only admit inline TEXT, so a framed row is not selected today;
+    the guard is what keeps a damaged payload from taking the sweep (and startup)
+    down if a pending set ever admits one. The row itself is never rewritten, so
+    rolling forward still derives its columns.
+    """
+    await _insert_damaged("job-damaged-denorm")
+    # Not selected by the TEXT-only pending sets, and the pass still completes.
+    assert await storage.backfill_results_denorm() == 0
+
+    frame = zstd.compress(json.dumps(_payload(failure_count=2)).encode())
+    params = storage._denorm_row_params(
+        [
+            {"rid": 1, "job_id": "job-damaged", "result_json": frame[:10]},
+            {
+                "rid": 2,
+                "job_id": "job-good",
+                "result_json": json.dumps(_payload(failure_count=2)),
+            },
+        ]
+    )
+    assert [p["rid"] for p in params] == [2], "an undecodable row was derived"
+    assert "Startup skipped job_id=job-damaged" in storage_logs.text
+    assert storage.undecodable_result_count() == 1
 
 
 async def test_denorm_sweep_never_blanks_identity_a_partial_payload_omits(
