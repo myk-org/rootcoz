@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
+import { useState } from 'react'
 import { render, screen } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
 import {
   AnalysisModelNotice,
   AnalysisModelSelect,
@@ -70,6 +72,24 @@ describe('AnalysisModelSelect layout', () => {
     providerStatus.openrouter.modelListingSupported = false
   })
 })
+describe('AnalysisModelSelect commit signal', () => {
+  it('reports a typed model id as final on blur, not per keystroke', async () => {
+    const onCommit = vi.fn()
+    function Stateful() {
+      const [value, setValue] = useState('')
+      return <AnalysisModelSelect provider="openrouter" value={value} onChange={setValue} onCommit={onCommit} forceServer={false} />
+    }
+    const user = userEvent.setup()
+    renderPicker(<Stateful />)
+    await user.type(screen.getByPlaceholderText('Enter model ID'), 'my-model')
+    // The value is still a draft: a stored prefix would be a wrong remembered pair.
+    expect(onCommit).not.toHaveBeenCalled()
+    await user.tab()
+    expect(onCommit).toHaveBeenCalledTimes(1)
+    expect(onCommit).toHaveBeenCalledWith('my-model')
+  })
+})
+
 describe('unlistable provider wording', () => {
   it('names the bundled snapshot rather than only saying "unverified"', () => {
     // modelListingSupported is false, so these IDs come from the frozen

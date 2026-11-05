@@ -22,6 +22,7 @@ import { TokenRequiredBanner } from '@/components/shared/TokenRequiredBanner'
 import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { CheckCircle2, ExternalLink } from 'lucide-react'
 import { completeAiPairOverride } from '@/lib/analysisAi'
+import { useAiSelection } from '@/lib/useAiSelection'
 import type {
   FeedbackRequest,
   FeedbackPreviewResponse,
@@ -38,10 +39,8 @@ interface FeedbackDialogProps {
 
 export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
   const [description, setDescription] = useState('')
-  // Local state: the feedback dialog is app-global, not page-scoped, so there is no
-  // shared selection to lift. Empty = server default (resolved server-side).
-  const [aiProvider, setAiProvider] = useState('')
-  const [aiModel, setAiModel] = useState('')
+  // Empty = server default (resolved server-side). Shared with the other AI surfaces.
+  const { aiProvider, aiModel, setAiPair } = useAiSelection()
   const [phase, setPhase] = useState<Phase>('form')
   const [issueUrl, setIssueUrl] = useState('')
   const [errorMsg, setErrorMsg] = useState('')
@@ -188,8 +187,6 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
       setPreviewBody('')
       setPreviewLabels([])
       setPreviewAi({ provider: '', model: '', generated: false })
-      setAiProvider('')
-      setAiModel('')
     }, 200)
   }
 
@@ -231,14 +228,16 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
               <div className="grid grid-cols-2 gap-2">
                 <AnalysisProviderSelect
                   value={aiProvider}
-                  onChange={(v) => { setAiProvider(v); setAiModel('') }}
+                  onChange={(v) => setAiPair(v, '')}
                   forceServer={false}
                   label="AI Provider for feedback"
+                  allowDefault
                 />
                 <AnalysisModelSelect
                   provider={aiProvider}
                   value={aiModel}
-                  onChange={setAiModel}
+                  onChange={(model) => setAiPair(aiProvider, model, { commit: false })}
+                  onCommit={(model) => setAiPair(aiProvider, model)}
                   forceServer={false}
                   label="AI Model for feedback"
                 />

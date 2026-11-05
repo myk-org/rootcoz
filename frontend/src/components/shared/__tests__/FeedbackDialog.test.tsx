@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
@@ -20,7 +20,7 @@ vi.mock('@/lib/api', () => {
   return {
     api: {
       post: vi.fn(),
-      get: vi.fn(),
+      get: vi.fn(() => Promise.resolve({ providers: {}, provider_status: {} })),
     },
     getRecentFailedCalls: vi.fn(() => []),
     ApiError: _ApiError,
@@ -45,13 +45,28 @@ vi.mock('@/lib/cookies', () => ({
   getGithubToken: () => mockGetGithubToken(),
 }))
 
+// The dialog is rendered bare, so it has no AuthProvider; the hook reads the user key.
+vi.mock('@/lib/auth', () => ({
+  useAuth: () => ({
+    username: 'alice', isAdmin: false, authenticated: true, loading: false,
+    canUseServerProviders: false, canUseFreeProviders: false,
+  }),
+}))
+
 // The picker needs auth context; its own behaviour is covered in BugCreationDialog tests.
+// The value is exposed so the remembered preselection is assertable.
 vi.mock('@/components/shared/AnalysisAiPicker', () => ({
-  AnalysisProviderSelect: ({ onChange }: { onChange: (v: string) => void }) => (
-    <button type="button" aria-label="pick-provider" onClick={() => onChange('claude')} />
+  AnalysisProviderSelect: ({ value, onChange }: { value: string; onChange: (v: string) => void }) => (
+    <>
+      <span data-testid="provider-value">{value}</span>
+      <button type="button" aria-label="pick-provider" onClick={() => onChange('claude')} />
+    </>
   ),
-  AnalysisModelSelect: ({ onChange }: { onChange: (v: string) => void }) => (
-    <button type="button" aria-label="pick-model" onClick={() => onChange('sonnet')} />
+  AnalysisModelSelect: ({ value, onChange }: { value: string; onChange: (v: string) => void }) => (
+    <>
+      <span data-testid="model-value">{value}</span>
+      <button type="button" aria-label="pick-model" onClick={() => onChange('sonnet')} />
+    </>
   ),
 }))
 
@@ -76,6 +91,10 @@ describe('FeedbackDialog', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+  })
+
+  afterEach(() => {
+    localStorage.clear()
   })
 
   it('renders form with description textarea when open', () => {
@@ -562,7 +581,7 @@ describe('FeedbackDialog', () => {
     expect('ai_model' in payload).toBe(false)
   })
 
-  it('sends no pair after close and reopen', async () => {
+  it('remembers the pair after close and reopen', async () => {
     mockPost.mockResolvedValue({ title: 'T', body: 'B', labels: [] })
     mockGetFailedCalls.mockReturnValue([])
     const user = userEvent.setup()
@@ -577,11 +596,31 @@ describe('FeedbackDialog', () => {
     await act(async () => { await new Promise((r) => setTimeout(r, 300)) })
     fireEvent.click(screen.getByTestId('reopen'))
 
+    // The description is per dialog session and still resets; only the pair is remembered.
+    expect(screen.getByLabelText('Description')).toHaveValue('')
     await user.type(screen.getByLabelText('Description'), 'second session')
     await user.click(screen.getByRole('button', { name: /preview/i }))
     await waitFor(() => expect(mockPost).toHaveBeenCalled())
     const payload = mockPost.mock.calls[0][1] as Record<string, unknown>
-    expect('ai_provider' in payload).toBe(false)
-    expect('ai_model' in payload).toBe(false)
+    expect(payload.ai_provider).toBe('claude')
+    expect(payload.ai_model).toBe('sonnet')
+  })
+
+  it('preselects the pair remembered for this user and sends it', async () => {
+    localStorage.setItem('rootcoz_last_ai_pair:alice', JSON.stringify({ provider: 'claude', model: 'sonnet' }))
+    mockPost.mockResolvedValue({ title: 'T', body: 'B', labels: [] })
+    mockGetFailedCalls.mockReturnValue([])
+    const user = userEvent.setup()
+    render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
+
+    expect(screen.getByTestId('provider-value')).toHaveTextContent('claude')
+    expect(screen.getByTestId('model-value')).toHaveTextContent('sonnet')
+
+    await user.type(screen.getByLabelText('Description'), 'x')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(mockPost).toHaveBeenCalled())
+    const payload = mockPost.mock.calls[0][1] as Record<string, unknown>
+    expect(payload.ai_provider).toBe('claude')
+    expect(payload.ai_model).toBe('sonnet')
   })
 })

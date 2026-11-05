@@ -1,6 +1,6 @@
 import { render, screen, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { it, expect } from 'vitest'
+import { it, expect, vi } from 'vitest'
 import { useState } from 'react'
 import { ModelCombobox } from './ModelCombobox'
 
@@ -43,9 +43,10 @@ it('mutes only Server on mixed models and explains access on hover and focus', a
 // the list and could not type a model ID. It must always be a real combobox.
 it('always accepts typed model IDs, including ones not in the list', async () => {
   const user = userEvent.setup()
+  const committed = vi.fn()
   function Harness() {
     const [value, setValue] = useState('')
-    return <ModelCombobox value={value} onChange={setValue} options={[{ id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' }]} />
+    return <ModelCombobox value={value} onChange={setValue} onCommit={committed} options={[{ id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' }]} />
   }
   render(<Harness />)
   const input = screen.getByRole('combobox')
@@ -53,6 +54,9 @@ it('always accepts typed model IDs, including ones not in the list', async () =>
 
   await user.type(input, 'gpt-5.6-luna')
   expect(input).toHaveValue('gpt-5.6-luna')
+  // Enter with no highlighted option must commit the free-typed id, not just close.
+  await user.keyboard('{Enter}')
+  expect(committed).toHaveBeenLastCalledWith('gpt-5.6-luna')
 })
 
 it('keeps the typed value verbatim instead of decorating it as unavailable', () => {

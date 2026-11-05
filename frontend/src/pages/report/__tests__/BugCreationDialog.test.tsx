@@ -90,6 +90,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  localStorage.clear()
   resetProviderCatalogCache()
 })
 
@@ -153,11 +154,28 @@ describe('BugCreationDialog AI picker', () => {
       expect.objectContaining({ ai_provider: 'claude', ai_model: 'sonnet' }))
   })
 
+  it('remembers the chosen pair for the next time the dialog opens', async () => {
+    const user = userEvent.setup()
+    await openPicker('openai', 'gpt-4o')
+
+    await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
+    await user.click(await screen.findByRole('option', { name: /claude.*Server/i }))
+    await user.click(screen.getByRole('combobox', { name: 'AI Model' }))
+    await user.click(await screen.findByRole('option', { name: /sonnet/ }))
+    cleanup()
+
+    // A later dialog on another failure, with a different (empty) analysis pair.
+    await openPicker('', '')
+    expect(screen.getByRole('combobox', { name: 'AI Provider' })).toHaveTextContent(/claude/i)
+    expect(screen.getByRole('combobox', { name: 'AI Model' })).toHaveValue('sonnet')
+  })
+
   it('leaves an empty selection to the server default', async () => {
     const user = userEvent.setup()
     await openPicker('', '')
 
-    expect(screen.getByRole('combobox', { name: 'AI Provider' })).toHaveTextContent(/Select provider/i)
+    // With nothing remembered and no analysis pair, the picker offers the server default.
+    expect(screen.getByRole('combobox', { name: 'AI Provider' })).toHaveTextContent(/Server default/i)
     expect(screen.getByRole('button', { name: /continue/i })).toBeEnabled()
     await user.click(screen.getByRole('button', { name: /continue/i }))
     await waitFor(() => expect(post).toHaveBeenCalled())

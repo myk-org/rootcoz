@@ -28,7 +28,7 @@ This asks the job's assistant for a cross-failure answer and leaves the evidence
 
 1. Open the result and start the chat.
 
-   From the report header, click `Chat`. The button is hidden for viewers, and the chat page opens at `/chat/{job_id}` for the job you came from. Pick a provider and model in the header, then click `Start Chat`. `Use server credentials` chooses whose AI key runs the session; the toggle is only available when your account may use server providers.
+   From the report header, click `Chat`. The button is hidden for viewers, and the chat page opens at `/chat/{job_id}` for the job you came from. The header preselects the provider and model you last used on this account — check they are the ones you want, or pick another pair — then click `Start Chat`. There is no reset to the analysed pair here: both fields are required to start, and a session you already started keeps the pair it was started with. `Use server credentials` chooses whose AI key runs the session; the toggle is only available when your account may use server providers.
 
    Starting a chat creates a per-user, per-job workspace and session. RootCoz clones the job's tests repo and any additional repositories, then copies CI build data into that workspace when the source provides it.
 
@@ -54,7 +54,7 @@ This asks the job's assistant for a cross-failure answer and leaves the evidence
 
 3. Ask your question.
 
-   Type in the `Ask a question...` box and press `Enter` to send, `Shift+Enter` for a newline. While the answer is being generated the thread shows `Thinking...` and a `Stop` button. Replies stream into the same conversation and are saved, so you can close the page and come back later.
+   Type in the `Ask a question...` box and press `Enter` to send, `Shift+Enter` for a newline. While the answer is being generated the thread shows `Thinking...` with the elapsed time and, for reviewers and above, a `Stop` button. The reply arrives as a single message when the turn ends and is saved, so you can close the page and come back later.
 
    > **Tip:** Because the assistant can read the cloned test code, questions like `Why does test_login assert on the old token format?` are often answered faster than asking for a re-analysis with a different model.
 

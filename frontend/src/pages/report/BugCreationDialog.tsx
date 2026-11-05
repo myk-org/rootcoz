@@ -23,7 +23,7 @@ import { CheckCircle2, ExternalLink, AlertTriangle } from 'lucide-react'
 import type { PreviewIssueResponse, CreateIssueResponse, SimilarIssue, CommentsAndReviews, TrackedInEntry } from '@/types'
 import { getGithubToken, getJiraToken, getJiraEmail, getJiraSaToken } from '@/lib/cookies'
 import { useReportDispatch, useRefreshEnrichments } from '@/pages/report/reportState'
-import { useAiSelection } from './useAiSelection'
+import { useAiSelection } from '@/lib/useAiSelection'
 import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { isAnalysisAiAvailable } from '@/lib/analysisAi'
 import { useProviderCatalog } from '@/lib/useProviderOptions'
@@ -357,11 +357,13 @@ export function BugCreationDialog({
                   value={aiProvider}
                   onChange={(v) => setAiPair(v, '')}
                   forceServer={false}
+                  allowDefault
                 />
                 <AnalysisModelSelect
                   provider={aiProvider}
                   value={aiModel}
-                  onChange={(model) => setAiPair(aiProvider, model)}
+                  onChange={(model) => setAiPair(aiProvider, model, { commit: false })}
+                  onCommit={(model) => setAiPair(aiProvider, model)}
                   forceServer={false}
                 />
               </div>
