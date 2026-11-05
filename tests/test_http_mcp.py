@@ -53,6 +53,23 @@ def _lock_in_child(
         release.wait(10)
 
 
+# A forkserver child can take well over 5s to boot on a loaded xdist worker, and
+# threads doing filesystem work are starved just as long. These waits only cost
+# time when something is really wrong.
+_COMPLETION_TIMEOUT = 60
+
+
+def _join_child(process: mp.Process) -> None:
+    """Wait for a forkserver child to finish, then assert it exited cleanly."""
+    process.join(_COMPLETION_TIMEOUT)
+    # One message for both the hung child and the non-zero exit: either way the
+    # reader must see the budget used and whether the child was still running.
+    assert process.exitcode == 0, (
+        f"child did not exit cleanly: exitcode={process.exitcode}, "
+        f"alive={process.is_alive()}, join budget={_COMPLETION_TIMEOUT}s"
+    )
+
+
 def test_install_skips_empty_tools(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
@@ -577,8 +594,7 @@ def test_install_lock_reaps_after_process_exit(tmp_path: Path, monkeypatch) -> N
         target=_lock_in_child, args=(workspace, tmp_path)
     )
     process.start()
-    process.join(5)
-    assert process.exitcode == 0
+    _join_child(process)
     assert path.exists()
     with http_mcp_mod._workspace_install_lock(tmp_path / "next"):
         assert path.exists()
@@ -604,9 +620,9 @@ def test_install_lock_reaping_preserves_holder_and_waiter(
     holder.start()
     waiter = other = None
     try:
-        # A forkserver child can take well over 5s to boot on a loaded
-        # xdist worker; waiting longer only costs time when something is wrong.
-        assert entered.wait(60)
+        assert entered.wait(_COMPLETION_TIMEOUT), (
+            f"child did not enter the install lock within {_COMPLETION_TIMEOUT}s"
+        )
         inode = path.stat().st_ino
         opened = threading.Event()
         acquired = threading.Event()
@@ -627,7 +643,9 @@ def test_install_lock_reaping_preserves_holder_and_waiter(
 
         waiter = threading.Thread(target=wait_for_lock)
         waiter.start()
-        assert opened.wait(30)
+        assert opened.wait(_COMPLETION_TIMEOUT), (
+            f"waiter thread did not open the lock file within {_COMPLETION_TIMEOUT}s"
+        )
         reaped = threading.Event()
         other_entered = threading.Event()
 
@@ -639,14 +657,15 @@ def test_install_lock_reaping_preserves_holder_and_waiter(
 
         other = threading.Thread(target=run_other)
         other.start()
-        assert other_entered.wait(30)
+        assert other_entered.wait(_COMPLETION_TIMEOUT), (
+            f"second thread did not enter its lock within {_COMPLETION_TIMEOUT}s"
+        )
         assert not acquired.is_set()
         release.set()
-        holder.join(5)
-        waiter.join(5)
-        other.join(5)
+        _join_child(holder)
+        waiter.join(_COMPLETION_TIMEOUT)
+        other.join(_COMPLETION_TIMEOUT)
         assert reaped.is_set()
-        assert holder.exitcode == 0
         assert acquired.is_set()
         assert not path.exists()
     finally:
@@ -656,6 +675,47 @@ def test_install_lock_reaping_preserves_holder_and_waiter(
             waiter.join(5)
         if other is not None:
             other.join(5)
+
+
+def test_join_child_survives_a_boot_slower_than_five_seconds() -> None:
+    """_join_child must hand the child a budget a slow boot can survive.
+
+    The fake child only finishes when it is waited on for at least
+    ``slow_boot_floor`` seconds -- deliberately a literal, far above the 5s
+    that flaked on CI, because a starved forkserver child or filesystem-bound
+    thread can need much longer. Pinning that literal is what makes a shrink
+    bite: at 6s or 10s the child never finishes, and the failed assertion
+    names the budget it was actually given.
+
+    Asserting ``budget == _COMPLETION_TIMEOUT`` alone would be tautological
+    (it only restates what _join_child passes in) and would stay green at 6s,
+    so the floor below carries the regression weight; the equality only stops
+    _join_child from inventing its own number instead of using the constant.
+    """
+    slow_boot_floor = 30
+
+    class SlowChild:
+        """Exits only if the caller waits longer than a slow boot can need."""
+
+        exitcode: int | None = None
+
+        def __init__(self) -> None:
+            self.budget: float | None = None
+            self.finished = False
+
+        def join(self, timeout: float | None = None) -> None:
+            self.budget = timeout
+            if timeout is not None and timeout >= slow_boot_floor:
+                self.finished = True
+                self.exitcode = 0
+
+        def is_alive(self) -> bool:
+            return not self.finished
+
+    slow = SlowChild()
+    _join_child(slow)  # No sleep: the fake records the budget it was given.
+    assert slow.exitcode == 0
+    assert slow.budget == _COMPLETION_TIMEOUT
 
 
 def test_install_lock_cleanup_does_not_wait_for_other_waiters(
