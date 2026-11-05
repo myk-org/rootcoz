@@ -31,7 +31,9 @@ def transcripts_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Point the transcripts module at a temp directory."""
     directory = tmp_path / "transcripts"
     directory.mkdir()
-    monkeypatch.setattr(transcripts_module, "TRANSCRIPTS_DIR", directory)
+    monkeypatch.setattr(
+        transcripts_module, "resolve_transcripts_dir", lambda: directory
+    )
     return directory
 
 
@@ -129,10 +131,61 @@ class TestListTranscripts:
         ]
 
     def test_missing_dir_returns_empty(self, tmp_path: Path, monkeypatch):
+        missing = tmp_path / "does-not-exist"
         monkeypatch.setattr(
-            transcripts_module, "TRANSCRIPTS_DIR", tmp_path / "does-not-exist"
+            transcripts_module, "resolve_transcripts_dir", lambda: missing
         )
         assert transcripts_module.list_transcripts() == []
+
+
+class TestDirResolution:
+    """One resolution decides which directory is written and measured.
+
+    The sidecar's own default differs from rootcoz's container default:
+    @myk-org/pi-sidecar transcriptsDir() returns
+    join(homedir(), ".pi", "sidecar", "transcripts") when
+    PI_SIDECAR_TRANSCRIPTS_DIR is unset (dist/transcripts.js, 4.14.0).
+    """
+
+    def test_sidecar_default_matches_the_package_literal(self):
+        assert transcripts_module.SIDECAR_DEFAULT_TRANSCRIPTS_DIR == Path(
+            Path.home(), ".pi", "sidecar", "transcripts"
+        )
+
+    def test_unset_env_resolves_to_the_sidecar_default(
+        self, tmp_path: Path, monkeypatch
+    ):
+        sidecar_default = tmp_path / "home" / ".pi" / "sidecar" / "transcripts"
+        sidecar_default.mkdir(parents=True)
+        monkeypatch.delenv("PI_SIDECAR_TRANSCRIPTS_DIR", raising=False)
+        monkeypatch.setattr(
+            transcripts_module, "SIDECAR_DEFAULT_TRANSCRIPTS_DIR", sidecar_default
+        )
+        assert transcripts_module.resolve_transcripts_dir() == sidecar_default
+
+    def test_unset_env_falls_back_to_the_rootcoz_default(
+        self, tmp_path: Path, monkeypatch
+    ):
+        rootcoz_default = tmp_path / "data" / "pi-sidecar" / "transcripts"
+        rootcoz_default.mkdir(parents=True)
+        monkeypatch.delenv("PI_SIDECAR_TRANSCRIPTS_DIR", raising=False)
+        monkeypatch.setattr(
+            transcripts_module,
+            "SIDECAR_DEFAULT_TRANSCRIPTS_DIR",
+            tmp_path / "absent-home-default",
+        )
+        monkeypatch.setattr(
+            transcripts_module, "ROOTCOZ_DEFAULT_TRANSCRIPTS_DIR", rootcoz_default
+        )
+        assert transcripts_module.resolve_transcripts_dir() == rootcoz_default
+
+    def test_explicit_env_wins(self, tmp_path: Path, monkeypatch):
+        configured = tmp_path / "custom"
+        monkeypatch.setenv("PI_SIDECAR_TRANSCRIPTS_DIR", str(configured))
+        assert transcripts_module.resolve_transcripts_dir() == configured
+        # Whitespace-only is unset, exactly like the sidecar's `.trim() ||`.
+        monkeypatch.setenv("PI_SIDECAR_TRANSCRIPTS_DIR", "   ")
+        assert transcripts_module.resolve_transcripts_dir() != configured
 
 
 class TestEnvBridge:
@@ -265,7 +318,7 @@ class TestTranscriptEndpoints:
         chat_session = "00000000-0000-0000-0000-00000000000b"
         _write_transcript(transcripts_dir, chat_session, ["msg"])
 
-        # NOTE: the endpoint reads TRANSCRIPTS_DIR through the module
+        # NOTE: the endpoint resolves the directory through the module
         monkeypatch.setattr("rootcoz.main.sidecar_transcripts", transcripts_module)
 
         async def seed():

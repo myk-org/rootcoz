@@ -62,7 +62,7 @@ from simple_logger.logger import get_logger
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
-from rootcoz import storage
+from rootcoz import server_status, storage
 from rootcoz import transcripts as sidecar_transcripts
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
@@ -1013,9 +1013,31 @@ _token_usage_listeners: set[asyncio.Event] = set()
 # Per-job chat change notifications
 _chat_listeners: dict[str, set[asyncio.Event]] = {}
 
+# Live SSE connections: one increment per stream, so a client subscribed to ten
+# topics is one client, not ten.
+_sse_connections = 0
+
 # Regex for validating job IDs in multiplexed SSE topics — prevents
 # SSE header injection via control characters in the event prefix.
 _VALID_JOB_ID_RE = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+
+def _sse_client_count() -> int:
+    """Live SSE connections, one per stream.
+
+    A multiplexed connection counts once however many topics it subscribed to;
+    the log and audit broadcasts each hold one listener per connection.
+    """
+    return (
+        _sse_connections
+        + _log_broadcast.listener_count
+        + _audit_broadcast.listener_count
+    )
+
+
+def _chat_turns_in_flight() -> int:
+    """Chat init/message tasks running right now (one per turn)."""
+    return sum(len(tasks) for tasks in _chat_job_tasks.values())
 
 
 def notify_dashboard_changed() -> None:
@@ -1096,6 +1118,12 @@ class _PayloadBroadcast:
     def has_listeners(self) -> bool:
         """Cheap check so a hot producer skips work when nobody is listening."""
         return bool(self._listeners)
+
+    @property
+    def listener_count(self) -> int:
+        """Number of live subscribers (server status reports this)."""
+        with self._lock:
+            return len(self._listeners)
 
     def publish(self, payload: Any) -> None:
         """Push one payload to every subscriber (thread-safe)."""
@@ -1210,6 +1238,7 @@ def _make_sse_stream(
     """
 
     async def event_generator() -> AsyncIterator[str]:
+        global _sse_connections
         my_event = asyncio.Event()
         wait_task: asyncio.Task[Any] | None = None
 
@@ -1218,6 +1247,7 @@ def _make_sse_stream(
             per_key_listeners.setdefault(listener_key, set()).add(my_event)
         else:
             listeners.add(my_event)
+        _sse_connections += 1
 
         try:
             while True:
@@ -1245,6 +1275,7 @@ def _make_sse_stream(
                 if my_event.is_set():
                     yield f"event: {event_name}\ndata: refresh\n\n"
         finally:
+            _sse_connections -= 1
             if wait_task is not None:
                 wait_task.cancel()
             if per_key_listeners is not None:
@@ -2662,6 +2693,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     try:
         cleanup_task = asyncio.create_task(_periodic_session_cleanup())
+        # One sampler for the event-loop lag the admin status page reports.
+        server_status.start_loop_lag_watchdog()
 
         # Pre-populate cursor models in background (don't block startup)
         task = asyncio.create_task(_safe_preload_cursor_models())
@@ -2702,6 +2735,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
         yield
     finally:
+        server_status.stop_loop_lag_watchdog()
         cleanup_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await cleanup_task
@@ -11247,6 +11281,7 @@ async def stream_multiplexed(
         raise HTTPException(status_code=400, detail="No valid topics specified")
 
     async def event_generator() -> AsyncIterator[str]:
+        global _sse_connections
         # Register all events in their listener sets
         for _prefix, ev, global_set, per_key_dict, key in registrations:
             if per_key_dict is not None:
@@ -11273,6 +11308,7 @@ async def stream_multiplexed(
         pending_feed = _PendingFeed(pending_event, username, "navbar:pending-count")
 
         wait_tasks: list[asyncio.Task[Any]] = []
+        _sse_connections += 1
 
         try:
             # Send initial navbar data on connect
@@ -11385,6 +11421,7 @@ async def stream_multiplexed(
                         yield f"event: {prefix}:{event_name}\ndata: refresh\n\n"
 
         finally:
+            _sse_connections -= 1
             for task in wait_tasks:
                 task.cancel()
 
@@ -12378,6 +12415,26 @@ def _data_probe_worker() -> None:
 
 
 threading.Thread(target=_data_probe_worker, name="data-probe", daemon=True).start()
+
+
+@app.get("/api/admin/server-status", operation_id="adminServerStatus")
+async def admin_server_status(request: Request) -> dict[str, Any]:
+    """Live server status for the admin page (admin only, read-only).
+
+    Disk, CPU, memory, process, database, sidecar and the warnings derived from
+    them. Every block reports its own ``available`` flag: a probe that cannot
+    read what it needs degrades that block, never the request.
+    """
+    _require_admin(request)
+    return strip_sensitive_from_response(
+        await server_status.collect_server_status(
+            db_path=storage.DB_PATH,
+            transcripts_dir=sidecar_transcripts.resolve_transcripts_dir(),
+            log_dir=Path(_LOG_FILE).parent if _LOG_FILE else None,
+            sse_clients=_sse_client_count(),
+            chat_turns=_chat_turns_in_flight(),
+        )
+    )
 
 
 @app.get("/metrics", operation_id="prometheusMetrics")
