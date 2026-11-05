@@ -10,10 +10,21 @@ commands = [
     "--extra",
     "tests",
     "pytest",
+    # A fixed worker count, not `-n auto`: auto reads nproc (24 threads on the CI
+    # host) but CI only delivers ~2.5-3.4 cores of effective parallelism (measured
+    # over two live runs) because build-container writes ~1TB of image layers
+    # alongside it, peak memory hits 36GB and 13GB spills to swap. The workers then
+    # starve each other: the same 5583-test suite takes 41s locally and 439.76s in
+    # CI (10.7x), and swung 301s vs 541s between CI runs. 8 is deliberately below
+    # the host's thread count and still fits a small runner, where auto collapses.
     "-n",
-    "auto",
+    "8",
     "tests/",
     "-q",
+    # The posted CI log is truncated (`[132617 bytes omitted before the failure]`),
+    # which is why per-test cost could not be recovered last time. --durations keeps
+    # the 25 slowest tests in the tail of the log, inside the truncation window.
+    "--durations=25",
   ],
 ]
 allowlist_externals = ["uv"]
