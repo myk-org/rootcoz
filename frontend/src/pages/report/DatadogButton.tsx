@@ -13,14 +13,13 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { api } from '@/lib/api'
-import { pushScopeQuery } from '@/lib/pushScopes'
 import {
   isUnreviewedPushRejection,
   pushRejectionDetail,
   unreviewedPushRejectionMessage,
   unreviewedPushTooltip,
 } from '@/lib/pushGate'
+import { pushToExporter } from './useExporterPush'
 import { useUnreviewedPushGate } from './pushGate'
 import { Upload, Loader2, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react'
 import type { DatadogPushResult } from '@/types'
@@ -95,8 +94,7 @@ export function DatadogButton({ jobId, jobName, buildNumber, childJobName, child
     setPushErrorDetail(null)
     setPushResult(null)
     try {
-      const qs = pushScopeQuery({ childJobName, childBuildNumber })
-      const result = await api.post<DatadogPushResult>(`/results/${jobId}/push/datadog${qs}`)
+      const result = await pushToExporter<DatadogPushResult>(jobId, 'datadog', { childJobName, childBuildNumber })
       setPushResult(result)
       setResultDialogOpen(true)
     } catch (err) {

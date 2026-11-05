@@ -13,8 +13,9 @@ import { ChevronDown, ChevronRight, ExternalLink, GitFork } from 'lucide-react'
 import { useAuth } from '@/lib/auth'
 import { ReportPortalButton } from './ReportPortalButton'
 import { DatadogButton } from './DatadogButton'
+import { GreenwaveButton } from './GreenwaveButton'
 import { TestListSection } from './TestListSection'
-import { useReportState } from '@/pages/report/reportState'
+import { useReportState, exporterEnabled } from '@/pages/report/reportState'
 
 interface ChildJobSectionProps {
   child: ChildJobAnalysis
@@ -126,6 +127,16 @@ export function ChildJobSection({ child, jobId, depth = 0, activeHash, parentHas
             childJobName={child.job_name}
             childBuildNumber={child.build_number}
             hasFailures={failures.length > 0}
+          />
+        )}
+        {isOperator && exporterEnabled(state.exporters, 'greenwave') && (
+          <GreenwaveButton
+            jobId={jobId}
+            jobName={child.job_name}
+            buildNumber={child.build_number}
+            childJobName={child.job_name}
+            childBuildNumber={child.build_number}
+            failures={failures}
           />
         )}
         {childBuildUrl && (

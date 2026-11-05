@@ -33,6 +33,15 @@ tests = [
     "pytest-asyncio",
     "pytest-xdist>=3.8.0",
 ]
+# Kerberos auth mode for the Greenwave exporter. Optional because the
+# pyspnego kerberos backend (python-gssapi) has no wheels — it compiles
+# against the system krb5 ABI at install time, which would make krb5
+# development headers a hard requirement of every install for a mode most
+# deployments do not use. The Docker image installs this extra so the
+# shipped container supports every auth mode.
+kerberos = [
+    "pyspnego[kerberos]>=0.10.0",
+]
 
 [build-system]
 requires = ["hatchling"]

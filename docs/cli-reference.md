@@ -71,7 +71,7 @@ Roles reported by `auth whoami` are `viewer`, `reviewer`, `operator`, and `admin
 | `rootcoz config filter-presets update ID [--name NAME] [--filters FILTERS_JSON]` | Rename a preset and/or replace its filters. Requires a server. |
 | `rootcoz config filter-presets delete ID` | Delete a preset you own (personal) or any server preset (operator+). Requires a server. |
 
-Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries, and a shared `[defaults]` table merged into every server. Per-server keys include `url`, `username`, `api_key`, `no_verify_ssl`, `ai_provider`, `ai_model`, `jenkins_*`, `jira_*`, `github_token`, `peers`, `additional_repos`, `labels`, `prow_url`, and `gcs_bucket`. See [Configuration Reference](configuration-reference.html) for the full list.
+Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries, and a shared `[defaults]` table merged into every server. Per-server keys include `url`, `username`, `api_key`, `no_verify_ssl`, `ai_provider`, `ai_model`, `jenkins_*`, `jira_*`, `github_token`, `peers`, `additional_repos`, `labels`, `prow_url`, `gcs_bucket`, and `greenwave_waiver_comment` (`--subject-identifier` deliberately has no stored default — a stale value could waive the wrong build). See [Configuration Reference](configuration-reference.html) for the full list.
 
 5. **Submit analyses.**
 
@@ -200,7 +200,7 @@ Sparse field paths include `result.summary`, `result.failed_count`, `result.fail
 | Command | Flags | Purpose |
 | --- | --- | --- |
 | `rootcoz exporters` | — | Available exporter plugins and their enabled state. |
-| `rootcoz push JOB_ID` | `--plugin`/`-p` (required), `--child-job-name`, `--child-build-number` | Push results through a named exporter plugin (`reportportal`, `datadog`). |
+| `rootcoz push JOB_ID` | `--plugin`/`-p` (required), `--child-job-name`, `--child-build-number`, `--subject-identifier`, `--waiver-comment` | Push results through a named exporter plugin (`reportportal`, `datadog`, `greenwave`). The Greenwave-only options set the waiver subject and comment. |
 | `rootcoz push-reportportal JOB_ID` | `--child-job-name`, `--child-build-number` | Report Portal shortcut; `push-rp` is a hidden alias. |
 | `rootcoz release` | `--json` | Latest GitHub release, the running server version, and whether an update is available. |
 
@@ -265,6 +265,7 @@ See [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analy
 | `settings set KEY VALUE` | — | Persist a server setting. |
 | `settings history` | `--key`/`-k`, `--limit`/`-l` (50) | Change log. |
 | `settings reset KEY` | — | Drop the DB override and fall back to env or default. |
+| `settings test INTEGRATION` | — | Test a connection (`jenkins`, `jira`, `github`, `reportportal`, `datadog`, `greenwave`, `prow`) with the current effective settings; prints `OK`/`FAILED` plus per-detail lines and exits `1` on failure. The `greenwave` test exercises the selected auth mode and reports it. Admin only. |
 | `settings export` | `--include-sensitive`, `--output`/`-o` | Write the DB-stored settings to a JSON document (stdout without `--output`). Secrets are excluded unless `--include-sensitive`; without it, embedded credentials (repo `@token`s, URL userinfo) are stripped from the export. An `--output` file is written with owner-only `0600` permissions. |
 | `settings import` | `--input`/`-i` (required), `--dry-run` | Apply an export document. Validated and atomic (single transaction); prints a per-setting diff with credentials masked. `--dry-run` validates and shows the diff without applying. |
 | `models refresh` | — | Re-read the model list from the sidecar. |

@@ -864,6 +864,72 @@ def test_settings_update_audits_keys_without_values(app_client) -> None:
     assert events[0]["target_type"] == "setting"
 
 
+def test_settings_update_audits_greenwave_auth_mode_change(app_client) -> None:
+    """A greenwave_auth_mode switch names old/new mode only — never credentials."""
+    admin_login(app_client)
+    response = app_client.put(
+        "/api/admin/settings",
+        json={
+            "settings": {
+                "greenwave_auth_mode": "bearer",
+                "greenwave_url": "https://resultsdb.example.com",
+                "greenwave_api_token": _SECRET,
+            }
+        },
+    )
+    assert response.status_code == 200, response.text
+    response = app_client.put(
+        "/api/admin/settings",
+        json={"settings": {"greenwave_auth_mode": "none"}},
+    )
+    assert response.status_code == 200, response.text
+
+    # Newest first: the mode switch is the latest settings.update row.
+    details = _events(action="settings.update")[0]["details"]
+    assert details["greenwave_auth_mode_change"] == {"old": "bearer", "new": "none"}
+    # The stored token never reaches the audit trail.
+    assert _SECRET not in json.dumps(_events(action="settings.update"))
+
+
+def test_settings_import_audits_greenwave_auth_mode_change(app_client) -> None:
+    """Import records the TRUE previous mode, not the value it just wrote.
+
+    Regression: the audit detail was built after the save had already
+    refreshed the settings cache, so the row read new -> new.
+    """
+    admin_login(app_client)
+    response = app_client.put(
+        "/api/admin/settings",
+        json={
+            "settings": {
+                "greenwave_auth_mode": "bearer",
+                "greenwave_url": "https://resultsdb.example.com",
+                "greenwave_api_token": _SECRET,
+            }
+        },
+    )
+    assert response.status_code == 200, response.text
+    response = app_client.post(
+        "/api/admin/settings/import",
+        json={
+            "version": 1,
+            "settings": {
+                "greenwave_auth_mode": "basic",
+                "greenwave_basic_user": "greenwave-user",
+                "greenwave_basic_password": _SECRET,
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    details = _events(action="settings.import")[0]["details"]
+    assert details["greenwave_auth_mode_change"] == {
+        "old": "bearer",
+        "new": "basic",
+    }
+    assert _SECRET not in json.dumps(_events(action="settings.import"))
+
+
 def test_settings_import_audits_changed_keys(app_client) -> None:
     admin_login(app_client)
     response = app_client.post(

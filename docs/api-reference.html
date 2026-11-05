@@ -872,7 +872,7 @@
 <td>POST</td>
 <td><code>/results/{job_id}/push/{plugin_name}</code></td>
 <td>operator</td>
-<td>Generic push (e.g. <code>reportportal</code>, <code>datadog</code>); <code>child_job_name</code> and <code>child_build_number</code> optional</td>
+<td>Generic push (<code>reportportal</code>, <code>datadog</code>, <code>greenwave</code>); <code>child_job_name</code> / <code>child_build_number</code> optional, plus <code>subject_identifier</code> (required for <strong>every</strong> Greenwave push — results and waivers alike, no job-name fallback, <code>422</code> without it) and <code>waiver_comment</code> (optional, embedded in the composed WaiverDB comment). Returns <code>409</code> when the pushed scope has unreviewed failures, <code>422</code> for a missing Greenwave prerequisite, and <code>503</code> when the classification-override table cannot be read</td>
 </tr>
 <tr>
 <td>POST</td>
@@ -1317,6 +1317,11 @@
 <td>DELETE</td>
 <td><code>/api/admin/settings/{key}</code></td>
 <td>Reset one setting to its default</td>
+</tr>
+<tr>
+<td>POST</td>
+<td><code>/api/admin/settings/test/{integration}</code></td>
+<td>Test a connection with the current effective settings (<code>jenkins</code>, <code>jira</code>, <code>github</code>, <code>reportportal</code>, <code>datadog</code>, <code>greenwave</code>, <code>prow</code>). Always answers HTTP 200 — <code>ok</code> in the body is the test outcome. The <code>greenwave</code> test exercises the selected auth mode end-to-end (one authenticated <code>GET {GREENWAVE_URL}/results?limit=1</code> through the same code path a push uses), reports the tested mode as <code>auth_mode</code> in the details, and lists <strong>all</strong> missing waiver prerequisites at once when <code>GREENWAVE_PUSH_WAIVERS</code> is on</td>
 </tr>
 <tr>
 <td>GET</td>

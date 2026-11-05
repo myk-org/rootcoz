@@ -335,7 +335,11 @@ rootcoz<span class="w"> </span>override-pattern<span class="w"> </span>JOB_ID<sp
 </li>
 <li>
 <p><code>I never see the Report Portal prompt.</code><br>
-  The <code>All failures reviewed. Update Report Portal?</code> prompt only appears when every failure in the job is reviewed and Report Portal is enabled for the server.</p>
+  The <code>All failures reviewed</code> prompt only appears when every failure in the job is reviewed and at least one exporter is enabled for the server — Report Portal, Datadog, or Greenwave. It then offers each enabled exporter's push.</p>
+</li>
+<li>
+<p><code>What is the text I have to approve before a Greenwave push?</code><br>
+  Greenwave includes a human-readable comment in each WaiverDB waiver it files, so the prompt pre-fills one from the job — <code>rootcoz: 3 failures reviewed for my-job #42 — PRODUCT BUG: 2, CODE ISSUE: 1</code> — counting the <strong>effective</strong> classifications (your overrides win over the AI label) and using no timestamps, usernames, or per-test names. You can edit it, and nothing is sent until you tick <code>I approve the text above</code>; editing the text voids the approval. The approved text is an input rather than a stored value: ResultsDB records the outcome per failure, and WaiverDB receives a comment the server composes from your text plus the pusher's name, the classification, the analysis details and the reviewer. The payload preview beside it shows the subject identifier, which of those two systems the push touches, the failure count, and your text verbatim. For a pipeline job the prompt pushes the root result only — child jobs carry their own push button and their own text.</p>
 </li>
 </ul>
 <h2 id="related-pages">Related Pages</h2>

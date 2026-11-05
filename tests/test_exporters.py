@@ -1048,6 +1048,11 @@ class TestBuildExportContextFetchHistory:
                 "rootcoz.main.get_history_classification", new_callable=AsyncMock
             ) as mock_hist,
             patch(
+                "rootcoz.storage.get_all_effective_classifications",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch(
                 "rootcoz.storage.get_tracked_in_for_scope",
                 new_callable=AsyncMock,
                 return_value={},
@@ -1128,6 +1133,9 @@ class TestBuildExportContextReviewedBy:
                     result_data=result_data,
                     settings=MagicMock(),
                     fetch_history=False,
+                    # These cases are about reviewed_by; the classification
+                    # overrides need a DB this test does not set up.
+                    fetch_effective_classifications=False,
                 )
             )
 
@@ -1223,6 +1231,11 @@ class TestBuildExportContextFetchTrackedIn:
                 return_value="",
             ),
             patch(
+                "rootcoz.storage.get_all_effective_classifications",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch(
                 "rootcoz.main.storage.get_tracked_in_for_scope",
                 new_callable=AsyncMock,
             ) as mock_tracked,
@@ -1253,6 +1266,113 @@ class TestBuildExportContextFetchTrackedIn:
         ctx, mock_tracked = self._run_build(False)
         assert mock_tracked.await_count == 0
         assert ctx.tracked_in_links == {}
+
+
+class TestChildReportAnchor:
+    """_child_report_anchor must mirror frontend childJobHash.ts (#183).
+
+    The report page assigns each child the id
+    ``child-<encodeURIComponent(job_name)>-<build>``, prefixed with every
+    ancestor's id joined by ``--`` — the server-built anchor must match
+    so pushed report links resolve.
+    """
+
+    @staticmethod
+    def _tree() -> list[dict]:
+        return [
+            {
+                "job_name": "parent-job",
+                "build_number": 3,
+                "failures": [],
+                "failed_children": [
+                    {
+                        "job_name": "nested-child",
+                        "build_number": 5,
+                        "failures": [],
+                        "failed_children": [],
+                    }
+                ],
+            }
+        ]
+
+    def test_nested_child_gets_parent_qualified_anchor(self):
+        from rootcoz.main import _child_report_anchor
+
+        assert (
+            _child_report_anchor(self._tree(), "nested-child", 5)
+            == "child-parent-job-3--child-nested-child-5"
+        )
+
+    def test_direct_child_gets_single_segment(self):
+        from rootcoz.main import _child_report_anchor
+
+        children = [{"job_name": "child-job", "build_number": 10}]
+        assert _child_report_anchor(children, "child-job", 10) == "child-child-job-10"
+
+    def test_special_characters_match_encode_uri_component(self):
+        """Encoding matches encodeURIComponent, not bare percent-encoding.
+
+        ``!`` stays literal under encodeURIComponent (and thus on the
+        report page) but is percent-encoded by ``quote(safe='')``;
+        ``/`` and spaces are percent-encoded by both.
+        """
+        from rootcoz.main import _child_report_anchor
+
+        children = [{"job_name": "a b/c!d", "build_number": 7}]
+        assert _child_report_anchor(children, "a b/c!d", 7) == "child-a%20b%2Fc!d-7"
+
+    def test_missing_child_falls_back_to_single_segment(self):
+        from rootcoz.main import _child_report_anchor
+
+        assert _child_report_anchor([], "ghost job", 4) == "child-ghost%20job-4"
+
+    def test_build_export_context_uses_qualified_anchor(self):
+        """The pushed report_url carries the qualified fragment."""
+        import asyncio
+
+        from rootcoz.main import _build_export_context
+
+        result_data = {
+            "job_name": "j",
+            "jenkins_url": "https://jenkins.example.com/job/j/1/",
+            "failures": [],
+            "child_job_analyses": self._tree(),
+        }
+        with (
+            patch(
+                "rootcoz.main._extract_base_url",
+                return_value="https://rc.example.com",
+            ),
+            patch(
+                "rootcoz.main.get_history_classification",
+                new_callable=AsyncMock,
+            ),
+            patch(
+                "rootcoz.storage.get_tracked_in_for_scope",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+            patch(
+                "rootcoz.storage.get_reviews_for_job",
+                new_callable=AsyncMock,
+                return_value={},
+            ),
+        ):
+            ctx = asyncio.run(
+                _build_export_context(
+                    job_id="job-1",
+                    result_data=result_data,
+                    settings=MagicMock(),
+                    child_job_name="nested-child",
+                    child_build_number=5,
+                    fetch_history=False,
+                    fetch_tracked_in_links=False,
+                )
+            )
+        assert (
+            ctx.report_url == "https://rc.example.com/results/job-1"
+            "#child-parent-job-3--child-nested-child-5"
+        )
 
 
 class TestExporterModel:

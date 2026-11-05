@@ -95,7 +95,7 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    At least one of the three must be enabled or the push is refused.
 
-   Manual pushes are also gated on review completion: until every failure **in the pushed scope** is reviewed, the push is refused with `409 job has N unreviewed failure(s) — review them before pushing`. A child-scoped push is a scope of its own, so a fully reviewed child can be pushed while the parent or a sibling still waits for review — the error names the scope it is about (`child job 'x' #5`). Each exporter has its own server-level escape hatch, and they are independent — enabling one does not ungate the other exporter:
+   Manual pushes are also gated on review completion: until every failure **in the pushed scope** is reviewed, the push is refused with `409 job has N unreviewed failure(s) — review them before pushing`. A child-scoped push is a scope of its own, so a fully reviewed child can be pushed while the parent or a sibling still waits for review — the error names the scope it is about (`child job 'x' #5`). The event exporters each have their own server-level escape hatch, and they are independent — enabling one does not ungate the other. Greenwave has none: it stays gated:
 
    | Toggle | Effect when enabled |
    | --- | --- |
@@ -128,9 +128,34 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    Datadog is a fire-and-forget sink: a failed event (network or HTTP error) is recorded per event in the push result and never breaks the analysis pipeline or the remaining events. The result also reports the scoreboard: `series` is the number of gauge series Datadog accepted and `series_error` the metrics failure, if any. A metrics failure does not undo the events already sent — the result says the events went through, with the series error alongside — and the scoreboard is skipped when the push aborted because Datadog rejected the credentials (`401`/`403`), since the same keys would fail again. When Datadog answers with a non-2xx status, the push error carries the intake's own verdict — the body's `errors[0].detail` and its `source.pointer`, the JSON pointer to the value that caused the error — for example `Failed to emit Datadog event for 'test_login_flow' (HTTP 400: Missing required attribute in body at /data/attributes/attributes/status)`. A body that is not JSON, is empty, or carries no usable detail falls back to the plain `(HTTP 400)` form. Manual Datadog pushes obey the same review gate as Report Portal — the `DD_ALLOW_UNREVIEWED_PUSH` row in the toggle table above is their escape hatch.
 
+9. Push results to Greenwave/ResultsDB.
+
+   Greenwave pushes classified failures as ResultsDB results and, optionally, WaiverDB waivers. It is configured entirely server-side (Server Settings → `Greenwave`): the exporter is on when an auth method is selected there (`bearer`, `oidc`, `kerberos`, `mtls`, `basic`, or `none`) and that method's fields are configured — there is no `GREENWAVE_AUTH_MODE` environment variable, and with no method selected the exporter stays disabled no matter what credentials are set (see [Configuration Reference](configuration-reference.html) for the upgrade note). Failures whose classification does not appear in the outcome map are skipped, so the pushed count can legitimately be smaller than the failure count.
+
+   Waiver submission is a separate layer on top: it needs `GREENWAVE_PUSH_WAIVERS=true` plus `GREENWAVE_WAIVER_URL` and `GREENWAVE_PRODUCT_VERSION` — and `GREENWAVE_WAIVER_TOKEN` only when the auth method is `bearer` (in every other mode the waiver write authenticates with the selected strategy, the same as the results write) — and each push must pass an explicit `--subject-identifier` — the artifact or build Greenwave gates on. Without one, the push is refused with HTTP 422 rather than writing a waiver against a guessed subject. Waivers are only submitted for failures reviewed by a human; a failure reviewed only by `rootcoz-ai` is never waived — lifting a gate needs a human decision, and there is no setting that re-enables it.
+
+   You can also push from the report page: click `Push to Greenwave` in the report header. The button appears only when the server advertises the Greenwave exporter as enabled (via the `capabilities.exporters` list in the job result), and it is disabled when the job has no failures. The dialog takes a `Subject identifier` — the build or artifact NVR the results and waivers apply to — and an optional `Waiver comment`. The identifier is mandatory for **every** Greenwave push: both a ResultsDB result and a WaiverDB waiver are gating writes keyed on that subject, so the server refuses a push without one with HTTP 422 and never falls back to the CI job name. The dialog therefore requires it even when waivers are off. Waivers are only filed when the server has `GREENWAVE_PUSH_WAIVERS` on — otherwise the push submits results only. The result dialog reports the pushed, waived, and skipped counts, and lists any per-failure errors.
+
+   The comment is not free-form guesswork: the dialog pre-fills it from the job (`rootcoz: 3 failures reviewed for my-job #42 — PRODUCT BUG: 2, CODE ISSUE: 1`, counting your overrides and never timestamps, usernames or per-test names), lets you edit it, and shows a read-only payload preview — subject identifier, waivers on or off, failure count, and the final text verbatim. Nothing is pushed until you tick `I approve the text above`, and editing the text voids that approval. What you approve is not a stored field, though: ResultsDB records the outcome per failure (the classification-to-outcome mapping), and the text becomes part of a WaiverDB comment that the server completes with the pusher's name, the classification, the analysis details and the reviewer — so the approved text is the human input to that comment, not the comment itself.
+
+   When every failure in the job has been reviewed, the `All failures reviewed` prompt offers the same push alongside Report Portal and Datadog when those exporters are enabled, and mounts the identical form, so the approval step cannot be skipped by going through the prompt instead of the button. For a pipeline job the prompt covers the root result; each child job has its own push button and its own approved text.
+
+   Push from the CLI (a per-server default for `--waiver-comment` can live in your CLI config file; `--subject-identifier` deliberately has none, because a stored default could waive the wrong build):
+
+   ```bash
+   rootcoz exporters
+   rootcoz push JOB_ID --plugin greenwave
+   rootcoz push JOB_ID --plugin greenwave \
+     --subject-identifier "pkg-1.0-1.el10" --waiver-comment "known flake"
+   ```
+
+   `AUTO_PUSH_EXPORTERS=greenwave` is a no-op: the automatic path cannot supply a subject identifier, and Greenwave declares `requires_subject_identifier`, so it is skipped with a log line and never auto-pushed — results or waivers. Push from the button or the CLI instead.
+
+   Manual Greenwave pushes obey the same unreviewed-failure gate as the event exporters: until every failure in the pushed scope is reviewed the request is refused with `409`, and Greenwave has **no** escape-hatch toggle (waivers require human review by design), so there is no way to push unreviewed failures to it.
+
 ## Advanced Usage
 
-Push through the generic exporter endpoint when you want the plugin dispatch rather than the Report Portal shortcut. `POST /results/{job_id}/push/{plugin_name}` takes the same optional `child_job_name` and `child_build_number` parameters and returns the exporter's own result fields plus `success` and `message`. The Report Portal-specific endpoint `POST /results/{job_id}/push-reportportal` remains available and is what the UI button uses.
+Push through the generic exporter endpoint when you want the plugin dispatch rather than the Report Portal shortcut. `POST /results/{job_id}/push/{plugin_name}` takes the same optional `child_job_name` and `child_build_number` parameters, plus the Greenwave-specific query parameters `subject_identifier` and `waiver_comment`, and returns the exporter's own result fields plus `success` and `message`. The Report Portal-specific endpoint `POST /results/{job_id}/push-reportportal` remains available and is what the UI button uses.
 
 Let the pipeline push for you. When `AUTO_PUSH_EXPORTERS` is set to a comma-separated plugin list (for example `reportportal,datadog`) and auto-review is enabled, RootCoz pushes to those exporters once every failure in the job is reviewed, recording the push under the reserved `rootcoz-ai` identity. An empty `AUTO_PUSH_EXPORTERS` disables this, and auto-push failures are logged rather than surfaced in the UI. This is a server-only setting, so the Server Settings page cannot change it — saving it there is rejected with `400 Server-only settings (env var only)`. Set `AUTO_PUSH_EXPORTERS` in the deployment environment, and note that the value is read into the server's settings cache at startup: changing it on a running process does not take effect until the settings are rebuilt or the server restarts.
 
@@ -171,6 +196,21 @@ For raw endpoints, see [API Endpoint Reference](api-reference.html) for details.
 
 - `Exporters` shows Report Portal as disabled.  
   Run `rootcoz exporters` and check the reason: the integration is off, all three `RP_PUSH_*` toggles are off, or `PUBLIC_BASE_URL` is missing while `RP_PUSH_ROOTCOZ_URL` is on.
+
+- `Exporters` shows Greenwave as disabled.  
+  No auth method is selected in Server Settings → `Greenwave` (an unset method disables the exporter entirely — see the upgrade note in [Configuration Reference](configuration-reference.html)), the selected method's fields are incomplete, or `GREENWAVE_PUSH_WAIVERS` is on without all waiver prerequisites (`GREENWAVE_WAIVER_URL`, `GREENWAVE_PRODUCT_VERSION`, and `GREENWAVE_WAIVER_TOKEN` in `bearer` mode). The readiness check mirrors what the exporter itself requires, so a plugin advertised as enabled always constructs.
+
+- A Greenwave push returns `409` (`has N unreviewed failure(s)`).  
+  The manual-push review gate applies to Greenwave like every exporter, and Greenwave has no escape-hatch toggle — review the failures (or let auto-review mark them) and push again. There is no setting that bypasses this for Greenwave.
+
+- A Greenwave push returns `503` (classification overrides unavailable).  
+  The server could not read the classification-override table it needs before writing a gating record, so the push was refused **before** anything was sent — Greenwave outcomes and waivers must reflect the reviewer's classification, never the older value in the stored result. Nothing was written; retry once the database is reachable.
+
+- A Greenwave push returns `422` (`subject_identifier` / waiver prerequisites).  
+  Waivers need an explicit subject: pass `--subject-identifier` (or set it in your CLI server profile), and check the waiver settings above. The push is refused before anything is written.
+
+- A Greenwave push returns `502`.  
+  The server could not reach ResultsDB or WaiverDB — transport-level failure, not a configuration problem. Check the URLs, `GREENWAVE_VERIFY_SSL`, and network reachability from the server.
 
 - The push returns `Operator access required.`  
   Exporter pushes need `operator` or `admin`. Reviewers can create and link issues, but not push.

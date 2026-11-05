@@ -2,6 +2,7 @@
 {{- $gcloudKey := include "rootcoz.gcloudServiceAccountKey" . -}}
 {{- $cursorAuth := include "rootcoz.cursorAuthJson" . -}}
 {{- $sidecarAgent := include "rootcoz.sidecarAgentSecretData" . -}}
+{{- $greenwave := include "rootcoz.greenwaveSecretData" . -}}
 {{- /* Resolved credentials Secret data (chart values + existing-Secret fallbacks),
        resolved once and reused for both the checksum and the envFrom gate. */ -}}
 {{- $credentials := include "rootcoz.credentialsSecretData" . -}}
@@ -40,6 +41,9 @@ spec:
         {{- end }}
         {{- if $sidecarAgent }}
         checksum/sidecar-agent: {{ $sidecarAgent | sha256sum }}
+        {{- end }}
+        {{- if $greenwave }}
+        checksum/greenwave-auth: {{ $greenwave | sha256sum }}
         {{- end }}
         {{- with .Values.podAnnotations }}
         {{- toYaml . | nindent 8 }}
@@ -189,6 +193,11 @@ spec:
             - name: sidecar-agent
               mountPath: /etc/pi-sidecar-agent
             {{- end }}
+            {{- if $greenwave }}
+            - name: greenwave-auth
+              mountPath: {{ .Values.greenwave.mountPath }}
+              readOnly: true
+            {{- end }}
       volumes:
         {{- if .Values.persistence.enabled }}
         - name: data
@@ -214,6 +223,15 @@ spec:
         - name: sidecar-agent-src
           secret:
             secretName: {{ include "rootcoz.sidecarAgentSecretName" . }}
+        {{- end }}
+        {{- if $greenwave }}
+        - name: greenwave-auth
+          secret:
+            secretName: {{ include "rootcoz.greenwaveSecretName" . }}
+            # 0440 (group-readable, never world-readable): secret volume files
+            # are root:root and the container user runs in GID 0, so no fsGroup
+            # is needed — same ownership story as the cursor secret, stricter mode.
+            defaultMode: 0440
         {{- end }}
       terminationGracePeriodSeconds: 30
       {{- with .Values.nodeSelector }}

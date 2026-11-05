@@ -189,7 +189,62 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    Every push also writes a metrics scoreboard: one `POST https://api.{site}/api/v2/series` after the events, carrying two gauges (series type `3`). `rootcoz.failures.classification` is tagged `job_name`, `build_number`, and `tfa.classification`; `rootcoz.failures.pattern` is tagged `job_name`, `build_number`, and `tfa.failure_pattern`. A child-scoped push adds `child_job_name`, `child_build_number` and `rootcoz.scope_id` to that identity — the same scope tags its events carry — so a child writes its own series instead of overwriting the parent build's scoreboard or another child's. `rootcoz.scope_id` is a hash of the child job name and child build number: the readable `child_job_name` tag is lossy by construction (`linux/py311` and `linux_py311` collapse to the same value), and a gauge is keyed on its tags, so the pair needs one value that cannot collide. Every category the vocabulary can produce is sent on every push, zeros included, because Datadog keeps the last value of a series it stops receiving — a skipped category would leave the previous build's count in place and the dashboard would double-count. A value is the current number of that build's failed tests in that category within the pushed scope: a re-push sets the same counts instead of adding, and a child-scoped push counts only that child. Points carry the push time, the same second the events of that run carry. A value outside the stored vocabulary is folded into an `unknown` series rather than published under its own name: the series list has to stay enumerable, or nothing can ever reset that value. With `DD_PUSH_CLASSIFICATIONS` off the classification gauges are still sent, all zeros — a gauge is overwritten or not, and omitting it leaves the counts a previous push published in place. A push with no failures still posts the zero-filled series, so a job that re-runs clean resets its scoreboard instead of keeping the last failed counts. `rootcoz.push_id` and `rootcoz.analysis_id` are deliberately **not** metric tags — a tag that changes every push would leave the previous push's last value in place (the double-count returns) and each new tag combination would bill as a new custom metric; both ids remain on the events. Metric tag values are lowercase and identical to the event tags (`CODE ISSUE` → `code_issue`; `tfa.classification` on events is lowercase too), so one dashboard filter matches either. The scoreboard is skipped when the push aborted on rejected credentials (`401`/`403`), and a metrics failure never undoes the events already sent: it is reported in the push result as `series` (the count Datadog accepted) and `series_error`, and the dialog says the events went through.
 
-9. **Auth and Security category.**
+9. **Greenwave category.**
+
+   | Variable | Default | Type | Secret | Restart | After login |
+   | --- | --- | --- | --- | --- | --- |
+   | `ENABLE_GREENWAVE` | unset | boolean | no | no | yes |
+   | `GREENWAVE_URL` | unset | string | no | no | yes |
+   | `GREENWAVE_API_TOKEN` | unset | string | yes | no | yes |
+   | `GREENWAVE_OIDC_TOKEN_URL` | unset | string | no | no | yes |
+   | `GREENWAVE_OIDC_CLIENT_ID` | unset | string | no | no | yes |
+   | `GREENWAVE_OIDC_CLIENT_SECRET` | unset | string | yes | no | yes |
+   | `GREENWAVE_KEYTAB_PATH` | unset | string | no | no | yes |
+   | `GREENWAVE_KEYTAB_PRINCIPAL` | unset | string | no | no | yes |
+   | `GREENWAVE_KRB5_SERVICE` | `HTTP` | string | no | no | yes |
+   | `GREENWAVE_KRB5_REALM` | unset | string | no | no | yes |
+   | `GREENWAVE_CLIENT_CERT` | unset | string | no | no | yes |
+   | `GREENWAVE_CLIENT_KEY` | unset | string | no | no | yes |
+   | `GREENWAVE_CA_BUNDLE` | unset | string | no | no | yes |
+   | `GREENWAVE_BASIC_USER` | unset | string | no | no | yes |
+   | `GREENWAVE_BASIC_PASSWORD` | unset | string | yes | no | yes |
+   | `GREENWAVE_WAIVER_URL` | unset | string | no | no | yes |
+   | `GREENWAVE_WAIVER_TOKEN` | unset | string | yes | no | yes |
+   | `GREENWAVE_PUSH_WAIVERS` | `false` | boolean | no | no | yes |
+   | `GREENWAVE_WAIVABLE_CLASSIFICATIONS` | `INFRASTRUCTURE` | string | no | no | yes |
+   | `GREENWAVE_OUTCOME_MAP` | `PRODUCT BUG:FAILED,CODE ISSUE:FAILED,INFRASTRUCTURE:INFO` | string | no | no | yes |
+   | `GREENWAVE_SUBJECT_TYPE` | `koji_build` | string | no | no | yes |
+   | `GREENWAVE_PRODUCT_VERSION` | unset | string | no | no | yes |
+   | `GREENWAVE_VERIFY_SSL` | `true` | boolean | no | no | yes |
+
+   Every Greenwave setting is editable at runtime through Server Settings — none are server-only or restart-required.
+
+   The auth method is selected by the **Server Settings** `greenwave_auth_mode` row (UI: `Greenwave → Auth method`): `bearer`, `oidc`, `kerberos`, `mtls`, `basic`, or `none`. There is no `GREENWAVE_AUTH_MODE` environment variable — like `JIRA_AUTH_MODE`, the selection is deliberately database-only, and an env var of that name is ignored, so an operator who sets it will see nothing happen. **An auth method selection is required for the Greenwave exporter** — only the selected method's fields are used, with no credential sniffing and no fallback. When no method is selected, the exporter is disabled entirely regardless of which credentials are configured. Setting `ENABLE_GREENWAVE=false` forces it off; setting it to `true` without a selected method logs a warning and stays off.
+
+   Each auth method owns its own credentials — `GREENWAVE_URL`, the waiver settings, and the outcome map are shared across methods:
+
+   - **`bearer`** (static API token): `GREENWAVE_API_TOKEN`
+   - **`oidc`** (OIDC client-credentials grant): `GREENWAVE_OIDC_TOKEN_URL`, `GREENWAVE_OIDC_CLIENT_ID`, `GREENWAVE_OIDC_CLIENT_SECRET` — a token is minted at the token URL on demand, cached in-process until shortly before its reported expiry, and sent as the Bearer; a 401 forces one refresh and retry
+   - **`kerberos`** (SPNEGO/Negotiate with a static client keytab): `GREENWAVE_KEYTAB_PATH`, `GREENWAVE_KEYTAB_PRINCIPAL`, `GREENWAVE_KRB5_SERVICE`, `GREENWAVE_KRB5_REALM`
+   - **`mtls`** (TLS client certificate): `GREENWAVE_CLIENT_CERT`, `GREENWAVE_CLIENT_KEY`, `GREENWAVE_CA_BUNDLE` (optional CA bundle; falls back to `GREENWAVE_VERIFY_SSL`)
+   - **`basic`** (HTTP Basic): `GREENWAVE_BASIC_USER`, `GREENWAVE_BASIC_PASSWORD`
+   - **`none`** (no authentication): only `GREENWAVE_URL` — for public ResultsDB instances
+
+   `GREENWAVE_API_TOKEN` applies **only** in `bearer` mode; in every other mode it is neither required nor used.
+
+   **Upgrade note (auth mode required):** the Greenwave exporter no longer auto-enables from configured credentials — an auth method must now be selected in Server Settings (`Greenwave → Auth method`) or via `PUT /api/admin/settings`, and with no method selected the exporter is **disabled** no matter what is configured. A deployment that previously worked with only `GREENWAVE_URL` and `GREENWAVE_API_TOKEN` in the environment is silently disabled after upgrading until an admin selects `bearer` there. This is a breaking change: plan the Server Settings visit as part of the upgrade.
+
+   The selected mode governs **both** push targets: the ResultsDB results write and the WaiverDB waiver write authenticate with the same strategy. The one exception is `bearer`, because ResultsDB and WaiverDB are separate services with separate tokens — in `bearer` mode the waiver write uses `GREENWAVE_WAIVER_TOKEN` instead of `GREENWAVE_API_TOKEN`. In every other mode `GREENWAVE_WAIVER_TOKEN` is neither required nor used.
+
+   URL validation: `GREENWAVE_URL` must be HTTPS with a hostname, and must not embed userinfo, a query string, a fragment, or an invalid port — a malformed or credential-bearing URL is a configuration error, not a silent skip. `none` is the only mode permitting a plain `http://` `GREENWAVE_URL` (public ResultsDB instances); every other mode requires HTTPS, and `GREENWAVE_WAIVER_URL` and `GREENWAVE_OIDC_TOKEN_URL` are HTTPS-only in all modes. Structural problems (userinfo, query, fragment, invalid port, no hostname) reject the value when it is saved or the server starts. The **scheme** rule is deliberately enforced one step later — at the push boundary and in the settings write path — because the URL can come from the environment while the auth mode only ever comes from the database: validating the scheme at startup would make a merged environment+database configuration unbuildable, which would discard every database override. The visible effect of a credential-bearing mode over plain HTTP is therefore an exporter reported as **not enabled** (and a push or test-connection refused with the reason), never a silently accepted configuration.
+
+   Kerberos operational setup: the keytab must be **mounted into the container** — `GREENWAVE_KEYTAB_PATH` points at the mounted file and `GREENWAVE_KEYTAB_PRINCIPAL` is the client principal it holds (`user@REALM`). `GREENWAVE_KRB5_SERVICE` is the service class of the target SPN (default `HTTP`), and the **service realm** comes from `GREENWAVE_KRB5_REALM` when set, otherwise from the realm of `GREENWAVE_KEYTAB_PRINCIPAL` — so `rootcoz@EXAMPLE.COM` against `resultsdb.example.com` yields `HTTP/resultsdb.example.com@EXAMPLE.COM`. Set `GREENWAVE_KRB5_REALM` when the service principal lives in a different realm than the client principal; leave both it and the principal's realm unset to let `krb5.conf` (`[domain_realm]`) resolve it, which is also the option that avoids `dns_canonicalize_hostname` touching a realm-qualified host. A `krb5.conf` describing your realm and KDC is required — set the standard `KRB5_CONFIG` environment variable to its path. The container image ships `pyspnego[kerberos]` and the krb5 runtime libraries, so no extra install is needed. A Kubernetes deployment mounts these files through the Helm chart (see `chart/README.md`; where the chart values differ from this description, follow the chart).
+
+   `GREENWAVE_OUTCOME_MAP` maps RootCoz classifications to ResultsDB outcomes, one `CLASS:OUTCOME` pair per comma-separated entry. Valid outcomes are `PASSED`, `FAILED`, `INFO`, and `NEEDS_INSPECTION`; anything else fails startup. Failures whose classification is not in the map are skipped (not exported). `GREENWAVE_WAIVABLE_CLASSIFICATIONS` is a comma-separated list, matched case-insensitively; unrecognized names log a warning but do not fail.
+
+   Every push needs an explicit `subject_identifier` (the build or artifact the results and waivers apply to); a CI job name is never used instead. Waiver submission needs more than the server settings, **and more than a working credential**: the rootcoz service account must hold **WaiverDB write permission for `rootcoz.*` testcases**. Without that permission the waiver write fails with HTTP 403 while the ResultsDB result pushes in the same run still succeed — a partial success that looks like a Greenwave bug until the permission is checked. Waiver submission needs more than the server settings: `GREENWAVE_PUSH_WAIVERS=true` also requires `GREENWAVE_WAIVER_URL`, `GREENWAVE_PRODUCT_VERSION`, and — only in `bearer` mode — `GREENWAVE_WAIVER_TOKEN`, plus a per-push `subject_identifier` (the artifact/build being gated) passed as a query parameter on the push request. Waivers are only submitted for failures reviewed by a human; a failure reviewed only by `rootcoz-ai` is never waived — lifting a gate needs a human decision, and there is no setting that re-enables it.
+
+10. **Auth and Security category.**
 
    | Variable | Default | Type | Secret | Restart | After login |
    | --- | --- | --- | --- | --- | --- |
@@ -218,7 +273,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    The audit trail also records the events an operator needs to explain a job or an account after the fact, each as its own id: `analysis.rerun` (target `job`, details `provider`, `model`, `trigger`, and `previous_classification` when the job already had a classified failure), `auth.logout`, `comment.delete` (target `comment`, details `job_id`), and `user.tracker_token_set` / `user.tracker_token_delete` (details name the tracker — `jira` or `github` — never the token). Comment edits are not audited because no comment-edit endpoint exists, and there is no session-revocation endpoint to audit: sessions end by logging out, rotating a key, or deleting the account, and each of those is recorded.
 
-10. **Prow category.**
+11. **Prow category.**
 
    | Variable | Default | Type | Secret | Restart | After login |
    | --- | --- | --- | --- | --- | --- |
@@ -227,7 +282,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    Both are validated on load rather than transformed. `PROW_URL` must start with `https://`, must contain a hostname, and must not embed credentials (`prow_validation.normalize_prow_url`) — surrounding whitespace is trimmed, but a trailing slash is left in place, so `https://prow.example.com/` and `https://prow.example.com` are both accepted and stay as written. `GCS_BUCKET` must match `[a-z0-9][a-z0-9._-]*` after trimming (`normalize_gcs_bucket`), so a `gs://` prefix is **rejected** rather than stripped; pass the bare bucket name. Both are also request-tunable, so a per-build submission can override the server default.
 
-11. **Server category.**
+12. **Server category.**
 
     | Variable | Default | Type | Secret | Restart | After login |
     | --- | --- | --- | --- | --- | --- |
@@ -256,7 +311,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    `AMBIENT_AUTH_PROVIDERS` lists provider IDs that authenticate via ambient credentials (ADC, OAuth, CLI login) and never consume a per-session user API key. They are excluded from the user credential flow even when the sidecar reports them as key-capable — without this, users can store a key the provider ignores (and any garbage key passes verification, because the provider authenticates via ADC regardless). Their models remain available with server credentials. Set it to an empty string to trust the sidecar's capability reporting entirely.
 
-12. **Web Push category.**
+13. **Web Push category.**
 
     | Variable | Default | Type | Secret | Restart | After login |
     | --- | --- | --- | --- | --- | --- |
@@ -266,7 +321,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
     Leave both keys empty to auto-generate a pair on first use. Setting only one of them logs a partial-configuration warning but does **not** disable Web Push: the missing key is auto-generated and persisted, and the pair in effect may therefore not match what you set. Because notification signing resolves keys through `get_vapid_config()`, which reads environment variables or the generated key file and never the database, a `VAPID_PRIVATE_KEY` saved through Server Settings is not used for signing. Set the keys in the environment to take effect. Note also that changing the public key or claim email invalidates subscriptions already registered with browsers — they are restart-required and best managed at deployment time.
 
-13. **Notifications category** (added with #347).
+14. **Notifications category** (added with #347).
 
     | Variable | Default | Type | Secret | Restart | After login |
     | --- | --- | --- | --- | --- | --- |
@@ -280,7 +335,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
     Email alerts need `SMTP_HOST` + `ALERT_EMAIL_TO` (from address defaults to `SMTP_USER`, then `rootcoz@<host>`); Slack alerts need `SLACK_WEBHOOK_URL`. The env var stays the deployment default — a saved setting overrides it.
 
-14. **Sidecar category** (added with #347 — restart required).
+15. **Sidecar category** (added with #347 — restart required).
 
     The pi-sidecar starts **once** at container boot and reads these from its process environment. A value saved here is persisted to `/data/pi-sidecar/env`, which the container entrypoint sources before starting the sidecar — the same bridge `RECORD_TRANSCRIPTS` uses. An empty field means "no override": the deployment environment governs.
 
@@ -635,9 +690,9 @@ Change settings after login without touching a restart. Open Server Settings, ed
 
 Sensitive values are returned masked as `••••••••`. `GET /api/admin/settings?reveal_key=ADMIN_KEY` unmasks one key, and `reveal_key=__all__` unmasks everything. Responses also report whether the value came from the database, the environment, or the code default, and flag when an environment variable of the same name also exists. See [API Endpoint Reference](api-reference.html).
 
-Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_CLIENT_SECRET`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `DATADOG_API_KEY`, `DATADOG_APP_KEY`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: `GET /api/admin/settings` decrypts them and masks them by default, but returns them in full when called with `reveal_key`. Treat that response as secret-bearing.
+Encryption uses Fernet (AES-128-CBC plus HMAC-SHA256). Sensitive fields are `JENKINS_USER`, `JENKINS_PASSWORD`, `JIRA_EMAIL`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_CLIENT_SECRET`, `JIRA_ATST_TOKEN`, `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `REPORTPORTAL_API_TOKEN`, `DATADOG_API_KEY`, `DATADOG_APP_KEY`, `GREENWAVE_API_TOKEN`, `GREENWAVE_WAIVER_TOKEN`, `GREENWAVE_OIDC_CLIENT_SECRET`, `GREENWAVE_BASIC_PASSWORD`, `SMTP_PASSWORD`, `SLACK_WEBHOOK_URL`, `ADMIN_KEY`, and `VAPID_PRIVATE_KEY`. They are encrypted before storage and never logged at any level. They are stripped from ordinary API responses, with one exception an administrator should know about: `GET /api/admin/settings` decrypts them and masks them by default, but returns them in full when called with `reveal_key`. Treat that response as secret-bearing.
 
-Blank strings normalise consistently: optional strings become unset, `AI_PROVIDER` is lowercased and normalised, `DEFAULT_USER_ROLE` is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only eight of them: `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_CLIENT_SECRET`, `REPORTPORTAL_API_TOKEN`, `DATADOG_API_KEY`, and `DATADOG_APP_KEY`. `ADMIN_KEY` and `VAPID_PRIVATE_KEY` are **not** trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or `echo` — stays part of the value and will not match on comparison. Pass those two without surrounding whitespace.
+Blank strings normalise consistently: optional strings become unset, `AI_PROVIDER` is lowercased and normalised, `DEFAULT_USER_ROLE` is validated against the three allowed roles, and secret strings lose surrounding whitespace — but only thirteen of them: `GITHUB_TOKEN`, `TESTS_REPO_TOKEN`, `JIRA_API_TOKEN`, `JIRA_PAT`, `JIRA_OAUTH_CLIENT_SECRET`, `JIRA_ATST_TOKEN`, `REPORTPORTAL_API_TOKEN`, `DATADOG_API_KEY`, `DATADOG_APP_KEY`, `GREENWAVE_API_TOKEN`, `GREENWAVE_WAIVER_TOKEN`, `GREENWAVE_OIDC_CLIENT_SECRET`, and `GREENWAVE_BASIC_PASSWORD`. `ADMIN_KEY`, `VAPID_PRIVATE_KEY`, `SMTP_PASSWORD`, and `SLACK_WEBHOOK_URL` are **not** trimmed, so a value pasted with surrounding whitespace keeps it, and a trailing newline — easy to pick up from a mounted Kubernetes Secret or `echo` — stays part of the value and will not match on comparison. Pass those without surrounding whitespace.
 
 ## Troubleshooting
 - `AI_PROVIDER is required` at startup.  
