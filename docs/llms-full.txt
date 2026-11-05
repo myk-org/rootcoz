@@ -2707,6 +2707,29 @@ That creates an active operator who can submit analyses, and one server setting 
    | --- | --- |
    | `Tokens` | Token usage broken down by provider, model, job, or day, with calls, input, output, cache read/write, cost, and average duration. Filter by date range and provider. |
    | `Logs` | The live server log tail, filterable by level and text, streamed over SSE. |
+   | `Server Status` | A live snapshot of the container this server runs in — see below. |
+
+   **Server Status answers "is anything wrong" before "what are the numbers".** The page renders warnings above the cards from the same numbers the cards show: the data directory at 75 % / 90 %, the container's memory working set at 90 % of its limit, an event-loop stall over 5 s, and an unreachable AI sidecar. Each one is a badge plus its text (`Critical` / `Warning`), never colour alone. The page refreshes every 30 s while the tab is visible and never runs two requests at once. The CLI mirrors it: `rootcoz admin server-status` (`--json` for the raw snapshot).
+
+   | Card | Shows |
+   | --- | --- |
+   | Disk | Used / capacity / percentage of the filesystem holding the data directory, plus the sizes of the database, the sidecar transcripts and the logs. |
+   | CPU | Process CPU as a percentage of one core over the sampled window, and the cgroup quota (`cpu.max`) when one is set. |
+   | Memory | Process RSS, container usage against `memory.max`, the working set, and the working set as a percentage of the limit. |
+   | Process | Version, build git SHA, uptime, PID, restart count, and the worst event-loop stall in the last minute. |
+   | Database | `results.db` size (main file plus its WAL), row counts for results, recorded failures and test entries, and the compression ratio. |
+   | AI sidecar | Reachable or not, models available, and free models declared. |
+   | Activity | Analyses running with how long each has been running, chat turns in flight, and SSE clients connected. |
+
+   **The disk figures describe a filesystem, not a quota.** `Disk` measures whichever filesystem holds the data directory — a PVC, a Docker volume, a bind mount or a plain directory — using the same probe the `rootcoz_data_*` metrics publish, so the page and your alerting can never disagree. It is **not** a per-volume quota, and on a shared node filesystem it includes other tenants' usage: 60 % there does not mean 40 % of your own headroom. The card says so.
+
+   **The build SHA is set by whoever builds the image.** The builder passes `--build-arg GIT_SHA=$(git rev-parse HEAD)` (the bundled `docker-compose.yaml` forwards a `GIT_SHA` environment variable to the build), that value is exactly what the Process card displays, and an image built without it shows `not visible in this container` — honest, not a bug.
+
+   **A value the container cannot read is shown as unreadable.** The CPU quota, memory limit and restart count come from cgroup v2 files, `CGROUP_ROOT` (`/sys/fs/cgroup`) and `/proc/self`; the git SHA comes from the build arg above. Where those are absent — Docker without cgroup namespacing, a non-Linux dev box, an image built without `GIT_SHA` — the card says `not visible in this container` with the reason, never `0` and never a dash that reads as healthy. An unreadable `cpu.max` or `memory.max` is likewise `unknown`, which is deliberately different from an explicitly unlimited cgroup (`no quota — unlimited` / `no limit set`).
+
+   **Memory uses the working set.** `memory.current` includes reclaimable page cache, which a growing database and its logs can fill on a healthy container; the 90 % warning is therefore based on the working set (`memory.current` minus `inactive_file`), the number the kubelet evicts on, not on raw usage.
+
+   **Row counts and sizes are snapshot numbers.** The counts are cached for five minutes on the server, so a card can lag the database; the size is read fresh. The compression ratio is `—` until the feature behind it lands, never a placeholder number.
 
 13. **Review the audit log.**
 
@@ -3129,6 +3152,7 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | GET | `/api/admin/audit/export` | Stream every event matching the list filters: `format` (`json`/`csv`) plus the same filters as `/api/admin/audit`. Uncapped — the way to retain evidence before retention deletes it |
 | POST | `/api/admin/ai-models/refresh` | Re-discover models from the sidecar |
 | GET | `/api/admin/component-versions` | Backend, sidecar, and chart versions |
+| GET | `/api/admin/server-status` | Live server status: `disk` (filesystem usage of the data directory plus `database`/`transcripts`/`logs` sizes), `cpu` (`process_percent`, `quota_cores`, `quota_state` = `set`/`unlimited`/`unknown`), `memory` (`rss_bytes`, `current_bytes`, `working_set_bytes`, `limit_bytes`, `limit_state`, `percent_of_limit` from the working set), `process` (`git_sha`, `restart_count` — `null` inside a container), `database` (size including the WAL, row counts, `compression_ratio`), `sidecar`, `activity` (`analyses_running`, `analyses` with per-analysis `elapsed_seconds`, `chat_turns_in_flight`, `sse_clients`), and `warnings`. Each probe block carries `available`; a probe that cannot read its source answers `{"available": false, "reason": "..."}` instead of failing the request |
 | GET | `/api/admin/db/schema` | Read-only schema dump |
 | POST | `/api/admin/db/query` | Read-only SQL for the admin chat |
 | GET | `/api/admin/chat` | Admin chat history |
@@ -3474,6 +3498,7 @@ See [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analy
 | Command | Flags | Purpose |
 | --- | --- | --- |
 | `component-versions` | — | Installed AI-sidecar component versions. |
+| `server-status` | — | Live server status: disk (filesystem usage of the data directory plus database, transcripts and logs sizes), CPU (process percent and cgroup quota — the cores, `no CPU quota (unlimited)` when `cpu.max` says `max`, or `quota unknown` when it cannot be read), memory (RSS, usage against `memory.max`, working set and its share of the limit, with the same set/unlimited/unknown distinction), process (version, commit, uptime, PID, restarts, worst event-loop stall in the last minute), database size and row counts, sidecar reachability and model counts, activity (analyses running with their elapsed time, chat turns in flight, SSE clients), and the derived warnings. A block the server cannot read prints `unavailable` with the reason instead of a zero. |
 | `token-usage` | `--period` (`today`, `week`, `month`, `all`), `--start-date`, `--end-date`, `--provider`, `--model`, `--call-type`, `--group-by` (`provider`, `model`, `call_type`, `day`, `week`, `month`, `job`), `--job-id`, `--format` (`table`, `json`, `csv`) | AI token usage and cost. No filters prints the summary dashboard. |
 | `transcripts list` | `--job` (filter to one run), `--format` (`table`, `json`) | Recorded AI session transcripts (redacted JSONL) with per-session context. Admin only. |
 | `transcripts show SESSION_ID` | `--output`/`-o` FILE | Download one transcript JSONL. Admin only. |

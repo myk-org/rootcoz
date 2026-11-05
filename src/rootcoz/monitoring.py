@@ -525,6 +525,17 @@ async def build_health_response(settings: Any, db_path: str) -> dict[str, Any]:
     # In-process state, no probe needed; a degraded entry makes the whole
     # response degraded without turning /api/health into a 503.
     checks["audit"] = audit_health_check()
+    # Rows a startup scan could not decode (a build with result_json compression
+    # wrote them). Degraded data, not a liveness failure: 200 with status
+    # "degraded", never 503. Reads as {"status": "ok", "undecodable_rows": 0}
+    # when nothing was skipped.
+    from rootcoz import storage  # local: monitoring takes db_path, stays DB-free
+
+    undecodable = storage.undecodable_result_count()
+    checks["result_json"] = {
+        "status": "degraded" if undecodable else "ok",
+        "undecodable_rows": undecodable,
+    }
 
     # Determine overall status. The sidecar is a hard dependency — every AI
     # feature routes through it and the container entrypoint tears the
