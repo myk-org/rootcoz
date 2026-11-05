@@ -3,6 +3,7 @@
 import asyncio
 import json
 import os
+import socket
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -7680,6 +7681,7 @@ class TestReAnalyzeFailure:
         """Re-analysis changes only its card; job totals retain all attempts."""
         from pi_sidecar_client import AIResult, AITokenUsage
 
+        from rootcoz.sources.base import CISourceResult
         from rootcoz.token_tracking import failure_group_usage, record_ai_usage
 
         job_id = "job-attempt-scopes"
@@ -7754,6 +7756,26 @@ class TestReAnalyzeFailure:
                 )
             ]
 
+        # The child failure has CI coordinates, so its re-analysis reconstructs a
+        # JenkinsSource and refetches console output from the real JENKINS_URL.
+        # Mock that boundary and pin egress so any outbound connection attempt
+        # fails and is recorded: both hostname resolution and the connect
+        # syscall, so an IP-literal connection cannot slip through unnoticed.
+        egress: list[Any] = []
+
+        class _EgressBlocked(OSError):
+            """Marker so the pin's own error is never read as a connection error."""
+
+        def _record(target: Any) -> None:
+            egress.append(target)
+            raise _EgressBlocked(f"test blocks network egress to {target!r}")
+
+        def _block_resolve(host, port, *args, **kwargs):
+            _record((host, port))
+
+        def _block_connect(self, address, *args, **kwargs):
+            _record(address)
+
         with (
             patch(
                 "rootcoz.main.analyze_failure_group", side_effect=analyze_replacement
@@ -7764,7 +7786,23 @@ class TestReAnalyzeFailure:
                 return_value="",
             ),
             patch("rootcoz.main.RepositoryManager"),
+            patch(
+                "rootcoz.sources.jenkins_source.JenkinsSource.refetch_context",
+                new_callable=AsyncMock,
+                return_value=CISourceResult(failures=[]),
+            ) as refetch_context,
+            patch.object(socket, "getaddrinfo", _block_resolve),
+            patch.object(socket.socket, "connect", _block_connect),
+            patch.object(socket.socket, "connect_ex", _block_connect),
         ):
+            # Self-check: an IP literal never reaches getaddrinfo, so only the
+            # connect pin can catch it. Connecting to a closed local port keeps
+            # this assertion offline.
+            with socket.socket() as probe, pytest.raises(_EgressBlocked):
+                probe.connect(("127.0.0.1", 9))
+            assert ("127.0.0.1", 9) in egress
+            egress.clear()
+
             for failure_id in (child_failure["id"], top[0]["id"]):
                 response = test_client.post(f"/api/failures/{failure_id}/re-analyze")
                 assert response.status_code == 202
@@ -7872,6 +7910,11 @@ class TestReAnalyzeFailure:
             assert result["failures"][0]["token_usage"]["total_input_tokens"] == 5
             assert result["token_usage"]["total_calls"] == 6
             assert result["token_usage"]["total_input_tokens"] == 50
+
+        # Only the child failure has CI coordinates, so exactly one refetch ran —
+        # mocked — and nothing reached the network.
+        assert refetch_context.await_count == 1
+        assert egress == [], f"re-analysis opened a socket / resolved a host: {egress}"
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("has_history", [False, True])

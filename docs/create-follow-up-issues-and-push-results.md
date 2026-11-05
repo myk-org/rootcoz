@@ -35,7 +35,7 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    RootCoz calls `POST /results/{job_id}/preview-github-issue` or `POST /results/{job_id}/preview-jira-bug`, which draft a title and body, and search for issues that look like duplicates of the same bug.
 
-   `Include links` adds clickable report and build URLs. `AI for issue generation` lets you pick a different provider or model for the draft. The preview also lists any similar issues it found, so you can link existing work instead of filing a duplicate.
+   `Include links` adds clickable report and build URLs. `AI for issue generation` lets you pick a different provider or model for the draft. On first use the picker starts on the pair that analysed this job. The pair you pick is remembered for your account and reused by later issue drafts and by chat; `Server default` forgets it and goes back to the server's configured model, and that choice is remembered too. The preview also lists any similar issues it found, so you can link existing work instead of filing a duplicate.
 
    > **Note:** `Include links` only has an effect when the server has a public base URL configured, because relative links would resolve against the tracker instead of RootCoz. See [Configuration Reference](configuration-reference.html) for details.
 
@@ -154,6 +154,8 @@ rootcoz push JOB_ID --plugin reportportal --json
 Tracker flags fall back to the values in your CLI server profile, so pass them explicitly only when you need to override. See [CLI Command Reference](cli-reference.html) for details.
 
 Send feedback about RootCoz itself through the `Feedback` button in the application header. You describe the problem, RootCoz collects browser context and recent console and API errors automatically, then drafts a GitHub issue you can edit before it is created. This flow is separate from failure issues and requires feedback to be enabled on the server.
+
+There is no analysed job behind feedback, so its `AI for issue generation` picker starts on the server default. The pair you pick is remembered for your account and reused by later feedback and issue drafts, and `Server default` stores that choice explicitly, so it survives a reload instead of quietly reverting.
 
 For raw endpoints, see [API Endpoint Reference](api-reference.html) for details.
 

@@ -153,6 +153,23 @@
         "image": { "type": "string" }
       }
     },
+    "alerts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "name": { "type": "string" },
+        "schedule": { "type": "string" },
+        "envLabel": { "type": "string" },
+        "metricsUrl": { "type": "string" },
+        "image": { "type": "string" },
+        "slackSecretName": { "type": "string" },
+        "slackSecretKey": { "type": "string" },
+        "errorRatePercent": { "type": "integer" },
+        "diskWarnPercent": { "type": "integer" },
+        "diskCritPercent": { "type": "integer" }
+      }
+    },
     "serviceAccount": {
       "type": "object",
       "properties": {

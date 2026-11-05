@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback, useMemo, type FormEvent, type KeyboardEvent } from 'react'
-import { api, ApiError } from '@/lib/api'
+import { api, ApiError, extractApiDetail } from '@/lib/api'
 import { useSSE } from '@/lib/useSSE'
 import { Button } from '@/components/ui/button'
 import { AnalysisModelNotice, AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
@@ -7,8 +7,9 @@ import { isAnalysisAiAvailable } from '@/lib/analysisAi'
 import { useProviderCatalog, useCursorAuthStatus } from '@/lib/useProviderOptions'
 import { CredentialAccessNotice } from '@/components/shared/CredentialAccessNotice'
 import { useAuth } from '@/lib/auth'
+import { useAiSelection } from '@/lib/useAiSelection'
 import { CursorAuthBanner } from '@/components/shared/CursorAuthBanner'
-import { normalizeProvider } from '@/lib/aiProviders'
+import { formatDuration, parseApiTimestamp, INVALID_DATE_FALLBACK } from '@/lib/utils'
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Textarea } from '@/components/ui/textarea'
@@ -18,6 +19,9 @@ import type { RepoUrl } from '@/lib/autoLink'
 import { Send, Loader2, Bot, User, Copy, Check } from 'lucide-react'
 
 const EMPTY_REPO_URLS: RepoUrl[] = []
+
+/** Roles allowed to abort a turn — mirrors the server's `_require_reviewer`. */
+const ABORT_ROLES = ['reviewer', 'operator', 'admin']
 
 const INIT_STEPS = [
   'Initializing workspace and cloning repositories...',
@@ -81,6 +85,51 @@ function StepIndicator({ label, done, active }: { label: string; done: boolean; 
   )
 }
 
+/** Busy bubble shared by the transient `Sending...` row and the persistent pending row. */
+function ChatBusyRow({ label, since, canStop, onStop }: { label: string; since?: Date | null; canStop: boolean; onStop: () => void }) {
+  // Ticks only while this bubble is mounted, i.e. only while something is busy.
+  const [now, setNow] = useState(() => Date.now())
+  const sinceMs = since ? since.getTime() : null
+  useEffect(() => {
+    if (sinceMs === null) return
+    const id = setInterval(() => setNow(Date.now()), 1000)
+    return () => clearInterval(id)
+  }, [sinceMs])
+  // formatDuration falls back to a dash when the browser clock is behind the
+  // server; render the bubble without a number rather than a nonsense one.
+  const elapsed = sinceMs === null ? '' : formatDuration(new Date(sinceMs), new Date(now))
+  const showElapsed = elapsed !== '' && elapsed !== INVALID_DATE_FALLBACK
+  return (
+    <div className="flex gap-3 justify-start">
+      <div className="shrink-0 mt-1">
+        <div className="h-7 w-7 rounded-full bg-accent-blue/15 flex items-center justify-center">
+          <Bot className="h-4 w-4 text-accent-blue" />
+        </div>
+      </div>
+      <div className="max-w-[75%] rounded-lg px-4 py-3 text-sm bg-surface-elevated text-text-secondary">
+        <div className="flex items-center gap-2 text-text-tertiary">
+          <Loader2 className="h-4 w-4 animate-spin" />
+          {/* The ticking label is hidden from assistive tech — a live region that
+              re-announces "Thinking... 12s" every second is noise. Transitions
+              are announced by the hidden role="status" region instead. */}
+          <span className="text-sm" aria-hidden="true">{showElapsed ? `${label} ${elapsed}` : label}</span>
+          {canStop && (
+            <Button
+              type="button"
+              variant="outline"
+              size="sm"
+              className="h-6 px-2 text-xs text-signal-red border-signal-red/30 hover:bg-signal-red/10 ml-2"
+              onClick={onStop}
+            >
+              Stop
+            </Button>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
 export function ChatUI({
   apiBasePath,
   sseTopic,
@@ -103,9 +152,11 @@ export function ChatUI({
   const [historyFailed, setHistoryFailed] = useState(false)
   const [historyRetry, setHistoryRetry] = useState(0)
 
-  const [aiProvider, setAiProvider] = useState(() => normalizeProvider(defaultProvider))
-  const [aiModel, setAiModel] = useState(defaultModel)
-  const { canUseServerProviders, canUseFreeProviders } = useAuth()
+  // Remembered pair; the props only seed the very first use. Chat has no
+  // "Server default" entry: an empty pair cannot start a session, so a cleared
+  // entry elsewhere in the app falls back to the analysed pair instead.
+  const { aiProvider, aiModel, setAiPair } = useAiSelection(defaultProvider, defaultModel, { respectCleared: false })
+  const { canUseServerProviders, canUseFreeProviders, role } = useAuth()
   const { providers, providerStatus } = useProviderCatalog()
   const cursorAuthStatus = useCursorAuthStatus()
 
@@ -121,7 +172,6 @@ export function ChatUI({
   const preflightRef = useRef(false)
   const sendInFlightRef = useRef(false)
   const [sending, setSending] = useState(false)
-  const [waitingForReplyId, setWaitingForReplyId] = useState<number | null>(null)
   const mountedRef = useRef(true)
   const startInFlightRef = useRef(false)
   const confirmedInitRef = useRef(false)
@@ -135,12 +185,12 @@ export function ChatUI({
   }, [])
 
   const hasPending = messages.some(m => m.status === 'pending')
-  const awaitingReply = waitingForReplyId !== null && !messages.some(m => m.id === waitingForReplyId)
-  const sendBusy = sending || awaitingReply || hasPending
-
-  useEffect(() => {
-    if (waitingForReplyId !== null && messages.some(m => m.id === waitingForReplyId)) setWaitingForReplyId(null)
-  }, [messages, waitingForReplyId])
+  const sendBusy = sending || hasPending
+  // Mirrors the server's `_require_reviewer` on abort_chat, which never checks that a
+  // session exists. Gating on sessionStarted would hide Stop whenever a pending turn
+  // outlives the session (credential or server grant revoked), wedging the composer.
+  // A stale role still fails safely: the 403 surfaces and the bubble keeps ticking.
+  const canStop = ABORT_ROLES.includes(role)
 
   const historyIsCurrent = useCallback((generation: number) =>
     mountedRef.current && !clearingRef.current && historyGenerationRef.current === generation, [])
@@ -163,16 +213,6 @@ export function ChatUI({
       : !input.trim()
         ? 'Type a message'
         : undefined
-
-  // Sync provider/model from props when they change (e.g., after job info loads)
-  useEffect(() => {
-    if (defaultProvider) setAiProvider(normalizeProvider(defaultProvider))
-  }, [defaultProvider])
-
-  useEffect(() => {
-    if (defaultModel) setAiModel(defaultModel)
-  }, [defaultModel])
-
 
   // Fetch messages with pagination (last 200); session metadata belongs to the first page.
   // Callers apply `preparing` themselves, after their generation check — an
@@ -271,7 +311,9 @@ export function ChatUI({
         }
       })
       .catch(err => { if (!ignore && historyIsCurrent(generation)) { setHistoryFailed(true); setError(err instanceof Error ? err.message : 'Failed to load chat history') } })
-      .finally(() => { if (!ignore && historyIsCurrent(generation)) setLoadingHistory(false) })
+      // Not generation-gated: a send or a sync can invalidate this fetch, and the
+      // spinner must still clear once the initial load has settled.
+      .finally(() => { if (!ignore && mountedRef.current) setLoadingHistory(false) })
     return () => { ignore = true }
   }, [fetchMessages, historyRetry, historyIsCurrent, applySession])
 
@@ -382,16 +424,21 @@ export function ChatUI({
 
   useSSE(sseTopic, chatEvents, { onReconnect: chatSseOnReconnect })
 
-  // Auto-scroll
+  // Auto-scroll — `sending` is in the deps because the transient Sending row is
+  // rendered from that flag, not from `messages`, so appending it fires nothing.
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [messages])
+  }, [messages, sending])
 
   const handleSend = useCallback(async (e?: FormEvent) => {
     e?.preventDefault()
     const trimmed = input.trim()
     if (!trimmed || !sessionStarted || clearing || sendBusy || sendInFlightRef.current) return
     sendInFlightRef.current = true
+    // A history fetch started before this send carries a snapshot without the
+    // optimistic row; invalidate it so its late arrival cannot drop the row and
+    // re-enable the composer mid-turn.
+    historyGenerationRef.current++
     setSending(true)
     console.info('[ChatUI] Sending message')
     setError('')
@@ -407,25 +454,38 @@ export function ChatUI({
       })
 
       if (!mountedRef.current) return
-      setWaitingForReplyId(res.assistant_message_id)
-      // Add user message only — assistant placeholder arrives via SSE when processing starts
+      // Insert both rows now so the busy bubble is visible before any refetch lands.
       setMessages(prev => {
-        // Dedupe: SSE may have already synced this message from the server
-        if (prev.some(m => m.id === res.user_message.id)) return prev
-        return [
-          ...prev,
-          {
+        const additions: ChatMessage[] = []
+        // Dedupe by id on both rows: an SSE sync may have beaten the POST response,
+        // and replacing a synced row would downgrade a finished reply to pending.
+        if (!prev.some(m => m.id === res.user_message.id)) {
+          additions.push({
             id: res.user_message.id,
             job_id: '',
-            role: 'user' as const,
+            role: 'user',
             content: trimmed,
             username: res.user_message.username,
             ai_provider: '',
             ai_model: '',
             status: 'completed',
             created_at: new Date().toISOString(),
-          },
-        ]
+          })
+        }
+        if (!prev.some(m => m.id === res.assistant_message_id)) {
+          additions.push({
+            id: res.assistant_message_id,
+            job_id: '',
+            role: 'assistant',
+            content: '',
+            status: 'pending',
+            created_at: new Date().toISOString(),
+            ai_provider: sessionChoice?.provider ?? '',
+            ai_model: sessionChoice?.model ?? '',
+            username: res.user_message.username,
+          })
+        }
+        return additions.length ? [...prev, ...additions] : prev
       })
 
       // Start polling fallback in case SSE connection is dead
@@ -492,7 +552,6 @@ export function ChatUI({
       historyGenerationRef.current++
       confirmedInitRef.current = false
       cancelPoll()
-      setWaitingForReplyId(null)
       setSessionStarted(false)
       setSessionChoice(null)
       sessionVersionRef.current = null
@@ -518,14 +577,18 @@ export function ChatUI({
   const handleAbort = useCallback(async () => {
     try {
       await api.post(`${apiBasePath}/abort`, {})
-      // Optimistically mark pending messages as failed locally
       setMessages(prev => prev.map(m =>
         m.status === 'pending'
           ? { ...m, status: 'failed' as const, content: 'Aborted by user.' }
           : m
       ))
-    } catch {
-      // Abort is best-effort — SSE will update the message status
+    } catch (err) {
+      if (!mountedRef.current) return
+      // A refused abort leaves the server row pending, so the turn really is still
+      // running: say why, keep the bubble ticking, and let the completion sync
+      // restore the composer. Flipping locally would re-enable it for the few
+      // seconds until the next sync put the pending row back.
+      setError(extractApiDetail(err) ?? (err instanceof Error ? err.message : 'Failed to stop the reply'))
     }
   }, [apiBasePath])
 
@@ -549,8 +612,8 @@ export function ChatUI({
                 : 'Existing session · selection pinned by server'}</span>
             ) : <div className="flex flex-col items-end gap-1">
               <div className="flex items-center gap-3">
-                <div className="w-[160px]"><AnalysisProviderSelect value={aiProvider} onChange={(v) => { setAiProvider(v); setAiModel('') }} forceServer={false} /></div>
-                <div className="w-[240px]"><AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={setAiModel} forceServer={false} hideNotice /></div>
+                <div className="w-[160px]"><AnalysisProviderSelect value={aiProvider} onChange={(v) => setAiPair(v, '')} forceServer={false} /></div>
+                <div className="w-[240px]"><AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={(model) => setAiPair(aiProvider, model, { commit: false })} onCommit={(model) => setAiPair(aiProvider, model)} forceServer={false} hideNotice /></div>
                 <Button size="sm" onClick={handleStart} disabled={!validPair || starting || clearing || loadingHistory || historyFailed}>
                   {starting ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Start Chat'}
                 </Button>
@@ -610,17 +673,30 @@ export function ChatUI({
           <StepIndicator label="Ready" done={initStepIndex > 2} active={initStepIndex === 2} />
         </div>}
 
+        {/* State transitions only — never the ticking label, which would re-announce every second. */}
+        <span className="sr-only" role="status">
+          {sending ? 'Sending message' : hasPending ? 'Waiting for the reply' : ''}
+        </span>
+
         {/* Messages area */}
         <div className="flex-1 flex flex-col overflow-y-auto px-6 py-4 space-y-4">
           {loadingHistory && <p className="text-sm text-text-tertiary">Loading chat history...</p>}
-          {!loadingHistory && messages.length === 0 && (
+          {!loadingHistory && messages.length === 0 && !sending && (
             <div className="flex flex-col items-center justify-center flex-1 text-text-tertiary">
               <Bot className="h-12 w-12 mb-3 opacity-30" />
               <p className="text-sm">{emptyMessage}</p>
               {emptySubtitle && <p className="text-xs mt-1">{emptySubtitle}</p>}
             </div>
           )}
-          {messages.map(msg => (
+          {messages.map(msg => msg.status === 'pending' ? (
+            <ChatBusyRow
+              key={msg.id}
+              label="Thinking..."
+              since={parseApiTimestamp(msg.created_at)}
+              canStop={canStop}
+              onStop={handleAbort}
+            />
+          ) : (
             <div
               key={msg.id}
               className={`flex gap-3 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
@@ -641,21 +717,7 @@ export function ChatUI({
                       : 'bg-surface-elevated text-text-secondary'
                 }`}
               >
-                {msg.status === 'pending' ? (
-                  <div className="flex items-center gap-2 text-text-tertiary">
-                    <Loader2 className="h-4 w-4 animate-spin" />
-                    <span className="text-sm">Thinking...</span>
-                    <Button
-                      type="button"
-                      variant="outline"
-                      size="sm"
-                      className="h-6 px-2 text-xs text-signal-red border-signal-red/30 hover:bg-signal-red/10 ml-2"
-                      onClick={handleAbort}
-                    >
-                      Stop
-                    </Button>
-                  </div>
-                ) : msg.role === 'assistant' ? (
+                {msg.role === 'assistant' ? (
                   <ChatMarkdown content={msg.content} />
                 ) : (
                   <div className="whitespace-pre-wrap break-words">
@@ -671,21 +733,19 @@ export function ChatUI({
                     {msg.status === 'failed' && <span className="text-signal-red">Failed</span>}
                     <span>{new Date(msg.created_at).toLocaleString()}</span>
                   </div>
-                  {msg.status !== 'pending' && (
-                    <Tooltip>
-                      <TooltipTrigger asChild>
-                        <button
-                          type="button"
-                          className="text-text-tertiary hover:text-text-primary transition-colors"
-                          onClick={() => copyMessage(msg.content, msg.id)}
-                          aria-label="Copy message"
-                        >
-                          {copiedMsgId === msg.id ? <Check className="h-3 w-3 text-signal-green" /> : <Copy className="h-3 w-3" />}
-                        </button>
-                      </TooltipTrigger>
-                      <TooltipContent>{copiedMsgId === msg.id ? 'Copied!' : 'Copy message'}</TooltipContent>
-                    </Tooltip>
-                  )}
+                  <Tooltip>
+                    <TooltipTrigger asChild>
+                      <button
+                        type="button"
+                        className="text-text-tertiary hover:text-text-primary transition-colors"
+                        onClick={() => copyMessage(msg.content, msg.id)}
+                        aria-label="Copy message"
+                      >
+                        {copiedMsgId === msg.id ? <Check className="h-3 w-3 text-signal-green" /> : <Copy className="h-3 w-3" />}
+                      </button>
+                    </TooltipTrigger>
+                    <TooltipContent>{copiedMsgId === msg.id ? 'Copied!' : 'Copy message'}</TooltipContent>
+                  </Tooltip>
                 </div>
               </div>
               {msg.role === 'user' && (
@@ -697,6 +757,9 @@ export function ChatUI({
               )}
             </div>
           ))}
+          {/* Below the thread, right above the sentinel. Rendering here does not by
+              itself keep it visible: the auto-scroll effect keys on `sending` too. */}
+          {sending && !hasPending && <ChatBusyRow label="Sending..." canStop={false} onStop={handleAbort} />}
           <div ref={messagesEndRef} />
         </div>
 

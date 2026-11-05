@@ -17,7 +17,7 @@ import sqlite3
 import threading
 import time as _time
 import uuid
-from collections import Counter, defaultdict
+from collections import Counter, defaultdict, deque
 from collections.abc import (
     AsyncIterator,
     Awaitable,
@@ -30,6 +30,7 @@ from collections.abc import (
 )
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
+from functools import partial
 from pathlib import Path
 from typing import Annotated, Any, Literal, get_args
 from urllib.parse import quote as _urlquote
@@ -233,6 +234,7 @@ from rootcoz.monitoring import (
     dispatch_alert,
     error_tracker,
     get_component_versions,
+    read_data_usage,
     record_audit_auth_suppression,
     record_audit_write_failure,
     render_prometheus_metrics,
@@ -12381,6 +12383,40 @@ async def admin_get_component_versions(request: Request) -> dict[str, Any]:
     return strip_sensitive_from_response({"components": await get_component_versions()})
 
 
+# Dedicated daemon worker for the /metrics filesystem probe. It is not a
+# ThreadPoolExecutor: the executor's workers are joined at interpreter exit, so a probe
+# stuck in a filesystem call (a hung mount) would block shutdown. A daemon thread is
+# never joined — the stuck probe simply dies with the process — and the single-slot
+# mailbox means a timed-out scrape never leaves work queued behind it: a new scrape
+# displaces the pending request, so the worker only ever runs the most recent one. A
+# timeout cancels the wait, not the probe, so later scrapes each pay the 2 s timeout
+# until the hung call returns.
+_DATA_PROBE_TIMEOUT_SECONDS = 2.0
+_data_probe_mailbox: deque[tuple[Callable[[], Any], list[Any]]] = deque()
+# Wakes the worker; deque.append/popleft are atomic, so no other lock is needed.
+_data_probe_ready = threading.Event()
+
+
+def _data_probe_worker() -> None:
+    while True:
+        _data_probe_ready.wait()
+        _data_probe_ready.clear()
+        try:
+            func, box = _data_probe_mailbox.popleft()
+        except IndexError:
+            continue
+        try:
+            box.append(func())
+        except Exception:
+            # A result must land in the box either way, or the scrape waits out its
+            # whole timeout for a worker that is already done.
+            box.append(None)
+            logger.debug("Data usage probe failed", exc_info=True)
+
+
+threading.Thread(target=_data_probe_worker, name="data-probe", daemon=True).start()
+
+
 @app.get("/metrics", operation_id="prometheusMetrics")
 async def prometheus_metrics() -> Response:
     """Prometheus metrics endpoint."""
@@ -12406,11 +12442,44 @@ async def prometheus_metrics() -> Response:
     except Exception:
         logger.debug("Failed to compute active analyses for metrics", exc_info=True)
 
+    # Filesystem probe for the data directory. Never raises: a failing or timing-out
+    # probe leaves the gauges absent so the scrape still answers 200.
+    data_used_bytes: int | None = None
+    data_capacity_bytes: int | None = None
+    try:
+        box: list[Any] = []
+        # Single slot: a displaced request is answered with None right away, otherwise
+        # its scrape waits out the whole timeout for a probe that will never run.
+        while _data_probe_mailbox:
+            try:
+                _, displaced_box = _data_probe_mailbox.popleft()
+            except IndexError:  # the worker took it first
+                break
+            displaced_box.append(None)
+        request = (partial(read_data_usage, db_path), box)
+        _data_probe_mailbox.append(request)
+        _data_probe_ready.set()
+        try:
+            async with asyncio.timeout(_DATA_PROBE_TIMEOUT_SECONDS):
+                while not box:
+                    await asyncio.sleep(0.05)
+        finally:
+            # Withdraw an abandoned request so the worker does not run it later.
+            with contextlib.suppress(ValueError):
+                _data_probe_mailbox.remove(request)
+        probe_result = box[0]
+        if probe_result is not None:
+            data_used_bytes, data_capacity_bytes = probe_result
+    except Exception:
+        logger.debug("Failed to read data usage for metrics", exc_info=True)
+
     return Response(
         content=render_prometheus_metrics(
             health_up=health_up,
             active_analyses=active_analyses,
             audit_write_failures=audit_health_check()["write_failures"],
+            data_used_bytes=data_used_bytes,
+            data_capacity_bytes=data_capacity_bytes,
         ),
         media_type="text/plain; version=0.0.4; charset=utf-8",
     )

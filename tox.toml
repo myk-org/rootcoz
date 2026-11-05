@@ -175,4 +175,28 @@ commands = [
     "--set",
     "encryptionKey=test-encryption-key-for-helm-template-render",  # pragma: allowlist secret
   ],
+  [
+    "sh",
+    "-c",
+    "OUT=/tmp/rootcoz-alerts-test-$$.yaml; helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render --set alerts.enabled=true --set alerts.diskWarnPercent=80 --set alerts.schedule='*/2 * * * *' --set 'imagePullSecrets[0].name=regcred' > $OUT 2>&1 && [ \"$(grep -c 'kind: CronJob' $OUT)\" = \"1\" ] && grep -qF 'schedule: \"*/2 * * * *\"' $OUT && grep -A1 'name: DISK_WARN_PERCENT' $OUT | grep -q '\"80\"' && grep -q 'secretKeyRef' $OUT && grep -q 'health-alert.sh' $OUT && sed -n '/kind: CronJob/,$p' $OUT | grep -q 'automountServiceAccountToken: false' && sed -n '/kind: CronJob/,$p' $OUT | grep -A1 'imagePullSecrets:' | grep -q 'name: regcred' && sed -n '/kind: CronJob/,$p' $OUT | grep -A8 'resources:' | grep -q 'cpu: 10m' && sed -n '/kind: CronJob/,$p' $OUT | grep -A8 'resources:' | grep -q 'memory: 16Mi' && rm -f $OUT",  # pragma: allowlist secret
+  ],
+  [
+    "sh",
+    "-c",
+    # A 60-char name must still produce a CronJob <= 52 (the Job controller appends 11)
+    # and a ConfigMap <= 63, with the script volume pointing at that ConfigMap.
+    "OUT=/tmp/rootcoz-alerts-long-name-$$.yaml; LONG=$(awk 'BEGIN{for(i=0;i<60;i++) printf \"a\"}'); helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render --set alerts.enabled=true --set fullnameOverride=$LONG > $OUT 2>&1 && CJ=$(grep -oE '^  name: .*-health-alerts$' $OUT | awk '{print $2}') && CM=$(grep -oE '^  name: .*-health-alerts-script$' $OUT | awk '{print $2}') && [ -n \"$CJ\" ] && [ ${#CJ} -le 52 ] && [ -n \"$CM\" ] && [ ${#CM} -le 63 ] && grep -A1 'configMap:' $OUT | grep -qF \"name: $CM\" && rm -f $OUT",  # pragma: allowlist secret
+  ],
+  [
+    "sh",
+    "-c",
+    # Two releases whose fullnames share the first 38 chars must not collide: the
+    # derived names carry a hash of the whole fullname, still within 52 / 63.
+    "P=$(awk 'BEGIN{for(i=0;i<38;i++) printf \"a\"}'); A=/tmp/rootcoz-alerts-shared-prefix-a-$$.yaml; B=/tmp/rootcoz-alerts-shared-prefix-b-$$.yaml; T='helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render --set alerts.enabled=true'; $T --set fullnameOverride=$P-one > $A 2>&1 && $T --set fullnameOverride=$P-two > $B 2>&1 && CJA=$(grep -oE '^  name: .*-health-alerts$' $A | awk '{print $2}') && CJB=$(grep -oE '^  name: .*-health-alerts$' $B | awk '{print $2}') && CMA=$(grep -oE '^  name: .*-health-alerts-script$' $A | awk '{print $2}') && CMB=$(grep -oE '^  name: .*-health-alerts-script$' $B | awk '{print $2}') && [ -n \"$CJA\" ] && [ -n \"$CJB\" ] && [ \"$CJA\" != \"$CJB\" ] && [ -n \"$CMA\" ] && [ -n \"$CMB\" ] && [ \"$CMA\" != \"$CMB\" ] && [ ${#CJA} -le 52 ] && [ ${#CJB} -le 52 ] && [ ${#CMA} -le 63 ] && [ ${#CMB} -le 63 ] && rm -f $A $B",  # pragma: allowlist secret
+  ],
+  [
+    "sh",
+    "-c",
+    "! helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'kind: CronJob'",  # pragma: allowlist secret
+  ],
 ]
