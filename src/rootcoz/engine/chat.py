@@ -5,10 +5,9 @@ Builds job-scoped system prompts and manages AI CLI conversations.
 
 import asyncio
 import base64
-import shutil
 import tempfile
-from collections.abc import Callable
-from contextlib import ExitStack
+from collections.abc import AsyncIterator, Callable
+from contextlib import ExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +31,7 @@ from rootcoz.jira import (
     resolve_jira_connection_from_params,
 )
 from rootcoz.storage import AI_SYSTEM_USERNAME
+from rootcoz.temp_paths import delete_tree, reusable_path_lock
 
 logger = get_child_logger(__name__)
 
@@ -71,6 +71,17 @@ def ensure_chat_workspace(job_id: str, username: str = "") -> Path:
     workspace.chmod(0o700)
     logger.info("Chat workspace created: %s", workspace)
     return workspace
+
+
+@asynccontextmanager
+async def chat_workspace_lock(job_id: str, username: str = "") -> AsyncIterator[None]:
+    """Hold the chat workspace's path lock for the create/reuse decision.
+
+    The path is deterministic and reused across messages, so a queued delete of
+    ``chat-{job}/{user}`` must finish before the next message creates into it.
+    """
+    async with reusable_path_lock(job_id, get_chat_workspace(job_id, username)):
+        yield
 
 
 def _resolve_chat_repo_target(workspace: Path, repo_name: str) -> tuple[str, Path]:
@@ -908,7 +919,7 @@ def build_admin_custom_tools(
     ]
 
 
-def _safe_remove_symlink(link: Path) -> None:
+def _safe_remove_symlink(link: Path) -> tuple[int, int]:
     """Remove a symlink and its target directory if safe.
 
     Only deletes the target when it resolves to a path under the process
@@ -920,38 +931,43 @@ def _safe_remove_symlink(link: Path) -> None:
     if target.exists() and target.is_dir():
         tmp_root = _tmp_root()
         if target.is_relative_to(tmp_root):
-            shutil.rmtree(target, ignore_errors=True)
-        else:
-            logger.warning(
-                "Chat cleanup: refusing to delete symlink target outside %s: %s",
-                tmp_root,
-                target,
-            )
+            return delete_tree(target)
+        logger.warning(
+            "Chat cleanup: refusing to delete symlink target outside %s: %s",
+            tmp_root,
+            target,
+        )
+    return (0, 0)
 
 
-def cleanup_chat_repos(job_id: str, username: str = "") -> None:
+def cleanup_chat_repos(job_id: str, username: str = "") -> tuple[int, int]:
     """Delete cloned repos and artifacts from chat workspace but keep session files."""
     workspace = get_chat_workspace(job_id, username)
     from rootcoz.engine.graft import cleanup_graph
     from rootcoz.engine.graft_http import unregister_workspace
 
     unregister_workspace(workspace)
-    cleanup_graph(workspace)
+    nbytes, entries = cleanup_graph(workspace)
     if not workspace.exists():
-        return
+        return (nbytes, entries)
 
     # Delete everything except hidden dirs (which contain session data)
     for item in workspace.iterdir():
         if item.name.startswith("."):
             continue  # Keep .claude/, .cursor/ etc (session data)
         if item.is_symlink():
-            _safe_remove_symlink(item)
+            item_bytes, item_entries = _safe_remove_symlink(item)
+            nbytes += item_bytes
+            entries += item_entries
         elif item.is_dir():
-            shutil.rmtree(item, ignore_errors=True)
+            item_bytes, item_entries = delete_tree(item)
+            nbytes += item_bytes
+            entries += item_entries
         else:
             item.unlink(missing_ok=True)
 
     logger.info(f"Cleaned up chat repos for job {job_id} (kept sessions)")
+    return (nbytes, entries)
 
 
 def _chat_mcp_lock_targets(workspace: Path) -> list[Path]:
@@ -965,7 +981,7 @@ def _chat_mcp_lock_targets(workspace: Path) -> list[Path]:
     return list(dict.fromkeys(targets))
 
 
-def cleanup_chat_workspace(job_id: str, username: str = "") -> None:
+def cleanup_chat_workspace(job_id: str, username: str = "") -> tuple[int, int]:
     """Delete the entire chat workspace including sessions."""
     workspace = get_chat_workspace(job_id, username)
     targets = _chat_mcp_lock_targets(workspace)
@@ -973,8 +989,8 @@ def cleanup_chat_workspace(job_id: str, username: str = "") -> None:
     from rootcoz.engine.graft_http import unregister_workspace
 
     unregister_workspace(workspace)
-    cleanup_graph(workspace)
-    # Hold each workspace's MCP install lock for the whole rmtree + dump
+    nbytes, entries = cleanup_graph(workspace)
+    # Hold each workspace's MCP install lock for the whole delete + dump
     # unlink so an in-flight installer cannot recreate credentials after
     # the job (or nested user dir) was removed.
     with ExitStack() as stack:
@@ -982,15 +998,20 @@ def cleanup_chat_workspace(job_id: str, username: str = "") -> None:
             stack.enter_context(_workspace_install_lock(target))
         if workspace.exists():
             # Resolve symlinks before removing workspace tree — symlinked
-            # artifact dirs live outside the workspace and won't be cleaned
-            # by shutil.rmtree (which removes the symlink, not its target).
+            # artifact dirs live outside the workspace and are not reached by
+            # the tree walk (which unlinks the symlink, not its target).
             for item in workspace.iterdir():
                 if item.is_symlink():
-                    _safe_remove_symlink(item)
-            shutil.rmtree(workspace, ignore_errors=True)
+                    item_bytes, item_entries = _safe_remove_symlink(item)
+                    nbytes += item_bytes
+                    entries += item_entries
+            tree_bytes, tree_entries = delete_tree(workspace)
+            nbytes += tree_bytes
+            entries += tree_entries
         for target in targets:
             cleanup_http_tools_mcp(target)
     logger.info(f"Deleted chat workspace for job {job_id}")
+    return (nbytes, entries)
 
 
 # -- Shared prompt building helpers --

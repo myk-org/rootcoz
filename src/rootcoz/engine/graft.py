@@ -20,6 +20,7 @@ from typing import Any
 
 from rootcoz import get_child_logger
 from rootcoz.engine.http_mcp import _workspace_install_lock
+from rootcoz.temp_paths import delete_tree
 
 logger = get_child_logger(__name__)
 
@@ -980,9 +981,14 @@ def indexed_roots(workspace: Path) -> dict[str, Path]:
         }
 
 
-def cleanup_graph(workspace: Path) -> None:
-    """Delete graphs and snapshots outside the AI-visible workspace."""
+def cleanup_graph(workspace: Path) -> tuple[int, int]:
+    """Delete graphs and snapshots outside the AI-visible workspace.
+
+    Returns ``(bytes, entries)`` reclaimed. Sync on purpose — this takes a
+    blocking ``flock`` and is a reaper step, never called from the event loop.
+    """
     root = _root(workspace)
     with _workspace_install_lock(Path(workspace).resolve()):
         if root.is_dir() and not root.is_symlink():
-            shutil.rmtree(root, ignore_errors=True)
+            return delete_tree(root)
+        return (0, 0)

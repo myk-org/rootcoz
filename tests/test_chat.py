@@ -1454,24 +1454,23 @@ class TestChatCleanup:
 @pytest.mark.asyncio
 async def test_cleanup_deleted_job_offloads_blocking_cleanup(monkeypatch):
     """Filesystem MCP locks must not run on the event loop."""
+    import asyncio
+
     from rootcoz import main as main_mod
 
     seen: list[str] = []
 
     def fake_cleanup(job_id: str, username: str = "") -> None:
+        # No running loop here proves the cleanup is off the loop; patching
+        # ``to_thread`` would only prove which helper was used.
+        with pytest.raises(RuntimeError):
+            asyncio.get_running_loop()
         seen.append(f"cleanup:{job_id}")
 
     monkeypatch.setattr("rootcoz.engine.chat.cleanup_chat_workspace", fake_cleanup)
-    orig_to_thread = main_mod.asyncio.to_thread
-
-    async def tracking_to_thread(fn, *args, **kwargs):
-        seen.append("to_thread")
-        return await orig_to_thread(fn, *args, **kwargs)
-
-    monkeypatch.setattr(main_mod.asyncio, "to_thread", tracking_to_thread)
     main_mod._chat_jobs_deleting.clear()
     await main_mod._cleanup_deleted_job_chat_workspaces("job-offload")
-    assert seen == ["to_thread", "cleanup:job-offload"]
+    assert seen == ["cleanup:job-offload"]
     assert "job-offload" not in main_mod._chat_jobs_deleting
     assert "job-offload" not in main_mod._chat_job_barriers
 

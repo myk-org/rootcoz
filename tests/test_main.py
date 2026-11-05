@@ -8252,6 +8252,12 @@ class TestReAnalyzeFailure:
                 with pytest.raises(asyncio.CancelledError):
                     await asyncio.wait_for(task, 2)
                 assert finished.is_set()
+                # The delete is a queued reaper step now, so wait for it instead of
+                # depending on worker-thread scheduling.
+                for _ in range(200):
+                    if manager.return_value.cleanup.called:
+                        break
+                    await asyncio.sleep(0.01)
                 manager.return_value.cleanup.assert_called_once()
             result = (await storage.get_result("job-cancel-tests"))["result"]
             assert result["cloning_repos"] == []

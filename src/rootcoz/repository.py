@@ -15,7 +15,7 @@ from git.exc import GitCommandError
 from pydantic import HttpUrl
 
 from rootcoz import get_child_logger
-from rootcoz.temp_paths import rootcoz_temp_base
+from rootcoz.temp_paths import delete_tree, rootcoz_temp_base
 
 if TYPE_CHECKING:
     from rootcoz.models import AdditionalRepo
@@ -179,7 +179,7 @@ def _clone_with_ssl_retry(
             )
             # Clean up partial clone before retry
             if clone_dir.exists():
-                shutil.rmtree(clone_dir)
+                delete_tree(clone_dir)
                 clone_dir.mkdir(parents=True, exist_ok=True)
             Repo.clone_from(
                 repo_url,
@@ -325,13 +325,21 @@ class RepositoryManager:
         logger.info(f"Created workspace directory: {workspace_dir}")
         return workspace_dir
 
-    def cleanup(self) -> None:
-        """Remove all cloned repositories."""
+    def cleanup(self) -> tuple[int, int]:
+        """Remove all cloned repositories; return ``(bytes, entries)`` reclaimed.
+
+        Sync on purpose — it is a reaper step, called from
+        ``temp_paths.cleanup_off_loop`` and never from the event loop.
+        """
         logger.debug("Cleaning up temporary directories")
+        reclaimed = 0
+        entries = 0
         for temp_dir in self.temp_dirs:
-            if temp_dir.exists():
-                shutil.rmtree(temp_dir)
+            nbytes, count = delete_tree(temp_dir)
+            reclaimed += nbytes
+            entries += count
         self.temp_dirs.clear()
+        return (reclaimed, entries)
 
     def __enter__(self) -> Self:
         """Enter context manager."""

@@ -299,6 +299,12 @@ from rootcoz.storage import (
     stamp_build_url,
     update_status,
 )
+from rootcoz.temp_paths import (
+    cleanup_off_loop,
+    cleanup_path_off_loop,
+    delete_reusable_path,
+    delete_tree,
+)
 from rootcoz.token_tracking import (
     build_token_usage_summary,
     child_usage_scope,
@@ -4310,7 +4316,8 @@ async def _resolve_settings_json_before_analysis(
         job_id,
     )
     clone_ok = False
-    with RepositoryManager() as repo_manager:
+    repo_manager = RepositoryManager()
+    try:
         workspace = repo_manager.create_workspace()
         target = workspace / "tests-repo-early"
         tests_path: Path | None = target
@@ -4347,6 +4354,9 @@ async def _resolve_settings_json_before_analysis(
             logger.error("Invalid .rootcoz/settings.json (details redacted)")
             await _fail_job(str(exc))
             return None
+    finally:
+        # Off the loop: this clone tree is a full repository checkout.
+        await cleanup_off_loop(job_id, repo_manager.cleanup)
 
     if not effective.ai_provider or not effective.ai_model:
         if not clone_ok:
@@ -5986,17 +5996,25 @@ async def _process_ci_source_analysis(
 
     finally:
         logger.debug(f"Cleaning up workspace for job_id={job_id}")
+        # Created before any await: a cancellation cancels every later await in
+        # this block, and the revoke must not be lost on the cancel path.
+        session_task = asyncio.create_task(_cleanup_ai_session(auth_header))
+        steps: list[Callable[[], object]] = []
         if repo_manager is not None:
             from rootcoz.engine.graft import cleanup_graph
             from rootcoz.engine.graft_http import unregister_workspace
 
             if repo_path is not None:
-                unregister_workspace(repo_path)
-                cleanup_graph(repo_path)
-            repo_manager.cleanup()
+                steps += [
+                    partial(unregister_workspace, repo_path),
+                    partial(cleanup_graph, repo_path),
+                ]
+            steps.append(repo_manager.cleanup)
         if source is not None:
-            source.cleanup()
-        await _cleanup_ai_session(auth_header)
+            steps.append(source.cleanup)
+        if steps:
+            await cleanup_off_loop(job_id, *steps)
+        await asyncio.shield(session_task)
 
 
 def _resolve_request_display_name(body: UnifiedAnalyzeRequest) -> str:
@@ -7379,24 +7397,26 @@ async def _reanalyze_failure_background(
 
     finally:
         notify_job_status_changed(job_id)
-        await _cleanup_ai_session(auth_header)
+        # Created before any await: a cancellation cancels every later await in
+        # this block, and the revoke must not be lost on the cancel path.
+        session_task = asyncio.create_task(_cleanup_ai_session(auth_header))
+        steps: list[Callable[[], object]] = []
         if repo_manager:
-            try:
-                from rootcoz.engine.graft import cleanup_graph
-                from rootcoz.engine.graft_http import unregister_workspace
+            from rootcoz.engine.graft import cleanup_graph
+            from rootcoz.engine.graft_http import unregister_workspace
 
-                if repo_path is not None:
-                    unregister_workspace(repo_path)
-                    cleanup_graph(repo_path)
-                repo_manager.cleanup()
-            except Exception:
-                logger.warning("Failed to cleanup repos", exc_info=True)
+            if repo_path is not None:
+                steps += [
+                    partial(unregister_workspace, repo_path),
+                    partial(cleanup_graph, repo_path),
+                ]
+            steps.append(repo_manager.cleanup)
         # Clean up downloaded source artifacts
         if source is not None:
-            try:
-                source.cleanup()
-            except Exception:
-                logger.warning("Failed to cleanup source artifacts", exc_info=True)
+            steps.append(source.cleanup)
+        if steps:
+            await cleanup_off_loop(job_id, *steps)
+        await asyncio.shield(session_task)
 
 
 @app.post(
@@ -19855,6 +19875,7 @@ async def _init_chat_under_barrier(
     from rootcoz.engine.chat import (
         build_chat_custom_tools,
         build_welcome_message,
+        chat_workspace_lock,
         clone_chat_repos,
         ensure_chat_workspace,
         init_chat_session,
@@ -19881,7 +19902,8 @@ async def _init_chat_under_barrier(
             credential_source,
             allow_empty=True,
         )
-        workspace = ensure_chat_workspace(job_id, username=username)
+        async with chat_workspace_lock(job_id, username):
+            workspace = ensure_chat_workspace(job_id, username=username)
 
     decrypted_params: dict[str, Any] = {}
     try:
@@ -20257,13 +20279,19 @@ async def _cleanup_deleted_job_chat_workspaces(job_id: str) -> None:
     barrier are dropped; the job row is already gone so a later init cannot
     recreate workspace state.
     """
-    from rootcoz.engine.chat import cleanup_chat_workspace
+    from rootcoz.engine.chat import cleanup_chat_workspace, get_chat_workspace
 
     _chat_jobs_deleting.add(job_id)
     try:
         await _cancel_tracked_chat_job_tasks(job_id)
         async with _get_chat_job_barrier(job_id):
-            await asyncio.to_thread(cleanup_chat_workspace, job_id)
+            # Marker + per-path lock: this path is deterministic and reused, so a
+            # queued delete must finish before the next session creates into it.
+            await delete_reusable_path(
+                job_id,
+                get_chat_workspace(job_id),
+                partial(cleanup_chat_workspace, job_id),
+            )
     except Exception:
         logger.warning("Failed to cleanup chat workspace for %s", job_id, exc_info=True)
     finally:
@@ -20481,6 +20509,7 @@ async def _process_chat_message(
     from rootcoz.engine.chat import (
         build_chat_custom_tools,
         chat_with_ai,
+        chat_workspace_lock,
         clone_chat_repos,
         ensure_chat_workspace,
     )
@@ -20573,7 +20602,8 @@ async def _process_chat_message(
                                 )
                                 break
 
-                        workspace = ensure_chat_workspace(job_id, username=username)
+                        async with chat_workspace_lock(job_id, username):
+                            workspace = ensure_chat_workspace(job_id, username=username)
 
                         decrypted_params = {}
                         try:
@@ -20823,7 +20853,7 @@ async def clear_chat_history(job_id: str, request: Request) -> dict[str, Any]:
     """Clear chat messages for the current user on a job."""
     _check_allow_list(request)
     _require_reviewer(request)
-    from rootcoz.engine.chat import cleanup_chat_repos
+    from rootcoz.engine.chat import cleanup_chat_repos, get_chat_workspace
 
     stored = await get_result(job_id)
     if not stored:
@@ -20838,15 +20868,11 @@ async def clear_chat_history(job_id: str, request: Request) -> dict[str, Any]:
         count = await storage.delete_chat_messages(job_id, username=username)
         await _cleanup_revoked_ai_sessions()
         notify_chat_changed(job_id, username=username)
-        try:
-            cleanup_chat_repos(job_id, username=username)
-        except Exception:
-            logger.warning(
-                "Failed to cleanup chat repos for %s/%s",
-                job_id,
-                username,
-                exc_info=True,
-            )
+        await cleanup_path_off_loop(
+            job_id,
+            get_chat_workspace(job_id, username),
+            partial(cleanup_chat_repos, job_id, username=username),
+        )
 
     _cleanup_chat_state(f"{job_id}:{username}")
     logger.info(
@@ -21054,6 +21080,7 @@ async def init_admin_chat(
         )
     from rootcoz.engine.chat import (
         build_admin_custom_tools,
+        chat_workspace_lock,
         ensure_chat_workspace,
         init_admin_chat_session,
     )
@@ -21073,7 +21100,8 @@ async def init_admin_chat(
             credential_source,
             allow_empty=True,
         )
-        workspace = ensure_chat_workspace(ADMIN_CHAT_JOB_ID, username=username)
+        async with chat_workspace_lock(ADMIN_CHAT_JOB_ID, username):
+            workspace = ensure_chat_workspace(ADMIN_CHAT_JOB_ID, username=username)
         if not await _available_chat_session(ADMIN_CHAT_JOB_ID, username):
             custom_tools: list[dict[str, Any]] = []
             auth_header = await _create_ai_auth_header(username, is_admin=True)
@@ -21289,6 +21317,7 @@ async def _process_admin_chat_message(
     from rootcoz.engine.chat import (
         admin_chat_with_ai,
         build_admin_custom_tools,
+        chat_workspace_lock,
         ensure_chat_workspace,
     )
 
@@ -21347,7 +21376,8 @@ async def _process_admin_chat_message(
                     )
                     break
 
-            workspace = ensure_chat_workspace(ADMIN_CHAT_JOB_ID, username=username)
+            async with chat_workspace_lock(ADMIN_CHAT_JOB_ID, username):
+                workspace = ensure_chat_workspace(ADMIN_CHAT_JOB_ID, username=username)
 
             settings = get_settings()
 
@@ -21529,21 +21559,22 @@ def _get_admin_artifacts_dir(username: str) -> Path:
     return _ADMIN_ARTIFACTS_BASE / safe_user
 
 
-def _cleanup_admin_artifacts(username: str) -> None:
-    """Delete all artifacts for an admin user."""
-    import shutil
-
+def _cleanup_admin_artifacts(username: str) -> tuple[int, int]:
+    """Delete all artifacts for an admin user; a reaper step, never inline."""
     artifacts_dir = _get_admin_artifacts_dir(username)
-    if artifacts_dir.exists():
-        try:
-            shutil.rmtree(artifacts_dir)
-            logger.info("Admin chat: cleaned up artifacts for %s", username)
-        except OSError:
-            logger.warning(
-                "Admin chat: failed to clean up artifacts for %s",
-                username,
-                exc_info=True,
-            )
+    if not artifacts_dir.exists():
+        return (0, 0)
+    try:
+        reclaimed = delete_tree(artifacts_dir)
+        logger.info("Admin chat: cleaned up artifacts for %s", username)
+        return reclaimed
+    except OSError:
+        logger.warning(
+            "Admin chat: failed to clean up artifacts for %s",
+            username,
+            exc_info=True,
+        )
+        return (0, 0)
 
 
 class SaveArtifactRequest(BaseModel):
@@ -21642,7 +21673,7 @@ async def get_admin_chat_artifact(
 async def clear_admin_chat_history(request: Request) -> dict[str, Any]:
     """Clear admin chat messages for the current user."""
     _require_admin(request)
-    from rootcoz.engine.chat import cleanup_chat_repos
+    from rootcoz.engine.chat import cleanup_chat_repos, get_chat_workspace
 
     username = request.state.username
 
@@ -21651,16 +21682,15 @@ async def clear_admin_chat_history(request: Request) -> dict[str, Any]:
         count = await storage.delete_chat_messages(ADMIN_CHAT_JOB_ID, username=username)
         await _cleanup_revoked_ai_sessions()
         notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
-        try:
-            cleanup_chat_repos(ADMIN_CHAT_JOB_ID, username=username)
-        except Exception:
-            logger.warning(
-                "Failed to cleanup admin chat repos for %s",
-                username,
-                exc_info=True,
-            )
+        await cleanup_path_off_loop(
+            ADMIN_CHAT_JOB_ID,
+            get_chat_workspace(ADMIN_CHAT_JOB_ID, username),
+            partial(cleanup_chat_repos, ADMIN_CHAT_JOB_ID, username=username),
+        )
 
-    _cleanup_admin_artifacts(username)
+    await cleanup_off_loop(
+        ADMIN_CHAT_JOB_ID, partial(_cleanup_admin_artifacts, username)
+    )
     _cleanup_chat_state(f"{ADMIN_CHAT_JOB_ID}:{username}")
     logger.info("Admin chat: cleared %d messages for user %s", count, username)
     return {"deleted": count}
