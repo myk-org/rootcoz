@@ -10,6 +10,7 @@ from pathlib import Path
 
 import pytest
 
+from rootcoz import temp_paths
 from rootcoz.engine import graft
 
 
@@ -704,7 +705,7 @@ def test_reap_graph_abandons_the_delete_while_a_builder_holds_the_lock(
         assert entered.wait(2)
         try:
             with caplog.at_level(logging.WARNING):
-                assert graft.reap_graph("job-1", workspace) is None
+                assert graft.reap_graph("job-1", workspace) is temp_paths.ABANDON
         finally:
             release.set()
         builder.result(timeout=2)
@@ -736,7 +737,7 @@ def test_reap_graph_deletes_after_the_builder_releases_the_lock(tmp_path, monkey
         builder = pool.submit(build)
         assert entered.wait(2)
         try:
-            assert graft.reap_graph("job-2", workspace) is None
+            assert graft.reap_graph("job-2", workspace) is temp_paths.ABANDON
         finally:
             release.set()
         builder.result(timeout=2)

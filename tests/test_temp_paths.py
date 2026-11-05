@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import errno
+import logging
 import os
 import threading
 import time
@@ -18,6 +19,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from rootcoz.temp_paths import (
+    ABANDON,
     cleanup_off_loop,
     cleanup_path_off_loop,
     delete_marker,
@@ -474,6 +476,118 @@ def test_delete_tree_on_a_missing_path_is_a_no_op(tmp_path) -> None:
 
 
 # -- The two analysis ``finally`` blocks ----------------------------------
+
+
+def _abandoning_reap_graph(job_id: str, workspace: Path) -> object:
+    return ABANDON
+
+
+async def test_an_abandoning_graph_step_skips_repo_manager_and_tree_delete(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """The analysis caller keeps ``repo_manager.cleanup`` behind an abandon signal."""
+    from rootcoz import temp_paths
+    from rootcoz.engine import graft
+
+    workspace = tmp_path / "workspace"
+    (workspace / "repo").mkdir(parents=True)
+    (workspace / "repo" / "file.txt").write_text("x")
+    deleted: list[Path] = []
+    repo_calls: list[str] = []
+    monkeypatch.setattr(
+        temp_paths, "delete_tree", lambda path: deleted.append(path) or (0, 0)
+    )
+    monkeypatch.setattr(graft, "reap_graph", _abandoning_reap_graph)
+
+    def repo_cleanup() -> None:
+        repo_calls.append("repo_manager.cleanup")
+
+    await cleanup_off_loop(
+        "job-abandon", partial(graft.reap_graph, "job-abandon", workspace), repo_cleanup
+    )
+    assert repo_calls == []
+    assert workspace.exists()
+
+    await cleanup_path_off_loop(
+        "job-abandon",
+        workspace,
+        partial(graft.reap_graph, "job-abandon", workspace),
+        repo_cleanup,
+    )
+    assert deleted == [], "the trailing whole-tree delete ran after an abandon"
+    assert repo_calls == [], "repo_manager.cleanup ran after an abandon"
+    assert workspace.exists()
+    assert (
+        "cleanup_abandoned what=job-abandon step=_abandoning_reap_graph" in caplog.text
+    )
+
+
+@pytest.mark.parametrize("clear", ["repos", "workspace"])
+async def test_the_chat_clear_path_abandons_without_deleting(
+    tmp_path, monkeypatch, clear
+) -> None:
+    """Both chat clear steps return the sentinel, so the queued tree delete is skipped."""
+    from rootcoz import temp_paths
+    from rootcoz.engine import chat, graft
+
+    workspace = tmp_path / "chat-job"
+    (workspace / "repo").mkdir(parents=True)
+    (workspace / "repo" / "file.txt").write_text("x")
+    deleted: list[Path] = []
+    monkeypatch.setattr(
+        temp_paths, "delete_tree", lambda path: deleted.append(path) or (0, 0)
+    )
+    monkeypatch.setattr(graft, "reap_graph", _abandoning_reap_graph)
+    monkeypatch.setattr(chat, "get_chat_workspace", lambda *args, **kwargs: workspace)
+    step = chat.cleanup_chat_repos if clear == "repos" else chat.cleanup_chat_workspace
+
+    assert step("job-abandon") is ABANDON
+    await cleanup_path_off_loop("job-abandon", workspace, partial(step, "job-abandon"))
+
+    assert deleted == []
+    assert workspace.exists(), "the chat clear deleted a live builder's workspace"
+    assert delete_marker(workspace).exists()
+
+
+async def test_the_normal_path_still_deletes_and_reports_bytes(
+    tmp_path, caplog
+) -> None:
+    """No abandon: the tree goes and the step's reclaimed bytes are logged."""
+    path = tmp_path / "chat-job"
+    (path / "repo").mkdir(parents=True)
+    (path / "repo" / "file.txt").write_text("x" * 10)
+
+    def graph() -> tuple[int, int]:
+        return (10, 1)
+
+    with caplog.at_level(logging.INFO):
+        await cleanup_path_off_loop("job-normal", path, graph)
+
+    assert not path.exists()
+    assert "cleanup what=job-normal step=graph reclaimed=10" in caplog.text
+    assert not delete_marker(path).exists()
+
+
+async def test_an_abandoned_cleanup_keeps_the_marker_for_the_next_create(
+    tmp_path, monkeypatch
+) -> None:
+    """The surviving tree must not be reused: the marker forces a re-create."""
+    from rootcoz.engine import graft
+
+    path = tmp_path / "chat-job" / "alice"
+    (path / "repo").mkdir(parents=True)
+    (path / "repo" / "file.txt").write_text("x")
+    monkeypatch.setattr(graft, "reap_graph", _abandoning_reap_graph)
+
+    await cleanup_path_off_loop(
+        "job-marker", path, partial(graft.reap_graph, "job-marker", path)
+    )
+
+    assert path.exists(), "the abandoned tree was deleted"
+    assert delete_marker(path).exists(), "an abandoned delete dropped its marker"
+    async with reusable_path_lock("job-marker", path):
+        assert not path.exists(), "the next create reused the abandoned tree"
+    assert not delete_marker(path).exists()
 
 
 async def test_ci_source_analysis_finally_does_not_block_the_loop(

@@ -31,7 +31,7 @@ from rootcoz.jira import (
     resolve_jira_connection_from_params,
 )
 from rootcoz.storage import AI_SYSTEM_USERNAME
-from rootcoz.temp_paths import delete_tree, reusable_path_lock
+from rootcoz.temp_paths import ABANDON, _Abandoned, delete_tree, reusable_path_lock
 
 logger = get_child_logger(__name__)
 
@@ -940,11 +940,12 @@ def _safe_remove_symlink(link: Path) -> tuple[int, int]:
     return (0, 0)
 
 
-def cleanup_chat_repos(job_id: str, username: str = "") -> tuple[int, int]:
+def cleanup_chat_repos(job_id: str, username: str = "") -> tuple[int, int] | _Abandoned:
     """Delete cloned repos, graphs and symlinked artifact targets from a workspace.
 
     A reaper step, never inline. The workspace itself (sessions included) is the
-    whole-tree ``delete_tree`` step the caller queues right after this one.
+    whole-tree ``delete_tree`` step the caller queues right after this one;
+    :data:`ABANDON` stops that step when a live graph builder owns the tree.
     """
     workspace = get_chat_workspace(job_id, username)
     from rootcoz.engine.graft import reap_graph
@@ -952,8 +953,8 @@ def cleanup_chat_repos(job_id: str, username: str = "") -> tuple[int, int]:
 
     unregister_workspace(workspace)
     graph = reap_graph(job_id, workspace)
-    if graph is None:
-        return (0, 0)
+    if isinstance(graph, _Abandoned):
+        return ABANDON
     nbytes, entries = graph
     if not workspace.exists():
         return (nbytes, entries)
@@ -988,8 +989,14 @@ def _chat_mcp_lock_targets(workspace: Path) -> list[Path]:
     return list(dict.fromkeys(targets))
 
 
-def cleanup_chat_workspace(job_id: str, username: str = "") -> tuple[int, int]:
-    """Delete the entire chat workspace including sessions."""
+def cleanup_chat_workspace(
+    job_id: str, username: str = ""
+) -> tuple[int, int] | _Abandoned:
+    """Delete the entire chat workspace including sessions.
+
+    :data:`ABANDON` means a live graph builder still owns the tree, so the
+    caller's whole-tree delete is skipped and the next sweep picks it up.
+    """
     workspace = get_chat_workspace(job_id, username)
     targets = _chat_mcp_lock_targets(workspace)
     from rootcoz.engine.graft import reap_graph
@@ -997,8 +1004,8 @@ def cleanup_chat_workspace(job_id: str, username: str = "") -> tuple[int, int]:
 
     unregister_workspace(workspace)
     graph = reap_graph(job_id, workspace)
-    if graph is None:
-        return (0, 0)
+    if isinstance(graph, _Abandoned):
+        return ABANDON
     nbytes, entries = graph
     # Hold each workspace's MCP install lock for the whole delete + dump
     # unlink so an in-flight installer cannot recreate credentials after

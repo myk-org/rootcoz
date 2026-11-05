@@ -20,7 +20,7 @@ from typing import Any
 
 from rootcoz import get_child_logger
 from rootcoz.engine.http_mcp import _workspace_install_lock
-from rootcoz.temp_paths import delete_tree
+from rootcoz.temp_paths import ABANDON, _Abandoned, delete_tree
 
 logger = get_child_logger(__name__)
 
@@ -1006,13 +1006,13 @@ def cleanup_graph(workspace: Path, *, deadline: float | None = None) -> tuple[in
         return (0, 0)
 
 
-def reap_graph(job_id: str, workspace: Path) -> tuple[int, int] | None:
+def reap_graph(job_id: str, workspace: Path) -> tuple[int, int] | _Abandoned:
     """``cleanup_graph`` as the reaper runs it: bounded, never under a builder.
 
-    ``None`` means the delete was abandoned, so the caller must not keep deleting
-    the rest of a workspace a live builder is reading; the leftovers belong to
-    the next sweep. One shared worker runs every queued delete, so an unbounded
-    wait here is what stalled them all (#402).
+    :data:`ABANDON` means the delete was abandoned, so the caller must not keep
+    deleting the rest of a workspace a live builder is reading; the leftovers
+    belong to the next sweep. One shared worker runs every queued delete, so an
+    unbounded wait here is what stalled them all (#402).
     """
     try:
         return cleanup_graph(workspace, deadline=time.monotonic() + GRAPH_LOCK_SECONDS)
@@ -1023,4 +1023,4 @@ def reap_graph(job_id: str, workspace: Path) -> tuple[int, int] | None:
             job_id,
             GRAPH_LOCK_SECONDS,
         )
-        return None
+        return ABANDON

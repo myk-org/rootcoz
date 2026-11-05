@@ -21,6 +21,18 @@ from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
+
+class _Abandoned:
+    """Type of :data:`ABANDON`, so a return type can be a union and narrow."""
+
+    __slots__ = ()
+
+
+#: A cleanup step returns this to stop the rest of this submission's steps.
+#: The tree is left for the next sweep instead of being deleted under a live
+#: builder; the runner still runs the ``always`` steps that must not be skipped.
+ABANDON = _Abandoned()
+
 # Under process temp root so chat symlink cleanup (honors TMPDIR) can delete it.
 ROOTCOZ_TEMP_DIRNAME = "rootcoz"
 
@@ -191,9 +203,20 @@ def delete_tree(path: Path) -> tuple[int, int]:
     return (size, entries)
 
 
-def _run_cleanup(what: str, *steps: Callable[[], object]) -> None:
-    """Run ``steps`` in the caller's order, one failure not losing the rest."""
-    for step in steps:
+def _run_cleanup(
+    what: str,
+    *steps: Callable[[], object],
+    always: tuple[Callable[[], object], ...] = (),
+) -> None:
+    """Run ``steps`` in the caller's order, one failure not losing the rest.
+
+    A step returning :data:`ABANDON` stops the remaining ``steps`` — the tree
+    belongs to a live builder, so deleting it here would race that builder. The
+    ``always`` steps still run: dropping a marker is safe only when the tree is
+    really gone, and ``_drop_deleting`` checks exactly that.
+    """
+
+    def run(step: Callable[[], object]) -> object:
         name = _step_name(step)
         started = time.monotonic()
         try:
@@ -209,8 +232,10 @@ def _run_cleanup(what: str, *steps: Callable[[], object]) -> None:
                 getattr(exc, "errno", None),
                 int((time.monotonic() - started) * 1000),
             )
-            continue
+            return None
         elapsed = int((time.monotonic() - started) * 1000)
+        if result is ABANDON:
+            return result
         if isinstance(result, tuple) and len(result) == 2:
             nbytes, entries = result
             logger.log(
@@ -225,6 +250,19 @@ def _run_cleanup(what: str, *steps: Callable[[], object]) -> None:
             )
         else:
             logger.debug("cleanup what=%s step=%s ms=%d", what, name, elapsed)
+        return result
+
+    for step in steps:
+        if run(step) is ABANDON:
+            logger.warning(
+                "cleanup_abandoned what=%s step=%s: leaving the rest of this "
+                "submission's steps to the next sweep",
+                what,
+                _step_name(step),
+            )
+            break
+    for step in always:
+        run(step)
 
 
 async def cleanup_off_loop(what: str, *steps: Callable[[], object]) -> None:
@@ -287,10 +325,17 @@ async def cleanup_path_off_loop(
         partial(_mark_deleting, path),
         *steps,
         partial(delete_tree, path),
-        partial(_drop_deleting, path),
     )
     try:
-        future = loop.run_in_executor(_CLEANUP_POOL, _run_cleanup, what, *cleanup_steps)
+        future = loop.run_in_executor(
+            _CLEANUP_POOL,
+            partial(
+                _run_cleanup,
+                what,
+                *cleanup_steps,
+                always=(partial(_drop_deleting, path),),
+            ),
+        )
     except BaseException:
         entry.lock.release()
         _drop_lock(key, entry)
