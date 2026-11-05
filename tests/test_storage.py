@@ -3006,6 +3006,63 @@ async def _failure_history_job_ids(db_path: Path) -> set[str]:
         return {row[0] for row in await cursor.fetchall()}
 
 
+async def _failure_history_row_ids(db_path: Path) -> dict[str, list[int]]:
+    """Map job_id -> failure_history row ids.
+
+    A repopulated row is deleted and re-inserted, so its AUTOINCREMENT id
+    changes: equal ids across two runs prove no write happened.
+    """
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute(
+            "SELECT job_id, id FROM failure_history ORDER BY job_id, id"
+        )
+        rows: dict[str, list[int]] = {}
+        for job_id, row_id in await cursor.fetchall():
+            rows.setdefault(job_id, []).append(row_id)
+        return rows
+
+
+async def _seed_mirrored_override(
+    db_path: Path, job_id: str, *, classification: str = "CODE ISSUE"
+) -> None:
+    """Seed the state the restore-AI migration repairs.
+
+    failure_history holds a user override the old mirroring code copied in,
+    while result_json still carries the original AI classification
+    (``PRODUCT BUG``, see ``_one_failure_result``).
+    """
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            "INSERT INTO failure_history (job_id, job_name, build_number, "
+            "test_name, classification, error_message, analyzed_at) "
+            "VALUES (?, ?, 1, ?, ?, 'e', datetime('now'))",
+            (job_id, job_id, f"{job_id}.test_a", classification),
+        )
+        await db.execute(
+            "INSERT INTO test_classifications "
+            "(test_name, job_name, classification, created_by, job_id) "
+            "VALUES (?, ?, ?, 'user', ?)",
+            (f"{job_id}.test_a", job_id, classification, job_id),
+        )
+        await db.commit()
+
+
+async def _failure_history_classifications(db_path: Path, job_id: str) -> list[str]:
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute(
+            "SELECT classification FROM failure_history WHERE job_id = ?", (job_id,)
+        )
+        return [row[0] for row in await cursor.fetchall()]
+
+
+async def _migration_recorded(db_path: Path, key: str) -> bool:
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute(
+            "SELECT 1 FROM _migrations_applied WHERE key = ?", (key,)
+        )
+        return await cursor.fetchone() is not None
+
+
 class TestUnreadableResultJson:
     """A result_json this build cannot decode must not abort startup."""
 
@@ -3269,4 +3326,69 @@ class TestUnreadableResultJson:
                 )
                 assert await cursor.fetchone() is None
 
-        assert "Migration: 1 row(s) skipped" in storage_logs.text
+        assert "Migration: 1 job(s) skipped (frame-1)" in storage_logs.text
+
+    async def test_restore_ai_migration_rewrites_readable_history_once(
+        self, temp_db_path: Path, storage_logs: Any
+    ) -> None:
+        """Restarts skip restored jobs and retry only the unreadable one."""
+        key = "restore_ai_classifications_v1"
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            async with aiosqlite.connect(temp_db_path) as db:
+                await db.execute(
+                    "DELETE FROM _migrations_applied WHERE key = ?", (key,)
+                )
+                await db.commit()
+            for index in range(3):
+                job_id = f"good-{index}"
+                await _insert_completed_result(
+                    temp_db_path, job_id, _one_failure_result(job_id)
+                )
+                await _seed_mirrored_override(temp_db_path, job_id)
+            await _insert_completed_result(temp_db_path, "frame-1", _ZSTD_FRAME)
+            await _seed_mirrored_override(temp_db_path, "frame-1")
+
+            # Run 1: the readable jobs are restored, the frame stays deferred.
+            await storage._migrate_restore_ai_classifications()
+            after_first = await _failure_history_row_ids(temp_db_path)
+            for index in range(3):
+                assert await _failure_history_classifications(
+                    temp_db_path, f"good-{index}"
+                ) == ["PRODUCT BUG"]
+            assert "frame-1" in after_first
+            assert await _migration_recorded(temp_db_path, key) is False
+
+            # Runs 2 and 3: no row is deleted/re-inserted, still pending.
+            for _ in range(2):
+                await storage._migrate_restore_ai_classifications()
+                assert await _failure_history_row_ids(temp_db_path) == after_first
+                assert await _migration_recorded(temp_db_path, key) is False
+                assert storage.undecodable_result_count() == 1
+            assert await _failure_history_classifications(temp_db_path, "frame-1") == [
+                "CODE ISSUE"
+            ]
+
+            # A build with the codec reads the row: the next run finishes it.
+            async with aiosqlite.connect(temp_db_path) as db:
+                await db.execute(
+                    "UPDATE results SET result_json = ? WHERE job_id = 'frame-1'",
+                    (_one_failure_result("frame-1"),),
+                )
+                await db.commit()
+            storage._undecodable_result_ids.clear()
+
+            await storage._migrate_restore_ai_classifications()
+
+            assert await _failure_history_classifications(temp_db_path, "frame-1") == [
+                "PRODUCT BUG"
+            ]
+            assert await _migration_recorded(temp_db_path, key) is True
+            assert storage.undecodable_result_count() == 0
+
+            # Once applied, later restarts touch nothing at all.
+            settled = await _failure_history_row_ids(temp_db_path)
+            await storage._migrate_restore_ai_classifications()
+            assert await _failure_history_row_ids(temp_db_path) == settled
+
+        assert "Migration: 1 job(s) skipped (frame-1)" in storage_logs.text

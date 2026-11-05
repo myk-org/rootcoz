@@ -1860,6 +1860,17 @@ async def _migrate_jira_url_per_method_split() -> None:
         await db.commit()
 
 
+# Jobs whose failure_history still mirrors a user override instead of the AI
+# value stored in result_json: exactly what the restore-AI migration repairs.
+_NEEDS_AI_RESTORE_SQL = (
+    "FROM failure_history fh "
+    "JOIN test_classifications tc "
+    "  ON tc.job_id = fh.job_id AND tc.test_name = fh.test_name "
+    "  AND (tc.child_build_number = 0 OR fh.child_build_number = tc.child_build_number) "
+    "WHERE fh.classification = tc.classification AND tc.created_by != ''"
+)
+
+
 async def _migrate_restore_ai_classifications() -> None:
     """One-time migration: restore original AI classifications in failure_history.
 
@@ -1869,66 +1880,81 @@ async def _migrate_restore_ai_classifications() -> None:
     differs from the original AI value in result_json) and re-populates
     from result_json to restore the original AI values.
 
-    Tracked via ``_migrations_applied`` table to ensure it runs only once.
+    Only the jobs that still match are re-populated, so a restart is a no-op
+    for history already restored instead of deleting and re-inserting every
+    readable job's rows. Tracked via ``_migrations_applied``; while a job whose
+    result_json this build cannot decode is still pending, the migration stays
+    unapplied so a build with the codec finishes it.
     """
     migration_key = "restore_ai_classifications_v1"
     async with _connect_db() as db:
         if await _migration_applied(db, migration_key):
             return  # Already applied
 
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM failure_history fh "
-            "JOIN test_classifications tc "
-            "  ON tc.job_id = fh.job_id AND tc.test_name = fh.test_name "
-            "  AND (tc.child_build_number = 0 OR fh.child_build_number = tc.child_build_number) "
-            "WHERE fh.classification = tc.classification AND tc.created_by != ''"
-        )
-        needs_restore = (await cursor.fetchone())[0] > 0
+        cursor = await db.execute(f"SELECT DISTINCT fh.job_id {_NEEDS_AI_RESTORE_SQL}")
+        pending_job_ids = [row[0] for row in await cursor.fetchall()]
 
-        if not needs_restore:
+        if not pending_job_ids:
             await _mark_migration_applied(db, migration_key)
             await db.commit()
             return
 
     logger.info(
-        "Migration: restoring original AI classifications in failure_history..."
+        "Migration: restoring original AI classifications in failure_history "
+        "for %d job(s)...",
+        len(pending_job_ids),
     )
-    async with _connect_db() as db:
-        cursor = await db.execute(
-            "SELECT job_id, result_json, created_at FROM results "
-            "WHERE status = 'completed' AND result_json IS NOT NULL"
-        )
-        rows = await cursor.fetchall()
 
     restored = 0
-    deferred = 0
-    for row in rows:
-        try:
-            result_data = parse_result_json(row["result_json"], job_id=row["job_id"])
-        except UnsupportedResultEncoding:
-            # This row's classifications stay wrong. Do not record the
-            # migration as done, so a build with the codec runs it again.
-            deferred += 1
-            continue
-        if result_data:
-            await populate_failure_history(
-                row["job_id"], result_data, analyzed_at=row["created_at"]
+    deferred: list[str] = []
+    for job_id in pending_job_ids:
+        async with _connect_db() as db:
+            cursor = await db.execute(
+                "SELECT result_json, created_at FROM results "
+                "WHERE job_id = ? AND status = 'completed' "
+                "AND result_json IS NOT NULL",
+                (job_id,),
             )
-            restored += 1
+            row = await cursor.fetchone()
+        if row is None:
+            # No completed result left to restore from -- nothing to retry.
+            continue
+        try:
+            result_data = parse_result_json(row["result_json"], job_id=job_id)
+        except UnsupportedResultEncoding:
+            # This job's classifications stay wrong. Count it for health and
+            # leave the migration unapplied so a build with the codec retries.
+            _note_undecodable_result(job_id)
+            deferred.append(job_id)
+            continue
+        if not result_data:
+            continue
+
+        await populate_failure_history(
+            job_id, result_data, analyzed_at=row["created_at"]
+        )
+        # Its rows now come from result_json. Re-check so a job whose stored AI
+        # value happens to equal the override is not rewritten on every run.
+        async with _connect_db() as db:
+            cursor = await db.execute(
+                f"SELECT 1 {_NEEDS_AI_RESTORE_SQL} AND fh.job_id = ?", (job_id,)
+            )
+            if await cursor.fetchone() is None:
+                restored += 1
 
     if deferred:
         logger.warning(
-            f"Migration: {deferred} row(s) skipped -- result_json uses an encoding "
-            "this build cannot decode. Migration left unapplied so it retries on "
-            "a build with the codec."
+            f"Migration: {len(deferred)} job(s) skipped ({', '.join(deferred)}) -- "
+            "result_json uses an encoding this build cannot decode. Migration "
+            "left unapplied so it retries on a build with the codec. Restored "
+            f"{restored} readable job(s); their history is not rewritten again."
         )
-    elif restored > 0:
-        async with _connect_db() as db:
-            await _mark_migration_applied(db, migration_key)
-            await db.commit()
-        logger.info("Migration: restored AI classifications for %d jobs", restored)
-    else:
-        logger.warning("Migration: no jobs could be restored (all parse failures)")
+        return
+
+    async with _connect_db() as db:
+        await _mark_migration_applied(db, migration_key)
+        await db.commit()
+    logger.info("Migration: restored AI classifications for %d jobs", restored)
 
 
 # Set of classification values that are actually pattern labels.
@@ -1988,7 +2014,7 @@ async def _migrate_backfill_pattern_axis() -> None:
         )
         affected_job_ids = [row[0] for row in await cursor.fetchall()]
 
-    deferred = 0
+    deferred: list[str] = []
     for job_id in affected_job_ids:
         async with _connect_db() as db:
             cursor = await db.execute(
@@ -2002,9 +2028,10 @@ async def _migrate_backfill_pattern_axis() -> None:
         except UnsupportedResultEncoding:
             # Cannot restore this row's root cause here, so its classification
             # keeps a pattern label. Do not record the migration as done --
-            # every step below is idempotent, so a build with the codec
-            # re-runs it and finishes the job.
-            deferred += 1
+            # every step below is idempotent and only touches affected jobs, so
+            # a build with the codec re-runs it and finishes the job.
+            _note_undecodable_result(job_id)
+            deferred.append(job_id)
             continue
         if not result_data:
             continue
@@ -2048,9 +2075,10 @@ async def _migrate_backfill_pattern_axis() -> None:
 
         if deferred:
             logger.warning(
-                f"Migration: pattern axis backfill skipped {deferred} job(s) whose "
-                "result_json uses an encoding this build cannot decode. Migration "
-                "left unapplied so it retries on a build with the codec."
+                f"Migration: pattern axis backfill skipped {len(deferred)} job(s) "
+                f"({', '.join(deferred)}) whose result_json uses an encoding this "
+                "build cannot decode. Migration left unapplied so it retries on a "
+                "build with the codec."
             )
         else:
             await _mark_migration_applied(db, migration_key)
