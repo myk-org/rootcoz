@@ -13,13 +13,21 @@ vi.mock('@/lib/auth', () => ({
   useAuth: () => ({ role: auth.isOperator ? 'operator' : 'viewer', isOperator: auth.isOperator }),
 }))
 
-function showReport(incompleteCount: number | undefined) {
+function showReport(incompleteCount: number) {
   const response: ResultResponse = {
     job_id: 'job-1', jenkins_url: null, status: 'completed', created_at: '', base_url: null, result_url: null,
     result: {
       job_id: 'job-1', job_name: 'example', build_number: 1, jenkins_url: null,
       status: 'completed', summary: 'done', ai_provider: '', ai_model: '',
-      failures: [], child_job_analyses: [], request_params: { ai_provider: '', ai_model: '' },
+      // The banner reads the failures, not `incomplete_count`: a reviewer
+      // override classifies a failure without refetching the result.
+      failures: Array.from({ length: incompleteCount }, (_, i) => ({
+        id: `id-${i}`, test_name: `test-${i}`, error: 'boom',
+        analysis: { classification: '', pattern: '', affected_tests: [], details: '', artifacts_evidence: '' },
+        analysis_error: 'AI analysis incomplete: response has no usable classification',
+        error_signature: `sig-${i}`,
+      })),
+      child_job_analyses: [], request_params: { ai_provider: '', ai_model: '' },
       incomplete_count: incompleteCount,
     },
   }

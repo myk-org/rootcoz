@@ -3022,10 +3022,13 @@ def push_rp_cmd(
         pushed = data.get("pushed", 0)
         errors = data.get("errors", [])
         unmatched = data.get("unmatched", [])
+        defaulted = data.get("defaulted", [])
         launch_id = data.get("launch_id")
         typer.echo(f"Pushed {pushed} classification(s) to Report Portal")
         if launch_id is not None:
             typer.echo(f"Launch ID: {launch_id}")
+        if defaulted:
+            typer.echo(f"Pushed as TO INVESTIGATE: {', '.join(defaulted)}")
         if unmatched:
             typer.echo(f"Unmatched: {', '.join(unmatched)}")
         if errors:

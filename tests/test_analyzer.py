@@ -509,6 +509,61 @@ class TestRunSingleAiAnalysis:
             assert excerpt.count("x") == AI_LOG_EXCERPT_CHARS - len("QUOTED-CI-LOG ")
 
     @pytest.mark.asyncio
+    async def test_narration_excerpt_is_scrubbed_before_logging(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """The DEBUG excerpt must not copy a credential the model quoted."""
+        from rootcoz.engine.core import logger as core_logger
+
+        # Narration quoting a CI log, which is how a credential reaches here.
+        narration = "Now let me read the deploy log: password=hunter2 it failed"
+        mock_cli = AsyncMock(
+            side_effect=lambda *a, **kw: AIResult(success=True, text=narration)
+        )
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_cli)
+
+        original_level = core_logger.level
+        core_logger.setLevel(logging.DEBUG)
+        core_logger.addHandler(caplog.handler)
+        try:
+            with pytest.raises(AnalysisIncompleteError):
+                await run_single_ai_analysis(
+                    failures=[
+                        FailedTest(
+                            test_name="test_foo",
+                            error_message="timeout",
+                            stack_trace="st",
+                        )
+                    ],
+                    console_context="",
+                    repo_path=None,
+                    ai_provider="cursor",
+                    ai_model="cursor:grok",
+                    ai_call_timeout=None,
+                    custom_prompt="",
+                    artifacts_context="",
+                    server_url="",
+                    job_id="job-1",
+                )
+        finally:
+            core_logger.removeHandler(caplog.handler)
+            core_logger.setLevel(original_level)
+
+        excerpt_messages = [
+            r.getMessage()
+            for r in caplog.records
+            if "first" in r.getMessage() and "chars" in r.getMessage()
+        ]
+        assert excerpt_messages, "the excerpt still reaches DEBUG"
+        for message in excerpt_messages:
+            assert "hunter2" not in message
+            assert "[REDACTED]" in message
+        # The rest of the excerpt stays readable for diagnosis.
+        assert "deploy log" in excerpt_messages[0]
+
+    @pytest.mark.asyncio
     async def test_narration_then_valid_answer_uses_second_response(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -2676,6 +2731,17 @@ class TestParseJsonResponseUsability:
             )
             is None
         )
+
+    def test_quoted_classification_is_not_taken_as_the_answer(self) -> None:
+        """A structured answer that quotes one must not become the diagnosis.
+
+        Recovery is for prose that did not parse; a quoted log line is not the
+        model's answer, and storing it attributes a diagnosis it never gave.
+        """
+        quoted = json.dumps(
+            {"details": "The failing log line read **Classification: PRODUCT BUG**"}
+        )
+        assert parse_json_response(quoted) is None
 
 
 class TestRecoverFromDetailsCodeFields:

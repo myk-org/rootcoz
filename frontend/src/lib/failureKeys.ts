@@ -1,5 +1,5 @@
 import { reviewKey } from '@/lib/reviewKey'
-import type { ChildJobAnalysis, ReviewState } from '@/types'
+import type { AnalysisDetail, ChildJobAnalysis, FailureAnalysis, ReviewState } from '@/types'
 
 /** Walk the child-job tree once, calling `visitor` at each node.
  *  Centralises the recursion so every consumer stays in sync. */
@@ -37,6 +37,27 @@ export function countAllFailures(failures: { test_name: string }[], children: Ch
   let count = 0
   walkChildTree(failures, children, (nodeFailures) => {
     count += nodeFailures.length
+  })
+  return count
+}
+
+/** Failures with no effective classification, mirroring the server's
+ *  `incomplete_count`: a live reviewer override wins over the stored
+ *  classification, so classifying a failure clears it from this total without
+ *  a refetch. */
+export function countUnclassifiedFailures(
+  failures: { test_name: string; analysis?: AnalysisDetail }[],
+  children: ChildJobAnalysis[],
+  classifications: Record<string, string>,
+): number {
+  let count = 0
+  walkChildTree(failures, children, (nodeFailures, jobName, buildNumber) => {
+    for (const f of nodeFailures) {
+      const stored = (f as FailureAnalysis).analysis?.classification ?? ''
+      const effective = classifications[reviewKey(f.test_name, jobName, buildNumber)] ?? stored
+      // The server strips before deciding (storage._effective_classification).
+      if (!effective.trim()) count += 1
+    }
   })
   return count
 }

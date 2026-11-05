@@ -21,7 +21,7 @@ import { CrossFailurePatterns } from './report/CrossFailurePatterns'
 import { TestListSection } from './report/TestListSection'
 import { AllReviewedPrompt } from './report/AllReviewedPrompt'
 import { collectChildExpandKeys, expandKey } from '@/lib/childJobHash'
-import { collectAllTestKeys, countAllFailures, reviewedKeyCount } from '@/lib/failureKeys'
+import { collectAllTestKeys, countAllFailures, countUnclassifiedFailures, reviewedKeyCount } from '@/lib/failureKeys'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -373,6 +373,14 @@ function ReportContent() {
     () => (result ? countAllFailures(result.failures ?? [], result.child_job_analyses ?? []) : 0),
     [result],
   )
+  // Live count, not `result.incomplete_count`: a reviewer override classifies a
+  // failure without a refetch, and the banner must clear with the card.
+  const incompleteCount = useMemo(
+    () => (result
+      ? countUnclassifiedFailures(result.failures ?? [], result.child_job_analyses ?? [], state.classifications)
+      : 0),
+    [result, state.classifications],
+  )
   const allTestKeys = useMemo(
     () => (result ? collectAllTestKeys(result.failures ?? [], result.child_job_analyses ?? []) : []),
     [result],
@@ -626,7 +634,7 @@ function ReportContent() {
       ) : null}
 
       {/* ---- Unclassified failures banner ---- */}
-      {(result.incomplete_count ?? 0) > 0 && (
+      {incompleteCount > 0 && (
         <div
           role="status"
           data-testid="incomplete-analysis-banner"
@@ -634,7 +642,7 @@ function ReportContent() {
         >
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-xs text-text-tertiary">
-              {result.incomplete_count} failure(s) have no usable analysis — the model returned nothing that could be classified. Re-analyze to classify them.
+              {incompleteCount} failure(s) have no usable analysis — the model returned nothing that could be classified. Re-analyze to classify them.
             </p>
             {isOperator && result.request_params && (
               <Button

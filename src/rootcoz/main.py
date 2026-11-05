@@ -135,6 +135,7 @@ from rootcoz.engine.core import (
     copy_rootcoz_pi_resources,
     extract_json_dict,
     get_failure_signature,
+    incomplete_reason,
     resolve_additional_repos,
     run_orchestrated_analysis,
     safe_update_clone_progress,
@@ -5104,7 +5105,11 @@ async def _run_per_group_analysis(
                 type(result).__name__,
                 safe_exception_frames(result),
             )
-            all_analyses.extend(_failed_group_analyses(signature, failures))
+            all_analyses.extend(
+                _failed_group_analyses(
+                    signature, failures, analysis_error=incomplete_reason(result)
+                )
+            )
         elif result:
             all_analyses.extend(result)
         else:
@@ -5305,11 +5310,7 @@ async def _analyze_failures_or_exit(
                 for analysis in _failed_group_analyses(
                     signature,
                     failures,
-                    analysis_error=(
-                        str(fallback_exc)
-                        if isinstance(fallback_exc, AnalysisIncompleteError)
-                        else ""
-                    ),
+                    analysis_error=incomplete_reason(fallback_exc),
                 )
             ]
 
@@ -5363,10 +5364,18 @@ async def _analyze_failures_or_exit(
 
 
 def _is_failed_analysis(failure: FailureAnalysis) -> bool:
-    """Identify the placeholder produced when a failure group cannot be analyzed."""
-    return (
-        failure.analysis.details == "Analysis failed; check server logs for details"
-        and not failure.analysis.classification
+    """Identify a group whose analysis is missing, not merely unclassified.
+
+    Two shapes mean the same thing: the ``_failed_group_analyses`` placeholder
+    (a provider error) and a row carrying ``analysis_error`` (our own answer was
+    unclassified, e.g. a peer group no peer could classify). Without the second,
+    such a group looked like a completed analysis and the whole job was reported
+    as analysed.
+    """
+    if failure.analysis.classification:
+        return False
+    return bool(failure.analysis_error) or failure.analysis.details == (
+        "Analysis failed; check server logs for details"
     )
 
 
@@ -10361,7 +10370,10 @@ async def _execute_rp_push(
         pushed_by: Username of the user who triggered the push.
 
     Returns:
-        Dict with keys: ``pushed``, ``unmatched``, ``errors``, ``launch_id``.
+        Dict with keys: ``pushed``, ``unmatched``, ``defaulted``, ``errors``,
+        ``launch_id``. ``unmatched`` is always empty (#397): an unmappable
+        classification is pushed as ``TO INVESTIGATE`` and named in
+        ``defaulted``.
     """
     context = await _build_export_context(
         job_id=job_id,

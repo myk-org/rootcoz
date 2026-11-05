@@ -402,7 +402,7 @@ rootcoz<span class="w"> </span>--json<span class="w"> </span>results<span class=
 <p>Report Portal has a shortcut that skips <code>--plugin</code>:</p>
 <p><code>bash
    rootcoz --json push-reportportal "$JOB_ID"</code></p>
-<p>The response includes <code>pushed</code>, <code>errors</code>, <code>unmatched</code>, and <code>launch_id</code>, so an automation can fail loudly when <code>unmatched</code> is non-empty.</p>
+<p>The response includes <code>pushed</code>, <code>errors</code>, <code>defaulted</code>, <code>unmatched</code>, and <code>launch_id</code>. <code>defaulted</code> names items pushed as <code>TO INVESTIGATE</code> because they had no classification to map; <code>unmatched</code> stays empty, because nothing is left out for want of a classification.</p>
 <ol>
 <li><strong>Script report output.</strong></li>
 </ol>
@@ -459,7 +459,7 @@ rootcoz<span class="w"> </span>--json<span class="w"> </span>results<span class=
      [ "$(jq -r '.has_more' &lt;&lt;&lt;"$PAGE")" = "true" ] || break
      OFFSET=$((OFFSET + 200))
    done</p>
-<p>rootcoz --json push "$JOB_ID" --plugin reportportal | jq '{pushed, unmatched, errors}'
+<p>rootcoz --json push "$JOB_ID" --plugin reportportal | jq '{pushed, defaulted, unmatched, errors}'
    ```</p>
 <p>The same shape works for a cron-driven report: swap step 2 for <code>reports totals</code> and drop the polling loop entirely.</p>
 <h2 id="advanced-usage">Advanced Usage</h2>
@@ -494,8 +494,8 @@ rootcoz<span class="w"> </span>--json<span class="w"> </span>results<span class=
   The dashboard counts analysis failures, while <code>results tests</code> pages the CI test entries. Raise <code>--limit</code> to 200 and keep incrementing <code>--offset</code> until <code>has_more</code> is <code>false</code>.</p>
 </li>
 <li>
-<p><code>push</code> reports unmatched tests.<br>
-  The exporter could not line the test names up. Run <code>rootcoz exporters</code> to confirm the plugin is enabled, and add <code>--child-job-name</code> and <code>--child-build-number</code> for pipeline jobs.</p>
+<p><code>push</code> reports items under <code>defaulted</code>.<br>
+  Those failures had no classification (or an unknown one) to map, so they were pushed as <code>TO INVESTIGATE</code>. Re-analyze the job to classify them and push again. A test that never reached the launch is named under <code>errors</code>, not here.</p>
 </li>
 <li>
 <p>A <code>403</code> mentions <code>can_view_reports</code>.<br>

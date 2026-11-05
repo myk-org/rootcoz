@@ -35,6 +35,7 @@ from rootcoz.engine.http_mcp import (
     cleanup_http_tools_mcp,
 )
 from rootcoz.engine.session_tools import build_session_tools
+from rootcoz.feedback import scrub_sensitive_data
 from rootcoz.logging_context import get_log_file
 from rootcoz.models import (
     AdditionalRepo,
@@ -1006,7 +1007,8 @@ def parse_json_response(raw_text: str) -> AnalysisDetail | None:
     1. Try parsing the raw text directly as JSON
     2. Try extracting JSON from brace-matching ({...})
     3. Try extracting from markdown code blocks
-    4. Fallback: regex/markdown recovery from the raw text
+    4. Fallback: regex/markdown recovery, only for text that did not parse as
+       JSON — a structured answer that names no usable classification stands
 
     A reply is only an analysis when it names a classification from the
     taxonomy (``PRIMARY_CLASSIFICATIONS``). Narration without a final answer is
@@ -1032,10 +1034,14 @@ def parse_json_response(raw_text: str) -> AnalysisDetail | None:
             classification = _usable_classification(parsed.classification)
             if classification:
                 return parsed.model_copy(update={"classification": classification})
+            # The structured answer is the model's answer. Salvaging a string it
+            # merely quoted (a log line, a previous run) would store a
+            # diagnosis the model never gave.
             logger.warning(
                 "AI JSON answer has no usable classification (%r); not an analysis",
                 parsed.classification,
             )
+            return None
 
     # Regex/markdown recovery for an answer that did not parse as JSON
     recovered = recover_from_details(AnalysisDetail(details=raw_text))
@@ -1063,6 +1069,15 @@ class AnalysisIncompleteError(RuntimeError):
         super().__init__(message)
         self.error_signature = error_signature
         self.raw_text = raw_text
+
+
+def incomplete_reason(error: object) -> str:
+    """``analysis_error`` for a failed group: our message, or ``""``.
+
+    Only ``AnalysisIncompleteError`` is stored. Any other error is a provider
+    failure whose text may echo a credential, and it must never reach a result.
+    """
+    return str(error) if isinstance(error, AnalysisIncompleteError) else ""
 
 
 def _usable_classification(value: str) -> str:
@@ -1800,6 +1815,7 @@ _NON_RETRYABLE_AI_ERRORS = (
 #: Longest raw AI answer ever written to a log, and only at DEBUG. WARNING
 #: carries the length plus a fingerprint instead: model narration can quote CI
 #: logs, artifact contents or tokens, and this engine runs on server credentials.
+#: The excerpt is scrubbed before it is logged (see ``scrub_sensitive_data``).
 AI_LOG_EXCERPT_CHARS = 2000
 
 
@@ -1967,7 +1983,7 @@ async def _call_ai_with_retry(
             logger.debug(
                 "AI answer with no usable classification, first %d chars: %s",
                 AI_LOG_EXCERPT_CHARS,
-                (result.text or "")[:AI_LOG_EXCERPT_CHARS],
+                scrub_sensitive_data((result.text or "")[:AI_LOG_EXCERPT_CHARS]),
             )
             if attempt >= max_attempts:
                 break
@@ -2925,13 +2941,7 @@ async def run_orchestrated_analysis(
                 # and must never be persisted into the result.
                 all_analyses.extend(
                     _failed_group_analyses(
-                        sig,
-                        failures,
-                        analysis_error=(
-                            str(result)
-                            if isinstance(result, AnalysisIncompleteError)
-                            else ""
-                        ),
+                        sig, failures, analysis_error=incomplete_reason(result)
                     )
                 )
                 continue

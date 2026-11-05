@@ -75,9 +75,9 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
 7. Push reviewed classifications to Report Portal.
 
-   Click `Push to Report Portal` in the report header, confirm, and RootCoz matches the job to its Report Portal launch, updates the matching test items, and reports how many classifications were pushed, plus any unmatched items and errors.
+   Click `Push to Report Portal` in the report header, confirm, and RootCoz matches the job to its Report Portal launch, updates the matching test items, and reports how many classifications were pushed, plus any items pushed as `TO INVESTIGATE` and any errors.
 
-   A failure whose classification is empty or unknown is not dropped from the push: it has no defect type to map to, so it is pushed with the neutral `TO INVESTIGATE` defect type and listed under `unmatched` as `<item name> (classification: <value>)` — `<value>` is `none` when the classification is empty. `unmatched` therefore names only the classifications that map to no Report Portal defect type, not items that failed to match the launch, and it does not shrink the batch. The report phrases it the same way: `N test(s) have no classification to map to a Report Portal defect type`, with a `Pushed N · skipped M` split when the counts differ, where `M` is the number pushed without a mapped defect type.
+   A failure whose classification is empty or unknown is not dropped from the push: it has no defect type to map to, so it is pushed with the neutral `TO INVESTIGATE` defect type and listed under `defaulted` as `<item name> (classification: <value>)` — `<value>` is `none` when the classification is empty. `defaulted` is informational: those items were pushed, so they never count as skipped and never shrink the batch. `unmatched` is empty in that case — nothing is left out for want of a classification — and `errors` names anything that could not be pushed at all. The report phrases the defaulted items as `N test(s) were pushed as TO INVESTIGATE because they have no classification`.
 
    You can also check what is available before pushing:
 
@@ -179,8 +179,8 @@ For raw endpoints, see [API Endpoint Reference](api-reference.html) for details.
 - The push returns `Operator access required.`  
   Exporter pushes need `operator` or `admin`. Reviewers can create and link issues, but not push.
 
-- The push reports unmatched items.  
-  Those failures have no classification (or an unknown one) to map to a Report Portal defect type. They were still pushed with `TO INVESTIGATE`; the entry names the classification it could not map. Re-analyze the job to classify them and push again. If the item names themselves look out of place for the launch, confirm the job name and build number match the Report Portal launch.
+- The push reports items it could not classify.  
+  Those failures have no classification (or an unknown one) to map to a Report Portal defect type. They were still pushed as `TO INVESTIGATE`; the entry names the classification it could not map. Re-analyze the job to classify them and push again. If a test you expected to reach the launch is missing altogether, check `errors` and confirm the job name and build number match the Report Portal launch.
 
 ## Related Pages
 

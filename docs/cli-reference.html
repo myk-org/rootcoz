@@ -1280,8 +1280,8 @@
   Pass both flags together; there is no way to target a child build without naming its job.</p>
 </li>
 <li>
-<p>A <code>push</code> reports every test as unmatched.<br>
-  The exporter could not match test names. Confirm the plugin is enabled with <code>rootcoz exporters</code>, and check the child scoping flags if the job is a pipeline parent.</p>
+<p>A <code>push</code> reports every test under <code>defaulted</code>.<br>
+  None of the failures had a classification to map, so they were pushed as <code>TO INVESTIGATE</code>. Re-analyze the jobs first. A test that never reached the launch is named under <code>errors</code> instead.</p>
 </li>
 </ul>
 <h2 id="related-pages">Related Pages</h2>

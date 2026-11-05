@@ -24,12 +24,14 @@ const usage: TokenUsageSummary = {
 
 type FailureWithUsage = FailureAnalysis & { token_usage?: TokenUsageSummary | null }
 
-function showCard(count: number, tokenUsage?: TokenUsageSummary | null, peerDebate?: PeerDebate) {
+function showCard(count: number, tokenUsage?: TokenUsageSummary | null, peerDebate?: PeerDebate, analysisError = '') {
   const tests: FailureWithUsage[] = Array.from({ length: count }, (_, i) => ({
     id: `id-${i}`, test_name: `test-${i}`, error: 'boom', error_signature: 'shared',
-    analysis: { classification: 'CODE ISSUE', pattern: '', affected_tests: [], details: '', artifacts_evidence: '' },
+    // A row with a reason has no classification: that is what makes it incomplete.
+    analysis: { classification: analysisError ? '' : 'CODE ISSUE', pattern: '', affected_tests: [], details: '', artifacts_evidence: '' },
     token_usage: tokenUsage,
     peer_debate: peerDebate,
+    ...(analysisError ? { analysis_error: analysisError } : {}),
   }))
   const group: GroupedFailure = { id: 'group-id-0', signature: 'shared', tests, count }
   render(
@@ -93,6 +95,24 @@ describe('FailureCard primary usage', () => {
     expect(screen.queryByPlaceholderText('provider')).toBeNull()
     expect(screen.queryByPlaceholderText('model')).toBeNull()
     expect(screen.queryByText(/AI for issue generation/i)).toBeNull()
+  })
+})
+
+describe('FailureCard incomplete analysis', () => {
+  beforeEach(() => { sessionStorage.clear(); auth.role = 'reviewer' })
+
+  it('renders the reason the analysis is missing', () => {
+    // The backend stores the reason on the row; without this the card showed
+    // only "check server logs" and the reason was invisible to reviewers.
+    showCard(1, null, undefined, 'AI analysis incomplete: response has no usable classification')
+    expect(screen.getByTestId('analysis-incomplete-reason')).toHaveTextContent(
+      'no usable classification',
+    )
+  })
+
+  it('renders nothing when the row has a real analysis', () => {
+    showCard(1)
+    expect(screen.queryByTestId('analysis-incomplete-reason')).toBeNull()
   })
 })
 

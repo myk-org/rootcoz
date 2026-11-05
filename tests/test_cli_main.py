@@ -4176,6 +4176,21 @@ class TestPushRpCommand:
         assert result.exit_code != 0
         assert "400" in result.output or "disabled" in result.output.lower()
 
+    def test_push_rp_reports_to_investigate_fallbacks(self, mock_client):
+        """A pushed-under-TO_INVESTIGATE item must not read as a clean push."""
+        mock_client.push_reportportal.return_value = {
+            "pushed": 2,
+            "unmatched": [],
+            "defaulted": ["test_a (classification: none)"],
+            "errors": [],
+            "launch_id": 42,
+        }
+        result = runner.invoke(app, ["push-rp", "job-123"])
+        assert result.exit_code == 0
+        assert (
+            "Pushed as TO INVESTIGATE: test_a (classification: none)" in result.output
+        )
+
     def test_push_rp_with_errors(self, mock_client):
         mock_client.push_reportportal.return_value = {
             "pushed": 1,

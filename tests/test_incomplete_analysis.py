@@ -5,8 +5,9 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 from typing import Any
-from unittest.mock import patch
+from unittest.mock import AsyncMock, patch
 
+import aiosqlite
 import pytest
 from fastapi.testclient import TestClient
 
@@ -395,6 +396,27 @@ class TestListingScanIsBounded:
                     result=_result_payload([_failure(f"t{i}")]),
                 )
 
+    async def test_one_undecodable_row_does_not_break_the_listing(
+        self, client: TestClient, temp_db_path: Path
+    ) -> None:
+        """A result written by a newer build must not abort the whole scan."""
+        await self._seed(temp_db_path, 1)
+        async with aiosqlite.connect(temp_db_path) as db:
+            await db.execute(
+                "INSERT INTO results (job_id, build_url, status, result_json) "
+                "VALUES (?, ?, 'completed', ?)",
+                (
+                    "job-newer-build",
+                    "https://ci.example.com/job/example-job/9/",
+                    b"\x28\xb5\x2f\xfd\x00\x01\x02\x03rest-of-frame",
+                ),
+            )
+            await db.commit()
+
+        resp = client.get("/api/results/incomplete", headers=_ADMIN_HEADERS)
+        assert resp.status_code == 200
+        assert [j["job_id"] for j in resp.json()] == ["job-0"]
+
     async def test_limit_stops_the_scan_early(
         self, client: TestClient, temp_db_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
@@ -429,6 +451,35 @@ class TestListingScanIsBounded:
         )
         assert resp.status_code == 422
 
+    async def test_scan_has_a_row_ceiling(
+        self,
+        client: TestClient,
+        temp_db_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """`limit` bounds the response, not the work: a viewer cannot force a
+        full-table result_json parse on every call."""
+        await self._seed(temp_db_path, 20)
+        monkeypatch.setattr(storage, "_INCOMPLETE_SCAN_BATCH", 2)
+        monkeypatch.setattr(storage, "_INCOMPLETE_SCAN_MAX_ROWS", 3)
+
+        visited: list[str] = []
+        real_parse = storage.parse_result_json
+
+        def _counting(raw: str, **kwargs: Any) -> dict[str, Any] | None:
+            visited.append(str(kwargs.get("job_id", "")))
+            return real_parse(raw, **kwargs)
+
+        monkeypatch.setattr(storage, "parse_result_json", _counting)
+
+        resp = client.get(
+            "/api/results/incomplete", params={"limit": 500}, headers=_ADMIN_HEADERS
+        )
+        assert resp.status_code == 200
+        # Every seeded row matches, so only the ceiling can stop the scan.
+        assert len(resp.json()) < 20
+        assert len(visited) <= 3 + 2
+
 
 class TestOperationId:
     def test_incomplete_listing_operation_id_matches_handler_name(
@@ -439,3 +490,69 @@ class TestOperationId:
             schema["paths"]["/api/results/incomplete"]["get"]["operationId"]
             == "apiIncompleteAnalyses"
         )
+
+
+class TestPerGroupFallbackKeepsTheReason:
+    async def test_unclassified_group_still_explains_itself(
+        self, _init_db, temp_db_path: Path
+    ) -> None:
+        """The per-group path must not drop the reason the outer one keeps."""
+        from rootcoz.engine.core import AnalysisIncompleteError
+        from rootcoz.main import _is_failed_analysis, _run_per_group_analysis
+        from rootcoz.models import FailedTest
+
+        reason = "AI analysis incomplete: response has no usable classification"
+
+        with patch(
+            "rootcoz.main.analyze_failure_group",
+            new_callable=AsyncMock,
+            side_effect=AnalysisIncompleteError(reason, error_signature="sig"),
+        ):
+            analyses = await _run_per_group_analysis(
+                groups={"sig": [FailedTest(test_name="t1", error_message="boom")]},
+                console_context="",
+                repo_path=None,
+                ai_provider="claude",
+                ai_model="opus",
+                ai_call_timeout=None,
+                custom_prompt="",
+                artifacts_context="",
+                server_url="",
+                job_id="job-1",
+                additional_repos=None,
+                max_concurrent_ai_calls=1,
+                auth_header="",
+            )
+
+        assert len(analyses) == 1
+        assert analyses[0].analysis.classification == ""
+        assert analyses[0].analysis_error == reason
+        # The job must not report this group as a completed analysis.
+        assert _is_failed_analysis(analyses[0])
+
+
+class TestFailedAnalysisPredicate:
+    def test_a_row_with_only_an_analysis_error_counts_as_failed(self) -> None:
+        """Peer path: no classification, reason stored — not a completed analysis."""
+        from rootcoz.main import _is_failed_analysis
+        from rootcoz.models import AnalysisDetail, FailureAnalysis
+
+        failure = FailureAnalysis(
+            test_name="t1",
+            error="boom",
+            analysis=AnalysisDetail(),
+            analysis_error="AI analysis incomplete: no usable classification",
+        )
+        assert _is_failed_analysis(failure)
+
+    def test_a_classified_row_is_not_failed(self) -> None:
+        from rootcoz.main import _is_failed_analysis
+        from rootcoz.models import AnalysisDetail, FailureAnalysis
+
+        failure = FailureAnalysis(
+            test_name="t1",
+            error="boom",
+            analysis=AnalysisDetail(classification="CODE ISSUE"),
+            analysis_error="stale reason that must not win",
+        )
+        assert not _is_failed_analysis(failure)

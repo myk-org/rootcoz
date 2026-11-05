@@ -4986,6 +4986,12 @@ _INCOMPLETE_SCAN_BATCH = 100
 #: ``result_json``, so an unbounded request is an unbounded scan (#392).
 MAX_INCOMPLETE_LIST_LIMIT = 500
 
+#: Hard ceiling on rows one listing request may examine. ``limit`` bounds the
+#: response, not the work: without this, a viewer could force a JSON parse of
+#: the whole ``results`` table on every call (#392 denormalises the count so it
+#: becomes an indexed query instead).
+_INCOMPLETE_SCAN_MAX_ROWS = 5000
+
 
 async def list_incomplete_analyses(limit: int = 100) -> list[dict[str, Any]]:
     """List jobs holding failures with no usable classification.
@@ -4998,13 +5004,14 @@ async def list_incomplete_analyses(limit: int = 100) -> list[dict[str, Any]]:
     Cost is proportional to the rows visited, not to ``limit``: the predicate
     is derived from ``result_json`` (an unindexed JSON column) with overrides in
     another table, so there is no index to seek on. Rows are streamed in
-    batches of :data:`_INCOMPLETE_SCAN_BATCH` and the scan stops as soon as
-    ``limit`` matches are collected. Denormalising the count onto ``results`` is
-    what would turn this into one indexed query (issue #392).
+    batches of :data:`_INCOMPLETE_SCAN_BATCH`, the scan stops as soon as
+    ``limit`` matches are collected or :data:`_INCOMPLETE_SCAN_MAX_ROWS` rows
+    have been examined, whichever comes first. Denormalising the count onto
+    ``results`` is what would turn this into one indexed query (issue #392).
 
     Args:
         limit: Maximum number of matching jobs to return.  ``0`` means no
-            limit, i.e. scan every row.
+            limit, i.e. scan every row up to the scan ceiling.
 
     Returns:
         Dicts with ``job_id``, ``job_name``, ``build_number``,
@@ -5014,17 +5021,21 @@ async def list_incomplete_analyses(limit: int = 100) -> list[dict[str, Any]]:
         raise ValueError("limit must be >= 0")
 
     jobs: list[dict[str, Any]] = []
+    visited = 0
     async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT job_id, result_json FROM results "
             "WHERE result_json IS NOT NULL ORDER BY created_at DESC"
         )
-        while True:
+        while visited < _INCOMPLETE_SCAN_MAX_ROWS:
             rows = await cursor.fetchmany(_INCOMPLETE_SCAN_BATCH)
             if not rows:
                 break
             for row in rows:
-                result_data = parse_result_json(
+                visited += 1
+                # Lenient: one result written by a newer build must not abort
+                # the whole listing.
+                result_data = parse_result_json_lenient(
                     row["result_json"], job_id=row["job_id"]
                 )
                 if not result_data:

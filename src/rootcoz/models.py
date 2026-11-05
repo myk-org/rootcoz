@@ -1285,10 +1285,11 @@ class ReportPortalPushResult(BaseModel):
     unmatched: list[str] = Field(
         default_factory=list,
         description=(
-            "Items left out because their classification maps to no RP defect "
-            "type, as '<item name> (classification: <value>)'. The frontend "
-            "reads this as skipped. An item that could not be pushed at all is "
-            "reported through 'errors', never here."
+            "Always empty since #397: an item whose classification maps to no "
+            "RP defect type is pushed under TO_INVESTIGATE and named in "
+            "'defaulted', never left out, and an item that could not be pushed "
+            "at all is reported through 'errors'. Kept so existing clients that "
+            "read it keep working."
         ),
     )
     defaulted: list[str] = Field(

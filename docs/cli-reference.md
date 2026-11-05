@@ -310,8 +310,8 @@ See [Managing Users and Server Settings](manage-users-and-server-settings.html) 
   The path is not on the allowlist. Run `rootcoz results fields` and copy the path exactly.
 - `--child-build requires --child-job`.  
   Pass both flags together; there is no way to target a child build without naming its job.
-- A `push` reports every test as unmatched.  
-  The exporter could not match test names. Confirm the plugin is enabled with `rootcoz exporters`, and check the child scoping flags if the job is a pipeline parent.
+- A `push` reports every test under `defaulted`.  
+  None of the failures had a classification to map, so they were pushed as `TO INVESTIGATE`. Re-analyze the jobs first. A test that never reached the launch is named under `errors` instead.
 
 ## Related Pages
 

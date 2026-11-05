@@ -1,6 +1,17 @@
 import { describe, expect, it } from 'vitest'
-import { countUnreviewedFailures } from '@/lib/failureKeys'
-import type { ChildJobAnalysis, ReviewState } from '@/types'
+import { countUnclassifiedFailures, countUnreviewedFailures } from '@/lib/failureKeys'
+import type { ChildJobAnalysis, FailureAnalysis, ReviewState } from '@/types'
+
+/** One failure with the classification the server stored for it. */
+function makeFailure(testName: string, classification: string): FailureAnalysis {
+  return {
+    id: `${testName}-id`,
+    test_name: testName,
+    error: 'boom',
+    analysis: { classification, pattern: '', affected_tests: [], details: '', artifacts_evidence: '' },
+    error_signature: 'sig',
+  }
+}
 
 function makeReview(reviewed: boolean): ReviewState {
   return { reviewed, username: 'user', updated_at: '2025-01-01T00:00:00Z' }
@@ -125,5 +136,36 @@ describe('countUnreviewedFailures', () => {
         childBuildNumber: 9,
       }),
     ).toBe(0)
+  })
+})
+
+describe('countUnclassifiedFailures', () => {
+  it('counts failures whose stored classification is empty', () => {
+    const failures = [makeFailure('test-a', ''), makeFailure('test-b', 'CODE ISSUE')]
+    expect(countUnclassifiedFailures(failures, [], {})).toBe(1)
+  })
+
+  it('treats a whitespace-only classification as empty, as the server does', () => {
+    // storage._effective_classification strips before deciding.
+    expect(countUnclassifiedFailures([makeFailure('test-a', '  ')], [], {})).toBe(1)
+  })
+
+  it('lets a live reviewer override clear a failure without a refetch', () => {
+    // The banner is derived from this count, so a classification the reviewer
+    // just saved must clear it immediately.
+    const failures = [makeFailure('test-a', '')]
+    expect(
+      countUnclassifiedFailures(failures, [], { 'test-a': 'PRODUCT BUG' }),
+    ).toBe(0)
+  })
+
+  it('counts child failures through their own review key', () => {
+    const child = { ...makeChild('child', 5), failures: [makeFailure('test-x', '')] }
+    expect(countUnclassifiedFailures([], [child], {})).toBe(1)
+    expect(
+      countUnclassifiedFailures([], [child], { 'child#5::test-x': 'CODE ISSUE' }),
+    ).toBe(0)
+    // A top-level override for the same test name never covers a child scope.
+    expect(countUnclassifiedFailures([], [child], { 'test-x': 'CODE ISSUE' })).toBe(1)
   })
 })

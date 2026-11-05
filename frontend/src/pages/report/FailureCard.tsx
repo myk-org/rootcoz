@@ -497,6 +497,19 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
               </pre>
             </div>
 
+            {/* Why there is no analysis (#397): the backend stores the reason on
+                the row, so an unclassified card explains itself instead of
+                showing a bare "check server logs". Only while the row has no
+                effective classification — a reviewer override completes it. */}
+            {rep.analysis_error && !classification.trim() && (
+              <div>
+                <h4 className="text-xs font-display uppercase tracking-widest text-text-tertiary mb-2">Analysis Incomplete</h4>
+                <p role="alert" data-testid="analysis-incomplete-reason" className="rounded-md bg-signal-orange/5 border border-signal-orange/20 p-3 text-sm text-text-secondary whitespace-pre-wrap">
+                  {rep.analysis_error}
+                </p>
+              </div>
+            )}
+
             {/* Analysis */}
             {analysis.details && (
               <div>
