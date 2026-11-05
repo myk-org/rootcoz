@@ -426,6 +426,13 @@ helm<span class="w"> </span><span class="nb">test</span><span class="w"> </span>
 <li>If you changed external secrets out of band, follow with <code>kubectl rollout restart deployment/rootcoz -n rootcoz</code>.</li>
 <li>For first-login and first-analysis steps after the rollout, see <a href="quickstart.html">Quickstart</a>.</li>
 </ul>
+<h3 id="roll-back-to-an-older-build">Roll back to an older build</h3>
+<p>A rollback to a build older than the one that wrote the data cannot read every row. If <code>result_json</code> was stored compressed, the older build skips those rows at startup instead of crashing on them, logs one line per skipped job naming its id, and logs one summary naming the count and the cause, for example:</p>
+<div class="highlight"><pre><span></span><code>Backfill skipped 13 result(s) whose result_json was written by a build with result_json compression, which this build cannot decode. Those rows are intact and untouched. Run a rootcoz build that has the result_json codec to read it, or restore a pre-compression copy of the database.
+</code></pre></div>
+
+<p>This skip guard is part of rootcoz itself, so it protects you only when the build you roll back to contains it. A build predating the guard still fails at startup on such a row, so roll back to a build that has it (releases from this version on).</p>
+<p>The server keeps serving everything else. <code>/api/health</code> reports <code>{"status": "degraded", "undecodable_rows": &lt;count&gt;}</code> under <code>checks.result_json</code> (it stays HTTP 200 — degraded data is not a liveness failure), and the count reads <code>{"status": "ok", "undecodable_rows": 0}</code> once nothing is skipped. Affected jobs show an empty analysis, and a job that was <code>waiting</code> stays <code>waiting</code>, until you roll forward again (or restore a database copy taken before the compression build). Nothing is written over those rows, so rolling forward brings them back.</p>
 <h2 id="watch-disk-usage-and-alert-on-a-filling-volume">Watch disk usage and alert on a filling volume</h2>
 <p>RootCoz ships no alerting stack — the rule below is yours to install. What it does ship is the metric: <code>/metrics</code> exposes three unlabelled gauges for the filesystem that holds the data directory. The probe is a <code>statvfs</code> on that directory, so it is storage-agnostic — the same gauges work for an OpenShift PVC, a Docker Compose volume, a bind mount or a plain directory, because they measure whichever filesystem backs the data dir. On a shared node filesystem the numbers can include other tenants' usage: read them as free/used space on that filesystem, not as a per-volume quota.</p>
 <div class="table-wrap"><table>
@@ -579,7 +586,10 @@ kubectl<span class="w"> </span>-n<span class="w"> </span>rootcoz<span class="w">
 <li><a href="#install-on-openshift-with-a-route">Install on OpenShift with a Route</a></li>
 <li><a href="#install-on-kubernetes-with-tls-ingress">Install on Kubernetes with TLS Ingress</a></li>
 <li><a href="#run-a-private-clusterip-only-release-and-port-forward-it">Run a private ClusterIP-only release and port-forward it</a></li>
-<li><a href="#upgrade-and-smoke-test-a-helm-release">Upgrade and smoke-test a Helm release</a></li>
+<li><a href="#upgrade-and-smoke-test-a-helm-release">Upgrade and smoke-test a Helm release</a><ul>
+<li><a href="#roll-back-to-an-older-build">Roll back to an older build</a></li>
+</ul>
+</li>
 <li><a href="#watch-disk-usage-and-alert-on-a-filling-volume">Watch disk usage and alert on a filling volume</a><ul>
 <li><a href="#the-chart-health-alert-cronjob-the-alternative-for-deployments-without-prometheus">The chart health-alert CronJob (the alternative for deployments without Prometheus)</a></li>
 </ul>
