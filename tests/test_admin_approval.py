@@ -599,6 +599,26 @@ async def _drain_until(stream, sink: list[str], needle: str, timeout: float = 2.
 _PENDING_EVENT = {"multiplexed": "navbar:pending-count", "standalone": "pending-count"}
 
 
+class TestServerStatusSseClientCount:
+    """The Activity card's SSE count: one per connection, not per topic."""
+
+    @pytest.mark.asyncio
+    async def test_a_multiplexed_connection_counts_once(self):
+        with _navbar_storage([]) as main:
+            before = main._sse_client_count()
+            resp = await main.stream_multiplexed(
+                _StubRequest(username="boss", is_admin=True),
+                topics="navbar,dashboard,settings",
+            )
+            stream = resp.body_iterator
+            try:
+                await stream.__anext__()
+                assert main._sse_client_count() == before + 1
+            finally:
+                await stream.aclose()
+            assert main._sse_client_count() == before
+
+
 class TestNavbarPendingCountStream:
     """The navbar SSE streams carry pending-count for admins (issue #227)."""
 

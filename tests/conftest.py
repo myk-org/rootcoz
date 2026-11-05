@@ -364,15 +364,19 @@ def _restore_audit_health_counters() -> Generator[None]:
     ``monitoring._audit_write_failures`` is non-zero, so a test whose audit
     write fails (any test hitting ``record_audit`` without a DB) flips
     ``test_build_health_response_healthy`` depending on which tests share its
-    xdist worker. Snapshot and restore both counters around every test.
+    xdist worker. The same applies to the count of rows a startup scan could
+    not decode. Snapshot and restore all of them around every test.
     """
-    from rootcoz import monitoring
+    from rootcoz import monitoring, storage
 
     failures = monitoring._audit_write_failures
     suppressed = monitoring._audit_suppressed_auth_events
+    undecodable = set(storage._undecodable_result_ids)
     yield
     monitoring._audit_write_failures = failures
     monitoring._audit_suppressed_auth_events = suppressed
+    storage._undecodable_result_ids.clear()
+    storage._undecodable_result_ids.update(undecodable)
 
 
 _TEST_SIDECAR_CATALOG = [

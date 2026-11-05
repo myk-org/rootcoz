@@ -1046,6 +1046,11 @@
 <td>Installed AI-sidecar component versions.</td>
 </tr>
 <tr>
+<td><code>server-status</code></td>
+<td>—</td>
+<td>Live server status: disk (filesystem usage of the data directory plus database, transcripts and logs sizes), CPU (process percent and cgroup quota — the cores, <code>no CPU quota (unlimited)</code> when <code>cpu.max</code> says <code>max</code>, or <code>quota unknown</code> when it cannot be read), memory (RSS, usage against <code>memory.max</code>, working set and its share of the limit, with the same set/unlimited/unknown distinction), process (version, commit, uptime, PID, restarts, worst event-loop stall in the last minute), database size and row counts, sidecar reachability and model counts, activity (analyses running with their elapsed time, chat turns in flight, SSE clients), and the derived warnings. A block the server cannot read prints <code>unavailable</code> with the reason instead of a zero.</td>
+</tr>
+<tr>
 <td><code>token-usage</code></td>
 <td><code>--period</code> (<code>today</code>, <code>week</code>, <code>month</code>, <code>all</code>), <code>--start-date</code>, <code>--end-date</code>, <code>--provider</code>, <code>--model</code>, <code>--call-type</code>, <code>--group-by</code> (<code>provider</code>, <code>model</code>, <code>call_type</code>, <code>day</code>, <code>week</code>, <code>month</code>, <code>job</code>), <code>--job-id</code>, <code>--format</code> (<code>table</code>, <code>json</code>, <code>csv</code>)</td>
 <td>AI token usage and cost. No filters prints the summary dashboard.</td>

@@ -675,6 +675,12 @@ class RootCozClient:
         """
         return self._request("GET", "/api/admin/component-versions")
 
+    def server_status(self) -> dict[str, Any]:
+        """Get live server status: disk, CPU, memory, DB, sidecar.
+        GET /api/admin/server-status
+        """
+        return self._request("GET", "/api/admin/server-status")
+
     # -- Health ---------------------------------------------------------------
 
     def health(self) -> dict[str, Any]:
