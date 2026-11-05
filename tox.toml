@@ -5,18 +5,18 @@ envlist = ["backend", "frontend", "chart"]
 description = "Run Python tests"
 commands = [
   [
-    "uv",
-    "run",
-    "--extra",
-    "tests",
-    "pytest",
-    "-n",
-    "auto",
-    "tests/",
-    "-q",
+    "sh",
+    "-c",
+    # Cap the worker count at 8 rather than fixing it: `-n auto` trusts nproc, but CI
+    # delivers far fewer effective cores than nproc reports while build-container runs
+    # alongside the tests, so auto oversubscribes there; a fixed 8 oversubscribes small
+    # runners. Take the smaller of the two.
+    # Keep --durations=25: the posted CI log is truncated, so per-test cost has to sit
+    # in its tail. Measured figures live in PR #432 and issue #431, not in this file.
+    "N=$(nproc); [ \"$N\" -gt 8 ] && N=8; exec uv run --extra tests pytest -n \"$N\" tests/ -q --durations=25",
   ],
 ]
-allowlist_externals = ["uv"]
+allowlist_externals = ["uv", "sh", "nproc"]
 
 [env.frontend]
 commands = [
