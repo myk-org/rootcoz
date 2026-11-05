@@ -204,24 +204,102 @@ async def test_a_failed_reusable_delete_leaves_the_marker(
     assert not delete_marker(path).exists()
 
 
-async def test_the_path_lock_map_stays_bounded_but_never_drops_a_held_lock(
+async def test_the_path_lock_map_drops_idle_entries_and_keeps_held_ones(
     tmp_path,
 ) -> None:
     from rootcoz import temp_paths
 
     held_path = tmp_path / "busy"
-    held = temp_paths._lock_for(held_path)
-    await held.acquire()
+    held_key, held = temp_paths._lock_for(held_path)
+    await held.lock.acquire()
     try:
-        for i in range(temp_paths._MAX_PATH_LOCKS * 2):
-            temp_paths._lock_for(tmp_path / f"chat-{i}")
-        # Chat workspaces are per (job, user) and jobs go away forever: idle
-        # entries are dropped, so the map cannot grow for the process lifetime.
-        assert len(temp_paths._path_locks) <= temp_paths._MAX_PATH_LOCKS
+        for i in range(512):
+            key, entry = temp_paths._lock_for(tmp_path / f"chat-{i}")
+            # Chat workspaces are per (job, user) and jobs go away forever: an
+            # entry with no holder and no waiter is dropped, so the map cannot
+            # grow for the process lifetime.
+            temp_paths._drop_lock(key, entry)
+        assert len(temp_paths._path_locks) == 1
         assert temp_paths._path_locks[os.path.realpath(held_path)] is held
     finally:
-        held.release()
+        held.lock.release()
+        temp_paths._drop_lock(held_key, held)
         temp_paths._path_locks.clear()
+
+
+async def test_a_release_with_a_waiter_pending_keeps_the_entry(tmp_path) -> None:
+    """``locked()`` is briefly false at a handoff: the waiter still owns the entry."""
+    from rootcoz import temp_paths
+
+    path = tmp_path / "chat-job" / "alice"
+    path.mkdir(parents=True)
+    key, holder = temp_paths._lock_for(path)
+    await holder.lock.acquire()
+    waiter_key, queued = temp_paths._lock_for(path)
+    assert queued is holder, "a second caller got a different lock for one path"
+    waiter = asyncio.create_task(holder.lock.acquire())
+    await asyncio.sleep(0.01)  # The waiter is queued now.
+
+    temp_paths._release_path_lock(key, holder)  # The holder finishes its delete.
+
+    # Released, waiter not resumed yet: the old eviction (``not locked()``) would
+    # drop this entry here and hand the next caller a second lock for the path.
+    assert temp_paths._path_locks[key] is holder
+    await waiter
+    assert temp_paths._path_locks[key] is holder
+
+    temp_paths._release_path_lock(waiter_key, queued)
+    assert key not in temp_paths._path_locks
+
+
+async def test_a_queued_waiter_keeps_its_lock_across_the_handoff(tmp_path) -> None:
+    """Delete then create of one path: same lock object, no overlap."""
+    from rootcoz import temp_paths
+
+    path = tmp_path / "chat-job" / "alice"
+    (path / "repo").mkdir(parents=True)
+    (path / "repo" / "file.txt").write_text("x")
+    key = os.path.realpath(path)
+    gate = threading.Event()
+    same_lock: list[bool] = []
+    overlapped: list[bool] = []
+
+    def gated_delete() -> None:
+        gate.wait(5)
+
+    holder = asyncio.create_task(
+        cleanup_path_off_loop("job-1", path, partial(gated_delete))
+    )
+    entry = None
+    for _ in range(200):
+        entry = temp_paths._path_locks.get(key)
+        if entry is not None and entry.lock.locked():
+            break
+        await asyncio.sleep(0.01)
+    assert entry is not None
+    held_lock = entry.lock
+
+    async def creator() -> None:
+        async with reusable_path_lock("job-1", path):
+            same_lock.append(temp_paths._path_locks[key].lock is held_lock)
+            overlapped.append(path.exists())
+
+    waiter = asyncio.create_task(creator())
+    try:
+        await asyncio.sleep(0.05)  # The waiter is queued behind the delete now.
+        # Map pressure during the handoff: other reusable paths pass through the
+        # map, far more than the old size bound held at once.
+        for i in range(512):
+            other_key, other = temp_paths._lock_for(tmp_path / f"chat-{i}")
+            temp_paths._drop_lock(other_key, other)
+        assert temp_paths._path_locks[key].lock is held_lock
+    finally:
+        gate.set()
+    await asyncio.gather(holder, waiter)
+
+    assert same_lock == [True], "the waiter and the creator got different locks"
+    assert overlapped == [False], "creation overlapped the queued delete"
+    assert key not in temp_paths._path_locks
 
 
 # -- Step 2: delete_tree ---------------------------------------------------
@@ -356,6 +434,39 @@ def test_unreadable_entry_does_not_abandon_the_tree(
     assert entries >= 2
     assert not (root / "good").exists()
     assert caplog.text.count("errno=13") == 1
+
+
+def test_a_scan_error_does_not_abandon_the_rest_of_the_tree(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    root = tmp_path / "tree"
+    poisoned = root / "poisoned"
+    poisoned.mkdir(parents=True)
+    (poisoned / "stuck.txt").write_text("z")
+    sibling = root / "sibling"
+    sibling.mkdir()
+    (sibling / "file.txt").write_text("x" * 100)
+    real_scandir = os.scandir
+    poisoned_id = (poisoned.stat().st_dev, poisoned.stat().st_ino)
+
+    def scandir(target):
+        if isinstance(target, int):
+            st = os.fstat(target)
+            if (st.st_dev, st.st_ino) == poisoned_id:
+                raise OSError(errno.EIO, "cannot scan")
+        return real_scandir(target)
+
+    monkeypatch.setattr(os, "scandir", scandir)
+    nbytes, entries = delete_tree(root)
+    monkeypatch.undo()
+
+    assert not sibling.exists(), "the sibling after the unscannable dir was abandoned"
+    assert (poisoned / "stuck.txt").exists()
+    assert (nbytes, entries) == (100, 2)  # sibling dir + its file, nothing else
+    assert caplog.text.count(f"errno={errno.EIO}") == 1
+
+    delete_tree(root)
+    assert not root.exists()
 
 
 def test_delete_tree_on_a_missing_path_is_a_no_op(tmp_path) -> None:

@@ -33,13 +33,24 @@ _CLEANUP_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rootcoz-re
 #: Locks for *reusable* workspaces only (``chat-{job}/{user}`` and the admin chat
 #: workspace), where a queued delete can race the next create of the same path.
 #: Keyed by ``realpath``; uuid workspaces are unique per use and need nothing.
-_path_locks: dict[str, asyncio.Lock] = {}
+_path_locks: dict[str, _PathLock] = {}
 
-#: Chat workspaces are one per ``(job, user)`` and jobs are deleted forever, so
-#: the map above would grow for the life of the process. Past this size the idle
-#: locks are dropped: an unlocked lock excludes nobody, it only saves an
-#: allocation for the job that comes back.
-_MAX_PATH_LOCKS = 256
+
+class _PathLock:
+    """One path's lock plus the number of holders and waiters that reference it.
+
+    ``asyncio.Lock.locked()`` is false for a moment after ``release()`` while a
+    queued waiter is still waiting to be resumed, so it cannot decide whether an
+    entry is disposable: dropping the entry there hands the waiter and the next
+    caller two different locks for one path, and a create runs into a delete.
+    Reference counting says what the lock cannot — nobody is waiting any more.
+    """
+
+    __slots__ = ("lock", "users")
+
+    def __init__(self) -> None:
+        self.lock = asyncio.Lock()
+        self.users = 0
 
 
 def rootcoz_temp_base() -> Path:
@@ -157,8 +168,14 @@ def delete_tree(path: Path) -> tuple[int, int]:
             record(display, exc)
             return
         try:
-            with os.scandir(fd) as it:
-                children = [entry.name for entry in it]
+            try:
+                with os.scandir(fd) as it:
+                    children = [entry.name for entry in it]
+            except OSError as exc:
+                # Scanning failed on an opened directory: record it and let the
+                # parent's loop carry on, instead of unwinding the whole walk.
+                record(display, exc)
+                return
             for child in children:
                 remove(child, fd, os.path.join(display, child))
         finally:
@@ -230,16 +247,21 @@ async def cleanup_off_loop(what: str, *steps: Callable[[], object]) -> None:
     )
 
 
-def _lock_for(path: Path) -> asyncio.Lock:
+def _lock_for(path: Path) -> tuple[str, _PathLock]:
+    """Return ``(key, entry)`` for ``path``, counting the caller as a user."""
     key = os.path.realpath(path)
-    lock = _path_locks.get(key)
-    if lock is not None:
-        return lock
-    if len(_path_locks) >= _MAX_PATH_LOCKS:
-        for stale in [k for k, held in _path_locks.items() if not held.locked()]:
-            del _path_locks[stale]
-    lock = _path_locks[key] = asyncio.Lock()
-    return lock
+    entry = _path_locks.get(key)
+    if entry is None:
+        entry = _path_locks[key] = _PathLock()
+    entry.users += 1
+    return (key, entry)
+
+
+def _drop_lock(key: str, entry: _PathLock) -> None:
+    """Drop the caller's reference; the entry goes when no holder or waiter is left."""
+    entry.users -= 1
+    if entry.users == 0 and _path_locks.get(key) is entry:
+        del _path_locks[key]
 
 
 async def cleanup_path_off_loop(
@@ -259,8 +281,8 @@ async def cleanup_path_off_loop(
     loop would reintroduce the very stall this module exists to avoid.
     """
     loop = asyncio.get_running_loop()
-    lock = _lock_for(path)
-    await lock.acquire()
+    key, entry = _lock_for(path)
+    await entry.lock.acquire()
     cleanup_steps: tuple[Callable[[], object], ...] = (
         partial(_mark_deleting, path),
         *steps,
@@ -270,10 +292,19 @@ async def cleanup_path_off_loop(
     try:
         future = loop.run_in_executor(_CLEANUP_POOL, _run_cleanup, what, *cleanup_steps)
     except BaseException:
-        lock.release()
+        entry.lock.release()
+        _drop_lock(key, entry)
         raise
-    future.add_done_callback(lambda _f: lock.release() if lock.locked() else None)
+    # Unlock before dropping the reference: a released lock with a queued waiter
+    # is still in use, and the waiter's own reference is what keeps the entry.
+    future.add_done_callback(lambda _f: _release_path_lock(key, entry))
     await asyncio.shield(future)
+
+
+def _release_path_lock(key: str, entry: _PathLock) -> None:
+    if entry.lock.locked():
+        entry.lock.release()
+    _drop_lock(key, entry)
 
 
 @asynccontextmanager
@@ -284,11 +315,14 @@ async def reusable_path_lock(what: str, path: Path) -> AsyncIterator[None]:
     because chat workspaces deliberately persist sessions and clones across
     messages.
     """
-    lock = _lock_for(path)
-    async with lock:
-        if delete_marker(path).exists():
-            logger.info("cleanup: re-creating %s after an interrupted delete", what)
-            await cleanup_off_loop(
-                what, partial(delete_tree, path), partial(_drop_deleting, path)
-            )
-        yield
+    key, entry = _lock_for(path)
+    try:
+        async with entry.lock:
+            if delete_marker(path).exists():
+                logger.info("cleanup: re-creating %s after an interrupted delete", what)
+                await cleanup_off_loop(
+                    what, partial(delete_tree, path), partial(_drop_deleting, path)
+                )
+            yield
+    finally:
+        _drop_lock(key, entry)
