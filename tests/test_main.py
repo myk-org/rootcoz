@@ -4399,6 +4399,28 @@ class TestCreateGithubIssueApiErrors:
         assert _REPORT_GITHUB_TOKEN not in caplog.text
 
     @pytest.mark.asyncio
+    async def test_github_message_cannot_forge_a_log_line(self, test_client, caplog):
+        """A tracker message is data, never a second log line."""
+        exc = self._raise_status(
+            503, json={"message": "Server Error\nERROR forged line by GitHub"}
+        )
+        with capture_main_logs(caplog):
+            response = await self._post_with_github_failure(
+                test_client, "job-gh-forge", exc
+            )
+
+        assert response.status_code == 502
+        refused = [
+            record.getMessage()
+            for record in caplog.records
+            if "GitHub refused" in record.getMessage()
+        ]
+        assert len(refused) == 1
+        # The text is kept, the line break that would fabricate an entry is not.
+        assert "forged line by GitHub" in refused[0]
+        assert "\n" not in refused[0]
+
+    @pytest.mark.asyncio
     async def test_github_api_http_error_returns_502(self, test_client):
         """A status outside the outage classes keeps its generic 502."""
         exc = self._raise_status(422, json={"message": "Validation Failed"})
@@ -4451,8 +4473,6 @@ class TestCreateJiraBugApiErrors:
     @pytest.mark.asyncio
     async def test_jira_5xx_is_a_retryable_outage(self, test_client, caplog):
         """A Jira 5xx says 'unavailable, retry' instead of a bare status."""
-        import httpx
-
         result_data = {
             "status": "completed",
             "summary": "",
@@ -4583,8 +4603,6 @@ class TestCreateJiraBugApiErrors:
         the detail must point at the credential and the log must keep the
         upstream status and Jira's message while leaking neither token nor body.
         """
-        import httpx
-
         result_data = {
             "status": "completed",
             "summary": "",
@@ -4642,8 +4660,6 @@ class TestCreateJiraBugApiErrors:
         self, test_client, caplog, status: int
     ):
         """A Jira 401/403 keeps the credential detail it always had."""
-        import httpx
-
         result_data = {
             "status": "completed",
             "summary": "",

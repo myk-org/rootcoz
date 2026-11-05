@@ -19368,7 +19368,8 @@ def _upstream_error_message(response: httpx.Response) -> str:
     ``errorMessages`` are read and the result is capped at
     ``_UPSTREAM_MESSAGE_LIMIT``: the response text is never logged (it can echo
     the request) and neither is the request itself, so no token can reach the
-    log.
+    log. Control characters are stripped for the same reason a request-supplied
+    name is sanitized: a crafted message must not forge extra log lines.
     """
     try:
         payload = response.json()
@@ -19384,7 +19385,7 @@ def _upstream_error_message(response: httpx.Response) -> str:
     error_messages = payload.get("errorMessages")
     if isinstance(error_messages, list):
         parts.extend(str(item).strip() for item in error_messages if str(item).strip())
-    return " ".join(parts)[:_UPSTREAM_MESSAGE_LIMIT]
+    return _sanitize_control_chars(" ".join(parts))[:_UPSTREAM_MESSAGE_LIMIT]
 
 
 def _upstream_status(exc: Exception) -> int | None:

@@ -75,7 +75,7 @@ export function BugCreationDialog({
 }: BugCreationDialogProps) {
   const dispatch = useReportDispatch()
   const refreshEnrichments = useRefreshEnrichments()
-  const { canUseServerProviders, canUseFreeProviders } = useAuth()
+  const { username, canUseServerProviders, canUseFreeProviders } = useAuth()
   const { aiProvider, aiModel, setAiPair } = useAiSelection(defaultAiProvider, defaultAiModel)
   const { providers, providerStatus } = useProviderCatalog()
   const [phase, setPhase] = useState<Phase>('idle')
@@ -285,12 +285,14 @@ export function BugCreationDialog({
     }
   }
 
-  /** This failure's links only: another test's link appearing while our POST
-   *  failed is not ours to report as a success. */
+  /** This failure's links this user filed: another test's link — or another
+   *  user's issue for this failure — appearing while our POST failed is not
+   *  ours to report as a success. An empty username matches nothing, so the
+   *  retry stays available. */
   async function failureLinks(): Promise<TrackedInEntry[]> {
     const res = await api.get<{ tracked_in: Record<string, TrackedInEntry[]> }>(`/results/${jobId}/tracked-in`)
     const scoped = res.tracked_in?.[reviewKey(testName, childJobName, childBuildNumber)] ?? []
-    return scoped.filter((link) => link.tracked_in_type === target)
+    return scoped.filter((link) => link.tracked_in_type === target && link.tracked_in_by === username)
   }
 
   const isBusy = promptPhase === 'loading-prompt' || promptPhase === 'loading' || promptPhase === 'prompt' || promptPhase === 'preview' || promptPhase === 'creating'
