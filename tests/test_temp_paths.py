@@ -12,6 +12,8 @@ import logging
 import os
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from functools import partial
 from pathlib import Path
 from unittest.mock import AsyncMock, patch
@@ -482,6 +484,30 @@ def _abandoning_reap_graph(job_id: str, workspace: Path) -> object:
     return ABANDON
 
 
+@contextmanager
+def _builder_holding(path: Path) -> Iterator[None]:
+    """Hold ``path``'s workspace install lock in another thread, as a builder does."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from rootcoz.engine.http_mcp import _workspace_install_lock
+
+    entered, release = threading.Event(), threading.Event()
+
+    def build() -> None:
+        with _workspace_install_lock(path.resolve()):
+            entered.set()
+            assert release.wait(3)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        builder = pool.submit(build)
+        assert entered.wait(2)
+        try:
+            yield
+        finally:
+            release.set()
+        builder.result(timeout=2)
+
+
 async def test_an_abandoning_graph_step_skips_repo_manager_and_tree_delete(
     tmp_path, monkeypatch, caplog
 ) -> None:
@@ -568,16 +594,63 @@ async def test_the_normal_path_still_deletes_and_reports_bytes(
     assert not delete_marker(path).exists()
 
 
-async def test_an_abandoned_cleanup_keeps_the_marker_for_the_next_create(
+async def test_recovery_yields_while_a_builder_holds_the_lock(
     tmp_path, monkeypatch
 ) -> None:
-    """The surviving tree must not be reused: the marker forces a re-create."""
+    """The builder that caused the abandon still owns the tree: recovery yields."""
+    from rootcoz import temp_paths
+    from rootcoz.engine import graft
+
+    path = tmp_path / "chat-job"
+    (path / "repo").mkdir(parents=True)
+    (path / "repo" / "file.txt").write_text("x")
+    delete_marker(path).write_text("", encoding="utf-8")
+    monkeypatch.setattr(graft, "GRAPH_LOCK_SECONDS", 0.05)
+    deleted: list[Path] = []
+    monkeypatch.setattr(
+        temp_paths, "delete_tree", lambda target: deleted.append(target) or (0, 0)
+    )
+
+    with _builder_holding(path):
+        async with reusable_path_lock("job-recover", path):
+            assert deleted == [], "recovery deleted under a live builder"
+        assert temp_paths.reap_reusable_path("job-recover", path) is ABANDON
+
+    assert path.exists()
+    assert delete_marker(path).exists(), "a yielded recovery dropped the marker"
+
+
+async def test_recovery_deletes_after_the_builder_releases_the_lock(
+    tmp_path, monkeypatch
+) -> None:
+    """No builder left: recovery deletes the marked tree and drops the marker."""
+    from rootcoz.engine import graft
+
+    path = tmp_path / "chat-job"
+    (path / "repo").mkdir(parents=True)
+    (path / "repo" / "file.txt").write_text("x")
+    delete_marker(path).write_text("", encoding="utf-8")
+    monkeypatch.setattr(graft, "GRAPH_LOCK_SECONDS", 0.05)
+
+    with _builder_holding(path):
+        pass  # The abandoning builder's lock, then released.
+
+    async with reusable_path_lock("job-recover", path):
+        assert not path.exists(), "the marked tree was reused"
+    assert not delete_marker(path).exists()
+
+
+async def test_an_abandoned_cleanup_keeps_the_marker_while_a_builder_holds_the_lock(
+    tmp_path, monkeypatch
+) -> None:
+    """Recovery must not delete the tree the abandoning builder still owns."""
     from rootcoz.engine import graft
 
     path = tmp_path / "chat-job" / "alice"
     (path / "repo").mkdir(parents=True)
     (path / "repo" / "file.txt").write_text("x")
     monkeypatch.setattr(graft, "reap_graph", _abandoning_reap_graph)
+    monkeypatch.setattr(graft, "GRAPH_LOCK_SECONDS", 0.05)
 
     await cleanup_path_off_loop(
         "job-marker", path, partial(graft.reap_graph, "job-marker", path)
@@ -585,9 +658,10 @@ async def test_an_abandoned_cleanup_keeps_the_marker_for_the_next_create(
 
     assert path.exists(), "the abandoned tree was deleted"
     assert delete_marker(path).exists(), "an abandoned delete dropped its marker"
-    async with reusable_path_lock("job-marker", path):
-        assert not path.exists(), "the next create reused the abandoned tree"
-    assert not delete_marker(path).exists()
+    with _builder_holding(path):
+        async with reusable_path_lock("job-marker", path):
+            assert path.exists(), "recovery deleted a live builder's tree"
+            assert delete_marker(path).exists(), "recovery dropped the marker early"
 
 
 async def test_ci_source_analysis_finally_does_not_block_the_loop(

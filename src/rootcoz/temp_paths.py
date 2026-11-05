@@ -203,6 +203,33 @@ def delete_tree(path: Path) -> tuple[int, int]:
     return (size, entries)
 
 
+def reap_reusable_path(what: str, path: Path) -> tuple[int, int] | _Abandoned:
+    """``delete_tree`` for a path whose earlier delete abandoned, under its lock.
+
+    Recovery used to run the whole-tree delete with no lock at all — i.e. under the
+    very builder whose flock is why the first delete abandoned. Bounded exactly
+    like ``reap_graph``: on timeout :data:`ABANDON` leaves the tree *and* its
+    marker for the next sweep, because the builder still owns them.
+    """
+    # Local imports: ``graft`` imports this module at import time.
+    from rootcoz.engine.graft import GRAPH_LOCK_SECONDS
+    from rootcoz.engine.http_mcp import _workspace_install_lock
+
+    try:
+        with _workspace_install_lock(
+            path.resolve(), deadline=time.monotonic() + GRAPH_LOCK_SECONDS
+        ):
+            return delete_tree(path)
+    except TimeoutError:
+        logger.warning(
+            "cleanup: %s still owned by a live builder after %ss; leaving the "
+            "interrupted delete's tree and marker for the next sweep",
+            what,
+            GRAPH_LOCK_SECONDS,
+        )
+        return ABANDON
+
+
 def _run_cleanup(
     what: str,
     *steps: Callable[[], object],
@@ -359,6 +386,10 @@ async def reusable_path_lock(what: str, path: Path) -> AsyncIterator[None]:
     Only the marker decides re-creation: an intact workspace is reused untouched,
     because chat workspaces deliberately persist sessions and clones across
     messages.
+
+    Recovery is a reaper step too: :func:`reap_reusable_path` waits, bounded, for
+    the builder's install lock, and yields — tree and marker untouched — when that
+    builder is still running.
     """
     key, entry = _lock_for(path)
     try:
@@ -366,7 +397,9 @@ async def reusable_path_lock(what: str, path: Path) -> AsyncIterator[None]:
             if delete_marker(path).exists():
                 logger.info("cleanup: re-creating %s after an interrupted delete", what)
                 await cleanup_off_loop(
-                    what, partial(delete_tree, path), partial(_drop_deleting, path)
+                    what,
+                    partial(reap_reusable_path, what, path),
+                    partial(_drop_deleting, path),
                 )
             yield
     finally:
