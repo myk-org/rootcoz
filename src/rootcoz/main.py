@@ -8137,15 +8137,30 @@ async def set_reviewed(
 # Per-job enrichment cache: every report load asks for the live badges, and each
 # miss costs one rate-limited GitHub/Jira call per link in the thread. Comment
 # links change rarely, so 60 s of staleness is invisible while it removes the
-# repeated upstream traffic. Failures are never cached; the entry is dropped
-# whenever the job's comments change (see notify_comments_changed).
+# repeated upstream traffic. Nothing that failed is cached — neither a raising
+# collection nor a single link lookup that returned None — and the entry is
+# dropped whenever the job's comments change (see notify_comments_changed).
 _ENRICHMENTS_TTL_SECONDS = 60
 _enrichments_cache: dict[str, tuple[float, dict[str, list[dict[str, Any]]]]] = {}
+# Collections in flight, keyed by job: a report load that arrives while the
+# first one is still looking up links joins it instead of repeating its
+# GitHub/Jira calls.
+_enrichments_inflight: dict[str, asyncio.Task[dict[str, list[dict[str, Any]]]]] = {}
+# Bumped on every comment change. A collector notes it after its cache miss and
+# skips its write once it moved — otherwise a snapshot read before the change
+# would overwrite the invalidation and leave the new link badge-less for a whole
+# TTL. One global counter rather than per job: a false skip only costs one
+# re-fetch, while a per-job map would need its own pruning.
+_enrichments_epoch = 0
 
 
 def _invalidate_enrichments_cache(job_id: str) -> None:
     """Drop a job's cached enrichments so the next read re-fetches them."""
+    global _enrichments_epoch
+    _enrichments_epoch += 1
     _enrichments_cache.pop(job_id, None)
+    # A read after the change must not join a collection that started before it.
+    _enrichments_inflight.pop(job_id, None)
 
 
 async def _collect_comment_enrichments(
@@ -8154,12 +8169,34 @@ async def _collect_comment_enrichments(
     """Resolve live statuses for every tracker link found in a job's comments.
 
     Serves a cached result when the job was collected within
-    ``_ENRICHMENTS_TTL_SECONDS``. Errors propagate and leave no cache entry.
+    ``_ENRICHMENTS_TTL_SECONDS``, and joins an already running collection of the
+    same job. Errors propagate and leave no cache entry; so does a collection
+    where any single link lookup failed, so the next read retries it.
     """
     cached = _enrichments_cache.get(job_id)
     if cached is not None and _time.monotonic() - cached[0] < _ENRICHMENTS_TTL_SECONDS:
         logger.debug(f"enrich_comments: job_id={job_id}, served from cache")
         return cached[1]
+    epoch = _enrichments_epoch
+    inflight = _enrichments_inflight.get(job_id)
+    if inflight is not None:
+        logger.debug(f"enrich_comments: job_id={job_id}, joined in-flight collection")
+        return await inflight
+    task = asyncio.create_task(_fetch_comment_enrichments(job_id, settings, epoch))
+    _enrichments_inflight[job_id] = task
+
+    def _forget(done: asyncio.Task[dict[str, list[dict[str, Any]]]]) -> None:
+        if _enrichments_inflight.get(job_id) is done:
+            _enrichments_inflight.pop(job_id, None)
+
+    task.add_done_callback(_forget)
+    return await task
+
+
+async def _fetch_comment_enrichments(
+    job_id: str, settings: Settings, epoch: int
+) -> dict[str, list[dict[str, Any]]]:
+    """Look up every tracker link in a job's comments and cache the result."""
     comments = await storage.get_comments_for_job(job_id)
     logger.debug(f"enrich_comments: job_id={job_id}, comments_count={len(comments)}")
 
@@ -8240,6 +8277,7 @@ async def _collect_comment_enrichments(
                 task_map[idx] = (str(c["id"]), {"type": "jira", "key": key})
 
     enrichments: dict[str, list[dict[str, Any]]] = {}
+    failed = False
     logger.debug(f"enrich_comments: job_id={job_id}, enrichment_tasks={len(tasks)}")
 
     if tasks:
@@ -8247,8 +8285,12 @@ async def _collect_comment_enrichments(
         for i, result in enumerate(results):
             if isinstance(result, Exception):
                 logger.debug("Enrichment task %d failed: %s", i, result)
+                failed = True
                 continue
             if result is None:
+                # The fetch helpers return None on any failure, so a missing
+                # badge here is not an answer — see the cache write below.
+                failed = True
                 continue
             comment_id, info = task_map[i]
             info["status"] = result
@@ -8257,7 +8299,22 @@ async def _collect_comment_enrichments(
     logger.debug(
         f"enrich_comments: job_id={job_id}, enrichments_count={len(enrichments)}"
     )
-    _enrichments_cache[job_id] = (_time.monotonic(), enrichments)
+    if failed:
+        logger.debug(f"enrich_comments: job_id={job_id}, a lookup failed; not cached")
+    elif epoch != _enrichments_epoch:
+        logger.debug(
+            f"enrich_comments: job_id={job_id}, comments changed mid-collect; "
+            "not cached"
+        )
+    else:
+        now = _time.monotonic()
+        # Expired entries are only ever dropped here: the dict grows on writes,
+        # so this is the one place that keeps it bounded. O(n) is fine — n is
+        # the number of distinct job ids read within a TTL, not request traffic.
+        for stale_id, (cached_at, _) in list(_enrichments_cache.items()):
+            if now - cached_at >= _ENRICHMENTS_TTL_SECONDS:
+                _enrichments_cache.pop(stale_id, None)
+        _enrichments_cache[job_id] = (now, enrichments)
     return enrichments
 
 

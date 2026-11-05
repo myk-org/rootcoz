@@ -340,9 +340,11 @@ def _restore_process_globals():
     logger_level = rootcoz_main.logger.level
     cli_main._state.clear()
     rootcoz_main._enrichments_cache.clear()
+    rootcoz_main._enrichments_inflight.clear()
     yield
     cli_main._state.clear()
     rootcoz_main._enrichments_cache.clear()
+    rootcoz_main._enrichments_inflight.clear()
     rootcoz_main.logger.level = logger_level
 
 

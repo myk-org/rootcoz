@@ -1920,6 +1920,150 @@ def test_comment_enrich_failure_is_not_cached(app_client) -> None:
     assert collect.await_count == 2
 
 
+def test_comment_enrich_expired_entry_is_pruned_on_write(app_client) -> None:
+    """An entry nobody reads again is evicted by the next write, not kept forever."""
+    admin_login(app_client)
+    _store_job("job-enrich-prune")
+    expired = main._time.monotonic() - main._ENRICHMENTS_TTL_SECONDS - 1
+    main._enrichments_cache["job-already-gone"] = (expired, {})
+
+    response = app_client.get("/results/job-enrich-prune/enrich-comments")
+
+    assert response.status_code == 200, response.text
+    assert "job-already-gone" not in main._enrichments_cache
+    assert "job-enrich-prune" in main._enrichments_cache
+
+
+def test_comment_enrich_mid_collect_invalidation_is_not_overwritten(app_client) -> None:
+    """A comment added mid-collect must not be hidden by the older snapshot."""
+    admin_login(app_client)
+    _store_job("job-enrich-race")
+    asyncio.run(
+        storage.add_comment(
+            job_id="job-enrich-race",
+            test_name="test_a",
+            comment="see https://github.com/o/r/pull/3",
+            username="admin",
+        )
+    )
+
+    async def _comment_added_while_looking_up(*_args: Any, **_kwargs: Any) -> Any:
+        # The user adds the link after the comments were read but before the
+        # badges are written back.
+        main.notify_comments_changed("job-enrich-race")
+        return {"state": "open"}
+
+    fetch = AsyncMock(side_effect=_comment_added_while_looking_up)
+    with (
+        patch.object(
+            main,
+            "detect_github_prs",
+            return_value=[{"owner": "o", "repo": "r", "number": 3}],
+        ),
+        patch.object(main, "detect_github_issues", return_value=[]),
+        patch.object(main, "fetch_github_pr_status", fetch),
+    ):
+        first = app_client.get("/results/job-enrich-race/enrich-comments")
+        second = app_client.get("/results/job-enrich-race/enrich-comments")
+
+    assert first.status_code == 200, first.text
+    assert "job-enrich-race" not in main._enrichments_cache
+    assert fetch.await_count == 2
+    assert second.json() == first.json()
+
+
+def test_comment_enrich_failed_lookup_is_not_cached(app_client) -> None:
+    """A badge-less lookup failure is retried, not replayed for a whole TTL."""
+    admin_login(app_client)
+    _store_job("job-enrich-badge")
+    asyncio.run(
+        storage.add_comment(
+            job_id="job-enrich-badge",
+            test_name="test_a",
+            comment="see https://github.com/o/r/pull/4",
+            username="admin",
+        )
+    )
+    fetch = AsyncMock(side_effect=[None, {"state": "open"}])
+    with (
+        patch.object(
+            main,
+            "detect_github_prs",
+            return_value=[{"owner": "o", "repo": "r", "number": 4}],
+        ),
+        patch.object(main, "detect_github_issues", return_value=[]),
+        patch.object(main, "fetch_github_pr_status", fetch),
+    ):
+        first = app_client.get("/results/job-enrich-badge/enrich-comments")
+        second = app_client.get("/results/job-enrich-badge/enrich-comments")
+
+    assert first.json() == {"enrichments": {}}
+    assert second.json() == {
+        "enrichments": {
+            "1": [{"type": "github_pr", "key": "o/r#4", "status": {"state": "open"}}]
+        }
+    }
+    assert fetch.await_count == 2
+
+
+def test_comment_enrich_concurrent_loads_share_one_collection(app_client) -> None:
+    """Two loads of the same uncached job run one set of lookups, not two."""
+    admin_login(app_client)
+    _store_job("job-enrich-shared")
+    asyncio.run(
+        storage.add_comment(
+            job_id="job-enrich-shared",
+            test_name="test_a",
+            comment="see https://github.com/o/r/pull/5",
+            username="admin",
+        )
+    )
+
+    async def _two_loads() -> tuple[Any, Any, int]:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _slow_fetch(*_args: Any, **_kwargs: Any) -> Any:
+            started.set()
+            await release.wait()
+            return {"state": "open"}
+
+        with (
+            patch.object(
+                main,
+                "detect_github_prs",
+                return_value=[{"owner": "o", "repo": "r", "number": 5}],
+            ),
+            patch.object(main, "detect_github_issues", return_value=[]),
+            patch.object(
+                main, "fetch_github_pr_status", AsyncMock(side_effect=_slow_fetch)
+            ) as fetch,
+        ):
+            first = asyncio.create_task(
+                main._collect_comment_enrichments(
+                    "job-enrich-shared", main.get_settings()
+                )
+            )
+            await started.wait()
+            second = asyncio.create_task(
+                main._collect_comment_enrichments(
+                    "job-enrich-shared", main.get_settings()
+                )
+            )
+            await asyncio.sleep(0)  # let the second request join the first
+            release.set()
+            return await first, await second, fetch.await_count
+
+    first, second, calls = asyncio.run(_two_loads())
+
+    assert (
+        first
+        == second
+        == {"1": [{"type": "github_pr", "key": "o/r#5", "status": {"state": "open"}}]}
+    )
+    assert calls == 1
+
+
 def test_pattern_override_is_audited(app_client) -> None:
     admin_login(app_client)
     _store_job("job-pattern")
