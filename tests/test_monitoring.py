@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import httpx
 import pytest
 
+from rootcoz import monitoring
 from rootcoz.encryption import strip_sensitive_from_response
 from rootcoz.monitoring import (
     AlertThrottler,
@@ -335,6 +336,50 @@ class TestHealthChecks:
         assert "checks" in result
         assert "error_rates" in result
         assert result["checks"]["database"]["status"] == "ok"
+
+    async def test_build_health_response_reports_undecodable_rows(
+        self, temp_db_path, monkeypatch
+    ):
+        """Skipped rows show as a degraded-data count, never as a 503."""
+        import aiosqlite
+
+        from rootcoz import storage
+
+        monkeypatch.setattr(monitoring, "_audit_write_failures", 0)
+
+        async with aiosqlite.connect(str(temp_db_path)) as db:
+            await db.execute("CREATE TABLE IF NOT EXISTS test (id INTEGER)")
+
+        settings = MagicMock()
+        settings.jenkins_url = ""
+        settings.reportportal_enabled = False
+        ai_ok = {"status": "ok", "provider": "claude", "model": "test"}
+
+        async def _health():
+            with (
+                patch.dict(os.environ, {"AI_PROVIDER": "claude", "AI_MODEL": "test"}),
+                patch(
+                    "rootcoz.monitoring.check_ai_provider",
+                    new_callable=AsyncMock,
+                    return_value=ai_ok,
+                ),
+            ):
+                return await build_health_response(settings, str(temp_db_path))
+
+        monkeypatch.setattr(storage, "_undecodable_result_ids", set())
+        clean = await _health()
+        assert clean["checks"]["result_json"] == {
+            "status": "ok",
+            "undecodable_rows": 0,
+        }
+
+        monkeypatch.setattr(storage, "_undecodable_result_ids", {"job-a", "job-b"})
+        degraded = await _health()
+        assert degraded["checks"]["result_json"] == {
+            "status": "degraded",
+            "undecodable_rows": 2,
+        }
+        assert degraded["status"] == "degraded"
 
     async def test_build_health_response_unhealthy_db(self):
         settings = MagicMock()

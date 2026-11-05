@@ -223,13 +223,15 @@ This is the shortest safe path for normal Helm updates once your release is alre
 
 ### Roll back to an older build
 
-A rollback to a build older than the one that wrote the data is safe to start, but it cannot read every row. If `result_json` was stored compressed, the older build skips those rows at startup and logs one warning naming the count and the cause, for example:
+A rollback to a build older than the one that wrote the data cannot read every row. If `result_json` was stored compressed, the older build skips those rows at startup instead of crashing on them, logs one line per skipped job naming its id, and logs one summary naming the count and the cause, for example:
 
 ```
 Backfill skipped 13 result(s) whose result_json was written by a build with result_json compression, which this build cannot decode. Those rows are intact and untouched. Run a rootcoz build that has the result_json codec to read it, or restore a pre-compression copy of the database.
 ```
 
-The server stays healthy and serves everything else; the affected jobs show an empty analysis until you roll forward again (or restore a database copy taken before the compression build). Nothing is written over those rows, so rolling forward brings them back.
+This skip guard is part of rootcoz itself, so it protects you only when the build you roll back to contains it. A build predating the guard still fails at startup on such a row, so roll back to a build that has it (releases from this version on).
+
+The server keeps serving everything else. `/api/health` reports `{"status": "degraded", "undecodable_rows": <count>}` under `checks.result_json` (it stays HTTP 200 — degraded data is not a liveness failure), and the count reads `{"status": "ok", "undecodable_rows": 0}` once nothing is skipped. Affected jobs show an empty analysis, and a job that was `waiting` stays `waiting`, until you roll forward again (or restore a database copy taken before the compression build). Nothing is written over those rows, so rolling forward brings them back.
 
 ## Watch disk usage and alert on a filling volume
 

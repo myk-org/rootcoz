@@ -3073,6 +3073,15 @@ class TestUnreadableResultJson:
                 "good-1",
                 "good-2",
             }
+            # The frames must survive untouched, and reads degrade, not raise.
+            for index in range(2):
+                assert (
+                    await _raw_result_json(temp_db_path, f"frame-{index}")
+                    == _ZSTD_FRAME
+                )
+                detail = await storage.get_result(f"frame-{index}")
+                assert detail is not None
+                assert detail["result"] is None
 
         assert "Backfill skipped 2 result(s)" in storage_logs.text
 
@@ -3112,3 +3121,152 @@ class TestUnreadableResultJson:
                 await storage.backfill_failure_history()
 
             assert await _failure_history_job_ids(temp_db_path) == set()
+
+    async def test_waiting_job_with_frame_stays_waiting(
+        self, temp_db_path: Path, storage_logs: Any
+    ) -> None:
+        """A waiting row this build cannot decode is not failed by the rollback."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            async with aiosqlite.connect(temp_db_path) as db:
+                await db.execute(
+                    "INSERT INTO results (job_id, build_url, status, result_json) "
+                    "VALUES (?, ?, 'waiting', ?)",
+                    ("waiting-frame", "http://j/1", _ZSTD_FRAME),
+                )
+                await db.commit()
+
+            waiting, recovered = await storage.mark_stale_results_failed()
+
+            assert waiting == []
+            assert recovered == []
+            async with aiosqlite.connect(temp_db_path) as db:
+                cursor = await db.execute(
+                    "SELECT status, error, completed_at, result_json FROM results "
+                    "WHERE job_id = ?",
+                    ("waiting-frame",),
+                )
+                row = await cursor.fetchone()
+            # Not resumed (this build cannot read it), but not failed either.
+            assert row[0] == "waiting"
+            assert row[1] == ""
+            assert row[2] is None
+            assert row[3] == _ZSTD_FRAME
+
+        assert "Startup skipped job_id=waiting-frame" in storage_logs.text
+        assert "Marking unrecoverable waiting job waiting-frame" not in (
+            storage_logs.text
+        )
+
+    async def test_unknown_encoding_not_blamed_on_compression(
+        self, temp_db_path: Path, storage_logs: Any
+    ) -> None:
+        """A non-UTF-8 blob gets the neutral diagnosis, counted, not zstd."""
+        blob = b"\xff\xfe\x00not text"
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            await _insert_completed_result(temp_db_path, "blob-1", blob)
+
+            await storage.backfill_failure_history()
+
+            assert await _raw_result_json(temp_db_path, "blob-1") == blob
+            assert storage.undecodable_result_count() == 1
+
+        text = storage_logs.text
+        assert "Backfill skipped 1 result(s) whose result_json uses an encoding" in text
+        assert "a compressed frame or a newer encoding" in text
+        assert "written by a build with result_json compression" not in text
+
+    async def test_each_skipped_row_logged_with_its_job_id(
+        self, temp_db_path: Path, storage_logs: Any
+    ) -> None:
+        """Per-row warnings name every job; the aggregate stays a summary."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            for index in range(2):
+                await _insert_completed_result(
+                    temp_db_path, f"frame-{index}", _ZSTD_FRAME
+                )
+
+            await storage.backfill_failure_history()
+
+            assert storage.undecodable_result_count() == 2
+
+        text = storage_logs.text
+        assert "Startup skipped job_id=frame-0" in text
+        assert "Startup skipped job_id=frame-1" in text
+        assert "Backfill skipped 2 result(s)" in text
+
+    async def test_pattern_axis_migration_retries_while_row_undecodable(
+        self, temp_db_path: Path, storage_logs: Any
+    ) -> None:
+        """A pattern label on an undecodable row keeps the migration unapplied."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            async with aiosqlite.connect(temp_db_path) as db:
+                # Pretend this build is running before the migration shipped.
+                await db.execute(
+                    "DELETE FROM _migrations_applied "
+                    "WHERE key = 'backfill_pattern_axis_v1'"
+                )
+                await db.execute(
+                    "INSERT INTO failure_history (job_id, job_name, build_number, "
+                    "test_name, classification, error_message, analyzed_at) "
+                    "VALUES ('frame-1', 'j', 1, 't', 'REGRESSION', 'e', "
+                    "datetime('now'))"
+                )
+                await db.commit()
+            await _insert_completed_result(temp_db_path, "frame-1", _ZSTD_FRAME)
+
+            await storage._migrate_backfill_pattern_axis()
+
+            async with aiosqlite.connect(temp_db_path) as db:
+                cursor = await db.execute(
+                    "SELECT 1 FROM _migrations_applied "
+                    "WHERE key = 'backfill_pattern_axis_v1'"
+                )
+                assert await cursor.fetchone() is None
+                cursor = await db.execute(
+                    "SELECT classification FROM failure_history "
+                    "WHERE job_id = 'frame-1'"
+                )
+                # Still the pattern label: not restored, so not recorded as done.
+                assert (await cursor.fetchone())[0] == "REGRESSION"
+
+        assert "pattern axis backfill skipped 1 job(s)" in storage_logs.text
+
+    async def test_restore_ai_migration_retries_while_row_undecodable(
+        self, temp_db_path: Path, storage_logs: Any
+    ) -> None:
+        """The AI-classification restore is not recorded done with rows skipped."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            async with aiosqlite.connect(temp_db_path) as db:
+                await db.execute(
+                    "DELETE FROM _migrations_applied "
+                    "WHERE key = 'restore_ai_classifications_v1'"
+                )
+                await db.execute(
+                    "INSERT INTO failure_history (job_id, job_name, build_number, "
+                    "test_name, classification, error_message, analyzed_at) "
+                    "VALUES ('frame-1', 'j', 1, 't', 'CODE ISSUE', 'e', "
+                    "datetime('now'))"
+                )
+                await db.execute(
+                    "INSERT INTO test_classifications "
+                    "(test_name, job_name, classification, created_by, job_id) "
+                    "VALUES ('t', 'j', 'CODE ISSUE', 'user', 'frame-1')"
+                )
+                await db.commit()
+            await _insert_completed_result(temp_db_path, "frame-1", _ZSTD_FRAME)
+
+            await storage._migrate_restore_ai_classifications()
+
+            async with aiosqlite.connect(temp_db_path) as db:
+                cursor = await db.execute(
+                    "SELECT 1 FROM _migrations_applied "
+                    "WHERE key = 'restore_ai_classifications_v1'"
+                )
+                assert await cursor.fetchone() is None
+
+        assert "Migration: 1 row(s) skipped" in storage_logs.text
