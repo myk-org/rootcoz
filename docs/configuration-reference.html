@@ -1283,6 +1283,7 @@ SECURE_COOKIES=false
 </tbody>
 </table></div>
 <p>Email alerts need <code>SMTP_HOST</code> + <code>ALERT_EMAIL_TO</code> (from address defaults to <code>SMTP_USER</code>, then <code>rootcoz@&lt;host&gt;</code>); Slack alerts need <code>SLACK_WEBHOOK_URL</code>. The env var stays the deployment default — a saved setting overrides it.</p>
+<p>A webhook saved here drives only the in-process alert path. It has <strong>no effect on the chart's health-alert CronJob</strong> (<code>alerts.enabled</code>): that job runs outside the application and reads the release Secret under <code>alerts.slackSecretKey</code>, so configure the two separately or the CronJob will print its messages into the job log instead of posting them.</p>
 </li>
 <li>
 <p><strong>Sidecar category</strong> (added with #347 — restart required).</p>
