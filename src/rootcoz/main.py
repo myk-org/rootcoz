@@ -6033,6 +6033,11 @@ async def _process_ci_source_analysis(
         # this block, and the revoke must not be lost on the cancel path.
         session_task = asyncio.create_task(_cleanup_ai_session(auth_header))
         steps: list[Callable[[], object]] = []
+        # Downloaded CI artifacts are not the tree a live graph builder owns, so an
+        # abandoned graph delete must not skip them: nothing else sweeps that dir.
+        always: tuple[Callable[[], object], ...] = (
+            (source.cleanup,) if source is not None else ()
+        )
         if repo_manager is not None:
             from rootcoz.engine.graft import reap_graph
             from rootcoz.engine.graft_http import unregister_workspace
@@ -6043,10 +6048,8 @@ async def _process_ci_source_analysis(
                     partial(reap_graph, job_id, repo_path),
                 ]
             steps.append(repo_manager.cleanup)
-        if source is not None:
-            steps.append(source.cleanup)
-        if steps:
-            await cleanup_off_loop(job_id, *steps)
+        if steps or always:
+            await cleanup_off_loop(job_id, *steps, always=always)
         await asyncio.shield(session_task)
 
 
@@ -7434,6 +7437,11 @@ async def _reanalyze_failure_background(
         # this block, and the revoke must not be lost on the cancel path.
         session_task = asyncio.create_task(_cleanup_ai_session(auth_header))
         steps: list[Callable[[], object]] = []
+        # Downloaded CI artifacts are not the tree a live graph builder owns, so an
+        # abandoned graph delete must not skip them: nothing else sweeps that dir.
+        always: tuple[Callable[[], object], ...] = (
+            (source.cleanup,) if source is not None else ()
+        )
         if repo_manager:
             from rootcoz.engine.graft import reap_graph
             from rootcoz.engine.graft_http import unregister_workspace
@@ -7444,11 +7452,8 @@ async def _reanalyze_failure_background(
                     partial(reap_graph, job_id, repo_path),
                 ]
             steps.append(repo_manager.cleanup)
-        # Clean up downloaded source artifacts
-        if source is not None:
-            steps.append(source.cleanup)
-        if steps:
-            await cleanup_off_loop(job_id, *steps)
+        if steps or always:
+            await cleanup_off_loop(job_id, *steps, always=always)
         await asyncio.shield(session_task)
 
 

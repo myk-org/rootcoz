@@ -178,6 +178,11 @@ def delete_tree(path: Path) -> tuple[int, int]:
 
     def record(p: str, exc: OSError) -> None:
         code = exc.errno or 0
+        if code == errno.ENOENT:
+            # Gone between our ``scandir`` and our ``unlink`` — a live agent
+            # deleting in its own workspace, or a second sweep. Nothing is left
+            # to delete, so this is not a path the reaper failed on.
+            return
         # The OS reason, not ``exc.strerror``: the raiser may have replaced it.
         reason = os.strerror(code) if code else exc.strerror or type(exc).__name__
         # Recorded as it arrives; ancestors are collapsed once, at report time.
@@ -304,15 +309,15 @@ def _run_cleanup(
         try:
             result = step()
         except Exception as exc:  # noqa: BLE001 - a delete failure must not lose later steps
+            elapsed = int((time.monotonic() - started) * 1000)
             # Type and errno only: the message can carry a repo URL before
             # ``_scrub_credentials`` has run, and this log is not a place to leak it.
+            # Formatted inline: the step name is data, and a template-keyed dedupe
+            # filter would swallow the second failing step of one submission.
             logger.warning(
-                "cleanup_failed what=%s step=%s error=%s errno=%s ms=%d",
-                what,
-                name,
-                type(exc).__name__,
-                getattr(exc, "errno", None),
-                int((time.monotonic() - started) * 1000),
+                f"cleanup_failed what={what} step={name} "
+                f"error={type(exc).__name__} errno={getattr(exc, 'errno', None)} "
+                f"ms={elapsed}"
             )
             return None
         elapsed = int((time.monotonic() - started) * 1000)
@@ -320,35 +325,38 @@ def _run_cleanup(
             return result
         if isinstance(result, tuple) and len(result) == 2:
             nbytes, entries = result
+            # Inline for the same reason: two steps reclaiming bytes through one
+            # template would log once and hide the other's figure.
             logger.log(
                 logging.INFO if nbytes else logging.DEBUG,
-                "cleanup what=%s step=%s reclaimed=%d (%s) entries=%d ms=%d",
-                what,
-                name,
-                nbytes,
-                _human(nbytes),
-                entries,
-                elapsed,
+                f"cleanup what={what} step={name} reclaimed={nbytes} "
+                f"({_human(nbytes)}) entries={entries} ms={elapsed}",
             )
         else:
-            logger.debug("cleanup what=%s step=%s ms=%d", what, name, elapsed)
+            logger.debug(f"cleanup what={what} step={name} ms={elapsed}")
         return result
 
     for step in steps:
         if run(step) is ABANDON:
             logger.warning(
-                "cleanup_abandoned what=%s step=%s: leaving the rest of this "
-                "submission's steps to the next sweep",
-                what,
-                _step_name(step),
+                f"cleanup_abandoned what={what} step={_step_name(step)}: leaving "
+                "the rest of this submission's steps to the next sweep"
             )
             break
     for step in always:
         run(step)
 
 
-async def cleanup_off_loop(what: str, *steps: Callable[[], object]) -> None:
+async def cleanup_off_loop(
+    what: str,
+    *steps: Callable[[], object],
+    always: tuple[Callable[[], object], ...] = (),
+) -> None:
     """Delete workspace artefacts off the loop; order preserved, survives cancellation.
+
+    ``always`` steps run even when a ``steps`` entry returns :data:`ABANDON`: they
+    delete a *different* tree from the one a live builder owns (a downloaded
+    artifact extract, say), so an abandoned graph delete must not leak them.
 
     ``asyncio.shield`` is deliberate: both analysis ``finally`` blocks also run on
     the cancellation path, where a plain ``await`` would skip the delete entirely
@@ -363,7 +371,9 @@ async def cleanup_off_loop(what: str, *steps: Callable[[], object]) -> None:
     """
     loop = asyncio.get_running_loop()
     await asyncio.shield(
-        loop.run_in_executor(_CLEANUP_POOL, _run_cleanup, what, *steps)
+        loop.run_in_executor(
+            _CLEANUP_POOL, partial(_run_cleanup, what, *steps, always=always)
+        )
     )
 
 
@@ -402,7 +412,14 @@ async def cleanup_path_off_loop(
     """
     loop = asyncio.get_running_loop()
     key, entry = _lock_for(path)
-    await entry.lock.acquire()
+    try:
+        await entry.lock.acquire()
+    except BaseException:
+        # Cancelled while queued behind a holder: we never held the lock, and
+        # ``users`` was already incremented for us, so the entry would stay in
+        # ``_path_locks`` for the process's lifetime.
+        _drop_lock(key, entry)
+        raise
     cleanup_steps: tuple[Callable[[], object], ...] = (
         partial(_mark_deleting, path),
         *steps,

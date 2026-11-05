@@ -281,6 +281,87 @@ async def test_a_release_with_a_waiter_pending_keeps_the_entry(tmp_path) -> None
     assert key not in temp_paths._path_locks
 
 
+async def test_a_cancelled_waiter_does_not_leak_its_path_lock(tmp_path) -> None:
+    """A waiter cancelled before it holds the lock still has a reference to drop."""
+    from rootcoz import temp_paths
+
+    path = tmp_path / "chat-job" / "alice"
+    (path / "repo").mkdir(parents=True)
+    key = os.path.realpath(path)
+    gate = threading.Event()
+
+    holder = asyncio.create_task(
+        cleanup_path_off_loop("job-cancel", path, partial(gate.wait, 5))
+    )
+    try:
+        for _ in range(200):
+            entry = temp_paths._path_locks.get(key)
+            if entry is not None and entry.lock.locked():
+                break
+            await asyncio.sleep(0.01)
+        waiter = asyncio.create_task(cleanup_path_off_loop("job-cancel", path))
+        await asyncio.sleep(0.05)  # The waiter is queued behind the holder now.
+        waiter.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await waiter
+    finally:
+        gate.set()
+    await holder
+
+    # Both references are gone: the entry must not survive as a stale lock that
+    # no caller can ever evict (one per cancelled chat clear, for the process's
+    # whole lifetime).
+    assert key not in temp_paths._path_locks
+
+
+async def test_an_abandoned_step_keeps_the_unrelated_always_steps() -> None:
+    """ABANDON protects the builder's tree, not every other path in the job."""
+    ran: list[str] = []
+
+    def graph() -> object:
+        return ABANDON
+
+    await cleanup_off_loop(
+        "job-always",
+        graph,
+        lambda: ran.append("repo_manager.cleanup"),
+        always=(lambda: ran.append("source.cleanup"),),
+    )
+
+    assert ran == ["source.cleanup"], "the downloaded artifacts leaked past the abandon"
+
+
+async def test_two_steps_do_not_swallow_each_other_in_the_log(caplog) -> None:
+    """Per-step results must be formatted before logging.
+
+    simple_logger's ``DuplicateFilter`` keys on ``(module, level, msg)`` — the
+    format string — so two steps logged through one template are one line, and a
+    silent delete looks like a delete that never ran.
+    """
+    from simple_logger.logger import DuplicateFilter
+
+    def boom() -> None:
+        raise OSError(errno.EACCES, "denied")
+
+    def bang() -> None:
+        raise OSError(errno.EACCES, "denied")
+
+    keeper = DuplicateFilter()
+    reaper_logger.addFilter(keeper)
+    try:
+        with caplog.at_level(logging.INFO):
+            await cleanup_off_loop(
+                "job-dedupe", boom, bang, lambda: (10, 1), lambda: (20, 2)
+            )
+    finally:
+        reaper_logger.removeFilter(keeper)
+
+    assert "step=boom" in caplog.text
+    assert "step=bang" in caplog.text, "the second failing step was deduped away"
+    assert "reclaimed=10" in caplog.text
+    assert "reclaimed=20" in caplog.text, "the second step's result was deduped away"
+
+
 async def test_a_queued_waiter_keeps_its_lock_across_the_handoff(tmp_path) -> None:
     """Delete then create of one path: same lock object, no overlap."""
     from rootcoz import temp_paths
@@ -411,6 +492,32 @@ def test_a_directory_swapped_for_a_symlink_is_not_followed(
     delete_tree(root)
     assert not root.exists()
     assert (outside / "keep.txt").read_text() == "keep me"
+
+
+def test_a_file_that_vanished_mid_walk_is_not_reported_as_undeleted(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """A live agent deleting in its own workspace is not a failed reaper."""
+    root = tmp_path / "tree"
+    (root / "sub").mkdir(parents=True)
+    (root / "sub" / "gone.txt").write_text("x")
+    real_unlink = os.unlink
+
+    def unlink(name, *args, **kwargs):
+        if os.path.basename(os.fspath(name)) == "gone.txt":
+            # Really gone, then reported: exactly what another process's delete
+            # between our ``scandir`` and our ``unlink`` looks like.
+            real_unlink(name, *args, **kwargs)
+            raise FileNotFoundError(errno.ENOENT, "No such file or directory", name)
+        return real_unlink(name, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", unlink)
+    nbytes, entries = delete_tree(root)
+    monkeypatch.undo()
+
+    assert not root.exists(), "a vanished entry stopped the walk"
+    assert (nbytes, entries) == (0, 2)
+    assert "paths not deleted" not in caplog.text, caplog.text
 
 
 def test_a_failed_delete_is_not_reported_as_reclaimed(
