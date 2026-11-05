@@ -58,6 +58,11 @@ FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
 
 WORKDIR /app
 
+# Commit the image was built from, read by the admin Server Status page
+# (GET /api/admin/server-status) and by `rootcoz admin server-status`.
+ARG GIT_SHA=""
+ENV GIT_SHA=${GIT_SHA}
+
 # Install bash, git (runtime for gitpython), curl (for Cursor CLI + NodeSource setup)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
