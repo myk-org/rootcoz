@@ -392,7 +392,8 @@ async def test_older_build_never_overwrites_a_newer_builds_payload(
     ``UnsupportedResultEncoding`` is an *intact* report: a build with a result_json
     codec this one lacks wrote it. Every writer reads before it writes, so every
     writer has to leave that row byte-identical -- a save, a status update and a
-    patch alike. Only a damaged frame is a row a write repairs.
+    patch alike -- and every writer has to tell its caller the write did not
+    happen, otherwise a refused update is reported as an applied one.
     """
     blob = b"\xff\xfe\x00a payload from a newer build"
     job_ids = ("newer-save", "newer-status", "newer-patch")
@@ -400,11 +401,21 @@ async def test_older_build_never_overwrites_a_newer_builds_payload(
         await _insert_newer_encoding(job_id, blob)
 
     payload = _payload(failure_count=20)
-    await storage.save_result("newer-save", "http://ci", "completed", payload)
-    await storage.update_status("newer-status", "completed", payload)
-    await storage.patch_result_json(
-        "newer-patch", lambda data: data.update({"summary": "patched"})
-    )
+    # Each writer raises the refusal, naming the reason, instead of returning.
+    with pytest.raises(
+        storage.UnsupportedResultEncoding, match="newer result_json encoding"
+    ):
+        await storage.save_result("newer-save", "http://ci", "completed", payload)
+    with pytest.raises(
+        storage.UnsupportedResultEncoding, match="newer result_json encoding"
+    ):
+        await storage.update_status("newer-status", "completed", payload)
+    with pytest.raises(
+        storage.UnsupportedResultEncoding, match="newer result_json encoding"
+    ):
+        await storage.patch_result_json(
+            "newer-patch", lambda data: data.update({"summary": "patched"})
+        )
 
     for job_id in job_ids:
         row = await _stored(_storage, job_id)
@@ -424,12 +435,22 @@ async def test_older_build_never_overwrites_a_newer_builds_payload(
             storage._RESULTS_DENORM_VERSION,
         )
         assert any(
-            record.levelname == "WARNING" and job_id in record.getMessage()
+            record.levelname == "ERROR" and job_id in record.getMessage()
             for record in storage_logs.records
-        ), f"no warning named {job_id}"
+        ), f"no error named {job_id}"
     # A status update is a write too, so it rolled back instead of half-applying.
     assert (await storage.get_result("newer-status"))["status"] == "running"
-    assert "so nothing was written over it" in storage_logs.text
+    assert "the write was refused and nothing was written over it" in (
+        storage_logs.text
+    )
+    # And the refusal reaches a caller that translates it, without touching it.
+    await storage.fail_job_without_result_write(
+        "newer-status", "write refused: newer result_json encoding"
+    )
+    failed = await _stored(_storage, "newer-status")
+    assert failed["result_json"] == blob
+    status = (await storage.get_result("newer-status"))["status"]
+    assert status == "failed"
 
     # The same bytes are what a build with the codec reads back, untouched.
     async with storage._connect_db() as db:

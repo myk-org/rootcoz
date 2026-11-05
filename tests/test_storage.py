@@ -3224,10 +3224,14 @@ class TestUnreadableResultJson:
 
             assert await _failure_history_job_ids(temp_db_path) == set()
 
-    async def test_waiting_job_with_frame_stays_waiting(
+    async def test_waiting_job_with_damaged_frame_is_failed(
         self, temp_db_path: Path, storage_logs: Any
     ) -> None:
-        """A waiting row this build cannot decode is not failed by the rollback."""
+        """A damaged waiting payload can never be resumed, so the job is failed.
+
+        Damage is terminal -- no codec upgrade inflates these bytes -- so leaving
+        the row 'waiting' stranded it forever with no task and no failure.
+        """
         with patch.object(storage, "DB_PATH", temp_db_path):
             await storage.init_db()
             async with aiosqlite.connect(temp_db_path) as db:
@@ -3249,16 +3253,56 @@ class TestUnreadableResultJson:
                     ("waiting-frame",),
                 )
                 row = await cursor.fetchone()
-            # Not resumed (this build cannot read it), but not failed either.
-            assert row[0] == "waiting"
-            assert row[1] == ""
-            assert row[2] is None
+            # Failed, with the damage named as the reason, payload untouched.
+            assert row[0] == "failed"
+            assert "truncated or corrupt" in row[1]
+            assert row[1] != storage.RESTART_ERROR_MSG
+            assert row[2] is not None
             assert row[3] == _DAMAGED_FRAME
 
         assert "Startup skipped job_id=waiting-frame" in storage_logs.text
-        assert "Marking unrecoverable waiting job waiting-frame" not in (
-            storage_logs.text
+        assert (
+            "Marking waiting job waiting-frame as failed: its result_json is damaged"
+            in storage_logs.text
         )
+
+    async def test_waiting_job_with_newer_encoding_stays_waiting(
+        self, temp_db_path: Path, storage_logs: Any
+    ) -> None:
+        """An intact payload from a newer build is left waiting, untouched.
+
+        A build with the result_json codec can still resume it, so this one must
+        not fail the job or write anything into the row.
+        """
+        blob = b"\xff\xfe\x00a payload from a newer build"
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            async with aiosqlite.connect(temp_db_path) as db:
+                await db.execute(
+                    "INSERT INTO results (job_id, build_url, status, result_json) "
+                    "VALUES (?, ?, 'waiting', ?)",
+                    ("waiting-newer", "http://j/2", blob),
+                )
+                await db.commit()
+
+            waiting, recovered = await storage.mark_stale_results_failed()
+
+            assert waiting == []
+            assert recovered == []
+            async with aiosqlite.connect(temp_db_path) as db:
+                cursor = await db.execute(
+                    "SELECT status, error, completed_at, result_json FROM results "
+                    "WHERE job_id = ?",
+                    ("waiting-newer",),
+                )
+                row = await cursor.fetchone()
+            assert row[0] == "waiting"
+            assert row[1] == ""
+            assert row[2] is None
+            assert row[3] == blob
+
+        assert "Startup skipped job_id=waiting-newer" in storage_logs.text
+        assert "Marking waiting job waiting-newer" not in storage_logs.text
 
     async def test_unknown_encoding_not_blamed_on_compression(
         self, temp_db_path: Path, storage_logs: Any

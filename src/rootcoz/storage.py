@@ -1,6 +1,7 @@
 """SQLite storage for analysis results."""
 
 import asyncio
+import contextlib
 import hashlib
 import hmac
 import json
@@ -388,7 +389,7 @@ def _note_unreadable_result(job_id: str, exc: UnreadableResultJson) -> bool:
         logger.warning(
             f"Startup skipped job_id={job_id}: result_json is a damaged "
             "(truncated or corrupt) compressed frame, which this build cannot "
-            "inflate. The row was not modified."
+            "inflate. The stored payload was not modified."
         )
         return True
     logger.warning(
@@ -3132,19 +3133,25 @@ async def _read_stored_result(
 async def _abandon_write(
     db: aiosqlite.Connection, job_id: str, exc: UnsupportedResultEncoding
 ) -> None:
-    """Roll back a write whose stored payload this build cannot decode.
+    """Roll back a write whose stored payload this build cannot decode, and refuse it.
 
     An ``UnsupportedResultEncoding`` row is an intact report from a build with a
     newer result_json codec: writing over it would destroy data that build can
-    still recover, so the writer leaves the row exactly as it found it and its
-    caller returns.
+    still recover, so the writer leaves the row exactly as it found it. The
+    refusal is raised rather than returned, because a caller that returned
+    normally would report a status or result it never persisted.
+
+    Raises:
+        UnsupportedResultEncoding: always -- the write did not happen.
     """
-    logger.warning(
+    logger.error(
         f"job_id={job_id}: stored result_json uses an encoding this build cannot "
-        f"decode ({type(exc).__name__}), so nothing was written over it -- a "
-        "build with the result_json codec still has the payload."
+        f"decode ({type(exc).__name__}), so the write was refused and nothing was "
+        "written over it -- a build with the result_json codec still has the "
+        "payload."
     )
     await db.execute("ROLLBACK")
+    raise exc
 
 
 async def save_result(
@@ -3166,6 +3173,10 @@ async def save_result(
 
     Nothing is written when the row already holds a payload this build cannot
     decode but a newer one can (a rollback): see :func:`_abandon_write`.
+
+    Raises:
+        UnsupportedResultEncoding: the save was refused for that reason, so
+            nothing was written.
     """
     if jenkins_url is not None:
         build_url = jenkins_url
@@ -3179,8 +3190,8 @@ async def save_result(
                 # link appended after the caller read the job cannot be dropped.
                 previous = await _read_stored_result(db, job_id)
             except UnsupportedResultEncoding as exc:
+                # Rolls back and raises: the caller must not read this as a save.
                 await _abandon_write(db, job_id, exc)
-                return
             if previous:
                 _preserve_reanalysis_forward_links(previous, result)
             await _sync_result_token_usage(db, job_id, result)
@@ -3281,6 +3292,10 @@ async def update_status(
 
     As in :func:`save_result`, a stored payload a newer build can decode but this
     one cannot is left untouched instead of being replaced.
+
+    Raises:
+        UnsupportedResultEncoding: the update was refused for that reason, so
+            nothing was written -- not the status either.
     """
     logger.debug(f"Updating status for job_id: {job_id} (status: {status})")
     async with _connect_db() as db:
@@ -3289,8 +3304,8 @@ async def update_status(
             try:
                 previous = await _read_stored_result(db, job_id)
             except UnsupportedResultEncoding as exc:
+                # Rolls back and raises: the caller must not read this as an update.
                 await _abandon_write(db, job_id, exc)
-                return
             if previous:
                 for key in ("progress_phase", "progress_log", "cloning_repos"):
                     if key in previous:
@@ -3365,6 +3380,27 @@ async def update_status(
         if cursor.rowcount == 0:
             logger.warning(f"update_status: no row found for job_id={job_id}")
         await db.commit()
+
+
+async def fail_job_without_result_write(job_id: str, reason: str) -> None:
+    """Mark *job_id* failed when a write to its ``result_json`` was refused.
+
+    Only the status columns are written: the stored payload belongs to a build
+    this one cannot decode, so it is left exactly as found. Exists so a refused
+    write ends the job with the reason visible instead of leaving it in the
+    status it was refused from.
+    """
+    async with _connect_db() as db:
+        await db.execute(
+            "UPDATE results SET status = 'failed', error = ?, completed_at = ? "
+            "WHERE job_id = ?",
+            (reason, datetime.now(UTC).isoformat(), job_id),
+        )
+        await db.commit()
+    logger.info(
+        f"job_id={job_id}: marked failed without writing result_json (only the "
+        "status columns changed)"
+    )
 
 
 async def claim_submitted_job_for_analyze(job_id: str) -> bool:
@@ -3619,7 +3655,11 @@ async def patch_result_json(
         already-deleted result.
 
     A damaged frame is replaced by the patched result; a payload a newer build can
-    decode but this one cannot is left untouched and the patch is skipped.
+    decode but this one cannot is left untouched and the patch is refused.
+
+    Raises:
+        UnsupportedResultEncoding: the patch was refused for that reason, so the
+            stored payload is unchanged.
     """
     async with _connect_db() as db:
         await db.execute("BEGIN IMMEDIATE")
@@ -3659,8 +3699,8 @@ async def patch_result_json(
                 )
                 result_data = {}
             except UnsupportedResultEncoding as exc:
+                # Rolls back and raises: the caller must not read this as a patch.
                 await _abandon_write(db, job_id, exc)
-                return
             if result_data is None:
                 await db.execute("ROLLBACK")
                 return
@@ -3687,7 +3727,10 @@ async def patch_result_json(
             )
             await db.commit()
         except Exception:
-            await db.execute("ROLLBACK")
+            # A refused write rolled back already; a second rollback must not
+            # mask the refusal with "no transaction is active".
+            with contextlib.suppress(aiosqlite.Error):
+                await db.execute("ROLLBACK")
             raise
 
 
@@ -6542,7 +6585,8 @@ async def mark_stale_results_failed() -> tuple[
     so they are marked as failed with an error message and completion timestamp.
 
     Waiting jobs were polling Jenkins and can be safely resumed by re-creating
-    their background task.
+    their background task -- unless their payload is damaged, which no build can
+    inflate, so those are failed with the damage as their error.
 
     Returns:
         Tuple of (waiting_jobs, recovered_jobs).
@@ -6590,7 +6634,22 @@ async def mark_stale_results_failed() -> tuple[
                     result_data = parse_result_json(
                         row["result_json"], job_id=row["job_id"]
                     )
-                except UnreadableResultJson as exc:
+                except DamagedResultEncoding as exc:
+                    # Damage is terminal: no build's codec will inflate these
+                    # bytes, so this job can never be resumed. Fail it with the
+                    # damage as its error instead of leaving it 'waiting'.
+                    _note_unreadable_result(row["job_id"], exc)
+                    logger.warning(
+                        f"Marking waiting job {row['job_id']} as failed: its "
+                        "result_json is damaged, so no build can resume it"
+                    )
+                    await db.execute(
+                        "UPDATE results SET status = 'failed', "
+                        "error = ?, completed_at = ? WHERE job_id = ?",
+                        (str(exc), now, row["job_id"]),
+                    )
+                    continue
+                except UnsupportedResultEncoding as exc:
                     # Nothing proves this job is unrecoverable: leave the row
                     # alone (still 'waiting', payload intact) so a build that
                     # can read it resumes it after rolling forward.

@@ -282,10 +282,12 @@ from rootcoz.storage import (
     ANALYSIS_STATE_ANALYZED,
     ANALYSIS_STATE_SUBMITTED,
     DB_PATH,
+    UnsupportedResultEncoding,
     backfill_result_json_compression,
     backfill_results_denorm,
     claim_submitted_job_for_analyze,
     copy_stable_analysis_ids,
+    fail_job_without_result_write,
     get_effective_classification,
     get_history_classification,
     get_result,
@@ -6022,6 +6024,18 @@ async def _process_ci_source_analysis(
         logger.info(f"Analysis task cancelled for job_id={job_id}")
         return
 
+    except UnsupportedResultEncoding as exc:
+        # The stored payload is a newer build's, so this build can never store
+        # this job's status or result. Fail it visibly, payload untouched,
+        # instead of reporting an update that never happened.
+        logger.error(f"Analysis for job_id={job_id} was not stored: {exc}")
+        await fail_job_without_result_write(job_id, str(exc))
+        notify_active_count_changed()
+        notify_dashboard_changed()
+        notify_job_status_changed(job_id)
+        notify_token_usage_changed()
+        return
+
     except Exception as e:
         logger.exception(f"Analysis failed for job {job_id}")
         user_error = make_user_friendly_error(e)
@@ -6042,7 +6056,12 @@ async def _process_ci_source_analysis(
         # Attach token usage even on failure
         await _attach_token_usage(job_id, fail_data)
 
-        await update_status(job_id, "failed", fail_data)
+        try:
+            await update_status(job_id, "failed", fail_data)
+        except UnsupportedResultEncoding as exc:
+            # The failure result was refused as well: still end the job, visibly.
+            logger.error(f"Failure result for job_id={job_id} was not stored: {exc}")
+            await fail_job_without_result_write(job_id, str(exc))
         notify_active_count_changed()
         notify_dashboard_changed()
         notify_job_status_changed(job_id)
