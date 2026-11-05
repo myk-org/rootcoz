@@ -253,12 +253,15 @@ interrupted and has to be re-submitted (results are written on completion; SQLit
 *unqualified* keys are rejected by the schema, so `resources.limit.cpu=4` (a typo) fails at render
 instead of producing a pod the API server refuses.
 
-**Units:** `memory` and `ephemeral-storage` must be strings with a unit (`4Gi`, `512Mi`) — Kubernetes
-reads a bare number as **bytes**, so `memory: 4` is 4 bytes and an OOM-kill on start. `cpu` accepts a
-bare number or a quantity string with a CPU suffix (`4`, `500m`, `2.5`, `n`/`u`/`m` and the usual
-`k`/`M`/…/`Ki` suffixes) — anything else, such as `--set resources.limits.cpu=not-a-quantity`, is
-schema-rejected at render instead of reaching the API server. Setting a key to `""` omits **that
-key** from the render — an empty quantity is invalid, so the chart drops it instead of emitting one.
+**Units:** the schema accepts the Kubernetes [Quantity
+grammar](https://kubernetes.io/docs/reference/kubernetes-api/definitions/quantity-resource/) for
+`cpu`, `memory` and `ephemeral-storage`: `4Gi`, `512Mi`, `.5Gi`, `500m`, `2.5`, `1e3`, plus a bare
+number. A unit-less value — a bare number (`memory: 4`) or a numeric string (`"4"`) — is **bytes**
+for `memory` and `ephemeral-storage`, so `memory: 4` is 4 bytes and an OOM-kill on start: always give
+memory and storage a unit. Anything the grammar does not accept, such as
+`--set resources.limits.cpu=not-a-quantity` or `4GiB`, is schema-rejected at render instead of
+reaching the API server. Setting a key to `""` omits **that key** from the render — an empty quantity
+is invalid, so the chart drops it instead of emitting one.
 
 **A cleared request is not "no floor".** Dropping the request key does not stop the **limit** from
 becoming the effective request: Kubernetes defaults a missing request to the matching limit, so
@@ -268,7 +271,7 @@ renders nothing that would. A genuine no-floor pod needs **both** sides cleared
 (`resources.requests.memory=""` and `resources.limits.memory=""`); clearing the request alone just
 removes the explicit value.
 
-Full sizing guidance for operators: [Deploying rootcoz → Sizing](deploy-rootcoz.html#sizing).
+Full sizing guidance for operators: [Deploying rootcoz → Sizing](../docs/deploy-rootcoz.md#sizing).
 
 **Out of scope, recorded so nobody "fixes" one side blindly:** `chart/README.md` (this section) and
 `.dev/openshift/deployment.yaml` disagree on the *request* — Guaranteed `32Gi` here versus a Burstable
@@ -377,11 +380,16 @@ helm test rootcoz -n rootcoz   # requires running release
 
 The `chart` tox env lints the chart, renders every recipe and fixture, renders
 `chart/examples/values-production.yaml` and asserts its resources plus the quoted `/tmp` `sizeLimit`
-(and that the `/tmp` mount never reaches the init container), checks that the default render still has
-no `/tmp` volume, and asserts the schema negatives (`resources.limit.cpu`, `resources.requests.cpuu`,
-binary `memory` and `ephemeral-storage`) plus the extended-resource and numeric-CPU positives, and
-that a bad cpu quantity (`not-a-quantity` on both `requests` and `limits`) is rejected while `4m` and
-an explicit string quantity still render. Two further checks cover the pod-integrity rules: `--set resources.requests.memory=""` renders no `memory`
+(and that the `/tmp` mount never reaches the init container). The default render — `chart/` with only
+`ai.provider`, `ai.model` and the required secrets, no overlay — has a **baseline assertion**: its
+container `resources` block must equal the chart defaults (`requests` `1`/`4Gi`, `limits` `2`/`8Gi`),
+and it must carry no `ephemeral-storage`, no `sizeLimit`, no `/tmp` mount and no `TMPDIR`, so a
+values or template change that alters the default pod template fails CI instead of silently rolling
+every install. The env also asserts the schema negatives (`resources.limit.cpu`,
+`resources.requests.cpuu`, a bad `memory` unit `4GiB`), the quantity positives (numeric `cpu`/`memory`
+and `ephemeral-storage`, `.5Gi`, `1e3`, `4m`, an explicit string quantity, extended resources), and
+that a bad cpu quantity (`not-a-quantity` on both `requests` and `limits`) is rejected. Two further
+checks cover the pod-integrity rules: `--set resources.requests.memory=""` renders no `memory`
 request (empty means omit), and with the sidecar agent dir configured the init container's `requests`
 equal its `limits`, so a Guaranteed app container keeps Guaranteed QoS for the whole pod.
 

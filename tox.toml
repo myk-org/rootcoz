@@ -104,10 +104,13 @@ commands = [
     "-c",
     "OUT=/tmp/rootcoz-production-sidecar-$$.yaml && helm template rootcoz chart/ -f chart/examples/values-openshift.yaml -f chart/examples/values-sidecar-agent-fixture.yaml -f chart/examples/values-production.yaml --set ai.geminiApiKey=test-key --set admin.key=test-admin-key --set encryptionKey=test-encryption-key-for-helm-template-render > $OUT && grep -q 'copy-sidecar-agent' $OUT && [ \"$(awk '/^      initContainers:/,/^      containers:/' $OUT | grep -c 'mountPath: /tmp$')\" = 0 ] && [ \"$(awk '/^      initContainers:/,/^      containers:/' $OUT | grep -c 'TMPDIR')\" = 0 ] && [ \"$(grep -c 'mountPath: /tmp$' $OUT)\" = 1 ] && [ \"$(grep -c 'name: TMPDIR' $OUT)\" = 1 ] && rm -f $OUT",  # pragma: allowlist secret
   ],
+  # The default render (chart/ with only the required flags, no overlay) is the
+  # baseline every install starts from: assert its resource block verbatim and
+  # that no ephemeral-storage (hence no /tmp emptyDir, sizeLimit or TMPDIR) is added.
   [
     "sh",
     "-c",
-    "OUT=/tmp/rootcoz-no-ephemeral-$$.yaml && helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render > $OUT && ! grep -q 'ephemeral-storage' $OUT && ! grep -q 'mountPath: /tmp$' $OUT && ! grep -q 'name: TMPDIR' $OUT && rm -f $OUT",  # pragma: allowlist secret
+    "T='helm template rootcoz chart/ --set ai.provider=gemini --set ai.model=gemini-2.5-pro --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render' && OUT=/tmp/rootcoz-default-render-$$.yaml && $T > $OUT && EXP=$(printf '%s\\n' 'limits:' '  cpu: \"2\"' '  memory: 8Gi' 'requests:' '  cpu: \"1\"' '  memory: 4Gi') && GOT=$(sed -n '/^      containers:/,/^      volumes:/p' $OUT | sed -n '/^          resources:/,/^          volumeMounts:/p' | sed -e '1d' -e '$d' -e 's/^            //') && { [ \"$GOT\" = \"$EXP\" ] || { printf 'default render resources changed:\\n%s\\n' \"$GOT\"; exit 1; }; } && ! grep -q 'ephemeral-storage' $OUT && ! grep -q 'sizeLimit' $OUT && ! grep -q 'mountPath: /tmp$' $OUT && ! grep -q 'name: TMPDIR' $OUT && rm -f $OUT",  # pragma: allowlist secret
   ],
   [
     "sh",
@@ -119,15 +122,18 @@ commands = [
     "-c",
     "helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set resources.requests.cpuu=4 --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'resources.requests: Additional property cpuu is not allowed'",  # pragma: allowlist secret
   ],
+  # memory/ephemeral-storage take any Kubernetes quantity: a bare number (bytes for
+  # memory/storage), a leading decimal point and exponent form all validate.
   [
     "sh",
     "-c",
-    "helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set resources.requests.ephemeral-storage=16 --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'resources.requests.ephemeral-storage: Invalid type. Expected: string, given: integer'",  # pragma: allowlist secret
+    "T='helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render' && OUT=/tmp/rootcoz-quantity-forms-$$.yaml && $T --set resources.limits.cpu=2 --set resources.limits.memory=4 --set resources.requests.ephemeral-storage=16 > $OUT && grep -q 'cpu: 2$' $OUT && grep -q 'memory: 4$' $OUT && grep -q 'ephemeral-storage: 16$' $OUT && $T --set resources.requests.memory=.5Gi --set resources.limits.cpu=1e3 > $OUT && grep -q 'memory: .5Gi' $OUT && grep -q 'cpu: \"1e3\"' $OUT && rm -f $OUT",  # pragma: allowlist secret
   ],
+  # A bad unit must still fail at schema validation, not reach the API server.
   [
     "sh",
     "-c",
-    "helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set resources.requests.memory=4 --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'resources.requests.memory: Invalid type. Expected: string, given: integer'",  # pragma: allowlist secret
+    "helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set resources.limits.memory=4GiB --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'resources.limits.memory: Does not match pattern'",  # pragma: allowlist secret
   ],
   # cpu is a quantity too: a typo must fail at schema validation, not at the API server after install.
   [
