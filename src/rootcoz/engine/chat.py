@@ -467,6 +467,62 @@ def analysis_http_tools(
     return tools
 
 
+def _tracker_issue_tools(
+    *, server_url: str, auth_headers: dict[str, str]
+) -> list[dict[str, Any]]:
+    """The two tracker-write tools chat may call when the user asks for an issue.
+
+    Both post to ``/api/chat-issue``, which files under the caller's OWN saved
+    credential and decides the repo/project, so the model sends only a title
+    and a body.
+    """
+    tools = []
+    for target, kind in (("github", "GitHub"), ("jira", "Jira")):
+        tools.append(
+            {
+                "name": f"create_{target}_issue",
+                "description": (
+                    f"Open a {kind} issue for the failure or problem the user is "
+                    "discussing. Call this ONLY when the user explicitly asks to "
+                    "open an issue — never proactively. You do not choose the "
+                    "repo/project: the server files it in the configured "
+                    "repository/Jira project. body must summarise the failure and "
+                    "context the user asked about. Returns the created issue URL "
+                    "and number/key; a refusal about missing credentials must be "
+                    "relayed to the user verbatim."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "Issue title",
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": (
+                                "Issue description summarising the failure and "
+                                "context the user asked about"
+                            ),
+                        },
+                    },
+                    "required": ["title", "body"],
+                },
+                "http": {
+                    "method": "POST",
+                    "url": f"{server_url}/api/chat-issue",
+                    "headers": {**auth_headers, "Content-Type": "application/json"},
+                    "body_template": {
+                        "target": target,
+                        "title": "{title}",
+                        "body": "{body}",
+                    },
+                },
+            }
+        )
+    return tools
+
+
 def build_chat_custom_tools(
     *,
     server_url: str,
@@ -743,6 +799,10 @@ def build_chat_custom_tools(
             }
         )
 
+    # Unconditional: the server reads the caller's own account token, so a
+    # missing credential comes back as a followable refusal, not a missing tool.
+    tools.extend(_tracker_issue_tools(server_url=server_url, auth_headers=auth_headers))
+
     return tools
 
 
@@ -782,7 +842,7 @@ def build_admin_custom_tools(
     """Build HTTP-backed custom tools for admin chat."""
     auth_headers = {"Authorization": f"Bearer {auth_token}"}
 
-    return [
+    tools: list[dict[str, Any]] = [
         {
             "name": "db_schema",
             "description": (
@@ -906,6 +966,8 @@ def build_admin_custom_tools(
             },
         },
     ]
+    tools.extend(_tracker_issue_tools(server_url=server_url, auth_headers=auth_headers))
+    return tools
 
 
 def _safe_remove_symlink(link: Path) -> None:
@@ -1069,8 +1131,16 @@ def build_welcome_message(
     )
 
 
-_COMMON_RULES = """- Do NOT modify any data — read-only access only
+_COMMON_RULES = """- Do NOT modify any data — read-only, EXCEPT the `create_github_issue` / `create_jira_issue` tools, which file an issue only when the user explicitly asks
 - Do NOT run arbitrary curl commands — use the provided tools"""
+
+_ISSUE_CREATE_RULES = """
+## Creating Issues
+- `create_github_issue` and `create_jira_issue` file an issue in the repository/Jira project the server is configured with — you never pick one.
+- Call them ONLY when the user explicitly asks to open an issue; never proactively.
+- On success, report the issue URL and number/key the tool returned.
+- If the tool refuses for missing credentials, relay it verbatim and name the fix: Profile Settings → add the GitHub/Jira token (if the refusal says the account has no profile, pass on its sign-in advice instead).
+- Never claim an issue exists when the tool was not called or did not succeed."""
 
 
 def build_system_prompt(
@@ -1119,6 +1189,7 @@ You have structured tools that you can call directly:
 {tools_section}
 
 **IMPORTANT:** Use these tools to get data when the user asks a question. Do NOT call tools proactively — only fetch data that's relevant to what the user is asking about.{repos_note}{unavailable_section}
+{_ISSUE_CREATE_RULES}
 
 ## Rules — STRICT
 - You MUST only discuss this specific job and its failures
@@ -1159,6 +1230,7 @@ You have structured tools — call them directly:
 **WORKFLOW:** For analytics questions (totals, overrides, issues), use the pre-built report tools first — they're faster and more accurate. Use `db_schema` + `db_query` only for questions the report tools can't answer.
 
 **SENSITIVE DATA:** Some columns contain encrypted values (tokens, passwords). Never output raw encrypted field values.{unavailable_section}
+{_ISSUE_CREATE_RULES}
 
 ## Report Generation
 When the user asks for a "report", "generate a report", "export", or similar:

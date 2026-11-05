@@ -15,7 +15,6 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import { Textarea } from '@/components/ui/textarea'
 import { LinkedText } from '@/components/shared/LinkedText'
 import { ChatMarkdown } from '@/components/shared/ChatMarkdown'
-import { ChatIssueDialog } from '@/components/shared/ChatIssueDialog'
 import type { RepoUrl } from '@/lib/autoLink'
 import { Send, Loader2, Bot, User, Copy, Check } from 'lucide-react'
 
@@ -141,7 +140,6 @@ export function ChatUI({
   emptySubtitle = '',
 }: ChatUIProps) {
   const [messages, setMessages] = useState<ChatMessage[]>([])
-  const [issueOpen, setIssueOpen] = useState(false)
   const [input, setInput] = useState('')
   const [error, setError] = useState('')
   const [sessionStarted, setSessionStarted] = useState(false)
@@ -525,13 +523,6 @@ export function ChatUI({
     } catch { /* clipboard not available */ }
   }, [messages])
 
-  const lastAnswer = useMemo(() => {
-    for (let i = messages.length - 1; i >= 0; i -= 1) {
-      if (messages[i].role === 'assistant' && messages[i].status === 'completed') return messages[i].content
-    }
-    return ''
-  }, [messages])
-
   const handleNewSession = useCallback(async () => {
     if (clearingRef.current || clearing || sendInFlightRef.current) return
     clearingRef.current = true
@@ -644,22 +635,6 @@ export function ChatUI({
                 </Button>
               </TooltipTrigger>
               <TooltipContent>{copiedAll ? 'Copied!' : 'Copy all messages'}</TooltipContent>
-            </Tooltip>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <span className="inline-flex">
-                  <Button
-                    variant="ghost"
-                    size="sm"
-                    className="h-7 px-3 text-xs"
-                    onClick={() => setIssueOpen(true)}
-                    disabled={!lastAnswer}
-                  >
-                    Create issue
-                  </Button>
-                </span>
-              </TooltipTrigger>
-              <TooltipContent>{lastAnswer ? 'Open a GitHub issue or Jira ticket from the last answer' : 'Wait for an answer to create an issue from'}</TooltipContent>
             </Tooltip>
             <Button
               variant="ghost"
@@ -834,7 +809,6 @@ export function ChatUI({
           </form>
         </div>
       </div>
-      <ChatIssueDialog open={issueOpen} onOpenChange={setIssueOpen} message={lastAnswer} />
     </TooltipProvider>
   )
 }

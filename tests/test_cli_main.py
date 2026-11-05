@@ -2450,23 +2450,6 @@ class TestCreateChatIssueCommand:
         assert "--jira-token" not in result.output
         assert "--jira-sa-token" not in result.output
 
-    def test_prefill_chat_issue(self, mock_client):
-        mock_client.prefill_chat_issue.return_value = {
-            "title": "Login fails",
-            "body": "The login test timed out.",
-        }
-        result = runner.invoke(app, ["prefill-chat-issue", "--text", "raw chat answer"])
-        assert result.exit_code == 0
-        assert "Title: Login fails" in result.output
-        assert "The login test timed out." in result.output
-        mock_client.prefill_chat_issue.assert_called_once_with(text="raw chat answer")
-
-    def test_prefill_chat_issue_exposes_no_token_options(self, mock_client):
-        result = runner.invoke(app, ["prefill-chat-issue", "--help"])
-        assert result.exit_code == 0
-        assert "--github-token" not in result.output
-        assert "--jira-token" not in result.output
-
 
 class TestOverrideClassificationCommand:
     def test_override(self, mock_client):

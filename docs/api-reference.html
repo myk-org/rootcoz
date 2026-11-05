@@ -851,12 +851,6 @@
 <td><code>target</code> (<code>github</code>/<code>jira</code>), <code>title</code>, <code>body</code>, optional <code>jira_project_key</code>, <code>jira_security_level</code>, <code>jira_issue_type</code>; returns <code>201</code></td>
 </tr>
 <tr>
-<td>POST</td>
-<td><code>/api/chat-issue/prefill</code></td>
-<td>reviewer</td>
-<td><code>text</code>; returns the scrubbed <code>title</code> and <code>body</code> an issue created from that chat answer would carry</td>
-</tr>
-<tr>
 <td>PUT</td>
 <td><code>/results/{job_id}/tracked-in</code></td>
 <td>reviewer</td>
@@ -897,7 +891,7 @@
 <blockquote>
 <p><strong>Note:</strong> All four issue preview and create endpoints call <code>_require_reviewer</code>, so a <code>viewer</code> receives <code>403</code> before the allow list is consulted. They additionally require valid tracker credentials and the matching <code>ENABLE_GITHUB_ISSUES</code> or <code>ENABLE_JIRA_ISSUES</code> toggle.</p>
 </blockquote>
-<p><code>POST /api/chat-issue</code> is the chat counterpart: it takes no <code>test_name</code> and no credentials. The tracker credential is <strong>always</strong> the caller's saved account token (<code>GET /api/user/tokens</code> is the source of truth for which trackers are available) — never the deployment's <code>GITHUB_TOKEN</code> or Jira credential, and with no exception for the bootstrap <code>admin</code>, which has no profile to store one. Status codes: <code>201</code> created; <code>400</code> for a missing account credential, a missing <code>TESTS_REPO_URL</code> or Jira project key, or an unusable/legacy service-account secret; <code>403</code> when the allow list blocks the caller, the caller is a <code>viewer</code>, or the tracker's <code>ENABLE_*</code> toggle is off; <code>401</code> when the tracker rejects the credential; <code>502</code> when the tracker is unreachable or errors. Every attempt — success or refusal — writes one <code>issue.create</code> audit row with <code>target_type="chat"</code> and <code>details.result</code> of <code>success</code> or <code>refused</code>; no row carries the issue text or a token. <code>title</code> and <code>body</code> pass <code>scrub_sensitive_data</code> before the tracker call, and the prefill route returns the same scrubbed text so a redaction the user disagrees with is visible and editable before anything is filed.</p>
+<p><code>POST /api/chat-issue</code> is the chat counterpart: it takes no <code>test_name</code> and no credentials. It is what the chat model calls through its <code>create_github_issue</code> / <code>create_jira_issue</code> tools when the user explicitly asks for an issue, and the title and body are the model's draft. The tracker credential is <strong>always</strong> the caller's saved account token (<code>GET /api/user/tokens</code> is the source of truth for which trackers are available) — never the deployment's <code>GITHUB_TOKEN</code> or Jira credential, and with no exception for the bootstrap <code>admin</code>, which has no profile to store one. Status codes: <code>201</code> created; <code>400</code> for a missing account credential, a missing <code>TESTS_REPO_URL</code> or Jira project key, or an unusable/legacy service-account secret; <code>403</code> when the allow list blocks the caller, the caller is a <code>viewer</code>, the tracker's <code>ENABLE_*</code> toggle is off, or GitHub's own answer is a token that is invalid or expired, lacks the <code>repo</code> scope, or cannot see <code>TESTS_REPO_URL</code> (GitHub answers <code>404</code> for an invisible repository); <code>401</code> when Jira rejects the credential; <code>429</code> when GitHub rate limits; <code>502</code> when the tracker is unreachable or failing. Every attempt — success or refusal — writes one <code>issue.create</code> audit row with <code>target_type="chat"</code> and <code>details.result</code> of <code>success</code> or <code>refused</code>; no row carries the issue text or a token. <code>title</code> and <code>body</code> pass <code>scrub_sensitive_data</code> before the tracker call, so a pasted credential never reaches the tracker.</p>
 <h3 id="history-and-classification-lookup">History and classification lookup</h3>
 <div class="table-wrap"><table>
 <thead>
@@ -1003,7 +997,7 @@
 </tr>
 </tbody>
 </table></div>
-<p>An answer can become a tracker issue: <code>ChatUI</code> offers <strong>Create issue</strong>, which drafts the title and body from the last answer through <code>POST /api/chat-issue/prefill</code> and files them through <code>POST /api/chat-issue</code> (see <a href="#trackers-issues-and-exporters">Trackers, issues, and exporters</a>). Admin chat (<code>/api/admin/chat/*</code>) has no tracker credential of its own; the dialog uses the caller's account tokens in both chats, and the human click is the only way chat text reaches a tracker — the AI has no issue-creation tool.</p>
+<p>An answer can become a tracker issue: the chat model files it through <code>POST /api/chat-issue</code> (see <a href="#trackers-issues-and-exporters">Trackers, issues, and exporters</a>) when the user asks it to, via its <code>create_github_issue</code> / <code>create_jira_issue</code> tools. Admin chat (<code>/api/admin/chat/*</code>) has no tracker credential of its own; the endpoint uses the caller's account tokens in both chats, so an issue is always filed under the person who asked.</p>
 <h3 id="server-sent-events-streams">Server-Sent Events streams</h3>
 <div class="table-wrap"><table>
 <thead>

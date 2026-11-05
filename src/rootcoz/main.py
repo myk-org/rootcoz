@@ -186,7 +186,6 @@ from rootcoz.models import (
     BulkDeleteRequest,
     BulkJobMetadataRequest,
     ChatInitRequest,
-    ChatIssuePrefillRequest,
     ChatIssueRequest,
     ChatMessageRequest,
     ChildJobAnalysis,
@@ -3220,7 +3219,6 @@ _BODY_LOGGING_SKIP_PATHS = frozenset(
         # Chat text is not structurally secret, so key-based masking misses a
         # pasted credential — the same reason /api/chat/ is skipped above.
         "/api/chat-issue",
-        "/api/chat-issue/prefill",
     }
 )
 
@@ -9149,16 +9147,21 @@ _ISSUE_CREATE_REFUSALS: tuple[type[Exception], ...] = (
 
 
 def _map_create_refusal(
-    target: Literal["github", "jira"], exc: Exception
+    target: Literal["github", "jira"],
+    exc: Exception,
+    *,
+    subject: str = "bug report",
 ) -> HTTPException:
     """The refusal a failed tracker create answers with.
 
-    The branch set is the union the two report endpoints used to carry inline:
-    a configuration error is a 400 (an unresolvable repo URL, an OAuth
-    credential that cannot mint), an auth failure is a 401, and a tracker or
-    transport failure is a retryable 502. ``JiraOAuthMintError`` is caught by
-    none of those branches — it subclasses ``RuntimeError`` — so dropping it
-    would turn the likeliest chat-path failure into a 500.
+    A configuration error is a 400 (an unresolvable repo URL, an OAuth
+    credential that cannot mint); everything a tracker or the transport raises
+    goes to that tracker's own refusal helper, so the feedback form, a report's
+    bug report and chat cannot describe the same outage differently.
+    ``JiraOAuthMintError`` is caught by none of those branches — it subclasses
+    ``RuntimeError`` — so dropping it would turn the likeliest chat-path
+    failure into a 500. ``subject`` names what the caller submitted, which is
+    what the vocabulary of the refusal helpers turns on.
     """
     github = target == "github"
     label = "GitHub" if github else "Jira"
@@ -9169,17 +9172,10 @@ def _map_create_refusal(
             status_code=400,
             detail=f"Invalid TESTS_REPO_URL: {exc}" if github else str(exc),
         )
-    if isinstance(exc, httpx.HTTPStatusError):
-        if exc.response.status_code in (401, 403):
-            return HTTPException(
-                status_code=401,
-                detail=f"{label} token is invalid or expired. "
-                "Update your token in settings.",
-            )
-        return HTTPException(
-            status_code=502,
-            detail=f"{label} API error: {exc.response.status_code}",
-        )
+    if github and isinstance(exc, (httpx.HTTPStatusError, httpx.RequestError)):
+        return _github_issue_refusal(exc, subject=subject)
+    if not github and isinstance(exc, httpx.HTTPStatusError):
+        return _jira_bug_refusal(exc)
     if isinstance(exc, httpx.RequestError):
         return HTTPException(status_code=502, detail=f"{label} API unreachable: {exc}")
     return HTTPException(
@@ -9225,6 +9221,7 @@ async def _create_issue_from_text(
     jira_security_level: str = "",
     jira_issue_type: str = "Bug",
     via: str = "rootcoz",
+    subject: str = "bug report",
     pre_check: Callable[[], Awaitable[Any]] | None = None,
 ) -> dict[str, Any]:
     """File one tracker issue from an already-written title and body.
@@ -9243,6 +9240,7 @@ async def _create_issue_from_text(
         username: The caller, for the attribution footer.
         settings: Effective settings, used to resolve the repo / project key.
         via: How the issue was produced (``rootcoz``, ``rootcoz chat``).
+        subject: What the caller submitted, for the refusal wording.
         pre_check: Runs after the gates and before the create call — the report
             path uses it to reject an unknown test name without filing an
             issue.
@@ -9333,7 +9331,7 @@ async def _create_issue_from_text(
                 issue_type=jira_issue_type,
             )
     except _ISSUE_CREATE_REFUSALS as exc:
-        raise _map_create_refusal(target, exc) from exc
+        raise _map_create_refusal(target, exc, subject=subject) from exc
 
     issue_url = _require_tracker_url(result, label)
     if github:
@@ -9450,34 +9448,6 @@ async def create_jira_bug_endpoint(
     return {**result, "comment_id": comment_id}
 
 
-_CHAT_ISSUE_TITLE_MAX = 120
-
-
-def _chat_issue_draft(text: str) -> dict[str, str]:
-    """The title and body a chat answer would be filed as.
-
-    One pattern set, here in Python: the dialog prefills from this, so a false
-    redaction is visible in the box about to be submitted and can be restored,
-    and the create handler scrubs again as a backstop.
-    """
-    body = scrub_sensitive_data(text)
-    for line in body.splitlines():
-        title = line.strip().lstrip("#>-*").strip()
-        if title:
-            return {"title": title[:_CHAT_ISSUE_TITLE_MAX], "body": body}
-    return {"title": "", "body": body}
-
-
-@app.post("/api/chat-issue/prefill", operation_id="prefillChatIssue")
-async def prefill_chat_issue(
-    request: Request, body: ChatIssuePrefillRequest
-) -> dict[str, str]:
-    """Draft the title and body of an issue from a chat answer."""
-    _require_reviewer(request)
-    _check_allow_list(request)
-    return _chat_issue_draft(body.text)
-
-
 @app.post("/api/chat-issue", status_code=201, operation_id="createChatIssue")
 async def create_chat_issue(
     request: Request,
@@ -9486,11 +9456,12 @@ async def create_chat_issue(
 ) -> dict[str, Any]:
     """Open a GitHub issue or Jira ticket from a chat conversation.
 
-    The only tracker write reachable from chat, and it is human-driven: the
-    caller has already seen and edited the text in a dialog, so no
-    model-authored request ever reaches a tracker. Credentials come from the
-    caller's account row — never a deployment credential, and there is no
-    bootstrap-``admin`` exception.
+    The only tracker write reachable from chat: the chat model calls it as
+    `create_github_issue` / `create_jira_issue` when the user asks for an issue,
+    with a model-written title and body. Credentials come from the caller's
+    account row — never a deployment credential, and there is no
+    bootstrap-``admin`` exception: a missing token is a followable 400 that the
+    model relays to the user.
     """
     username = request.state.username
     tracker = body.target
@@ -9529,6 +9500,7 @@ async def create_chat_issue(
             jira_security_level=body.jira_security_level,
             jira_issue_type=body.jira_issue_type,
             via="rootcoz chat",
+            subject="issue",
         )
     except HTTPException as exc:
         await _record_refused_attempt(

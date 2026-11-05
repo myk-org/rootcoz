@@ -4884,9 +4884,13 @@ class TestChatIssueEndpoint:
         mock_create.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_github_upstream_error_keeps_the_report_path_mapping(
-        self, test_client
-    ):
+    async def test_github_404_names_the_repo_scope_on_the_chat_path(self, test_client):
+        """#398's mapping wins: a 404 is a repository the token cannot see.
+
+        GitHub answers 404 instead of 403 for an invisible repository, so the
+        chat path must send the user to TESTS_REPO_URL and their token — a 502
+        would blame the upstream and hide the fix.
+        """
         import httpx
 
         headers = await self._user("chat-gh-404", github_token="ghp_row_token")
@@ -4902,8 +4906,12 @@ class TestChatIssueEndpoint:
                     json={**self._CHAT, "target": "github"},
                     headers=headers,
                 )
-        assert response.status_code == 502
-        assert response.json()["detail"] == "GitHub API error: 404"
+        assert response.status_code == 403
+        assert response.json()["detail"] == (
+            "GitHub cannot see the repository in TESTS_REPO_URL, so your issue "
+            "was not filed. Check that the repository exists and that your "
+            "token can access it in Profile Settings."
+        )
 
     # -- Jira -----------------------------------------------------------------
 
@@ -5042,8 +5050,8 @@ class TestChatIssueEndpoint:
         """A pasted token never reaches the tracker — not even as a hex SHA.
 
         A 40-hex commit SHA is also a legacy GitHub token shape, so the shared
-        scrubber redacts it; the dialog prefills through the same scrubber, so
-        the user sees the marker and restores the SHA by hand if it was one.
+        scrubber redacts it; the chat model sends what the scrubber returns, so
+        the refusal names the marker and the user can retype the SHA by hand.
         """
         sha = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
         headers = await self._user("chat-scrub", github_token="ghp_row_token")
@@ -5068,30 +5076,6 @@ class TestChatIssueEndpoint:
         assert "[REDACTED_GITHUB_TOKEN]" in kwargs["title"]
         assert sha not in kwargs["body"]
         assert "[REDACTED_HEX_TOKEN]" in kwargs["body"]
-
-    def test_prefill_drafts_a_scrubbed_title_and_body(self, test_client):
-        sha = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
-        text = (
-            "## Login test fails\n\n"
-            "The login test timed out with token=ghp_abcdefghijklmnopqrstuvwxyz0123."
-            f" It broke on commit {sha}."
-        )
-        response = test_client.post("/api/chat-issue/prefill", json={"text": text})
-        assert response.status_code == 200
-        data = response.json()
-        assert data["title"] == "Login test fails"
-        assert "ghp_" not in data["body"]
-        assert "[REDACTED]" in data["body"]
-        # The dialog shows the same text it will submit: the SHA redaction is
-        # visible in the box, so the user can restore a real commit id by hand.
-        assert sha not in data["body"]
-        assert "[REDACTED_HEX_TOKEN]" in data["body"]
-
-    def test_prefill_truncates_the_title(self, test_client):
-        response = test_client.post("/api/chat-issue/prefill", json={"text": "x" * 500})
-        assert response.status_code == 200
-        assert response.json()["title"] == "x" * 120
-        assert response.json()["body"] == "x" * 500
 
 
 class TestHistoryEndpoints:

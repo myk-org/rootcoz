@@ -36,7 +36,6 @@ AUDIT_EXEMPT: dict[tuple[str, str], str] = {
     ("POST", "/results/{job_id}/preview-github-issue"): "read-only preview",
     ("POST", "/results/{job_id}/preview-jira-bug"): "read-only preview",
     ("POST", "/api/feedback/preview"): "read-only preview",
-    ("POST", "/api/chat-issue/prefill"): "read-only prefill",
     ("POST", "/api/jobs/metadata/rules/preview"): "read-only preview",
     ("POST", "/api/jira-projects"): "read-only lookup",
     ("POST", "/api/jira-security-levels"): "read-only lookup",

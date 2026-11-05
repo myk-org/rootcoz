@@ -298,7 +298,7 @@ rootcoz<span class="w"> </span>admin-chat<span class="w"> </span>send<span class
    rootcoz admin-chat history --limit 20</code></p>
 <blockquote>
 <p><strong>Tip:</strong> Use the web UI when you want the clearest live experience. It shows the active reply immediately and gives you a <code>Stop</code> button while the assistant is still working.</p>
-<p><strong>From an answer to a ticket:</strong> click <code>Create issue</code> above the conversation to open a GitHub issue or Jira ticket from the <strong>last completed answer</strong>. Server Chat itself resolves no tracker credential — the dialog files the issue with the token saved in <em>your</em> account, so add one in Profile Settings first, or the dialog tells you that none is available. The same call from the CLI, with no token flags:</p>
+<p><strong>From an answer to a ticket:</strong> ask the assistant to file it — "create a GitHub issue for this" or "open a Jira ticket" — and it drafts the title and body from the conversation. Server Chat itself resolves no tracker credential — the issue is filed with the token saved in <em>your</em> account, so add one in Profile Settings first, or the assistant relays the <code>400</code> that says none is available. The same call from the CLI, with no token flags:</p>
 </blockquote>
 <div class="highlight"><pre><span></span><code>rootcoz create-chat-issue --target jira --title "Dashboard filters drop the team" --body "$(cat ticket-body.md)"
 </code></pre></div>

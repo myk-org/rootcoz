@@ -67,7 +67,7 @@ This confirms the CLI is using an admin identity, then asks a server-wide questi
 
    > **Tip:** Use the web UI when you want the clearest live experience. It shows the busy state from the moment you send, tells you how long the turn has been running, and gives you a `Stop` button while the assistant is still working.
 
-   > **From an answer to a ticket:** click `Create issue` above the conversation to open a GitHub issue or Jira ticket from the **last completed answer**. Server Chat itself resolves no tracker credential — the dialog files the issue with the token saved in *your* account, so add one in Profile Settings first, or the dialog tells you that none is available. The same call from the CLI, with no token flags:
+   > **From an answer to a ticket:** ask the assistant to file it — "create a GitHub issue for this" or "open a Jira ticket" — and it drafts the title and body from the conversation. Server Chat itself resolves no tracker credential — the issue is filed with the token saved in *your* account, so add one in Profile Settings first, or the assistant relays the `400` that says none is available. The same call from the CLI, with no token flags:
 
 ```
 rootcoz create-chat-issue --target jira --title "Dashboard filters drop the team" --body "$(cat ticket-body.md)"

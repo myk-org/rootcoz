@@ -312,11 +312,16 @@ def test_chat_issue_body_is_never_logged(test_client, caplog):
     try:
         with caplog.at_level(logging.DEBUG):
             test_client.post(
-                "/api/chat-issue/prefill", json={"text": "token ghp_secret"}
+                "/api/chat-issue",
+                json={
+                    "target": "github",
+                    "title": "token ghp_secret",
+                    "body": "token ghp_secret",
+                },
             )
 
         body_log = _get_debug_messages(
-            caplog, containing="Incoming POST /api/chat-issue/prefill body:"
+            caplog, containing="Incoming POST /api/chat-issue body:"
         )
         assert not body_log, "chat text is in skip-paths; body should NOT be logged"
     finally:

@@ -1429,13 +1429,6 @@ class RootCozClient:
             "POST", "/api/chat-issue", json=payload, accept_statuses=(201,)
         )
 
-    def prefill_chat_issue(self, text: str) -> dict[str, Any]:
-        """Draft an issue from chat text. POST /api/chat-issue/prefill
-
-        Returns the scrubbed ``title`` and ``body`` a create call would file.
-        """
-        return self._request("POST", "/api/chat-issue/prefill", json={"text": text})
-
     # -- User Tokens ----------------------------------------------------------
 
     def get_user_tokens(self) -> dict[str, Any]:

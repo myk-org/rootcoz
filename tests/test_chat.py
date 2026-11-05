@@ -341,7 +341,7 @@ class TestBuildChatCustomTools:
             github_repo="org/repo",
         )
         names = [t["name"] for t in tools]
-        assert len(names) == 9  # 5 base + 2 jira + 2 github
+        assert len(names) == 11  # 5 base + 2 jira + 2 github + 2 issue-create
 
     def test_no_jira_without_token(self):
         tools = build_chat_custom_tools(
@@ -649,7 +649,7 @@ class TestBuildAdminCustomTools:
             server_url="http://localhost:8000",
             auth_token="test-token",
         )
-        assert len(tools) == 6
+        assert len(tools) == 8
         names = [t["name"] for t in tools]
         assert names == [
             "db_schema",
@@ -658,6 +658,8 @@ class TestBuildAdminCustomTools:
             "get_classification_overrides",
             "get_issues_created",
             "save_report",
+            "create_github_issue",
+            "create_jira_issue",
         ]
 
     def test_report_tool_urls(self):
@@ -784,6 +786,121 @@ class TestBuildAdminSystemPrompt:
         assert "save_report" in prompt
         assert "self-contained HTML" in prompt
         assert "CSS inline" in prompt
+
+
+@pytest.fixture
+def github_issue_config():
+    """Enable GitHub issue creation (the server-side repo config) for a test."""
+    from rootcoz.config import get_settings
+
+    with patch.dict(
+        os.environ,
+        {
+            "TESTS_REPO_URL": "https://github.com/org/repo",
+            "GITHUB_TOKEN": "ghp_test",  # pragma: allowlist secret
+        },
+    ):
+        get_settings.cache_clear()
+        yield
+        get_settings.cache_clear()
+
+
+class TestChatIssueTools:
+    """The chat model files a tracker issue itself when the user asks for one."""
+
+    def test_issue_tools_in_job_and_admin_chat(self):
+        job_tools = build_chat_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+            job_id="j1",
+        )
+        admin_tools = build_admin_custom_tools(
+            server_url="http://localhost:8000",
+            auth_token="tok",
+        )
+        for tools in (job_tools, admin_tools):
+            by_name = {t["name"]: t for t in tools}
+            for target in ("github", "jira"):
+                tool = by_name[f"create_{target}_issue"]
+                assert tool["http"]["method"] == "POST"
+                assert tool["http"]["url"] == "http://localhost:8000/api/chat-issue"
+                assert tool["http"]["headers"]["Authorization"] == "Bearer tok"
+                assert tool["http"]["body_template"] == {
+                    "target": target,
+                    "title": "{title}",
+                    "body": "{body}",
+                }
+                assert tool["parameters"]["required"] == ["title", "body"]
+                assert "ONLY when the user explicitly asks" in tool["description"]
+                # The model must not pick the repo/project.
+                assert "do not choose the repo/project" in tool["description"]
+
+    async def test_created_issue_is_the_tool_result(
+        self, test_client, github_issue_config
+    ):
+        """A 201 body with the issue URL is what the tool hands the model."""
+        _, api_key = await storage.create_user("chat-issue-ok")
+        await storage.save_user_tokens(
+            "chat-issue-ok",
+            github_token="ghp_row_token",  # pragma: allowlist secret
+        )
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/7",
+                "number": 7,
+            }
+            response = test_client.post(
+                "/api/chat-issue",
+                json={
+                    "target": "github",
+                    "title": "test_login times out",
+                    "body": "DNS timeout resolving auth.",
+                },
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+        assert response.status_code == 201, response.text
+        # Unwrapped: this JSON body is exactly what the sidecar returns to the model.
+        assert response.json()["url"] == "https://github.com/org/repo/issues/7"
+        assert response.json()["number"] == 7
+
+    async def test_refusal_body_reaches_the_model_unchanged(
+        self, test_client, github_issue_config
+    ):
+        """No saved token → the followable 400 detail the model must relay verbatim."""
+        _, api_key = await storage.create_user("chat-issue-none")
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            response = test_client.post(
+                "/api/chat-issue",
+                json={"target": "github", "title": "t", "body": "b"},
+                headers={"Authorization": f"Bearer {api_key}"},
+            )
+        assert response.status_code == 400
+        assert response.json()["detail"] == (
+            "GitHub token is required. Set up your token in Profile Settings."
+        )
+        mock_create.assert_not_called()
+
+    def test_prompts_require_explicit_request_and_relay(self):
+        job_prompt = build_system_prompt(
+            job_name="job",
+            build_number=1,
+            job_id="j1",
+            custom_tools=build_chat_custom_tools(
+                server_url="http://localhost:8000", auth_token="tok", job_id="j1"
+            ),
+        )
+        admin_prompt = build_admin_system_prompt(
+            build_admin_custom_tools(
+                server_url="http://localhost:8000", auth_token="tok"
+            )
+        )
+        for prompt in (job_prompt, admin_prompt):
+            assert "create_github_issue" in prompt
+            assert "create_jira_issue" in prompt
+            assert "ONLY when the user explicitly asks" in prompt
+            assert "relay it verbatim" in prompt
+            assert "Profile Settings" in prompt
+            assert "Never claim an issue exists" in prompt
 
 
 class TestBuildSystemPrompt:

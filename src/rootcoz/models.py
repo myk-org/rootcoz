@@ -1151,12 +1151,6 @@ class ChatIssueRequest(BaseModel):
         return v.strip() if isinstance(v, str) else v
 
 
-class ChatIssuePrefillRequest(BaseModel):
-    """Request body for drafting an issue from chat text."""
-
-    text: str
-
-
 OverrideClassificationLiteral = Literal["CODE ISSUE", "PRODUCT BUG", "INFRASTRUCTURE"]
 PatternLiteral = Literal[
     "NEW", "REGRESSION", "FLAKY", "INTERMITTENT", "KNOWN_BUG", "PERSISTENT"

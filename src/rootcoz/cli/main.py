@@ -2863,33 +2863,6 @@ def create_chat_issue(
         typer.echo(f"URL: {data.get('url', '')}")
 
 
-@app.command("prefill-chat-issue")
-def prefill_chat_issue(
-    text: str = typer.Option(
-        ..., "--text", help="Chat answer to draft the issue from."
-    ),
-    json_output: bool = _JSON_OPTION,
-) -> None:
-    """Draft the title and body an issue created from chat text would carry.
-
-    The server scrubs the text, so the draft you review is the text that would
-    be filed — one pattern set for both. No token option, like its create
-    counterpart.
-    """
-    _set_json(json_output)
-    try:
-        data = _get_client().prefill_chat_issue(text=text)
-    except RootCozError as err:
-        _handle_error(err)
-
-    if _state.get("json", False):
-        print_output(data, columns=[], as_json=True)
-    else:
-        typer.echo(f"Title: {data.get('title', '')}")
-        typer.echo("")
-        typer.echo(data.get("body", ""))
-
-
 @app.command("validate-token")
 def validate_token_cmd(
     token_type: str = typer.Argument(help="Token type: 'github' or 'jira'"),
