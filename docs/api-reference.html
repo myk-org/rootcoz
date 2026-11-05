@@ -1375,6 +1375,11 @@
 </tr>
 <tr>
 <td>GET</td>
+<td><code>/api/admin/server-status</code></td>
+<td>Live server status: <code>disk</code> (filesystem usage of the data directory plus <code>database</code>/<code>transcripts</code>/<code>logs</code> sizes), <code>cpu</code> (<code>process_percent</code>, <code>quota_cores</code>, <code>quota_state</code> = <code>set</code>/<code>unlimited</code>/<code>unknown</code>), <code>memory</code> (<code>rss_bytes</code>, <code>current_bytes</code>, <code>working_set_bytes</code>, <code>limit_bytes</code>, <code>limit_state</code>, <code>percent_of_limit</code> from the working set), <code>process</code> (<code>git_sha</code>, <code>restart_count</code> — <code>null</code> inside a container), <code>database</code> (size including the WAL, row counts, <code>compression_ratio</code>), <code>sidecar</code>, <code>activity</code> (<code>analyses_running</code>, <code>analyses</code> with per-analysis <code>elapsed_seconds</code>, <code>chat_turns_in_flight</code>, <code>sse_clients</code>), and <code>warnings</code>. Each probe block carries <code>available</code>; a probe that cannot read its source answers <code>{"available": false, "reason": "..."}</code> instead of failing the request</td>
+</tr>
+<tr>
+<td>GET</td>
 <td><code>/api/admin/db/schema</code></td>
 <td>Read-only schema dump</td>
 </tr>

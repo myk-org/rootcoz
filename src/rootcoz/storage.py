@@ -282,18 +282,94 @@ def _hash_session_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def parse_result_json(raw: str | None, *, job_id: str = "") -> dict[str, Any] | None:
+_ZSTD_FRAME_MAGIC = b"\x28\xb5\x2f\xfd"
+
+# What an operator can actually do about a row this build cannot decode.
+_RESULT_ENCODING_REMEDY = (
+    "Run a rootcoz build that has the result_json codec to read it, "
+    "or restore a pre-compression copy of the database."
+)
+
+
+class UnsupportedResultEncoding(Exception):
+    """Stored ``result_json`` uses an encoding this build cannot decode.
+
+    Not corruption: the payload is intact, it was written by a newer build
+    (result_json compression) and this build simply predates the codec.
+    """
+
+
+# Rows a startup scan had to skip because this build cannot decode them.
+# Read by the /api/health ``result_json`` entry so an operator sees the
+# degraded-data count without grepping the startup log.
+_undecodable_result_ids: set[str] = set()
+
+
+def undecodable_result_count() -> int:
+    """Count of stored results this process could not decode at startup."""
+    return len(_undecodable_result_ids)
+
+
+def _note_undecodable_result(job_id: str) -> None:
+    """Warn once for a skipped row, naming it, and count it for health."""
+    _undecodable_result_ids.add(job_id)
+    logger.warning(
+        f"Startup skipped job_id={job_id}: result_json uses an encoding this "
+        "build cannot decode (a compressed frame or a newer encoding). The row "
+        "is intact and was not modified."
+    )
+
+
+def _unsupported_result_encoding(raw: str | bytes) -> str | None:
+    """Describe why *raw* cannot be decoded here, or return None if it can.
+
+    A ``result_json`` comes back as bytes holding a zstd frame when the row was
+    written by a build with result_json compression. Without this check the
+    frame reaches ``json.loads``, which raises a bare ``UnicodeDecodeError``
+    that says nothing about the cause. Single source of that message.
+    """
+    if not isinstance(raw, bytes):
+        return None
+    if raw.startswith(_ZSTD_FRAME_MAGIC):
+        return (
+            "result_json is a zstd frame "
+            f"({_ZSTD_FRAME_MAGIC.hex(' ')}): the row was written by a build with "
+            "result_json compression, which this build cannot decode. "
+            f"The row is intact. {_RESULT_ENCODING_REMEDY}"
+        )
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return (
+            "result_json is not UTF-8 text: the row was written by a build with a "
+            "newer result_json encoding, which this build cannot decode. "
+            f"{_RESULT_ENCODING_REMEDY}"
+        )
+    return None
+
+
+def parse_result_json(
+    raw: str | bytes | None, *, job_id: str = ""
+) -> dict[str, Any] | None:
     """Decode and validate a ``result_json`` blob.
 
     Args:
-        raw: The raw JSON string from the database, or None.
+        raw: The raw JSON string (or stored bytes) from the database, or None.
         job_id: Optional job_id for log messages.
 
     Returns:
         Parsed dict when valid, None when *raw* is empty/malformed.
+
+    Raises:
+        UnsupportedResultEncoding: *raw* is framed by an encoding this build
+            cannot decode. Callers that must not die on it (startup scans) use
+            ``parse_result_json_lenient``.
     """
     if not raw:
         return None
+    unsupported = _unsupported_result_encoding(raw)
+    if unsupported is not None:
+        raise UnsupportedResultEncoding(f"job_id={job_id or '?'}: {unsupported}")
     try:
         data = json.loads(raw)
     except json.JSONDecodeError, TypeError:
@@ -307,6 +383,23 @@ def parse_result_json(raw: str | None, *, job_id: str = "") -> dict[str, Any] | 
         )
         return None
     return data
+
+
+def parse_result_json_lenient(
+    raw: str | bytes | None, *, job_id: str = ""
+) -> dict[str, Any] | None:
+    """``parse_result_json`` for scans where one row must not abort startup.
+
+    Only an undecodable *payload* degrades to None. Programming errors inside
+    parsing still raise. Callers that must know a row was skipped (the
+    failure-history backfill, the waiting-job rollback, the migrations) call
+    ``parse_result_json`` and handle ``UnsupportedResultEncoding`` themselves.
+    """
+    try:
+        return parse_result_json(raw, job_id=job_id)
+    except UnsupportedResultEncoding as exc:
+        logger.debug(f"Startup scan skipped a stored result: {exc}")
+        return None
 
 
 async def _migrate_add_column(
@@ -1767,6 +1860,17 @@ async def _migrate_jira_url_per_method_split() -> None:
         await db.commit()
 
 
+# Jobs whose failure_history still mirrors a user override instead of the AI
+# value stored in result_json: exactly what the restore-AI migration repairs.
+_NEEDS_AI_RESTORE_SQL = (
+    "FROM failure_history fh "
+    "JOIN test_classifications tc "
+    "  ON tc.job_id = fh.job_id AND tc.test_name = fh.test_name "
+    "  AND (tc.child_build_number = 0 OR fh.child_build_number = tc.child_build_number) "
+    "WHERE fh.classification = tc.classification AND tc.created_by != ''"
+)
+
+
 async def _migrate_restore_ai_classifications() -> None:
     """One-time migration: restore original AI classifications in failure_history.
 
@@ -1776,53 +1880,81 @@ async def _migrate_restore_ai_classifications() -> None:
     differs from the original AI value in result_json) and re-populates
     from result_json to restore the original AI values.
 
-    Tracked via ``_migrations_applied`` table to ensure it runs only once.
+    Only the jobs that still match are re-populated, so a restart is a no-op
+    for history already restored instead of deleting and re-inserting every
+    readable job's rows. Tracked via ``_migrations_applied``; while a job whose
+    result_json this build cannot decode is still pending, the migration stays
+    unapplied so a build with the codec finishes it.
     """
     migration_key = "restore_ai_classifications_v1"
     async with _connect_db() as db:
         if await _migration_applied(db, migration_key):
             return  # Already applied
 
-        cursor = await db.execute(
-            "SELECT COUNT(*) FROM failure_history fh "
-            "JOIN test_classifications tc "
-            "  ON tc.job_id = fh.job_id AND tc.test_name = fh.test_name "
-            "  AND (tc.child_build_number = 0 OR fh.child_build_number = tc.child_build_number) "
-            "WHERE fh.classification = tc.classification AND tc.created_by != ''"
-        )
-        needs_restore = (await cursor.fetchone())[0] > 0
+        cursor = await db.execute(f"SELECT DISTINCT fh.job_id {_NEEDS_AI_RESTORE_SQL}")
+        pending_job_ids = [row[0] for row in await cursor.fetchall()]
 
-        if not needs_restore:
+        if not pending_job_ids:
             await _mark_migration_applied(db, migration_key)
             await db.commit()
             return
 
     logger.info(
-        "Migration: restoring original AI classifications in failure_history..."
+        "Migration: restoring original AI classifications in failure_history "
+        "for %d job(s)...",
+        len(pending_job_ids),
     )
-    async with _connect_db() as db:
-        cursor = await db.execute(
-            "SELECT job_id, result_json, created_at FROM results "
-            "WHERE status = 'completed' AND result_json IS NOT NULL"
-        )
-        rows = await cursor.fetchall()
 
     restored = 0
-    for row in rows:
-        result_data = parse_result_json(row["result_json"], job_id=row["job_id"])
-        if result_data:
-            await populate_failure_history(
-                row["job_id"], result_data, analyzed_at=row["created_at"]
-            )
-            restored += 1
-
-    if restored > 0:
+    deferred: list[str] = []
+    for job_id in pending_job_ids:
         async with _connect_db() as db:
-            await _mark_migration_applied(db, migration_key)
-            await db.commit()
-        logger.info("Migration: restored AI classifications for %d jobs", restored)
-    else:
-        logger.warning("Migration: no jobs could be restored (all parse failures)")
+            cursor = await db.execute(
+                "SELECT result_json, created_at FROM results "
+                "WHERE job_id = ? AND status = 'completed' "
+                "AND result_json IS NOT NULL",
+                (job_id,),
+            )
+            row = await cursor.fetchone()
+        if row is None:
+            # No completed result left to restore from -- nothing to retry.
+            continue
+        try:
+            result_data = parse_result_json(row["result_json"], job_id=job_id)
+        except UnsupportedResultEncoding:
+            # This job's classifications stay wrong. Count it for health and
+            # leave the migration unapplied so a build with the codec retries.
+            _note_undecodable_result(job_id)
+            deferred.append(job_id)
+            continue
+        if not result_data:
+            continue
+
+        await populate_failure_history(
+            job_id, result_data, analyzed_at=row["created_at"]
+        )
+        # Its rows now come from result_json. Re-check so a job whose stored AI
+        # value happens to equal the override is not rewritten on every run.
+        async with _connect_db() as db:
+            cursor = await db.execute(
+                f"SELECT 1 {_NEEDS_AI_RESTORE_SQL} AND fh.job_id = ?", (job_id,)
+            )
+            if await cursor.fetchone() is None:
+                restored += 1
+
+    if deferred:
+        logger.warning(
+            f"Migration: {len(deferred)} job(s) skipped ({', '.join(deferred)}) -- "
+            "result_json uses an encoding this build cannot decode. Migration "
+            "left unapplied so it retries on a build with the codec. Restored "
+            f"{restored} readable job(s); their history is not rewritten again."
+        )
+        return
+
+    async with _connect_db() as db:
+        await _mark_migration_applied(db, migration_key)
+        await db.commit()
+    logger.info("Migration: restored AI classifications for %d jobs", restored)
 
 
 # Set of classification values that are actually pattern labels.
@@ -1882,6 +2014,7 @@ async def _migrate_backfill_pattern_axis() -> None:
         )
         affected_job_ids = [row[0] for row in await cursor.fetchall()]
 
+    deferred: list[str] = []
     for job_id in affected_job_ids:
         async with _connect_db() as db:
             cursor = await db.execute(
@@ -1890,7 +2023,16 @@ async def _migrate_backfill_pattern_axis() -> None:
             row = await cursor.fetchone()
         if not row or not row[0]:
             continue
-        result_data = parse_result_json(row[0], job_id=job_id)
+        try:
+            result_data = parse_result_json(row[0], job_id=job_id)
+        except UnsupportedResultEncoding:
+            # Cannot restore this row's root cause here, so its classification
+            # keeps a pattern label. Do not record the migration as done --
+            # every step below is idempotent and only touches affected jobs, so
+            # a build with the codec re-runs it and finishes the job.
+            _note_undecodable_result(job_id)
+            deferred.append(job_id)
+            continue
         if not result_data:
             continue
 
@@ -1931,9 +2073,18 @@ async def _migrate_backfill_pattern_axis() -> None:
             f"WHERE classification IN ({pattern_placeholders}) AND pattern = ''"
         )
 
-        await _mark_migration_applied(db, migration_key)
+        if deferred:
+            logger.warning(
+                f"Migration: pattern axis backfill skipped {len(deferred)} job(s) "
+                f"({', '.join(deferred)}) whose result_json uses an encoding this "
+                "build cannot decode. Migration left unapplied so it retries on a "
+                "build with the codec."
+            )
+        else:
+            await _mark_migration_applied(db, migration_key)
         await db.commit()
-    logger.info("Migration: pattern axis backfill complete")
+    if not deferred:
+        logger.info("Migration: pattern axis backfill complete")
 
 
 async def _migrate_recompute_normalized_signatures() -> None:
@@ -2179,7 +2330,7 @@ async def get_review_status(job_id: str) -> dict[str, Any]:
         row = await cursor.fetchone()
         total_failures = 0
         if row and row[0]:
-            result_data = parse_result_json(row[0], job_id=job_id)
+            result_data = parse_result_json_lenient(row[0], job_id=job_id)
             if result_data is not None:
                 total_failures = count_all_failures(result_data)
 
@@ -3064,7 +3215,9 @@ async def get_result(
             logger.debug(
                 f"get_result: job_id={job_id}, found=True, status={row['status']}"
             )
-            parsed = parse_result_json(row["result_json"], job_id=job_id)
+            # Lenient: a row this build cannot decode degrades to an empty
+            # result instead of failing the whole read.
+            parsed = parse_result_json_lenient(row["result_json"], job_id=job_id)
             if parsed:
                 await _backfill_failure_uuids(job_id, parsed)
                 if summary := await _token_usage_snapshot(db, job_id):
@@ -3225,7 +3378,9 @@ async def find_failure_by_uuid(
             (failure_uuid,),
         )
         async for row in cursor:
-            result_data = parse_result_json(row["result_json"], job_id=row["job_id"])
+            result_data = parse_result_json_lenient(
+                row["result_json"], job_id=row["job_id"]
+            )
             if not result_data:
                 continue
             # Search top-level failures
@@ -3909,9 +4064,23 @@ async def backfill_failure_history() -> None:
 
     logger.info(f"Backfilling failure_history from {len(rows)} missing results")
     backfilled = 0
+    compressed: list[str] = []
+    undecodable: list[str] = []
+    malformed: list[str] = []
     for job_id, result_json_str, created_at in rows:
-        result_data = parse_result_json(result_json_str, job_id=job_id)
+        try:
+            result_data = parse_result_json(result_json_str, job_id=job_id)
+        except UnsupportedResultEncoding:
+            # Not corruption, and not a reason to have no service: this build
+            # predates the codec that wrote the row. Row is left untouched.
+            _note_undecodable_result(job_id)
+            if result_json_str.startswith(_ZSTD_FRAME_MAGIC):
+                compressed.append(job_id)
+            else:
+                undecodable.append(job_id)
+            continue
         if result_data is None:
+            malformed.append(job_id)
             continue
         # Skip completed results with zero failures — they have nothing to
         # insert into failure_history, so without this guard the LEFT JOIN
@@ -3924,7 +4093,46 @@ async def backfill_failure_history() -> None:
         )
         backfilled += 1
 
+    _warn_unreadable_results(compressed, undecodable, malformed)
     logger.info(f"Backfill complete: processed {backfilled}/{len(rows)} results")
+
+
+def _sample_job_ids(job_ids: list[str], limit: int = 5) -> str:
+    """Format the first *limit* job ids, noting how many were dropped."""
+    shown = ", ".join(job_ids[:limit])
+    hidden = len(job_ids) - limit
+    return f"{shown} (+{hidden} more)" if hidden > 0 else shown
+
+
+def _warn_unreadable_results(
+    compressed: list[str], undecodable: list[str], malformed: list[str]
+) -> None:
+    """One aggregated warning per reason for rows the backfill had to skip.
+
+    *compressed* holds the rows whose payload is a zstd frame — the diagnosis
+    is certain there. *undecodable* holds the rest, where the only fact known
+    is that this build cannot decode the bytes.
+    """
+    if compressed:
+        logger.warning(
+            f"Backfill skipped {len(compressed)} result(s) whose result_json was "
+            "written by a build with result_json compression, which this build "
+            f"cannot decode. Those rows are intact and untouched. "
+            f"{_RESULT_ENCODING_REMEDY} Job ids: {_sample_job_ids(compressed)}"
+        )
+    if undecodable:
+        logger.warning(
+            f"Backfill skipped {len(undecodable)} result(s) whose result_json "
+            "uses an encoding this build cannot decode -- a compressed frame or a "
+            f"newer encoding. Those rows are intact and untouched. "
+            f"{_RESULT_ENCODING_REMEDY} Job ids: {_sample_job_ids(undecodable)}"
+        )
+    if malformed:
+        logger.warning(
+            f"Backfill skipped {len(malformed)} result(s) whose result_json decoded "
+            "but is not a JSON object (corrupt or truncated row -- not an encoding "
+            f"problem). Job ids: {_sample_job_ids(malformed)}"
+        )
 
 
 async def carry_forward_user_overrides(job_id: str, result_data: dict[str, Any]) -> int:
@@ -4541,6 +4749,23 @@ async def count_active_analyses() -> int:
         return row[0] if row else 0
 
 
+async def list_active_analyses(limit: int = 20) -> list[dict[str, Any]]:
+    """Active analyses with their start times, so elapsed time can be shown.
+
+    Lightweight like ``count_active_analyses``: no ``result_json`` is fetched.
+    """
+    placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            f"SELECT job_id, job_name, build_number, status, created_at, "
+            f"analysis_started_at FROM results "
+            f"WHERE status IN ({placeholders}) ORDER BY created_at LIMIT ?",
+            (*ACTIVE_STATUSES, limit),
+        )
+        rows = await cursor.fetchall()
+        return [dict(row) for row in rows]
+
+
 async def list_distinct_job_names() -> set[str]:
     """Return distinct non-empty job names from results. Lightweight query for backfill."""
     async with _connect_db() as db:
@@ -4566,7 +4791,7 @@ def _parse_dashboard_row(row: aiosqlite.Row) -> dict[str, Any]:
         "comment_count": row_data["comment_count"],
         "analysis_state": row_data.get("analysis_state") or ANALYSIS_STATE_ANALYZED,
     }
-    result_data = parse_result_json(row["result_json"], job_id=row["job_id"])
+    result_data = parse_result_json_lenient(row["result_json"], job_id=row["job_id"])
     if result_data:
         entry["job_name"] = result_data.get("job_name", "")
         if "build_number" in result_data:
@@ -5731,9 +5956,16 @@ async def mark_stale_results_failed() -> tuple[
         rows = await cursor.fetchall()
         for row in rows:
             if row["result_json"]:
-                result_data = parse_result_json(
-                    row["result_json"], job_id=row["job_id"]
-                )
+                try:
+                    result_data = parse_result_json(
+                        row["result_json"], job_id=row["job_id"]
+                    )
+                except UnsupportedResultEncoding:
+                    # Nothing proves this job is unrecoverable: leave the row
+                    # alone (still 'waiting', payload intact) so a build with
+                    # the codec resumes it after rolling forward.
+                    _note_undecodable_result(row["job_id"])
+                    continue
                 stored_params = (
                     result_data.get("request_params") if result_data else None
                 )
