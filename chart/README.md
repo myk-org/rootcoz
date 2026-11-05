@@ -92,6 +92,10 @@ imagePullSecrets:
   - name: ghcr-pull-secret
 ```
 
+### Build git SHA
+
+The Process card on Admin → Server Status shows the commit the image was built from, and only the image builder can supply it: pass `--build-arg GIT_SHA=$(git rev-parse HEAD)` (`docker-compose.yaml` forwards a `GIT_SHA` environment variable to the build); this chart does not build images, so an image built without the arg shows `not visible in this container` — honest, not a bug.
+
 ## Required Values
 
 | Value | Env var | Notes |

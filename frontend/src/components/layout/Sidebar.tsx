@@ -2,6 +2,7 @@ import type { MouseEvent as ReactMouseEvent } from 'react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { Link, useLocation } from 'react-router-dom'
 import {
+  Activity,
   AtSign,
   BarChart3,
   Clock,
@@ -55,6 +56,7 @@ const ADMIN_NAV_ITEMS: NavItem[] = [
   { to: '/admin/chat', label: 'Chat', icon: MessageSquare },
   { to: '/admin/logs', label: 'Logs', icon: ScrollText },
   { to: '/admin/transcripts', label: 'Transcripts', icon: FileText },
+  { to: '/admin/server-status', label: 'Server Status', icon: Activity },
   { to: '/admin/settings', label: 'Settings', icon: Settings },
 ]
 

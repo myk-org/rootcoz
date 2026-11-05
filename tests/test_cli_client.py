@@ -2150,6 +2150,21 @@ class TestRootCozClientAdminUsers:
         result = client.admin_component_versions()
         assert result["components"]["pi"] == "1.0.0"
 
+    def test_server_status(self):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/admin/server-status"
+            return httpx.Response(
+                200,
+                json={
+                    "disk": {"available": True, "used_ratio": 0.5},
+                    "warnings": [],
+                },
+            )
+
+        result = _make_client(handler).server_status()
+        assert result["disk"]["used_ratio"] == 0.5
+
     def test_admin_create_user(self):
         def handler(request):
             assert request.method == "POST"

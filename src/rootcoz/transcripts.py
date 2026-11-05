@@ -2,8 +2,9 @@
 
 The sidecar (>= 4.12.0) records one ``{session_id}.jsonl`` per session when
 ``RECORD_TRANSCRIPTS`` is enabled at container start. Files live under
-``PI_SIDECAR_TRANSCRIPTS_DIR`` (rootcoz default: ``/data/pi-sidecar/transcripts``
-so they survive container/pod replacement).
+the directory :func:`resolve_transcripts_dir` returns (rootcoz pins
+``/data/pi-sidecar/transcripts`` so transcripts survive container/pod
+replacement; a host install falls back to the sidecar's own default).
 
 Correlation contract (#328): the transcript filename is the sidecar
 ``session_id``. ``ai_token_usage.session_id`` + ``job_id``/``call_type`` give
@@ -29,17 +30,44 @@ logger = get_child_logger(__name__)
 
 # Bridge file: the sidecar reads RECORD_TRANSCRIPTS from its process env at
 # container start. rootcoz persists the DB-configured value to a FIXED path
-# (never derived from TRANSCRIPTS_DIR — a custom directory must not move the
-# bridge away from the path the entrypoint sources). The bridge carries ONLY
-# the DB override: when the admin has not set the value in Server Settings,
-# no assignment is written, so the deployment environment (compose/Helm)
-# controls the sidecar.
+# (never derived from the transcripts directory — a custom directory must not
+# move the bridge away from the path the entrypoint sources). The bridge
+# carries ONLY the DB override: when the admin has not set the value in
+# Server Settings, no assignment is written, so the deployment environment
+# (compose/Helm) controls the sidecar.
 
-# Same env var the sidecar reads; the default must live under /data so
-# transcripts survive container replacement.
-TRANSCRIPTS_DIR = Path(
-    os.getenv("PI_SIDECAR_TRANSCRIPTS_DIR", "/data/pi-sidecar/transcripts")
-)
+# Default the sidecar itself falls back to when PI_SIDECAR_TRANSCRIPTS_DIR is
+# unset: @myk-org/pi-sidecar transcriptsDir() returns
+# join(homedir(), ".pi", "sidecar", "transcripts") (dist/transcripts.js, 4.14.0).
+SIDECAR_DEFAULT_TRANSCRIPTS_DIR = Path("~/.pi/sidecar/transcripts").expanduser()
+
+# Container default rootcoz pins so transcripts survive replacement. Deployments
+# export it as PI_SIDECAR_TRANSCRIPTS_DIR (entrypoint, compose, Helm chart).
+ROOTCOZ_DEFAULT_TRANSCRIPTS_DIR = Path("/data/pi-sidecar/transcripts")
+
+
+def resolve_transcripts_dir() -> Path:
+    """Directory the sidecar writes transcripts to on this host.
+
+    Same order as the sidecar's own resolution: an explicit
+    ``PI_SIDECAR_TRANSCRIPTS_DIR`` wins (including the DB override the entrypoint
+    exports from the bridge), then the sidecar's ``~/.pi/sidecar/transcripts``
+    default, then rootcoz's ``/data`` default. Probing a directory the sidecar
+    never writes is what reported a recording host install as unavailable.
+    """
+    override = os.getenv("PI_SIDECAR_TRANSCRIPTS_DIR", "").strip()
+    if override:
+        return Path(override)
+    for candidate in (
+        SIDECAR_DEFAULT_TRANSCRIPTS_DIR,
+        ROOTCOZ_DEFAULT_TRANSCRIPTS_DIR,
+    ):
+        if candidate.is_dir():
+            return candidate
+    # Nothing on disk: report where the sidecar writes, so the probe says
+    # "no transcripts" instead of measuring an unrelated directory (never two).
+    return SIDECAR_DEFAULT_TRANSCRIPTS_DIR
+
 
 # Fixed bridge location (env-overridable for tests).
 ENV_BRIDGE_PATH = Path(os.getenv("PI_SIDECAR_ENV_BRIDGE", "/data/pi-sidecar/env"))
@@ -120,13 +148,14 @@ def list_transcripts() -> list[TranscriptInfo]:
     Unreadable or non-matching entries are skipped — a partially written or
     foreign file must not break the listing.
     """
-    if not TRANSCRIPTS_DIR.is_dir():
+    directory = resolve_transcripts_dir()
+    if not directory.is_dir():
         return []
     infos: list[TranscriptInfo] = []
     try:
-        entries = list(TRANSCRIPTS_DIR.iterdir())
+        entries = list(directory.iterdir())
     except OSError:
-        logger.warning("Unable to list transcripts dir %s", TRANSCRIPTS_DIR)
+        logger.warning("Unable to list transcripts dir %s", directory)
         return []
     for entry in entries:
         if not entry.name.endswith(".jsonl"):
@@ -179,7 +208,7 @@ def transcript_path(session_id: str) -> Path | None:
     """Validated transcript file path, or None for malformed/traversal ids."""
     if not valid_session_id(session_id):
         return None
-    return TRANSCRIPTS_DIR / f"{session_id}.jsonl"
+    return resolve_transcripts_dir() / f"{session_id}.jsonl"
 
 
 def transcript_summary(info: TranscriptInfo, context: dict[str, Any]) -> dict[str, Any]:

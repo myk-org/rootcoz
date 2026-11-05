@@ -665,6 +665,147 @@ def component_versions_cmd(json_output: bool = _JSON_OPTION) -> None:
         typer.echo(f"  {name}: {version if version else 'not installed'}")
 
 
+@admin_app.command("server-status")
+def server_status_cmd(json_output: bool = _JSON_OPTION) -> None:
+    """Show live server status: disk, CPU, memory, process, DB, sidecar.
+
+    Admin only. Every block reports whether it could be read; a probe that
+    could not reach its source says so instead of printing a zero.
+    """
+    _set_json(json_output)
+    try:
+        data = _get_client().server_status()
+    except RootCozError as exc:
+        _handle_error(exc)
+    if _state.get("json", False):
+        print_output(data, columns=[], as_json=True)
+        return
+
+    process = data.get("process", {})
+    typer.echo(
+        f"Process: rootcoz {process.get('version', 'unknown')} "
+        f"(pid {process.get('pid', '?')}, "
+        f"up {float(process.get('uptime_seconds') or 0):.0f}s, "
+        f"restarts {_status_value(process.get('restart_count'))}, "
+        f"loop lag {_status_value(process.get('loop_lag_ms'))} ms)"
+    )
+    disk = data.get("disk", {})
+    _echo_status_block(
+        "Disk",
+        disk,
+        f"{_status_ratio(disk.get('used_ratio'))}% used, "
+        f"{_status_bytes(disk.get('used_bytes'))} of "
+        f"{_status_bytes(disk.get('capacity_bytes'))} "
+        f"(database {_status_bytes(disk.get('database_bytes'))}, "
+        f"transcripts {_status_bytes(disk.get('transcripts_bytes'))}, "
+        f"logs {_status_bytes(disk.get('logs_bytes'))})",
+    )
+    cpu = data.get("cpu", {})
+    _echo_status_block(
+        "CPU",
+        cpu,
+        f"{_status_value(cpu.get('process_percent'))}% of a core, "
+        f"{_status_cpu_quota(cpu)}",
+    )
+    memory = data.get("memory", {})
+    _echo_status_block(
+        "Memory",
+        memory,
+        f"{_status_bytes(memory.get('rss_bytes'))} resident, "
+        f"{_status_value(memory.get('percent_of_limit'))}% of "
+        f"{_status_memory_limit(memory)}",
+    )
+    database = data.get("database", {})
+    _echo_status_block(
+        "Database",
+        database,
+        f"{_status_bytes(database.get('size_bytes'))} — "
+        f"{database.get('results', '?')} results, "
+        f"{database.get('failures', '?')} failures, "
+        f"{database.get('test_entries', '?')} test entries",
+    )
+    sidecar = data.get("sidecar", {})
+    typer.echo(
+        f"Sidecar: {'reachable' if sidecar.get('reachable') else 'unreachable'} — "
+        f"{_status_value(sidecar.get('models'))} models, "
+        f"{_status_value(sidecar.get('free_models'))} free"
+    )
+    activity = data.get("activity", {})
+    if activity:
+        typer.echo(
+            "Activity: "
+            f"{_status_value(activity.get('analyses_running'))} analyses running, "
+            f"{_status_value(activity.get('chat_turns_in_flight'))} chat turns in "
+            f"flight, {_status_value(activity.get('sse_clients'))} SSE clients"
+        )
+        for running in activity.get("analyses") or []:
+            typer.echo(
+                f"  {running.get('job_name') or running.get('job_id')} "
+                f"#{running.get('build_number')} {running.get('status')} "
+                f"for {_status_value(running.get('elapsed_seconds'))}s"
+            )
+    for warning in data.get("warnings", []):
+        typer.echo(f"[{warning.get('level', 'warn')}] {warning.get('message', '')}")
+
+
+def _echo_status_block(label: str, block: dict[str, Any], detail: str) -> None:
+    """Print one status block, or why it could not be read."""
+    if block.get("available", True):
+        typer.echo(f"{label}: {detail}")
+    else:
+        typer.echo(f"{label}: unavailable ({block.get('reason', 'no reason given')})")
+
+
+def _status_value(value: Any) -> str:
+    """Format a status number; a missing one reads as ``?``, never as zero."""
+    if value is None:
+        return "?"
+    return f"{value}"
+
+
+def _status_ratio(value: Any) -> str:
+    """Format a 0..1 ratio as whole percent; ``?`` when it is unknown."""
+    if value is None:
+        return "?"
+    return f"{float(value) * 100:.0f}"
+
+
+def _status_bytes(value: Any) -> str:
+    """Format a byte count for humans; ``?`` when the probe had no number."""
+    if value is None:
+        return "?"
+    size = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if size < 1024 or unit == "TiB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TiB"
+
+
+def _status_cpu_quota(cpu: dict[str, Any]) -> str:
+    """CPU quota with the same three states the page shows.
+
+    ``quota_state`` separates an unlimited cgroup from a ``cpu.max`` that could
+    not be read, so neither renders as a bare ``?`` that reads as unknown.
+    """
+    cores = cpu.get("quota_cores")
+    if cores is not None:
+        return f"quota {cores} cores"
+    if cpu.get("quota_state") == "unlimited":
+        return "no CPU quota (unlimited)"
+    return "quota unknown"
+
+
+def _status_memory_limit(memory: dict[str, Any]) -> str:
+    """Memory limit with ``set`` / ``unlimited`` / ``unknown`` kept distinct."""
+    limit = memory.get("limit_bytes")
+    if limit is not None:
+        return f"limit {_status_bytes(limit)}"
+    if memory.get("limit_state") == "unlimited":
+        return "no limit (unlimited)"
+    return "limit unknown"
+
+
 @app.command()
 def version(
     json_output: bool = _JSON_OPTION,
