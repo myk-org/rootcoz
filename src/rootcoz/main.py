@@ -8174,12 +8174,23 @@ async def set_reviewed(
 # repeated upstream traffic. Nothing that failed is cached — neither a raising
 # collection nor a single link lookup that returned None — and the entry is
 # dropped whenever the job's comments change (see notify_comments_changed).
+# Entries are keyed by (job_id, settings fingerprint): a snapshot may only be
+# replayed under the tracker configuration that produced it.
 _ENRICHMENTS_TTL_SECONDS = 60
-_enrichments_cache: dict[str, tuple[float, dict[str, list[dict[str, Any]]]]] = {}
-# Collections in flight, keyed by job: a report load that arrives while the
-# first one is still looking up links joins it instead of repeating its
+# Nothing keeps an unknown job id out of the cache (its collection succeeds —
+# storage simply has no comments for it), so the cap is what bounds an
+# authenticated caller minting distinct ids. Worst case for a wrong eviction is
+# one extra collection.
+_ENRICHMENTS_CACHE_MAX_ENTRIES = 512
+_enrichments_cache: dict[
+    tuple[str, str], tuple[float, dict[str, list[dict[str, Any]]]]
+] = {}
+# Collections in flight, keyed like the cache: a report load that arrives while
+# the first one is still looking up links joins it instead of repeating its
 # GitHub/Jira calls.
-_enrichments_inflight: dict[str, asyncio.Task[dict[str, list[dict[str, Any]]]]] = {}
+_enrichments_inflight: dict[
+    tuple[str, str], asyncio.Task[dict[str, list[dict[str, Any]]]]
+] = {}
 # Bumped on every comment change. A collector notes it after its cache miss and
 # skips its write once it moved — otherwise a snapshot read before the change
 # would overwrite the invalidation and leave the new link badge-less for a whole
@@ -8192,9 +8203,52 @@ def _invalidate_enrichments_cache(job_id: str) -> None:
     """Drop a job's cached enrichments so the next read re-fetches them."""
     global _enrichments_epoch
     _enrichments_epoch += 1
-    _enrichments_cache.pop(job_id, None)
-    # A read after the change must not join a collection that started before it.
-    _enrichments_inflight.pop(job_id, None)
+    # Every configuration's entry for this job, and a read after the change
+    # must not join a collection that started before it.
+    for cache in (_enrichments_cache, _enrichments_inflight):
+        for stale_key in [k for k in cache if k[0] == job_id]:
+            cache.pop(stale_key, None)
+
+
+def _enrichments_settings_fingerprint(settings: Settings) -> str:
+    """Short, non-reversible identity of the tracker config of a snapshot.
+
+    A cached snapshot is only valid under the settings that produced it:
+    disabling Jira or rotating a tracker credential must show on the next read
+    instead of after the TTL. Hashed — a cache key never holds a secret.
+    """
+    connection = resolve_jira_connection(settings) if settings.jira_enabled else None
+    identity = (
+        ()
+        if connection is None
+        else (
+            connection.mode,
+            connection.api_base,
+            connection.browse_base,
+            connection.api_path,
+            connection.sa_client_id,
+            connection.sa_client_secret,
+            connection.auth or (),
+            tuple(connection.headers.values()),
+        )
+    )
+    github_token = (
+        settings.github_token.get_secret_value() if settings.github_token else ""
+    )
+    return hashlib.sha256(repr((identity, github_token)).encode()).hexdigest()[:16]
+
+
+def _remember_enrichments(
+    cache_key: tuple[str, str], now: float, enrichments: dict[str, list[dict[str, Any]]]
+) -> None:
+    """Store one snapshot: drop expired entries, then evict down to the cap."""
+    for stale_key, (cached_at, _) in list(_enrichments_cache.items()):
+        if now - cached_at >= _ENRICHMENTS_TTL_SECONDS:
+            _enrichments_cache.pop(stale_key, None)
+    _enrichments_cache[cache_key] = (now, enrichments)
+    while len(_enrichments_cache) > _ENRICHMENTS_CACHE_MAX_ENTRIES:
+        oldest = min(_enrichments_cache, key=lambda k: _enrichments_cache[k][0])
+        _enrichments_cache.pop(oldest, None)
 
 
 async def _collect_comment_enrichments(
@@ -8202,28 +8256,30 @@ async def _collect_comment_enrichments(
 ) -> dict[str, list[dict[str, Any]]]:
     """Resolve live statuses for every tracker link found in a job's comments.
 
-    Serves a cached result when the job was collected within
-    ``_ENRICHMENTS_TTL_SECONDS``, and joins an already running collection of the
-    same job. Errors propagate and leave no cache entry; so does a collection
-    where any single link lookup failed, so the next read retries it.
+    Serves a cached result when the job was collected with the same tracker
+    configuration within ``_ENRICHMENTS_TTL_SECONDS``, and joins an already
+    running collection of the same job. Errors propagate and leave no cache
+    entry; so does a collection where any single link lookup failed, so the
+    next read retries it.
     """
-    cached = _enrichments_cache.get(job_id)
+    cache_key = (job_id, _enrichments_settings_fingerprint(settings))
+    cached = _enrichments_cache.get(cache_key)
     if cached is not None and _time.monotonic() - cached[0] < _ENRICHMENTS_TTL_SECONDS:
         logger.debug(f"enrich_comments: job_id={job_id}, served from cache")
         return cached[1]
     epoch = _enrichments_epoch
-    inflight = _enrichments_inflight.get(job_id)
+    inflight = _enrichments_inflight.get(cache_key)
     if inflight is not None:
         logger.debug(f"enrich_comments: job_id={job_id}, joined in-flight collection")
         # Shielded: a reader whose client goes away must not cancel the
         # collection the other readers of this job are waiting on.
         return await asyncio.shield(inflight)
-    task = asyncio.create_task(_fetch_comment_enrichments(job_id, settings, epoch))
-    _enrichments_inflight[job_id] = task
+    task = asyncio.create_task(_fetch_comment_enrichments(cache_key, settings, epoch))
+    _enrichments_inflight[cache_key] = task
 
     def _forget(done: asyncio.Task[dict[str, list[dict[str, Any]]]]) -> None:
-        if _enrichments_inflight.get(job_id) is done:
-            _enrichments_inflight.pop(job_id, None)
+        if _enrichments_inflight.get(cache_key) is done:
+            _enrichments_inflight.pop(cache_key, None)
         if not done.cancelled():
             done.exception()  # shielded and now unread: never "never retrieved"
 
@@ -8232,9 +8288,10 @@ async def _collect_comment_enrichments(
 
 
 async def _fetch_comment_enrichments(
-    job_id: str, settings: Settings, epoch: int
+    cache_key: tuple[str, str], settings: Settings, epoch: int
 ) -> dict[str, list[dict[str, Any]]]:
     """Look up every tracker link in a job's comments and cache the result."""
+    job_id = cache_key[0]
     comments = await storage.get_comments_for_job(job_id)
     logger.debug(f"enrich_comments: job_id={job_id}, comments_count={len(comments)}")
 
@@ -8276,6 +8333,10 @@ async def _fetch_comment_enrichments(
     tasks: list[Coroutine[Any, Any, Any]] = []
     task_map: dict[int, tuple[str, dict[str, Any]]] = {}
 
+    # Detected even when no connection is usable: a job whose comments carry
+    # Jira keys must not have its GitHub result cached while Jira is down.
+    jira_keys_seen = False
+
     for c in comments:
         for pr in detect_github_prs(c["comment"]):
             idx = len(tasks)
@@ -8313,14 +8374,16 @@ async def _fetch_comment_enrichments(
                 },
             )
 
-        if jira_connection:
-            for key in detect_jira_keys(c["comment"]):
-                idx = len(tasks)
-                tasks.append(fetch_jira_ticket_status(jira_connection, key))
-                task_map[idx] = (str(c["id"]), {"type": "jira", "key": key})
+        for jira_key in detect_jira_keys(c["comment"]):
+            jira_keys_seen = True
+            if jira_connection is None:
+                continue
+            idx = len(tasks)
+            tasks.append(fetch_jira_ticket_status(jira_connection, jira_key))
+            task_map[idx] = (str(c["id"]), {"type": "jira", "key": jira_key})
 
     enrichments: dict[str, list[dict[str, Any]]] = {}
-    failed = jira_failed
+    failed = jira_failed and jira_keys_seen
     logger.debug(f"enrich_comments: job_id={job_id}, enrichment_tasks={len(tasks)}")
 
     if tasks:
@@ -8350,14 +8413,7 @@ async def _fetch_comment_enrichments(
             "not cached"
         )
     else:
-        now = _time.monotonic()
-        # Expired entries are only ever dropped here: the dict grows on writes,
-        # so this is the one place that keeps it bounded. O(n) is fine — n is
-        # the number of distinct job ids read within a TTL, not request traffic.
-        for stale_id, (cached_at, _) in list(_enrichments_cache.items()):
-            if now - cached_at >= _ENRICHMENTS_TTL_SECONDS:
-                _enrichments_cache.pop(stale_id, None)
-        _enrichments_cache[job_id] = (now, enrichments)
+        _remember_enrichments(cache_key, _time.monotonic(), enrichments)
     return enrichments
 
 
@@ -10874,6 +10930,12 @@ async def bulk_delete_jobs_endpoint(
 
     origins = await _reanalysis_origins(job_ids)
     result = await storage.delete_jobs_bulk(job_ids)
+    # Invalidate before any await below: the deletion is committed, so a read
+    # arriving during the cleanup must not serve the deleted jobs' badges — and
+    # a failure in the cleanup must not leave them readable until they expire.
+    # Over-invalidating an id whose deletion failed only costs one extra read.
+    for job_id in job_ids:
+        _invalidate_enrichments_cache(job_id)
     # A job whose deletion failed keeps its row, so its origin keeps the link.
     deleted_ids = set(result["deleted"])
     await _unlink_reanalysis_origins(
@@ -10883,7 +10945,6 @@ async def bulk_delete_jobs_endpoint(
     result["unauthorized"] = unauthorized_ids
 
     for job_id in result["deleted"]:
-        _invalidate_enrichments_cache(job_id)
         await _cleanup_deleted_job_chat_workspaces(job_id)
 
     notify_active_count_changed()
