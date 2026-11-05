@@ -9550,9 +9550,26 @@ async def _chat_issue_github_repo(
 
 # Pending chat issue drafts, keyed by their single-use confirmation id.
 # In-memory like the rest of the chat state: a restart drops them and the model
-# is told to propose again.
+# is told to propose again. Each entry holds a title and body until it expires,
+# so both the account and the whole map are capped.
 _ISSUE_DRAFT_TTL_SECONDS = 600
+#: Live previews one account keeps; a new proposal replaces its oldest.
+_ISSUE_DRAFTS_PER_USER = 5
+#: Live previews the process keeps for every account together.
+_ISSUE_DRAFTS_MAX = 200
 _chat_issue_drafts: dict[str, dict[str, Any]] = {}
+
+
+def _release_issue_draft(confirmation_id: str, draft: dict[str, Any]) -> None:
+    """Hand a claimed draft back, so a refused or failed create can be retried.
+
+    The claim is single use, not single attempt: only a create that FILED
+    something uses the draft up. An outage, an upstream refusal or a bad
+    request leaves the user's confirmation intact instead of asking them to
+    approve the same text again.
+    """
+    if draft["expires_at"] > _time.monotonic():
+        _chat_issue_drafts.setdefault(confirmation_id, draft)
 
 
 def _prune_issue_drafts(now: float) -> None:
@@ -9637,10 +9654,14 @@ async def _chat_last_message_id(conversation: str, username: str) -> int:
     """
     if not conversation:
         return 0
-    messages = await storage.get_chat_messages(
-        conversation, limit=None, username=username
-    )
-    return max((message["id"] for message in messages), default=0)
+    return await storage.get_chat_message_max_id(conversation, username)
+
+
+#: How many of the user's OWN messages a confirmation is looked for in after the
+#: draft's watermark, newest first. A confirmation always arrives within a few
+#: replies, and the fixed window keeps this one small query per create attempt
+#: however long the conversation grows.
+_CONFIRM_SCAN_MESSAGES = 50
 
 
 async def _user_replied_with_code(
@@ -9650,17 +9671,22 @@ async def _user_replied_with_code(
 
     Only the persisted chat row counts: the model writes assistant messages and
     tool calls, never user rows, so the model cannot confirm its own draft.
+    Bounded query: only the newest ``_CONFIRM_SCAN_MESSAGES`` user messages in
+    this chat newer than the watermark are read (the storage query filters on
+    ``id > after_id``, the role and the username), and the scan stops at the
+    first match.
     """
     if not conversation:
         return False
-    messages = await storage.get_chat_messages(
-        conversation, limit=None, username=username
+    messages = await storage.get_chat_user_messages_since(
+        conversation,
+        after_id=after_id,
+        limit=_CONFIRM_SCAN_MESSAGES,
+        username=username,
     )
     return any(
-        message["id"] > after_id
-        and message["role"] == "user"
-        # Spelled out: an empty username's query returns every user's messages.
-        and message["username"] == username
+        # Spelled out again: an empty username's query returns every user.
+        message["username"] == username
         and _message_confirms_code(message["content"], code)
         for message in messages
     )
@@ -9683,9 +9709,36 @@ async def _store_issue_draft(
     is the chat the draft belongs to (``""`` for a direct, non-chat call): the
     create call only redeems a chat draft once a user message in that chat
     carries the code.
+
+    Bounded: a proposal is title and body held until it expires, so this
+    account's oldest draft is evicted before it exceeds
+    ``_ISSUE_DRAFTS_PER_USER``, and a store already at ``_ISSUE_DRAFTS_MAX``
+    refuses the new draft instead of growing.
     """
     now = _time.monotonic()
     _prune_issue_drafts(now)
+    if len(_chat_issue_drafts) >= _ISSUE_DRAFTS_MAX:
+        # Checked before evicting: a full store must not cost this user a draft.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "No issue was drafted: this server is holding too many "
+                "unconfirmed issue previews right now. Wait a few minutes for "
+                "the older ones to expire, then propose the issue again."
+            ),
+        )
+    # ``expires_at`` is a fixed TTL from a monotonic clock, so sorting by it is
+    # sorting by age: the oldest draft of this account goes first.
+    mine = sorted(
+        (
+            (draft_id, draft)
+            for draft_id, draft in _chat_issue_drafts.items()
+            if draft["username"] == username
+        ),
+        key=lambda item: item[1]["expires_at"],
+    )
+    for draft_id, _draft in mine[: max(len(mine) - _ISSUE_DRAFTS_PER_USER + 1, 0)]:
+        _chat_issue_drafts.pop(draft_id, None)
     code = _new_issue_code(conversation=conversation)
     draft_id = uuid.uuid4().hex
     _chat_issue_drafts[draft_id] = {
@@ -9733,8 +9786,8 @@ async def _consume_issue_draft(
     title: str,
     body: str,
     destination: dict[str, str],
-) -> None:
-    """Redeem a draft for this caller, once, or refuse with the next step.
+) -> dict[str, Any]:
+    """Claim a draft for this caller, once, or refuse with the next step.
 
     This is the consent gate, and consent is something the model cannot supply:
     a create call without a live draft of its own files nothing, the code must
@@ -9743,6 +9796,13 @@ async def _consume_issue_draft(
     proposes and creates in one turn therefore gets a refusal naming the step
     it skipped. The draft also binds the destination, so an approved "this text
     for this repo" cannot authorise another repo, run or Jira project.
+
+    The claim is atomic: the draft is popped before the first ``await``, so of
+    two concurrent creates with the same id exactly one wins it and the other
+    reads it as already used. A refusal hands the claim back
+    (:func:`_release_issue_draft`) — only a create that files something, or a
+    failure after it (:func:`create_chat_issue`), spends it. Returns the claimed
+    draft.
     """
     propose = (
         "call propose_tracker_issue first, show the user the preview and file "
@@ -9757,10 +9817,9 @@ async def _consume_issue_draft(
                 "fails."
             ),
         )
-    draft = _chat_issue_drafts.get(confirmation_id)
+    draft = _chat_issue_drafts.pop(confirmation_id, None)
     expired = draft is not None and draft["expires_at"] <= _time.monotonic()
     if draft is None or expired:
-        _chat_issue_drafts.pop(confirmation_id, None)
         raise HTTPException(
             status_code=400,
             detail=(
@@ -9768,6 +9827,54 @@ async def _consume_issue_draft(
                 f"or already used. To file the issue, {propose} again."
             ),
         )
+    try:
+        _require_draft_matches(
+            draft,
+            code=code,
+            username=username,
+            target=target,
+            title=title,
+            body=body,
+            destination=destination,
+            propose=propose,
+        )
+        if draft["conversation"] and not await _user_replied_with_code(
+            conversation=draft["conversation"],
+            username=username,
+            code=draft["code"],
+            after_id=draft["watermark"],
+        ):
+            # The structural half: the code alone proves nothing, because the
+            # model reads it in the preview it composes. Only a stored USER
+            # message does.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No issue was filed: nobody confirmed this draft — "
+                    f"{_CONFIRM_STEP}. Show the user the preview and wait for "
+                    "that reply before calling create again; you cannot confirm "
+                    "it for them."
+                ),
+            )
+    except HTTPException:
+        # A refused attempt is not a use: the user's confirmation still works.
+        _release_issue_draft(confirmation_id, draft)
+        raise
+    return draft
+
+
+def _require_draft_matches(
+    draft: dict[str, Any],
+    *,
+    code: str,
+    username: str,
+    target: Literal["github", "jira"],
+    title: str,
+    body: str,
+    destination: dict[str, str],
+    propose: str,
+) -> None:
+    """Refuse a claim whose caller, code, text or destination is not the draft's."""
     if draft["username"] != username:
         # Never a 404 and never a success: the id is real but not this caller's.
         raise HTTPException(
@@ -9786,23 +9893,6 @@ async def _consume_issue_draft(
                 f"the code it returned — {_CONFIRM_STEP}."
             ),
         )
-    if draft["conversation"] and not await _user_replied_with_code(
-        conversation=draft["conversation"],
-        username=username,
-        code=draft["code"],
-        after_id=draft["watermark"],
-    ):
-        # The structural half: the code alone proves nothing, because the model
-        # reads it in the preview it composes. Only a stored USER message does.
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "No issue was filed: nobody confirmed this draft — "
-                f"{_CONFIRM_STEP}. Show the user the preview and wait for that "
-                "reply before calling create again; you cannot confirm it for "
-                "them."
-            ),
-        )
     if (
         draft["target"] != target
         or draft["title"] != title
@@ -9818,9 +9908,6 @@ async def _consume_issue_draft(
                 "the new preview."
             ),
         )
-    # Single use: the id (and the code with it) dies with the create call it
-    # authorized.
-    _chat_issue_drafts.pop(confirmation_id, None)
 
 
 async def _create_issue_from_text(
@@ -10259,7 +10346,7 @@ async def create_chat_issue(
         )
         # The consent gate: without a live draft of its own and the user's reply,
         # nothing is filed.
-        await _consume_issue_draft(
+        draft = await _consume_issue_draft(
             body.confirmation_id,
             code=body.confirmation_code,
             username=username,
@@ -10268,23 +10355,33 @@ async def create_chat_issue(
             body=issue_body,
             destination=destination,
         )
-        result = await _create_issue_from_text(
-            tracker,
-            title,
-            issue_body,
-            username=username,
-            settings=settings,
-            github_token=user_tokens.get("github_token", ""),
-            jira_token=user_tokens.get("jira_token", ""),
-            jira_email=user_tokens.get("jira_email", ""),
-            jira_sa_token=user_tokens.get("jira_sa_token", ""),
-            jira_project_key=destination.get("jira_project_key", ""),
-            jira_security_level=destination.get("jira_security_level", ""),
-            jira_issue_type=destination.get("jira_issue_type", "Bug"),
-            github_repo_url=github_repo_url,
-            via="rootcoz chat",
-            subject="issue",
-        )
+        try:
+            result = await _create_issue_from_text(
+                tracker,
+                title,
+                issue_body,
+                username=username,
+                settings=settings,
+                github_token=user_tokens.get("github_token", ""),
+                jira_token=user_tokens.get("jira_token", ""),
+                jira_email=user_tokens.get("jira_email", ""),
+                jira_sa_token=user_tokens.get("jira_sa_token", ""),
+                jira_project_key=destination.get("jira_project_key", ""),
+                jira_security_level=destination.get("jira_security_level", ""),
+                jira_issue_type=destination.get("jira_issue_type", "Bug"),
+                github_repo_url=github_repo_url,
+                via="rootcoz chat",
+                subject="issue",
+            )
+        except Exception:
+            # An outage or a refusal is not a decision: the confirmation survives
+            # so the user can retry it once the tracker is back, and only a filed
+            # issue spends it.
+            # shortcut: a create that failed AFTER the tracker accepted it can be
+            # retried into a duplicate — the alternative is making the user
+            # approve the same text again on every upstream blip.
+            _release_issue_draft(body.confirmation_id, draft)
+            raise
     except HTTPException as exc:
         details: dict[str, Any] = {"tracker": tracker, "result": "refused"}
         upstream_status = _upstream_status(exc)

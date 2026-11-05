@@ -5575,6 +5575,190 @@ class TestChatIssueEndpoint:
             response = test_client.post("/api/chat-issue", json=draft, headers=headers)
         assert response.status_code == 201, response.text
 
+    # -- the claim, the caps and retries --------------------------------------
+
+    @pytest.fixture(autouse=True)
+    def _no_leftover_drafts(self):
+        """Drafts are process state: every test here starts and ends empty."""
+        from rootcoz import main as main_mod
+
+        main_mod._chat_issue_drafts.clear()
+        yield
+        main_mod._chat_issue_drafts.clear()
+
+    @pytest.mark.asyncio
+    async def test_two_parallel_creates_file_one_issue(self, test_client):
+        """One confirmation files once, however many creates arrive together.
+
+        Both requests are held inside the consent read at the same time: without
+        an atomic claim both pass it and both file, so the second has to be
+        refused by the claim itself and not by timing.
+        """
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        headers = await self._admin("chat-race", github_token="ghp_row_token")
+        draft = await self._propose(test_client, "github", headers)
+
+        scans: list[int] = []
+        # Both POSTs start together, then the patched consent read keeps the
+        # first one inside it long enough for the second to arrive.
+        start = threading.Barrier(2, timeout=5)
+
+        async def _slow_reply_check(**_kwargs) -> bool:
+            scans.append(1)
+            await asyncio.sleep(0.2)
+            return True
+
+        def _create() -> int:
+            start.wait()
+            return test_client.post(
+                "/api/chat-issue", json=draft, headers=headers
+            ).status_code
+
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            patch("rootcoz.main._user_replied_with_code", new=_slow_reply_check),
+            _with_github_issue_config(),
+        ):
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/20",
+                "number": 20,
+            }
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                statuses = [
+                    future.result(timeout=30)
+                    for future in [pool.submit(_create) for _ in range(2)]
+                ]
+
+        assert sorted(statuses) == [201, 400], statuses
+        # Exactly one request ever reached the consent read: the loser lost the
+        # claim before it could.
+        assert len(scans) == 1
+        assert mock_create.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_new_proposal_replaces_this_users_oldest_draft(self, test_client):
+        """Five live previews per account: the sixth evicts the first."""
+        from rootcoz import main as main_mod
+
+        headers = await self._admin("chat-cap", github_token="ghp_row_token")
+        drafts = [
+            await self._propose_only(test_client, "github", headers)
+            for _ in range(main_mod._ISSUE_DRAFTS_PER_USER + 1)
+        ]
+        live = {
+            draft_id
+            for draft_id, draft in main_mod._chat_issue_drafts.items()
+            if draft["username"] == "chat-cap"
+        }
+        assert len(live) == main_mod._ISSUE_DRAFTS_PER_USER
+        assert drafts[0]["confirmation_id"] not in live
+        assert drafts[-1]["confirmation_id"] in live
+        # The evicted draft is gone, and says so the way any spent id does.
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post(
+                "/api/chat-issue", json=drafts[0], headers=headers
+            )
+        assert response.status_code == 400
+        assert "unknown, expired or already used" in response.json()["detail"]
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_full_store_refuses_the_new_proposal(
+        self, test_client, monkeypatch
+    ):
+        """The whole map has a ceiling, and hitting it is a refusable 503."""
+        from rootcoz import main as main_mod
+
+        monkeypatch.setattr(main_mod, "_ISSUE_DRAFTS_MAX", 1)
+        first = await self._admin("chat-fill", github_token="ghp_row_token")
+        await self._propose_only(test_client, "github", first)
+        second = await self._admin("chat-full", github_token="ghp_row_token")
+        with _with_github_issue_config():
+            proposal = test_client.post(
+                "/api/chat-issue/propose",
+                json={
+                    **self._CHAT,
+                    "target": "github",
+                    "conversation": self._ADMIN_CHAT,
+                },
+                headers=second,
+            )
+        assert proposal.status_code == 503, proposal.text
+        detail = proposal.json()["detail"]
+        assert "too many unconfirmed issue previews" in detail
+        assert "propose the issue again" in detail
+        # Nothing was kept for the refused account.
+        assert not [
+            draft
+            for draft in main_mod._chat_issue_drafts.values()
+            if draft["username"] == "chat-full"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_an_upstream_outage_leaves_the_confirmation_usable(self, test_client):
+        """A 5xx is not a decision: the same id and code file once it recovers."""
+        headers = await self._admin("chat-outage", github_token="ghp_row_token")
+        draft = await self._propose(test_client, "github", headers)
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.side_effect = httpx.HTTPStatusError(
+                "outage",
+                request=httpx.Request("POST", "https://api.github.com"),
+                response=httpx.Response(502),
+            )
+            with _with_github_issue_config():
+                failed = test_client.post(
+                    "/api/chat-issue", json=draft, headers=headers
+                )
+        assert failed.status_code == 502, failed.text
+        assert "Try again in a few minutes" in failed.json()["detail"]
+        # The user retries with exactly what they approved — no new preview.
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/21",
+                "number": 21,
+            }
+            with _with_github_issue_config():
+                retried = test_client.post(
+                    "/api/chat-issue", json=draft, headers=headers
+                )
+        assert retried.status_code == 201, retried.text
+        assert mock_create.call_count == 1
+        # Filed once is spent: the retry was the single successful use.
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            again = test_client.post("/api/chat-issue", json=draft, headers=headers)
+        assert again.status_code == 400
+        assert "already used" in again.json()["detail"]
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_reply_from_before_the_draft_does_not_confirm(self, test_client):
+        """The code only counts in a message stored AFTER the preview."""
+        headers = await self._admin("chat-stale-reply", github_token="ghp_row_token")
+        # A reply sent for an earlier draft, carrying a code this draft never had.
+        await self._user_reply(headers, "ABCDEF")
+        draft = await self._propose_only(test_client, "github", headers)
+        await self._user_reply(headers, "ABCDEF")
+        # Rewind the watermark: the only matching reply is now older than the draft.
+        from rootcoz import main as main_mod
+
+        main_mod._chat_issue_drafts[draft["confirmation_id"]]["watermark"] = 10**6
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post("/api/chat-issue", json=draft, headers=headers)
+        assert response.status_code == 400, response.text
+        assert "nobody confirmed this draft" in response.json()["detail"]
+        mock_create.assert_not_called()
+
     # -- audit trail ----------------------------------------------------------
 
     @pytest.mark.asyncio
