@@ -947,11 +947,14 @@ def cleanup_chat_repos(job_id: str, username: str = "") -> tuple[int, int]:
     whole-tree ``delete_tree`` step the caller queues right after this one.
     """
     workspace = get_chat_workspace(job_id, username)
-    from rootcoz.engine.graft import cleanup_graph
+    from rootcoz.engine.graft import reap_graph
     from rootcoz.engine.graft_http import unregister_workspace
 
     unregister_workspace(workspace)
-    nbytes, entries = cleanup_graph(workspace)
+    graph = reap_graph(job_id, workspace)
+    if graph is None:
+        return (0, 0)
+    nbytes, entries = graph
     if not workspace.exists():
         return (nbytes, entries)
 
@@ -989,11 +992,14 @@ def cleanup_chat_workspace(job_id: str, username: str = "") -> tuple[int, int]:
     """Delete the entire chat workspace including sessions."""
     workspace = get_chat_workspace(job_id, username)
     targets = _chat_mcp_lock_targets(workspace)
-    from rootcoz.engine.graft import cleanup_graph
+    from rootcoz.engine.graft import reap_graph
     from rootcoz.engine.graft_http import unregister_workspace
 
     unregister_workspace(workspace)
-    nbytes, entries = cleanup_graph(workspace)
+    graph = reap_graph(job_id, workspace)
+    if graph is None:
+        return (0, 0)
+    nbytes, entries = graph
     # Hold each workspace's MCP install lock for the whole delete + dump
     # unlink so an in-flight installer cannot recreate credentials after
     # the job (or nested user dir) was removed.

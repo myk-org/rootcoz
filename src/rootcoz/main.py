@@ -6000,13 +6000,13 @@ async def _process_ci_source_analysis(
         session_task = asyncio.create_task(_cleanup_ai_session(auth_header))
         steps: list[Callable[[], object]] = []
         if repo_manager is not None:
-            from rootcoz.engine.graft import cleanup_graph
+            from rootcoz.engine.graft import reap_graph
             from rootcoz.engine.graft_http import unregister_workspace
 
             if repo_path is not None:
                 steps += [
                     partial(unregister_workspace, repo_path),
-                    partial(cleanup_graph, repo_path),
+                    partial(reap_graph, job_id, repo_path),
                 ]
             steps.append(repo_manager.cleanup)
         if source is not None:
@@ -7401,13 +7401,13 @@ async def _reanalyze_failure_background(
         session_task = asyncio.create_task(_cleanup_ai_session(auth_header))
         steps: list[Callable[[], object]] = []
         if repo_manager:
-            from rootcoz.engine.graft import cleanup_graph
+            from rootcoz.engine.graft import reap_graph
             from rootcoz.engine.graft_http import unregister_workspace
 
             if repo_path is not None:
                 steps += [
                     partial(unregister_workspace, repo_path),
-                    partial(cleanup_graph, repo_path),
+                    partial(reap_graph, job_id, repo_path),
                 ]
             steps.append(repo_manager.cleanup)
         # Clean up downloaded source artifacts

@@ -1,6 +1,7 @@
 """Bounded Graft snapshots and read-only query routing."""
 
 import json
+import logging
 import os
 import subprocess
 import threading
@@ -667,6 +668,119 @@ def test_query_lock_wait_is_bounded(tmp_path, monkeypatch):
         finally:
             release.set()
         holder.result(timeout=2)
+
+
+def test_reap_graph_abandons_the_delete_while_a_builder_holds_the_lock(
+    tmp_path, monkeypatch, caplog
+):
+    """A live build owns the tree: the reaper logs, deletes nothing, returns None."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from rootcoz.engine.http_mcp import _workspace_install_lock
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    root = graft._root(workspace)
+    root.mkdir()
+    (root / "snapshot.py").write_text("source")
+    monkeypatch.setattr(graft, "GRAPH_LOCK_SECONDS", 0.05)
+    monkeypatch.setattr(graft.logger, "propagate", True)
+    deleted: list[Path] = []
+
+    def record_delete(path: Path) -> tuple[int, int]:
+        deleted.append(path)
+        return (0, 0)
+
+    monkeypatch.setattr(graft, "delete_tree", record_delete)
+    entered, release = threading.Event(), threading.Event()
+
+    def build():
+        with _workspace_install_lock(workspace):
+            entered.set()
+            assert release.wait(3)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        builder = pool.submit(build)
+        assert entered.wait(2)
+        try:
+            with caplog.at_level(logging.WARNING):
+                assert graft.reap_graph("job-1", workspace) is None
+        finally:
+            release.set()
+        builder.result(timeout=2)
+
+    assert deleted == []
+    assert root.exists()
+    assert "graph-lock-timeout job_id=job-1" in caplog.text
+
+
+def test_reap_graph_deletes_after_the_builder_releases_the_lock(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    from rootcoz.engine.http_mcp import _workspace_install_lock
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    root = graft._root(workspace)
+    root.mkdir()
+    (root / "snapshot.py").write_text("source")
+    monkeypatch.setattr(graft, "GRAPH_LOCK_SECONDS", 0.05)
+    entered, release = threading.Event(), threading.Event()
+
+    def build():
+        with _workspace_install_lock(workspace):
+            entered.set()
+            assert release.wait(3)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        builder = pool.submit(build)
+        assert entered.wait(2)
+        try:
+            assert graft.reap_graph("job-2", workspace) is None
+        finally:
+            release.set()
+        builder.result(timeout=2)
+
+    nbytes, _entries = graft.reap_graph("job-2", workspace)
+    assert nbytes > 0
+    assert not root.exists()
+
+
+def test_cleanup_graph_without_a_deadline_still_waits_and_succeeds(tmp_path):
+    """The default keeps the old blocking contract for direct callers."""
+    from concurrent.futures import ThreadPoolExecutor
+
+    from rootcoz.engine.http_mcp import _workspace_install_lock
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    root = graft._root(workspace)
+    root.mkdir()
+    (root / "snapshot.py").write_text("source")
+    entered, release = threading.Event(), threading.Event()
+
+    def build():
+        with _workspace_install_lock(workspace):
+            entered.set()
+            assert release.wait(3)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        builder = pool.submit(build)
+        assert entered.wait(2)
+        timer = threading.Timer(0.2, release.set)
+        timer.start()
+        try:
+            started = time.monotonic()
+            nbytes, _entries = graft.cleanup_graph(workspace)
+            waited = time.monotonic() - started
+        finally:
+            timer.cancel()
+            release.set()
+        builder.result(timeout=2)
+
+    assert waited >= 0.1
+    assert nbytes > 0
+    assert not root.exists()
 
 
 def test_index_outcome_logs_are_sanitized():

@@ -26,6 +26,13 @@ logger = get_child_logger(__name__)
 
 MAX_SECONDS = 30
 BUILD_SECONDS = 120
+#: Longest a reaper waits for a live graph build before abandoning a delete.
+#: ``index_repositories`` holds the workspace lock for a whole run, four repos at
+#: a time, and one trail build is bounded by ``BUILD_SECONDS``; the usual
+#: five-clone job is ``ceil(5 / 4)`` batches, so a builder's own worst case is
+#: ``2 * BUILD_SECONDS``. Waiting exactly that long abandons the delete only when
+#: the build has outrun its bound, and the next sweep picks the graph up.
+GRAPH_LOCK_SECONDS = BUILD_SECONDS * 2
 FAILED_RETRY_SECONDS = 300
 QUERY_SECONDS = 45
 MAX_OUTPUT = 1024 * 1024
@@ -981,14 +988,39 @@ def indexed_roots(workspace: Path) -> dict[str, Path]:
         }
 
 
-def cleanup_graph(workspace: Path) -> tuple[int, int]:
+def cleanup_graph(workspace: Path, *, deadline: float | None = None) -> tuple[int, int]:
     """Delete graphs and snapshots outside the AI-visible workspace.
 
     Returns ``(bytes, entries)`` reclaimed. Sync on purpose — this takes a
     blocking ``flock`` and is a reaper step, never called from the event loop.
+
+    ``deadline`` bounds the wait for that ``flock``; ``None`` waits forever, which
+    is what a direct caller without a builder to race expects. When it expires
+    ``TimeoutError`` propagates and nothing is deleted, because the tree still
+    belongs to the builder holding the lock.
     """
     root = _root(workspace)
-    with _workspace_install_lock(Path(workspace).resolve()):
+    with _workspace_install_lock(Path(workspace).resolve(), deadline=deadline):
         if root.is_dir() and not root.is_symlink():
             return delete_tree(root)
         return (0, 0)
+
+
+def reap_graph(job_id: str, workspace: Path) -> tuple[int, int] | None:
+    """``cleanup_graph`` as the reaper runs it: bounded, never under a builder.
+
+    ``None`` means the delete was abandoned, so the caller must not keep deleting
+    the rest of a workspace a live builder is reading; the leftovers belong to
+    the next sweep. One shared worker runs every queued delete, so an unbounded
+    wait here is what stalled them all (#402).
+    """
+    try:
+        return cleanup_graph(workspace, deadline=time.monotonic() + GRAPH_LOCK_SECONDS)
+    except TimeoutError:
+        logger.warning(
+            "graph-lock-timeout job_id=%s: graph build still holds the workspace "
+            "lock after %ds; leaving the graph for the next sweep",
+            job_id,
+            GRAPH_LOCK_SECONDS,
+        )
+        return None
