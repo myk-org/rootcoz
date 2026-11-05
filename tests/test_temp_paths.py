@@ -463,6 +463,8 @@ def test_unreadable_entry_does_not_abandon_the_tree(
     assert entries >= 2
     assert not (root / "good").exists()
     assert caplog.text.count("errno=13") == 1
+    # The poisoned directory's contents are unknown, not one entry.
+    assert "1 directory not descended" in caplog.text, caplog.text
 
 
 def test_a_scan_error_does_not_abandon_the_rest_of_the_tree(
@@ -493,6 +495,7 @@ def test_a_scan_error_does_not_abandon_the_rest_of_the_tree(
     assert (poisoned / "stuck.txt").exists()
     assert (nbytes, entries) == (100, 2)  # sibling dir + its file, nothing else
     assert caplog.text.count(f"errno={errno.EIO}") == 1
+    assert "1 directory not descended" in caplog.text, caplog.text
 
     delete_tree(root)
     assert not root.exists()
@@ -540,10 +543,11 @@ def test_two_distinct_errnos_are_one_aggregated_warning(
     warnings = _cleanup_warnings(caplog)
     assert len(warnings) == 1, warnings
     line = warnings[0]
-    assert line.startswith("cleanup: 2 entries not deleted ("), line
+    assert line.startswith("cleanup: 2 paths not deleted ("), line
     assert f"errno={errno.EACCES} {os.strerror(errno.EACCES)}: 1" in line, line
     assert f"errno={errno.ENOTEMPTY} {os.strerror(errno.ENOTEMPTY)}: 1" in line, line
     assert "stuck.txt" in line, line
+    assert "not descended" not in line, line
 
 
 def test_repeated_errnos_are_counted_not_logged_per_entry(
@@ -561,12 +565,40 @@ def test_repeated_errnos_are_counted_not_logged_per_entry(
     assert (nbytes, entries) == (0, 0)
     warnings = _cleanup_warnings(caplog)
     assert len(warnings) == 1, warnings
-    assert warnings[0].startswith("cleanup: 3 entries not deleted ("), warnings[0]
+    assert warnings[0].startswith("cleanup: 3 paths not deleted ("), warnings[0]
     assert f"errno={errno.EACCES} {os.strerror(errno.EACCES)}: 2" in warnings[0], (
         warnings[0]
     )
     assert f"errno={errno.ENOTEMPTY} {os.strerror(errno.ENOTEMPTY)}: 1" in warnings[0]
-    assert caplog.text.count("entries not deleted") == 1
+    assert caplog.text.count("paths not deleted") == 1
+
+
+def test_one_stuck_file_at_depth_four_counts_paths_not_operations(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """The same surviving subtree re-reported by every ancestor rmdir is one path.
+
+    One unlinkable file under a/b/c is EACCES on the file, then ENOTEMPTY on c, b,
+    a and the root: four operations, one subtree. Reporting ``5 entries`` invented
+    work that never existed.
+    """
+    root = tmp_path / "tree"
+    deep = root / "a" / "b" / "c"
+    deep.mkdir(parents=True)
+    (deep / "stuck.txt").write_text("x")
+    _fail_unlink_of({"stuck.txt"}, monkeypatch)
+
+    assert delete_tree(root) == (0, 0)
+    monkeypatch.undo()
+
+    warnings = _cleanup_warnings(caplog)
+    assert len(warnings) == 1, warnings
+    line = warnings[0]
+    assert line.startswith("cleanup: 2 paths not deleted ("), line
+    assert f"errno={errno.EACCES} {os.strerror(errno.EACCES)}: 1" in line, line
+    assert f"errno={errno.ENOTEMPTY} {os.strerror(errno.ENOTEMPTY)}: 1" in line, line
+    # The example for the collapsed subtree is the deepest directory, the cause.
+    assert os.fspath(deep) in line, line
 
 
 def test_a_clean_walk_logs_nothing(tmp_path, caplog) -> None:

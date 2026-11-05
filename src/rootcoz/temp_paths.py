@@ -8,6 +8,7 @@ blocks, so a delete inline there stalls the probes (#402).
 from __future__ import annotations
 
 import asyncio
+import errno
 import logging
 import os
 import stat
@@ -131,10 +132,15 @@ def delete_tree(path: Path) -> tuple[int, int]:
     removed is counted, so a failed entry is never reported as reclaimed.
 
     Failures are aggregated into **one** warning per walk, carrying every errno with
-    its count and one example path. One line per errno is not enough: simple_logger's
-    ``DuplicateFilter`` keys on ``(module, level, msg)`` — the *format string* — so a
-    second errno logged through the same template was dropped and only surfaced as
-    ``repeated N times`` on the next record (#402).
+    its count of *distinct paths* and one example path — not one count per failed
+    operation: every ancestor ``rmdir`` above a stuck file re-reports the same
+    surviving subtree as ``ENOTEMPTY``, so counting operations turned one unlinkable
+    file at depth 4 into "5 entries". A directory that could not be opened hides an
+    unknown number of entries, so it is reported as not descended alongside the
+    count. One line per errno is not enough: simple_logger's ``DuplicateFilter``
+    keys on ``(module, level, msg)`` — the *format string* — so a second errno logged
+    through the same template was dropped and only surfaced as ``repeated N times``
+    on the next record (#402).
 
     No second pass and no ``statvfs``: the size is accumulated by the walk itself,
     so it is attributable to this tree even on a shared volume.
@@ -144,19 +150,25 @@ def delete_tree(path: Path) -> tuple[int, int]:
         return (0, 0)
     size = 0
     entries = 0
-    # errno -> (count, strerror, one example path)
-    failures: dict[int, tuple[int, str, str]] = {}
+    # errno -> (distinct paths that failed, strerror); insertion order gives the example
+    failures: dict[int, tuple[set[str], str]] = {}
+    # Directories whose contents were never walked, so their entry count is unknown.
+    not_descended = 0
 
     def record(p: str, exc: OSError) -> None:
         code = exc.errno or 0
         # The OS reason, not ``exc.strerror``: the raiser may have replaced it.
         reason = os.strerror(code) if code else exc.strerror or type(exc).__name__
-        count, first_reason, example = failures.get(code, (0, reason, p))
-        failures[code] = (count + 1, first_reason, example)
+        paths = failures.setdefault(code, (set(), reason))[0]
+        if code == errno.ENOTEMPTY and any(q.startswith(p + os.sep) for q in paths):
+            # This directory's rmdir failed only because something already
+            # recorded below it survived: the same failure, not a second path.
+            return
+        paths.add(p)
 
     def remove(name: str, parent_fd: int | None, display: str) -> None:
         """Remove ``name`` from ``parent_fd`` (``None``: the absolute root path)."""
-        nonlocal size, entries
+        nonlocal size, entries, not_descended
         dfd = {} if parent_fd is None else {"dir_fd": parent_fd}
         try:
             st = os.stat(name, follow_symlinks=False, **dfd)
@@ -180,6 +192,7 @@ def delete_tree(path: Path) -> tuple[int, int]:
             )
         except OSError as exc:
             record(display, exc)
+            not_descended += 1
             return
         try:
             try:
@@ -189,6 +202,7 @@ def delete_tree(path: Path) -> tuple[int, int]:
                 # Scanning failed on an opened directory: record it and let the
                 # parent's loop carry on, instead of unwinding the whole walk.
                 record(display, exc)
+                not_descended += 1
                 return
             for child in children:
                 remove(child, fd, os.path.join(display, child))
@@ -206,11 +220,19 @@ def delete_tree(path: Path) -> tuple[int, int]:
         # Formatted inline, not %-args: the content must be in ``record.msg`` or a
         # template-keyed dedupe filter swallows the whole line.
         detail = ", ".join(
-            f"errno={code} {reason}: {count} e.g. {example}"
-            for code, (count, reason, example) in sorted(failures.items())
+            f"errno={code} {reason}: {len(paths)} e.g. {next(iter(paths))}"
+            for code, (paths, reason) in sorted(failures.items())
         )
-        total = sum(count for count, _, _ in failures.values())
-        logger.warning(f"cleanup: {total} entries not deleted ({detail})")
+        total = sum(len(paths) for paths, _ in failures.values())
+        # A directory we could not open reads as one path otherwise, hiding the
+        # thousands of entries behind it: name that gap separately.
+        skipped = (
+            f"; {not_descended} "
+            f"director{'y' if not_descended == 1 else 'ies'} not descended"
+            if not_descended
+            else ""
+        )
+        logger.warning(f"cleanup: {total} paths not deleted ({detail}){skipped}")
     return (size, entries)
 
 
