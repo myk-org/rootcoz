@@ -440,7 +440,8 @@ def read_process() -> dict[str, Any]:
     """Version, build sha, uptime, pid, restarts and the loop-lag sample."""
     return {
         "version": _get_app_version(),
-        # The image embeds its commit at build time; empty when it does not.
+        # The image builder passes the commit (`--build-arg GIT_SHA=...`, which
+        # docker-compose.yaml forwards); empty when a builder omits it.
         "git_sha": os.getenv("GIT_SHA", ""),
         "uptime_seconds": round(time.monotonic() - _PROCESS_STARTED, 1),
         "pid": os.getpid(),
