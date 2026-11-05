@@ -2,8 +2,10 @@
 
 import asyncio
 import json
+import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import aiosqlite
@@ -2940,3 +2942,173 @@ class TestJiraUrlPerMethodSplitMigration:
                 "jira_server_ssl_verify",
             ):
                 assert await storage.get_server_setting(key) is None
+
+
+# A zstd frame header, as written into result_json by a build with compression.
+# 0xB5 in position 1 is the byte that used to blow up json.loads in a downgrade.
+_ZSTD_FRAME = b"\x28\xb5\x2f\xfd" + b"\x00\x01\x02\x03rest-of-frame"
+
+
+@pytest.fixture
+def storage_logs(caplog: pytest.LogCaptureFixture) -> Any:
+    """Attach caplog to the storage logger (simple_logger sets propagate=False)."""
+    storage.logger.setLevel(logging.DEBUG)
+    storage.logger.addHandler(caplog.handler)
+    try:
+        yield caplog
+    finally:
+        storage.logger.removeHandler(caplog.handler)
+
+
+def _one_failure_result(job_name: str) -> str:
+    """Return a valid result_json payload carrying exactly one failure."""
+    return json.dumps(
+        {
+            "job_name": job_name,
+            "build_number": 1,
+            "failures": [
+                {
+                    "test_name": f"{job_name}.test_a",
+                    "error": "boom",
+                    "error_signature": f"sig-{job_name}",
+                    "analysis": {"classification": "PRODUCT BUG", "details": "..."},
+                }
+            ],
+            "child_job_analyses": [],
+        }
+    )
+
+
+async def _insert_completed_result(
+    db_path: Path, job_id: str, result_json: str | bytes
+) -> None:
+    """Insert a completed results row verbatim (bytes land as a BLOB)."""
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            "INSERT INTO results (job_id, build_url, status, result_json) "
+            "VALUES (?, ?, 'completed', ?)",
+            (job_id, "https://jenkins.example.test/job/x/1/", result_json),
+        )
+        await db.commit()
+
+
+async def _raw_result_json(db_path: Path, job_id: str) -> Any:
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute(
+            "SELECT result_json FROM results WHERE job_id = ?", (job_id,)
+        )
+        return (await cursor.fetchone())[0]
+
+
+async def _failure_history_job_ids(db_path: Path) -> set[str]:
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute("SELECT DISTINCT job_id FROM failure_history")
+        return {row[0] for row in await cursor.fetchall()}
+
+
+class TestUnreadableResultJson:
+    """A result_json this build cannot decode must not abort startup."""
+
+    def test_frame_raises_actionable_error(self) -> None:
+        """The error names compression and tells the operator what to do."""
+        with pytest.raises(storage.UnsupportedResultEncoding) as excinfo:
+            storage.parse_result_json(_ZSTD_FRAME, job_id="frame-1")
+        message = str(excinfo.value)
+        assert "frame-1" in message
+        assert "zstd frame" in message
+        assert "result_json compression" in message
+        assert "restore a pre-compression copy of the database" in message
+
+    def test_non_utf8_bytes_also_raise(self) -> None:
+        """Bytes that are neither text nor a frame are an encoding problem too."""
+        with pytest.raises(storage.UnsupportedResultEncoding, match="not UTF-8 text"):
+            storage.parse_result_json(b"\xff\xfe\x00not text", job_id="blob-1")
+
+    def test_plain_text_still_parses(self) -> None:
+        """A text row is unaffected by the encoding guard."""
+        parsed = storage.parse_result_json(_one_failure_result("job-a"), job_id="a")
+        assert parsed is not None
+        assert parsed["job_name"] == "job-a"
+
+    async def test_init_db_survives_zstd_framed_row(
+        self, temp_db_path: Path, storage_logs: Any
+    ) -> None:
+        """init_db completes, counts the row, names the cause, leaves it alone."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            await _insert_completed_result(temp_db_path, "frame-1", _ZSTD_FRAME)
+
+            await storage.init_db()  # must not raise
+
+            assert await _raw_result_json(temp_db_path, "frame-1") == _ZSTD_FRAME
+            assert await _failure_history_job_ids(temp_db_path) == set()
+            # Reads degrade to an empty result instead of failing.
+            detail = await storage.get_result("frame-1")
+            assert detail is not None
+            assert detail["result"] is None
+
+        assert "Backfill skipped 1 result(s)" in storage_logs.text
+        assert "result_json compression" in storage_logs.text
+        assert "restore a pre-compression copy of the database" in storage_logs.text
+
+    async def test_backfill_processes_good_rows_and_counts_bad_ones(
+        self, temp_db_path: Path, storage_logs: Any
+    ) -> None:
+        """Two frames + three good rows: the good three are backfilled, count is 2."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            for index in range(2):
+                await _insert_completed_result(
+                    temp_db_path, f"frame-{index}", _ZSTD_FRAME
+                )
+            for index in range(3):
+                await _insert_completed_result(
+                    temp_db_path, f"good-{index}", _one_failure_result(f"job-{index}")
+                )
+
+            await storage.backfill_failure_history()
+
+            assert await _failure_history_job_ids(temp_db_path) == {
+                "good-0",
+                "good-1",
+                "good-2",
+            }
+
+        assert "Backfill skipped 2 result(s)" in storage_logs.text
+
+    async def test_non_json_row_reported_separately_from_encoding(
+        self, temp_db_path: Path, storage_logs: Any
+    ) -> None:
+        """Corruption keeps its own counter and message."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            await _insert_completed_result(temp_db_path, "frame-1", _ZSTD_FRAME)
+            await _insert_completed_result(temp_db_path, "corrupt-1", b"not json")
+
+            await storage.backfill_failure_history()
+
+            assert await _failure_history_job_ids(temp_db_path) == set()
+
+        text = storage_logs.text
+        assert "Backfill skipped 1 result(s) whose result_json decoded" in text
+        assert "not a JSON object" in text
+        assert "Backfill skipped 1 result(s) whose result_json was written" in text
+
+    async def test_genuine_parse_error_is_not_swallowed(
+        self, temp_db_path: Path
+    ) -> None:
+        """Only undecodable payloads are skipped; a parsing bug still raises."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            await _insert_completed_result(
+                temp_db_path, "good-1", _one_failure_result("job-1")
+            )
+            with (
+                patch.object(
+                    storage, "parse_result_json", side_effect=ValueError("genuine bug")
+                ),
+                pytest.raises(ValueError, match="genuine bug"),
+            ):
+                await storage.backfill_failure_history()
+
+            assert await _failure_history_job_ids(temp_db_path) == set()

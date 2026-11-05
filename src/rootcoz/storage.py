@@ -282,18 +282,73 @@ def _hash_session_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
-def parse_result_json(raw: str | None, *, job_id: str = "") -> dict[str, Any] | None:
+_ZSTD_FRAME_MAGIC = b"\x28\xb5\x2f\xfd"
+
+# What an operator can actually do about a row this build cannot decode.
+_RESULT_ENCODING_REMEDY = (
+    "Run a rootcoz build that has the result_json codec to read it, "
+    "or restore a pre-compression copy of the database."
+)
+
+
+class UnsupportedResultEncoding(Exception):
+    """Stored ``result_json`` uses an encoding this build cannot decode.
+
+    Not corruption: the payload is intact, it was written by a newer build
+    (result_json compression) and this build simply predates the codec.
+    """
+
+
+def _unsupported_result_encoding(raw: str | bytes) -> str | None:
+    """Describe why *raw* cannot be decoded here, or return None if it can.
+
+    A ``result_json`` comes back as bytes holding a zstd frame when the row was
+    written by a build with result_json compression. Without this check the
+    frame reaches ``json.loads``, which raises a bare ``UnicodeDecodeError``
+    that says nothing about the cause. Single source of that message.
+    """
+    if not isinstance(raw, bytes):
+        return None
+    if raw.startswith(_ZSTD_FRAME_MAGIC):
+        return (
+            "result_json is a zstd frame "
+            f"({_ZSTD_FRAME_MAGIC.hex(' ')}): the row was written by a build with "
+            "result_json compression, which this build cannot decode. "
+            f"The row is intact. {_RESULT_ENCODING_REMEDY}"
+        )
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return (
+            "result_json is not UTF-8 text: the row was written by a build with a "
+            "newer result_json encoding, which this build cannot decode. "
+            f"{_RESULT_ENCODING_REMEDY}"
+        )
+    return None
+
+
+def parse_result_json(
+    raw: str | bytes | None, *, job_id: str = ""
+) -> dict[str, Any] | None:
     """Decode and validate a ``result_json`` blob.
 
     Args:
-        raw: The raw JSON string from the database, or None.
+        raw: The raw JSON string (or stored bytes) from the database, or None.
         job_id: Optional job_id for log messages.
 
     Returns:
         Parsed dict when valid, None when *raw* is empty/malformed.
+
+    Raises:
+        UnsupportedResultEncoding: *raw* is framed by an encoding this build
+            cannot decode. Callers that must not die on it (startup scans) use
+            ``parse_result_json_lenient``.
     """
     if not raw:
         return None
+    unsupported = _unsupported_result_encoding(raw)
+    if unsupported is not None:
+        raise UnsupportedResultEncoding(f"job_id={job_id or '?'}: {unsupported}")
     try:
         data = json.loads(raw)
     except json.JSONDecodeError, TypeError:
@@ -307,6 +362,22 @@ def parse_result_json(raw: str | None, *, job_id: str = "") -> dict[str, Any] | 
         )
         return None
     return data
+
+
+def parse_result_json_lenient(
+    raw: str | bytes | None, *, job_id: str = ""
+) -> dict[str, Any] | None:
+    """``parse_result_json`` for scans where one row must not abort startup.
+
+    Only an undecodable *payload* degrades to None. Programming errors inside
+    parsing still raise. The failure-history backfill does not use this: it
+    counts the undecodable rows itself.
+    """
+    try:
+        return parse_result_json(raw, job_id=job_id)
+    except UnsupportedResultEncoding as exc:
+        logger.debug(f"Startup scan skipped a stored result: {exc}")
+        return None
 
 
 async def _migrate_add_column(
@@ -1809,7 +1880,9 @@ async def _migrate_restore_ai_classifications() -> None:
 
     restored = 0
     for row in rows:
-        result_data = parse_result_json(row["result_json"], job_id=row["job_id"])
+        result_data = parse_result_json_lenient(
+            row["result_json"], job_id=row["job_id"]
+        )
         if result_data:
             await populate_failure_history(
                 row["job_id"], result_data, analyzed_at=row["created_at"]
@@ -1890,7 +1963,7 @@ async def _migrate_backfill_pattern_axis() -> None:
             row = await cursor.fetchone()
         if not row or not row[0]:
             continue
-        result_data = parse_result_json(row[0], job_id=job_id)
+        result_data = parse_result_json_lenient(row[0], job_id=job_id)
         if not result_data:
             continue
 
@@ -2179,7 +2252,7 @@ async def get_review_status(job_id: str) -> dict[str, Any]:
         row = await cursor.fetchone()
         total_failures = 0
         if row and row[0]:
-            result_data = parse_result_json(row[0], job_id=job_id)
+            result_data = parse_result_json_lenient(row[0], job_id=job_id)
             if result_data is not None:
                 total_failures = count_all_failures(result_data)
 
@@ -3064,7 +3137,9 @@ async def get_result(
             logger.debug(
                 f"get_result: job_id={job_id}, found=True, status={row['status']}"
             )
-            parsed = parse_result_json(row["result_json"], job_id=job_id)
+            # Lenient: a row this build cannot decode degrades to an empty
+            # result instead of failing the whole read.
+            parsed = parse_result_json_lenient(row["result_json"], job_id=job_id)
             if parsed:
                 await _backfill_failure_uuids(job_id, parsed)
                 if summary := await _token_usage_snapshot(db, job_id):
@@ -3225,7 +3300,9 @@ async def find_failure_by_uuid(
             (failure_uuid,),
         )
         async for row in cursor:
-            result_data = parse_result_json(row["result_json"], job_id=row["job_id"])
+            result_data = parse_result_json_lenient(
+                row["result_json"], job_id=row["job_id"]
+            )
             if not result_data:
                 continue
             # Search top-level failures
@@ -3909,9 +3986,18 @@ async def backfill_failure_history() -> None:
 
     logger.info(f"Backfilling failure_history from {len(rows)} missing results")
     backfilled = 0
+    undecodable: list[str] = []
+    malformed: list[str] = []
     for job_id, result_json_str, created_at in rows:
-        result_data = parse_result_json(result_json_str, job_id=job_id)
+        try:
+            result_data = parse_result_json(result_json_str, job_id=job_id)
+        except UnsupportedResultEncoding:
+            # Not corruption, and not a reason to have no service: this build
+            # predates the codec that wrote the row. Row is left untouched.
+            undecodable.append(job_id)
+            continue
         if result_data is None:
+            malformed.append(job_id)
             continue
         # Skip completed results with zero failures — they have nothing to
         # insert into failure_history, so without this guard the LEFT JOIN
@@ -3924,7 +4010,32 @@ async def backfill_failure_history() -> None:
         )
         backfilled += 1
 
+    _warn_unreadable_results(undecodable, malformed)
     logger.info(f"Backfill complete: processed {backfilled}/{len(rows)} results")
+
+
+def _sample_job_ids(job_ids: list[str], limit: int = 5) -> str:
+    """Format the first *limit* job ids, noting how many were dropped."""
+    shown = ", ".join(job_ids[:limit])
+    hidden = len(job_ids) - limit
+    return f"{shown} (+{hidden} more)" if hidden > 0 else shown
+
+
+def _warn_unreadable_results(undecodable: list[str], malformed: list[str]) -> None:
+    """One aggregated warning per reason for rows the backfill had to skip."""
+    if undecodable:
+        logger.warning(
+            f"Backfill skipped {len(undecodable)} result(s) whose result_json was "
+            "written by a build with result_json compression, which this build "
+            f"cannot decode. Those rows are intact and untouched. "
+            f"{_RESULT_ENCODING_REMEDY} Job ids: {_sample_job_ids(undecodable)}"
+        )
+    if malformed:
+        logger.warning(
+            f"Backfill skipped {len(malformed)} result(s) whose result_json decoded "
+            "but is not a JSON object (corrupt or truncated row -- not an encoding "
+            f"problem). Job ids: {_sample_job_ids(malformed)}"
+        )
 
 
 async def carry_forward_user_overrides(job_id: str, result_data: dict[str, Any]) -> int:
@@ -4566,7 +4677,7 @@ def _parse_dashboard_row(row: aiosqlite.Row) -> dict[str, Any]:
         "comment_count": row_data["comment_count"],
         "analysis_state": row_data.get("analysis_state") or ANALYSIS_STATE_ANALYZED,
     }
-    result_data = parse_result_json(row["result_json"], job_id=row["job_id"])
+    result_data = parse_result_json_lenient(row["result_json"], job_id=row["job_id"])
     if result_data:
         entry["job_name"] = result_data.get("job_name", "")
         if "build_number" in result_data:
@@ -5731,7 +5842,7 @@ async def mark_stale_results_failed() -> tuple[
         rows = await cursor.fetchall()
         for row in rows:
             if row["result_json"]:
-                result_data = parse_result_json(
+                result_data = parse_result_json_lenient(
                     row["result_json"], job_id=row["job_id"]
                 )
                 stored_params = (

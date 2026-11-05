@@ -221,6 +221,16 @@ This is the shortest safe path for normal Helm updates once your release is alre
 - If you changed external secrets out of band, follow with `kubectl rollout restart deployment/rootcoz -n rootcoz`.
 - For first-login and first-analysis steps after the rollout, see [Quickstart](quickstart.html).
 
+### Roll back to an older build
+
+A rollback to a build older than the one that wrote the data is safe to start, but it cannot read every row. If `result_json` was stored compressed, the older build skips those rows at startup and logs one warning naming the count and the cause, for example:
+
+```
+Backfill skipped 13 result(s) whose result_json was written by a build with result_json compression, which this build cannot decode. Those rows are intact and untouched. Run a rootcoz build that has the result_json codec to read it, or restore a pre-compression copy of the database.
+```
+
+The server stays healthy and serves everything else; the affected jobs show an empty analysis until you roll forward again (or restore a database copy taken before the compression build). Nothing is written over those rows, so rolling forward brings them back.
+
 ## Watch disk usage and alert on a filling volume
 
 RootCoz ships no alerting stack — the rule below is yours to install. What it does ship is the metric: `/metrics` exposes three unlabelled gauges for the filesystem that holds the data directory. The probe is a `statvfs` on that directory, so it is storage-agnostic — the same gauges work for an OpenShift PVC, a Docker Compose volume, a bind mount or a plain directory, because they measure whichever filesystem backs the data dir. On a shared node filesystem the numbers can include other tenants' usage: read them as free/used space on that filesystem, not as a per-volume quota.
