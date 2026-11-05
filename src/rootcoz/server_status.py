@@ -159,6 +159,10 @@ def _tree_size(path: pathlib.Path) -> int | None:
         for name in files:
             try:
                 total += os.path.getsize(os.path.join(root, name))
+            except FileNotFoundError:
+                # Cleanup or rotation removed it between the walk listing it
+                # and the stat: a vanished file is not an unreadable subtree.
+                continue
             except OSError as exc:
                 errors.append(exc)
     if errors:
@@ -552,6 +556,9 @@ async def read_sidecar() -> dict[str, Any]:
         return result
 
     result["reachable"] = True
+    # A reachable sidecar is an available block that owns its numbers; keeping
+    # the fallback's available=False would contradict reachable=True.
+    result["available"] = True
     try:
         result["models"] = len(await ai_client.list_models())
     except Exception:
@@ -679,13 +686,13 @@ async def _guarded(
         return {**fallback, "reason": f"probe failed: {exc}"}
 
 
-async def _running_analyses() -> list[dict[str, Any]] | None:
-    """Active analyses with how long each has been running; None on failure."""
-    try:
-        rows = await storage.list_active_analyses()
-    except aiosqlite.Error, OSError:
-        logger.debug("Server status: active analysis list failed", exc_info=True)
-        return None
+async def _running_analyses() -> list[dict[str, Any]]:
+    """Active analyses with how long each has been running.
+
+    Capped for display: ``list_active_analyses`` returns at most 20 rows, so its
+    length is never the total (see ``_activity_block``).
+    """
+    rows = await storage.list_active_analyses()
     return [
         {
             "job_id": row.get("job_id", ""),
@@ -698,6 +705,28 @@ async def _running_analyses() -> list[dict[str, Any]] | None:
         }
         for row in rows
     ]
+
+
+async def _activity_block(
+    *, chat_turns: int | None, sse_clients: int | None
+) -> dict[str, Any]:
+    """Analyses running, chat turns in flight and SSE clients.
+
+    The running count comes from the uncapped ``count_active_analyses``: the
+    display list is limited to 20 rows, so its length would report a backlog as
+    20. A failing read drops only the analysis fields.
+    """
+    activity: dict[str, Any] = {}
+    if chat_turns is not None:
+        activity["chat_turns_in_flight"] = chat_turns
+    if sse_clients is not None:
+        activity["sse_clients"] = sse_clients
+    try:
+        activity["analyses_running"] = await storage.count_active_analyses()
+        activity["analyses"] = await _running_analyses()
+    except aiosqlite.Error, OSError:
+        logger.debug("Server status: activity read failed", exc_info=True)
+    return activity
 
 
 def _elapsed_seconds(since: str | None) -> int | None:
@@ -748,15 +777,13 @@ async def collect_server_status(
         _guarded("sidecar", read_sidecar(), dict(_SIDECAR_UNAVAILABLE)),
     )
 
-    activity: dict[str, Any] = {}
-    running = await _running_analyses()
-    if running is not None:
-        activity["analyses_running"] = len(running)
-        activity["analyses"] = running
-    if chat_turns is not None:
-        activity["chat_turns_in_flight"] = chat_turns
-    if sse_clients is not None:
-        activity["sse_clients"] = sse_clients
+    # Guarded like every other probe: the activity queries share the same
+    # deadline, so a stalled database read cannot hold the request open.
+    activity = await _guarded(
+        "activity",
+        _activity_block(chat_turns=chat_turns, sse_clients=sse_clients),
+        {},
+    )
 
     status: dict[str, Any] = {
         "disk": disk,

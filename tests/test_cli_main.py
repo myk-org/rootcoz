@@ -4600,6 +4600,33 @@ class TestAdminServerStatusCommand:
         assert result.exit_code == 0
         assert "CPU: unavailable (no cgroup)" in result.output
 
+    def _status_with(self, mock_client, cpu_state, memory_state):
+        mock_client.server_status.return_value = {
+            **self._PAYLOAD,
+            "cpu": {
+                **self._PAYLOAD["cpu"],
+                "quota_cores": None,
+                "quota_state": cpu_state,
+            },
+            "memory": {
+                **self._PAYLOAD["memory"],
+                "limit_bytes": None,
+                "limit_state": memory_state,
+            },
+            "warnings": [],
+        }
+        return runner.invoke(app, ["admin", "server-status"])
+
+    def test_server_status_unlimited_quota_is_not_unknown(self, mock_client):
+        """A null quota means unlimited only when the cgroup says so."""
+        unlimited = self._status_with(mock_client, "unlimited", "unlimited")
+        assert "no CPU quota (unlimited)" in unlimited.output
+        assert "no limit (unlimited)" in unlimited.output
+
+        unknown = self._status_with(mock_client, "unknown", "unknown")
+        assert "quota unknown" in unknown.output
+        assert "limit unknown" in unknown.output
+
 
 class TestAdminUsersListCommand:
     def test_admin_users_list(self, mock_client):

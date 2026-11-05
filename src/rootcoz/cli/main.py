@@ -705,7 +705,7 @@ def server_status_cmd(json_output: bool = _JSON_OPTION) -> None:
         "CPU",
         cpu,
         f"{_status_value(cpu.get('process_percent'))}% of a core, "
-        f"quota {_status_value(cpu.get('quota_cores'))} cores",
+        f"{_status_cpu_quota(cpu)}",
     )
     memory = data.get("memory", {})
     _echo_status_block(
@@ -713,7 +713,7 @@ def server_status_cmd(json_output: bool = _JSON_OPTION) -> None:
         memory,
         f"{_status_bytes(memory.get('rss_bytes'))} resident, "
         f"{_status_value(memory.get('percent_of_limit'))}% of "
-        f"limit {_status_bytes(memory.get('limit_bytes'))}",
+        f"{_status_memory_limit(memory)}",
     )
     database = data.get("database", {})
     _echo_status_block(
@@ -780,6 +780,30 @@ def _status_bytes(value: Any) -> str:
             return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
         size /= 1024
     return f"{size:.1f} TiB"
+
+
+def _status_cpu_quota(cpu: dict[str, Any]) -> str:
+    """CPU quota with the same three states the page shows.
+
+    ``quota_state`` separates an unlimited cgroup from a ``cpu.max`` that could
+    not be read, so neither renders as a bare ``?`` that reads as unknown.
+    """
+    cores = cpu.get("quota_cores")
+    if cores is not None:
+        return f"quota {cores} cores"
+    if cpu.get("quota_state") == "unlimited":
+        return "no CPU quota (unlimited)"
+    return "quota unknown"
+
+
+def _status_memory_limit(memory: dict[str, Any]) -> str:
+    """Memory limit with ``set`` / ``unlimited`` / ``unknown`` kept distinct."""
+    limit = memory.get("limit_bytes")
+    if limit is not None:
+        return f"limit {_status_bytes(limit)}"
+    if memory.get("limit_state") == "unlimited":
+        return "no limit (unlimited)"
+    return "limit unknown"
 
 
 @app.command()

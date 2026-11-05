@@ -286,6 +286,23 @@ class TestDisk:
         block = server_status.read_disk(tmp_path / "results.db", transcripts, None)
         assert block["transcripts_bytes"] is None
 
+    def test_a_file_removed_mid_scan_is_skipped(self, tmp_path, monkeypatch) -> None:
+        """Rotation deleting a file between the walk and the stat is not an
+        unreadable subtree: the rest of the total still counts."""
+        transcripts = tmp_path / "transcripts"
+        _write(transcripts / "a.jsonl", "y" * 40)
+        _write(transcripts / "b.jsonl", "y" * 10)
+        real_getsize = os.path.getsize
+
+        def _getsize(path):
+            if str(path).endswith("b.jsonl"):
+                raise FileNotFoundError(str(path))
+            return real_getsize(path)
+
+        monkeypatch.setattr(server_status.os.path, "getsize", _getsize)
+        block = server_status.read_disk(tmp_path / "results.db", transcripts, None)
+        assert block["transcripts_bytes"] == 40
+
     def test_database_size_includes_the_wal(self, tmp_path) -> None:
         """Committed pages can live in -wal until a checkpoint."""
         db_path = _write(tmp_path / "results.db", "x" * 100)
@@ -432,6 +449,7 @@ class TestSidecarProbe:
         monkeypatch.setattr("rootcoz.server_status._check_http_service", _down)
         block = asyncio.run(server_status.read_sidecar())
         assert block["reachable"] is False
+        assert block["available"] is False
         assert block["reason"] == "connection refused"
 
     def test_reachable_sidecar_reports_model_counts(self, monkeypatch) -> None:
@@ -449,6 +467,9 @@ class TestSidecarProbe:
         monkeypatch.setattr(storage, "list_free_ai_models", _free)
         block = asyncio.run(server_status.read_sidecar())
         assert block["reachable"] is True
+        # Availability and reachability cannot disagree, or a consumer that
+        # trusts ``available`` reads a healthy sidecar as unavailable.
+        assert block["available"] is True
         assert block["models"] == 2
         assert block["free_models"] == 1
 
@@ -538,6 +559,7 @@ class TestCollectServerStatus:
         cgroup, proc = _fake_roots(tmp_path)
         monkeypatch.setattr("rootcoz.server_status.read_data_usage", lambda _p: (1, 4))
         monkeypatch.setattr(storage, "list_active_analyses", _async(_running_rows))
+        monkeypatch.setattr(storage, "count_active_analyses", _async(2))
         monkeypatch.setattr(server_status, "read_sidecar", _sidecar_up)
 
         status = self._status(
@@ -629,11 +651,27 @@ class TestCollectServerStatus:
         async def _broken():
             raise OSError("db gone")
 
+        monkeypatch.setattr(storage, "count_active_analyses", _broken)
         monkeypatch.setattr(storage, "list_active_analyses", _broken)
         monkeypatch.setattr(server_status, "read_sidecar", _sidecar_up)
 
         status = self._status(tmp_path, cgroup_root=cgroup, proc_self=proc)
         assert status["activity"] == {}
+
+    def test_running_count_is_not_the_display_limit(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The list is capped at 20 rows; the count must still be the backlog."""
+        cgroup, proc = _fake_roots(tmp_path)
+        monkeypatch.setattr("rootcoz.server_status.read_data_usage", lambda _p: (1, 4))
+        monkeypatch.setattr(storage, "list_active_analyses", _async(_running_rows))
+        monkeypatch.setattr(storage, "count_active_analyses", _async(37))
+        monkeypatch.setattr(server_status, "read_sidecar", _sidecar_up)
+
+        status = self._status(tmp_path, cgroup_root=cgroup, proc_self=proc)
+        assert status["activity"]["analyses_running"] == 37
+        # The rows are still the bounded detail list.
+        assert len(status["activity"]["analyses"]) == 2
 
 
 def _running_rows() -> list[dict]:
