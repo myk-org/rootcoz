@@ -10991,16 +10991,15 @@ async def abort_analysis(
         }
 
     try:
-        await update_status(job_id, "aborted", abort_data)
-    except UnsupportedResultEncoding as exc:
+        await update_status(
+            job_id, "aborted", abort_data, refusal_log_level=logging.WARNING
+        )
+    except UnsupportedResultEncoding:
         # The abort is the status transition, and the job's task is already gone,
         # so the row must not stay 'active'. Only the payload rewrite was refused:
         # that stored report belongs to a build with a newer codec, so it stays
-        # byte-identical and the job is ended with a status-only update.
-        logger.warning(
-            f"job_id={job_id}: aborted without rewriting its result_json, which "
-            f"this build cannot decode ({type(exc).__name__})"
-        )
+        # byte-identical and the job is ended with a status-only update. The
+        # refusal was already logged (once, at WARNING) by the write itself.
         await update_status(job_id, "aborted")
     notify_active_count_changed()
     notify_dashboard_changed()

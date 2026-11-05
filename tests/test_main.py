@@ -1905,7 +1905,8 @@ class TestAbortEndpoint:
         The task is already cancelled, so a refused payload write must not leave
         an 'active' row with nothing left to finish it: the status transition is
         the abort, the payload rewrite is not. The newer build's bytes stay
-        untouched and one warning names the job.
+        untouched and the refused write logs once, at WARNING -- the abort
+        succeeded, so nothing about it is an error.
         """
         from rootcoz import main
 
@@ -1939,6 +1940,9 @@ class TestAbortEndpoint:
                 await db.commit()
             main._job_tasks["job-newer-payload"] = task
             logging.getLogger("rootcoz.main").propagate = True
+            # simple_logger sets propagate=False on the storage logger too.
+            storage.logger.setLevel(logging.DEBUG)
+            storage.logger.addHandler(caplog.handler)
             try:
                 with caplog.at_level(logging.WARNING, logger="rootcoz.main"):
                     resp = test_client.post(
@@ -1946,6 +1950,7 @@ class TestAbortEndpoint:
                         cookies={"rootcoz_username": "testuser"},
                     )
             finally:
+                storage.logger.removeHandler(caplog.handler)
                 logging.getLogger("rootcoz.main").propagate = False
                 main._job_tasks.pop("job-newer-payload", None)
 
@@ -1966,14 +1971,19 @@ class TestAbortEndpoint:
                 ).fetchone()
             assert row["result_json"] == blob, "the refused payload rewrite wrote"
 
-        warnings = [
-            record.getMessage()
+        # One message, once, and not at ERROR: the abort itself completed.
+        named = [
+            record
             for record in caplog.records
-            if record.levelname == "WARNING"
-            and "job-newer-payload" in record.getMessage()
+            if "job-newer-payload" in record.getMessage()
         ]
+        assert not [r for r in named if r.levelno >= logging.ERROR], [
+            r.getMessage() for r in named if r.levelno >= logging.ERROR
+        ]
+        warnings = [r.getMessage() for r in named if r.levelname == "WARNING"]
         assert len(warnings) == 1, warnings
         assert "cannot decode" in warnings[0]
+        assert "nothing was written over it" in warnings[0]
 
     @pytest.mark.asyncio
     async def test_abort_cancels_the_job_task(self, test_client, temp_db_path: Path):

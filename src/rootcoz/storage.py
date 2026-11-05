@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
@@ -3131,7 +3132,11 @@ async def _read_stored_result(
 
 
 async def _abandon_write(
-    db: aiosqlite.Connection, job_id: str, exc: UnsupportedResultEncoding
+    db: aiosqlite.Connection,
+    job_id: str,
+    exc: UnsupportedResultEncoding,
+    *,
+    log_level: int = logging.ERROR,
 ) -> None:
     """Roll back a write whose stored payload this build cannot decode, and refuse it.
 
@@ -3141,14 +3146,20 @@ async def _abandon_write(
     refusal is raised rather than returned, because a caller that returned
     normally would report a status or result it never persisted.
 
+    *log_level* defaults to ERROR: a refused write failed the operation that
+    asked for it. A caller whose operation still succeeds without the payload
+    (an abort: the status transition is the whole action) passes WARNING, so the
+    log line matches the outcome instead of contradicting it.
+
     Raises:
         UnsupportedResultEncoding: always -- the write did not happen.
     """
-    logger.error(
+    logger.log(
+        log_level,
         f"job_id={job_id}: stored result_json uses an encoding this build cannot "
         f"decode ({type(exc).__name__}), so the write was refused and nothing was "
         "written over it -- a build with the result_json codec still has the "
-        "payload."
+        "payload.",
     )
     await db.execute("ROLLBACK")
     raise exc
@@ -3274,6 +3285,8 @@ async def update_status(
     job_id: str,
     status: str,
     result: dict[str, Any] | None = None,
+    *,
+    refusal_log_level: int = logging.ERROR,
 ) -> None:
     """Update the status of an existing analysis result.
 
@@ -3289,6 +3302,8 @@ async def update_status(
         job_id: Unique identifier for the analysis job.
         status: New status for the analysis.
         result: Optional result data to store. When None, result_json is not modified.
+        refusal_log_level: Log level for a refused payload write; ERROR unless the
+            caller's operation survives the refusal (see :func:`_abandon_write`).
 
     As in :func:`save_result`, a stored payload a newer build can decode but this
     one cannot is left untouched instead of being replaced.
@@ -3305,7 +3320,7 @@ async def update_status(
                 previous = await _read_stored_result(db, job_id)
             except UnsupportedResultEncoding as exc:
                 # Rolls back and raises: the caller must not read this as an update.
-                await _abandon_write(db, job_id, exc)
+                await _abandon_write(db, job_id, exc, log_level=refusal_log_level)
             if previous:
                 for key in ("progress_phase", "progress_log", "cloning_repos"):
                     if key in previous:

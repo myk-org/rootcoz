@@ -468,6 +468,32 @@ async def test_older_build_never_overwrites_a_newer_builds_payload(
     )
 
 
+async def test_a_refused_save_result_still_logs_error(_storage, storage_logs) -> None:
+    """The refusal level was not weakened for writes that did fail.
+
+    The abort path logs the refusal at WARNING because the abort completes
+    without the payload rewrite; a save has nothing to fall back on, so its
+    refusal stays an error.
+    """
+    await _insert_newer_encoding("refused-save", b"\xff\xfe\x00newer payload")
+
+    with pytest.raises(storage.UnsupportedResultEncoding):
+        await storage.save_result(
+            "refused-save", "http://ci", "completed", _payload(failure_count=2)
+        )
+
+    levels = [
+        record.levelname
+        for record in storage_logs.records
+        if "refused-save" in record.getMessage() and record.levelno >= logging.WARNING
+    ]
+    assert levels == ["ERROR"], [
+        record.getMessage()
+        for record in storage_logs.records
+        if "refused-save" in record.getMessage()
+    ]
+
+
 # --- the backfill -----------------------------------------------------------
 
 
