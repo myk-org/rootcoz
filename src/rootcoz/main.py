@@ -9206,6 +9206,27 @@ def _require_tracker_enabled(
         )
 
 
+def _chat_tracker_targets(
+    settings: Settings, user_tokens: dict[str, str]
+) -> tuple[str, ...]:
+    """The trackers chat may offer this user: enabled here AND saved by them.
+
+    Mirrors the two gates of ``POST /api/chat-issue``
+    (``_require_tracker_enabled``, then the caller's account credential), so a
+    chat tool is advertised only when it can actually file. ``user_tokens`` is
+    the caller's own ``storage.get_user_tokens`` row — never a deployment
+    credential.
+    """
+    targets: list[str] = []
+    if settings.enable_github_issues is not False and user_tokens.get("github_token"):
+        targets.append("github")
+    if _jira_issue_creation_enabled(settings) and (
+        user_tokens.get("jira_token") or user_tokens.get("jira_sa_token")
+    ):
+        targets.append("jira")
+    return tuple(targets)
+
+
 async def _create_issue_from_text(
     target: Literal["github", "jira"],
     title: str,
@@ -20265,6 +20286,9 @@ async def _init_chat_under_barrier(
                 github_token=github_token,
                 github_repo=github_repo,
                 jira_connection=jira_connection,
+                tracker_targets=_chat_tracker_targets(
+                    _settings, await storage.get_user_tokens(username)
+                ),
             )
         else:
             logger.warning(
@@ -20962,6 +20986,10 @@ async def _process_chat_message(
                                 github_token=github_token,
                                 github_repo=github_repo,
                                 jira_connection=jira_connection,
+                                tracker_targets=_chat_tracker_targets(
+                                    settings,
+                                    await storage.get_user_tokens(username),
+                                ),
                             )
                         else:
                             logger.warning(
@@ -21410,6 +21438,9 @@ async def init_admin_chat(
                 custom_tools = build_admin_custom_tools(
                     server_url=server_url,
                     auth_token=auth_header.removeprefix("Bearer ").strip(),
+                    tracker_targets=_chat_tracker_targets(
+                        get_settings(), await storage.get_user_tokens(username)
+                    ),
                 )
             else:
                 logger.warning("Admin chat init: no auth token for %s", username)
@@ -21699,6 +21730,9 @@ async def _process_admin_chat_message(
                 auth_token=auth_header.removeprefix("Bearer ").strip()
                 if auth_header
                 else "",
+                tracker_targets=_chat_tracker_targets(
+                    settings, await storage.get_user_tokens(username)
+                ),
             )
 
             abort_key = f"{ADMIN_CHAT_JOB_ID}:{username}"

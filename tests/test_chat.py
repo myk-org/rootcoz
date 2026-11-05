@@ -180,6 +180,9 @@ class TestBuildChatCustomTools:
         # No jira/github without credentials
         assert "search_jira" not in names
         assert "search_github_issues" not in names
+        # No issue tool either: no tracker was named for this session.
+        assert "create_github_issue" not in names
+        assert "create_jira_issue" not in names
 
     def test_get_job_tests_tool_query(self):
         """Optional status stays in query; server sanitizes unsubstituted placeholders."""
@@ -339,6 +342,7 @@ class TestBuildChatCustomTools:
             jira_token="jira-tok",
             github_token="gh-tok",
             github_repo="org/repo",
+            tracker_targets=("github", "jira"),
         )
         names = [t["name"] for t in tools]
         assert len(names) == 11  # 5 base + 2 jira + 2 github + 2 issue-create
@@ -649,7 +653,7 @@ class TestBuildAdminCustomTools:
             server_url="http://localhost:8000",
             auth_token="test-token",
         )
-        assert len(tools) == 8
+        assert len(tools) == 6
         names = [t["name"] for t in tools]
         assert names == [
             "db_schema",
@@ -658,8 +662,6 @@ class TestBuildAdminCustomTools:
             "get_classification_overrides",
             "get_issues_created",
             "save_report",
-            "create_github_issue",
-            "create_jira_issue",
         ]
 
     def test_report_tool_urls(self):
@@ -805,6 +807,63 @@ def github_issue_config():
         get_settings.cache_clear()
 
 
+class TestChatTrackerTargets:
+    """Only a tracker the server enables AND the user saved is offered in chat."""
+
+    @staticmethod
+    def _settings(**overrides):
+        from rootcoz.config import Settings
+
+        with patch.dict(os.environ, {}, clear=True):
+            return Settings(_env_file=None, **overrides)
+
+    def _targets(self, settings, **tokens):
+        from rootcoz.main import _chat_tracker_targets
+
+        return _chat_tracker_targets(settings, tokens)
+
+    def test_no_token_offers_nothing(self):
+        assert self._targets(self._settings()) == ()
+
+    def test_github_token_and_flag_on_offers_github(self):
+        assert self._targets(
+            self._settings(),
+            github_token="ghp_user",  # pragma: allowlist secret
+        ) == ("github",)
+
+    def test_github_flag_off_offers_nothing(self):
+        assert (
+            self._targets(
+                self._settings(enable_github_issues=False),
+                github_token="ghp_user",  # pragma: allowlist secret
+            )
+            == ()
+        )
+
+    def test_jira_only_user_gets_only_jira(self):
+        assert self._targets(self._settings(), jira_token="jira-user") == ("jira",)
+        assert self._targets(self._settings(), jira_sa_token="ATOA-user") == ("jira",)
+
+    def test_jira_flag_off_offers_nothing(self):
+        assert (
+            self._targets(self._settings(enable_jira_issues=False), jira_token="jira")
+            == ()
+        )
+
+    def test_jira_only_target_builds_only_the_jira_tool(self):
+        names = [
+            t["name"]
+            for t in build_chat_custom_tools(
+                server_url="http://localhost:8000",
+                auth_token="tok",
+                job_id="j1",
+                tracker_targets=self._targets(self._settings(), jira_token="jira-user"),
+            )
+        ]
+        assert "create_jira_issue" in names
+        assert "create_github_issue" not in names
+
+
 class TestChatIssueTools:
     """The chat model files a tracker issue itself when the user asks for one."""
 
@@ -813,10 +872,12 @@ class TestChatIssueTools:
             server_url="http://localhost:8000",
             auth_token="tok",
             job_id="j1",
+            tracker_targets=("github", "jira"),
         )
         admin_tools = build_admin_custom_tools(
             server_url="http://localhost:8000",
             auth_token="tok",
+            tracker_targets=("github", "jira"),
         )
         for tools in (job_tools, admin_tools):
             by_name = {t["name"]: t for t in tools}
@@ -886,12 +947,17 @@ class TestChatIssueTools:
             build_number=1,
             job_id="j1",
             custom_tools=build_chat_custom_tools(
-                server_url="http://localhost:8000", auth_token="tok", job_id="j1"
+                server_url="http://localhost:8000",
+                auth_token="tok",
+                job_id="j1",
+                tracker_targets=("github", "jira"),
             ),
         )
         admin_prompt = build_admin_system_prompt(
             build_admin_custom_tools(
-                server_url="http://localhost:8000", auth_token="tok"
+                server_url="http://localhost:8000",
+                auth_token="tok",
+                tracker_targets=("github", "jira"),
             )
         )
         for prompt in (job_prompt, admin_prompt):
@@ -901,6 +967,16 @@ class TestChatIssueTools:
             assert "relay it verbatim" in prompt
             assert "Profile Settings" in prompt
             assert "Never claim an issue exists" in prompt
+
+    def test_prompt_tells_the_model_what_to_do_without_the_tool(self):
+        """A tracker the user never set up is absent — and the prompt says so."""
+        prompt = build_admin_system_prompt(
+            build_admin_custom_tools(server_url="http://localhost:8000", auth_token="t")
+        )
+        assert "create_github_issue" not in prompt.split("## Creating Issues")[0]
+        assert "NOT in your tool list cannot be used" in prompt
+        assert "Say you cannot open that issue" in prompt
+        assert "Profile Settings → add the GitHub/Jira token" in prompt
 
 
 class TestBuildSystemPrompt:

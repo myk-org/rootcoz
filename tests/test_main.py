@@ -13956,6 +13956,8 @@ async def test_admin_chat_processing_uses_session_source_and_resets_context(
             ai_provider="openai",
             ai_model="test-model",
             ai_call_timeout=30,
+            enable_github_issues=False,
+            enable_jira_issues=False,
         ),
     )
     monkeypatch.setattr(

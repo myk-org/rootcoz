@@ -468,16 +468,18 @@ def analysis_http_tools(
 
 
 def _tracker_issue_tools(
-    *, server_url: str, auth_headers: dict[str, str]
+    *, server_url: str, auth_headers: dict[str, str], targets: tuple[str, ...]
 ) -> list[dict[str, Any]]:
-    """The two tracker-write tools chat may call when the user asks for an issue.
+    """The tracker-write tools chat may call when the user asks for an issue.
 
-    Both post to ``/api/chat-issue``, which files under the caller's OWN saved
+    Each posts to ``/api/chat-issue``, which files under the caller's OWN saved
     credential and decides the repo/project, so the model sends only a title
-    and a body.
+    and a body. ``targets`` names only the trackers the server enables *and*
+    the user's account holds a token for; empty means no tool is advertised.
     """
     tools = []
-    for target, kind in (("github", "GitHub"), ("jira", "Jira")):
+    for target in targets:
+        kind = "GitHub" if target == "github" else "Jira"
         tools.append(
             {
                 "name": f"create_{target}_issue",
@@ -535,6 +537,7 @@ def build_chat_custom_tools(
     github_token: str = "",
     github_repo: str = "",
     jira_connection: JiraConnection | None = None,
+    tracker_targets: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
     """Build HTTP-backed custom tools for a chat session.
 
@@ -799,9 +802,13 @@ def build_chat_custom_tools(
             }
         )
 
-    # Unconditional: the server reads the caller's own account token, so a
-    # missing credential comes back as a followable refusal, not a missing tool.
-    tools.extend(_tracker_issue_tools(server_url=server_url, auth_headers=auth_headers))
+    tools.extend(
+        _tracker_issue_tools(
+            server_url=server_url,
+            auth_headers=auth_headers,
+            targets=tracker_targets,
+        )
+    )
 
     return tools
 
@@ -838,6 +845,7 @@ def build_admin_custom_tools(
     *,
     server_url: str,
     auth_token: str,
+    tracker_targets: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
     """Build HTTP-backed custom tools for admin chat."""
     auth_headers = {"Authorization": f"Bearer {auth_token}"}
@@ -966,7 +974,13 @@ def build_admin_custom_tools(
             },
         },
     ]
-    tools.extend(_tracker_issue_tools(server_url=server_url, auth_headers=auth_headers))
+    tools.extend(
+        _tracker_issue_tools(
+            server_url=server_url,
+            auth_headers=auth_headers,
+            targets=tracker_targets,
+        )
+    )
     return tools
 
 
@@ -1131,15 +1145,16 @@ def build_welcome_message(
     )
 
 
-_COMMON_RULES = """- Do NOT modify any data — read-only, EXCEPT the `create_github_issue` / `create_jira_issue` tools, which file an issue only when the user explicitly asks
+_COMMON_RULES = """- Do NOT modify any data — read-only. The one exception is a tracker issue tool in your tool list (`create_github_issue` / `create_jira_issue`), and only when the user explicitly asks
 - Do NOT run arbitrary curl commands — use the provided tools"""
 
 _ISSUE_CREATE_RULES = """
 ## Creating Issues
 - `create_github_issue` and `create_jira_issue` file an issue in the repository/Jira project the server is configured with — you never pick one.
-- Call them ONLY when the user explicitly asks to open an issue; never proactively.
+- Call a tracker tool ONLY when the user explicitly asks to open an issue; never proactively.
 - On success, report the issue URL and number/key the tool returned.
-- If the tool refuses for missing credentials, relay it verbatim and name the fix: Profile Settings → add the GitHub/Jira token (if the refusal says the account has no profile, pass on its sign-in advice instead).
+- A tracker whose tool is NOT in your tool list cannot be used: this account has no token saved for it, or the server disabled it. Say you cannot open that issue and name the fix: Profile Settings → add the GitHub/Jira token. Never claim you can open one and never call another tool as a substitute.
+- If a tool you do have refuses for missing credentials, relay it verbatim and name the same fix (if the refusal says the account has no profile, pass on its sign-in advice instead).
 - Never claim an issue exists when the tool was not called or did not succeed."""
 
 

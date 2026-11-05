@@ -258,7 +258,7 @@ rootcoz<span class="w"> </span>admin-chat<span class="w"> </span>send<span class
 <ol>
 <li>Choose how RootCoz should pick the model.</li>
 </ol>
-<p>RootCoz can use the server default AI settings or a one-off override for the next question.</p>
+<p>The header preselects the provider and model you last used on this account, so leaving it alone repeats your previous choice rather than the server default. To use a different pair, pick it — both a provider and a model are always required, because chat cannot start on an empty pair. A session that is already running keeps the pair it was started with, so its reply is always attributed to what it actually used.</p>
 <div class="table-wrap"><table>
 <thead>
 <tr>
@@ -269,8 +269,8 @@ rootcoz<span class="w"> </span>admin-chat<span class="w"> </span>send<span class
 </thead>
 <tbody>
 <tr>
-<td>Use the server default</td>
-<td>Leave the provider and model already loaded in the header.</td>
+<td>Use the pair already selected</td>
+<td>It is loaded in the header — leave it. This is the pair you used last, not necessarily the server default.</td>
 <td>Omit <code>--provider</code> and <code>--model</code>.</td>
 </tr>
 <tr>
@@ -289,7 +289,7 @@ rootcoz<span class="w"> </span>admin-chat<span class="w"> </span>send<span class
 <ol>
 <li>Ask a cross-job question and follow the reply.</li>
 </ol>
-<p>In the web UI, type your question and press <code>Enter</code> to send it. Use <code>Shift+Enter</code> when you want a newline instead. While RootCoz is working, the thread shows <code>Thinking...</code> and keeps the response in the same conversation.</p>
+<p>In the web UI, type your question and press <code>Enter</code> to send it. Use <code>Shift+Enter</code> when you want a newline instead. While RootCoz is working, the thread shows <code>Thinking...</code> with the elapsed time; the reply arrives as one message when the turn ends and stays in the same conversation.</p>
 <p>In the CLI, send the question directly:</p>
 <p><code>bash
    rootcoz admin-chat send "Show where humans overrode the AI most often this month."</code></p>
@@ -297,7 +297,7 @@ rootcoz<span class="w"> </span>admin-chat<span class="w"> </span>send<span class
 <p><code>bash
    rootcoz admin-chat history --limit 20</code></p>
 <blockquote>
-<p><strong>Tip:</strong> Use the web UI when you want the clearest live experience. It shows the active reply immediately and gives you a <code>Stop</code> button while the assistant is still working.</p>
+<p><strong>Tip:</strong> Use the web UI when you want the clearest live experience. It shows the busy state from the moment you send, tells you how long the turn has been running, and gives you a <code>Stop</code> button while the assistant is still working.</p>
 <p><strong>From an answer to a ticket:</strong> ask the assistant to file it — "create a GitHub issue for this" or "open a Jira ticket" — and it drafts the title and body from the conversation. Server Chat itself resolves no tracker credential — the issue is filed with the token saved in <em>your</em> account, so add one in Profile Settings first, or the assistant relays the <code>400</code> that says none is available. The same call from the CLI, with no token flags:</p>
 </blockquote>
 <div class="highlight"><pre><span></span><code>rootcoz create-chat-issue --target jira --title "Dashboard filters drop the team" --body "$(cat ticket-body.md)"
