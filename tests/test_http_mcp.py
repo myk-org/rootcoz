@@ -53,6 +53,18 @@ def _lock_in_child(
         release.wait(10)
 
 
+# A forkserver child can take well over 5s to boot on a loaded xdist worker, and
+# threads doing filesystem work are starved just as long. These waits only cost
+# time when something is really wrong.
+_COMPLETION_TIMEOUT = 60
+
+
+def _join_child(process: mp.Process) -> None:
+    """Wait for a forkserver child to finish, then assert it exited cleanly."""
+    process.join(_COMPLETION_TIMEOUT)
+    assert process.exitcode == 0
+
+
 def test_install_skips_empty_tools(tmp_path: Path) -> None:
     workspace = tmp_path / "ws"
     workspace.mkdir()
@@ -577,8 +589,7 @@ def test_install_lock_reaps_after_process_exit(tmp_path: Path, monkeypatch) -> N
         target=_lock_in_child, args=(workspace, tmp_path)
     )
     process.start()
-    process.join(5)
-    assert process.exitcode == 0
+    _join_child(process)
     assert path.exists()
     with http_mcp_mod._workspace_install_lock(tmp_path / "next"):
         assert path.exists()
@@ -642,11 +653,10 @@ def test_install_lock_reaping_preserves_holder_and_waiter(
         assert other_entered.wait(30)
         assert not acquired.is_set()
         release.set()
-        holder.join(5)
-        waiter.join(5)
-        other.join(5)
+        _join_child(holder)
+        waiter.join(_COMPLETION_TIMEOUT)
+        other.join(_COMPLETION_TIMEOUT)
         assert reaped.is_set()
-        assert holder.exitcode == 0
         assert acquired.is_set()
         assert not path.exists()
     finally:
@@ -656,6 +666,23 @@ def test_install_lock_reaping_preserves_holder_and_waiter(
             waiter.join(5)
         if other is not None:
             other.join(5)
+
+
+def test_join_child_survives_a_boot_slower_than_five_seconds() -> None:
+    """The assertion is about completion, not about the old 5s budget."""
+
+    class SlowChild:
+        """Exits only if the caller waits longer than the 5s that flaked on CI."""
+
+        exitcode: int | None = None
+
+        def join(self, timeout: float | None = None) -> None:
+            if timeout is not None and timeout > 5:
+                self.exitcode = 0
+
+    slow = SlowChild()
+    _join_child(slow)  # No sleep: the fake records the budget it was given.
+    assert slow.exitcode == 0
 
 
 def test_install_lock_cleanup_does_not_wait_for_other_waiters(
