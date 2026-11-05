@@ -799,6 +799,46 @@ class TestServerStatusEndpoint:
         assert "sse_clients" in data["activity"]
         assert "chat_turns_in_flight" in data["activity"]
 
+    def test_disk_probe_measures_the_resolved_transcripts_dir(
+        self, client, stub_probes, monkeypatch, tmp_path
+    ) -> None:
+        """A host install records under the sidecar default, not /data.
+
+        The block must report the size of the directory the sidecar was
+        actually told to use, and only that directory.
+        """
+        from rootcoz import transcripts as transcripts_module
+
+        seeded = tmp_path / "home" / ".pi" / "sidecar" / "transcripts"
+        seeded.mkdir(parents=True)
+        (seeded / "a.jsonl").write_text("y" * 40)
+        monkeypatch.delenv("PI_SIDECAR_TRANSCRIPTS_DIR", raising=False)
+        monkeypatch.setattr(
+            transcripts_module, "SIDECAR_DEFAULT_TRANSCRIPTS_DIR", seeded
+        )
+        probed: list[Path] = []
+
+        def _read_disk(_db_path, transcripts_dir, _log_dir):
+            probed.append(transcripts_dir)
+            return {
+                "available": True,
+                "used_ratio": 0.75,
+                "transcripts_bytes": server_status._tree_size(transcripts_dir),
+            }
+
+        monkeypatch.setattr(server_status, "read_disk", _read_disk)
+        cookies = client.post(
+            "/api/auth/login",
+            json={
+                "username": "admin",
+                "api_key": "test-admin-key-16chars",  # pragma: allowlist secret
+            },
+        ).cookies
+        resp = client.get("/api/admin/server-status", cookies=cookies)
+        assert resp.status_code == 200
+        assert probed == [seeded]
+        assert resp.json()["disk"]["transcripts_bytes"] == 40
+
     def test_operation_id_follows_the_handler_name(self, client) -> None:
         from rootcoz.main import app
 

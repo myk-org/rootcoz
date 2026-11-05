@@ -12399,7 +12399,7 @@ async def admin_server_status(request: Request) -> dict[str, Any]:
     return strip_sensitive_from_response(
         await server_status.collect_server_status(
             db_path=storage.DB_PATH,
-            transcripts_dir=sidecar_transcripts.TRANSCRIPTS_DIR,
+            transcripts_dir=sidecar_transcripts.resolve_transcripts_dir(),
             log_dir=Path(_LOG_FILE).parent if _LOG_FILE else None,
             sse_clients=_sse_client_count(),
             chat_turns=_chat_turns_in_flight(),
