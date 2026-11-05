@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import socket
 from contextlib import contextmanager
@@ -1894,6 +1895,136 @@ class TestAbortEndpoint:
                 cookies={"rootcoz_session": bob_session},
             )
             assert resp.status_code == 403
+
+    @pytest.mark.asyncio
+    async def test_abort_with_undecodable_payload_still_aborts(
+        self, test_client, temp_db_path: Path, caplog
+    ) -> None:
+        """An abort whose payload this build cannot decode still ends the job.
+
+        The task is already cancelled, so a refused payload write must not leave
+        an 'active' row with nothing left to finish it: the status transition is
+        the abort, the payload rewrite is not. The newer build's bytes stay
+        untouched and one warning names the job.
+        """
+        from rootcoz import main
+
+        class _FakeTask:
+            """A tracked background task: records the cancel, then ends."""
+
+            cancelled = False
+
+            def done(self) -> bool:
+                return self.cancelled
+
+            def cancel(self) -> None:
+                self.cancelled = True
+
+            def __await__(self):
+                async def _end() -> None:
+                    return None
+
+                return _end().__await__()
+
+        blob = b"\xff\xfe\x00a payload from a newer build"
+        task = _FakeTask()
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "INSERT INTO results (job_id, status, result_json)"
+                    " VALUES (?, 'running', ?)",
+                    ("job-newer-payload", blob),
+                )
+                await db.commit()
+            main._job_tasks["job-newer-payload"] = task
+            logging.getLogger("rootcoz.main").propagate = True
+            try:
+                with caplog.at_level(logging.WARNING, logger="rootcoz.main"):
+                    resp = test_client.post(
+                        "/results/job-newer-payload/abort",
+                        cookies={"rootcoz_username": "testuser"},
+                    )
+            finally:
+                logging.getLogger("rootcoz.main").propagate = False
+                main._job_tasks.pop("job-newer-payload", None)
+
+            # The caller gets the abort it asked for...
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "aborted"
+            # ...no task is left to finish it...
+            assert task.cancelled
+            # ...and the row is terminal, not still active.
+            stored = await storage.get_result("job-newer-payload")
+            assert stored["status"] == "aborted"
+            async with storage._connect_db() as db:
+                row = await (
+                    await db.execute(
+                        "SELECT result_json FROM results WHERE job_id = ?",
+                        ("job-newer-payload",),
+                    )
+                ).fetchone()
+            assert row["result_json"] == blob, "the refused payload rewrite wrote"
+
+        warnings = [
+            record.getMessage()
+            for record in caplog.records
+            if record.levelname == "WARNING"
+            and "job-newer-payload" in record.getMessage()
+        ]
+        assert len(warnings) == 1, warnings
+        assert "cannot decode" in warnings[0]
+
+    @pytest.mark.asyncio
+    async def test_abort_cancels_the_job_task(self, test_client, temp_db_path: Path):
+        """A normal abort still cancels the tracked task and forgets it."""
+        from rootcoz import main
+
+        cancelled: list[bool] = []
+
+        class _FakeTask:
+            cancelled = False
+
+            def done(self) -> bool:
+                return self.cancelled
+
+            def cancel(self) -> None:
+                self.cancelled = True
+                cancelled.append(True)
+
+            def __await__(self):
+                async def _end() -> None:
+                    return None
+
+                return _end().__await__()
+
+        task = _FakeTask()
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            await storage.save_result(
+                job_id="job-abort-task",
+                jenkins_url="http://jenkins",
+                status="running",
+                result={
+                    "job_name": "test",
+                    "build_number": 1,
+                    "request_params": {"submitted_by": "testuser"},
+                },
+            )
+            main._job_tasks["job-abort-task"] = task
+            try:
+                resp = test_client.post(
+                    "/results/job-abort-task/abort",
+                    cookies={"rootcoz_username": "testuser"},
+                )
+                assert resp.status_code == 200
+                assert cancelled == [True], "the abort did not cancel the job's task"
+                assert "job-abort-task" not in main._job_tasks
+            finally:
+                main._job_tasks.pop("job-abort-task", None)
+
+            stored = await storage.get_result("job-abort-task")
+            assert stored["status"] == "aborted"
 
 
 class TestAppLifespan:
