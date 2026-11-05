@@ -2064,6 +2064,144 @@ def test_comment_enrich_concurrent_loads_share_one_collection(app_client) -> Non
     assert calls == 1
 
 
+def test_comment_enrich_cancelled_reader_keeps_the_collection_alive(
+    app_client,
+) -> None:
+    """A reader whose client goes away must not cancel the shared collection."""
+    admin_login(app_client)
+    _store_job("job-enrich-cancelled")
+    asyncio.run(
+        storage.add_comment(
+            job_id="job-enrich-cancelled",
+            test_name="test_a",
+            comment="see https://github.com/o/r/pull/6",
+            username="admin",
+        )
+    )
+
+    async def _cancel_one_reader() -> dict[str, list[dict[str, Any]]]:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _slow_fetch(*_args: Any, **_kwargs: Any) -> Any:
+            started.set()
+            await release.wait()
+            return {"state": "open"}
+
+        with (
+            patch.object(
+                main,
+                "detect_github_prs",
+                return_value=[{"owner": "o", "repo": "r", "number": 6}],
+            ),
+            patch.object(main, "detect_github_issues", return_value=[]),
+            patch.object(
+                main, "fetch_github_pr_status", AsyncMock(side_effect=_slow_fetch)
+            ),
+        ):
+            first = asyncio.create_task(
+                main._collect_comment_enrichments(
+                    "job-enrich-cancelled", main.get_settings()
+                )
+            )
+            await started.wait()
+            second = asyncio.create_task(
+                main._collect_comment_enrichments(
+                    "job-enrich-cancelled", main.get_settings()
+                )
+            )
+            await asyncio.sleep(0)  # let the second read join the first
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            release.set()
+            return await second
+
+    assert asyncio.run(_cancel_one_reader()) == {
+        "1": [{"type": "github_pr", "key": "o/r#6", "status": {"state": "open"}}]
+    }
+
+
+def test_comment_enrich_failed_jira_setup_is_not_cached(app_client) -> None:
+    """An unusable Jira connection leaves the Jira badges out: retry, don't cache."""
+    admin_login(app_client)
+    _store_job("job-enrich-jira")
+    asyncio.run(
+        storage.add_comment(
+            job_id="job-enrich-jira",
+            test_name="test_a",
+            comment="see PROJ-7",
+            username="admin",
+        )
+    )
+    complete = AsyncMock(side_effect=main.JiraOAuthMintError("mint failed"))
+    with (
+        patch.object(
+            main,
+            "resolve_jira_connection",
+            return_value=SimpleNamespace(mode="sa"),
+        ),
+        patch.object(main, "complete_jira_connection", complete),
+    ):
+        first = asyncio.run(
+            main._collect_comment_enrichments(
+                "job-enrich-jira",
+                SimpleNamespace(jira_enabled=True, github_token=None),
+            )
+        )
+        second = asyncio.run(
+            main._collect_comment_enrichments(
+                "job-enrich-jira",
+                SimpleNamespace(jira_enabled=True, github_token=None),
+            )
+        )
+
+    assert first == second == {}
+    assert complete.await_count == 2
+    assert "job-enrich-jira" not in main._enrichments_cache
+
+
+def test_comment_enrich_cache_is_evicted_when_the_job_is_deleted(app_client) -> None:
+    """Deleted comments must not stay readable through the cached badges."""
+    admin_login(app_client)
+    fetch = AsyncMock(return_value={"state": "open"})
+    for job_id in ("job-enrich-gone", "job-enrich-gone-bulk"):
+        _store_job(job_id)
+        asyncio.run(
+            storage.add_comment(
+                job_id=job_id,
+                test_name="test_a",
+                comment="see https://github.com/o/r/pull/8",
+                username="admin",
+            )
+        )
+    with (
+        patch.object(
+            main,
+            "detect_github_prs",
+            return_value=[{"owner": "o", "repo": "r", "number": 8}],
+        ),
+        patch.object(main, "detect_github_issues", return_value=[]),
+        patch.object(main, "fetch_github_pr_status", fetch),
+    ):
+        for job_id in ("job-enrich-gone", "job-enrich-gone-bulk"):
+            response = app_client.get(f"/results/{job_id}/enrich-comments")
+            assert response.status_code == 200, response.text
+            assert job_id in main._enrichments_cache
+
+        deleted = app_client.delete("/results/job-enrich-gone")
+        bulk = app_client.request(
+            "DELETE",
+            "/api/results/bulk",
+            json={"job_ids": ["job-enrich-gone-bulk"]},
+        )
+
+    assert deleted.status_code == 200, deleted.text
+    assert bulk.status_code == 200, bulk.text
+    assert "job-enrich-gone" not in main._enrichments_cache
+    assert "job-enrich-gone-bulk" not in main._enrichments_cache
+
+
 def test_pattern_override_is_audited(app_client) -> None:
     admin_login(app_client)
     _store_job("job-pattern")

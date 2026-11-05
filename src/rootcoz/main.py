@@ -8215,16 +8215,20 @@ async def _collect_comment_enrichments(
     inflight = _enrichments_inflight.get(job_id)
     if inflight is not None:
         logger.debug(f"enrich_comments: job_id={job_id}, joined in-flight collection")
-        return await inflight
+        # Shielded: a reader whose client goes away must not cancel the
+        # collection the other readers of this job are waiting on.
+        return await asyncio.shield(inflight)
     task = asyncio.create_task(_fetch_comment_enrichments(job_id, settings, epoch))
     _enrichments_inflight[job_id] = task
 
     def _forget(done: asyncio.Task[dict[str, list[dict[str, Any]]]]) -> None:
         if _enrichments_inflight.get(job_id) is done:
             _enrichments_inflight.pop(job_id, None)
+        if not done.cancelled():
+            done.exception()  # shielded and now unread: never "never retrieved"
 
     task.add_done_callback(_forget)
-    return await task
+    return await asyncio.shield(task)
 
 
 async def _fetch_comment_enrichments(
@@ -8241,6 +8245,9 @@ async def _fetch_comment_enrichments(
     jira_connection: JiraConnection | None = (
         resolve_jira_connection(settings) if settings.jira_enabled else None
     )
+    # A Jira connection that cannot be completed leaves the Jira badges out of
+    # this snapshot; that is a failure to retry, not an answer to cache.
+    jira_failed = False
     if jira_connection is not None and jira_connection.mode == "none":
         jira_connection = None
     if jira_connection is not None and jira_connection.mode in ("sa", "atst"):
@@ -8253,11 +8260,13 @@ async def _fetch_comment_enrichments(
         except JiraOAuthMintError as exc:
             logger.warning("Comment enrichment: %s; skipping Jira keys", exc)
             jira_connection = None
+            jira_failed = True
         if jira_connection is not None and not jira_connection.api_base:
             logger.warning(
                 "Comment enrichment: gateway cloud ID unresolvable; skipping Jira keys"
             )
             jira_connection = None
+            jira_failed = True
 
     github_token = (
         settings.github_token.get_secret_value() if settings.github_token else None
@@ -8311,7 +8320,7 @@ async def _fetch_comment_enrichments(
                 task_map[idx] = (str(c["id"]), {"type": "jira", "key": key})
 
     enrichments: dict[str, list[dict[str, Any]]] = {}
-    failed = False
+    failed = jira_failed
     logger.debug(f"enrich_comments: job_id={job_id}, enrichment_tasks={len(tasks)}")
 
     if tasks:
@@ -10874,6 +10883,7 @@ async def bulk_delete_jobs_endpoint(
     result["unauthorized"] = unauthorized_ids
 
     for job_id in result["deleted"]:
+        _invalidate_enrichments_cache(job_id)
         await _cleanup_deleted_job_chat_workspaces(job_id)
 
     notify_active_count_changed()
@@ -10922,6 +10932,8 @@ async def delete_job_endpoint(
 
     origins = await _reanalysis_origins([job_id])
     await storage.delete_job(job_id)
+    # The comments are gone; their cached badges must not outlive them.
+    _invalidate_enrichments_cache(job_id)
     await _unlink_reanalysis_origins(origins)
     await _cleanup_revoked_ai_sessions()
     await _cleanup_deleted_job_chat_workspaces(job_id)
