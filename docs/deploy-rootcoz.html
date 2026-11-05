@@ -508,6 +508,42 @@ kubectl<span class="w"> </span>-n<span class="w"> </span>rootcoz<span class="w">
 <li>Pin <code>alerts.image</code> by digest for production. The default <code>curlimages/curl:8.12.1</code> is a tag, and the job runs with <code>automountServiceAccountToken: false</code> because it only needs to reach the application Service. The pod pulls the image with the release's <code>imagePullSecrets</code>, the same ones the application Deployment uses.</li>
 <li>Deploy the alert before or after the image that carries the data-directory gauges: when the ratio line is absent the disk check is skipped silently, and the health and error-rate checks keep working.</li>
 </ul>
+<h2 id="database-size-and-compaction">Database size and compaction</h2>
+<p>Analysis results are stored compressed: every new <code>result_json</code> payload of 1 KB
+or more is a zstd frame inside the same column, and a payload a frame would
+grow stays plain text. SQLite reports which shape a row has (<code>typeof(result_json)</code>
+is <code>blob</code> or <code>text</code>), and the application decodes both transparently — no
+migration step, no setting to turn it on.</p>
+<ul>
+<li>
+<p>Rows written before the upgrade are derived and compacted in the background
+  after the next start, so startup and <code>/health</code> are never delayed by them. The
+  sweep commits one batch at a time, is safe to interrupt, and resumes where it
+  stopped on the following boot; the log reports the column bytes and the
+  database file size before and after.</p>
+</li>
+<li>
+<p>The database <strong>file</strong> only shrinks after a rewrite plus <code>VACUUM</code>, which takes
+  the write lock and needs free space roughly equal to the file size. That is an
+  operator step, deliberately not automated on a live single-replica deployment.
+  The image has no <code>sqlite3</code> CLI, but it does ship Python:</p>
+</li>
+</ul>
+<div class="highlight"><pre><span></span><code>kubectl<span class="w"> </span><span class="nb">exec</span><span class="w"> </span>-n<span class="w"> </span>rootcoz<span class="w"> </span>deploy/rootcoz<span class="w"> </span>--<span class="w"> </span>python<span class="w"> </span>-c<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span><span class="s2">"import sqlite3; sqlite3.connect('/data/results.db').execute('VACUUM')"</span>
+</code></pre></div>
+
+<p>Retry it while the application reports <code>database is locked</code>. If the volume has
+  no headroom for a second copy of the file, scale the deployment to zero and run
+  the same statement from a pod that mounts the volume instead.</p>
+<ul>
+<li>Rows written by a pre-compression build are still readable by that build as
+  long as they are plain text. A build from before this change cannot read a
+  compressed row — parsing the frame raises a decode error, so those results
+  surface as errors until you upgrade again — but it never destroys one. Do not
+  roll back once the background sweep has run: restore the database from a
+  backup taken before the upgrade instead. Upgrade all replicas together.</li>
+</ul>
 <h2 id="troubleshooting">Troubleshooting</h2>
 <ul>
 <li>
@@ -584,6 +620,7 @@ kubectl<span class="w"> </span>-n<span class="w"> </span>rootcoz<span class="w">
 <li><a href="#the-chart-health-alert-cronjob-the-alternative-for-deployments-without-prometheus">The chart health-alert CronJob (the alternative for deployments without Prometheus)</a></li>
 </ul>
 </li>
+<li><a href="#database-size-and-compaction">Database size and compaction</a></li>
 <li><a href="#troubleshooting">Troubleshooting</a></li>
 <li><a href="#related-pages">Related Pages</a></li>
 </ul>

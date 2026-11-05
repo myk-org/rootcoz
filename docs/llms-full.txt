@@ -437,6 +437,39 @@ Delete the existing CronJob and let the chart recreate it, or adopt it by adding
 - Pin `alerts.image` by digest for production. The default `curlimages/curl:8.12.1` is a tag, and the job runs with `automountServiceAccountToken: false` because it only needs to reach the application Service. The pod pulls the image with the release's `imagePullSecrets`, the same ones the application Deployment uses.
 - Deploy the alert before or after the image that carries the data-directory gauges: when the ratio line is absent the disk check is skipped silently, and the health and error-rate checks keep working.
 
+## Database size and compaction
+
+Analysis results are stored compressed: every new `result_json` payload of 1 KB
+or more is a zstd frame inside the same column, and a payload a frame would
+grow stays plain text. SQLite reports which shape a row has (`typeof(result_json)`
+is `blob` or `text`), and the application decodes both transparently — no
+migration step, no setting to turn it on.
+
+- Rows written before the upgrade are derived and compacted in the background
+  after the next start, so startup and `/health` are never delayed by them. The
+  sweep commits one batch at a time, is safe to interrupt, and resumes where it
+  stopped on the following boot; the log reports the column bytes and the
+  database file size before and after.
+- The database **file** only shrinks after a rewrite plus `VACUUM`, which takes
+  the write lock and needs free space roughly equal to the file size. That is an
+  operator step, deliberately not automated on a live single-replica deployment.
+  The image has no `sqlite3` CLI, but it does ship Python:
+
+```bash
+    kubectl exec -n rootcoz deploy/rootcoz -- python -c \
+      "import sqlite3; sqlite3.connect('/data/results.db').execute('VACUUM')"
+```
+
+  Retry it while the application reports `database is locked`. If the volume has
+  no headroom for a second copy of the file, scale the deployment to zero and run
+  the same statement from a pod that mounts the volume instead.
+- Rows written by a pre-compression build are still readable by that build as
+  long as they are plain text. A build from before this change cannot read a
+  compressed row — parsing the frame raises a decode error, so those results
+  surface as errors until you upgrade again — but it never destroys one. Do not
+  roll back once the background sweep has run: restore the database from a
+  backup taken before the upgrade instead. Upgrade all replicas together.
+
 ## Troubleshooting
 
 - `route.enabled and ingress.enabled are mutually exclusive`

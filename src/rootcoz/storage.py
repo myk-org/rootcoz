@@ -296,6 +296,9 @@ def _hash_session_token(token: str) -> str:
 # ``bytes`` and ``typeof(result_json)`` says which in SQL. Every reader goes
 # through :func:`parse_result_json`, so nothing else understands the two shapes.
 # ``compression.zstd`` is stdlib from Python 3.14 on (PEP 784) — no dependency.
+# The payload stays inline, with the per-group text repeated in every failure:
+# normalising it into ``failure_groups`` measured ~0.1 % on top of zstd and was
+# rejected on #409, not overlooked.
 _RESULT_ZSTD_MIN_BYTES = 1024  # below this a frame is never smaller
 _RESULT_ZSTD_LEVEL = 3  # 9.1x at 0.21 ms/row; level 9 buys 8% for 3x the CPU
 
