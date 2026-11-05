@@ -1,6 +1,7 @@
 """Pydantic request and response models."""
 
 import json
+import re
 from datetime import datetime
 from typing import Annotated, Any, Literal, Self
 from uuid import uuid4
@@ -1131,21 +1132,75 @@ class CreateIssueRequest(_ChildJobFieldsValidator, _TrackerCredentialsMixin):
     )
 
 
-class ChatIssueRequest(BaseModel):
-    """Request body for opening a tracker issue from a chat conversation.
+#: ``owner/name`` shape of a GitHub repository slug (never a URL).
+_REPO_SLUG_RE = re.compile(r"[\w.-]+/[\w.-]+")
 
-    No credentials and no ``test_name``: there is no failure to name, and the
-    credential is the caller's saved account token — never the request's.
+_REPO_SLUG_ERROR = (
+    "repo must be a bare 'owner/name' GitHub repository (for example "
+    "'org/repo') — pass the slug, not a URL and not a repository name alone"
+)
+
+
+def _validate_repo_slug(v: str) -> str:
+    """Accept an empty value (the run's test repo) or a bare ``owner/name``.
+
+    Applied by the chat-issue endpoints, which answer a malformed value with a
+    400 whose detail the chat model relays to the user.
+    """
+    slug = v.strip() if isinstance(v, str) else v
+    if slug and not _REPO_SLUG_RE.fullmatch(slug):
+        raise ValueError(_REPO_SLUG_ERROR)
+    return slug
+
+
+class ChatIssueProposeRequest(BaseModel):
+    """Request body for drafting a chat issue the user has to approve.
+
+    Nothing is filed here: the server keeps the scrubbed title and body as a
+    single-use draft and returns the id the create call must present. ``repo``
+    is the draft's target repository, so the preview shows where it would file.
     """
 
     target: Literal["github", "jira"]
     title: IssueTitle
     body: str
+    repo: str = ""
+
+    @field_validator("repo")
+    @classmethod
+    def _strip_repo(cls, v: str) -> str:
+        return v.strip() if isinstance(v, str) else v
+
+
+class ChatIssueRequest(BaseModel):
+    """Request body for opening a tracker issue from a chat conversation.
+
+    No credentials and no ``test_name``: there is no failure to name, and the
+    credential is the caller's saved account token — never the request's.
+    ``confirmation_id`` is the id of a draft the user approved (see
+    ``POST /api/chat-issue/propose``); an empty or unknown id files nothing.
+
+    ``repo`` is a bare ``owner/name`` GitHub slug, empty for the run's test
+    repo; ``job_id`` is the run that bounds which repos a non-admin may name.
+    """
+
+    target: Literal["github", "jira"]
+    title: IssueTitle
+    body: str
+    repo: str = ""
+    job_id: str = ""
+    confirmation_id: str = ""
     jira_project_key: str = ""
     jira_security_level: str = ""
     jira_issue_type: IssueTypeName = "Bug"
 
-    @field_validator("jira_project_key", "jira_security_level")
+    @field_validator(
+        "jira_project_key",
+        "jira_security_level",
+        "confirmation_id",
+        "job_id",
+        "repo",
+    )
     @classmethod
     def _strip_overrides(cls, v: str) -> str:
         return v.strip() if isinstance(v, str) else v

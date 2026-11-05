@@ -3,6 +3,7 @@
 import asyncio
 import os
 from pathlib import Path
+from typing import Any, ClassVar
 from unittest.mock import AsyncMock, call, patch
 
 import pytest
@@ -345,7 +346,7 @@ class TestBuildChatCustomTools:
             tracker_targets=("github", "jira"),
         )
         names = [t["name"] for t in tools]
-        assert len(names) == 11  # 5 base + 2 jira + 2 github + 2 issue-create
+        assert len(names) == 12  # 5 base + 2 jira + 2 github + 2 create + 1 propose
 
     def test_no_jira_without_token(self):
         tools = build_chat_custom_tools(
@@ -814,6 +815,7 @@ class TestChatTrackerTargets:
     def _settings(**overrides):
         from rootcoz.config import Settings
 
+        overrides.setdefault("tests_repo_url", "https://github.com/org/repo")
         with patch.dict(os.environ, {}, clear=True):
             return Settings(_env_file=None, **overrides)
 
@@ -830,6 +832,25 @@ class TestChatTrackerTargets:
             self._settings(),
             github_token="ghp_user",  # pragma: allowlist secret
         ) == ("github",)
+
+    def test_github_without_a_repository_offers_nothing(self):
+        """No TESTS_REPO_URL means every GitHub create call would refuse."""
+        from rootcoz.main import _chat_tracker_state
+
+        assert (
+            self._targets(
+                self._settings(tests_repo_url=""),
+                github_token="ghp_user",  # pragma: allowlist secret
+            )
+            == ()
+        )
+        assert (
+            _chat_tracker_state(
+                self._settings(tests_repo_url=""),
+                {"github_token": "ghp_user"},  # pragma: allowlist secret
+            )[1]["github"]
+            == "no_repository"
+        )
 
     def test_github_flag_off_offers_nothing(self):
         assert (
@@ -865,7 +886,7 @@ class TestChatTrackerTargets:
 
 
 class TestChatIssueTools:
-    """The chat model files a tracker issue itself when the user asks for one."""
+    """The chat model proposes an issue, then files the draft the user approved."""
 
     def test_issue_tools_in_job_and_admin_chat(self):
         job_tools = build_chat_custom_tools(
@@ -873,31 +894,66 @@ class TestChatIssueTools:
             auth_token="tok",
             job_id="j1",
             tracker_targets=("github", "jira"),
+            issue_repos=("org/tests", "org/lib"),
         )
         admin_tools = build_admin_custom_tools(
             server_url="http://localhost:8000",
             auth_token="tok",
             tracker_targets=("github", "jira"),
         )
-        for tools in (job_tools, admin_tools):
+        for tools, in_job_chat in ((job_tools, True), (admin_tools, False)):
             by_name = {t["name"]: t for t in tools}
+            propose = by_name["propose_tracker_issue"]
+            assert propose["http"]["method"] == "POST"
+            assert (
+                propose["http"]["url"] == "http://localhost:8000/api/chat-issue/propose"
+            )
+            assert propose["http"]["headers"]["Authorization"] == "Bearer tok"
+            assert propose["parameters"]["required"] == ["target", "title", "body"]
+            assert propose["parameters"]["properties"]["target"]["enum"] == [
+                "github",
+                "jira",
+            ]
             for target in ("github", "jira"):
                 tool = by_name[f"create_{target}_issue"]
                 assert tool["http"]["method"] == "POST"
                 assert tool["http"]["url"] == "http://localhost:8000/api/chat-issue"
                 assert tool["http"]["headers"]["Authorization"] == "Bearer tok"
-                assert tool["http"]["body_template"] == {
+                expected_body = {
                     "target": target,
                     "title": "{title}",
                     "body": "{body}",
+                    "confirmation_id": "{confirmation_id}",
                 }
-                assert tool["parameters"]["required"] == ["title", "body"]
-                assert "ONLY when the user explicitly asks" in tool["description"]
-                # The model must not pick the repo/project.
-                assert "do not choose the repo/project" in tool["description"]
+                if target == "github":
+                    # Only GitHub takes a repo, and a job chat names its run.
+                    expected_body["repo"] = "{repo}"
+                    if in_job_chat:
+                        expected_body["job_id"] = "j1"
+                assert tool["http"]["body_template"] == expected_body
+                assert tool["parameters"]["required"] == [
+                    "title",
+                    "body",
+                    "confirmation_id",
+                ]
+                assert "ONLY after the user answered yes" in tool["description"]
+                assert "without a valid confirmation_id fails" in tool["description"]
+                # The Jira project is never the model's to pick.
+                if target == "jira":
+                    assert "do not choose the Jira project" in tool["description"]
+
+    def test_no_issue_tools_at_all_without_a_usable_tracker(self):
+        names = [
+            tool["name"]
+            for tool in build_chat_custom_tools(
+                server_url="http://localhost:8000", auth_token="tok", job_id="j1"
+            )
+        ]
+        assert "propose_tracker_issue" not in names
+        assert not [n for n in names if n.startswith("create_")]
 
     async def test_created_issue_is_the_tool_result(
-        self, test_client, github_issue_config
+        self, test_client, temp_db_path: Path, github_issue_config
     ):
         """A 201 body with the issue URL is what the tool hands the model."""
         _, api_key = await storage.create_user("chat-issue-ok")
@@ -905,6 +961,23 @@ class TestChatIssueTools:
             "chat-issue-ok",
             github_token="ghp_row_token",  # pragma: allowlist secret
         )
+        # A non-admin GitHub write needs the run it belongs to (see #407).
+        await _save_job(
+            temp_db_path,
+            "chat-issue-run",
+            {"request_params": {"tests_repo_url": "https://github.com/org/repo"}},
+        )
+        headers = {"Authorization": f"Bearer {api_key}"}
+        proposal = test_client.post(
+            "/api/chat-issue/propose",
+            json={
+                "target": "github",
+                "title": "test_login times out",
+                "body": "DNS timeout resolving auth.",
+            },
+            headers=headers,
+        )
+        assert proposal.status_code == 201, proposal.text
         with patch("rootcoz.main.create_github_issue") as mock_create:
             mock_create.return_value = {
                 "url": "https://github.com/org/repo/issues/7",
@@ -914,10 +987,12 @@ class TestChatIssueTools:
                 "/api/chat-issue",
                 json={
                     "target": "github",
-                    "title": "test_login times out",
-                    "body": "DNS timeout resolving auth.",
+                    "title": proposal.json()["title"],
+                    "body": proposal.json()["body"],
+                    "confirmation_id": proposal.json()["confirmation_id"],
+                    "job_id": "chat-issue-run",
                 },
-                headers={"Authorization": f"Bearer {api_key}"},
+                headers=headers,
             )
         assert response.status_code == 201, response.text
         # Unwrapped: this JSON body is exactly what the sidecar returns to the model.
@@ -952,18 +1027,22 @@ class TestChatIssueTools:
                 job_id="j1",
                 tracker_targets=("github", "jira"),
             ),
+            tracker_unavailable={"github": "no_token", "jira": "no_token"},
         )
         admin_prompt = build_admin_system_prompt(
             build_admin_custom_tools(
                 server_url="http://localhost:8000",
                 auth_token="tok",
                 tracker_targets=("github", "jira"),
-            )
+            ),
+            tracker_unavailable={"github": "no_token", "jira": "no_token"},
         )
         for prompt in (job_prompt, admin_prompt):
+            assert "propose_tracker_issue" in prompt
             assert "create_github_issue" in prompt
             assert "create_jira_issue" in prompt
             assert "ONLY when the user explicitly asks" in prompt
+            assert "Creating without a confirmation id files nothing" in prompt
             assert "relay it verbatim" in prompt
             assert "Profile Settings" in prompt
             assert "Never claim an issue exists" in prompt
@@ -971,12 +1050,33 @@ class TestChatIssueTools:
     def test_prompt_tells_the_model_what_to_do_without_the_tool(self):
         """A tracker the user never set up is absent — and the prompt says so."""
         prompt = build_admin_system_prompt(
-            build_admin_custom_tools(server_url="http://localhost:8000", auth_token="t")
+            build_admin_custom_tools(
+                server_url="http://localhost:8000", auth_token="t"
+            ),
+            tracker_unavailable={"github": "no_token", "jira": "no_token"},
         )
         assert "create_github_issue" not in prompt.split("## Creating Issues")[0]
-        assert "NOT in your tool list cannot be used" in prompt
+        assert "no tool in your tool list cannot be used" in prompt
         assert "Say you cannot open that issue" in prompt
-        assert "Profile Settings → add the GitHub/Jira token" in prompt
+        assert "Profile Settings → add the GitHub token" in prompt
+        assert "Profile Settings → add the Jira token" in prompt
+
+    def test_prompt_does_not_send_a_server_disabled_tracker_to_profile(self):
+        """Adding a token cannot turn a tracker on, so the prompt stops saying so."""
+        prompt = build_admin_system_prompt(
+            build_admin_custom_tools(
+                server_url="http://localhost:8000", auth_token="t"
+            ),
+            tracker_unavailable={
+                "github": "no_repository",
+                "jira": "server_disabled",
+            },
+        )
+        rules = prompt.split("## Creating Issues")[1]
+        assert "TESTS_REPO_URL" in rules
+        assert "issue creation is disabled on this server" in rules
+        # The token advice belongs only to the missing-token case.
+        assert "Profile Settings → add" not in rules
 
 
 class TestBuildSystemPrompt:
@@ -3258,3 +3358,255 @@ async def test_chat_availability_does_not_bypass_route_authorization(
         ).status_code
         == 403
     )
+
+
+class TestChatIssueRepoAllowList:
+    """A job chat files only in that run's repos; an admin may name any (#407)."""
+
+    _PARAMS: ClassVar[dict[str, Any]] = {
+        "job_name": "job",
+        "build_number": 1,
+        "tests_repo_url": "https://github.com/org/tests",
+        "additional_repos": [{"name": "lib", "url": "https://github.com/org/lib"}],
+    }
+
+    async def _save_run(self, temp_db_path: Path, job_id: str, params=None) -> str:
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.save_result(
+                job_id,
+                "",
+                "completed",
+                {
+                    "status": "completed",
+                    "summary": "t",
+                    "failures": [],
+                    "request_params": dict(params or self._PARAMS),
+                },
+            )
+        return job_id
+
+    async def _reviewer(self, username: str = "repo-filer") -> dict[str, str]:
+        _, api_key = await storage.create_user(username, role="reviewer")
+        await storage.save_user_tokens(
+            username,
+            github_token="ghp_row_token",  # pragma: allowlist secret
+        )
+        return {"Authorization": f"Bearer {api_key}"}
+
+    @staticmethod
+    def _file(
+        test_client,
+        headers: dict[str, str],
+        *,
+        job_id: str = "",
+        repo: str | None = None,
+    ):
+        """Propose then create — the two-step gate every write goes through."""
+        proposal_body: dict[str, str] = {"target": "github", "title": "t", "body": "b"}
+        if job_id:
+            proposal_body["job_id"] = job_id
+        if repo is not None:
+            proposal_body["repo"] = repo
+        proposal = test_client.post(
+            "/api/chat-issue/propose", json=proposal_body, headers=headers
+        )
+        assert proposal.status_code == 201, proposal.text
+        created = test_client.post(
+            "/api/chat-issue",
+            json={
+                "target": "github",
+                "title": proposal.json()["title"],
+                "body": proposal.json()["body"],
+                "confirmation_id": proposal.json()["confirmation_id"],
+                **({"repo": repo} if repo is not None else {}),
+                **({"job_id": job_id} if job_id else {}),
+            },
+            headers=headers,
+        )
+        return created
+
+    @staticmethod
+    def _filed_repo(mock_create) -> str:
+        assert mock_create.call_count == 1, mock_create.call_args
+        return mock_create.call_args.kwargs["repo_url"]
+
+    async def test_empty_repo_files_in_the_runs_test_repo(
+        self, test_client, temp_db_path: Path, github_issue_config
+    ):
+        """Leaving repo empty is today's behaviour: the run's test repo."""
+        job_id = await self._save_run(temp_db_path, "job-repo-default")
+        headers = await self._reviewer()
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/tests/issues/1",
+                "number": 1,
+            }
+            response = self._file(test_client, headers, job_id=job_id)
+        assert response.status_code == 201, response.text
+        assert self._filed_repo(mock_create) == "https://github.com/org/tests"
+
+    async def test_the_runs_test_repo_is_accepted(
+        self, test_client, temp_db_path: Path, github_issue_config
+    ):
+        job_id = await self._save_run(temp_db_path, "job-repo-tests")
+        headers = await self._reviewer()
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/tests/issues/2",
+                "number": 2,
+            }
+            response = self._file(test_client, headers, job_id=job_id, repo="org/tests")
+        assert response.status_code == 201, response.text
+        assert self._filed_repo(mock_create) == "https://github.com/org/tests"
+
+    async def test_an_additional_repo_is_accepted(
+        self, test_client, temp_db_path: Path, github_issue_config
+    ):
+        job_id = await self._save_run(temp_db_path, "job-repo-additional")
+        headers = await self._reviewer()
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/lib/issues/3",
+                "number": 3,
+            }
+            response = self._file(test_client, headers, job_id=job_id, repo="org/lib")
+        assert response.status_code == 201, response.text
+        assert self._filed_repo(mock_create) == "https://github.com/org/lib"
+
+    async def test_a_foreign_repo_is_refused_and_names_the_allowed_set(
+        self, test_client, temp_db_path: Path, github_issue_config
+    ):
+        job_id = await self._save_run(temp_db_path, "job-repo-foreign")
+        headers = await self._reviewer()
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            response = self._file(
+                test_client, headers, job_id=job_id, repo="someone/elsewhere"
+            )
+        assert response.status_code == 400, response.text
+        detail = response.json()["detail"]
+        assert "someone/elsewhere" in detail
+        assert "org/tests" in detail and "org/lib" in detail
+        assert "only go to this run's test repo and additional repos" in detail
+        mock_create.assert_not_called()
+
+    async def test_a_malformed_repo_is_refused_as_a_url_or_a_bare_name(
+        self, test_client, github_issue_config
+    ):
+        """Not a 422: the detail is the string the model relays to the user."""
+        headers = await self._reviewer("slug")
+        for bad in ("https://github.com/org/tests", "tests"):
+            response = test_client.post(
+                "/api/chat-issue/propose",
+                json={"target": "github", "title": "t", "body": "b", "repo": bad},
+                headers=headers,
+            )
+            assert response.status_code == 400, response.text
+            assert "'owner/name'" in response.json()["detail"]
+
+    async def test_an_admin_may_name_any_repo(
+        self, test_client, temp_db_path: Path, github_issue_config
+    ):
+        admin, api_key = await storage.create_admin_user("repo-admin")
+        await storage.save_user_tokens(
+            admin,
+            github_token="ghp_row_token",  # pragma: allowlist secret
+        )
+        headers = {"Authorization": f"Bearer {api_key}"}
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/any/where/issues/4",
+                "number": 4,
+            }
+            response = self._file(test_client, headers, repo="any/where")
+        assert response.status_code == 201, response.text
+        assert self._filed_repo(mock_create) == "https://github.com/any/where"
+
+    async def test_a_non_admin_without_a_run_is_refused(
+        self, test_client, github_issue_config
+    ):
+        headers = await self._reviewer("no-run")
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            response = self._file(test_client, headers, repo="org/tests")
+        assert response.status_code == 400, response.text
+        assert "must be tied to a run" in response.json()["detail"]
+        mock_create.assert_not_called()
+
+    def test_job_prompt_lists_the_allowed_repos(self):
+        repos = ("org/tests", "org/lib")
+        prompt = build_system_prompt(
+            job_name="job",
+            build_number=1,
+            job_id="j1",
+            custom_tools=build_chat_custom_tools(
+                server_url="http://localhost:8000",
+                auth_token="tok",
+                job_id="j1",
+                tracker_targets=("github",),
+                issue_repos=repos,
+            ),
+            issue_repos=repos,
+        )
+        assert "only file a GitHub issue in this run's repos" in prompt
+        assert "org/tests, org/lib" in prompt
+
+    def test_admin_prompt_says_any_repo(self):
+        prompt = build_admin_system_prompt(
+            build_admin_custom_tools(
+                server_url="http://localhost:8000",
+                auth_token="tok",
+                tracker_targets=("github",),
+            )
+        )
+        assert "may name any GitHub repository" in prompt
+
+
+class TestChatSessionToolRefresh:
+    """A resumed sidecar session keeps its creation-time tools (#407).
+
+    ``chat_with_ai`` resumes an existing session by sending only the message, so
+    a tracker enabled — or a token saved — after the session started never
+    reaches the model in it. The session is rebuilt instead of resumed.
+    """
+
+    def test_an_unchanged_tool_set_resumes_the_session(self):
+        from rootcoz import main as main_mod
+
+        main_mod._remember_chat_session_tools("sid-same", ("github",))
+        assert main_mod._enable_tools_for_session("sid-same", ("github",)) == "sid-same"
+
+    def test_a_newly_enabled_tracker_rebuilds_the_session(self):
+        from rootcoz import main as main_mod
+
+        main_mod._remember_chat_session_tools("sid-new", ("github",))
+        assert main_mod._enable_tools_for_session("sid-new", ("github", "jira")) is None
+
+    def test_removed_access_also_rebuilds_the_session(self):
+        from rootcoz import main as main_mod
+
+        main_mod._remember_chat_session_tools("sid-gone", ("github", "jira"))
+        assert main_mod._enable_tools_for_session("sid-gone", ("github",)) is None
+
+    def test_an_unknown_session_is_adopted_then_rebuilt_on_a_change(self):
+        """After a restart the creation-time set is unknown — adopt, do not churn."""
+        from rootcoz import main as main_mod
+
+        assert (
+            main_mod._enable_tools_for_session("sid-unknown", ("github",))
+            == "sid-unknown"
+        )
+        assert (
+            main_mod._enable_tools_for_session("sid-unknown", ("github", "jira"))
+            is None
+        )
+
+    def test_no_session_means_build_one(self):
+        from rootcoz.main import _enable_tools_for_session
+
+        assert _enable_tools_for_session(None, ("github",)) is None
+
+    def test_a_rebuild_forgets_the_stale_targets(self):
+        from rootcoz import main as main_mod
+
+        main_mod._remember_chat_session_tools("sid-stale", ("github",))
+        assert main_mod._enable_tools_for_session("sid-stale", ("jira",)) is None
+        assert "sid-stale" not in main_mod._chat_session_tracker_targets

@@ -1409,11 +1409,29 @@ class RootCozClient:
             accept_statuses=(201,),
         )
 
+    def propose_chat_issue(
+        self,
+        target: str,
+        title: str,
+        body: str,
+    ) -> dict[str, Any]:
+        """Draft an issue from chat text. POST /api/chat-issue/propose
+
+        Files nothing: the reply carries the ``confirmation_id`` that
+        ``create_chat_issue`` needs, plus the exact title and body it would file.
+        Drafts are single-use and expire, so propose again after any edit.
+        """
+        payload: dict[str, Any] = {"target": target, "title": title, "body": body}
+        return self._request(
+            "POST", "/api/chat-issue/propose", json=payload, accept_statuses=(201,)
+        )
+
     def create_chat_issue(
         self,
         target: str,
         title: str,
         body: str,
+        confirmation_id: str,
         jira_project_key: str = "",
         jira_security_level: str = "",
         jira_issue_type: str = "Bug",
@@ -1422,9 +1440,15 @@ class RootCozClient:
 
         No token parameter on purpose: the server files the issue with the
         credentials saved in the caller's account, and a deployment token is
-        never a fallback.
+        never a fallback. ``confirmation_id`` must come from
+        ``propose_chat_issue`` for the same title and body.
         """
-        payload: dict[str, Any] = {"target": target, "title": title, "body": body}
+        payload: dict[str, Any] = {
+            "target": target,
+            "title": title,
+            "body": body,
+            "confirmation_id": confirmation_id,
+        }
         if jira_project_key:
             payload["jira_project_key"] = jira_project_key
         if jira_security_level:

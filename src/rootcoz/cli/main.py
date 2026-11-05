@@ -2953,11 +2953,55 @@ def create_issue(
             typer.echo(f"Comment added (id: {data['comment_id']})")
 
 
-@app.command("create-chat-issue")
-def create_chat_issue(
+@app.command("propose-chat-issue")
+def propose_chat_issue(
     target: str = typer.Option(..., "--target", help="github or jira."),
     title: str = typer.Option(..., "--title", help="Issue title."),
     body: str = typer.Option(..., "--body", help="Issue body."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Draft an issue from chat text and print the confirmation id.
+
+    Files nothing. Print the returned title and body, review them, then pass
+    the id to `create-chat-issue` — the server files only a draft that was
+    proposed, and a confirmation id works once.
+    """
+    _set_json(json_output)
+    normalized_target = _validate_issue_type(target, option="--target")
+    try:
+        client = _get_client()
+        data = client.propose_chat_issue(
+            target=normalized_target,
+            title=title,
+            body=body,
+        )
+    except RootCozError as err:
+        _handle_error(err)
+
+    if _state.get("json", False):
+        print_output(data, columns=[], as_json=True)
+    else:
+        typer.echo(f"Confirmation id: {data.get('confirmation_id', '')}")
+        typer.echo(f"Title: {data.get('title', '')}")
+        typer.echo("Body:")
+        typer.echo(data.get("body", ""))
+        typer.echo(
+            "\nReview it, then file it with: "
+            f"rootcoz create-chat-issue --target {normalized_target} "
+            f"--confirmation-id {data.get('confirmation_id', '')}"
+        )
+
+
+@app.command("create-chat-issue")
+def create_chat_issue(
+    target: str = typer.Option(..., "--target", help="github or jira, as proposed."),
+    confirmation_id: str = typer.Option(
+        ...,
+        "--confirmation-id",
+        help="Id from `rootcoz propose-chat-issue` for this exact title and body.",
+    ),
+    title: str = typer.Option(..., "--title", help="Issue title, as proposed."),
+    body: str = typer.Option(..., "--body", help="Issue body, as proposed."),
     jira_project_key: str = typer.Option(
         "",
         "--jira-project-key",
@@ -2975,11 +3019,12 @@ def create_chat_issue(
     ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
-    """Create a GitHub issue or Jira ticket from chat text.
+    """File an issue drafted with `propose-chat-issue`.
 
     Tracker credentials are the ones saved in your account: this command
     deliberately has no token options, so it can never file an issue under a
-    server token.
+    server token. A confirmation id authorises one draft, once, so propose
+    again after editing the title or body.
     """
     _set_json(json_output)
     normalized_target = _validate_issue_type(target, option="--target")
@@ -2989,6 +3034,7 @@ def create_chat_issue(
             target=normalized_target,
             title=title,
             body=body,
+            confirmation_id=confirmation_id,
             jira_project_key=jira_project_key,
             jira_security_level=jira_security_level,
             jira_issue_type=jira_issue_type,

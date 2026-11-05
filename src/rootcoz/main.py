@@ -186,6 +186,7 @@ from rootcoz.models import (
     BulkDeleteRequest,
     BulkJobMetadataRequest,
     ChatInitRequest,
+    ChatIssueProposeRequest,
     ChatIssueRequest,
     ChatMessageRequest,
     ChildJobAnalysis,
@@ -227,6 +228,7 @@ from rootcoz.models import (
     UnsubscribeRequest,
     UpdateFilterPresetRequest,
     _JenkinsParamsMixin,
+    _validate_repo_slug,
 )
 from rootcoz.monitoring import (
     _get_app_version,
@@ -3253,6 +3255,7 @@ _BODY_LOGGING_SKIP_PATHS = frozenset(
         # Chat text is not structurally secret, so key-based masking misses a
         # pasted credential — the same reason /api/chat/ is skipped above.
         "/api/chat-issue",
+        "/api/chat-issue/propose",
     }
 )
 
@@ -9240,25 +9243,342 @@ def _require_tracker_enabled(
         )
 
 
+def _chat_tracker_state(
+    settings: Settings, user_tokens: dict[str, str]
+) -> tuple[tuple[str, ...], dict[str, str]]:
+    """``(trackers chat may offer this user, why each other tracker is absent)``.
+
+    Mirrors the gates of ``POST /api/chat-issue``
+    (``_require_tracker_enabled``, the repo the server would file in, then the
+    caller's account credential), so a chat tool is advertised only when it can
+    actually file. ``user_tokens`` is the caller's own
+    ``storage.get_user_tokens`` row — never a deployment credential.
+
+    The reasons are what the system prompt needs to tell a server-disabled
+    tracker from a token this account has not saved: telling a user to add a
+    token cannot fix a tracker an administrator turned off.
+    """
+    targets: list[str] = []
+    unavailable: dict[str, str] = {}
+    if settings.enable_github_issues is False:
+        unavailable["github"] = "server_disabled"
+    elif not user_tokens.get("github_token"):
+        unavailable["github"] = "no_token"
+    elif not _resolve_github_repo_url(settings):
+        # Without TESTS_REPO_URL the create call refuses before reaching GitHub.
+        unavailable["github"] = "no_repository"
+    else:
+        targets.append("github")
+    if not _jira_issue_creation_enabled(settings):
+        unavailable["jira"] = "server_disabled"
+    elif not (user_tokens.get("jira_token") or user_tokens.get("jira_sa_token")):
+        unavailable["jira"] = "no_token"
+    else:
+        targets.append("jira")
+    return tuple(targets), unavailable
+
+
 def _chat_tracker_targets(
     settings: Settings, user_tokens: dict[str, str]
 ) -> tuple[str, ...]:
-    """The trackers chat may offer this user: enabled here AND saved by them.
+    """Only the trackers chat may offer this user (see :func:`_chat_tracker_state`)."""
+    return _chat_tracker_state(settings, user_tokens)[0]
 
-    Mirrors the two gates of ``POST /api/chat-issue``
-    (``_require_tracker_enabled``, then the caller's account credential), so a
-    chat tool is advertised only when it can actually file. ``user_tokens`` is
-    the caller's own ``storage.get_user_tokens`` row — never a deployment
-    credential.
+
+# Tracker targets a chat session was created with, keyed by sidecar session id.
+_chat_session_tracker_targets: dict[str, tuple[str, ...]] = {}
+
+
+def _enable_tools_for_session(
+    session_id: str | None, targets: tuple[str, ...]
+) -> str | None:
+    """The session to resume, or ``None`` when its tools are out of date.
+
+    A resumed sidecar session keeps the tools and system prompt it was created
+    with, so a token saved (or a tracker enabled/disabled) after the session
+    started never reaches the model in it. Rather than resume with a stale tool
+    list, hand back ``None`` so the caller builds a fresh session from the
+    current tools — the conversation itself comes from stored history either
+    way.
+
+    The creation-time set lives in memory: after a restart it is unknown, so the
+    session is adopted at its current targets (no forced session churn) and a
+    later change still rebuilds it.
+
+    shortcut: a change made across a restart is only picked up on the next one,
+    upgrade to a persisted per-session value if chats commonly survive restarts.
     """
-    targets: list[str] = []
-    if settings.enable_github_issues is not False and user_tokens.get("github_token"):
-        targets.append("github")
-    if _jira_issue_creation_enabled(settings) and (
-        user_tokens.get("jira_token") or user_tokens.get("jira_sa_token")
+    if not session_id:
+        return None
+    known = _chat_session_tracker_targets.get(session_id)
+    if known is None:
+        _chat_session_tracker_targets[session_id] = targets
+        return session_id
+    if known == targets:
+        return session_id
+    logger.info(
+        "Chat: tool set changed (%s -> %s); starting a fresh session instead of "
+        "resuming %s",
+        known,
+        targets,
+        session_id,
+    )
+    _chat_session_tracker_targets.pop(session_id, None)
+    return None
+
+
+def _remember_chat_session_tools(
+    session_id: str | None, targets: tuple[str, ...]
+) -> None:
+    """Record the tracker tools a fresh chat session was created with."""
+    if not session_id:
+        return
+    # Bounded like the other in-memory chat maps: old sessions are unreachable
+    # once their chat has moved on.
+    if len(_chat_session_tracker_targets) > 512:
+        _chat_session_tracker_targets.clear()
+    _chat_session_tracker_targets[session_id] = targets
+
+
+def _github_repo_slug(repo_url: Any) -> str:
+    """``owner/name`` for a GitHub repo URL, ``''`` for any other host.
+
+    Existing parsers do the work: ``parse_repo_ref`` drops a ``:ref`` suffix and
+    ``parse_github_repo_url`` accepts github.com only — the host the issue API
+    this server calls actually serves. So a GitLab URL can never contribute a
+    slug that would point at some unrelated GitHub repository.
+    """
+    url, _ref = parse_repo_ref(str(repo_url or ""))
+    try:
+        owner, name = parse_github_repo_url(url)
+    except ValueError:
+        return ""
+    return f"{owner}/{name}"
+
+
+def _job_issue_repo_slugs(
+    params: dict[str, Any], settings: Settings
+) -> tuple[str, frozenset[str]]:
+    """``(the run's test repo slug, every slug a job chat may file into)``.
+
+    The run's stored ``tests_repo_url`` and ``additional_repos``, resolved by
+    the same helpers the analysis itself used, so the allow-list cannot drift
+    from the repos the run actually had. The deployment's own ``TESTS_REPO_URL``
+    joins the set too: it is the repo an empty ``repo`` resolves to.
+
+    A run whose stored params cannot be replayed yields ``('', frozenset())``
+    (logged): such a chat can still file in the server's default repo, but
+    cannot choose one.
+    """
+    server_slug = _github_repo_slug(_resolve_github_repo_url(settings))
+    try:
+        body, merged = _reconstruct_from_params(
+            {
+                "request_params": params,
+                "job_name": params.get("job_name"),
+                "build_number": params.get("build_number"),
+            }
+        )
+    except Exception:
+        logger.warning(
+            "Chat issue: cannot replay stored params to build the repo allow-list",
+            exc_info=True,
+        )
+        return "", frozenset({server_slug} if server_slug else set())
+    default = _github_repo_slug(resolve_tests_repo_url(body, merged))
+    slugs = {server_slug} if server_slug else set()
+    if default:
+        slugs.add(default)
+    for repo in resolve_additional_repos(body, merged):
+        slug = _github_repo_slug(repo.url)
+        if slug:
+            slugs.add(slug)
+    return default, frozenset(slugs)
+
+
+async def _chat_issue_repo_slugs(
+    job_id: str, settings: Settings
+) -> tuple[str, frozenset[str]]:
+    """The allow-list of the run a chat issue names (see _job_issue_repo_slugs)."""
+    stored = await storage.get_result(job_id)
+    params = ((stored or {}).get("result") or {}).get("request_params") or {}
+    if not params:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"No issue was filed: job '{job_id}' has no stored run to take "
+                "repositories from."
+            ),
+        )
+    return _job_issue_repo_slugs(params, settings)
+
+
+def _chat_issue_is_admin(request: Request) -> bool:
+    """True for an admin caller — the bootstrap ``admin`` included."""
+    return bool(getattr(request.state, "is_admin", False)) or (
+        getattr(request.state, "role", "") == "admin"
+    )
+
+
+def _require_repo_slug(repo: str) -> str:
+    """The validated ``owner/name`` slug, or a 400 naming the accepted shape."""
+    try:
+        return _validate_repo_slug(repo)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+async def _chat_issue_github_repo(
+    request: Request, body: ChatIssueRequest, settings: Settings
+) -> str:
+    """The repo URL this chat issue files into (``''`` = the server's own).
+
+    A job chat is bounded by that run: its test repo plus its additional repos.
+    An admin is not — an administrator may name any GitHub repo.
+    """
+    repo = _require_repo_slug(body.repo)
+    if _chat_issue_is_admin(request):
+        return f"https://github.com/{repo}" if repo else ""
+    if not body.job_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No issue was filed: an issue from job chat must be tied to a "
+                "run, because only that run's repos may receive it. Open the "
+                "chat from a job analysis and ask again."
+            ),
+        )
+    default, allowed = await _chat_issue_repo_slugs(body.job_id, settings)
+    if not repo:
+        # What chat filed before this allow-list existed: the run's test repo.
+        return f"https://github.com/{default}" if default else ""
+    if repo not in allowed:
+        names = ", ".join(sorted(allowed)) or "none (this run has no GitHub repo)"
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"No issue was filed: '{repo}' is not available to this chat — "
+                "an issue from job chat may only go to this run's test repo and "
+                f"additional repos: {names}."
+            ),
+        )
+    return f"https://github.com/{repo}"
+
+
+# Pending chat issue drafts, keyed by their single-use confirmation id.
+# In-memory like the rest of the chat state: a restart drops them and the model
+# is told to propose again.
+_ISSUE_DRAFT_TTL_SECONDS = 600
+_chat_issue_drafts: dict[str, dict[str, Any]] = {}
+
+
+def _prune_issue_drafts(now: float) -> None:
+    """Drop every draft past its expiry, so the map cannot outgrow its use."""
+    for draft_id, draft in list(_chat_issue_drafts.items()):
+        if draft["expires_at"] <= now:
+            _chat_issue_drafts.pop(draft_id, None)
+
+
+def _store_issue_draft(
+    *,
+    username: str,
+    target: Literal["github", "jira"],
+    title: str,
+    body: str,
+    repo: str = "",
+) -> tuple[str, str]:
+    """Store a scrubbed draft and return ``(confirmation_id, preview)``.
+
+    The preview is what the user is asked to approve, so it carries the exact
+    title, body and repo a paid-for confirmation id would file.
+    """
+    now = _time.monotonic()
+    _prune_issue_drafts(now)
+    draft_id = uuid.uuid4().hex
+    _chat_issue_drafts[draft_id] = {
+        "username": username,
+        "target": target,
+        "title": title,
+        "body": body,
+        "repo": repo,
+        "expires_at": now + _ISSUE_DRAFT_TTL_SECONDS,
+    }
+    kind = "GitHub" if target == "github" else "Jira"
+    where = f"Repo: {repo}\n\n" if repo else ""
+    preview = (
+        f"Proposed {kind} issue — nothing has been filed yet.\n\n"
+        f"{where}Title: {title}\n\nBody:\n{body}\n\n"
+        f"To file exactly this, the user must approve it; then call "
+        f"create_{target}_issue with confirmation_id {draft_id} within "
+        f"{_ISSUE_DRAFT_TTL_SECONDS // 60} minutes."
+    )
+    return draft_id, preview
+
+
+def _consume_issue_draft(
+    confirmation_id: str,
+    *,
+    username: str,
+    target: Literal["github", "jira"],
+    title: str,
+    body: str,
+    repo: str = "",
+) -> None:
+    """Redeem a draft for this caller, once, or refuse with the next step.
+
+    This is the consent gate: a create call without a live draft of its own
+    files nothing. Every refusal names the steps, so the model can recover
+    instead of retrying blindly.
+    """
+    propose = (
+        "call propose_tracker_issue first, show the user the preview and file "
+        "only after they approve it"
+    )
+    if not confirmation_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No issue was filed: a confirmation id is required. To file an "
+                f"issue, {propose}. Creating without a confirmation id always "
+                "fails."
+            ),
+        )
+    draft = _chat_issue_drafts.get(confirmation_id)
+    expired = draft is not None and draft["expires_at"] <= _time.monotonic()
+    if draft is None or expired:
+        _chat_issue_drafts.pop(confirmation_id, None)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No issue was filed: that confirmation id is unknown, expired "
+                f"or already used. To file the issue, {propose} again."
+            ),
+        )
+    if draft["username"] != username:
+        # Never a 404 and never a success: the id is real but not this caller's.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No issue was filed: that confirmation id belongs to another "
+                f"account. To file an issue, {propose} for this account."
+            ),
+        )
+    if (
+        draft["target"] != target
+        or draft["title"] != title
+        or draft["body"] != body
+        or draft.get("repo", "") != repo
     ):
-        targets.append("jira")
-    return tuple(targets)
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No issue was filed: the title, body, repo or tracker differ "
+                f"from what the user was shown. To file the edited issue, {propose} "
+                "again."
+            ),
+        )
+    # Single use: the id dies with the create call it authorized.
+    _chat_issue_drafts.pop(confirmation_id, None)
 
 
 async def _create_issue_from_text(
@@ -9275,6 +9595,7 @@ async def _create_issue_from_text(
     jira_project_key: str = "",
     jira_security_level: str = "",
     jira_issue_type: str = "Bug",
+    github_repo_url: str = "",
     via: str = "rootcoz",
     subject: str = "bug report",
     pre_check: Callable[[], Awaitable[Any]] | None = None,
@@ -9294,6 +9615,8 @@ async def _create_issue_from_text(
         body: Issue body, without the attribution footer (added here).
         username: The caller, for the attribution footer.
         settings: Effective settings, used to resolve the repo / project key.
+        github_repo_url: The GitHub repo the caller is allowed to file in;
+            ``""`` means the deployment's own ``TESTS_REPO_URL``.
         via: How the issue was produced (``rootcoz``, ``rootcoz chat``).
         subject: What the caller submitted, for the refusal wording.
         pre_check: Runs after the gates and before the create call — the report
@@ -9349,11 +9672,15 @@ async def _create_issue_from_text(
 
     tests_repo_url = ""
     if github:
-        tests_repo_url = _resolve_github_repo_url(settings)
+        tests_repo_url = github_repo_url or _resolve_github_repo_url(settings)
         if not tests_repo_url:
             raise HTTPException(
                 status_code=400,
-                detail="No test repository URL available. The job was analyzed without tests_repo_url.",
+                detail=(
+                    "No test repository URL available: this server has no "
+                    "TESTS_REPO_URL configured and the job was analyzed without "
+                    "tests_repo_url, so there is nowhere to file the issue."
+                ),
             )
 
     try:
@@ -9503,6 +9830,90 @@ async def create_jira_bug_endpoint(
     return {**result, "comment_id": comment_id}
 
 
+async def _chat_issue_tracker_tokens(
+    username: str,
+    tracker: Literal["github", "jira"],
+    settings: Settings,
+) -> dict[str, str]:
+    """The tracker gates a chat issue write and its draft both run, then tokens.
+
+    Order matters: the deployment switch first, then the caller's own
+    credential, so a disabled tracker answers 403 even for an account with no
+    token for it. Credentials are always the caller's account row — there is no
+    deployment fallback and no bootstrap-``admin`` exception. Access control
+    (``_require_reviewer``/``_check_allow_list``) stays in each handler so it
+    runs before anything else there.
+    """
+    _require_tracker_enabled(tracker, settings)
+    user_tokens = await storage.get_user_tokens(username)
+    if tracker == "github":
+        has_credential = bool(user_tokens.get("github_token"))
+        kind = "GitHub"
+    else:
+        has_credential = bool(
+            user_tokens.get("jira_token") or user_tokens.get("jira_sa_token")
+        )
+        kind = "Jira"
+    if not has_credential:
+        raise HTTPException(
+            status_code=400,
+            detail=await _require_user_tracker_credential(username, kind),
+        )
+    return user_tokens
+
+
+@app.post("/api/chat-issue/propose", status_code=201, operation_id="proposeChatIssue")
+async def propose_chat_issue(
+    request: Request,
+    body: ChatIssueProposeRequest,
+    settings: Settings = _SETTINGS_DEP,
+) -> dict[str, Any]:
+    """Draft a chat issue for the user to approve — files nothing.
+
+    Step one of the two-step gate. The scrubbed title and body are kept under a
+    single-use id for this caller, and the returned ``preview`` is what the
+    chat model has to show: ``POST /api/chat-issue`` files that exact text only
+    with a live id, so an injected instruction cannot file an issue the user
+    never saw.
+    """
+    username = request.state.username
+    tracker = body.target
+    _require_reviewer(request)
+    _check_allow_list(request)
+    try:
+        await _chat_issue_tracker_tokens(username, tracker, settings)
+    except HTTPException as exc:
+        logger.info("Chat issue draft refused for %s: %s", username, exc.detail)
+        raise
+    title = scrub_sensitive_data(body.title)
+    issue_body = scrub_sensitive_data(body.body)
+    repo = _require_repo_slug(body.repo)
+    confirmation_id, preview = _store_issue_draft(
+        username=username,
+        target=tracker,
+        title=title,
+        body=issue_body,
+        repo=repo,
+    )
+    logger.info(
+        "Chat issue draft %s prepared for %s (%s, repo=%s, %d chars)",
+        confirmation_id,
+        username,
+        tracker,
+        body.repo or "(server default)",
+        len(issue_body),
+    )
+    return {
+        "confirmation_id": confirmation_id,
+        "target": tracker,
+        "repo": repo,
+        "title": title,
+        "body": issue_body,
+        "preview": preview,
+        "expires_in_seconds": _ISSUE_DRAFT_TTL_SECONDS,
+    }
+
+
 @app.post("/api/chat-issue", status_code=201, operation_id="createChatIssue")
 async def create_chat_issue(
     request: Request,
@@ -9511,12 +9922,12 @@ async def create_chat_issue(
 ) -> dict[str, Any]:
     """Open a GitHub issue or Jira ticket from a chat conversation.
 
-    The only tracker write reachable from chat: the chat model calls it as
-    `create_github_issue` / `create_jira_issue` when the user asks for an issue,
-    with a model-written title and body. Credentials come from the caller's
-    account row — never a deployment credential, and there is no
-    bootstrap-``admin`` exception: a missing token is a followable 400 that the
-    model relays to the user.
+    The only tracker write reachable from chat, and it needs a ``confirmation_id``
+    from ``POST /api/chat-issue/propose``: the title and body filed are the ones
+    the user approved, so the model's own judgement that the user "asked for it"
+    files nothing. Credentials come from the caller's account row — never a
+    deployment credential, and there is no bootstrap-``admin`` exception: a
+    missing token is a followable 400 that the model relays to the user.
     """
     username = request.state.username
     tracker = body.target
@@ -9526,25 +9937,27 @@ async def create_chat_issue(
         # the docs promise a row for, and this endpoint has no other refusal path.
         _require_reviewer(request)
         _check_allow_list(request)
-        _require_tracker_enabled(tracker, settings)
-        user_tokens = await storage.get_user_tokens(username)
+        user_tokens = await _chat_issue_tracker_tokens(username, tracker, settings)
+        title = scrub_sensitive_data(body.title)
+        issue_body = scrub_sensitive_data(body.body)
+        # Which repo a job chat may file in (admins may name any): resolved
+        # before the consent gate so the draft has to name the same one.
+        github_repo_url = ""
         if tracker == "github":
-            has_credential = bool(user_tokens.get("github_token"))
-            kind = "GitHub"
-        else:
-            has_credential = bool(
-                user_tokens.get("jira_token") or user_tokens.get("jira_sa_token")
-            )
-            kind = "Jira"
-        if not has_credential:
-            raise HTTPException(
-                status_code=400,
-                detail=await _require_user_tracker_credential(username, kind),
-            )
+            github_repo_url = await _chat_issue_github_repo(request, body, settings)
+        # The consent gate: without a live draft of its own, nothing is filed.
+        _consume_issue_draft(
+            body.confirmation_id,
+            username=username,
+            target=tracker,
+            title=title,
+            body=issue_body,
+            repo=body.repo,
+        )
         result = await _create_issue_from_text(
             tracker,
-            scrub_sensitive_data(body.title),
-            scrub_sensitive_data(body.body),
+            title,
+            issue_body,
             username=username,
             settings=settings,
             github_token=user_tokens.get("github_token", ""),
@@ -9554,28 +9967,51 @@ async def create_chat_issue(
             jira_project_key=body.jira_project_key,
             jira_security_level=body.jira_security_level,
             jira_issue_type=body.jira_issue_type,
+            github_repo_url=github_repo_url,
             via="rootcoz chat",
             subject="issue",
         )
     except HTTPException as exc:
+        details: dict[str, Any] = {"tracker": tracker, "result": "refused"}
+        upstream_status = _upstream_status_of_refusal(exc)
+        if upstream_status is not None:
+            # The number that tells an outage from a lost token; never the
+            # upstream message, which can echo the submitted text.
+            details["upstream_status"] = upstream_status
         await _record_refused_attempt(
             action="issue.create",
             request=request,
             message=message,
             target_type="chat",
             exc=exc,
-            details={"tracker": tracker, "result": "refused"},
+            details=details,
+        )
+        raise
+    except Exception:
+        # Anything else (a token row that will not decrypt, a storage failure)
+        # is still one attempt: the chat trail promises a row per attempt.
+        await _record_failed_attempt(
+            action="issue.create",
+            request=request,
+            message=message,
+            target_type="chat",
+            details={"tracker": tracker},
         )
         raise
 
-    # Never the body: the tracker, the outcome and the issue this run produced.
+    # Never the body: the tracker, the repo, the outcome and the issue produced.
     await record_audit(
         action="issue.create",
         actor=username,
         message=f"{message}: {result['url']}",
         target_type="chat",
         target_id=None,
-        details={"tracker": tracker, "result": "success"},
+        details={
+            "tracker": tracker,
+            "repo": body.repo,
+            "job_id": body.job_id,
+            "result": "success",
+        },
         request=request,
     )
     return result
@@ -19631,6 +20067,22 @@ def _upstream_status(exc: Exception) -> int | None:
     return None if status in (401, 403, 429) else status
 
 
+def _upstream_status_of_refusal(exc: HTTPException) -> int | None:
+    """The upstream status behind a refusal, read from its chained cause.
+
+    ``_map_create_refusal`` raises the client-facing ``HTTPException`` with the
+    tracker/transport error as its cause, so the audit row can still name the
+    upstream number without the mapping having to carry it. Unlike
+    :func:`_upstream_status` this keeps 401/403/429: GitHub answers 403 both for
+    a token without repository access and for a rate limit, so an administrator
+    reading the chat trail needs the number itself to tell them apart.
+    """
+    cause = exc.__cause__
+    if isinstance(cause, httpx.HTTPStatusError):
+        return cause.response.status_code
+    return None
+
+
 def _github_issue_refusal(
     exc: Exception, *, subject: str = "feedback"
 ) -> HTTPException:
@@ -20329,6 +20781,10 @@ async def _init_chat_under_barrier(
     _raise_if_chat_job_deleted(job_id)
     if not await _available_chat_session(job_id, username):
         custom_tools: list[dict[str, Any]] = []
+        tracker_targets, tracker_unavailable = _chat_tracker_state(
+            _settings, await storage.get_user_tokens(username)
+        )
+        issue_repos = _job_issue_repo_slugs(decrypted_params, _settings)[1]
         auth_header = await _create_ai_auth_header(username)
         if auth_header:
             server_url = _build_internal_server_url()
@@ -20343,9 +20799,8 @@ async def _init_chat_under_barrier(
                 github_token=github_token,
                 github_repo=github_repo,
                 jira_connection=jira_connection,
-                tracker_targets=_chat_tracker_targets(
-                    _settings, await storage.get_user_tokens(username)
-                ),
+                tracker_targets=tracker_targets,
+                issue_repos=tuple(sorted(issue_repos)),
             )
         else:
             logger.warning(
@@ -20384,6 +20839,8 @@ async def _init_chat_under_barrier(
                 custom_tools=custom_tools,
                 repos_available=repos_available,
                 ci_build_data_available=ci_build_data_available,
+                issue_repos=tuple(sorted(issue_repos)),
+                tracker_unavailable=tracker_unavailable,
             )
         finally:
             chat_session_source.reset(source_token)
@@ -20392,6 +20849,7 @@ async def _init_chat_under_barrier(
             await _discard_unsaved_ai_session(session_id, username, ai_provider)
         _raise_if_chat_job_deleted(job_id)
         if session_id:
+            _remember_chat_session_tools(session_id, tracker_targets)
             saved = await storage.add_chat_message(
                 job_id=job_id,
                 role="assistant",
@@ -20965,7 +21423,7 @@ async def _process_chat_message(
                         # Find session_id from the last completed assistant message
                         # Scan all_history (not filtered history) because the init
                         # message has empty content but carries the session_id
-                        last_session_id = session_id
+                        last_session_id: str | None = session_id
                         for msg in reversed(all_history):
                             if (
                                 msg.get("role") == "assistant"
@@ -21030,6 +21488,19 @@ async def _process_chat_message(
                         server_url = _build_internal_server_url()
                         auth_header = await _create_ai_auth_header(username)
 
+                        tracker_targets, tracker_unavailable = _chat_tracker_state(
+                            settings, await storage.get_user_tokens(username)
+                        )
+                        issue_repos = _job_issue_repo_slugs(decrypted_params, settings)[
+                            1
+                        ]
+                        # A resumed session keeps its creation-time tools, so a
+                        # token saved or a tracker toggled mid-chat only reaches
+                        # the model through a fresh session.
+                        last_session_id = _enable_tools_for_session(
+                            last_session_id, tracker_targets
+                        )
+
                         custom_tools: list[dict[str, Any]] = []
                         if auth_header:
                             custom_tools = build_chat_custom_tools(
@@ -21043,10 +21514,8 @@ async def _process_chat_message(
                                 github_token=github_token,
                                 github_repo=github_repo,
                                 jira_connection=jira_connection,
-                                tracker_targets=_chat_tracker_targets(
-                                    settings,
-                                    await storage.get_user_tokens(username),
-                                ),
+                                tracker_targets=tracker_targets,
+                                issue_repos=tuple(sorted(issue_repos)),
                             )
                         else:
                             logger.warning(
@@ -21107,6 +21576,8 @@ async def _process_chat_message(
                         repos_available=repos_available,
                         ci_build_data_available=ci_build_data_available,
                         install_mcp=False,
+                        tracker_unavailable=tracker_unavailable,
+                        issue_repos=tuple(sorted(issue_repos)),
                     )
 
                     if abort_signal.is_set():
@@ -21173,6 +21644,7 @@ async def _process_chat_message(
                         )
                         return
 
+                    _remember_chat_session_tools(new_session_id, tracker_targets)
                     saved = await storage.complete_chat_message_if_generation(
                         assistant_msg_id,
                         content=response_text,
@@ -21489,15 +21961,16 @@ async def init_admin_chat(
         workspace = ensure_chat_workspace(ADMIN_CHAT_JOB_ID, username=username)
         if not await _available_chat_session(ADMIN_CHAT_JOB_ID, username):
             custom_tools: list[dict[str, Any]] = []
+            tracker_targets, _ = _chat_tracker_state(
+                get_settings(), await storage.get_user_tokens(username)
+            )
             auth_header = await _create_ai_auth_header(username, is_admin=True)
             if auth_header:
                 server_url = _build_internal_server_url()
                 custom_tools = build_admin_custom_tools(
                     server_url=server_url,
                     auth_token=auth_header.removeprefix("Bearer ").strip(),
-                    tracker_targets=_chat_tracker_targets(
-                        get_settings(), await storage.get_user_tokens(username)
-                    ),
+                    tracker_targets=tracker_targets,
                 )
             else:
                 logger.warning("Admin chat init: no auth token for %s", username)
@@ -21526,6 +21999,7 @@ async def init_admin_chat(
                 chat_session_source.reset(source_token)
                 ai_username.reset(token)
             if session_id:
+                _remember_chat_session_tools(session_id, tracker_targets)
                 saved = await storage.add_chat_message(
                     job_id=ADMIN_CHAT_JOB_ID,
                     role="assistant",
@@ -21746,7 +22220,7 @@ async def _process_admin_chat_message(
                 if m.get("status") != "pending" and m.get("content")
             ]
 
-            last_session_id = session_id
+            last_session_id: str | None = session_id
             for msg in reversed(all_history):
                 if (
                     msg.get("role") == "assistant"
@@ -21782,14 +22256,20 @@ async def _process_admin_chat_message(
                 )
                 return
 
+            tracker_targets, tracker_unavailable = _chat_tracker_state(
+                settings, await storage.get_user_tokens(username)
+            )
+            # A resumed session keeps its creation-time tools (see
+            # _enable_tools_for_session): rebuild when this user's set changed.
+            last_session_id = _enable_tools_for_session(
+                last_session_id, tracker_targets
+            )
             custom_tools = build_admin_custom_tools(
                 server_url=server_url,
                 auth_token=auth_header.removeprefix("Bearer ").strip()
                 if auth_header
                 else "",
-                tracker_targets=_chat_tracker_targets(
-                    settings, await storage.get_user_tokens(username)
-                ),
+                tracker_targets=tracker_targets,
             )
 
             abort_key = f"{ADMIN_CHAT_JOB_ID}:{username}"
@@ -21813,6 +22293,7 @@ async def _process_admin_chat_message(
                 ai_call_timeout=settings.ai_call_timeout,
                 session_id=last_session_id,
                 custom_tools=custom_tools,
+                tracker_unavailable=tracker_unavailable,
             )
 
             if abort_signal.is_set():
@@ -21886,6 +22367,7 @@ async def _process_admin_chat_message(
                 )
                 return
 
+            _remember_chat_session_tools(new_session_id, tracker_targets)
             saved = await storage.complete_chat_message_if_generation(
                 assistant_msg_id,
                 content=response_text,

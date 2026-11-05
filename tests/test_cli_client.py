@@ -642,6 +642,7 @@ class TestRootCozClientBugCreation:
                 "target": "jira",
                 "title": "DNS timeout",
                 "body": "Description...",
+                "confirmation_id": "draft-1",
                 "jira_project_key": "PROJ",
             }
             return httpx.Response(
@@ -658,9 +659,34 @@ class TestRootCozClientBugCreation:
             target="jira",
             title="DNS timeout",
             body="Description...",
+            confirmation_id="draft-1",
             jira_project_key="PROJ",
         )
         assert result["key"] == "PROJ-7"
+
+    def test_propose_chat_issue(self):
+        def handler(request):
+            assert request.method == "POST"
+            assert str(request.url).endswith("/api/chat-issue/propose")
+            assert json.loads(request.content) == {
+                "target": "jira",
+                "title": "DNS timeout",
+                "body": "Description...",
+            }
+            return httpx.Response(
+                201,
+                json={
+                    "confirmation_id": "draft-1",
+                    "title": "DNS timeout",
+                    "body": "Description...",
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.propose_chat_issue(
+            target="jira", title="DNS timeout", body="Description..."
+        )
+        assert result["confirmation_id"] == "draft-1"
 
     def test_override_classification(self):
         def handler(request):

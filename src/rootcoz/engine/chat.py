@@ -468,47 +468,128 @@ def analysis_http_tools(
 
 
 def _tracker_issue_tools(
-    *, server_url: str, auth_headers: dict[str, str], targets: tuple[str, ...]
+    *,
+    server_url: str,
+    auth_headers: dict[str, str],
+    targets: tuple[str, ...],
+    issue_repos: tuple[str, ...] = (),
+    job_id: str = "",
 ) -> list[dict[str, Any]]:
-    """The tracker-write tools chat may call when the user asks for an issue.
+    """The tracker tools chat may call, as the two steps the server enforces.
 
-    Each posts to ``/api/chat-issue``, which files under the caller's OWN saved
-    credential and decides the repo/project, so the model sends only a title
-    and a body. ``targets`` names only the trackers the server enables *and*
-    the user's account holds a token for; empty means no tool is advertised.
+    ``propose_tracker_issue`` stores the draft the user is asked to approve;
+    ``create_<target>_issue`` files it and needs the id the proposal returned.
+    Both post to the server, which files under the caller's OWN saved
+    credential. ``targets`` names only the trackers the server enables, can
+    file in, *and* the user's account holds a token for; empty means no tool is
+    advertised at all.
+
+    ``issue_repos`` are the repos this session may file a GitHub issue in and
+    ``job_id`` is the run they belong to — both empty for an admin chat, whose
+    repo choice the server does not cap.
     """
-    tools = []
+    if not targets:
+        return []
+    github = "github" in targets
+    repo_body = {"repo": "{repo}"} if github else {}
+    repo_properties = {"repo": _issue_repo_param(issue_repos)} if github else {}
+    tools: list[dict[str, Any]] = [
+        {
+            "name": "propose_tracker_issue",
+            "description": (
+                "Step 1 of filing an issue. Draft the title and body for the "
+                "issue the user asked about and call this first: it files "
+                "nothing, and returns a confirmation_id plus a preview of the "
+                "exact title and body that would be filed. Show that preview to "
+                "the user and ask whether to file it. Call this again for any "
+                "edit — a confirmation_id authorises one specific draft."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "enum": list(targets),
+                        "description": "Which tracker to draft the issue for",
+                    },
+                    "title": {"type": "string", "description": "Issue title"},
+                    "body": {
+                        "type": "string",
+                        "description": (
+                            "Issue description summarising the failure and "
+                            "context the user asked about"
+                        ),
+                    },
+                    **repo_properties,
+                },
+                "required": ["target", "title", "body"],
+            },
+            "http": {
+                "method": "POST",
+                "url": f"{server_url}/api/chat-issue/propose",
+                "headers": {**auth_headers, "Content-Type": "application/json"},
+                "body_template": {
+                    "target": "{target}",
+                    "title": "{title}",
+                    "body": "{body}",
+                    **repo_body,
+                },
+            },
+        }
+    ]
     for target in targets:
         kind = "GitHub" if target == "github" else "Jira"
+        if target != "github":
+            repo_rule = (
+                "You do not choose the Jira project: the server files it in the "
+                "configured one. "
+            )
+        elif issue_repos:
+            repo_rule = (
+                "You may only name this run's test repo or one of its "
+                "additional repos as repo; leave it empty for the test repo. "
+            )
+        else:
+            repo_rule = (
+                "You may name any GitHub repository as repo; leave it empty for "
+                "the server's configured test repo. "
+            )
         tools.append(
             {
                 "name": f"create_{target}_issue",
                 "description": (
-                    f"Open a {kind} issue for the failure or problem the user is "
-                    "discussing. Call this ONLY when the user explicitly asks to "
-                    "open an issue — never proactively. You do not choose the "
-                    "repo/project: the server files it in the configured "
-                    "repository/Jira project. body must summarise the failure and "
-                    "context the user asked about. Returns the created issue URL "
-                    "and number/key; a refusal about missing credentials must be "
-                    "relayed to the user verbatim."
+                    f"Step 2 of filing a {kind} issue: file the draft the user "
+                    "approved. Call this ONLY after the user answered yes to the "
+                    "preview from propose_tracker_issue, and pass that "
+                    "confirmation_id with the same title and body. Creating "
+                    "without a valid confirmation_id fails and files nothing — a "
+                    "confirmation_id is single-use and expires, so propose again "
+                    "for any change. "
+                    f"{repo_rule}"
+                    "Returns the created issue URL and number/key; a refusal "
+                    "must be relayed to the user verbatim."
                 ),
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "title": {
                             "type": "string",
-                            "description": "Issue title",
+                            "description": "Issue title, as proposed",
                         },
                         "body": {
                             "type": "string",
+                            "description": ("Issue description, exactly as proposed"),
+                        },
+                        "confirmation_id": {
+                            "type": "string",
                             "description": (
-                                "Issue description summarising the failure and "
-                                "context the user asked about"
+                                "The confirmation_id propose_tracker_issue "
+                                "returned for this exact title and body"
                             ),
                         },
+                        **(repo_properties if target == "github" else {}),
                     },
-                    "required": ["title", "body"],
+                    "required": ["title", "body", "confirmation_id"],
                 },
                 "http": {
                     "method": "POST",
@@ -518,6 +599,10 @@ def _tracker_issue_tools(
                         "target": target,
                         "title": "{title}",
                         "body": "{body}",
+                        "confirmation_id": "{confirmation_id}",
+                        **(repo_body if target == "github" else {}),
+                        # The run that bounds the repo choice, empty for admin chat.
+                        **({"job_id": job_id} if target == "github" and job_id else {}),
                     },
                 },
             }
@@ -538,6 +623,7 @@ def build_chat_custom_tools(
     github_repo: str = "",
     jira_connection: JiraConnection | None = None,
     tracker_targets: tuple[str, ...] = (),
+    issue_repos: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
     """Build HTTP-backed custom tools for a chat session.
 
@@ -807,6 +893,8 @@ def build_chat_custom_tools(
             server_url=server_url,
             auth_headers=auth_headers,
             targets=tracker_targets,
+            issue_repos=issue_repos,
+            job_id=job_id,
         )
     )
 
@@ -1145,16 +1233,107 @@ def build_welcome_message(
     )
 
 
-_COMMON_RULES = """- Do NOT modify any data — read-only. The one exception is a tracker issue tool in your tool list (`create_github_issue` / `create_jira_issue`), and only when the user explicitly asks
+_COMMON_RULES = """- Do NOT modify any data — read-only. The one exception is a tracker issue tool in your tool list (`propose_tracker_issue` plus `create_github_issue` / `create_jira_issue`), and only once the user has approved the draft you proposed
 - Do NOT run arbitrary curl commands — use the provided tools"""
 
-_ISSUE_CREATE_RULES = """
+#: What to tell the user for each reason a tracker tool is missing from the list.
+_TRACKER_UNAVAILABLE_REASONS = {
+    "server_disabled": (
+        "issue creation is disabled on this server, so no token can enable it — "
+        "an administrator has to turn it on"
+    ),
+    "no_repository": (
+        "this server has no TESTS_REPO_URL configured, so there is no "
+        "repository to file in — an administrator has to set it, and a token "
+        "will not help"
+    ),
+}
+
+
+def _issue_repo_param(issue_repos: tuple[str, ...]) -> dict[str, Any]:
+    """The ``repo`` argument of a GitHub issue tool, with its real limits.
+
+    A job chat is capped at the run's own repos, so the model is told them;
+    an admin chat gets the unbounded wording instead.
+    """
+    if issue_repos:
+        allowed = ", ".join(issue_repos)
+        text = (
+            "GitHub repository to file in, as 'owner/name'. Must be this run's "
+            f"test repo or one of its additional repos: {allowed}. Leave empty "
+            "to use the test repo."
+        )
+    else:
+        text = (
+            "GitHub repository to file in, as 'owner/name'. Any repository may "
+            "be named here. Leave empty to use the server's configured test "
+            "repo."
+        )
+    return {"type": "string", "description": text}
+
+
+def _issue_create_rules(
+    unavailable: dict[str, str] | None = None,
+    *,
+    issue_repos: tuple[str, ...] = (),
+    admin: bool = False,
+) -> str:
+    """The issue-creation rules, with the real reason each tracker is absent.
+
+    A tracker can be missing for two unrelated reasons: the server turned it
+    off (or has no repository to file in), or this account never saved that
+    tracker's token. Only the second one is fixed in Profile Settings, so the
+    prompt states which one applies instead of always pointing at the token.
+
+    ``issue_repos`` names the repos a job chat may file in; ``admin`` says the
+    caller is not capped by any run's repo set.
+    """
+    unavailable = unavailable or {}
+    reasons = []
+    for tracker, reason in sorted(unavailable.items()):
+        kind = "GitHub" if tracker == "github" else "Jira"
+        if reason in _TRACKER_UNAVAILABLE_REASONS:
+            reasons.append(f"  - {kind}: {_TRACKER_UNAVAILABLE_REASONS[reason]}.")
+        else:
+            reasons.append(
+                f"  - {kind}: this account has no {kind} token saved. Tell the "
+                f"user the fix: Profile Settings → add the {kind} token."
+            )
+    absent = (
+        "\n".join(reasons)
+        if reasons
+        else "  - none: every tracker this chat can file in is in your tool list."
+    )
+    if admin:
+        repo_rule = (
+            "- You may name any GitHub repository (`owner/name`) as `repo`; "
+            "leave it empty to use the server's configured test repo. The repo "
+            "is part of the draft you propose, so the user approves where the "
+            "issue goes."
+        )
+    elif issue_repos:
+        repo_rule = (
+            "- You may only file a GitHub issue in this run's repos, named as "
+            f"`owner/name`: {', '.join(issue_repos)}. Leave `repo` empty to use "
+            "the test repo. Any other repository is refused — do not promise it."
+        )
+    else:
+        repo_rule = (
+            "- You never pick the repository or Jira project: the server files "
+            "the issue where it is configured."
+        )
+    return f"""
 ## Creating Issues
-- `create_github_issue` and `create_jira_issue` file an issue in the repository/Jira project the server is configured with — you never pick one.
-- Call a tracker tool ONLY when the user explicitly asks to open an issue; never proactively.
-- On success, report the issue URL and number/key the tool returned.
-- A tracker whose tool is NOT in your tool list cannot be used: this account has no token saved for it, or the server disabled it. Say you cannot open that issue and name the fix: Profile Settings → add the GitHub/Jira token. Never claim you can open one and never call another tool as a substitute.
-- If a tool you do have refuses for missing credentials, relay it verbatim and name the same fix (if the refusal says the account has no profile, pass on its sign-in advice instead).
+- You never file an issue on your own judgement: the server only files a draft the user approved. Call a create tool ONLY when the user explicitly asks for an issue.
+- Step 1: call `propose_tracker_issue` with the target, title and body. It files nothing and returns a `confirmation_id` and a preview of the exact title and body that would be filed.
+- Step 2: show the user that preview (the title and body as written) and ask whether to file it.
+- Step 3: only after the user answers yes, call `create_github_issue` / `create_jira_issue` with that `confirmation_id` and the same title and body. Creating without a confirmation id files nothing and fails with the steps to follow; a confirmation id is single-use and expires after 10 minutes, so propose again after any edit.
+- If the user declines, do not call the create tool — acknowledge and stop.
+{repo_rule}
+- A tracker with no tool in your tool list cannot be used. Say you cannot open that issue there and name the reason and the fix:
+{absent}
+- Never claim you can open an issue that is not in your tool list, never call another tool as a substitute, and do not send the user to Profile Settings for a tracker this server disabled or has no repository for.
+- If a tool you do have refuses, relay it verbatim and name the fix it gives.
 - Never claim an issue exists when the tool was not called or did not succeed."""
 
 
@@ -1165,8 +1344,14 @@ def build_system_prompt(
     custom_tools: list[dict[str, Any]],
     repos_available: bool = False,
     ci_build_data_available: bool = False,
+    tracker_unavailable: dict[str, str] | None = None,
+    issue_repos: tuple[str, ...] = (),
 ) -> str:
-    """Build a system prompt that scopes the AI to a specific analyzed job."""
+    """Build a system prompt that scopes the AI to a specific analyzed job.
+
+    ``issue_repos`` are the repos this run may file a GitHub issue in, so the
+    model reads them instead of guessing.
+    """
     tools_section = _build_tools_section(custom_tools)
     unavailable_section = _build_unavailable_section(custom_tools)
     graph_note = ""
@@ -1204,7 +1389,7 @@ You have structured tools that you can call directly:
 {tools_section}
 
 **IMPORTANT:** Use these tools to get data when the user asks a question. Do NOT call tools proactively — only fetch data that's relevant to what the user is asking about.{repos_note}{unavailable_section}
-{_ISSUE_CREATE_RULES}
+{_issue_create_rules(tracker_unavailable, issue_repos=issue_repos)}
 
 ## Rules — STRICT
 - You MUST only discuss this specific job and its failures
@@ -1216,6 +1401,7 @@ You have structured tools that you can call directly:
 
 def build_admin_system_prompt(
     custom_tools: list[dict[str, Any]],
+    tracker_unavailable: dict[str, str] | None = None,
 ) -> str:
     """Build system prompt for admin global chat — server-wide scope."""
     tools_section = _build_tools_section(custom_tools)
@@ -1245,7 +1431,7 @@ You have structured tools — call them directly:
 **WORKFLOW:** For analytics questions (totals, overrides, issues), use the pre-built report tools first — they're faster and more accurate. Use `db_schema` + `db_query` only for questions the report tools can't answer.
 
 **SENSITIVE DATA:** Some columns contain encrypted values (tokens, passwords). Never output raw encrypted field values.{unavailable_section}
-{_ISSUE_CREATE_RULES}
+{_issue_create_rules(tracker_unavailable, admin=True)}
 
 ## Report Generation
 When the user asks for a "report", "generate a report", "export", or similar:
@@ -1398,6 +1584,8 @@ async def init_chat_session(
     custom_tools: list[dict[str, Any]] | None = None,
     repos_available: bool = False,
     ci_build_data_available: bool = False,
+    issue_repos: tuple[str, ...] = (),
+    tracker_unavailable: dict[str, str] | None = None,
 ) -> str | None:
     """Initialize a chat session via the sidecar. Returns session_id or None."""
     system_prompt = build_system_prompt(
@@ -1407,6 +1595,8 @@ async def init_chat_session(
         custom_tools=custom_tools or [],
         repos_available=repos_available,
         ci_build_data_available=ci_build_data_available,
+        issue_repos=issue_repos,
+        tracker_unavailable=tracker_unavailable,
     )
     return await _create_chat_session(
         system_prompt=system_prompt,
@@ -1564,6 +1754,8 @@ async def chat_with_ai(
     repos_available: bool = False,
     ci_build_data_available: bool = False,
     install_mcp: bool = True,
+    tracker_unavailable: dict[str, str] | None = None,
+    issue_repos: tuple[str, ...] = (),
 ) -> tuple[bool, str, str | None]:
     """Send a chat message and get an AI response via the sidecar."""
 
@@ -1575,6 +1767,8 @@ async def chat_with_ai(
             custom_tools=custom_tools or [],
             repos_available=repos_available,
             ci_build_data_available=ci_build_data_available,
+            tracker_unavailable=tracker_unavailable,
+            issue_repos=issue_repos,
         )
 
     return await _chat_with_ai_impl(
@@ -1605,11 +1799,15 @@ async def admin_chat_with_ai(
     ai_call_timeout: int | None = None,
     session_id: str | None = None,
     custom_tools: list[dict[str, Any]] | None = None,
+    tracker_unavailable: dict[str, str] | None = None,
 ) -> tuple[bool, str, str | None]:
     """Send an admin chat message and get an AI response."""
 
     def _build_prompt() -> str:
-        return build_admin_system_prompt(custom_tools=custom_tools or [])
+        return build_admin_system_prompt(
+            custom_tools=custom_tools or [],
+            tracker_unavailable=tracker_unavailable,
+        )
 
     return await _chat_with_ai_impl(
         message=message,

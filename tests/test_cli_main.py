@@ -2411,6 +2411,8 @@ class TestCreateChatIssueCommand:
                 "Bug fix",
                 "--body",
                 "Details...",
+                "--confirmation-id",
+                "draft-1",
             ],
         )
         assert result.exit_code == 0
@@ -2420,6 +2422,7 @@ class TestCreateChatIssueCommand:
             target="github",
             title="Bug fix",
             body="Details...",
+            confirmation_id="draft-1",
             jira_project_key="",
             jira_security_level="",
             jira_issue_type="Bug",
@@ -2436,10 +2439,37 @@ class TestCreateChatIssueCommand:
                 "X",
                 "--body",
                 "Y",
+                "--confirmation-id",
+                "draft-1",
             ],
         )
         assert result.exit_code == 1
         assert "--target" in result.output
+        mock_client.create_chat_issue.assert_not_called()
+
+    def test_propose_chat_issue_prints_the_draft_to_approve(self, mock_client):
+        """The command files nothing: it prints the text and the next command."""
+        mock_client.propose_chat_issue.return_value = {
+            "confirmation_id": "draft-1",
+            "title": "Bug fix",
+            "body": "Details...",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "propose-chat-issue",
+                "--target",
+                "github",
+                "--title",
+                "Bug fix",
+                "--body",
+                "Details...",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "draft-1" in result.output
+        assert "Details..." in result.output
+        assert "create-chat-issue" in result.output
         mock_client.create_chat_issue.assert_not_called()
 
     def test_create_chat_issue_exposes_no_token_options(self, mock_client):
