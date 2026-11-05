@@ -8214,8 +8214,9 @@ def _enrichments_settings_fingerprint(settings: Settings) -> str:
     """Short, non-reversible identity of the tracker config of a snapshot.
 
     A cached snapshot is only valid under the settings that produced it:
-    disabling Jira or rotating a tracker credential must show on the next read
-    instead of after the TTL. Hashed — a cache key never holds a secret.
+    disabling Jira, rotating a tracker credential, or tightening TLS must show
+    on the next read instead of after the TTL. Hashed — a cache key never holds
+    a secret.
     """
     connection = resolve_jira_connection(settings) if settings.jira_enabled else None
     identity = (
@@ -8225,7 +8226,11 @@ def _enrichments_settings_fingerprint(settings: Settings) -> str:
             connection.mode,
             connection.api_base,
             connection.browse_base,
+            connection.site_url,
             connection.api_path,
+            connection.search_path,
+            # A result fetched with verification off must not outlive enabling it.
+            connection.ssl_verify,
             connection.sa_client_id,
             connection.sa_client_secret,
             connection.auth or (),

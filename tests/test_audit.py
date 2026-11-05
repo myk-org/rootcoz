@@ -1817,17 +1817,7 @@ def test_comment_enrich_success_is_not_audited(app_client) -> None:
             username="admin",
         )
     )
-    with (
-        patch.object(
-            main,
-            "detect_github_prs",
-            return_value=[{"owner": "o", "repo": "r", "number": 1}],
-        ),
-        patch.object(main, "detect_github_issues", return_value=[]),
-        patch.object(
-            main, "fetch_github_pr_status", AsyncMock(return_value={"state": "open"})
-        ),
-    ):
+    with _github_pr_lookup(1):
         response = app_client.get("/results/job-enrich/enrich-comments")
     assert response.status_code == 200, response.text
     assert response.json() == {
@@ -1837,6 +1827,26 @@ def test_comment_enrich_success_is_not_audited(app_client) -> None:
     }
 
     assert _events(action="comment.enrich") == []
+
+
+@contextlib.contextmanager
+def _github_pr_lookup(number: int, fetch: AsyncMock | None = None):
+    """Patch the tracker lookups so a job's only link is GitHub PR ``o/r#<number>``.
+
+    Yields the status mock, so a test can assert how often it was called or
+    give it a side effect.
+    """
+    fetch = fetch if fetch is not None else AsyncMock(return_value={"state": "open"})
+    with (
+        patch.object(
+            main,
+            "detect_github_prs",
+            return_value=[{"owner": "o", "repo": "r", "number": number}],
+        ),
+        patch.object(main, "detect_github_issues", return_value=[]),
+        patch.object(main, "fetch_github_pr_status", fetch),
+    ):
+        yield fetch
 
 
 def _cached_enrichment_job_ids() -> set[str]:
@@ -1910,15 +1920,7 @@ def test_comment_enrich_second_read_uses_the_cache(app_client) -> None:
         )
     )
     fetch = AsyncMock(return_value={"state": "open"})
-    with (
-        patch.object(
-            main,
-            "detect_github_prs",
-            return_value=[{"owner": "o", "repo": "r", "number": 2}],
-        ),
-        patch.object(main, "detect_github_issues", return_value=[]),
-        patch.object(main, "fetch_github_pr_status", fetch),
-    ):
+    with _github_pr_lookup(2, fetch):
         first = app_client.get("/results/job-enrich-cached/enrich-comments")
         second = app_client.get("/results/job-enrich-cached/enrich-comments")
 
@@ -1995,15 +1997,7 @@ def test_comment_enrich_mid_collect_invalidation_is_not_overwritten(app_client) 
         return {"state": "open"}
 
     fetch = AsyncMock(side_effect=_comment_added_while_looking_up)
-    with (
-        patch.object(
-            main,
-            "detect_github_prs",
-            return_value=[{"owner": "o", "repo": "r", "number": 3}],
-        ),
-        patch.object(main, "detect_github_issues", return_value=[]),
-        patch.object(main, "fetch_github_pr_status", fetch),
-    ):
+    with _github_pr_lookup(3, fetch):
         first = app_client.get("/results/job-enrich-race/enrich-comments")
         second = app_client.get("/results/job-enrich-race/enrich-comments")
 
@@ -2026,15 +2020,7 @@ def test_comment_enrich_failed_lookup_is_not_cached(app_client) -> None:
         )
     )
     fetch = AsyncMock(side_effect=[None, {"state": "open"}])
-    with (
-        patch.object(
-            main,
-            "detect_github_prs",
-            return_value=[{"owner": "o", "repo": "r", "number": 4}],
-        ),
-        patch.object(main, "detect_github_issues", return_value=[]),
-        patch.object(main, "fetch_github_pr_status", fetch),
-    ):
+    with _github_pr_lookup(4, fetch):
         first = app_client.get("/results/job-enrich-badge/enrich-comments")
         second = app_client.get("/results/job-enrich-badge/enrich-comments")
 
@@ -2069,17 +2055,8 @@ def test_comment_enrich_concurrent_loads_share_one_collection(app_client) -> Non
             await release.wait()
             return {"state": "open"}
 
-        with (
-            patch.object(
-                main,
-                "detect_github_prs",
-                return_value=[{"owner": "o", "repo": "r", "number": 5}],
-            ),
-            patch.object(main, "detect_github_issues", return_value=[]),
-            patch.object(
-                main, "fetch_github_pr_status", AsyncMock(side_effect=_slow_fetch)
-            ) as fetch,
-        ):
+        fetch = AsyncMock(side_effect=_slow_fetch)
+        with _github_pr_lookup(5, fetch):
             first = asyncio.create_task(
                 main._collect_comment_enrichments(
                     "job-enrich-shared", main.get_settings()
@@ -2129,17 +2106,7 @@ def test_comment_enrich_cancelled_reader_keeps_the_collection_alive(
             await release.wait()
             return {"state": "open"}
 
-        with (
-            patch.object(
-                main,
-                "detect_github_prs",
-                return_value=[{"owner": "o", "repo": "r", "number": 6}],
-            ),
-            patch.object(main, "detect_github_issues", return_value=[]),
-            patch.object(
-                main, "fetch_github_pr_status", AsyncMock(side_effect=_slow_fetch)
-            ),
-        ):
+        with _github_pr_lookup(6, AsyncMock(side_effect=_slow_fetch)):
             first = asyncio.create_task(
                 main._collect_comment_enrichments(
                     "job-enrich-cancelled", main.get_settings()
@@ -2209,13 +2176,7 @@ def test_comment_enrich_github_only_job_is_cached_despite_a_jira_outage(
     complete = AsyncMock(side_effect=main.JiraOAuthMintError("mint failed"))
     with (
         patch.object(main, "complete_jira_connection", complete),
-        patch.object(
-            main,
-            "detect_github_prs",
-            return_value=[{"owner": "o", "repo": "r", "number": 9}],
-        ),
-        patch.object(main, "detect_github_issues", return_value=[]),
-        patch.object(main, "fetch_github_pr_status", fetch),
+        _github_pr_lookup(9, fetch),
     ):
         first = asyncio.run(
             main._collect_comment_enrichments("job-enrich-gh-only", settings)
@@ -2262,6 +2223,40 @@ def test_comment_enrich_cache_follows_the_jira_settings(app_client) -> None:
     assert fetch.await_count == 1
 
 
+def test_comment_enrich_cache_follows_the_jira_tls_setting(app_client) -> None:
+    """Enabling cert verification must not replay an unverified Jira read."""
+    admin_login(app_client)
+    _use_jira_oauth_settings()
+    _store_job("job-enrich-tls")
+    asyncio.run(
+        storage.add_comment(
+            job_id="job-enrich-tls",
+            test_name="test_a",
+            comment="see PROJ-11",
+            username="admin",
+        )
+    )
+    fetch = AsyncMock(return_value="Open")
+    with (
+        patch.object(
+            main, "complete_jira_connection", AsyncMock(side_effect=lambda c: c)
+        ),
+        patch.object(main, "fetch_jira_ticket_status", fetch),
+    ):
+        update_db_settings_cache({"jira_oauth_ssl_verify": "false"})
+        unverified = asyncio.run(
+            main._collect_comment_enrichments("job-enrich-tls", main.get_settings())
+        )
+        update_db_settings_cache({"jira_oauth_ssl_verify": "true"})
+        verified = asyncio.run(
+            main._collect_comment_enrichments("job-enrich-tls", main.get_settings())
+        )
+
+    assert verified == unverified
+    assert verified["1"][0]["status"] == "Open"
+    assert fetch.await_count == 2
+
+
 def test_comment_enrich_cache_is_evicted_when_the_job_is_deleted(app_client) -> None:
     """Deleted comments must not stay readable through the cached badges."""
     admin_login(app_client)
@@ -2276,15 +2271,7 @@ def test_comment_enrich_cache_is_evicted_when_the_job_is_deleted(app_client) -> 
                 username="admin",
             )
         )
-    with (
-        patch.object(
-            main,
-            "detect_github_prs",
-            return_value=[{"owner": "o", "repo": "r", "number": 8}],
-        ),
-        patch.object(main, "detect_github_issues", return_value=[]),
-        patch.object(main, "fetch_github_pr_status", fetch),
-    ):
+    with _github_pr_lookup(8, fetch):
         for job_id in ("job-enrich-gone", "job-enrich-gone-bulk"):
             response = app_client.get(f"/results/{job_id}/enrich-comments")
             assert response.status_code == 200, response.text
@@ -2315,17 +2302,7 @@ def test_bulk_delete_invalidates_enrichments_before_the_cleanup(app_client) -> N
             username="admin",
         )
     )
-    with (
-        patch.object(
-            main,
-            "detect_github_prs",
-            return_value=[{"owner": "o", "repo": "r", "number": 11}],
-        ),
-        patch.object(main, "detect_github_issues", return_value=[]),
-        patch.object(
-            main, "fetch_github_pr_status", AsyncMock(return_value={"state": "open"})
-        ),
-    ):
+    with _github_pr_lookup(11):
         assert (
             app_client.get("/results/job-enrich-bulk-fast/enrich-comments").status_code
             == 200
