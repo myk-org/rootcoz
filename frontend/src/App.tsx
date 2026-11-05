@@ -24,6 +24,7 @@ import { ReportsPage } from '@/pages/ReportsPage'
 import { LogsPage } from '@/pages/LogsPage'
 import { AdminTranscriptsPage } from '@/pages/AdminTranscriptsPage'
 import { AdminAuditPage } from '@/pages/AdminAuditPage'
+import { AdminServerStatusPage } from '@/pages/AdminServerStatusPage'
 
 export default function App() {
   return (
@@ -52,6 +53,7 @@ export default function App() {
             <Route path="/admin/logs" element={<ProtectedRoute adminOnly><LogsPage /></ProtectedRoute>} />
             <Route path="/admin/audit" element={<ProtectedRoute adminOnly><AdminAuditPage /></ProtectedRoute>} />
             <Route path="/admin/transcripts" element={<ProtectedRoute adminOnly><AdminTranscriptsPage /></ProtectedRoute>} />
+            <Route path="/admin/server-status" element={<ProtectedRoute adminOnly><AdminServerStatusPage /></ProtectedRoute>} />
           </Route>
         </Routes>
         </SSEProvider>

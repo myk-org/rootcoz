@@ -25,6 +25,11 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      # Commit shown on the admin Server Status page. Set it for a real build:
+      #   GIT_SHA=$(git rev-parse HEAD) docker compose build
+      # Empty is fine: the Process card then says "not visible in this container".
+      args:
+        GIT_SHA: ${GIT_SHA:-}
 
     # Container name for easier management
     container_name: rootcoz
