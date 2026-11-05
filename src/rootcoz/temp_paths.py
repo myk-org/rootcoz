@@ -19,7 +19,9 @@ from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
 
-logger = logging.getLogger(__name__)
+from rootcoz import get_child_logger
+
+logger = get_child_logger(__name__)
 
 
 class _Abandoned:

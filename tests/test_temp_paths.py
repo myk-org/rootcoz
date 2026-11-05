@@ -28,6 +28,31 @@ from rootcoz.temp_paths import (
     delete_tree,
     reusable_path_lock,
 )
+from rootcoz.temp_paths import logger as reaper_logger
+
+
+@pytest.fixture(autouse=True)
+def _capture_reaper_logs(caplog: pytest.LogCaptureFixture) -> Iterator[None]:
+    """Put caplog on the reaper's own logger.
+
+    It is a simple_logger child (``propagate=False``), so records never reach the
+    root logger caplog listens on — without this the log assertions pass vacuously.
+    """
+    original_level = reaper_logger.level
+    original_filters = list(reaper_logger.filters)
+    reaper_logger.setLevel(logging.DEBUG)
+    reaper_logger.addHandler(caplog.handler)
+    # simple_logger's DuplicateFilter keys on (module, level, msg) and keeps that
+    # state for the whole session, so a later test's identical line is dropped.
+    for log_filter in original_filters:
+        reaper_logger.removeFilter(log_filter)
+    try:
+        yield
+    finally:
+        reaper_logger.removeHandler(caplog.handler)
+        reaper_logger.setLevel(original_level)
+        for log_filter in original_filters:
+            reaper_logger.addFilter(log_filter)
 
 
 async def _tick_until(coro_done: asyncio.Future[object], interval: float = 0.01) -> int:
