@@ -760,10 +760,10 @@
 <td>Comment author or admin</td>
 </tr>
 <tr>
-<td>POST</td>
+<td>GET</td>
 <td><code>/results/{job_id}/enrich-comments</code></td>
 <td>viewer</td>
-<td>Live GitHub PR and Jira ticket status</td>
+<td>Live GitHub PR and Jira ticket status. Read, not audited: the report page calls it on every load and the result is cached for 60 s. Only refused and failed attempts are recorded</td>
 </tr>
 <tr>
 <td>POST</td>

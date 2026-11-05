@@ -1804,7 +1804,8 @@ def test_comment_add_denied_by_the_allow_list_is_audited(app_client) -> None:
     assert event["details"] == {"reason": "forbidden", "test_name": "test_a"}
 
 
-def test_comment_enrich_is_audited(app_client) -> None:
+def test_comment_enrich_success_is_not_audited(app_client) -> None:
+    """A read is not an event: the report page calls this on every load."""
     admin_login(app_client)
     _store_job("job-enrich")
     asyncio.run(
@@ -1826,15 +1827,32 @@ def test_comment_enrich_is_audited(app_client) -> None:
             main, "fetch_github_pr_status", AsyncMock(return_value={"state": "open"})
         ),
     ):
-        response = app_client.post("/results/job-enrich/enrich-comments")
+        response = app_client.get("/results/job-enrich/enrich-comments")
     assert response.status_code == 200, response.text
+    assert response.json() == {
+        "enrichments": {
+            "1": [{"type": "github_pr", "key": "o/r#1", "status": {"state": "open"}}]
+        }
+    }
 
-    events = _events(action="comment.enrich")
-    assert len(events) == 1
-    event = events[0]
-    assert (event["actor"], event["outcome"]) == ("admin", "success")
+    assert _events(action="comment.enrich") == []
+
+
+def test_comment_enrich_refusal_is_audited(app_client) -> None:
+    """Probing a job the caller may not see writes its refused row."""
+    admin_login(app_client)
+    with patch.object(
+        main,
+        "_check_allow_list",
+        side_effect=main.HTTPException(status_code=403, detail="Not allowed"),
+    ):
+        response = app_client.get("/results/job-enrich/enrich-comments")
+    assert response.status_code == 403, response.text
+
+    event = _events(action="comment.enrich")[0]
+    assert event["outcome"] == "denied"
     assert event["target_id"] == "job-enrich"
-    assert event["details"] == {"count": 1, "job_id": "job-enrich"}
+    assert event["details"] == {"reason": "forbidden", "job_id": "job-enrich"}
 
 
 def test_comment_enrich_failure_is_audited(app_client) -> None:
@@ -1848,19 +1866,58 @@ def test_comment_enrich_failure_is_audited(app_client) -> None:
         ),
         pytest.raises(RuntimeError),
     ):
-        app_client.post("/results/job-enrich/enrich-comments")
+        app_client.get("/results/job-enrich/enrich-comments")
 
     event = _events(action="comment.enrich")[0]
     assert event["outcome"] == "failure"
     assert event["details"] == {"reason": "internal_error", "job_id": "job-enrich"}
     assert event["target_id"] == "job-enrich"
 
-    response = app_client.post("/results/job-enrich/enrich-comments")
+
+def test_comment_enrich_second_read_uses_the_cache(app_client) -> None:
+    """A second read within the TTL must not hit GitHub again."""
+    admin_login(app_client)
+    _store_job("job-enrich-cached")
+    asyncio.run(
+        storage.add_comment(
+            job_id="job-enrich-cached",
+            test_name="test_a",
+            comment="see https://github.com/o/r/pull/2",
+            username="admin",
+        )
+    )
+    fetch = AsyncMock(return_value={"state": "open"})
+    with (
+        patch.object(
+            main,
+            "detect_github_prs",
+            return_value=[{"owner": "o", "repo": "r", "number": 2}],
+        ),
+        patch.object(main, "detect_github_issues", return_value=[]),
+        patch.object(main, "fetch_github_pr_status", fetch),
+    ):
+        first = app_client.get("/results/job-enrich-cached/enrich-comments")
+        second = app_client.get("/results/job-enrich-cached/enrich-comments")
+
+    assert first.status_code == 200, first.text
+    assert second.json() == first.json()
+    assert fetch.await_count == 1
+
+
+def test_comment_enrich_failure_is_not_cached(app_client) -> None:
+    """An error leaves no cache entry, so the next read retries upstream."""
+    admin_login(app_client)
+    _store_job("job-enrich-retry")
+    collect = AsyncMock(side_effect=[RuntimeError("db down"), []])
+    with patch.object(storage, "get_comments_for_job", collect):
+        with pytest.raises(RuntimeError):
+            app_client.get("/results/job-enrich-retry/enrich-comments")
+
+        response = app_client.get("/results/job-enrich-retry/enrich-comments")
+
     assert response.status_code == 200, response.text
-    assert [event["outcome"] for event in _events(action="comment.enrich")] == [
-        "success",
-        "failure",
-    ]
+    assert response.json() == {"enrichments": {}}
+    assert collect.await_count == 2
 
 
 def test_pattern_override_is_audited(app_client) -> None:
@@ -6894,7 +6951,6 @@ _DETAIL_KEYS: dict[str, set[str]] = {
     "provider.remove": {"provider", "had_stored_key", "models"},
     "provider.models_set": {"provider", "total"},
     "comment.delete": {"job_id", "test_name"},
-    "comment.enrich": {"count", "job_id"},
     "tracked_in.set": {"test_name", "changed"},
     "user.ai_credential_set": {"provider", "model"},
 }
@@ -7081,7 +7137,6 @@ _MATRIX_ACTIONS = frozenset(
         "export.push",
         "provider.remove",
         "comment.delete",
-        "comment.enrich",
         "provider.models_set",
         "tracked_in.set",
         "user.ai_credential_set",

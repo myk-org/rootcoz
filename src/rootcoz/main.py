@@ -1036,6 +1036,7 @@ set_usage_callback(notify_job_status_changed)
 
 def notify_comments_changed(job_id: str) -> None:
     """Signal SSE listeners for a specific job that comments changed."""
+    _invalidate_enrichments_cache(job_id)
     listeners = _comment_listeners.get(job_id)
     if listeners:
         for event in listeners:
@@ -8133,10 +8134,32 @@ async def set_reviewed(
     }
 
 
+# Per-job enrichment cache: every report load asks for the live badges, and each
+# miss costs one rate-limited GitHub/Jira call per link in the thread. Comment
+# links change rarely, so 60 s of staleness is invisible while it removes the
+# repeated upstream traffic. Failures are never cached; the entry is dropped
+# whenever the job's comments change (see notify_comments_changed).
+_ENRICHMENTS_TTL_SECONDS = 60
+_enrichments_cache: dict[str, tuple[float, dict[str, list[dict[str, Any]]]]] = {}
+
+
+def _invalidate_enrichments_cache(job_id: str) -> None:
+    """Drop a job's cached enrichments so the next read re-fetches them."""
+    _enrichments_cache.pop(job_id, None)
+
+
 async def _collect_comment_enrichments(
     job_id: str, settings: Settings
 ) -> dict[str, list[dict[str, Any]]]:
-    """Resolve live statuses for every tracker link found in a job's comments."""
+    """Resolve live statuses for every tracker link found in a job's comments.
+
+    Serves a cached result when the job was collected within
+    ``_ENRICHMENTS_TTL_SECONDS``. Errors propagate and leave no cache entry.
+    """
+    cached = _enrichments_cache.get(job_id)
+    if cached is not None and _time.monotonic() - cached[0] < _ENRICHMENTS_TTL_SECONDS:
+        logger.debug(f"enrich_comments: job_id={job_id}, served from cache")
+        return cached[1]
     comments = await storage.get_comments_for_job(job_id)
     logger.debug(f"enrich_comments: job_id={job_id}, comments_count={len(comments)}")
 
@@ -8234,10 +8257,11 @@ async def _collect_comment_enrichments(
     logger.debug(
         f"enrich_comments: job_id={job_id}, enrichments_count={len(enrichments)}"
     )
+    _enrichments_cache[job_id] = (_time.monotonic(), enrichments)
     return enrichments
 
 
-@app.post("/results/{job_id}/enrich-comments", operation_id="enrichComments")
+@app.get("/results/{job_id}/enrich-comments", operation_id="enrichComments")
 async def enrich_comments(
     job_id: str,
     request: Request,
@@ -8249,8 +8273,12 @@ async def enrich_comments(
     Read-only: no storage writes, no external mutations. Any authenticated user
     may call it, since the statuses are rendered beside the comment links a
     viewer can already read.
+
+    A read is not audited — opening a report used to leave a ``Comment Enrich``
+    row in the audit trail, which buried the events worth reading. The refusal
+    and failure rows stay: probing a job you may not see is a security event.
     """
-    logger.debug(f"POST /results/{job_id}/enrich-comments")
+    logger.debug(f"GET /results/{job_id}/enrich-comments")
     message = f"User '{request.state.username}' enriched comments in job {job_id}"
     try:
         _check_allow_list(request)
@@ -8276,18 +8304,6 @@ async def enrich_comments(
             details={"job_id": job_id},
         )
         raise
-    await record_audit(
-        action="comment.enrich",
-        actor=request.state.username,
-        message=(
-            f"User '{request.state.username}' enriched"
-            f" {len(enrichments)} comment(s) in job {job_id}"
-        ),
-        target_type="job",
-        target_id=job_id,
-        details={"count": len(enrichments), "job_id": job_id},
-        request=request,
-    )
     return {"enrichments": enrichments}
 
 
