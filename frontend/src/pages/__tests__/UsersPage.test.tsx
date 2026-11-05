@@ -154,18 +154,17 @@ describe('UsersPage pagination', () => {
 
   it('moves to the next window and back, and stops at both ends', async () => {
     mockServer(manyUsers(137))
+    const user1 = userEvent.setup()
     renderPage()
 
     expect(await screen.findByRole('button', { name: 'Previous' })).toBeDisabled()
 
-    // fireEvent, not userEvent: under full-suite load userEvent's own machinery
-    // cost ~4.6 s for these two clicks and pushed the test past its 5 s budget.
-    fireEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await user1.click(screen.getByRole('button', { name: 'Next' }))
     expect(await screen.findByText('user-026')).toBeInTheDocument()
     expect(get).toHaveBeenCalledWith('/api/admin/users?limit=25&offset=25')
     expect(screen.getByRole('status')).toHaveTextContent('26–50 of 137')
 
-    fireEvent.click(screen.getByRole('button', { name: 'Previous' }))
+    await user1.click(screen.getByRole('button', { name: 'Previous' }))
     expect(await screen.findByText('user-001')).toBeInTheDocument()
     expect(get).toHaveBeenCalledWith('/api/admin/users?limit=25&offset=0')
     expect(screen.getByRole('status')).toHaveTextContent('1–25 of 137')
@@ -256,8 +255,6 @@ describe('UsersPage pagination', () => {
 
   it('starts over at the first window when the page size changes', async () => {
     mockServer(manyUsers(137))
-    // userEvent stays: Radix Select opens on a real mouse pointer sequence, which
-    // fireEvent.click does not produce. See the pagination test above for the flake.
     const user1 = userEvent.setup()
     renderPage('/admin/users?limit=25&offset=25')
 
@@ -363,17 +360,17 @@ describe('UsersPage account state', () => {
 
   it('disables only after confirmation, then refetches instead of patching the row', async () => {
     put.mockResolvedValue({})
+    const user1 = userEvent.setup()
     renderPage()
 
-    // fireEvent, not userEvent: two interactions after mount — see the pagination test.
-    fireEvent.click(await screen.findByRole('button', { name: 'Disable alice' }))
+    await user1.click(await screen.findByRole('button', { name: 'Disable alice' }))
     const dialog = await screen.findByRole('dialog')
     expect(within(dialog).getByText(/cannot log in until you enable/i)).toBeInTheDocument()
     expect(put).not.toHaveBeenCalled()
 
     // The server is the truth: the row flips only because the refetch says so.
     mockUsers([user('alice', { disabled: true }), user('bob')])
-    fireEvent.click(within(dialog).getByRole('button', { name: 'Disable' }))
+    await user1.click(within(dialog).getByRole('button', { name: 'Disable' }))
 
     await waitFor(() =>
       expect(put).toHaveBeenCalledWith('/api/admin/users/alice/disabled', { disabled: true }),

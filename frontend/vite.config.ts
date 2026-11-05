@@ -33,14 +33,19 @@ export default defineConfig({
     maxWorkers: 4,
     setupFiles: './src/test/setup.ts',
     css: true,
-    // 15 s, not vitest's 5 s default. Measured with the suite pinned to two
-    // cores plus two burners on those cores — the same recipe that reproduced
-    // the CI timeout on UsersPage.test.tsx — several jsdom tests need more than
-    // 5 s of wall time on a loaded runner: UsersPage pagination 4321-6331 ms,
-    // AnalysisAiPicker 5082-7133 ms, UsersGrant 4151-5137 ms. With 5 s the
-    // suite failed on those three; with 15 s it passed 3/3 runs and the worst
-    // test in the whole suite took 7280 ms (2x headroom). A budget that fails
-    // on the clock rather than an assertion teaches people to weaken tests.
+    // 15 s, not vitest's 5 s default: at 5 s a full-suite run pinned to two cores
+    // plus two burners (the recipe that reproduces the CI flake) fails with
+    // "Test timed out in 5000ms" and no assertion error, on whichever jsdom tests
+    // are slowest that run — UsersPage pagination and its search-debounce test,
+    // AnalysisAiPicker's unavailable-sources test, UsersGrant's grant tests. The
+    // worst measured 6.2-8.1 s over loaded runs, so 15 s is ~2x headroom.
+    //
+    // The cost is jsdom rendering, not the interaction API: the pagination test
+    // costs the same with fireEvent.click as with userEvent.click (~1.9 s on two
+    // loaded cores, 3/3 runs each), so it keeps userEvent and its real pointer
+    // sequence. Per-test budgets would flake again on the next slow test, and
+    // they cannot mask an assertion: find/waitFor keep their 1 s window, so a
+    // wrong expectation still fails in 1 s, not 15.
     testTimeout: 15_000,
   },
   server: {
