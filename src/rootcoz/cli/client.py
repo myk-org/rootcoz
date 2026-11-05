@@ -1414,14 +1414,32 @@ class RootCozClient:
         target: str,
         title: str,
         body: str,
+        repo: str = "",
+        job_id: str = "",
+        jira_project_key: str = "",
+        jira_security_level: str = "",
+        jira_issue_type: str = "Bug",
     ) -> dict[str, Any]:
         """Draft an issue from chat text. POST /api/chat-issue/propose
 
         Files nothing: the reply carries the ``confirmation_id`` that
         ``create_chat_issue`` needs, plus the exact title and body it would file.
         Drafts are single-use and expire, so propose again after any edit.
+
+        The destination (``repo``, ``job_id``, the Jira overrides) is part of
+        the draft, so ``create_chat_issue`` must be given the same one.
         """
         payload: dict[str, Any] = {"target": target, "title": title, "body": body}
+        if repo:
+            payload["repo"] = repo
+        if job_id:
+            payload["job_id"] = job_id
+        if jira_project_key:
+            payload["jira_project_key"] = jira_project_key
+        if jira_security_level:
+            payload["jira_security_level"] = jira_security_level
+        if jira_issue_type and jira_issue_type != "Bug":
+            payload["jira_issue_type"] = jira_issue_type
         return self._request(
             "POST", "/api/chat-issue/propose", json=payload, accept_statuses=(201,)
         )
@@ -1432,6 +1450,8 @@ class RootCozClient:
         title: str,
         body: str,
         confirmation_id: str,
+        repo: str = "",
+        job_id: str = "",
         jira_project_key: str = "",
         jira_security_level: str = "",
         jira_issue_type: str = "Bug",
@@ -1441,7 +1461,7 @@ class RootCozClient:
         No token parameter on purpose: the server files the issue with the
         credentials saved in the caller's account, and a deployment token is
         never a fallback. ``confirmation_id`` must come from
-        ``propose_chat_issue`` for the same title and body.
+        ``propose_chat_issue`` for the same title, body and destination.
         """
         payload: dict[str, Any] = {
             "target": target,
@@ -1449,6 +1469,10 @@ class RootCozClient:
             "body": body,
             "confirmation_id": confirmation_id,
         }
+        if repo:
+            payload["repo"] = repo
+        if job_id:
+            payload["job_id"] = job_id
         if jira_project_key:
             payload["jira_project_key"] = jira_project_key
         if jira_security_level:

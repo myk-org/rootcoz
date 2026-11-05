@@ -493,6 +493,9 @@ def _tracker_issue_tools(
     github = "github" in targets
     repo_body = {"repo": "{repo}"} if github else {}
     repo_properties = {"repo": _issue_repo_param(issue_repos)} if github else {}
+    # The run a job chat belongs to, hardcoded so the model cannot name another
+    # one: the draft binds it and a create naming a different run is refused.
+    job_body = {"job_id": job_id} if job_id else {}
     tools: list[dict[str, Any]] = [
         {
             "name": "propose_tracker_issue",
@@ -533,6 +536,7 @@ def _tracker_issue_tools(
                     "title": "{title}",
                     "body": "{body}",
                     **repo_body,
+                    **job_body,
                 },
             },
         }
@@ -602,7 +606,7 @@ def _tracker_issue_tools(
                         "confirmation_id": "{confirmation_id}",
                         **(repo_body if target == "github" else {}),
                         # The run that bounds the repo choice, empty for admin chat.
-                        **({"job_id": job_id} if target == "github" and job_id else {}),
+                        **(job_body if target == "github" else {}),
                     },
                 },
             }
@@ -1237,6 +1241,8 @@ _COMMON_RULES = """- Do NOT modify any data — read-only. The one exception is 
 - Do NOT run arbitrary curl commands — use the provided tools"""
 
 #: What to tell the user for each reason a tracker tool is missing from the list.
+#: `{kind}` is the tracker name. Only the missing-token case is fixed in Profile
+#: Settings — a disabled tracker or a missing repository is not.
 _TRACKER_UNAVAILABLE_REASONS = {
     "server_disabled": (
         "issue creation is disabled on this server, so no token can enable it — "
@@ -1246,6 +1252,15 @@ _TRACKER_UNAVAILABLE_REASONS = {
         "this server has no TESTS_REPO_URL configured, so there is no "
         "repository to file in — an administrator has to set it, and a token "
         "will not help"
+    ),
+    "no_token": (
+        "this account has no {kind} token saved. Tell the user the fix: "
+        "Profile Settings → add the {kind} token."
+    ),
+    "unusable_credential": (
+        "this account's saved {kind} credential cannot be used with the "
+        "server's {kind} settings, so no issue can be filed with it. Tell the "
+        "user the fix: Profile Settings → re-save the {kind} credential."
     ),
 }
 
@@ -1280,10 +1295,11 @@ def _issue_create_rules(
 ) -> str:
     """The issue-creation rules, with the real reason each tracker is absent.
 
-    A tracker can be missing for two unrelated reasons: the server turned it
-    off (or has no repository to file in), or this account never saved that
-    tracker's token. Only the second one is fixed in Profile Settings, so the
-    prompt states which one applies instead of always pointing at the token.
+    A tracker can be missing for unrelated reasons: the server turned it off,
+    it has no repository to file in, this account never saved that tracker's
+    token, or the saved credential cannot be used with the server's settings.
+    Only the credential cases are fixed in Profile Settings, so the prompt
+    states which one applies instead of always pointing at the token.
 
     ``issue_repos`` names the repos a job chat may file in; ``admin`` says the
     caller is not capped by any run's repo set.
@@ -1292,13 +1308,10 @@ def _issue_create_rules(
     reasons = []
     for tracker, reason in sorted(unavailable.items()):
         kind = "GitHub" if tracker == "github" else "Jira"
-        if reason in _TRACKER_UNAVAILABLE_REASONS:
-            reasons.append(f"  - {kind}: {_TRACKER_UNAVAILABLE_REASONS[reason]}.")
-        else:
-            reasons.append(
-                f"  - {kind}: this account has no {kind} token saved. Tell the "
-                f"user the fix: Profile Settings → add the {kind} token."
-            )
+        detail = _TRACKER_UNAVAILABLE_REASONS.get(
+            reason, "this account has no usable {kind} credential saved."
+        )
+        reasons.append(f"  - {kind}: {detail.format(kind=kind)}")
     absent = (
         "\n".join(reasons)
         if reasons

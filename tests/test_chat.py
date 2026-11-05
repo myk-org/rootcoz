@@ -816,13 +816,22 @@ class TestChatTrackerTargets:
         from rootcoz.config import Settings
 
         overrides.setdefault("tests_repo_url", "https://github.com/org/repo")
+        # A Jira credential is usable only with a server auth method it can
+        # serve: pat needs a server URL, oauth the client/cloud ids.
+        overrides.setdefault("jira_server_url", "https://jira.example.com")
+        overrides.setdefault("atlassian_oauth_client_id", "client-id")
+        overrides.setdefault("atlassian_oauth_cloud_id", "cloud-id")
         with patch.dict(os.environ, {}, clear=True):
             return Settings(_env_file=None, **overrides)
 
     def _targets(self, settings, **tokens):
         from rootcoz.main import _chat_tracker_targets
 
-        return _chat_tracker_targets(settings, tokens)
+        return _chat_tracker_targets(
+            settings,
+            tokens,
+            github_repo_available=bool(settings.tests_repo_url),
+        )
 
     def test_no_token_offers_nothing(self):
         assert self._targets(self._settings()) == ()
@@ -833,8 +842,20 @@ class TestChatTrackerTargets:
             github_token="ghp_user",  # pragma: allowlist secret
         ) == ("github",)
 
+    def test_a_jobs_own_repo_offers_github_without_tests_repo_url(self):
+        """A job chat files in the run's test repo, so no TESTS_REPO_URL is needed."""
+        from rootcoz.main import _chat_tracker_state
+
+        targets, unavailable = _chat_tracker_state(
+            self._settings(tests_repo_url=""),
+            {"github_token": "ghp_user"},  # pragma: allowlist secret
+            github_repo_available=True,
+        )
+        assert targets == ("github",)
+        assert "github" not in unavailable
+
     def test_github_without_a_repository_offers_nothing(self):
-        """No TESTS_REPO_URL means every GitHub create call would refuse."""
+        """No TESTS_REPO_URL and no run repo means every create call would refuse."""
         from rootcoz.main import _chat_tracker_state
 
         assert (
@@ -848,9 +869,24 @@ class TestChatTrackerTargets:
             _chat_tracker_state(
                 self._settings(tests_repo_url=""),
                 {"github_token": "ghp_user"},  # pragma: allowlist secret
+                github_repo_available=False,
             )[1]["github"]
             == "no_repository"
         )
+
+    def test_a_missing_repository_is_a_400_when_asked_directly(self):
+        """The gate pairs every reason with the refusal the create call answers."""
+        from rootcoz.main import _chat_tracker_gate
+
+        reason, refusal = _chat_tracker_gate(
+            "github",
+            self._settings(tests_repo_url=""),
+            {"github_token": "ghp_user"},  # pragma: allowlist secret
+            github_repo_available=False,
+        )
+        assert reason == "no_repository"
+        assert refusal is not None and refusal.status_code == 400
+        assert "TESTS_REPO_URL" in refusal.detail
 
     def test_github_flag_off_offers_nothing(self):
         assert (
@@ -864,6 +900,28 @@ class TestChatTrackerTargets:
     def test_jira_only_user_gets_only_jira(self):
         assert self._targets(self._settings(), jira_token="jira-user") == ("jira",)
         assert self._targets(self._settings(), jira_sa_token="ATOA-user") == ("jira",)
+
+    def test_a_jira_credential_the_settings_cannot_serve_is_not_offered(self):
+        """A legacy SA secret is refused by the create call, so it is not a tool."""
+        from rootcoz.main import _chat_tracker_state
+
+        targets, unavailable = _chat_tracker_state(
+            self._settings(),
+            {"jira_sa_token": "legacy-secret"},
+            github_repo_available=True,
+        )
+        assert targets == ()
+        assert unavailable["jira"] == "unusable_credential"
+
+        # The same order of checks as the endpoint: with no method configured
+        # there is nothing to file through either.
+        no_method = self._settings(jira_server_url="")
+        assert (
+            _chat_tracker_state(
+                no_method, {"jira_token": "pat"}, github_repo_available=True
+            )[1]["jira"]
+            == "unusable_credential"
+        )
 
     def test_jira_flag_off_offers_nothing(self):
         assert (
@@ -941,6 +999,13 @@ class TestChatIssueTools:
                 # The Jira project is never the model's to pick.
                 if target == "jira":
                     assert "do not choose the Jira project" in tool["description"]
+            # The draft is proposed for the same run it is later created in.
+            proposed = dict(propose["http"]["body_template"])
+            if in_job_chat:
+                assert proposed["job_id"] == "j1"
+                assert proposed["repo"] == "{repo}"
+            else:
+                assert "job_id" not in proposed
 
     def test_no_issue_tools_at_all_without_a_usable_tracker(self):
         names = [
@@ -974,6 +1039,8 @@ class TestChatIssueTools:
                 "target": "github",
                 "title": "test_login times out",
                 "body": "DNS timeout resolving auth.",
+                # The run the draft is for: the same one must be created in.
+                "job_id": "chat-issue-run",
             },
             headers=headers,
         )
@@ -1076,6 +1143,19 @@ class TestChatIssueTools:
         assert "TESTS_REPO_URL" in rules
         assert "issue creation is disabled on this server" in rules
         # The token advice belongs only to the missing-token case.
+        assert "Profile Settings → add" not in rules
+
+    def test_prompt_names_an_unusable_credential_as_a_credential_problem(self):
+        """A saved-but-unusable Jira credential is not "no token saved"."""
+        prompt = build_admin_system_prompt(
+            build_admin_custom_tools(
+                server_url="http://localhost:8000", auth_token="t"
+            ),
+            tracker_unavailable={"jira": "unusable_credential"},
+        )
+        rules = prompt.split("## Creating Issues")[1]
+        assert "cannot be used with the server's Jira settings" in rules
+        assert "re-save the Jira credential" in rules
         assert "Profile Settings → add" not in rules
 
 
@@ -3530,6 +3610,32 @@ class TestChatIssueRepoAllowList:
         assert response.status_code == 400, response.text
         assert "must be tied to a run" in response.json()["detail"]
         mock_create.assert_not_called()
+
+    async def test_a_run_repo_alone_is_enough_to_offer_and_file(
+        self, test_client, temp_db_path: Path
+    ):
+        """No TESTS_REPO_URL: the run's own repo is a destination, so the tool is offered."""
+        from rootcoz.config import get_settings
+        from rootcoz.main import _chat_tracker_state, _job_issue_repo_slugs
+
+        job_id = await self._save_run(temp_db_path, "job-repo-only")
+        _default, slugs = _job_issue_repo_slugs(self._PARAMS, get_settings())
+        targets, unavailable = _chat_tracker_state(
+            get_settings(),
+            {"github_token": "ghp_row_token"},  # pragma: allowlist secret
+            github_repo_available=bool(slugs),
+        )
+        assert "github" in targets, unavailable
+
+        headers = await self._reviewer("repo-only")
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/tests/issues/5",
+                "number": 5,
+            }
+            response = self._file(test_client, headers, job_id=job_id)
+        assert response.status_code == 201, response.text
+        assert self._filed_repo(mock_create) == "https://github.com/org/tests"
 
     def test_job_prompt_lists_the_allowed_repos(self):
         repos = ("org/tests", "org/lib")

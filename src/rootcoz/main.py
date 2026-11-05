@@ -9158,6 +9158,15 @@ _TRACKER_CREDENTIAL_NO_PROFILE_DETAIL = (
     "Sign in with your own account and add the token in Profile Settings."
 )
 
+#: The draft-time refusal when this caller has nowhere to file a GitHub issue.
+#: The create call states the no-``TESTS_REPO_URL`` case itself; a proposal runs
+#: before any destination is resolved, so it names both ways out.
+_CHAT_NO_REPO_DETAIL = (
+    "Nowhere to file this issue: this chat has no GitHub repository it may use. "
+    "Name a repository the run may file in, or ask an administrator to set "
+    "TESTS_REPO_URL."
+)
+
 
 async def _require_user_tracker_credential(username: str, kind: str) -> str:
     """The 400 detail for a caller with no *kind* credential in their account.
@@ -9243,16 +9252,76 @@ def _require_tracker_enabled(
         )
 
 
+def _chat_tracker_gate(
+    target: Literal["github", "jira"],
+    settings: Settings,
+    user_tokens: dict[str, str],
+    *,
+    github_repo_available: bool = True,
+) -> tuple[str, HTTPException | None]:
+    """``(reason, refusal)``: why chat cannot file in ``target``, else ``('', None)``.
+
+    The ONE tracker gate: the chat tool list (:func:`_chat_tracker_state`) and
+    the create endpoint (:func:`_chat_issue_tracker_tokens`) both read it, so a
+    tool is advertised exactly when the endpoint would file.
+
+    The order is the endpoint's: the deployment switch first (a disabled
+    tracker answers 403 even for an account with no token for it, because
+    adding one cannot turn it on), then the caller's own credential, then
+    whether that credential can actually file — the GitHub destination, or the
+    Jira auth method the saved credential pins.
+
+    ``github_repo_available`` answers "is there a repository this caller may
+    file in?". The tool list knows its run's repos and says so; a create request
+    keeps the default, because it resolves its destination itself and its own
+    refusal names the run, the allow-list or ``TESTS_REPO_URL``.
+    """
+    try:
+        _require_tracker_enabled(target, settings)
+    except HTTPException as exc:
+        return "server_disabled", exc
+    if target == "github":
+        if not user_tokens.get("github_token"):
+            return "no_token", None
+        if not github_repo_available:
+            return "no_repository", HTTPException(
+                status_code=400, detail=_CHAT_NO_REPO_DETAIL
+            )
+        return "", None
+    jira_token = user_tokens.get("jira_token", "")
+    jira_sa_token = user_tokens.get("jira_sa_token", "")
+    if not (jira_token or jira_sa_token):
+        return "no_token", None
+    try:
+        # A legacy (non-ATOA) service-account secret, or a credential that pins
+        # an auth method the effective settings cannot serve, is refused by the
+        # create call — so it must not read as usable here either.
+        _require_usable_jira_sa_token(jira_token, jira_sa_token)
+        _require_jira_method_configured(
+            _build_effective_jira_settings(
+                settings,
+                jira_token,
+                user_tokens.get("jira_email", ""),
+                user_jira_sa_token=jira_sa_token,
+            )
+        )
+    except HTTPException as exc:
+        return "unusable_credential", exc
+    return "", None
+
+
 def _chat_tracker_state(
-    settings: Settings, user_tokens: dict[str, str]
+    settings: Settings,
+    user_tokens: dict[str, str],
+    *,
+    github_repo_available: bool,
 ) -> tuple[tuple[str, ...], dict[str, str]]:
     """``(trackers chat may offer this user, why each other tracker is absent)``.
 
-    Mirrors the gates of ``POST /api/chat-issue``
-    (``_require_tracker_enabled``, the repo the server would file in, then the
-    caller's account credential), so a chat tool is advertised only when it can
-    actually file. ``user_tokens`` is the caller's own
-    ``storage.get_user_tokens`` row — never a deployment credential.
+    Reads :func:`_chat_tracker_gate` for both trackers, so a chat tool is
+    advertised only when ``POST /api/chat-issue`` would actually file.
+    ``user_tokens`` is the caller's own ``storage.get_user_tokens`` row — never
+    a deployment credential.
 
     The reasons are what the system prompt needs to tell a server-disabled
     tracker from a token this account has not saved: telling a user to add a
@@ -9260,29 +9329,27 @@ def _chat_tracker_state(
     """
     targets: list[str] = []
     unavailable: dict[str, str] = {}
-    if settings.enable_github_issues is False:
-        unavailable["github"] = "server_disabled"
-    elif not user_tokens.get("github_token"):
-        unavailable["github"] = "no_token"
-    elif not _resolve_github_repo_url(settings):
-        # Without TESTS_REPO_URL the create call refuses before reaching GitHub.
-        unavailable["github"] = "no_repository"
-    else:
-        targets.append("github")
-    if not _jira_issue_creation_enabled(settings):
-        unavailable["jira"] = "server_disabled"
-    elif not (user_tokens.get("jira_token") or user_tokens.get("jira_sa_token")):
-        unavailable["jira"] = "no_token"
-    else:
-        targets.append("jira")
+    for target in ("github", "jira"):
+        reason, _refusal = _chat_tracker_gate(
+            target, settings, user_tokens, github_repo_available=github_repo_available
+        )
+        if reason:
+            unavailable[target] = reason
+        else:
+            targets.append(target)
     return tuple(targets), unavailable
 
 
 def _chat_tracker_targets(
-    settings: Settings, user_tokens: dict[str, str]
+    settings: Settings,
+    user_tokens: dict[str, str],
+    *,
+    github_repo_available: bool,
 ) -> tuple[str, ...]:
     """Only the trackers chat may offer this user (see :func:`_chat_tracker_state`)."""
-    return _chat_tracker_state(settings, user_tokens)[0]
+    return _chat_tracker_state(
+        settings, user_tokens, github_repo_available=github_repo_available
+    )[0]
 
 
 # Tracker targets a chat session was created with, keyed by sidecar session id.
@@ -9422,8 +9489,10 @@ def _chat_issue_is_admin(request: Request) -> bool:
 
 def _require_repo_slug(repo: str) -> str:
     """The validated ``owner/name`` slug, or a 400 naming the accepted shape."""
+    # An omitted optional tool argument can reach the server as the literal
+    # ``{repo}`` placeholder, which means "the default repository" — not a slug.
     try:
-        return _validate_repo_slug(repo)
+        return _validate_repo_slug(_sanitize_sidecar_placeholder(repo))
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -9479,18 +9548,43 @@ def _prune_issue_drafts(now: float) -> None:
             _chat_issue_drafts.pop(draft_id, None)
 
 
+def _issue_destination(
+    *,
+    target: Literal["github", "jira"],
+    repo: str = "",
+    job_id: str = "",
+    jira_project_key: str = "",
+    jira_security_level: str = "",
+    jira_issue_type: str = "",
+) -> dict[str, str]:
+    """Where an issue would be filed — the half of a draft the user approves.
+
+    Bound into the draft at propose time and compared at create time, so a
+    confirmation id approves "this text in this destination" and can never be
+    reused to file the same text somewhere else (another run's repo, another
+    Jira project or visibility). ``repo`` must already be a slug.
+    """
+    if target == "github":
+        return {"repo": repo, "job_id": job_id}
+    return {
+        "jira_project_key": jira_project_key,
+        "jira_security_level": jira_security_level,
+        "jira_issue_type": jira_issue_type or "Bug",
+    }
+
+
 def _store_issue_draft(
     *,
     username: str,
     target: Literal["github", "jira"],
     title: str,
     body: str,
-    repo: str = "",
+    destination: dict[str, str],
 ) -> tuple[str, str]:
     """Store a scrubbed draft and return ``(confirmation_id, preview)``.
 
     The preview is what the user is asked to approve, so it carries the exact
-    title, body and repo a paid-for confirmation id would file.
+    title, body and destination a paid-for confirmation id would file.
     """
     now = _time.monotonic()
     _prune_issue_drafts(now)
@@ -9500,11 +9594,19 @@ def _store_issue_draft(
         "target": target,
         "title": title,
         "body": body,
-        "repo": repo,
+        "destination": destination,
         "expires_at": now + _ISSUE_DRAFT_TTL_SECONDS,
     }
     kind = "GitHub" if target == "github" else "Jira"
-    where = f"Repo: {repo}\n\n" if repo else ""
+    where = "".join(
+        f"{label}: {destination[key]}\n\n"
+        for label, key in (
+            ("Repo", "repo"),
+            ("Jira project", "jira_project_key"),
+            ("Jira security level", "jira_security_level"),
+        )
+        if destination.get(key)
+    )
     preview = (
         f"Proposed {kind} issue — nothing has been filed yet.\n\n"
         f"{where}Title: {title}\n\nBody:\n{body}\n\n"
@@ -9522,13 +9624,15 @@ def _consume_issue_draft(
     target: Literal["github", "jira"],
     title: str,
     body: str,
-    repo: str = "",
+    destination: dict[str, str],
 ) -> None:
     """Redeem a draft for this caller, once, or refuse with the next step.
 
     This is the consent gate: a create call without a live draft of its own
-    files nothing. Every refusal names the steps, so the model can recover
-    instead of retrying blindly.
+    files nothing, and the draft it redeems must name the same destination, so
+    an approved "this title and body for this repo" cannot authorise another
+    repo, run or Jira project. Every refusal names the steps, so the model can
+    recover instead of retrying blindly.
     """
     propose = (
         "call propose_tracker_issue first, show the user the preview and file "
@@ -9567,14 +9671,15 @@ def _consume_issue_draft(
         draft["target"] != target
         or draft["title"] != title
         or draft["body"] != body
-        or draft.get("repo", "") != repo
+        or draft["destination"] != destination
     ):
         raise HTTPException(
             status_code=400,
             detail=(
-                "No issue was filed: the title, body, repo or tracker differ "
-                f"from what the user was shown. To file the edited issue, {propose} "
-                "again."
+                "No issue was filed: the title, body, tracker or destination "
+                "(repo, run or Jira project) differ from what the user was "
+                f"shown. To file the edited issue, {propose} again and approve "
+                "the new preview."
             ),
         )
     # Single use: the id dies with the create call it authorized.
@@ -9835,30 +9940,31 @@ async def _chat_issue_tracker_tokens(
     tracker: Literal["github", "jira"],
     settings: Settings,
 ) -> dict[str, str]:
-    """The tracker gates a chat issue write and its draft both run, then tokens.
+    """The caller's own tokens, once the shared tracker gate says it can file.
 
-    Order matters: the deployment switch first, then the caller's own
-    credential, so a disabled tracker answers 403 even for an account with no
-    token for it. Credentials are always the caller's account row — there is no
-    deployment fallback and no bootstrap-``admin`` exception. Access control
+    The gate is :func:`_chat_tracker_gate` — the same one the chat tool list
+    reads — so a tool is advertised exactly when this endpoint would file.
+    Credentials are always the caller's account row: there is no deployment
+    fallback and no bootstrap-``admin`` exception. Access control
     (``_require_reviewer``/``_check_allow_list``) stays in each handler so it
     runs before anything else there.
+
+    The repo question (``github_repo_available``) is deliberately not asked
+    here: :func:`_chat_issue_github_repo` resolves this request's destination and
+    refuses with a wording that names the run, the allow-list or
+    ``TESTS_REPO_URL``, which a yes/no could not.
     """
-    _require_tracker_enabled(tracker, settings)
     user_tokens = await storage.get_user_tokens(username)
-    if tracker == "github":
-        has_credential = bool(user_tokens.get("github_token"))
-        kind = "GitHub"
-    else:
-        has_credential = bool(
-            user_tokens.get("jira_token") or user_tokens.get("jira_sa_token")
-        )
-        kind = "Jira"
-    if not has_credential:
+    reason, refusal = _chat_tracker_gate(tracker, settings, user_tokens)
+    if reason == "no_token":
         raise HTTPException(
             status_code=400,
-            detail=await _require_user_tracker_credential(username, kind),
+            detail=await _require_user_tracker_credential(
+                username, "GitHub" if tracker == "github" else "Jira"
+            ),
         )
+    if refusal is not None:
+        raise refusal
     return user_tokens
 
 
@@ -9871,36 +9977,47 @@ async def propose_chat_issue(
     """Draft a chat issue for the user to approve — files nothing.
 
     Step one of the two-step gate. The scrubbed title and body are kept under a
-    single-use id for this caller, and the returned ``preview`` is what the
-    chat model has to show: ``POST /api/chat-issue`` files that exact text only
-    with a live id, so an injected instruction cannot file an issue the user
-    never saw.
+    single-use id for this caller together with the destination they were
+    written for, and the returned ``preview`` is what the chat model has to
+    show: ``POST /api/chat-issue`` files that exact text only with a live id
+    naming the same destination, so an injected instruction cannot file an
+    issue the user never saw — nor redirect an approved one.
     """
     username = request.state.username
     tracker = body.target
     _require_reviewer(request)
     _check_allow_list(request)
+    repo = _require_repo_slug(body.repo) if tracker == "github" else ""
     try:
+        # No destination check here: proposing files nothing, and the create
+        # call owns the precise "which repo may this chat use" refusal.
         await _chat_issue_tracker_tokens(username, tracker, settings)
     except HTTPException as exc:
         logger.info("Chat issue draft refused for %s: %s", username, exc.detail)
         raise
     title = scrub_sensitive_data(body.title)
     issue_body = scrub_sensitive_data(body.body)
-    repo = _require_repo_slug(body.repo)
+    destination = _issue_destination(
+        target=tracker,
+        repo=repo,
+        job_id=body.job_id,
+        jira_project_key=body.jira_project_key,
+        jira_security_level=body.jira_security_level,
+        jira_issue_type=body.jira_issue_type,
+    )
     confirmation_id, preview = _store_issue_draft(
         username=username,
         target=tracker,
         title=title,
         body=issue_body,
-        repo=repo,
+        destination=destination,
     )
     logger.info(
-        "Chat issue draft %s prepared for %s (%s, repo=%s, %d chars)",
+        "Chat issue draft %s prepared for %s (%s, destination=%s, %d chars)",
         confirmation_id,
         username,
         tracker,
-        body.repo or "(server default)",
+        destination,
         len(issue_body),
     )
     return {
@@ -9923,11 +10040,13 @@ async def create_chat_issue(
     """Open a GitHub issue or Jira ticket from a chat conversation.
 
     The only tracker write reachable from chat, and it needs a ``confirmation_id``
-    from ``POST /api/chat-issue/propose``: the title and body filed are the ones
-    the user approved, so the model's own judgement that the user "asked for it"
-    files nothing. Credentials come from the caller's account row — never a
-    deployment credential, and there is no bootstrap-``admin`` exception: a
-    missing token is a followable 400 that the model relays to the user.
+    from ``POST /api/chat-issue/propose``: the title, body and destination filed
+    are the ones the user approved, so the model's own judgement that the user
+    "asked for it" files nothing, and an id approved for one repo, run or Jira
+    project cannot be spent on another. Credentials come from the caller's
+    account row — never a deployment credential, and there is no
+    bootstrap-``admin`` exception: a missing token is a followable 400 that the
+    model relays to the user.
     """
     username = request.state.username
     tracker = body.target
@@ -9945,6 +10064,14 @@ async def create_chat_issue(
         github_repo_url = ""
         if tracker == "github":
             github_repo_url = await _chat_issue_github_repo(request, body, settings)
+        destination = _issue_destination(
+            target=tracker,
+            repo=_require_repo_slug(body.repo) if tracker == "github" else "",
+            job_id=body.job_id,
+            jira_project_key=body.jira_project_key,
+            jira_security_level=body.jira_security_level,
+            jira_issue_type=body.jira_issue_type,
+        )
         # The consent gate: without a live draft of its own, nothing is filed.
         _consume_issue_draft(
             body.confirmation_id,
@@ -9952,7 +10079,7 @@ async def create_chat_issue(
             target=tracker,
             title=title,
             body=issue_body,
-            repo=body.repo,
+            destination=destination,
         )
         result = await _create_issue_from_text(
             tracker,
@@ -9973,7 +10100,7 @@ async def create_chat_issue(
         )
     except HTTPException as exc:
         details: dict[str, Any] = {"tracker": tracker, "result": "refused"}
-        upstream_status = _upstream_status_of_refusal(exc)
+        upstream_status = _upstream_status(exc)
         if upstream_status is not None:
             # The number that tells an outage from a lost token; never the
             # upstream message, which can echo the submitted text.
@@ -10008,7 +10135,7 @@ async def create_chat_issue(
         target_id=None,
         details={
             "tracker": tracker,
-            "repo": body.repo,
+            "repo": destination.get("repo", ""),
             "job_id": body.job_id,
             "result": "success",
         },
@@ -20054,33 +20181,20 @@ def _upstream_error_message(response: httpx.Response) -> str:
     return _sanitize_control_chars(" ".join(parts))[:_UPSTREAM_MESSAGE_LIMIT]
 
 
-def _upstream_status(exc: Exception) -> int | None:
-    """The upstream status worth auditing, when the call carried one.
-
-    401/403/429 are the credential's own answer and the audit reason code
-    already names them (unauthenticated/forbidden/rate limit), so only the
-    statuses that tell an outage from a lost token are returned.
-    """
-    if not isinstance(exc, httpx.HTTPStatusError):
-        return None
-    status = exc.response.status_code
-    return None if status in (401, 403, 429) else status
-
-
-def _upstream_status_of_refusal(exc: HTTPException) -> int | None:
-    """The upstream status behind a refusal, read from its chained cause.
+def _upstream_status(exc: BaseException) -> int | None:
+    """The upstream status behind a failure or a refusal, when there was one.
 
     ``_map_create_refusal`` raises the client-facing ``HTTPException`` with the
-    tracker/transport error as its cause, so the audit row can still name the
-    upstream number without the mapping having to carry it. Unlike
-    :func:`_upstream_status` this keeps 401/403/429: GitHub answers 403 both for
-    a token without repository access and for a rate limit, so an administrator
-    reading the chat trail needs the number itself to tell them apart.
+    tracker/transport error as its cause, so a refusal's audit row can still
+    name the upstream number without the mapping having to carry it. Every
+    status is returned, 401/403/429 included: GitHub answers 403 both for a
+    token without repository access and for a rate limit, so the number itself
+    is what tells an administrator reading the trail which one it was.
     """
-    cause = exc.__cause__
-    if isinstance(cause, httpx.HTTPStatusError):
-        return cause.response.status_code
-    return None
+    cause = exc.__cause__ if isinstance(exc, HTTPException) else exc
+    if not isinstance(cause, httpx.HTTPStatusError):
+        return None
+    return cause.response.status_code
 
 
 def _github_issue_refusal(
@@ -20237,7 +20351,6 @@ async def create_feedback(
     _check_allow_list(request)
     settings = get_settings()
     message = f"User '{request.state.username}' created a feedback issue"
-    upstream_status: int | None = None
     try:
         if not settings.feedback_enabled:
             raise HTTPException(
@@ -20258,10 +20371,11 @@ async def create_feedback(
             )
 
         try:
-            # Attribution comes from the signed provenance the preview embedded in
-            # its body — never from the request (which carries no provider/model)
-            # and never re-resolved here, so a settings change between preview and
-            # create cannot miscredit the model that wrote the body.
+            # Attribution comes from the signed provenance the preview embedded
+            # in its body — never from the request (which carries no
+            # provider/model) and never re-resolved here, so a settings change
+            # between preview and create cannot miscredit the model that wrote
+            # the body.
             issue = await create_feedback_from_preview(
                 title=body.title,
                 body=body.body,
@@ -20269,13 +20383,16 @@ async def create_feedback(
                 github_token=github_token,
             )
         except Exception as exc:  # GitHub API failure or anything else
-            upstream_status = _upstream_status(exc)
+            # The caller-facing refusal, with the upstream error chained so the
+            # audit row can still name its status.
             raise _github_issue_refusal(exc) from exc
     except HTTPException as exc:
         details: dict[str, Any] = {"kind": "github_issue"}
-        if upstream_status is not None:
-            # The number that tells an outage from a lost token; never the
-            # upstream message, which can echo the request.
+        # The number that tells an outage from a lost token; never the upstream
+        # message, which can echo the request. 401/403/429 are the credential's
+        # own answer here and the reason code already names them.
+        upstream_status = _upstream_status(exc)
+        if upstream_status is not None and upstream_status not in (401, 403, 429):
             details["upstream_status"] = upstream_status
         await _record_refused_attempt(
             action="feedback.create",
@@ -20781,10 +20898,14 @@ async def _init_chat_under_barrier(
     _raise_if_chat_job_deleted(job_id)
     if not await _available_chat_session(job_id, username):
         custom_tools: list[dict[str, Any]] = []
-        tracker_targets, tracker_unavailable = _chat_tracker_state(
-            _settings, await storage.get_user_tokens(username)
-        )
         issue_repos = _job_issue_repo_slugs(decrypted_params, _settings)[1]
+        tracker_targets, tracker_unavailable = _chat_tracker_state(
+            _settings,
+            await storage.get_user_tokens(username),
+            # This run's own repos are a destination too: a deployment with no
+            # TESTS_REPO_URL can still file into the job's test repo.
+            github_repo_available=bool(issue_repos),
+        )
         auth_header = await _create_ai_auth_header(username)
         if auth_header:
             server_url = _build_internal_server_url()
@@ -21488,12 +21609,14 @@ async def _process_chat_message(
                         server_url = _build_internal_server_url()
                         auth_header = await _create_ai_auth_header(username)
 
-                        tracker_targets, tracker_unavailable = _chat_tracker_state(
-                            settings, await storage.get_user_tokens(username)
-                        )
                         issue_repos = _job_issue_repo_slugs(decrypted_params, settings)[
                             1
                         ]
+                        tracker_targets, tracker_unavailable = _chat_tracker_state(
+                            settings,
+                            await storage.get_user_tokens(username),
+                            github_repo_available=bool(issue_repos),
+                        )
                         # A resumed session keeps its creation-time tools, so a
                         # token saved or a tracker toggled mid-chat only reaches
                         # the model through a fresh session.
@@ -21962,7 +22085,13 @@ async def init_admin_chat(
         if not await _available_chat_session(ADMIN_CHAT_JOB_ID, username):
             custom_tools: list[dict[str, Any]] = []
             tracker_targets, _ = _chat_tracker_state(
-                get_settings(), await storage.get_user_tokens(username)
+                get_settings(),
+                await storage.get_user_tokens(username),
+                # An admin chat belongs to no run: only the deployment's own
+                # TESTS_REPO_URL is a destination it can rely on.
+                github_repo_available=bool(
+                    getattr(get_settings(), "tests_repo_url", "")
+                ),
             )
             auth_header = await _create_ai_auth_header(username, is_admin=True)
             if auth_header:
@@ -22257,7 +22386,9 @@ async def _process_admin_chat_message(
                 return
 
             tracker_targets, tracker_unavailable = _chat_tracker_state(
-                settings, await storage.get_user_tokens(username)
+                settings,
+                await storage.get_user_tokens(username),
+                github_repo_available=bool(getattr(settings, "tests_repo_url", "")),
             )
             # A resumed session keeps its creation-time tools (see
             # _enable_tools_for_session): rebuild when this user's set changed.

@@ -1159,16 +1159,29 @@ class ChatIssueProposeRequest(BaseModel):
     Nothing is filed here: the server keeps the scrubbed title and body as a
     single-use draft and returns the id the create call must present. ``repo``
     is the draft's target repository, so the preview shows where it would file.
+
+    Every destination field (``repo``, ``job_id``, the Jira overrides) is bound
+    into the draft: the create call must name the same ones, because a
+    confirmation id approves this text for THIS destination.
     """
 
     target: Literal["github", "jira"]
     title: IssueTitle
     body: str
     repo: str = ""
+    job_id: str = ""
+    jira_project_key: str = ""
+    jira_security_level: str = ""
+    jira_issue_type: IssueTypeName = "Bug"
 
-    @field_validator("repo")
+    @field_validator(
+        "repo",
+        "job_id",
+        "jira_project_key",
+        "jira_security_level",
+    )
     @classmethod
-    def _strip_repo(cls, v: str) -> str:
+    def _strip_destination(cls, v: str) -> str:
         return v.strip() if isinstance(v, str) else v
 
 

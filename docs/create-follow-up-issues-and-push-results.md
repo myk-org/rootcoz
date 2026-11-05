@@ -81,14 +81,18 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    > **Warning:** GitHub and Jira issue creation can be disabled per server with `ENABLE_GITHUB_ISSUES` and `ENABLE_JIRA_ISSUES`. When disabled, the buttons are greyed out and the endpoints refuse the request.
 
-   > **From chat:** a chat answer can become an issue too. In job chat or admin chat, ask the assistant to file it — "create a GitHub issue for this" or "open a Jira ticket" — and it calls its `create_github_issue` / `create_jira_issue` tool with a title and body it drafts from the conversation. The tool is offered for a tracker only when the server enables it **and** your account holds that tracker's token, so a token saved in Profile Settings works even on a fresh browser. A tracker you have no token for (or one the server disabled) is not offered at all, and the assistant says it cannot file there and points you at Profile Settings instead of claiming it can. Nothing is filed until you ask for it, and a refusal from a tool it does have (`400`, `403`, `401`, `502`) is relayed verbatim, so a missing credential points at Profile Settings. The same thing from a terminal, with the same account credential and no token flags:
+   > **From chat:** a chat answer can become an issue too. In job chat or admin chat, ask the assistant to file it — "create a GitHub issue for this" or "open a Jira ticket". It drafts the title and body, shows you a preview of exactly what would be filed (including the repository or Jira project), and files it only after you approve: the approval is a single-use confirmation id that expires after ten minutes, and it authorises that text **for that destination only**, so the same title and body cannot be redirected to another repository, run or Jira project. The tool is offered for a tracker only when the server enables it, your account holds that tracker's token, **and** there is somewhere to file (a run repository or the server's `TESTS_REPO_URL`). A tracker you have no token for, one the server disabled, or one with no repository is not offered at all, and the assistant names the matching fix — Profile Settings for a credential, an administrator for a disable switch or a missing `TESTS_REPO_URL` — instead of claiming it can file. A refusal from a tool it does have (`400`, `403`, `401`, `502`) is relayed verbatim. The same gate from a terminal, with the same account credential and no token flags:
 
 ```
-rootcoz create-chat-issue --target github \
+rootcoz propose-chat-issue --target github --job-id JOB_ID \
+  --title "Login fails after token refresh" --body "$(cat issue-body.md)"
+# review the preview, then run the create command it printed, for example:
+rootcoz create-chat-issue --target github --job-id JOB_ID \
+  --confirmation-id CONFIRMATION_ID \
   --title "Login fails after token refresh" --body "$(cat issue-body.md)"
 ```
 
-   Chat-created issues carry no comment and no tracked-in link: there is no failure to attach them to, and the endpoint deliberately takes no job id.
+   `--job-id` is required for a GitHub issue from a non-admin account: only that run's repositories (its test repo and additional repos) may receive it, and `--repo owner/name` narrows the choice. Admins may name any repository. The run and repo named at `propose-chat-issue` must be the ones named at `create-chat-issue` — a confirmation id approves one destination, and a different one is refused. Chat-created issues carry no comment and no tracked-in link: there is no failure to attach them to.
 
 5. Link a failure to an issue that already exists.
 

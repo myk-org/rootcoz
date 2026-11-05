@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 from typing import ClassVar, Self
 from unittest.mock import MagicMock, patch
 
@@ -2423,6 +2424,8 @@ class TestCreateChatIssueCommand:
             title="Bug fix",
             body="Details...",
             confirmation_id="draft-1",
+            repo="",
+            job_id="",
             jira_project_key="",
             jira_security_level="",
             jira_issue_type="Bug",
@@ -2471,6 +2474,44 @@ class TestCreateChatIssueCommand:
         assert "Details..." in result.output
         assert "create-chat-issue" in result.output
         mock_client.create_chat_issue.assert_not_called()
+
+    def test_the_proposed_command_can_actually_run(self, mock_client):
+        """Every option `create-chat-issue` requires is in the command it prints."""
+        mock_client.propose_chat_issue.return_value = {
+            "confirmation_id": "draft-1",
+            "title": "Bug fix",
+            "body": "Details...",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "propose-chat-issue",
+                "--target",
+                "github",
+                "--title",
+                "Bug fix",
+                "--body",
+                "Details...",
+                "--repo",
+                "org/tests",
+                "--job-id",
+                "job-1",
+            ],
+        )
+        assert result.exit_code == 0
+        command = result.output.split("file it with: ", 1)[1].strip()
+        for option in (
+            "--target github",
+            "--confirmation-id draft-1",
+            "--title " + shlex.quote("Bug fix"),
+            "--body " + shlex.quote("Details..."),
+            "--repo org/tests",
+            "--job-id job-1",
+        ):
+            assert option in command
+        # And it names the same destination the draft was proposed for.
+        assert mock_client.propose_chat_issue.call_args[1]["repo"] == "org/tests"
+        assert mock_client.propose_chat_issue.call_args[1]["job_id"] == "job-1"
 
     def test_create_chat_issue_exposes_no_token_options(self, mock_client):
         """A command that could take a token could file under a server token."""

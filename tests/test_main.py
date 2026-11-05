@@ -4761,17 +4761,24 @@ class TestChatIssueEndpoint:
         test_client,
         target: str,
         headers: dict[str, str] | None = None,
+        job_id: str = "",
         **text: str,
     ) -> dict[str, str]:
         """Draft the issue the user approves, as the chat model must.
 
         ``/api/chat-issue`` files only a proposed draft, so every create call
-        here starts from the fields this returned. ``text`` overrides the
-        default ``title``/``body`` (and adds ``repo``) of the draft.
+        here starts from the fields this returned. ``job_id`` is the run the
+        model drafts for (the draft binds it); ``text`` overrides the default
+        ``title``/``body`` and adds a ``repo`` or a Jira override.
         """
         proposal = test_client.post(
             "/api/chat-issue/propose",
-            json={**cls._CHAT, "target": target, **text},
+            json={
+                **cls._CHAT,
+                "target": target,
+                **text,
+                **({"job_id": job_id} if job_id else {}),
+            },
             headers=headers or {},
         )
         assert proposal.status_code == 201, proposal.text
@@ -4792,7 +4799,7 @@ class TestChatIssueEndpoint:
         job_id = await self._run(
             "chat-gh-run", tests_repo_url="https://github.com/org/repo"
         )
-        draft = await self._propose(test_client, "github", headers)
+        draft = await self._propose(test_client, "github", headers, job_id=job_id)
         with patch("rootcoz.main.create_github_issue") as mock_create:
             mock_create.return_value = {
                 "url": "https://github.com/org/repo/issues/7",
@@ -4928,7 +4935,7 @@ class TestChatIssueEndpoint:
     async def test_github_without_a_repo_url_returns_400(self, test_client):
         headers = await self._user("chat-gh-norepo", github_token="ghp_row_token")
         job_id = await self._run("chat-gh-norepo-run")
-        draft = await self._propose(test_client, "github", headers)
+        draft = await self._propose(test_client, "github", headers, job_id=job_id)
         with patch("rootcoz.main.create_github_issue") as mock_create:
             response = test_client.post(
                 "/api/chat-issue",
@@ -4953,7 +4960,7 @@ class TestChatIssueEndpoint:
         job_id = await self._run(
             "chat-gh-404-run", tests_repo_url="https://github.com/org/repo"
         )
-        draft = await self._propose(test_client, "github", headers)
+        draft = await self._propose(test_client, "github", headers, job_id=job_id)
         with patch("rootcoz.main.create_github_issue") as mock_create:
             mock_create.side_effect = httpx.HTTPStatusError(
                 "Not Found",
@@ -5041,7 +5048,12 @@ class TestChatIssueEndpoint:
 
     @pytest.mark.asyncio
     async def test_jira_legacy_service_account_secret_is_refused(self, test_client):
-        """A legacy SA secret is rejected, never silently dropped."""
+        """A legacy SA secret is rejected, never silently dropped.
+
+        The refusal comes at the proposal, not at the create: the tool list no
+        longer offers a Jira issue for a credential the create call would
+        refuse, so the model is told before it drafts anything.
+        """
         headers = await self._user(
             "chat-jira-legacy", jira_sa_token="legacy-secret-token"
         )
@@ -5049,14 +5061,13 @@ class TestChatIssueEndpoint:
             patch("rootcoz.main.create_jira_bug") as mock_create,
             _enable_feature("jira_enabled"),
         ):
-            draft = await self._propose(test_client, "jira", headers)
-            response = test_client.post(
-                "/api/chat-issue",
-                json=draft,
+            proposal = test_client.post(
+                "/api/chat-issue/propose",
+                json={**self._CHAT, "target": "jira"},
                 headers=headers,
             )
-        assert response.status_code == 400
-        assert "not a recognized" in response.json()["detail"]
+        assert proposal.status_code == 400, proposal.text
+        assert "not a recognized" in proposal.json()["detail"]
         mock_create.assert_not_called()
 
     @pytest.mark.asyncio
@@ -5124,7 +5135,7 @@ class TestChatIssueEndpoint:
         title = "auth broke with ghp_abcdefghijklmnopqrstuvwxyz0123"
         issue_body = f"Commit {sha} broke login."
         draft = await self._propose(
-            test_client, "github", headers, title=title, body=issue_body
+            test_client, "github", headers, job_id=job_id, title=title, body=issue_body
         )
         with patch("rootcoz.main.create_github_issue") as mock_create:
             mock_create.return_value = {
@@ -5282,6 +5293,120 @@ class TestChatIssueEndpoint:
             assert (await self._chat_audit())["events"][0]["details"][
                 "upstream_status"
             ] == upstream
+
+    # -- the destination the draft binds --------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_an_approved_draft_cannot_switch_the_repo(self, test_client):
+        """The id approves this text for this repo — not the same text elsewhere."""
+        headers = await self._admin("chat-repo-switch", github_token="ghp_row_token")
+        draft = await self._propose(test_client, "github", headers, repo="org/one")
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/one/issues/1",
+                "number": 1,
+            }
+            with _with_github_issue_config():
+                elsewhere = test_client.post(
+                    "/api/chat-issue",
+                    json={**draft, "repo": "org/two"},
+                    headers=headers,
+                )
+                approved = test_client.post(
+                    "/api/chat-issue",
+                    json={**draft, "repo": "org/one"},
+                    headers=headers,
+                )
+        assert elsewhere.status_code == 400, elsewhere.text
+        detail = elsewhere.json()["detail"]
+        assert "destination" in detail
+        assert "propose_tracker_issue" in detail
+        # The repo the user approved still files, and only once.
+        assert approved.status_code == 201, approved.text
+        assert mock_create.call_count == 1
+        assert mock_create.call_args[1]["repo_url"] == "https://github.com/org/one"
+
+    @pytest.mark.asyncio
+    async def test_an_approved_draft_cannot_switch_the_run(self, test_client):
+        """An empty repo means the drafted run's test repo, not another run's."""
+        headers = await self._user("chat-run-switch", github_token="ghp_row_token")
+        await self._run("chat-run-a", tests_repo_url="https://github.com/org/a")
+        await self._run("chat-run-b", tests_repo_url="https://github.com/org/b")
+        draft = await self._propose(test_client, "github", headers, job_id="chat-run-a")
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post(
+                "/api/chat-issue",
+                json={**draft, "job_id": "chat-run-b"},
+                headers=headers,
+            )
+        assert response.status_code == 400, response.text
+        assert "destination" in response.json()["detail"]
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_approved_draft_cannot_switch_the_jira_project(self, test_client):
+        """The project, security level and issue type are the approved ones."""
+        headers = await self._user(
+            "chat-jira-switch", jira_token="user_jira_token", jira_email="u@example.com"
+        )
+        with patch("rootcoz.main.create_jira_bug") as mock_create:
+            mock_create.return_value = {
+                "key": "TEST-7",
+                "url": "https://jira.example.com/browse/TEST-7",
+            }
+            with _enable_feature("jira_enabled"):
+                for override in (
+                    {"jira_project_key": "OTHER"},
+                    {"jira_security_level": "Secret"},
+                ):
+                    draft = await self._propose(
+                        test_client, "jira", headers, jira_project_key="TEST"
+                    )
+                    response = test_client.post(
+                        "/api/chat-issue",
+                        json={**draft, "jira_project_key": "TEST", **override},
+                        headers=headers,
+                    )
+                    assert response.status_code == 400, response.text
+                    assert "destination" in response.json()["detail"]
+                approved = await self._propose(
+                    test_client, "jira", headers, jira_project_key="TEST"
+                )
+                filed = test_client.post(
+                    "/api/chat-issue",
+                    json={**approved, "jira_project_key": "TEST"},
+                    headers=headers,
+                )
+        assert filed.status_code == 201, filed.text
+        assert mock_create.call_count == 1
+        assert mock_create.call_args[1]["project_key"] == "TEST"
+
+    @pytest.mark.asyncio
+    async def test_the_default_repo_placeholder_is_the_default_repo(self, test_client):
+        """An omitted ``repo`` reaches the server as ``{repo}``, not as a slug."""
+        headers = await self._user("chat-placeholder", github_token="ghp_row_token")
+        job_id = await self._run(
+            "chat-placeholder-run", tests_repo_url="https://github.com/org/repo"
+        )
+        draft = await self._propose(
+            test_client, "github", headers, job_id=job_id, repo="{repo}"
+        )
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/3",
+                "number": 3,
+            }
+            with _with_github_issue_config():
+                response = test_client.post(
+                    "/api/chat-issue",
+                    json={**draft, "job_id": job_id, "repo": "{repo}"},
+                    headers=headers,
+                )
+        assert response.status_code == 201, response.text
+        assert mock_create.call_args[1]["repo_url"] == "https://github.com/org/repo"
 
 
 class TestHistoryEndpoints:

@@ -5,6 +5,7 @@ import errno
 import json as json_mod
 import logging
 import os
+import shlex
 import sys
 import tempfile
 from collections.abc import Callable
@@ -2958,6 +2959,31 @@ def propose_chat_issue(
     target: str = typer.Option(..., "--target", help="github or jira."),
     title: str = typer.Option(..., "--title", help="Issue title."),
     body: str = typer.Option(..., "--body", help="Issue body."),
+    repo: str = typer.Option(
+        "",
+        "--repo",
+        help="GitHub repository to file in, as owner/name (empty: the default).",
+    ),
+    job_id: str = typer.Option(
+        "",
+        "--job-id",
+        help="Job whose repos bound a non-admin GitHub issue.",
+    ),
+    jira_project_key: str = typer.Option(
+        "",
+        "--jira-project-key",
+        help="Jira project key for bug creation (overrides server config).",
+    ),
+    jira_security_level: str = typer.Option(
+        "",
+        "--jira-security-level",
+        help="Jira security level name for restricted issues.",
+    ),
+    jira_issue_type: str = typer.Option(
+        "Bug",
+        "--jira-issue-type",
+        help="Jira issue type name (e.g. Bug, Story, Task). Default: Bug.",
+    ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Draft an issue from chat text and print the confirmation id.
@@ -2974,6 +3000,11 @@ def propose_chat_issue(
             target=normalized_target,
             title=title,
             body=body,
+            repo=repo,
+            job_id=job_id,
+            jira_project_key=jira_project_key,
+            jira_security_level=jira_security_level,
+            jira_issue_type=jira_issue_type,
         )
     except RootCozError as err:
         _handle_error(err)
@@ -2985,11 +3016,33 @@ def propose_chat_issue(
         typer.echo(f"Title: {data.get('title', '')}")
         typer.echo("Body:")
         typer.echo(data.get("body", ""))
-        typer.echo(
-            "\nReview it, then file it with: "
-            f"rootcoz create-chat-issue --target {normalized_target} "
-            f"--confirmation-id {data.get('confirmation_id', '')}"
-        )
+        # Every option the create command needs to redeem this draft, so the
+        # command printed here can be copied and run as-is.
+        suggested = [
+            "rootcoz",
+            "create-chat-issue",
+            "--target",
+            normalized_target,
+            "--confirmation-id",
+            str(data.get("confirmation_id", "")),
+            "--title",
+            shlex.quote(str(data.get("title", ""))),
+            "--body",
+            shlex.quote(str(data.get("body", ""))),
+        ]
+        if repo:
+            suggested.extend(["--repo", shlex.quote(repo)])
+        if job_id:
+            suggested.extend(["--job-id", shlex.quote(job_id)])
+        if jira_project_key:
+            suggested.extend(["--jira-project-key", shlex.quote(jira_project_key)])
+        if jira_security_level:
+            suggested.extend(
+                ["--jira-security-level", shlex.quote(jira_security_level)]
+            )
+        if jira_issue_type != "Bug":
+            suggested.extend(["--jira-issue-type", shlex.quote(jira_issue_type)])
+        typer.echo("\nReview it, then file it with: " + " ".join(suggested))
 
 
 @app.command("create-chat-issue")
@@ -3002,6 +3055,16 @@ def create_chat_issue(
     ),
     title: str = typer.Option(..., "--title", help="Issue title, as proposed."),
     body: str = typer.Option(..., "--body", help="Issue body, as proposed."),
+    repo: str = typer.Option(
+        "",
+        "--repo",
+        help="GitHub repository to file in, as proposed (empty: the default).",
+    ),
+    job_id: str = typer.Option(
+        "",
+        "--job-id",
+        help="Job whose repos bound a non-admin GitHub issue, as proposed.",
+    ),
     jira_project_key: str = typer.Option(
         "",
         "--jira-project-key",
@@ -3024,7 +3087,7 @@ def create_chat_issue(
     Tracker credentials are the ones saved in your account: this command
     deliberately has no token options, so it can never file an issue under a
     server token. A confirmation id authorises one draft, once, so propose
-    again after editing the title or body.
+    again after editing the title, body or destination.
     """
     _set_json(json_output)
     normalized_target = _validate_issue_type(target, option="--target")
@@ -3035,6 +3098,8 @@ def create_chat_issue(
             title=title,
             body=body,
             confirmation_id=confirmation_id,
+            repo=repo,
+            job_id=job_id,
             jira_project_key=jira_project_key,
             jira_security_level=jira_security_level,
             jira_issue_type=jira_issue_type,
