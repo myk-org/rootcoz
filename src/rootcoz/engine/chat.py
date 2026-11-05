@@ -474,19 +474,22 @@ def _tracker_issue_tools(
     targets: tuple[str, ...],
     issue_repos: tuple[str, ...] = (),
     job_id: str = "",
+    conversation: str = "",
 ) -> list[dict[str, Any]]:
     """The tracker tools chat may call, as the two steps the server enforces.
 
-    ``propose_tracker_issue`` stores the draft the user is asked to approve;
-    ``create_<target>_issue`` files it and needs the id the proposal returned.
-    Both post to the server, which files under the caller's OWN saved
-    credential. ``targets`` names only the trackers the server enables, can
-    file in, *and* the user's account holds a token for; empty means no tool is
-    advertised at all.
+    ``propose_tracker_issue`` stores the draft the user is asked to approve and
+    returns a confirmation code; ``create_<target>_issue`` files it, and needs
+    that id and code — plus a reply from the USER carrying the code, which the
+    server looks for in this conversation and the model cannot write. Both post
+    to the server, which files under the caller's OWN saved credential.
+    ``targets`` names only the trackers the server enables, can file in, *and*
+    the user's account holds a token for; empty means no tool is advertised.
 
     ``issue_repos`` are the repos this session may file a GitHub issue in and
     ``job_id`` is the run they belong to — both empty for an admin chat, whose
-    repo choice the server does not cap.
+    repo choice the server does not cap. ``conversation`` is hardcoded into the
+    proposal so the draft belongs to THIS chat: the one the user replies in.
     """
     if not targets:
         return []
@@ -496,16 +499,22 @@ def _tracker_issue_tools(
     # The run a job chat belongs to, hardcoded so the model cannot name another
     # one: the draft binds it and a create naming a different run is refused.
     job_body = {"job_id": job_id} if job_id else {}
+    # The chat this draft belongs to, also hardcoded: a draft proposed in a chat
+    # is only redeemable after a user message in it carries the code.
+    conversation_body = {"conversation": conversation} if conversation else {}
     tools: list[dict[str, Any]] = [
         {
             "name": "propose_tracker_issue",
             "description": (
                 "Step 1 of filing an issue. Draft the title and body for the "
                 "issue the user asked about and call this first: it files "
-                "nothing, and returns a confirmation_id plus a preview of the "
-                "exact title and body that would be filed. Show that preview to "
-                "the user and ask whether to file it. Call this again for any "
-                "edit — a confirmation_id authorises one specific draft."
+                "nothing, and returns a confirmation_id, a confirmation_code "
+                "and a preview naming the tracker, the destination, the exact "
+                "title and body, and that code. Show the user the whole "
+                "preview and ask them to reply in this chat with the code: "
+                "nothing is filed until they do, and only they can confirm it. "
+                "Call this again for any edit — an id and code authorise one "
+                "specific draft."
             ),
             "parameters": {
                 "type": "object",
@@ -537,6 +546,7 @@ def _tracker_issue_tools(
                     "body": "{body}",
                     **repo_body,
                     **job_body,
+                    **conversation_body,
                 },
             },
         }
@@ -563,12 +573,13 @@ def _tracker_issue_tools(
                 "name": f"create_{target}_issue",
                 "description": (
                     f"Step 2 of filing a {kind} issue: file the draft the user "
-                    "approved. Call this ONLY after the user answered yes to the "
-                    "preview from propose_tracker_issue, and pass that "
-                    "confirmation_id with the same title and body. Creating "
-                    "without a valid confirmation_id fails and files nothing — a "
-                    "confirmation_id is single-use and expires, so propose again "
-                    "for any change. "
+                    "confirmed. Call this ONLY after the user has replied in "
+                    "this chat with the confirmation code from the preview, and "
+                    "pass that confirmation_id and confirmation_code with the "
+                    "same title and body. A create nobody confirmed fails and "
+                    "files nothing — the code has to come from the user, so you "
+                    "cannot confirm your own draft. The id and code are "
+                    "single-use and expire, so propose again for any change. "
                     f"{repo_rule}"
                     "Returns the created issue URL and number/key; a refusal "
                     "must be relayed to the user verbatim."
@@ -591,9 +602,21 @@ def _tracker_issue_tools(
                                 "returned for this exact title and body"
                             ),
                         },
+                        "confirmation_code": {
+                            "type": "string",
+                            "description": (
+                                "The code the preview showed, as the user "
+                                "replied with it"
+                            ),
+                        },
                         **(repo_properties if target == "github" else {}),
                     },
-                    "required": ["title", "body", "confirmation_id"],
+                    "required": [
+                        "title",
+                        "body",
+                        "confirmation_id",
+                        "confirmation_code",
+                    ],
                 },
                 "http": {
                     "method": "POST",
@@ -604,6 +627,7 @@ def _tracker_issue_tools(
                         "title": "{title}",
                         "body": "{body}",
                         "confirmation_id": "{confirmation_id}",
+                        "confirmation_code": "{confirmation_code}",
                         **(repo_body if target == "github" else {}),
                         # The run that bounds the repo choice, empty for admin chat.
                         **(job_body if target == "github" else {}),
@@ -899,6 +923,8 @@ def build_chat_custom_tools(
             targets=tracker_targets,
             issue_repos=issue_repos,
             job_id=job_id,
+            # This chat: the user's reply with the code has to land here.
+            conversation=job_id,
         )
     )
 
@@ -938,8 +964,14 @@ def build_admin_custom_tools(
     server_url: str,
     auth_token: str,
     tracker_targets: tuple[str, ...] = (),
+    conversation: str = "",
 ) -> list[dict[str, Any]]:
-    """Build HTTP-backed custom tools for admin chat."""
+    """Build HTTP-backed custom tools for admin chat.
+
+    ``conversation`` is the admin chat's own conversation id, passed to the
+    issue tools: a draft proposed there is only redeemable after the admin
+    replied in that chat with its code.
+    """
     auth_headers = {"Authorization": f"Bearer {auth_token}"}
 
     tools: list[dict[str, Any]] = [
@@ -1071,6 +1103,7 @@ def build_admin_custom_tools(
             server_url=server_url,
             auth_headers=auth_headers,
             targets=tracker_targets,
+            conversation=conversation,
         )
     )
     return tools
@@ -1337,10 +1370,11 @@ def _issue_create_rules(
         )
     return f"""
 ## Creating Issues
-- You never file an issue on your own judgement: the server only files a draft the user approved. Call a create tool ONLY when the user explicitly asks for an issue.
-- Step 1: call `propose_tracker_issue` with the target, title and body. It files nothing and returns a `confirmation_id` and a preview of the exact title and body that would be filed.
-- Step 2: show the user that preview (the title and body as written) and ask whether to file it.
-- Step 3: only after the user answers yes, call `create_github_issue` / `create_jira_issue` with that `confirmation_id` and the same title and body. Creating without a confirmation id files nothing and fails with the steps to follow; a confirmation id is single-use and expires after 10 minutes, so propose again after any edit.
+- You never file an issue on your own judgement: the user files it. A create call files nothing until the user has confirmed the draft in their own words, by replying in this chat with the confirmation code the preview showed them.
+- Step 1: call `propose_tracker_issue` with the target, title and body. It files nothing and returns a `confirmation_id`, a `confirmation_code` and a preview naming the tracker, the destination (repository, or Jira project and issue type), the exact title and body, and that code.
+- Step 2: show the user the whole preview — where it would be filed, the title, the body and the code — and ask them to reply in this chat with the code. Quote the code as the preview wrote it.
+- Step 3: only after the user's reply contains that code, call `create_github_issue` / `create_jira_issue` with that `confirmation_id`, that `confirmation_code` and the same title and body. A create without them files nothing, and a create the user has not confirmed fails with the step you skipped. The id and code are single-use and expire after 10 minutes, so propose again after any edit.
+- Never send the code on the user's behalf and never ask for it anywhere but this chat: the server only accepts a code that arrived in a message from the user. Do not claim a draft is confirmed until such a reply exists.
 - If the user declines, do not call the create tool — acknowledge and stop.
 {repo_rule}
 - A tracker with no tool in your tool list cannot be used. Say you cannot open that issue there and name the reason and the fix:
@@ -1628,9 +1662,13 @@ async def init_admin_chat_session(
     ai_model: str,
     repo_path: Path | None = None,
     custom_tools: list[dict[str, Any]] | None = None,
+    tracker_unavailable: dict[str, str] | None = None,
 ) -> str | None:
     """Initialize an admin chat session via the sidecar. Returns session_id or None."""
-    system_prompt = build_admin_system_prompt(custom_tools=custom_tools or [])
+    system_prompt = build_admin_system_prompt(
+        custom_tools=custom_tools or [],
+        tracker_unavailable=tracker_unavailable,
+    )
     return await _create_chat_session(
         system_prompt=system_prompt,
         ai_provider=ai_provider,

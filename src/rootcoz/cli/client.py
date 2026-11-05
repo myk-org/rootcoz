@@ -1422,9 +1422,10 @@ class RootCozClient:
     ) -> dict[str, Any]:
         """Draft an issue from chat text. POST /api/chat-issue/propose
 
-        Files nothing: the reply carries the ``confirmation_id`` that
-        ``create_chat_issue`` needs, plus the exact title and body it would file.
-        Drafts are single-use and expire, so propose again after any edit.
+        Files nothing: the reply carries the ``confirmation_id`` and
+        ``confirmation_code`` that ``create_chat_issue`` needs, plus the exact
+        title and body it would file. Drafts are single-use and expire, so
+        propose again after any edit.
 
         The destination (``repo``, ``job_id``, the Jira overrides) is part of
         the draft, so ``create_chat_issue`` must be given the same one.
@@ -1450,6 +1451,7 @@ class RootCozClient:
         title: str,
         body: str,
         confirmation_id: str,
+        confirmation_code: str,
         repo: str = "",
         job_id: str = "",
         jira_project_key: str = "",
@@ -1460,14 +1462,16 @@ class RootCozClient:
 
         No token parameter on purpose: the server files the issue with the
         credentials saved in the caller's account, and a deployment token is
-        never a fallback. ``confirmation_id`` must come from
-        ``propose_chat_issue`` for the same title, body and destination.
+        never a fallback. ``confirmation_id`` and ``confirmation_code`` must
+        come from ``propose_chat_issue`` for the same title, body and
+        destination — a code the user did not read in the preview files nothing.
         """
         payload: dict[str, Any] = {
             "target": target,
             "title": title,
             "body": body,
             "confirmation_id": confirmation_id,
+            "confirmation_code": confirmation_code,
         }
         if repo:
             payload["repo"] = repo

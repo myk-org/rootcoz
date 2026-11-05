@@ -1157,12 +1157,18 @@ class ChatIssueProposeRequest(BaseModel):
     """Request body for drafting a chat issue the user has to approve.
 
     Nothing is filed here: the server keeps the scrubbed title and body as a
-    single-use draft and returns the id the create call must present. ``repo``
-    is the draft's target repository, so the preview shows where it would file.
+    single-use draft and returns the id and confirmation code the create call
+    must present. ``repo`` is the draft's target repository, so the preview
+    shows where it would file.
 
     Every destination field (``repo``, ``job_id``, the Jira overrides) is bound
-    into the draft: the create call must name the same ones, because a
+    into the draft — as the value it RESOLVES to, not as sent — because a
     confirmation id approves this text for THIS destination.
+
+    ``conversation`` is the chat the draft belongs to, and the chat tools inject
+    it server-side (a job's id, or the admin chat's); the model cannot set it,
+    and an empty value means a direct, non-chat caller (the CLI), which confirms
+    with the code itself.
     """
 
     target: Literal["github", "jira"]
@@ -1170,6 +1176,7 @@ class ChatIssueProposeRequest(BaseModel):
     body: str
     repo: str = ""
     job_id: str = ""
+    conversation: str = ""
     jira_project_key: str = ""
     jira_security_level: str = ""
     jira_issue_type: IssueTypeName = "Bug"
@@ -1177,6 +1184,7 @@ class ChatIssueProposeRequest(BaseModel):
     @field_validator(
         "repo",
         "job_id",
+        "conversation",
         "jira_project_key",
         "jira_security_level",
     )
@@ -1190,8 +1198,10 @@ class ChatIssueRequest(BaseModel):
 
     No credentials and no ``test_name``: there is no failure to name, and the
     credential is the caller's saved account token — never the request's.
-    ``confirmation_id`` is the id of a draft the user approved (see
-    ``POST /api/chat-issue/propose``); an empty or unknown id files nothing.
+    ``confirmation_id`` is the id of a draft the user approved and
+    ``confirmation_code`` is the code its preview showed (see
+    ``POST /api/chat-issue/propose``); a missing, unknown or unconfirmed pair
+    files nothing.
 
     ``repo`` is a bare ``owner/name`` GitHub slug, empty for the run's test
     repo; ``job_id`` is the run that bounds which repos a non-admin may name.
@@ -1203,6 +1213,7 @@ class ChatIssueRequest(BaseModel):
     repo: str = ""
     job_id: str = ""
     confirmation_id: str = ""
+    confirmation_code: str = ""
     jira_project_key: str = ""
     jira_security_level: str = ""
     jira_issue_type: IssueTypeName = "Bug"
@@ -1211,6 +1222,7 @@ class ChatIssueRequest(BaseModel):
         "jira_project_key",
         "jira_security_level",
         "confirmation_id",
+        "confirmation_code",
         "job_id",
         "repo",
     )

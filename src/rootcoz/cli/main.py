@@ -2986,11 +2986,11 @@ def propose_chat_issue(
     ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
-    """Draft an issue from chat text and print the confirmation id.
+    """Draft an issue from chat text and print the confirmation id and code.
 
-    Files nothing. Print the returned title and body, review them, then pass
-    the id to `create-chat-issue` — the server files only a draft that was
-    proposed, and a confirmation id works once.
+    Files nothing. Print the returned title and body, review them, then pass the
+    id and code to `create-chat-issue` — the server files only a draft that was
+    proposed and whose code you read in the preview, and it works once.
     """
     _set_json(json_output)
     normalized_target = _validate_issue_type(target, option="--target")
@@ -3013,6 +3013,7 @@ def propose_chat_issue(
         print_output(data, columns=[], as_json=True)
     else:
         typer.echo(f"Confirmation id: {data.get('confirmation_id', '')}")
+        typer.echo(f"Confirmation code: {data.get('confirmation_code', '')}")
         typer.echo(f"Title: {data.get('title', '')}")
         typer.echo("Body:")
         typer.echo(data.get("body", ""))
@@ -3025,6 +3026,8 @@ def propose_chat_issue(
             normalized_target,
             "--confirmation-id",
             str(data.get("confirmation_id", "")),
+            "--confirmation-code",
+            str(data.get("confirmation_code", "")),
             "--title",
             shlex.quote(str(data.get("title", ""))),
             "--body",
@@ -3052,6 +3055,11 @@ def create_chat_issue(
         ...,
         "--confirmation-id",
         help="Id from `rootcoz propose-chat-issue` for this exact title and body.",
+    ),
+    confirmation_code: str = typer.Option(
+        ...,
+        "--confirmation-code",
+        help="Code `propose-chat-issue` printed and the user read in the preview.",
     ),
     title: str = typer.Option(..., "--title", help="Issue title, as proposed."),
     body: str = typer.Option(..., "--body", help="Issue body, as proposed."),
@@ -3086,8 +3094,8 @@ def create_chat_issue(
 
     Tracker credentials are the ones saved in your account: this command
     deliberately has no token options, so it can never file an issue under a
-    server token. A confirmation id authorises one draft, once, so propose
-    again after editing the title, body or destination.
+    server token. The id and code authorise one draft, once, so propose again
+    after editing the title, body or destination.
     """
     _set_json(json_output)
     normalized_target = _validate_issue_type(target, option="--target")
@@ -3098,6 +3106,7 @@ def create_chat_issue(
             title=title,
             body=body,
             confirmation_id=confirmation_id,
+            confirmation_code=confirmation_code,
             repo=repo,
             job_id=job_id,
             jira_project_key=jira_project_key,

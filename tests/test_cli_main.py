@@ -2414,6 +2414,8 @@ class TestCreateChatIssueCommand:
                 "Details...",
                 "--confirmation-id",
                 "draft-1",
+                "--confirmation-code",
+                "ABC234",
             ],
         )
         assert result.exit_code == 0
@@ -2424,6 +2426,7 @@ class TestCreateChatIssueCommand:
             title="Bug fix",
             body="Details...",
             confirmation_id="draft-1",
+            confirmation_code="ABC234",
             repo="",
             job_id="",
             jira_project_key="",
@@ -2444,6 +2447,8 @@ class TestCreateChatIssueCommand:
                 "Y",
                 "--confirmation-id",
                 "draft-1",
+                "--confirmation-code",
+                "ABC234",
             ],
         )
         assert result.exit_code == 1
@@ -2454,6 +2459,7 @@ class TestCreateChatIssueCommand:
         """The command files nothing: it prints the text and the next command."""
         mock_client.propose_chat_issue.return_value = {
             "confirmation_id": "draft-1",
+            "confirmation_code": "ABC234",
             "title": "Bug fix",
             "body": "Details...",
         }
@@ -2471,6 +2477,7 @@ class TestCreateChatIssueCommand:
         )
         assert result.exit_code == 0
         assert "draft-1" in result.output
+        assert "ABC234" in result.output
         assert "Details..." in result.output
         assert "create-chat-issue" in result.output
         mock_client.create_chat_issue.assert_not_called()
@@ -2479,6 +2486,7 @@ class TestCreateChatIssueCommand:
         """Every option `create-chat-issue` requires is in the command it prints."""
         mock_client.propose_chat_issue.return_value = {
             "confirmation_id": "draft-1",
+            "confirmation_code": "ABC234",
             "title": "Bug fix",
             "body": "Details...",
         }
@@ -2503,6 +2511,7 @@ class TestCreateChatIssueCommand:
         for option in (
             "--target github",
             "--confirmation-id draft-1",
+            "--confirmation-code ABC234",
             "--title " + shlex.quote("Bug fix"),
             "--body " + shlex.quote("Details..."),
             "--repo org/tests",

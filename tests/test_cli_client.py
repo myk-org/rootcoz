@@ -643,6 +643,7 @@ class TestRootCozClientBugCreation:
                 "title": "DNS timeout",
                 "body": "Description...",
                 "confirmation_id": "draft-1",
+                "confirmation_code": "ABC234",
                 "jira_project_key": "PROJ",
             }
             return httpx.Response(
@@ -660,6 +661,7 @@ class TestRootCozClientBugCreation:
             title="DNS timeout",
             body="Description...",
             confirmation_id="draft-1",
+            confirmation_code="ABC234",
             jira_project_key="PROJ",
         )
         assert result["key"] == "PROJ-7"
@@ -673,6 +675,7 @@ class TestRootCozClientBugCreation:
                 "title": "DNS timeout",
                 "body": "Description...",
                 "confirmation_id": "draft-1",
+                "confirmation_code": "ABC234",
                 "repo": "org/tests",
                 "job_id": "job-1",
             }
@@ -685,6 +688,7 @@ class TestRootCozClientBugCreation:
             title="DNS timeout",
             body="Description...",
             confirmation_id="draft-1",
+            confirmation_code="ABC234",
             repo="org/tests",
             job_id="job-1",
         )

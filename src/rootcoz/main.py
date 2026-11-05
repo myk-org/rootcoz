@@ -13,7 +13,9 @@ import logging.handlers
 import math
 import os
 import re
+import secrets
 import sqlite3
+import string
 import threading
 import time as _time
 import uuid
@@ -8406,7 +8408,7 @@ def _resolve_github_repo_url(settings: Settings) -> str:
     Returns:
         The resolved repo URL, or an empty string when unavailable.
     """
-    url, _ref = parse_repo_ref(str(settings.tests_repo_url or ""))
+    url, _ref = parse_repo_ref(str(getattr(settings, "tests_repo_url", "") or ""))
     return url
 
 
@@ -9159,8 +9161,8 @@ _TRACKER_CREDENTIAL_NO_PROFILE_DETAIL = (
 )
 
 #: The draft-time refusal when this caller has nowhere to file a GitHub issue.
-#: The create call states the no-``TESTS_REPO_URL`` case itself; a proposal runs
-#: before any destination is resolved, so it names both ways out.
+#: Both steps resolve the destination (the proposal shows it, the create files
+#: only what was shown), so both answer with this one wording.
 _CHAT_NO_REPO_DETAIL = (
     "Nowhere to file this issue: this chat has no GitHub repository it may use. "
     "Name a repository the run may file in, or ask an administrator to set "
@@ -9423,6 +9425,16 @@ def _github_repo_slug(repo_url: Any) -> str:
     return f"{owner}/{name}"
 
 
+def _settings_github_repo_available(settings: Settings) -> bool:
+    """True when the deployment's own repo is one GitHub chat can file in.
+
+    ``TESTS_REPO_URL`` may name a host the GitHub issue API cannot serve, so a
+    chat that has no run of its own asks the same parser the create call uses
+    instead of testing the setting for emptiness.
+    """
+    return bool(_github_repo_slug(_resolve_github_repo_url(settings)))
+
+
 def _job_issue_repo_slugs(
     params: dict[str, Any], settings: Settings
 ) -> tuple[str, frozenset[str]]:
@@ -9498,7 +9510,9 @@ def _require_repo_slug(repo: str) -> str:
 
 
 async def _chat_issue_github_repo(
-    request: Request, body: ChatIssueRequest, settings: Settings
+    request: Request,
+    body: ChatIssueRequest | ChatIssueProposeRequest,
+    settings: Settings,
 ) -> str:
     """The repo URL this chat issue files into (``''`` = the server's own).
 
@@ -9562,7 +9576,9 @@ def _issue_destination(
     Bound into the draft at propose time and compared at create time, so a
     confirmation id approves "this text in this destination" and can never be
     reused to file the same text somewhere else (another run's repo, another
-    Jira project or visibility). ``repo`` must already be a slug.
+    Jira project or visibility). ``repo`` must already be a slug, and every
+    value here is already resolved: an omitted field is shown and bound as the
+    default it falls back to, never as "".
     """
     if target == "github":
         return {"repo": repo, "job_id": job_id}
@@ -9573,21 +9589,104 @@ def _issue_destination(
     }
 
 
-def _store_issue_draft(
+#: The step a create call skips when nobody has confirmed its draft. Quoted
+#: once so every refusal names the same missing step.
+_CONFIRM_STEP = "the user must confirm by replying with the code shown in the preview"
+
+#: No ``I``/``O``/``0``/``1``: the user retypes this code from the preview.
+_ISSUE_CODE_ALPHABET = "".join(
+    char
+    for char in string.ascii_uppercase + string.digits
+    if char not in {"I", "J", "L", "O", "0", "1"}
+)
+_ISSUE_CODE_LENGTH = 6
+
+
+def _new_issue_code(*, conversation: str) -> str:
+    """A short code the user replies with, unique among this chat's live drafts.
+
+    Two open drafts of one conversation must not share a code, so a reply can
+    only ever confirm the draft it was shown for.
+    """
+    live = {
+        draft["code"]
+        for draft in _chat_issue_drafts.values()
+        if draft["conversation"] == conversation
+    }
+    while True:
+        code = "".join(
+            secrets.choice(_ISSUE_CODE_ALPHABET) for _ in range(_ISSUE_CODE_LENGTH)
+        )
+        if code not in live:
+            return code
+
+
+def _message_confirms_code(content: str, code: str) -> bool:
+    """True when *content* contains *code* as its own token, in any case."""
+    if not code:
+        return False
+    pattern = rf"(?<![A-Za-z0-9]){re.escape(code)}(?![A-Za-z0-9])"
+    return re.search(pattern, content or "", re.IGNORECASE) is not None
+
+
+async def _chat_last_message_id(conversation: str, username: str) -> int:
+    """The id of the newest stored message in *conversation*, 0 when empty.
+
+    A draft records this watermark so only a message stored AFTER the draft
+    existed can confirm it.
+    """
+    if not conversation:
+        return 0
+    messages = await storage.get_chat_messages(
+        conversation, limit=None, username=username
+    )
+    return max((message["id"] for message in messages), default=0)
+
+
+async def _user_replied_with_code(
+    *, conversation: str, username: str, code: str, after_id: int
+) -> bool:
+    """True when this user STORED a user-role message with *code* after a draft.
+
+    Only the persisted chat row counts: the model writes assistant messages and
+    tool calls, never user rows, so the model cannot confirm its own draft.
+    """
+    if not conversation:
+        return False
+    messages = await storage.get_chat_messages(
+        conversation, limit=None, username=username
+    )
+    return any(
+        message["id"] > after_id
+        and message["role"] == "user"
+        # Spelled out: an empty username's query returns every user's messages.
+        and message["username"] == username
+        and _message_confirms_code(message["content"], code)
+        for message in messages
+    )
+
+
+async def _store_issue_draft(
     *,
     username: str,
     target: Literal["github", "jira"],
     title: str,
     body: str,
     destination: dict[str, str],
-) -> tuple[str, str]:
-    """Store a scrubbed draft and return ``(confirmation_id, preview)``.
+    conversation: str = "",
+) -> tuple[str, str, str]:
+    """Store a scrubbed draft and return ``(confirmation_id, code, preview)``.
 
-    The preview is what the user is asked to approve, so it carries the exact
-    title, body and destination a paid-for confirmation id would file.
+    The preview is what the user is asked to approve, so it states the tracker,
+    the RESOLVED destination, the exact title and body, and the code the user
+    has to reply with — what is shown is what would be filed. ``conversation``
+    is the chat the draft belongs to (``""`` for a direct, non-chat call): the
+    create call only redeems a chat draft once a user message in that chat
+    carries the code.
     """
     now = _time.monotonic()
     _prune_issue_drafts(now)
+    code = _new_issue_code(conversation=conversation)
     draft_id = uuid.uuid4().hex
     _chat_issue_drafts[draft_id] = {
         "username": username,
@@ -9595,31 +9694,40 @@ def _store_issue_draft(
         "title": title,
         "body": body,
         "destination": destination,
+        "conversation": conversation,
+        "code": code,
+        "watermark": await _chat_last_message_id(conversation, username),
         "expires_at": now + _ISSUE_DRAFT_TTL_SECONDS,
     }
     kind = "GitHub" if target == "github" else "Jira"
-    where = "".join(
-        f"{label}: {destination[key]}\n\n"
-        for label, key in (
-            ("Repo", "repo"),
-            ("Jira project", "jira_project_key"),
-            ("Jira security level", "jira_security_level"),
+    if target == "github":
+        where = f"Destination: GitHub repository {destination['repo']}"
+    else:
+        where = (
+            f"Destination: Jira project {destination['jira_project_key']}, "
+            f"issue type {destination['jira_issue_type']}"
         )
-        if destination.get(key)
-    )
+        if destination.get("jira_security_level"):
+            where += f", security level {destination['jira_security_level']}"
+    minutes = _ISSUE_DRAFT_TTL_SECONDS // 60
     preview = (
         f"Proposed {kind} issue — nothing has been filed yet.\n\n"
-        f"{where}Title: {title}\n\nBody:\n{body}\n\n"
-        f"To file exactly this, the user must approve it; then call "
-        f"create_{target}_issue with confirmation_id {draft_id} within "
-        f"{_ISSUE_DRAFT_TTL_SECONDS // 60} minutes."
+        f"Tracker: {kind}\n{where}\nTitle: {title}\n\nBody:\n{body}\n\n"
+        f"Confirmation code: {code}\n\n"
+        "To file exactly this, the user has to reply in this chat with the "
+        f"confirmation code {code} within {minutes} minutes. Nothing is filed "
+        "until that reply arrives, and the code has to come from the user.\n\n"
+        f"Then call create_{target}_issue with confirmation_id {draft_id} and "
+        f"confirmation_code {code}, with the title, body and destination above "
+        "unchanged."
     )
-    return draft_id, preview
+    return draft_id, code, preview
 
 
-def _consume_issue_draft(
+async def _consume_issue_draft(
     confirmation_id: str,
     *,
+    code: str,
     username: str,
     target: Literal["github", "jira"],
     title: str,
@@ -9628,11 +9736,13 @@ def _consume_issue_draft(
 ) -> None:
     """Redeem a draft for this caller, once, or refuse with the next step.
 
-    This is the consent gate: a create call without a live draft of its own
-    files nothing, and the draft it redeems must name the same destination, so
-    an approved "this title and body for this repo" cannot authorise another
-    repo, run or Jira project. Every refusal names the steps, so the model can
-    recover instead of retrying blindly.
+    This is the consent gate, and consent is something the model cannot supply:
+    a create call without a live draft of its own files nothing, the code must
+    match the one the preview showed the user, and a chat draft is only live
+    once a USER-authored message in that chat carries the code. A model that
+    proposes and creates in one turn therefore gets a refusal naming the step
+    it skipped. The draft also binds the destination, so an approved "this text
+    for this repo" cannot authorise another repo, run or Jira project.
     """
     propose = (
         "call propose_tracker_issue first, show the user the preview and file "
@@ -9667,6 +9777,32 @@ def _consume_issue_draft(
                 f"account. To file an issue, {propose} for this account."
             ),
         )
+    if (code or "").strip().upper() != draft["code"]:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No issue was filed: the confirmation code is missing or does "
+                f"not match this draft. To file the issue, {propose} and pass "
+                f"the code it returned — {_CONFIRM_STEP}."
+            ),
+        )
+    if draft["conversation"] and not await _user_replied_with_code(
+        conversation=draft["conversation"],
+        username=username,
+        code=draft["code"],
+        after_id=draft["watermark"],
+    ):
+        # The structural half: the code alone proves nothing, because the model
+        # reads it in the preview it composes. Only a stored USER message does.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No issue was filed: nobody confirmed this draft — "
+                f"{_CONFIRM_STEP}. Show the user the preview and wait for that "
+                "reply before calling create again; you cannot confirm it for "
+                "them."
+            ),
+        )
     if (
         draft["target"] != target
         or draft["title"] != title
@@ -9682,7 +9818,8 @@ def _consume_issue_draft(
                 "the new preview."
             ),
         )
-    # Single use: the id dies with the create call it authorized.
+    # Single use: the id (and the code with it) dies with the create call it
+    # authorized.
     _chat_issue_drafts.pop(confirmation_id, None)
 
 
@@ -9968,6 +10105,61 @@ async def _chat_issue_tracker_tokens(
     return user_tokens
 
 
+async def _chat_issue_resolved_destination(
+    request: Request,
+    body: ChatIssueProposeRequest | ChatIssueRequest,
+    settings: Settings,
+    user_tokens: dict[str, str],
+) -> tuple[dict[str, str], str]:
+    """``(destination the issue would land in, GitHub repo URL)``, resolved now.
+
+    Both steps resolve it from the same request and the same settings, so the
+    preview states the real destination (an omitted ``repo`` is the run's test
+    repo or ``TESTS_REPO_URL``, an omitted Jira project is the configured one)
+    and the create call can only file in the one the user approved. A change to
+    a default between the two steps therefore lands as a mismatch, not as a
+    silently different destination.
+
+    The refusals are the create call's own (this chat may not use that repo,
+    nowhere to file, no Jira project), moved to the proposal so they arrive
+    before the user is asked to approve anything.
+    """
+    if body.target == "github":
+        repo_url = await _chat_issue_github_repo(request, body, settings)
+        repo_url = repo_url or _resolve_github_repo_url(settings)
+        slug = _github_repo_slug(repo_url)
+        if not slug:
+            raise HTTPException(status_code=400, detail=_CHAT_NO_REPO_DETAIL)
+        return (
+            _issue_destination(target="github", repo=slug, job_id=body.job_id),
+            repo_url,
+        )
+    effective = _build_effective_jira_settings(
+        settings,
+        user_tokens.get("jira_token", ""),
+        user_tokens.get("jira_email", ""),
+        user_jira_sa_token=user_tokens.get("jira_sa_token", ""),
+    )
+    project_key = body.jira_project_key or effective.jira_project_key
+    if not project_key:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Jira project key is required. Provide it in the request or "
+                "configure JIRA_PROJECT_KEY on the server."
+            ),
+        )
+    return (
+        _issue_destination(
+            target="jira",
+            jira_project_key=project_key,
+            jira_security_level=body.jira_security_level,
+            jira_issue_type=body.jira_issue_type,
+        ),
+        "",
+    )
+
+
 @app.post("/api/chat-issue/propose", status_code=201, operation_id="proposeChatIssue")
 async def propose_chat_issue(
     request: Request,
@@ -9977,53 +10169,54 @@ async def propose_chat_issue(
     """Draft a chat issue for the user to approve — files nothing.
 
     Step one of the two-step gate. The scrubbed title and body are kept under a
-    single-use id for this caller together with the destination they were
-    written for, and the returned ``preview`` is what the chat model has to
-    show: ``POST /api/chat-issue`` files that exact text only with a live id
-    naming the same destination, so an injected instruction cannot file an
-    issue the user never saw — nor redirect an approved one.
+    single-use id for this caller together with the RESOLVED destination they
+    were written for and a confirmation code; the returned ``preview`` states
+    the tracker, that destination, the title and the code, because it is what
+    the user is asked to approve. ``POST /api/chat-issue`` files that exact text
+    only with a live id, the same code and a user message in this chat carrying
+    that code — so an injected instruction cannot file an issue the user never
+    saw, nor redirect an approved one.
     """
     username = request.state.username
     tracker = body.target
     _require_reviewer(request)
     _check_allow_list(request)
-    repo = _require_repo_slug(body.repo) if tracker == "github" else ""
+    if tracker == "github":
+        _require_repo_slug(body.repo)
     try:
-        # No destination check here: proposing files nothing, and the create
-        # call owns the precise "which repo may this chat use" refusal.
-        await _chat_issue_tracker_tokens(username, tracker, settings)
+        user_tokens = await _chat_issue_tracker_tokens(username, tracker, settings)
+        destination, _repo_url = await _chat_issue_resolved_destination(
+            request, body, settings, user_tokens
+        )
     except HTTPException as exc:
         logger.info("Chat issue draft refused for %s: %s", username, exc.detail)
         raise
     title = scrub_sensitive_data(body.title)
     issue_body = scrub_sensitive_data(body.body)
-    destination = _issue_destination(
-        target=tracker,
-        repo=repo,
-        job_id=body.job_id,
-        jira_project_key=body.jira_project_key,
-        jira_security_level=body.jira_security_level,
-        jira_issue_type=body.jira_issue_type,
-    )
-    confirmation_id, preview = _store_issue_draft(
+    confirmation_id, code, preview = await _store_issue_draft(
         username=username,
         target=tracker,
         title=title,
         body=issue_body,
         destination=destination,
+        conversation=body.conversation,
     )
     logger.info(
-        "Chat issue draft %s prepared for %s (%s, destination=%s, %d chars)",
+        "Chat issue draft %s prepared for %s (%s, conversation=%r, "
+        "destination=%s, %d chars)",
         confirmation_id,
         username,
         tracker,
+        body.conversation,
         destination,
         len(issue_body),
     )
     return {
         "confirmation_id": confirmation_id,
+        "confirmation_code": code,
         "target": tracker,
-        "repo": repo,
+        "repo": destination.get("repo", ""),
+        "destination": destination,
         "title": title,
         "body": issue_body,
         "preview": preview,
@@ -10040,13 +10233,13 @@ async def create_chat_issue(
     """Open a GitHub issue or Jira ticket from a chat conversation.
 
     The only tracker write reachable from chat, and it needs a ``confirmation_id``
-    from ``POST /api/chat-issue/propose``: the title, body and destination filed
-    are the ones the user approved, so the model's own judgement that the user
-    "asked for it" files nothing, and an id approved for one repo, run or Jira
-    project cannot be spent on another. Credentials come from the caller's
-    account row — never a deployment credential, and there is no
-    bootstrap-``admin`` exception: a missing token is a followable 400 that the
-    model relays to the user.
+    and ``confirmation_code`` from ``POST /api/chat-issue/propose``: the title,
+    body and destination filed are the ones the user approved, and for a draft
+    proposed in a chat the code only works once the USER has replied with it in
+    that chat, so a model that proposes and creates in one turn files nothing.
+    Credentials come from the caller's account row — never a deployment
+    credential, and there is no bootstrap-``admin`` exception: a missing token is
+    a followable 400 that the model relays to the user.
     """
     username = request.state.username
     tracker = body.target
@@ -10059,22 +10252,16 @@ async def create_chat_issue(
         user_tokens = await _chat_issue_tracker_tokens(username, tracker, settings)
         title = scrub_sensitive_data(body.title)
         issue_body = scrub_sensitive_data(body.body)
-        # Which repo a job chat may file in (admins may name any): resolved
-        # before the consent gate so the draft has to name the same one.
-        github_repo_url = ""
-        if tracker == "github":
-            github_repo_url = await _chat_issue_github_repo(request, body, settings)
-        destination = _issue_destination(
-            target=tracker,
-            repo=_require_repo_slug(body.repo) if tracker == "github" else "",
-            job_id=body.job_id,
-            jira_project_key=body.jira_project_key,
-            jira_security_level=body.jira_security_level,
-            jira_issue_type=body.jira_issue_type,
+        # Resolved exactly as the proposal resolved it, so the draft has to name
+        # the same destination and the issue is filed where it was approved.
+        destination, github_repo_url = await _chat_issue_resolved_destination(
+            request, body, settings, user_tokens
         )
-        # The consent gate: without a live draft of its own, nothing is filed.
-        _consume_issue_draft(
+        # The consent gate: without a live draft of its own and the user's reply,
+        # nothing is filed.
+        await _consume_issue_draft(
             body.confirmation_id,
+            code=body.confirmation_code,
             username=username,
             target=tracker,
             title=title,
@@ -10091,9 +10278,9 @@ async def create_chat_issue(
             jira_token=user_tokens.get("jira_token", ""),
             jira_email=user_tokens.get("jira_email", ""),
             jira_sa_token=user_tokens.get("jira_sa_token", ""),
-            jira_project_key=body.jira_project_key,
-            jira_security_level=body.jira_security_level,
-            jira_issue_type=body.jira_issue_type,
+            jira_project_key=destination.get("jira_project_key", ""),
+            jira_security_level=destination.get("jira_security_level", ""),
+            jira_issue_type=destination.get("jira_issue_type", "Bug"),
             github_repo_url=github_repo_url,
             via="rootcoz chat",
             subject="issue",
@@ -22084,14 +22271,13 @@ async def init_admin_chat(
         workspace = ensure_chat_workspace(ADMIN_CHAT_JOB_ID, username=username)
         if not await _available_chat_session(ADMIN_CHAT_JOB_ID, username):
             custom_tools: list[dict[str, Any]] = []
-            tracker_targets, _ = _chat_tracker_state(
+            tracker_targets, tracker_unavailable = _chat_tracker_state(
                 get_settings(),
                 await storage.get_user_tokens(username),
                 # An admin chat belongs to no run: only the deployment's own
-                # TESTS_REPO_URL is a destination it can rely on.
-                github_repo_available=bool(
-                    getattr(get_settings(), "tests_repo_url", "")
-                ),
+                # TESTS_REPO_URL is a destination it can rely on, and the
+                # tool list asks the same parser the create call uses.
+                github_repo_available=_settings_github_repo_available(get_settings()),
             )
             auth_header = await _create_ai_auth_header(username, is_admin=True)
             if auth_header:
@@ -22100,6 +22286,7 @@ async def init_admin_chat(
                     server_url=server_url,
                     auth_token=auth_header.removeprefix("Bearer ").strip(),
                     tracker_targets=tracker_targets,
+                    conversation=ADMIN_CHAT_JOB_ID,
                 )
             else:
                 logger.warning("Admin chat init: no auth token for %s", username)
@@ -22123,6 +22310,9 @@ async def init_admin_chat(
                     ai_model=ai_model,
                     repo_path=workspace,
                     custom_tools=custom_tools,
+                    # The first-turn prompt names why a tracker is missing, so an
+                    # admin chats with the real reason, not a placeholder.
+                    tracker_unavailable=tracker_unavailable,
                 )
             finally:
                 chat_session_source.reset(source_token)
@@ -22388,7 +22578,7 @@ async def _process_admin_chat_message(
             tracker_targets, tracker_unavailable = _chat_tracker_state(
                 settings,
                 await storage.get_user_tokens(username),
-                github_repo_available=bool(getattr(settings, "tests_repo_url", "")),
+                github_repo_available=_settings_github_repo_available(settings),
             )
             # A resumed session keeps its creation-time tools (see
             # _enable_tools_for_session): rebuild when this user's set changed.
@@ -22401,6 +22591,7 @@ async def _process_admin_chat_message(
                 if auth_header
                 else "",
                 tracker_targets=tracker_targets,
+                conversation=ADMIN_CHAT_JOB_ID,
             )
 
             abort_key = f"{ADMIN_CHAT_JOB_ID}:{username}"

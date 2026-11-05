@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import socket
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
@@ -4717,6 +4717,9 @@ class TestChatIssueEndpoint:
         "body": "The login test timed out resolving the auth service.",
     }
 
+    #: The admin chat's conversation id — what its issue tools hardcode.
+    _ADMIN_CHAT: ClassVar[str] = "__admin_chat__"
+
     # -- helpers -------------------------------------------------------------
 
     @staticmethod
@@ -4751,9 +4754,83 @@ class TestChatIssueEndpoint:
             job_id,
             "",
             "completed",
-            {"request_params": {"job_name": job_id, **params}},
+            {
+                "request_params": {
+                    "job_name": job_id,
+                    "build_number": 1,
+                    **params,
+                }
+            },
         )
         return job_id
+
+    @classmethod
+    async def _propose_only(
+        cls,
+        test_client,
+        target: str,
+        headers: dict[str, str] | None = None,
+        job_id: str = "",
+        conversation: str | None = None,
+        **text: str,
+    ) -> dict[str, str]:
+        """Draft as the chat tool does, and return nothing the user confirmed.
+
+        The proposal carries the conversation the chat tool hardcodes (the run
+        for a job chat, the admin chat otherwise; ``conversation=""`` is a
+        direct, non-chat caller such as the CLI), and this stores NO user reply
+        — the caller decides whether to send one with :meth:`_user_reply`.
+        """
+        if conversation is None:
+            conversation = job_id or "__admin_chat__"
+        proposal_body = {
+            **cls._CHAT,
+            "target": target,
+            **text,
+            **({"job_id": job_id} if job_id else {}),
+            **({"conversation": conversation} if conversation else {}),
+        }
+        # A chat with no run of its own files in the deployment's repo, so the
+        # proposal resolves that repo — as a real admin deployment has it.
+        github_repo = nullcontext()
+        if not job_id and target == "github":
+            github_repo = _with_github_issue_config()
+        with github_repo:
+            proposal = test_client.post(
+                "/api/chat-issue/propose",
+                json=proposal_body,
+                headers=headers or {},
+            )
+        assert proposal.status_code == 201, proposal.text
+        draft = proposal.json()
+        return {
+            "confirmation_id": draft["confirmation_id"],
+            "confirmation_code": draft["confirmation_code"],
+            "title": draft["title"],
+            "body": draft["body"],
+            "target": target,
+        }
+
+    @staticmethod
+    async def _user_reply(
+        headers: dict[str, str] | None,
+        code: str,
+        *,
+        conversation: str = "__admin_chat__",
+        username: str | None = None,
+        role: str = "user",
+    ) -> None:
+        """Store a chat message carrying *code* — the user's confirmation."""
+        if username is None:
+            token = (headers or {}).get("Authorization", "")
+            user = await storage.get_user_by_key(token.removeprefix("Bearer "))
+            username = (user or {}).get("username", "")
+        await storage.add_chat_message(
+            conversation,
+            role=role,
+            content=f"Yes, file it: {code}",
+            username=username or "",
+        )
 
     @classmethod
     async def _propose(
@@ -4762,33 +4839,34 @@ class TestChatIssueEndpoint:
         target: str,
         headers: dict[str, str] | None = None,
         job_id: str = "",
+        conversation: str | None = None,
         **text: str,
     ) -> dict[str, str]:
-        """Draft the issue the user approves, as the chat model must.
+        """Draft the issue and send the user's reply, as a real chat would.
 
-        ``/api/chat-issue`` files only a proposed draft, so every create call
-        here starts from the fields this returned. ``job_id`` is the run the
-        model drafts for (the draft binds it); ``text`` overrides the default
-        ``title``/``body`` and adds a ``repo`` or a Jira override.
+        ``/api/chat-issue`` files only a proposed draft whose code the USER
+        replied with, so every create call here starts from these fields. Care
+        is taken to keep the reply in the draft's own conversation: a code from
+        another conversation is not a confirmation.
         """
-        proposal = test_client.post(
-            "/api/chat-issue/propose",
-            json={
-                **cls._CHAT,
-                "target": target,
-                **text,
-                **({"job_id": job_id} if job_id else {}),
-            },
-            headers=headers or {},
+        draft = await cls._propose_only(
+            test_client,
+            target,
+            headers,
+            job_id=job_id,
+            conversation=conversation,
+            **text,
         )
-        assert proposal.status_code == 201, proposal.text
-        draft = proposal.json()
-        return {
-            "confirmation_id": draft["confirmation_id"],
-            "title": draft["title"],
-            "body": draft["body"],
-            "target": target,
-        }
+        await cls._user_reply(
+            headers,
+            draft["confirmation_code"],
+            conversation=(
+                conversation
+                if conversation is not None
+                else (job_id or "__admin_chat__")
+            ),
+        )
+        return draft
 
     # -- GitHub --------------------------------------------------------------
 
@@ -4933,17 +5011,23 @@ class TestChatIssueEndpoint:
 
     @pytest.mark.asyncio
     async def test_github_without_a_repo_url_returns_400(self, test_client):
+        """Nowhere to file is refused at the proposal: there is no destination
+        to show the user — and no default can change between the two steps."""
         headers = await self._user("chat-gh-norepo", github_token="ghp_row_token")
         job_id = await self._run("chat-gh-norepo-run")
-        draft = await self._propose(test_client, "github", headers, job_id=job_id)
         with patch("rootcoz.main.create_github_issue") as mock_create:
-            response = test_client.post(
-                "/api/chat-issue",
-                json={**draft, "job_id": job_id},
+            proposal = test_client.post(
+                "/api/chat-issue/propose",
+                json={
+                    **self._CHAT,
+                    "target": "github",
+                    "job_id": job_id,
+                    "conversation": job_id,
+                },
                 headers=headers,
             )
-        assert response.status_code == 400
-        assert "No test repository URL available" in response.json()["detail"]
+        assert proposal.status_code == 400, proposal.text
+        assert "Nowhere to file this issue" in proposal.json()["detail"]
         mock_create.assert_not_called()
 
     @pytest.mark.asyncio
@@ -5166,7 +5250,10 @@ class TestChatIssueEndpoint:
     async def test_a_create_without_a_draft_files_nothing(self, test_client):
         """The model's own claim that the user asked is not consent."""
         headers = await self._admin("chat-nodraft", github_token="ghp_row_token")
-        with patch("rootcoz.main.create_github_issue") as mock_create:
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
             missing = test_client.post(
                 "/api/chat-issue",
                 json={**self._CHAT, "target": "github"},
@@ -5213,7 +5300,8 @@ class TestChatIssueEndpoint:
         # An expired draft of a fresh create is refused the same way.
         expired = await self._propose(test_client, "github", headers)
         main_mod._chat_issue_drafts[expired["confirmation_id"]]["expires_at"] = 0
-        stale = test_client.post("/api/chat-issue", json=expired, headers=headers)
+        with _with_github_issue_config():
+            stale = test_client.post("/api/chat-issue", json=expired, headers=headers)
         assert stale.status_code == 400
         assert "expired" in stale.json()["detail"]
 
@@ -5222,7 +5310,10 @@ class TestChatIssueEndpoint:
         headers = await self._admin("chat-mine", github_token="ghp_row_token")
         other = await self._admin("chat-theirs", github_token="ghp_row_token")
         draft = await self._propose(test_client, "github", other)
-        with patch("rootcoz.main.create_github_issue") as mock_create:
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
             response = test_client.post("/api/chat-issue", json=draft, headers=headers)
         assert response.status_code == 400
         assert "belongs to another account" in response.json()["detail"]
@@ -5232,7 +5323,10 @@ class TestChatIssueEndpoint:
     async def test_an_admin_needs_a_draft_too(self, test_client):
         """No rank is exempt: the draft is about consent, not permissions."""
         headers = await self._admin("chat-admin-nodraft", github_token="ghp_row_token")
-        with patch("rootcoz.main.create_github_issue") as mock_create:
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
             response = test_client.post(
                 "/api/chat-issue",
                 json={**self._CHAT, "target": "github"},
@@ -5241,6 +5335,245 @@ class TestChatIssueEndpoint:
         assert response.status_code == 400
         assert "confirmation id" in response.json()["detail"]
         mock_create.assert_not_called()
+
+    # -- the user's confirmation (the code in their own reply) ----------------
+
+    @pytest.mark.asyncio
+    async def test_the_preview_names_the_tracker_destination_and_code(
+        self, test_client
+    ):
+        """The user approves a destination, not just text: an omitted repo is
+        shown as the repo it resolves to, and the preview carries the code."""
+        headers = await self._admin("chat-preview", github_token="ghp_row_token")
+        with _with_github_issue_config():
+            proposal = test_client.post(
+                "/api/chat-issue/propose",
+                json={
+                    **self._CHAT,
+                    "target": "github",
+                    "conversation": self._ADMIN_CHAT,
+                },
+                headers=headers,
+            )
+        assert proposal.status_code == 201, proposal.text
+        preview = proposal.json()["preview"]
+        code = proposal.json()["confirmation_code"]
+        assert len(code) == 6
+        assert "Tracker: GitHub" in preview
+        # The default repo is named, not left as an empty field to approve.
+        assert "Destination: GitHub repository org/repo" in preview
+        assert self._CHAT["title"] in preview
+        assert self._CHAT["body"] in preview
+        assert f"Confirmation code: {code}" in preview
+        assert proposal.json()["destination"]["repo"] == "org/repo"
+
+    def test_a_non_github_tests_repo_is_not_a_github_destination(self):
+        """A chat with no run of its own gates GitHub on a repo it can file in.
+
+        ``TESTS_REPO_URL`` pointing at another host is not a GitHub destination,
+        so the tool must not be offered for it — the create call parses the URL
+        and would refuse every issue.
+        """
+        from rootcoz.main import _settings_github_repo_available
+
+        assert (
+            _settings_github_repo_available(
+                SimpleNamespace(tests_repo_url="https://gitlab.com/org/repo")
+            )
+            is False
+        )
+        assert (
+            _settings_github_repo_available(
+                SimpleNamespace(tests_repo_url="https://github.com/org/repo")
+            )
+            is True
+        )
+        # No setting at all (the deployment this gate exists for).
+        assert _settings_github_repo_available(SimpleNamespace()) is False
+
+    @pytest.mark.asyncio
+    async def test_the_jira_preview_names_the_project_and_issue_type(self, test_client):
+        headers = await self._user(
+            "chat-preview-jira", jira_token="user_jira_token", jira_email="u@e.com"
+        )
+        with _enable_feature("jira_enabled"):
+            proposal = test_client.post(
+                "/api/chat-issue/propose",
+                json={**self._CHAT, "target": "jira"},
+                headers=headers,
+            )
+        assert proposal.status_code == 201, proposal.text
+        preview = proposal.json()["preview"]
+        assert "Tracker: Jira" in preview
+        assert "Destination: Jira project TEST, issue type Bug" in preview
+        assert f"Confirmation code: {proposal.json()['confirmation_code']}" in preview
+
+    @pytest.mark.asyncio
+    async def test_a_create_nobody_confirmed_files_nothing(self, test_client):
+        """The model may propose and create in one turn — it gets the skipped step.
+
+        It holds the id and the code (both come back in the proposal), so this
+        is the case that proves the gate is not a shared secret: what is missing
+        is a message from the user.
+        """
+        headers = await self._admin("chat-unconfirmed", github_token="ghp_row_token")
+        draft = await self._propose_only(test_client, "github", headers)
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post("/api/chat-issue", json=draft, headers=headers)
+        assert response.status_code == 400, response.text
+        assert (
+            "the user must confirm by replying with the code shown in the preview"
+            in response.json()["detail"]
+        )
+        mock_create.assert_not_called()
+        # Nothing was spent: the same draft still files once the user replies.
+        await self._user_reply(headers, draft["confirmation_code"])
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/11",
+                "number": 11,
+            }
+            with _with_github_issue_config():
+                filed = test_client.post("/api/chat-issue", json=draft, headers=headers)
+        assert filed.status_code == 201, filed.text
+
+    @pytest.mark.asyncio
+    async def test_a_model_authored_message_does_not_confirm(self, test_client):
+        """Only a stored USER message counts: the model writes the others."""
+        headers = await self._admin("chat-selfconfirm", github_token="ghp_row_token")
+        draft = await self._propose_only(test_client, "github", headers)
+        # Exactly what the chat model's own turn stores — and the code in it.
+        await self._user_reply(headers, draft["confirmation_code"], role="assistant")
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post("/api/chat-issue", json=draft, headers=headers)
+        assert response.status_code == 400, response.text
+        assert (
+            "the user must confirm by replying with the code shown in the preview"
+            in response.json()["detail"]
+        )
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_code_from_another_conversation_does_not_confirm(self, test_client):
+        """The reply has to land in the chat the draft belongs to."""
+        headers = await self._user("chat-other-conv", github_token="ghp_row_token")
+        await self._run("chat-conv-a", tests_repo_url="https://github.com/org/a")
+        await self._run("chat-conv-b", tests_repo_url="https://github.com/org/b")
+        draft = await self._propose_only(
+            test_client, "github", headers, job_id="chat-conv-a"
+        )
+        await self._user_reply(
+            headers, draft["confirmation_code"], conversation="chat-conv-b"
+        )
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post(
+                "/api/chat-issue",
+                json={**draft, "job_id": "chat-conv-a"},
+                headers=headers,
+            )
+        assert response.status_code == 400, response.text
+        assert "nobody confirmed this draft" in response.json()["detail"]
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_another_users_reply_does_not_confirm(self, test_client):
+        """A second account's message in the same chat is not this user's consent."""
+        headers = await self._user("chat-code-mine", github_token="ghp_row_token")
+        await self._run("chat-code-shared", tests_repo_url="https://github.com/org/a")
+        draft = await self._propose_only(
+            test_client, "github", headers, job_id="chat-code-shared"
+        )
+        await self._user_reply(
+            None,
+            draft["confirmation_code"],
+            conversation="chat-code-shared",
+            username="chat-code-theirs",
+        )
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post(
+                "/api/chat-issue",
+                json={**draft, "job_id": "chat-code-shared"},
+                headers=headers,
+            )
+        assert response.status_code == 400, response.text
+        assert "nobody confirmed this draft" in response.json()["detail"]
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_wrong_or_missing_code_is_refused(self, test_client):
+        headers = await self._admin("chat-wrong-code", github_token="ghp_row_token")
+        draft = await self._propose_only(test_client, "github", headers)
+        await self._user_reply(headers, draft["confirmation_code"])
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            wrong = test_client.post(
+                "/api/chat-issue",
+                json={**draft, "confirmation_code": "ZZZZZZ"},
+                headers=headers,
+            )
+            missing = test_client.post(
+                "/api/chat-issue",
+                json={**draft, "confirmation_code": ""},
+                headers=headers,
+            )
+        for response in (wrong, missing):
+            assert response.status_code == 400, response.text
+            assert "confirmation code" in response.json()["detail"]
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_the_code_dies_with_the_id_on_use(self, test_client):
+        """One file per draft: the code cannot be replayed after it worked."""
+        headers = await self._admin("chat-code-once", github_token="ghp_row_token")
+        draft = await self._propose_only(test_client, "github", headers)
+        await self._user_reply(headers, draft["confirmation_code"])
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/12",
+                "number": 12,
+            }
+            with _with_github_issue_config():
+                first = test_client.post("/api/chat-issue", json=draft, headers=headers)
+                replay = test_client.post(
+                    "/api/chat-issue", json=draft, headers=headers
+                )
+        assert first.status_code == 201, first.text
+        assert replay.status_code == 400
+        assert "already used" in replay.json()["detail"]
+        assert mock_create.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_direct_caller_confirms_with_the_code_alone(self, test_client):
+        """No conversation (the CLI): the human running the two commands typed
+        the code, and no chat tool can propose such a draft."""
+        headers = await self._admin("chat-cli", github_token="ghp_row_token")
+        draft = await self._propose_only(
+            test_client, "github", headers, conversation=""
+        )
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/13",
+                "number": 13,
+            }
+            response = test_client.post("/api/chat-issue", json=draft, headers=headers)
+        assert response.status_code == 201, response.text
 
     # -- audit trail ----------------------------------------------------------
 
@@ -5255,6 +5588,7 @@ class TestChatIssueEndpoint:
                 new_callable=AsyncMock,
                 side_effect=RuntimeError("storage is down"),
             ),
+            _with_github_issue_config(),
             pytest.raises(RuntimeError),
         ):
             test_client.post("/api/chat-issue", json=draft, headers=headers)

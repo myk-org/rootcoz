@@ -958,6 +958,7 @@ class TestChatIssueTools:
             server_url="http://localhost:8000",
             auth_token="tok",
             tracker_targets=("github", "jira"),
+            conversation="__admin_chat__",
         )
         for tools, in_job_chat in ((job_tools, True), (admin_tools, False)):
             by_name = {t["name"]: t for t in tools}
@@ -982,6 +983,7 @@ class TestChatIssueTools:
                     "title": "{title}",
                     "body": "{body}",
                     "confirmation_id": "{confirmation_id}",
+                    "confirmation_code": "{confirmation_code}",
                 }
                 if target == "github":
                     # Only GitHub takes a repo, and a job chat names its run.
@@ -993,19 +995,33 @@ class TestChatIssueTools:
                     "title",
                     "body",
                     "confirmation_id",
+                    "confirmation_code",
                 ]
-                assert "ONLY after the user answered yes" in tool["description"]
-                assert "without a valid confirmation_id fails" in tool["description"]
+                assert (
+                    "replied in this chat with the confirmation code"
+                    in (tool["description"])
+                )
+                assert (
+                    "without a valid confirmation_id fails" not in (tool["description"])
+                )
                 # The Jira project is never the model's to pick.
                 if target == "jira":
                     assert "do not choose the Jira project" in tool["description"]
-            # The draft is proposed for the same run it is later created in.
+            # The draft is proposed for the same run it is later created in, and
+            # the conversation the user has to reply in is injected server-side
+            # (the model cannot set it, so it cannot propose a draft that skips
+            # the user's reply).
             proposed = dict(propose["http"]["body_template"])
+            assert proposed["conversation"] == (
+                "j1" if in_job_chat else "__admin_chat__"
+            )
             if in_job_chat:
                 assert proposed["job_id"] == "j1"
                 assert proposed["repo"] == "{repo}"
             else:
                 assert "job_id" not in proposed
+            assert "confirmation_code" in propose["description"]
+            assert "reply in this chat with the code" in propose["description"]
 
     def test_no_issue_tools_at_all_without_a_usable_tracker(self):
         names = [
@@ -1041,10 +1057,20 @@ class TestChatIssueTools:
                 "body": "DNS timeout resolving auth.",
                 # The run the draft is for: the same one must be created in.
                 "job_id": "chat-issue-run",
+                # The chat the user has to reply in (the tool injects it).
+                "conversation": "chat-issue-run",
             },
             headers=headers,
         )
         assert proposal.status_code == 201, proposal.text
+        code = proposal.json()["confirmation_code"]
+        # The user's own reply with the code is the confirmation.
+        await storage.add_chat_message(
+            "chat-issue-run",
+            role="user",
+            content=f"Yes, file it: {code}",
+            username="chat-issue-ok",
+        )
         with patch("rootcoz.main.create_github_issue") as mock_create:
             mock_create.return_value = {
                 "url": "https://github.com/org/repo/issues/7",
@@ -1057,6 +1083,7 @@ class TestChatIssueTools:
                     "title": proposal.json()["title"],
                     "body": proposal.json()["body"],
                     "confirmation_id": proposal.json()["confirmation_id"],
+                    "confirmation_code": code,
                     "job_id": "chat-issue-run",
                 },
                 headers=headers,
@@ -1108,8 +1135,11 @@ class TestChatIssueTools:
             assert "propose_tracker_issue" in prompt
             assert "create_github_issue" in prompt
             assert "create_jira_issue" in prompt
-            assert "ONLY when the user explicitly asks" in prompt
-            assert "Creating without a confirmation id files nothing" in prompt
+            # The user files it: the code has to arrive in their own reply.
+            assert "the user files it" in prompt
+            assert "reply in this chat with the code" in prompt
+            assert "Never send the code on the user's behalf" in prompt
+            assert "a create the user has not confirmed fails" in prompt
             assert "relay it verbatim" in prompt
             assert "Profile Settings" in prompt
             assert "Never claim an issue exists" in prompt
@@ -1157,6 +1187,28 @@ class TestChatIssueTools:
         assert "cannot be used with the server's Jira settings" in rules
         assert "re-save the Jira credential" in rules
         assert "Profile Settings → add" not in rules
+
+    async def test_the_admin_chat_session_prompt_names_the_real_reason(self):
+        """The FIRST turn carries the reason too, not just later messages.
+
+        ``init_admin_chat_session`` built its prompt without the unavailable
+        reasons, so an admin whose tracker is disabled read the placeholder
+        ("every tracker this chat can file in is in your tool list") and was
+        sent looking for a token that cannot help.
+        """
+        from rootcoz.engine import chat as chat_mod
+
+        with patch.object(
+            chat_mod, "_create_chat_session", AsyncMock(return_value="sid")
+        ) as create:
+            await chat_mod.init_admin_chat_session(
+                ai_provider="p",
+                ai_model="m",
+                tracker_unavailable={"github": "server_disabled"},
+            )
+        prompt = create.call_args.kwargs["system_prompt"]
+        assert "issue creation is disabled on this server" in prompt
+        assert "every tracker this chat can file in is in your tool list" not in prompt
 
 
 class TestBuildSystemPrompt:
@@ -3474,36 +3526,67 @@ class TestChatIssueRepoAllowList:
         return {"Authorization": f"Bearer {api_key}"}
 
     @staticmethod
-    def _file(
+    async def _reply_as(headers: dict[str, str], code: str, conversation: str) -> None:
+        """Store the user message whose code is the confirmation (see #407)."""
+        token = headers["Authorization"].removeprefix("Bearer ").strip()
+        user = await storage.get_user_by_key(token)
+        assert user is not None
+        await storage.add_chat_message(
+            conversation,
+            role="user",
+            content=f"Yes, file it: {code}",
+            username=user["username"],
+        )
+
+    @classmethod
+    async def _draft(
+        cls, test_client, headers, *, job_id="", repo=None, conversation=None
+    ):
+        """The proposal step alone: the response says whether it can be filed."""
+        if conversation is None:
+            conversation = job_id or "__admin_chat__"
+        proposal_body: dict[str, str] = {
+            "target": "github",
+            "title": "t",
+            "body": "b",
+            # The chat this draft belongs to; the user replies in it.
+            "conversation": conversation,
+        }
+        if job_id:
+            proposal_body["job_id"] = job_id
+        if repo is not None:
+            proposal_body["repo"] = repo
+        return test_client.post(
+            "/api/chat-issue/propose", json=proposal_body, headers=headers
+        )
+
+    @classmethod
+    async def _file(
+        cls,
         test_client,
         headers: dict[str, str],
         *,
         job_id: str = "",
         repo: str | None = None,
     ):
-        """Propose then create — the two-step gate every write goes through."""
-        proposal_body: dict[str, str] = {"target": "github", "title": "t", "body": "b"}
-        if job_id:
-            proposal_body["job_id"] = job_id
-        if repo is not None:
-            proposal_body["repo"] = repo
-        proposal = test_client.post(
-            "/api/chat-issue/propose", json=proposal_body, headers=headers
-        )
+        """Propose, reply with the code, create — the gate every write crosses."""
+        proposal = await cls._draft(test_client, headers, job_id=job_id, repo=repo)
         assert proposal.status_code == 201, proposal.text
-        created = test_client.post(
+        code = proposal.json()["confirmation_code"]
+        await cls._reply_as(headers, code, job_id or "__admin_chat__")
+        return test_client.post(
             "/api/chat-issue",
             json={
                 "target": "github",
                 "title": proposal.json()["title"],
                 "body": proposal.json()["body"],
                 "confirmation_id": proposal.json()["confirmation_id"],
+                "confirmation_code": code,
                 **({"repo": repo} if repo is not None else {}),
                 **({"job_id": job_id} if job_id else {}),
             },
             headers=headers,
         )
-        return created
 
     @staticmethod
     def _filed_repo(mock_create) -> str:
@@ -3521,7 +3604,7 @@ class TestChatIssueRepoAllowList:
                 "url": "https://github.com/org/tests/issues/1",
                 "number": 1,
             }
-            response = self._file(test_client, headers, job_id=job_id)
+            response = await self._file(test_client, headers, job_id=job_id)
         assert response.status_code == 201, response.text
         assert self._filed_repo(mock_create) == "https://github.com/org/tests"
 
@@ -3535,7 +3618,9 @@ class TestChatIssueRepoAllowList:
                 "url": "https://github.com/org/tests/issues/2",
                 "number": 2,
             }
-            response = self._file(test_client, headers, job_id=job_id, repo="org/tests")
+            response = await self._file(
+                test_client, headers, job_id=job_id, repo="org/tests"
+            )
         assert response.status_code == 201, response.text
         assert self._filed_repo(mock_create) == "https://github.com/org/tests"
 
@@ -3549,17 +3634,20 @@ class TestChatIssueRepoAllowList:
                 "url": "https://github.com/org/lib/issues/3",
                 "number": 3,
             }
-            response = self._file(test_client, headers, job_id=job_id, repo="org/lib")
+            response = await self._file(
+                test_client, headers, job_id=job_id, repo="org/lib"
+            )
         assert response.status_code == 201, response.text
         assert self._filed_repo(mock_create) == "https://github.com/org/lib"
 
     async def test_a_foreign_repo_is_refused_and_names_the_allowed_set(
         self, test_client, temp_db_path: Path, github_issue_config
     ):
+        """The destination is resolved at the proposal, before any approval."""
         job_id = await self._save_run(temp_db_path, "job-repo-foreign")
         headers = await self._reviewer()
         with patch("rootcoz.main.create_github_issue") as mock_create:
-            response = self._file(
+            response = await self._draft(
                 test_client, headers, job_id=job_id, repo="someone/elsewhere"
             )
         assert response.status_code == 400, response.text
@@ -3597,7 +3685,7 @@ class TestChatIssueRepoAllowList:
                 "url": "https://github.com/any/where/issues/4",
                 "number": 4,
             }
-            response = self._file(test_client, headers, repo="any/where")
+            response = await self._file(test_client, headers, repo="any/where")
         assert response.status_code == 201, response.text
         assert self._filed_repo(mock_create) == "https://github.com/any/where"
 
@@ -3606,7 +3694,7 @@ class TestChatIssueRepoAllowList:
     ):
         headers = await self._reviewer("no-run")
         with patch("rootcoz.main.create_github_issue") as mock_create:
-            response = self._file(test_client, headers, repo="org/tests")
+            response = await self._draft(test_client, headers, repo="org/tests")
         assert response.status_code == 400, response.text
         assert "must be tied to a run" in response.json()["detail"]
         mock_create.assert_not_called()
@@ -3633,7 +3721,7 @@ class TestChatIssueRepoAllowList:
                 "url": "https://github.com/org/tests/issues/5",
                 "number": 5,
             }
-            response = self._file(test_client, headers, job_id=job_id)
+            response = await self._file(test_client, headers, job_id=job_id)
         assert response.status_code == 201, response.text
         assert self._filed_repo(mock_create) == "https://github.com/org/tests"
 
