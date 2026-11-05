@@ -119,6 +119,24 @@ def _drop_deleting(path: Path) -> None:
         )
 
 
+def _collapse_ancestors(paths: set[str]) -> list[str]:
+    """Keep only the deepest of ``paths``, dropping every ancestor above it.
+
+    An ``rmdir`` that failed because something below it survived re-reports the
+    failure its descendant already recorded, so both are one path and the deeper
+    directory is the cause. Sorting makes a descendant follow every ancestor, so a
+    single pass spots a collapse by comparing with the last surviving path: no
+    prefix shares more than one ancestor in sorted order.
+    """
+    kept: list[str] = []
+    for p in sorted(paths):
+        if kept and p.startswith(kept[-1] + os.sep):
+            kept[-1] = p
+        else:
+            kept.append(p)
+    return kept
+
+
 def delete_tree(path: Path) -> tuple[int, int]:
     """Delete ``path`` in one post-order walk; return ``(bytes, entries)``.
 
@@ -135,9 +153,12 @@ def delete_tree(path: Path) -> tuple[int, int]:
     its count of *distinct paths* and one example path — not one count per failed
     operation: every ancestor ``rmdir`` above a stuck file re-reports the same
     surviving subtree as ``ENOTEMPTY``, so counting operations turned one unlinkable
-    file at depth 4 into "5 entries". A directory that could not be opened hides an
-    unknown number of entries, so it is reported as not descended alongside the
-    count. One line per errno is not enough: simple_logger's ``DuplicateFilter``
+    file at depth 4 into "5 entries". That collapse is one sorted pass at report
+    time (:func:`_collapse_ancestors`), not a scan of the growing set per insert:
+    the walk runs on the single reaper worker, so an O(n²) summary over thousands
+    of siblings would slow every cleanup queued behind it (#424). A directory that
+    could not be opened hides an unknown number of entries, so it is reported as not
+    descended alongside the count. One line per errno is not enough: simple_logger's ``DuplicateFilter``
     keys on ``(module, level, msg)`` — the *format string* — so a second errno logged
     through the same template was dropped and only surfaced as ``repeated N times``
     on the next record (#402).
@@ -159,12 +180,8 @@ def delete_tree(path: Path) -> tuple[int, int]:
         code = exc.errno or 0
         # The OS reason, not ``exc.strerror``: the raiser may have replaced it.
         reason = os.strerror(code) if code else exc.strerror or type(exc).__name__
-        paths = failures.setdefault(code, (set(), reason))[0]
-        if code == errno.ENOTEMPTY and any(q.startswith(p + os.sep) for q in paths):
-            # This directory's rmdir failed only because something already
-            # recorded below it survived: the same failure, not a second path.
-            return
-        paths.add(p)
+        # Recorded as it arrives; ancestors are collapsed once, at report time.
+        failures.setdefault(code, (set(), reason))[0].add(p)
 
     def remove(name: str, parent_fd: int | None, display: str) -> None:
         """Remove ``name`` from ``parent_fd`` (``None``: the absolute root path)."""
@@ -219,11 +236,16 @@ def delete_tree(path: Path) -> tuple[int, int]:
     if failures:
         # Formatted inline, not %-args: the content must be in ``record.msg`` or a
         # template-keyed dedupe filter swallows the whole line.
-        detail = ", ".join(
-            f"errno={code} {reason}: {len(paths)} e.g. {next(iter(paths))}"
-            for code, (paths, reason) in sorted(failures.items())
-        )
-        total = sum(len(paths) for paths, _ in failures.values())
+        parts: list[str] = []
+        total = 0
+        for code, (paths, reason) in sorted(failures.items()):
+            # Only ENOTEMPTY nests: an ancestor above a surviving entry repeats it.
+            kept = (
+                _collapse_ancestors(paths) if code == errno.ENOTEMPTY else list(paths)
+            )
+            total += len(kept)
+            parts.append(f"errno={code} {reason}: {len(kept)} e.g. {kept[0]}")
+        detail = ", ".join(parts)
         # A directory we could not open reads as one path otherwise, hiding the
         # thousands of entries behind it: name that gap separately.
         skipped = (

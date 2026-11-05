@@ -601,6 +601,52 @@ def test_one_stuck_file_at_depth_four_counts_paths_not_operations(
     assert os.fspath(deep) in line, line
 
 
+def test_many_stuck_siblings_cost_no_more_than_the_walk_itself(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """2 000 stuck siblings: one summary pass, not a scan of the set per insert.
+
+    Collapsing ancestors inside ``record`` ran ``any(startswith)`` over every path
+    recorded so far, so the no-match case here was O(n²) — four to five times the
+    plain walk on this machine, and it runs on the single reaper worker, where it
+    slows every cleanup queued behind it (#424). Measured against the same walk
+    with nothing stuck, so the budget holds on a slow machine too.
+    """
+
+    def walk(name: str) -> Path:
+        root = tmp_path / name
+        for i in range(2000):
+            directory = root / f"dir-{i:05d}"
+            directory.mkdir(parents=True)
+            (directory / "stuck.txt").write_text("x")
+        return root
+
+    clean_root = walk("clean-walk")
+    started = time.perf_counter()
+    delete_tree(clean_root)
+    clean_seconds = time.perf_counter() - started
+
+    stuck_root = walk("stuck-walk")
+    _fail_unlink_of({"stuck.txt"}, monkeypatch)
+    started = time.perf_counter()
+    assert delete_tree(stuck_root) == (0, 0)
+    stuck_seconds = time.perf_counter() - started
+    monkeypatch.undo()
+
+    assert stuck_seconds < clean_seconds * 2, (
+        f"summary work dominates the walk: {stuck_seconds:.3f}s stuck vs "
+        f"{clean_seconds:.3f}s clean"
+    )
+    warnings = _cleanup_warnings(caplog)
+    assert len(warnings) == 1, warnings
+    line = warnings[0]
+    # 2 000 files (EACCES) + 2 000 directories (ENOTEMPTY); the root's own rmdir is
+    # the same failure as the surviving siblings below it, so it is not a 4 001st.
+    assert line.startswith("cleanup: 4000 paths not deleted ("), line
+    assert f"errno={errno.EACCES} {os.strerror(errno.EACCES)}: 2000" in line, line
+    assert f"errno={errno.ENOTEMPTY} {os.strerror(errno.ENOTEMPTY)}: 2000" in line, line
+
+
 def test_a_clean_walk_logs_nothing(tmp_path, caplog) -> None:
     root = tmp_path / "tree"
     (root / "dir").mkdir(parents=True)
