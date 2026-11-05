@@ -500,6 +500,87 @@ async def test_denorm_sweep_never_blanks_identity_a_partial_payload_omits(
     assert row["build_number"] == 42, "the payload still says nothing about it"
 
 
+async def test_denorm_sweep_never_blanks_failures_or_summary_a_payload_omits(
+    _storage,
+) -> None:
+    """Same class as the ``build_id`` regression, different columns.
+
+    ``update_status`` replaces the payload, so a partial one carries neither
+    ``failures`` nor ``summary`` — the columns survive the write, and the sweep
+    must not blank them either, or the failures become unfindable by identifier.
+    """
+    await storage.save_result(
+        job_id="job-partial-failures",
+        status="running",
+        result={
+            "job_name": "partial-job",
+            "summary": "all failures analysed",
+            "failures": [
+                {"id": "fail-kept-1", "test_name": "t1", "error": "e1"},
+                {"id": "fail-kept-2", "test_name": "t2", "error": "e2"},
+            ],
+        },
+    )
+    await storage.update_status(
+        "job-partial-failures",
+        "failed",
+        result={"job_name": "partial-job", "error": "boom"},
+    )
+    assert await storage.backfill_results_denorm() == 1
+
+    row = await _stored(_storage, "job-partial-failures")
+    assert row["failure_ids"] == "fail-kept-1 fail-kept-2"
+    assert row["summary"] == "all failures analysed"
+    assert "failures" not in storage.parse_result_json(row["result_json"])
+
+    # Fill-in still works: the payload that does describe them replaces them.
+    await storage.save_result(
+        job_id="job-partial-failures",
+        status="completed",
+        result={
+            "job_name": "partial-job",
+            "summary": "fresh",
+            "failures": [{"id": "fail-new", "test_name": "t1", "error": "e1"}],
+        },
+    )
+    row = await _stored(_storage, "job-partial-failures")
+    assert (row["failure_ids"], row["summary"]) == ("fail-new", "fresh")
+    assert await storage.backfill_results_denorm() == 0
+
+
+async def test_denorm_sweep_honours_a_value_the_payload_explicitly_clears(
+    _storage,
+) -> None:
+    """An empty value under a present key is a clear, not an omission.
+
+    The writer keys on presence, so ``request_params.submitted_by = ""`` clears
+    the column. A build that replaces the payload without its columns (an older
+    one) leaves the stale value behind, and once the row is compressed a
+    version-gated pass can never revisit it — only the TEXT sweep can.
+    """
+    await _insert_legacy("job-cleared", _payload(failure_count=3))
+    assert await storage.backfill_results_denorm() == 1
+    row = await _stored(_storage, "job-cleared")
+    assert (row["submitted_by"], row["display_name"]) == ("yuval", "Human Name")
+    assert await storage.list_dashboard_submitters() == ["yuval"]
+
+    cleared = _payload(failure_count=3)
+    cleared["request_params"]["submitted_by"] = ""
+    cleared["display_name"] = ""
+    async with storage._connect_db() as db:
+        await db.execute(
+            "UPDATE results SET result_json = ? WHERE job_id = 'job-cleared'",
+            (json.dumps(cleared),),
+        )
+        await db.commit()
+
+    assert await storage.backfill_results_denorm() == 1
+    row = await _stored(_storage, "job-cleared")
+    assert (row["submitted_by"], row["display_name"]) == ("", "")
+    assert await storage.list_dashboard_submitters() == []
+    assert await storage.backfill_results_denorm() == 0, "the clear converged"
+
+
 async def test_init_db_leaves_legacy_row_payloads_alone(_storage) -> None:
     """Startup is schema-only; the derive pass is a background task (#409).
 

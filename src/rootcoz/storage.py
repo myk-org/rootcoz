@@ -477,25 +477,36 @@ async def _claim_migration(db: aiosqlite.Connection, key: str) -> bool:
 # The ``typeof`` guard keeps that from applying to a row a concurrent
 # compression pass just turned into a frame.
 #
-# The identity columns can only be filled in, never blanked: a partial
-# ``update_status`` payload omits keys by design (it keeps ``build_id`` in the
-# column while its payload has none), so "derived empty" means "this payload
-# does not know", not "clear it" — overwriting would strip the build identity
-# the writer deliberately preserved. Such a row stays "columns disagree with the
-# payload", so each pass re-writes it once with the same values: one no-op
-# UPDATE per boot, never a lost column.
+# A column is only written when the payload speaks about it, and `key presence`
+# is that test — the same one the writer uses. A partial ``update_status``
+# payload omits keys by design (it keeps ``build_id``, ``summary`` and
+# ``failure_ids`` in the columns while its payload has none), so an absent key
+# means "this payload does not know" and overwriting would strip the identity the
+# writer deliberately preserved and make those failures unfindable by identifier.
+# An empty value under a *present* key is the opposite: a clear, which the writer
+# applied and which the sweep must apply too — keeping it ("``:v <> ''``") would
+# leave a cleared submitter in the picker forever once the row is compressed and
+# no version-gated pass can revisit it. ``failure_ids`` is only a superset
+# prefilter (``find_failure_by_uuid`` still verifies against the payload), so a
+# stale entry costs a re-read, never a wrong answer. An omitted key still leaves
+# "columns disagree with the payload", so each pass re-writes such a row once with
+# the same values: one no-op UPDATE per boot, never a lost or a stuck column.
 _RESULTS_DENORM_UPDATE_SQL = (
     "UPDATE results SET"
-    " job_name = CASE WHEN :job_name <> '' THEN :job_name ELSE job_name END,"
-    " build_number = CASE WHEN :build_number <> 0"
+    " job_name = CASE WHEN :job_name_present"
+    " THEN :job_name ELSE job_name END,"
+    " build_number = CASE WHEN :build_number_present"
     " THEN :build_number ELSE build_number END,"
-    " build_id = CASE WHEN :build_id <> '' THEN :build_id ELSE build_id END,"
-    " submitted_by = CASE WHEN :submitted_by <> ''"
+    " build_id = CASE WHEN :build_id_present"
+    " THEN :build_id ELSE build_id END,"
+    " submitted_by = CASE WHEN :submitted_by_present"
     " THEN :submitted_by ELSE submitted_by END,"
-    " summary = :summary,"
-    " display_name = CASE WHEN :display_name <> ''"
+    " summary = CASE WHEN :summary_present"
+    " THEN :summary ELSE summary END,"
+    " display_name = CASE WHEN :display_name_present"
     " THEN :display_name ELSE display_name END,"
-    " failure_ids = :failure_ids,"
+    " failure_ids = CASE WHEN :failure_ids_present"
+    " THEN :failure_ids ELSE failure_ids END,"
     " denorm_version = :denorm_version"
     " WHERE rowid = :rid AND typeof(result_json) = 'text'"
     " AND result_json = :payload"
@@ -561,26 +572,13 @@ def _denorm_row_params(rows: Sequence[aiosqlite.Row]) -> list[dict[str, Any]]:
     """
     params: list[dict[str, Any]] = []
     for row in rows:
-        (
-            job_name,
-            build_number,
-            build_id,
-            submitted_by,
-            summary,
-            display_name,
-            failure_ids,
-        ) = _extract_denormalized_fields(
-            parse_result_json(row["result_json"], job_id=row["job_id"])
-        )
+        payload = parse_result_json(row["result_json"], job_id=row["job_id"])
+        values = dict(zip(_DENORM_COLUMNS, _extract_denormalized_fields(payload)))
+        present = _denorm_presence(payload)
         params.append(
             {
-                "job_name": job_name,
-                "build_number": build_number,
-                "build_id": build_id,
-                "submitted_by": submitted_by,
-                "summary": summary,
-                "display_name": display_name,
-                "failure_ids": failure_ids,
+                **values,
+                **{f"{column}_present": present[column] for column in values},
                 "denorm_version": _RESULTS_DENORM_VERSION,
                 "rid": row["rid"],
                 "payload": row["result_json"],
@@ -2680,6 +2678,39 @@ def _collect_failure_ids(result: dict[str, Any]) -> list[str]:
     return ids
 
 
+# One entry per value ``_extract_denormalized_fields`` returns, same order.
+_DENORM_COLUMNS = (
+    "job_name",
+    "build_number",
+    "build_id",
+    "submitted_by",
+    "summary",
+    "display_name",
+    "failure_ids",
+)
+
+
+def _denorm_presence(result: dict[str, Any] | None) -> dict[str, bool]:
+    """Whether the payload speaks about each denormalized column.
+
+    Key presence, not the value: an empty value under a present key is a clear
+    the writer applied, a missing key is "this payload does not know". Both the
+    writer and the sweep decide on this one answer.
+    """
+    payload = result or {}
+    request_params = payload.get("request_params")
+    return {
+        "job_name": "job_name" in payload,
+        "build_number": "build_number" in payload,
+        "build_id": "build_id" in payload,
+        "submitted_by": isinstance(request_params, dict)
+        and "submitted_by" in request_params,
+        "summary": "summary" in payload,
+        "display_name": "display_name" in payload,
+        "failure_ids": "failures" in payload or "child_job_analyses" in payload,
+    }
+
+
 def _extract_denormalized_fields(
     result: dict[str, Any] | None,
 ) -> tuple[str, int, str, str, str, str, str]:
@@ -2742,39 +2773,11 @@ def _append_denormalized_set_parts(
     Only includes a denormalized column when *result* carries what it is
     derived from — partial payloads must not clobber existing column values.
     """
-    (
-        job_name,
-        build_number,
-        build_id,
-        submitted_by,
-        summary,
-        display_name,
-        failure_ids,
-    ) = _extract_denormalized_fields(result)
-    if "job_name" in result:
-        set_parts.append("job_name = ?")
-        params.append(job_name)
-    if "build_number" in result:
-        set_parts.append("build_number = ?")
-        params.append(build_number)
-    if "build_id" in result:
-        set_parts.append("build_id = ?")
-        params.append(build_id)
-    if (
-        isinstance(result.get("request_params"), dict)
-        and "submitted_by" in result["request_params"]
-    ):
-        set_parts.append("submitted_by = ?")
-        params.append(submitted_by)
-    if "summary" in result:
-        set_parts.append("summary = ?")
-        params.append(summary)
-    if "display_name" in result:
-        set_parts.append("display_name = ?")
-        params.append(display_name)
-    if "failures" in result or "child_job_analyses" in result:
-        set_parts.append("failure_ids = ?")
-        params.append(failure_ids)
+    present = _denorm_presence(result)
+    for column, value in zip(_DENORM_COLUMNS, _extract_denormalized_fields(result)):
+        if present[column]:
+            set_parts.append(f"{column} = ?")
+            params.append(value)
     if "analysis_state" in result:
         set_parts.append("analysis_state = ?")
         params.append(_coerce_analysis_state(result.get("analysis_state")))
