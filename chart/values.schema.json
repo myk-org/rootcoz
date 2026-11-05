@@ -123,7 +123,7 @@
     "resources": {
       "type": "object",
       "additionalProperties": false,
-      "description": "Container resource requests/limits. Unknown keys are rejected (a typo like resources.limit silently rendered an invalid pod). Extended resources (nvidia.com/gpu) and hugepages-* are allowed. Any value the Kubernetes Quantity grammar accepts is allowed, including a bare number: for memory/ephemeral-storage a unit-less value is bytes.",
+      "description": "Container resource requests/limits. Unknown keys are rejected (a typo like resources.limit silently rendered an invalid pod). Extended resources (nvidia.com/gpu, example.com/GPU_2 — the name after the slash is a Kubernetes qualified name, so uppercase, '_' and '.' are legal) and hugepages-* are allowed. Any value the Kubernetes Quantity grammar accepts is allowed, including a bare number: for memory/ephemeral-storage a unit-less value is bytes.",
       "properties": {
         "requests": {
           "type": "object",
@@ -156,7 +156,7 @@
             }
           },
           "patternProperties": {
-            "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?/[a-z0-9]([-a-z0-9]*[a-z0-9])?$": { "type": ["string", "number"], "minLength": 1 },
+            "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/[A-Za-z0-9]([-_.A-Za-z0-9]*[A-Za-z0-9])?$": { "type": ["string", "number"], "minLength": 1 },
             "^hugepages-[0-9]+[KMGT]i$": { "type": ["string", "number"], "minLength": 1 }
           }
         },
@@ -191,7 +191,7 @@
             }
           },
           "patternProperties": {
-            "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?/[a-z0-9]([-a-z0-9]*[a-z0-9])?$": { "type": ["string", "number"], "minLength": 1 },
+            "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/[A-Za-z0-9]([-_.A-Za-z0-9]*[A-Za-z0-9])?$": { "type": ["string", "number"], "minLength": 1 },
             "^hugepages-[0-9]+[KMGT]i$": { "type": ["string", "number"], "minLength": 1 }
           }
         }

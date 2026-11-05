@@ -215,6 +215,12 @@ Clones and code-graph indexes live under `/tmp`. Setting `resources.limits["ephe
 makes the chart mount a dedicated `/tmp` `emptyDir` with `sizeLimit` equal to that limit, verbatim,
 plus `TMPDIR=/tmp`. There is no second value to keep in sync.
 
+**Ownership vs. #402 C1.** This chart owns the `/tmp` cap: the number is
+`resources.limits["ephemeral-storage"]` and there is no separate `workspace.sizeLimit` key. #402 C1
+applies the same `/tmp` `emptyDir` + `sizeLimit` to the live deployment, so that deployment must carry
+the same number as the profile it runs (the production example uses `16Gi`). Two values for one
+threshold is exactly the drift the single-source rule above prevents.
+
 Behaviour and failure mode: exceeding the container's ephemeral-storage limit **or** the `emptyDir`
 `sizeLimit` is a **kubelet eviction, not a throttle** — the whole pod goes down mid-analysis. In flight,
 analyses in that process are lost (results are written on completion), pi-sidecar transcripts end
@@ -387,9 +393,13 @@ and it must carry no `ephemeral-storage`, no `sizeLimit`, no `/tmp` mount and no
 values or template change that alters the default pod template fails CI instead of silently rolling
 every install. The env also asserts the schema negatives (`resources.limit.cpu`,
 `resources.requests.cpuu`, a bad `memory` unit `4GiB`), the quantity positives (numeric `cpu`/`memory`
-and `ephemeral-storage`, `.5Gi`, `1e3`, `4m`, an explicit string quantity, extended resources), and
-that a bad cpu quantity (`not-a-quantity` on both `requests` and `limits`) is rejected. Two further
-checks cover the pod-integrity rules: `--set resources.requests.memory=""` renders no `memory`
+and `ephemeral-storage`, `.5Gi`, `1e3`, `4m`, an explicit string quantity, extended resources —
+`nvidia.com/gpu`, `hugepages-2Mi`, a mixed-case name `example.com/GPU_2`, and the rejection of a
+malformed one), and that a bad cpu quantity (`not-a-quantity` on both `requests` and `limits`) is
+rejected. Two negatives cover wrong **types** rather than wrong keys or strings: a list where a
+quantity goes (`resources.limits.memory=[1]`), and a non-string value in `podAnnotations` /
+`podLabels` / `nodeSelector`, which are string→string maps. Further checks cover the pod-integrity
+rules: `--set resources.requests.memory=""` renders no `memory`
 request (empty means omit), and with the sidecar agent dir configured the init container's `requests`
 equal its `limits`, so a Guaranteed app container keeps Guaranteed QoS for the whole pod.
 
