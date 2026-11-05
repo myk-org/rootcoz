@@ -129,6 +129,18 @@ commands = [
     "-c",
     "helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set resources.requests.memory=4 --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render 2>&1 | grep -q 'resources.requests.memory: Invalid type. Expected: string, given: integer'",  # pragma: allowlist secret
   ],
+  # cpu is a quantity too: a typo must fail at schema validation, not at the API server after install.
+  [
+    "sh",
+    "-c",
+    "T='helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render'; L=/tmp/rootcoz-bad-cpu-limits-$$.log; R=/tmp/rootcoz-bad-cpu-requests-$$.log && ! $T --set resources.limits.cpu=not-a-quantity > $L 2>&1 && grep -q 'resources.limits.cpu: Does not match pattern' $L && ! $T --set resources.requests.cpu=not-a-quantity > $R 2>&1 && grep -q 'resources.requests.cpu: Does not match pattern' $R && rm -f $L $R",  # pragma: allowlist secret
+  ],
+  # Valid cpu quantities still pass: milli form and an explicit string quantity.
+  [
+    "sh",
+    "-c",
+    "T='helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render'; OUT=/tmp/rootcoz-good-cpu-$$.yaml && $T --set resources.limits.cpu=4m > $OUT && grep -q 'cpu: 4m' $OUT && $T --set-string resources.limits.cpu=4 > $OUT && grep -q 'cpu: \"4\"' $OUT && rm -f $OUT",  # pragma: allowlist secret
+  ],
   # "" means omit: the empty key must be dropped, not rendered as an invalid quantity.
   [
     "sh",

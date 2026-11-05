@@ -131,10 +131,10 @@
           "description": "Scheduling floor. Setting a key to \"\" omits the explicit request, but the limit still becomes the effective request unless a LimitRange defaults one.",
           "properties": {
             "cpu": {
-              "description": "Quantity or bare number. \"\" omits the key.",
+              "description": "Quantity or bare number (4, 500m, \"2.5\"). \"\" omits the key.",
               "anyOf": [
                 { "type": "number" },
-                { "type": "string", "minLength": 1 },
+                { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(n|u|m|k|M|G|T|P|E|Ki|Mi|Gi|Ti|Pi|Ei)?$" },
                 { "const": "" }
               ]
             },
@@ -166,10 +166,10 @@
           "description": "Eviction/throttle ceiling. An ephemeral-storage limit here also caps the /tmp emptyDir at the same sizeLimit.",
           "properties": {
             "cpu": {
-              "description": "Quantity or bare number. \"\" omits the key.",
+              "description": "Quantity or bare number (4, 500m, \"2.5\"). \"\" omits the key.",
               "anyOf": [
                 { "type": "number" },
-                { "type": "string", "minLength": 1 },
+                { "type": "string", "pattern": "^[0-9]+(\\.[0-9]+)?(n|u|m|k|M|G|T|P|E|Ki|Mi|Gi|Ti|Pi|Ei)?$" },
                 { "const": "" }
               ]
             },

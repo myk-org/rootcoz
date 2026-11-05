@@ -397,7 +397,9 @@ restart — eviction, upgrade, node drain — interrupts running analyses. Track
 and re-submit after the rollout.
 
 Extended resources (`nvidia.com/gpu`, `hugepages-*`) are supported in `resources.requests` / `limits`.
-`memory` and `ephemeral-storage` need a unit (`4Gi`); a bare number is read as bytes. See
+`memory` and `ephemeral-storage` need a unit (`4Gi`); a bare number is read as bytes. `cpu` takes a
+bare number or a quantity string (`4`, `500m`, `2.5`) — a typo such as `not-a-quantity` fails schema
+validation at render, not after install at the API server. See
 [the chart README](https://github.com/myk-org/rootcoz/blob/main/chart/README.md) for the full
 rationale.
 

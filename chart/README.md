@@ -255,7 +255,9 @@ instead of producing a pod the API server refuses.
 
 **Units:** `memory` and `ephemeral-storage` must be strings with a unit (`4Gi`, `512Mi`) — Kubernetes
 reads a bare number as **bytes**, so `memory: 4` is 4 bytes and an OOM-kill on start. `cpu` accepts a
-string or a bare number (`--set resources.requests.cpu=4` is valid). Setting a key to `""` omits **that
+bare number or a quantity string with a CPU suffix (`4`, `500m`, `2.5`, `n`/`u`/`m` and the usual
+`k`/`M`/…/`Ki` suffixes) — anything else, such as `--set resources.limits.cpu=not-a-quantity`, is
+schema-rejected at render instead of reaching the API server. Setting a key to `""` omits **that
 key** from the render — an empty quantity is invalid, so the chart drops it instead of emitting one.
 
 **A cleared request is not "no floor".** Dropping the request key does not stop the **limit** from
@@ -377,8 +379,9 @@ The `chart` tox env lints the chart, renders every recipe and fixture, renders
 `chart/examples/values-production.yaml` and asserts its resources plus the quoted `/tmp` `sizeLimit`
 (and that the `/tmp` mount never reaches the init container), checks that the default render still has
 no `/tmp` volume, and asserts the schema negatives (`resources.limit.cpu`, `resources.requests.cpuu`,
-binary `memory` and `ephemeral-storage`) plus the extended-resource and numeric-CPU positives. Two
-further checks cover the pod-integrity rules: `--set resources.requests.memory=""` renders no `memory`
+binary `memory` and `ephemeral-storage`) plus the extended-resource and numeric-CPU positives, and
+that a bad cpu quantity (`not-a-quantity` on both `requests` and `limits`) is rejected while `4m` and
+an explicit string quantity still render. Two further checks cover the pod-integrity rules: `--set resources.requests.memory=""` renders no `memory`
 request (empty means omit), and with the sidecar agent dir configured the init container's `requests`
 equal its `limits`, so a Guaranteed app container keeps Guaranteed QoS for the whole pod.
 

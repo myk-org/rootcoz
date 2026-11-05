@@ -475,7 +475,9 @@ limit over no limit — an uncapped pod causes node <code>DiskPressure</code>, w
 restart — eviction, upgrade, node drain — interrupts running analyses. Track them on the dashboard
 and re-submit after the rollout.</p>
 <p>Extended resources (<code>nvidia.com/gpu</code>, <code>hugepages-*</code>) are supported in <code>resources.requests</code> / <code>limits</code>.
-<code>memory</code> and <code>ephemeral-storage</code> need a unit (<code>4Gi</code>); a bare number is read as bytes. See
+<code>memory</code> and <code>ephemeral-storage</code> need a unit (<code>4Gi</code>); a bare number is read as bytes. <code>cpu</code> takes a
+bare number or a quantity string (<code>4</code>, <code>500m</code>, <code>2.5</code>) — a typo such as <code>not-a-quantity</code> fails schema
+validation at render, not after install at the API server. See
 <a href="https://github.com/myk-org/rootcoz/blob/main/chart/README.md">the chart README</a> for the full
 rationale.</p>
 <h2 id="upgrade-and-smoke-test-a-helm-release">Upgrade and smoke-test a Helm release</h2>
