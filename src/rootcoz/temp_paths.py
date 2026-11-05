@@ -32,9 +32,14 @@ _CLEANUP_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rootcoz-re
 
 #: Locks for *reusable* workspaces only (``chat-{job}/{user}`` and the admin chat
 #: workspace), where a queued delete can race the next create of the same path.
-#: Keyed by ``realpath``; uuid workspaces are unique per use and need nothing, so
-#: this dict is bounded by users, not by jobs.
+#: Keyed by ``realpath``; uuid workspaces are unique per use and need nothing.
 _path_locks: dict[str, asyncio.Lock] = {}
+
+#: Chat workspaces are one per ``(job, user)`` and jobs are deleted forever, so
+#: the map above would grow for the life of the process. Past this size the idle
+#: locks are dropped: an unlocked lock excludes nobody, it only saves an
+#: allocation for the job that comes back.
+_MAX_PATH_LOCKS = 256
 
 
 def rootcoz_temp_base() -> Path:
@@ -91,18 +96,21 @@ def _drop_deleting(path: Path) -> None:
 def delete_tree(path: Path) -> tuple[int, int]:
     """Delete ``path`` in one post-order walk; return ``(bytes, entries)``.
 
-    Symlinks are unlinked, never descended into, and every directory is
-    realpath-checked against the root before it is walked — ``DirEntry.is_dir()``
-    follows links, so a link planted in a workspace would otherwise delete outside
-    it. An unreadable entry is recorded once per distinct errno and skipped; the
-    rest of the tree is still deleted, where ``shutil.rmtree`` aborts at the first
-    error and silently leaks everything after it.
+    Symlinks are unlinked, never descended into — a symlinked root included, so a
+    planted link cannot turn a workspace delete into its target's delete. Every
+    directory is opened ``O_NOFOLLOW`` and its children are unlinked **relative to
+    that descriptor**, so replacing a directory with a symlink mid-walk cannot
+    redirect the deletes outside the tree. An unreadable entry is recorded once per
+    distinct errno and skipped; the rest of the tree is still deleted, where
+    ``shutil.rmtree`` aborts at the first error and silently leaks everything after
+    it. Only what was really removed is counted, so a failed entry is never
+    reported as reclaimed.
 
     No second pass and no ``statvfs``: the size is accumulated by the walk itself,
     so it is attributable to this tree even on a shared volume.
     """
-    root = os.path.realpath(path)
-    if not os.path.lexists(root):
+    top = os.fspath(path)
+    if not os.path.lexists(top):
         return (0, 0)
     size = 0
     entries = 0
@@ -121,38 +129,48 @@ def delete_tree(path: Path) -> tuple[int, int]:
             exc.strerror,
         )
 
-    def remove(p: str) -> None:
+    def remove(name: str, parent_fd: int | None, display: str) -> None:
+        """Remove ``name`` from ``parent_fd`` (``None``: the absolute root path)."""
         nonlocal size, entries
+        dfd = {} if parent_fd is None else {"dir_fd": parent_fd}
         try:
-            st = os.lstat(p)
+            st = os.stat(name, follow_symlinks=False, **dfd)
         except OSError as exc:
-            record(p, exc)
+            record(display, exc)
+            return
+        if not stat.S_ISDIR(st.st_mode):
+            try:
+                os.unlink(name, **dfd)
+            except OSError as exc:
+                record(display, exc)
+                return
+            size += st.st_size
+            entries += 1
+            return
+        try:
+            fd = os.open(
+                name,
+                os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC,
+                **dfd,
+            )
+        except OSError as exc:
+            record(display, exc)
+            return
+        try:
+            with os.scandir(fd) as it:
+                children = [entry.name for entry in it]
+            for child in children:
+                remove(child, fd, os.path.join(display, child))
+        finally:
+            os.close(fd)
+        try:
+            os.rmdir(name, **dfd)
+        except OSError as exc:
+            record(display, exc)
             return
         entries += 1
-        if not stat.S_ISDIR(st.st_mode):
-            size += st.st_size
-            try:
-                os.unlink(p)
-            except OSError as exc:
-                record(p, exc)
-            return
-        real = os.path.realpath(p)
-        if real != root and not real.startswith(root + os.sep):
-            logger.warning("cleanup: refusing to walk %s outside %s", p, root)
-            return
-        try:
-            children = [entry.path for entry in os.scandir(p)]
-        except OSError as exc:
-            record(p, exc)
-            return
-        for child in children:
-            remove(child)
-        try:
-            os.rmdir(p)
-        except OSError as exc:
-            record(p, exc)
 
-    remove(root)
+    remove(top, None, top)
     return (size, entries)
 
 
@@ -215,15 +233,25 @@ async def cleanup_off_loop(what: str, *steps: Callable[[], object]) -> None:
 def _lock_for(path: Path) -> asyncio.Lock:
     key = os.path.realpath(path)
     lock = _path_locks.get(key)
-    if lock is None:
-        lock = _path_locks[key] = asyncio.Lock()
+    if lock is not None:
+        return lock
+    if len(_path_locks) >= _MAX_PATH_LOCKS:
+        for stale in [k for k, held in _path_locks.items() if not held.locked()]:
+            del _path_locks[stale]
+    lock = _path_locks[key] = asyncio.Lock()
     return lock
 
 
 async def cleanup_path_off_loop(
     what: str, path: Path, *steps: Callable[[], object]
 ) -> None:
-    """Run delete ``steps`` for a reusable ``path`` under its lock, off the loop.
+    """Delete the reusable ``path``: marker, ``steps``, whole tree — one reaper job.
+
+    The marker outside the tree is what tells a later creator that a delete died
+    mid-tree, instead of "wipe before create" which would destroy a live session;
+    it is written *here*, so every reusable-path delete is marker-aware by
+    construction and no call site can queue a delete that a later create would
+    happily reuse half of. It is dropped only once the tree is really gone.
 
     The lock is taken **on the loop** before submitting and released from the
     future's done callback: an ``asyncio.Lock`` cannot be acquired in the reaper
@@ -233,31 +261,19 @@ async def cleanup_path_off_loop(
     loop = asyncio.get_running_loop()
     lock = _lock_for(path)
     await lock.acquire()
+    cleanup_steps: tuple[Callable[[], object], ...] = (
+        partial(_mark_deleting, path),
+        *steps,
+        partial(delete_tree, path),
+        partial(_drop_deleting, path),
+    )
     try:
-        future = loop.run_in_executor(_CLEANUP_POOL, _run_cleanup, what, *steps)
+        future = loop.run_in_executor(_CLEANUP_POOL, _run_cleanup, what, *cleanup_steps)
     except BaseException:
         lock.release()
         raise
     future.add_done_callback(lambda _f: lock.release() if lock.locked() else None)
     await asyncio.shield(future)
-
-
-async def delete_reusable_path(
-    what: str, path: Path, *prepare: Callable[[], object]
-) -> None:
-    """Whole-tree delete of a reusable path: marker, ``prepare`` steps, ``delete_tree``.
-
-    The marker outside the tree is what tells a later creator that a delete died
-    mid-tree, instead of "wipe before create" which would destroy a live session.
-    """
-    await cleanup_path_off_loop(
-        what,
-        path,
-        partial(_mark_deleting, path),
-        *prepare,
-        partial(delete_tree, path),
-        partial(_drop_deleting, path),
-    )
 
 
 @asynccontextmanager

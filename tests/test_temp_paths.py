@@ -19,8 +19,8 @@ import pytest
 
 from rootcoz.temp_paths import (
     cleanup_off_loop,
+    cleanup_path_off_loop,
     delete_marker,
-    delete_reusable_path,
     delete_tree,
     reusable_path_lock,
 )
@@ -141,7 +141,7 @@ async def test_create_waits_for_a_queued_delete_of_the_same_path(tmp_path) -> No
 
     started = time.monotonic()
     delete_task = asyncio.create_task(
-        delete_reusable_path("job-1", path, partial(slow_delete))
+        cleanup_path_off_loop("job-1", path, partial(slow_delete))
     )
     await asyncio.sleep(0.05)
     async with reusable_path_lock("job-1", path):
@@ -172,6 +172,56 @@ async def test_marker_outside_the_tree_decides_recreation(tmp_path) -> None:
     async with reusable_path_lock("job-1", path):
         assert not path.exists()
     assert not marker.exists()
+
+
+async def test_a_failed_reusable_delete_leaves_the_marker(
+    tmp_path, monkeypatch
+) -> None:
+    """A delete that dies mid-tree must keep the marker, so the create re-clones."""
+    path = tmp_path / "chat-job" / "alice"
+    (path / "repo").mkdir(parents=True)
+    (path / "repo" / "keep.txt").write_text("stuck")
+    (path / "repo" / "gone.txt").write_text("x" * 10)
+    real_unlink = os.unlink
+
+    def unlink(name, *args, **kwargs):
+        if os.path.basename(os.fspath(name)) == "keep.txt":
+            raise PermissionError(errno.EACCES, "denied", str(name))
+        return real_unlink(name, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", unlink)
+    await cleanup_path_off_loop("job-1", path)
+
+    assert delete_marker(path).exists(), "a dead delete left nothing to re-create from"
+    assert not (path / "repo" / "gone.txt").exists()
+
+    monkeypatch.undo()
+    # The next create re-creates the whole workspace, so ``clone_chat_repos``
+    # cannot skip a repo the failed delete took away.
+    async with reusable_path_lock("job-1", path):
+        assert not (path / "repo").exists()
+        assert not path.exists()
+    assert not delete_marker(path).exists()
+
+
+async def test_the_path_lock_map_stays_bounded_but_never_drops_a_held_lock(
+    tmp_path,
+) -> None:
+    from rootcoz import temp_paths
+
+    held_path = tmp_path / "busy"
+    held = temp_paths._lock_for(held_path)
+    await held.acquire()
+    try:
+        for i in range(temp_paths._MAX_PATH_LOCKS * 2):
+            temp_paths._lock_for(tmp_path / f"chat-{i}")
+        # Chat workspaces are per (job, user) and jobs go away forever: idle
+        # entries are dropped, so the map cannot grow for the process lifetime.
+        assert len(temp_paths._path_locks) <= temp_paths._MAX_PATH_LOCKS
+        assert temp_paths._path_locks[os.path.realpath(held_path)] is held
+    finally:
+        held.release()
+        temp_paths._path_locks.clear()
 
 
 # -- Step 2: delete_tree ---------------------------------------------------
@@ -205,6 +255,83 @@ def test_delete_tree_never_follows_a_symlink_out_of_the_root(tmp_path) -> None:
     assert not root.exists()
 
 
+def test_delete_tree_unlinks_a_symlinked_root_without_its_target(tmp_path) -> None:
+    """A symlinked workspace root is the link's problem, not its target's."""
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep me")
+    link = tmp_path / "workspace"
+    link.symlink_to(outside)
+
+    nbytes, entries = delete_tree(link)
+
+    assert (outside / "keep.txt").read_text() == "keep me"
+    assert not link.is_symlink()
+    assert (nbytes, entries) == (len(os.fspath(outside)), 1)
+
+
+def test_a_directory_swapped_for_a_symlink_is_not_followed(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """Check-then-use: a dir replaced by a link mid-walk must not redirect the walk."""
+    root = tmp_path / "tree"
+    victim = root / "victim"
+    victim.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (outside / "keep.txt").write_text("keep me")
+    real_open = os.open
+    swapped: list[str] = []
+
+    def swapping_open(name, flags, *args, **kwargs):
+        if not swapped and os.fspath(name) == victim.name:
+            swapped.append(victim.name)
+            victim.rmdir()
+            victim.symlink_to(outside)
+        return real_open(name, flags, *args, **kwargs)
+
+    monkeypatch.setattr(os, "open", swapping_open)
+    delete_tree(root)
+    monkeypatch.undo()
+
+    assert swapped == [victim.name]
+    assert (outside / "keep.txt").read_text() == "keep me"
+    assert victim.is_symlink(), "the planted link was not left for the next pass"
+    # O_NOFOLLOW|O_DIRECTORY refuses the swapped link (ENOTDIR or ELOOP).
+    assert any(f"errno={code}" in caplog.text for code in (errno.ENOTDIR, errno.ELOOP))
+
+    # A later pass unlinks the link itself and finishes the tree.
+    delete_tree(root)
+    assert not root.exists()
+    assert (outside / "keep.txt").read_text() == "keep me"
+
+
+def test_a_failed_delete_is_not_reported_as_reclaimed(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    root = tmp_path / "tree"
+    (root / "good").mkdir(parents=True)
+    (root / "good" / "file.txt").write_text("x" * 100)
+    (root / "stuck.txt").write_text("y" * 7)
+    real_unlink = os.unlink
+
+    def unlink(name, *args, **kwargs):
+        if os.path.basename(os.fspath(name)) == "stuck.txt":
+            raise PermissionError(errno.EACCES, "denied", str(name))
+        return real_unlink(name, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", unlink)
+    nbytes, entries = delete_tree(root)
+    monkeypatch.undo()
+
+    assert not (root / "good").exists(), "the rest of the tree was abandoned"
+    assert (root / "stuck.txt").exists()
+    # ``reclaimed`` is what is really gone: the stuck file's 7 bytes and the root
+    # directory (ENOTEMPTY) are excluded, the readable half is still counted.
+    assert (nbytes, entries) == (100, 2)
+    assert f"errno={errno.EACCES}" in caplog.text
+
+
 def test_unreadable_entry_does_not_abandon_the_tree(
     tmp_path, monkeypatch, caplog
 ) -> None:
@@ -214,14 +341,14 @@ def test_unreadable_entry_does_not_abandon_the_tree(
     poisoned = root / "poisoned"
     poisoned.mkdir()
     (poisoned / "file.txt").write_text("y")
-    real_scandir = os.scandir
+    real_open = os.open
 
-    def scandir(path):
-        if os.fspath(path) == str(poisoned):
-            raise PermissionError(errno.EACCES, "denied", str(poisoned))
-        return real_scandir(path)
+    def open_dir(name, flags, *args, **kwargs):
+        if os.fspath(name) == poisoned.name:
+            raise PermissionError(errno.EACCES, "denied", str(name))
+        return real_open(name, flags, *args, **kwargs)
 
-    monkeypatch.setattr(os, "scandir", scandir)
+    monkeypatch.setattr(os, "open", open_dir)
     nbytes, entries = delete_tree(root)
     monkeypatch.undo()
 

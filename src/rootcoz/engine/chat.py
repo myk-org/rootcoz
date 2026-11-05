@@ -941,7 +941,11 @@ def _safe_remove_symlink(link: Path) -> tuple[int, int]:
 
 
 def cleanup_chat_repos(job_id: str, username: str = "") -> tuple[int, int]:
-    """Delete cloned repos and artifacts from chat workspace but keep session files."""
+    """Delete cloned repos, graphs and symlinked artifact targets from a workspace.
+
+    A reaper step, never inline. The workspace itself (sessions included) is the
+    whole-tree ``delete_tree`` step the caller queues right after this one.
+    """
     workspace = get_chat_workspace(job_id, username)
     from rootcoz.engine.graft import cleanup_graph
     from rootcoz.engine.graft_http import unregister_workspace
@@ -966,7 +970,7 @@ def cleanup_chat_repos(job_id: str, username: str = "") -> tuple[int, int]:
         else:
             item.unlink(missing_ok=True)
 
-    logger.info(f"Cleaned up chat repos for job {job_id} (kept sessions)")
+    logger.info(f"Cleaned up chat repos for job {job_id}")
     return (nbytes, entries)
 
 

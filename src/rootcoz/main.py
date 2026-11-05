@@ -302,7 +302,6 @@ from rootcoz.storage import (
 from rootcoz.temp_paths import (
     cleanup_off_loop,
     cleanup_path_off_loop,
-    delete_reusable_path,
     delete_tree,
 )
 from rootcoz.token_tracking import (
@@ -20285,9 +20284,10 @@ async def _cleanup_deleted_job_chat_workspaces(job_id: str) -> None:
     try:
         await _cancel_tracked_chat_job_tasks(job_id)
         async with _get_chat_job_barrier(job_id):
-            # Marker + per-path lock: this path is deterministic and reused, so a
-            # queued delete must finish before the next session creates into it.
-            await delete_reusable_path(
+            # Marker + per-path lock are inside the helper: this path is
+            # deterministic and reused, so a queued delete must finish before the
+            # next session creates into it, and a partial one must not be reused.
+            await cleanup_path_off_loop(
                 job_id,
                 get_chat_workspace(job_id),
                 partial(cleanup_chat_workspace, job_id),
@@ -20868,6 +20868,8 @@ async def clear_chat_history(job_id: str, request: Request) -> dict[str, Any]:
         count = await storage.delete_chat_messages(job_id, username=username)
         await _cleanup_revoked_ai_sessions()
         notify_chat_changed(job_id, username=username)
+        # Marker-aware: the helper also drops the workspace itself (session dirs
+        # included), so a failed delete is re-created instead of reused.
         await cleanup_path_off_loop(
             job_id,
             get_chat_workspace(job_id, username),
@@ -21682,6 +21684,8 @@ async def clear_admin_chat_history(request: Request) -> dict[str, Any]:
         count = await storage.delete_chat_messages(ADMIN_CHAT_JOB_ID, username=username)
         await _cleanup_revoked_ai_sessions()
         notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
+        # Marker-aware: the helper also drops the workspace itself (session dirs
+        # included), so a failed delete is re-created instead of reused.
         await cleanup_path_off_loop(
             ADMIN_CHAT_JOB_ID,
             get_chat_workspace(ADMIN_CHAT_JOB_ID, username),
