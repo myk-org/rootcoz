@@ -16,14 +16,25 @@ jobs:
         env:
           BASE_REF: ${{ github.base_ref }}
         run: |
-          # Only added/modified generated files are a violation. A DELETION is the migration
+          set -euo pipefail
+          # The diff is captured first so its exit status is checked on its own: piping git into
+          # grep without pipefail reports "no match" when the diff never ran (missing base ref,
+          # shallow clone), so an absent check would look exactly like a passing one.
+          diff_out="$(git diff --name-status --diff-filter=AMR -M "origin/${BASE_REF}...HEAD")"
+
+          # Only added/modified/renamed files are a violation. A DELETION is the migration
           # itself (#442 removes the committed output) and must pass, or the PR that fixes the
-          # rule can never satisfy it.
-          if git diff --name-only --diff-filter=AM "origin/${BASE_REF}...HEAD" \
-            | grep -E '^(docs/[^/]+\.html|docs/assets/.*|docs/llms(-full)?\.txt|docs/search-index\.json)$'; then
-            echo "::error::Generated docs must not be committed — the site is built on main from docs/*.md."
-            echo "HTML, assets/, llms*.txt and search-index.json are build output of .github/workflows/docs.yml."
-            echo "Remove them from the PR and edit the docs/*.md source instead."
+          # rule can never satisfy it. Renames are checked on BOTH sides, so
+          # docs/foo.md -> docs/index.html is caught too.
+          offenders="$(printf '%s\n' "$diff_out" | cut -f2- | tr '\t' '\n' \
+            | grep -vE '^(docs/(.*/)?[^/]+\.md|docs/nav\.json)$' \
+            | grep -E '^docs/' || true)"
+
+          if [ -n "$offenders" ]; then
+            echo "::error::Generated docs must not be committed — the site is built on main from the docs sources."
+            printf '%s\n' "$offenders"
+            echo "Everything under docs/ other than docs/**/*.md and docs/nav.json is build output of"
+            echo ".github/workflows/docs.yml — edit the markdown source instead."
             exit 1
           fi
           echo "No generated docs in the diff."

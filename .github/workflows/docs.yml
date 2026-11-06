@@ -21,6 +21,10 @@ permissions:
 
 jobs:
   build:
+    # workflow_dispatch accepts any ref, so without this guard `gh workflow run docs.yml --ref
+    # some-branch` would publish that branch's docs/ to the live Pages site. Deploying is main-only;
+    # a manual run is still how the first deploy after the Pages switch is triggered.
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -35,6 +39,7 @@ jobs:
 
   deploy:
     needs: build
+    if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     environment:
       name: github-pages
