@@ -41,6 +41,7 @@ from rootcoz.models import (
     ChildJobAnalysis,
     FailedTest,
     FailureAnalysis,
+    is_failed_analysis,
 )
 from rootcoz.sources.base import (
     INGEST_COMPLETE_SUMMARY,
@@ -1419,10 +1420,16 @@ async def _ingest_child_job_inner(
 
 
 def child_has_successful_analysis(child: ChildJobAnalysis) -> bool:
-    """Whether a child tree contains at least one successful AI analysis."""
+    """Whether a child tree contains at least one successful AI analysis.
+
+    A row without a usable classification is not an analysis: placeholders and
+    unclassified answers still appear in ``failures`` (so the tests stay
+    visible), so counting them as success let a parent report work the AI never
+    did.
+    """
     if child.all_groups_failed or child.note:
         return False
-    return bool(child.failures) or any(
+    return any(not is_failed_analysis(failure) for failure in child.failures) or any(
         child_has_successful_analysis(nested) for nested in child.failed_children
     )
 

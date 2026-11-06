@@ -644,6 +644,22 @@ class FailureAnalysis(BaseModel):
         return v
 
 
+def is_failed_analysis(failure: FailureAnalysis) -> bool:
+    """Identify a group whose analysis is missing, not merely unclassified.
+
+    Two shapes mean the same thing: the ``_failed_group_analyses`` placeholder
+    (a provider error) and a row carrying ``analysis_error`` (our own answer was
+    unclassified, e.g. a peer group no peer could classify). Without the second,
+    such a group looked like a completed analysis and the whole job was reported
+    as analysed.
+    """
+    if failure.analysis.classification:
+        return False
+    return bool(failure.analysis_error) or failure.analysis.details == (
+        "Analysis failed; check server logs for details"
+    )
+
+
 class ChildJobAnalysis(BaseModel):
     """Analysis result for a failed child job in a pipeline."""
 

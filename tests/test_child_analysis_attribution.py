@@ -479,3 +479,34 @@ def test_nested_all_failed_children_are_not_counted_as_success() -> None:
             ],
         )
     )
+
+
+@pytest.mark.parametrize(
+    ("classification", "details", "analysis_error", "expected"),
+    [
+        # A child carrying placeholder rows analysed nothing, even though the
+        # rows are present so the failed tests stay reviewable.
+        ("", "Analysis failed; check server logs for details", "", False),
+        ("", "narration only", "AI analysis incomplete", False),
+        # The direction that must keep working: a classified row is a success.
+        ("CODE ISSUE", "narration only", "", True),
+    ],
+)
+def test_child_success_requires_a_usable_classification(
+    classification: str, details: str, analysis_error: str, expected: bool
+) -> None:
+    from rootcoz.sources.jenkins_source import child_has_successful_analysis
+
+    child = ChildJobAnalysis(
+        job_name="child",
+        build_number=1,
+        failures=[
+            FailureAnalysis(
+                test_name="test_a",
+                error="boom",
+                analysis_error=analysis_error,
+                analysis=AnalysisDetail(classification=classification, details=details),
+            )
+        ],
+    )
+    assert child_has_successful_analysis(child) is expected

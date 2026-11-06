@@ -227,6 +227,7 @@ from rootcoz.models import (
     UnsubscribeRequest,
     UpdateFilterPresetRequest,
     _JenkinsParamsMixin,
+    is_failed_analysis,
 )
 from rootcoz.monitoring import (
     _get_app_version,
@@ -5337,7 +5338,7 @@ async def _analyze_failures_or_exit(
     # Placeholders keep failed tests visible but are not successful analyses.
     from rootcoz.sources.jenkins_source import child_has_successful_analysis
 
-    if not any(not _is_failed_analysis(a) for a in all_analyses) and not any(
+    if not any(not is_failed_analysis(a) for a in all_analyses) and not any(
         child_has_successful_analysis(c) for c in (child_job_analyses or [])
     ):
         error_msg = (
@@ -5381,22 +5382,6 @@ async def _analyze_failures_or_exit(
     return all_analyses, test_failures, unique_errors, cross_failure_patterns
 
 
-def _is_failed_analysis(failure: FailureAnalysis) -> bool:
-    """Identify a group whose analysis is missing, not merely unclassified.
-
-    Two shapes mean the same thing: the ``_failed_group_analyses`` placeholder
-    (a provider error) and a row carrying ``analysis_error`` (our own answer was
-    unclassified, e.g. a peer group no peer could classify). Without the second,
-    such a group looked like a completed analysis and the whole job was reported
-    as analysed.
-    """
-    if failure.analysis.classification:
-        return False
-    return bool(failure.analysis_error) or failure.analysis.details == (
-        "Analysis failed; check server logs for details"
-    )
-
-
 def _count_failed_child_groups(children: list[ChildJobAnalysis]) -> int:
     """Count failed signatures within each child build, including nested builds."""
     total = 0
@@ -5404,7 +5389,7 @@ def _count_failed_child_groups(children: list[ChildJobAnalysis]) -> int:
         signatures = {
             storage.resolve_signature(failure)
             for failure in child.failures
-            if _is_failed_analysis(failure)
+            if is_failed_analysis(failure)
         }
         total += len(signatures)
         if child.all_groups_failed and not child.failures:
@@ -5877,7 +5862,7 @@ async def _process_ci_source_analysis(
             analysis_result_tuple
         )
 
-        failed_tests = [a for a in all_analyses if _is_failed_analysis(a)]
+        failed_tests = [a for a in all_analyses if is_failed_analysis(a)]
         failed_analyses = len({storage.resolve_signature(a) for a in failed_tests})
         analysis_status: Literal["completed", "failed"] = (
             "completed"

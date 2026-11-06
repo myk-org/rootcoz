@@ -685,8 +685,8 @@ class TestPerGroupFallbackKeepsTheReason:
     ) -> None:
         """The per-group path must not drop the reason the outer one keeps."""
         from rootcoz.engine.core import AnalysisIncompleteError
-        from rootcoz.main import _is_failed_analysis, _run_per_group_analysis
-        from rootcoz.models import FailedTest
+        from rootcoz.main import _run_per_group_analysis
+        from rootcoz.models import FailedTest, is_failed_analysis
 
         reason = "AI analysis incomplete: response has no usable classification"
 
@@ -715,14 +715,13 @@ class TestPerGroupFallbackKeepsTheReason:
         assert analyses[0].analysis.classification == ""
         assert analyses[0].analysis_error == reason
         # The job must not report this group as a completed analysis.
-        assert _is_failed_analysis(analyses[0])
+        assert is_failed_analysis(analyses[0])
 
 
 class TestFailedAnalysisPredicate:
     def test_a_row_with_only_an_analysis_error_counts_as_failed(self) -> None:
         """Peer path: no classification, reason stored — not a completed analysis."""
-        from rootcoz.main import _is_failed_analysis
-        from rootcoz.models import AnalysisDetail, FailureAnalysis
+        from rootcoz.models import AnalysisDetail, FailureAnalysis, is_failed_analysis
 
         failure = FailureAnalysis(
             test_name="t1",
@@ -730,11 +729,10 @@ class TestFailedAnalysisPredicate:
             analysis=AnalysisDetail(),
             analysis_error="AI analysis incomplete: no usable classification",
         )
-        assert _is_failed_analysis(failure)
+        assert is_failed_analysis(failure)
 
     def test_a_classified_row_is_not_failed(self) -> None:
-        from rootcoz.main import _is_failed_analysis
-        from rootcoz.models import AnalysisDetail, FailureAnalysis
+        from rootcoz.models import AnalysisDetail, FailureAnalysis, is_failed_analysis
 
         failure = FailureAnalysis(
             test_name="t1",
@@ -742,4 +740,4 @@ class TestFailedAnalysisPredicate:
             analysis=AnalysisDetail(classification="CODE ISSUE"),
             analysis_error="stale reason that must not win",
         )
-        assert not _is_failed_analysis(failure)
+        assert not is_failed_analysis(failure)
