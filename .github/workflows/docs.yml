@@ -4,8 +4,11 @@ on:
   push:
     branches: [main]
     paths:
-      - "docs/**.md"
-      - "docs/nav.json"
+      # Any docs change, not just .md: the migration that removes the committed output touches
+      # only generated paths, and it must still deploy.
+      - "docs/**"
+  # The first deploy after Pages is switched to build_type=workflow has no push to ride on.
+  workflow_dispatch:
 
 concurrency:
   group: docs
