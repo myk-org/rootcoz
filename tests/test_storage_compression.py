@@ -6,6 +6,7 @@ site that used to read the payload with JSON functions — which cannot read a f
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import re
@@ -1089,3 +1090,168 @@ async def test_no_sql_site_still_parses_result_json(_storage) -> None:
         text = module.read_text()
         for pattern in patterns:
             assert not re.search(pattern, text), f"{module.name}: {pattern}"
+
+
+# --- the write lock is never held across an encode (#433) -------------------
+
+
+async def test_a_slow_encode_does_not_hold_the_write_lock(
+    _storage, monkeypatch
+) -> None:
+    """Two writers encode at the same time: neither waits out ``busy_timeout``.
+
+    The encode runs off the loop with no transaction open, so the write lock is
+    taken only around the (fast) statement. Holding it across the encode makes
+    the second writer's ``BEGIN IMMEDIATE`` fail with ``database is locked`` on a
+    contended box -- the CI failure this shape exists to prevent.
+    """
+    payload = _payload(failure_count=20)
+    # Seed the rows the status writers update while the encoder is still fast.
+    for job_id in ("job-lock-status-a", "job-lock-status-b"):
+        await storage.save_result(job_id, "", "running", payload)
+
+    # A busy_timeout far shorter than the encode below, applied to every
+    # connection this test opens: a lock held across the encode has to time out.
+    real_connect_db = storage._connect_db
+
+    @contextlib.asynccontextmanager
+    async def short_busy_timeout() -> Any:
+        async with real_connect_db() as db:
+            await db.execute("PRAGMA busy_timeout=300")
+            yield db
+
+    monkeypatch.setattr(storage, "_connect_db", short_busy_timeout)
+    real_compress = zstd.compress
+
+    def slow_compress(data: bytes, level: int = 0) -> bytes:
+        time.sleep(0.6)  # longer than busy_timeout: a held lock has to time out
+        return real_compress(data, level)
+
+    monkeypatch.setattr(storage.zstd, "compress", slow_compress)
+    await asyncio.gather(
+        storage.save_result("job-lock-save-a", "", "completed", payload),
+        storage.save_result("job-lock-save-b", "", "completed", payload),
+        storage.update_status("job-lock-status-a", "completed", payload),
+        storage.update_status("job-lock-status-b", "completed", payload),
+    )
+
+    for job_id in ("job-lock-save-a", "job-lock-save-b"):
+        assert (await _stored(_storage, job_id))["kind"] == "blob"
+    for job_id in ("job-lock-status-a", "job-lock-status-b"):
+        stored = await storage.get_result(job_id)
+        assert stored["status"] == "completed"
+        assert stored["result"]["summary"] == payload["summary"]
+
+
+async def test_a_payload_changed_during_the_encode_is_re_read(
+    _storage, monkeypatch, storage_logs
+) -> None:
+    """A CAS miss re-reads and re-encodes: the write lands on the newer payload.
+
+    The row is changed by another writer while our payload is being encoded. The
+    write must notice, re-read (keeping the forward link that arrived meanwhile)
+    and write a complete payload -- not the stale one it encoded first.
+    """
+    await storage.save_result("job-cas", "", "running", _payload(failure_count=20))
+
+    real_compress = zstd.compress
+    encoding = threading.Event()
+    encodes: list[int] = []
+
+    def slow_first_compress(data: bytes, level: int = 0) -> bytes:
+        encodes.append(len(encodes))
+        if len(encodes) == 1:
+            encoding.set()
+            time.sleep(0.4)  # the other writer lands inside this window
+        return real_compress(data, level)
+
+    monkeypatch.setattr(storage.zstd, "compress", slow_first_compress)
+    finishing = _payload(failure_count=20, summary="finishing")
+    save = asyncio.create_task(
+        storage.save_result("job-cas", "", "completed", finishing)
+    )
+    await asyncio.to_thread(encoding.wait)
+
+    def _link(data: dict) -> None:
+        data["request_params"]["reanalyzed_to_job_ids"] = ["job-child"]
+
+    await storage.patch_result_json("job-cas", _link)
+    await save
+
+    stored = storage.parse_result_json(
+        (await _stored(_storage, "job-cas"))["result_json"], job_id="job-cas"
+    )
+    assert stored["summary"] == "finishing", "the write landed a stale payload"
+    assert len(stored["failures"]) == 20, "the retried write stored a partial payload"
+    assert stored["request_params"]["reanalyzed_to_job_ids"] == ["job-child"], (
+        "the retry must re-read the row it writes over"
+    )
+    # Two encodes by the save (first + retry) and one by the patch in between.
+    assert len(encodes) == 3, "the CAS miss did not re-encode"
+    assert "changed while the payload was encoded" in storage_logs.text
+
+
+async def test_a_payload_that_never_settles_is_refused_not_overwritten(
+    _storage, monkeypatch
+) -> None:
+    """Retries are bounded: past the bound the write is refused, the row untouched."""
+    await storage.save_result("job-cas-fail", "", "running", _payload(failure_count=20))
+    before = (await _stored(_storage, "job-cas-fail"))["result_json"]
+
+    async def never_settles(*args: Any, **kwargs: Any) -> bool:
+        return False
+
+    monkeypatch.setattr(storage, "_stored_payload_unchanged", never_settles)
+    real_dump = storage._dump_result_json
+    encodes = 0
+
+    def counting_dump(result: dict) -> Any:
+        nonlocal encodes
+        encodes += 1
+        return real_dump(result)
+
+    monkeypatch.setattr(storage, "_dump_result_json", counting_dump)
+    with pytest.raises(storage.ConcurrentResultWriteError, match="nothing was written"):
+        await storage.save_result(
+            "job-cas-fail", "", "completed", _payload(failure_count=20, summary="new")
+        )
+
+    assert encodes == storage._MAX_RESULT_WRITE_ATTEMPTS
+    assert (await _stored(_storage, "job-cas-fail"))["result_json"] == before
+
+
+async def test_a_status_only_update_never_touches_the_payload(
+    _storage, monkeypatch
+) -> None:
+    """No payload, no read, no thread hop and no encode -- just the status write."""
+    await storage.save_result(
+        "job-status-only", "", "running", _payload(failure_count=20)
+    )
+    before = (await _stored(_storage, "job-status-only"))["result_json"]
+
+    def boom(*args: Any, **kwargs: Any) -> Any:
+        raise AssertionError("a status-only update read or encoded result_json")
+
+    monkeypatch.setattr(storage, "_dump_result_json", boom)
+    monkeypatch.setattr(storage, "parse_result_json", boom)
+    real_to_thread = asyncio.to_thread
+    hops: list[Any] = []
+
+    async def counting_to_thread(func: Any, /, *args: Any, **kwargs: Any) -> Any:
+        hops.append(func)
+        return await real_to_thread(func, *args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "to_thread", counting_to_thread)
+    await storage.update_status("job-status-only", "failed")
+
+    assert hops == [], "a status-only update paid a thread hop"
+    async with storage._connect_db() as db:
+        status = (
+            await (
+                await db.execute(
+                    "SELECT status FROM results WHERE job_id = 'job-status-only'"
+                )
+            ).fetchone()
+        )[0]
+    assert status == "failed"
+    assert (await _stored(_storage, "job-status-only"))["result_json"] == before
