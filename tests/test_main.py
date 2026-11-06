@@ -14772,3 +14772,138 @@ class TestAdminUsersPaging:
     )
     def test_out_of_range_paging_is_rejected(self, test_client, params) -> None:
         assert test_client.get("/api/admin/users", params=params).status_code == 422
+
+
+class TestAnalysisReaperIsOneCopy:
+    """Both analysis ``finally`` blocks reap through one helper (#424).
+
+    The sequence — revoke task first, then the graph/artifact steps, then the
+    shielded revoke — is only correct when it is edited in one place. Two copies
+    had already drifted (``if repo_manager:`` vs ``if repo_manager is not None:``),
+    so the contract asserted here is the shared call, not a shape of the source.
+    """
+
+    #: The whole surface of the helper: no call site may grow a private variant.
+    _KWARGS: ClassVar[set[str]] = {
+        "job_id",
+        "auth_header",
+        "source",
+        "repo_manager",
+        "repo_path",
+    }
+
+    async def test_ci_source_analysis_reaps_through_the_shared_helper(
+        self, temp_db_path: Path, monkeypatch
+    ) -> None:
+        from rootcoz.main import _process_ci_source_analysis
+        from rootcoz.models import UnifiedAnalyzeRequest
+        from rootcoz.sources.base import CISourceResult
+
+        monkeypatch.setattr(storage, "DB_PATH", temp_db_path)
+        body = UnifiedAnalyzeRequest(
+            type="jenkins",
+            job_name="my-job",
+            build_number=1,
+            ai_provider="claude",
+            ai_model="test-model",
+        )
+        merged = _build_wait_settings(
+            jenkins_url="https://jenkins.example.com", wait_for_completion=False
+        )
+        with (
+            patch.object(storage, "DB_PATH", temp_db_path),
+            patch(
+                "rootcoz.sources.jenkins_source.JenkinsSource.fetch",
+                new_callable=AsyncMock,
+                return_value=CISourceResult(
+                    failures=[], identity={"job_name": "my-job"}
+                ),
+            ),
+            patch("rootcoz.main.safe_update_progress", new_callable=AsyncMock),
+            _patch_preflight(),
+            patch(
+                "rootcoz.main._reap_analysis_workspace", new_callable=AsyncMock
+            ) as reap,
+        ):
+            await storage.init_db()
+            await storage.save_result("job-one-copy", "", "pending", {})
+            await _process_ci_source_analysis(
+                job_id="job-one-copy",
+                body=body,
+                merged=merged,
+                display_name="my-job",
+                ai_provider="claude",
+                ai_model="test-model",
+                peer_ai_configs=None,
+                tests_repo_url="",
+                tests_repo_ref="",
+                resolved_tests_repo_token="",
+                additional_repos_list=[],
+                base_url="",
+            )
+
+        reap.assert_awaited_once()
+        kwargs = reap.await_args.kwargs
+        assert set(kwargs) == self._KWARGS
+        assert kwargs["job_id"] == "job-one-copy"
+        # The clone workspace the run created is handed to the reaper, not lost.
+        assert kwargs["repo_manager"] is not None
+        assert kwargs["repo_path"] is not None
+
+    async def test_reanalysis_reaps_through_the_shared_helper(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from rootcoz.main import _reanalyze_failure_background
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "one-copy.db")
+        with (
+            patch("rootcoz.main.RepositoryManager") as manager,
+            patch(
+                "rootcoz.main._create_ai_auth_header",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            patch(
+                "rootcoz.main._resolve_settings_json_before_analysis",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "rootcoz.main._reap_analysis_workspace", new_callable=AsyncMock
+            ) as reap,
+        ):
+            manager.return_value.create_workspace.return_value = tmp_path / "workspace"
+            manager.return_value.clone_into.return_value = None
+            await storage.init_db()
+            await storage.save_result(
+                "job-one-copy-2",
+                "",
+                "completed",
+                {"failures": [{"id": "failure-id", "reanalysis_status": "running"}]},
+            )
+            await _reanalyze_failure_background(
+                "job-one-copy-2",
+                "failure-id",
+                {},
+                "claude",
+                "opus",
+                None,
+                "",
+                None,
+                0,
+                "https://example.com/tests",
+                "main",
+                "",
+                None,
+                "admin",
+                1,
+            )
+
+        reap.assert_awaited_once()
+        kwargs = reap.await_args.kwargs
+        assert set(kwargs) == self._KWARGS
+        assert kwargs["job_id"] == "job-one-copy-2"
+        # Same manager and workspace the re-analyze run used: an inline `if
+        # repo_manager:` copy would at best drift again, at worst skip the reaper.
+        assert kwargs["repo_manager"] is manager.return_value
+        assert kwargs["repo_path"] == tmp_path / "workspace"

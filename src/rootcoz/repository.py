@@ -177,9 +177,21 @@ def _clone_with_ssl_retry(
                 f"SSL certificate verification failed for {redact_url(str(repo_url))}, "
                 "retrying with SSL verification disabled (GIT_SSL_NO_VERIFY=1)"
             )
-            # Clean up partial clone before retry
+            # Clean up the partial clone before the retry: a delete that could
+            # not remove the tree leaves a non-empty dir, and cloning into that
+            # residue fails in a way that hides the real cause. Same test as
+            # ``RepositoryManager.cleanup``: only a delete that left nothing is
+            # a safe base for the retry.
             if clone_dir.exists():
-                delete_tree(clone_dir)
+                result = delete_tree(clone_dir)
+                if result.failed or clone_dir.exists():
+                    logger.error(
+                        f"Partial clone at {clone_dir} survived the delete "
+                        f"(failed={result.failed}); not retrying the clone into it"
+                    )
+                    raise OSError(
+                        f"Cannot retry the clone: {clone_dir} could not be removed"
+                    ) from exc
                 clone_dir.mkdir(parents=True, exist_ok=True)
             Repo.clone_from(
                 repo_url,

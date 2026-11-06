@@ -5473,6 +5473,46 @@ def _count_failed_child_groups(children: list[ChildJobAnalysis]) -> int:
     return total
 
 
+async def _reap_analysis_workspace(
+    *,
+    job_id: str,
+    auth_header: str,
+    source: CISource | None,
+    repo_manager: RepositoryManager | None,
+    repo_path: Path | None,
+) -> None:
+    """Revoke the AI session and reap one analysis run's workspace, off the loop.
+
+    The single copy of the whole sequence both analysis ``finally`` blocks run:
+    revoke task first, then the graph/artifact steps, then the shielded revoke.
+    Kept here because the ordering only holds if it is edited in one place — the
+    two copies had already drifted (#424).
+    """
+    logger.debug(f"Cleaning up workspace for job_id={job_id}")
+    # Created before any await: a cancellation cancels every later await in this
+    # block, and the revoke must not be lost on the cancel path.
+    session_task = asyncio.create_task(_cleanup_ai_session(auth_header))
+    steps: list[Callable[[], object]] = []
+    # Downloaded CI artifacts are not the tree a live graph builder owns, so an
+    # abandoned graph delete must not skip them: nothing else sweeps that dir.
+    always: tuple[Callable[[], object], ...] = (
+        (source.cleanup,) if source is not None else ()
+    )
+    if repo_manager is not None:
+        from rootcoz.engine.graft import reap_graph
+        from rootcoz.engine.graft_http import unregister_workspace
+
+        if repo_path is not None:
+            steps += [
+                partial(unregister_workspace, repo_path),
+                partial(reap_graph, job_id, repo_path),
+            ]
+        steps.append(repo_manager.cleanup)
+    if steps or always:
+        await cleanup_off_loop(job_id, *steps, always=always)
+    await asyncio.shield(session_task)
+
+
 async def _process_ci_source_analysis(
     *,
     job_id: str,
@@ -6120,29 +6160,13 @@ async def _process_ci_source_analysis(
         notify_token_usage_changed()
 
     finally:
-        logger.debug(f"Cleaning up workspace for job_id={job_id}")
-        # Created before any await: a cancellation cancels every later await in
-        # this block, and the revoke must not be lost on the cancel path.
-        session_task = asyncio.create_task(_cleanup_ai_session(auth_header))
-        steps: list[Callable[[], object]] = []
-        # Downloaded CI artifacts are not the tree a live graph builder owns, so an
-        # abandoned graph delete must not skip them: nothing else sweeps that dir.
-        always: tuple[Callable[[], object], ...] = (
-            (source.cleanup,) if source is not None else ()
+        await _reap_analysis_workspace(
+            job_id=job_id,
+            auth_header=auth_header,
+            source=source,
+            repo_manager=repo_manager,
+            repo_path=repo_path,
         )
-        if repo_manager is not None:
-            from rootcoz.engine.graft import reap_graph
-            from rootcoz.engine.graft_http import unregister_workspace
-
-            if repo_path is not None:
-                steps += [
-                    partial(unregister_workspace, repo_path),
-                    partial(reap_graph, job_id, repo_path),
-                ]
-            steps.append(repo_manager.cleanup)
-        if steps or always:
-            await cleanup_off_loop(job_id, *steps, always=always)
-        await asyncio.shield(session_task)
 
 
 def _resolve_request_display_name(body: UnifiedAnalyzeRequest) -> str:
@@ -7525,28 +7549,13 @@ async def _reanalyze_failure_background(
 
     finally:
         notify_job_status_changed(job_id)
-        # Created before any await: a cancellation cancels every later await in
-        # this block, and the revoke must not be lost on the cancel path.
-        session_task = asyncio.create_task(_cleanup_ai_session(auth_header))
-        steps: list[Callable[[], object]] = []
-        # Downloaded CI artifacts are not the tree a live graph builder owns, so an
-        # abandoned graph delete must not skip them: nothing else sweeps that dir.
-        always: tuple[Callable[[], object], ...] = (
-            (source.cleanup,) if source is not None else ()
+        await _reap_analysis_workspace(
+            job_id=job_id,
+            auth_header=auth_header,
+            source=source,
+            repo_manager=repo_manager,
+            repo_path=repo_path,
         )
-        if repo_manager:
-            from rootcoz.engine.graft import reap_graph
-            from rootcoz.engine.graft_http import unregister_workspace
-
-            if repo_path is not None:
-                steps += [
-                    partial(unregister_workspace, repo_path),
-                    partial(reap_graph, job_id, repo_path),
-                ]
-            steps.append(repo_manager.cleanup)
-        if steps or always:
-            await cleanup_off_loop(job_id, *steps, always=always)
-        await asyncio.shield(session_task)
 
 
 @app.post(
