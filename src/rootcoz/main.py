@@ -7625,16 +7625,16 @@ async def re_analyze_failure(
 
         # Immediately patch the failure as "running"
         already_running = False
+        marked = False
 
         def _patch_running(result_data: dict[str, Any]) -> None:
-            nonlocal already_running
-            # Re-decided on every attempt: patch_result_json re-applies this to a
-            # re-read payload after a CAS miss, and only the last attempt's verdict
-            # matches the state it wrote. A verdict from a discarded attempt would
-            # answer 409 for a `running` mark that was never kept.
-            already_running = False
+            nonlocal already_running, marked
+            # Both verdicts come from the payload the patch writes: a failure the
+            # stored result no longer holds is not marked, and answering 202 for
+            # it would start work whose state was never recorded.
             failure = _find_failure_by_uuid_in_result(result_data, failure_uuid)
             if failure:
+                marked = True
                 if failure.get("reanalysis_status") == "running":
                     already_running = True
                     return
@@ -7645,6 +7645,15 @@ async def re_analyze_failure(
                 }
 
         await patch_result_json(parent_job_id, _patch_running)
+
+        if not marked:
+            # The failure this request found was removed from the result before
+            # the patch landed (a concurrent rewrite), so there is nothing left to
+            # re-analyze.
+            raise HTTPException(
+                status_code=404,
+                detail=f"Failure {failure_uuid} no longer exists in {parent_job_id}",
+            )
 
         if already_running:
             # Nothing was written for this attempt, so refusing here costs no work.
@@ -10989,16 +10998,23 @@ async def abort_analysis(
 
     # Re-check status — task may have completed between cancel and here
     current = await storage.get_result(job_id)
-    if current and current.get("status") in ("completed", "failed"):
+    decided_from = current["status"] if current else None
+    if decided_from in ("completed", "failed"):
         logger.info(f"Job {job_id} completed/failed during abort — not overwriting")
         return {
-            "status": current["status"],
-            "message": f"Job finished as {current['status']} during abort",
+            "status": decided_from,
+            "message": f"Job finished as {decided_from} during abort",
         }
 
+    # The status this abort was decided from guards the write, so a job that
+    # finishes while the abort waits for its write lock is not ended over.
     try:
-        await update_status(
-            job_id, "aborted", abort_data, refusal_log_level=logging.WARNING
+        aborted = await update_status(
+            job_id,
+            "aborted",
+            abort_data,
+            refusal_log_level=logging.WARNING,
+            expect_status=decided_from,
         )
     except UnsupportedResultEncoding:
         # The abort is the status transition, and the job's task is already gone,
@@ -11006,7 +11022,17 @@ async def abort_analysis(
         # that stored report belongs to a build with a newer codec, so it stays
         # byte-identical and the job is ended with a status-only update. The
         # refusal was already logged (once, at WARNING) by the write itself.
-        await update_status(job_id, "aborted")
+        aborted = await update_status(job_id, "aborted", expect_status=decided_from)
+    if not aborted:
+        # A status newer than the one this abort was decided from landed first;
+        # reporting the job as aborted would contradict the row.
+        current = await storage.get_result(job_id)
+        finished = current["status"] if current else "gone"
+        logger.info(f"Job {job_id} reached {finished} during abort — not overwriting")
+        return {
+            "status": finished,
+            "message": f"Job finished as {finished} during abort",
+        }
     notify_active_count_changed()
     notify_dashboard_changed()
     notify_job_status_changed(job_id)

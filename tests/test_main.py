@@ -839,6 +839,34 @@ class TestAnalyzeEndpoint:
             assert data["base_url"] == ""
             assert data["result_url"].startswith("/results/")
 
+    def test_a_refused_initial_write_starts_no_analysis(self, test_client) -> None:
+        """#419: nothing is started for a job whose initial state was not written.
+
+        The initial write is refused when the row holds a payload this build
+        cannot decode, and the enqueue must not spawn the analysis then: no write
+        of this build could record the status it starts with.
+        """
+        with (
+            patch(
+                "rootcoz.main.save_result",
+                side_effect=storage.UnsupportedResultEncoding("newer build"),
+            ),
+            patch("rootcoz.main._process_ci_source_analysis") as process,
+            pytest.raises(storage.UnsupportedResultEncoding),
+        ):
+            test_client.post(
+                "/analyze",
+                json={
+                    "type": "jenkins",
+                    "job_name": "test",
+                    "build_number": 123,
+                    "tests_repo_url": "https://github.com/example/repo",
+                    "ai_provider": "claude",
+                    "ai_model": "test-model",
+                },
+            )
+        process.assert_not_called()
+
     def test_analyze_invalid_build_number(self, test_client) -> None:
         """Test that invalid build number returns 422."""
         response = test_client.post(
@@ -7681,65 +7709,47 @@ class TestReAnalyzeFailure:
         assert failure["status"] == "FAILED"
 
     @pytest.mark.asyncio
-    async def test_re_analyze_that_wins_a_retry_starts(self, test_client) -> None:
-        """The 409 is decided from the state the patch actually wrote.
+    async def test_re_analyze_of_a_failure_removed_before_the_patch_is_refused(
+        self, test_client
+    ) -> None:
+        """A failure the written payload no longer holds starts no re-analysis.
 
-        The first attempt sees the failure already running and is discarded by the
-        CAS (a completion cleared it under the encode); the retry writes `running`.
-        Answering 409 there would refuse a re-analysis that has already started.
+        The failure is found in the stored result, then a concurrent rewrite takes
+        it out before this request's patch lands. The patch marks nothing, so the
+        endpoint must refuse instead of answering 202 for work it never recorded.
         """
-        import sqlite3
-
         fa = FailureAnalysis(
-            test_name="tests.TestReAnalyze.test_race",
+            test_name="tests.TestReAnalyze.test_removed",
             error="ValueError",
             analysis=AnalysisDetail(classification="CODE ISSUE"),
         )
-        fa_dict = fa.model_dump(mode="json")
-        fa_dict["reanalysis_status"] = "running"
         params = encrypt_sensitive_fields(
             {"ai_provider": "claude", "ai_model": "opus", "submitted_by": "admin"}
         )
         params["submitted_by"] = "admin"
         await storage.save_result(
-            "job-reanalyze-race",
+            "job-reanalyze-removed",
             "",
             "completed",
-            {"summary": "1 failure", "failures": [fa_dict], "request_params": params},
+            {
+                "summary": "1 failure",
+                "failures": [fa.model_dump(mode="json")],
+                "request_params": params,
+            },
         )
 
-        real_dump = storage._dump_result_json
-        raced = False
-
-        def dump_after_completion(result_data: dict[str, Any]) -> Any:
-            nonlocal raced
-            failures = result_data.get("failures") or []
-            if not raced and failures and failures[0].get("reanalysis_status"):
-                # The other worker finishes the re-analysis while this payload is
-                # encoded, so the attempt that read `running` is obsolete.
-                raced = True
-                done = dict(result_data)
-                done["failures"] = [
-                    {k: v for k, v in failures[0].items() if k != "reanalysis_status"}
-                ]
-                with sqlite3.connect(storage.DB_PATH) as conn:
-                    conn.execute(
-                        "UPDATE results SET result_json = ? WHERE job_id = ?",
-                        (json.dumps(done), "job-reanalyze-race"),
-                    )
-            return real_dump(result_data)
-
         with (
-            patch.object(storage, "_dump_result_json", dump_after_completion),
-            patch("rootcoz.main._reanalyze_failure_background", new_callable=AsyncMock),
+            patch("rootcoz.main._find_failure_by_uuid_in_result", return_value=None),
+            patch(
+                "rootcoz.main._reanalyze_failure_background", new_callable=AsyncMock
+            ) as background,
         ):
             response = test_client.post(f"/api/failures/{fa.id}/re-analyze")
 
-        assert response.status_code == 202, response.text
-        stored = await storage.get_result("job-reanalyze-race")
-        assert stored["result"]["failures"][0]["reanalysis_status"] == "running", (
-            "the request started a re-analysis it should have reported"
-        )
+        assert response.status_code == 404, response.text
+        background.assert_not_called()
+        stored = await storage.get_result("job-reanalyze-removed")
+        assert "reanalysis_status" not in stored["result"]["failures"][0]
 
     @pytest.mark.asyncio
     async def test_reanalyze_usage_isolated_by_attempt_and_child(

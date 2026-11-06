@@ -1143,16 +1143,16 @@ async def test_a_slow_encode_does_not_hold_the_write_lock(
         assert stored["result"]["summary"] == payload["summary"]
 
 
-async def test_a_payload_changed_during_the_encode_is_re_read(
-    _storage, monkeypatch, storage_logs
+async def test_a_patch_waits_for_the_write_it_would_have_raced(
+    _storage, monkeypatch
 ) -> None:
-    """A CAS miss re-reads and re-encodes: the write lands on the newer payload.
+    """A patch cannot land inside another write, so neither can lose the other.
 
-    The row is changed by another writer while our payload is being encoded. The
-    write must notice, re-read (keeping the forward link that arrived meanwhile)
-    and write a complete payload -- not the stale one it encoded first.
+    The save holds the job's write lock while its payload is encoded, so a patch
+    for the same job waits for it: the link is applied to the payload the save
+    wrote, and the save's payload is complete rather than stale.
     """
-    await storage.save_result("job-cas", "", "running", _payload(failure_count=20))
+    await storage.save_result("job-lock", "", "running", _payload(failure_count=20))
 
     real_compress = zstd.compress
     encoding = threading.Event()
@@ -1162,43 +1162,44 @@ async def test_a_payload_changed_during_the_encode_is_re_read(
         encodes.append(len(encodes))
         if len(encodes) == 1:
             encoding.set()
-            time.sleep(0.4)  # the other writer lands inside this window
+            time.sleep(0.4)  # the patch has to wait out this window
         return real_compress(data, level)
 
     monkeypatch.setattr(storage.zstd, "compress", slow_first_compress)
     finishing = _payload(failure_count=20, summary="finishing")
     save = asyncio.create_task(
-        storage.save_result("job-cas", "", "completed", finishing)
+        storage.save_result("job-lock", "", "completed", finishing)
     )
     await asyncio.to_thread(encoding.wait)
 
     def _link(data: dict) -> None:
         data["request_params"]["reanalyzed_to_job_ids"] = ["job-child"]
 
-    await storage.patch_result_json("job-cas", _link)
+    patch = asyncio.create_task(storage.patch_result_json("job-lock", _link))
+    assert not patch.done(), "the patch ran inside the save's write"
     await save
+    await patch
 
     stored = storage.parse_result_json(
-        (await _stored(_storage, "job-cas"))["result_json"], job_id="job-cas"
+        (await _stored(_storage, "job-lock"))["result_json"], job_id="job-lock"
     )
-    assert stored["summary"] == "finishing", "the write landed a stale payload"
-    assert len(stored["failures"]) == 20, "the retried write stored a partial payload"
+    assert stored["summary"] == "finishing"
+    assert len(stored["failures"]) == 20
     assert stored["request_params"]["reanalyzed_to_job_ids"] == ["job-child"], (
-        "the retry must re-read the row it writes over"
+        "the patch must apply to the payload the save wrote"
     )
-    # Two encodes by the save (first + retry) and one by the patch in between.
-    assert len(encodes) == 3, "the CAS miss did not re-encode"
-    assert "changed while the payload was encoded" in storage_logs.text
+    # One encode by the save and one by the patch: neither re-encoded.
+    assert len(encodes) == 2
 
 
-async def test_a_slow_result_write_never_reverts_a_newer_status(
-    _storage, monkeypatch, storage_logs
+async def test_a_status_write_waits_for_the_payload_write_it_raced(
+    _storage, monkeypatch
 ) -> None:
-    """The status a write was decided from guards the transition it writes.
+    """Writes to one job are ordered, never interleaved, so nothing is reverted.
 
-    A payload writer stages its report without the lock, so a status-only update
-    that lands inside that window is the newer state: it must survive, and the
-    losing write is refused (payload and all) instead of reverting it.
+    A status-only update for a job whose payload is being encoded waits for that
+    write. Both land, in that order: the completion is the newer state and the
+    payload written before it stays.
     """
     await storage.save_result(
         "job-status-race", "", "running", _payload(failure_count=20)
@@ -1211,7 +1212,7 @@ async def test_a_slow_result_write_never_reverts_a_newer_status(
         encodes.append(len(encodes))
         if len(encodes) == 1:
             encoding.set()
-            time.sleep(0.4)  # the status-only writer lands inside this window
+            time.sleep(0.4)  # the status-only writer has to wait this out
         return real_dump(result)
 
     monkeypatch.setattr(storage, "_dump_result_json", slow_first_dump)
@@ -1223,45 +1224,36 @@ async def test_a_slow_result_write_never_reverts_a_newer_status(
         )
     )
     await asyncio.to_thread(encoding.wait)
-    assert await storage.update_status("job-status-race", "completed") is True
-    assert await failing is False, "the losing transition must say it did not land"
-
-    stored = await storage.get_result("job-status-race")
-    assert stored["status"] == "completed", "a slow writer reverted a newer status"
-    assert stored["result"]["summary"] == "many failures", (
-        "the refused write still landed its payload under the newer status"
+    completing = asyncio.create_task(
+        storage.update_status("job-status-race", "completed")
     )
-    assert len(encodes) == 1, "a lost transition must not be retried"
-    assert "was decided from status 'running'" in storage_logs.text
+    assert not completing.done(), "the status write ran inside the payload write"
+
+    assert await failing is True
+    assert await completing is True
+    stored = await storage.get_result("job-status-race")
+    assert stored["status"] == "completed", "the newer status must be the last one"
+    assert stored["result"]["summary"] == "boom"
+    assert len(encodes) == 1, "an ordered write must not re-encode"
 
 
-async def test_a_payload_that_never_settles_is_refused_not_overwritten(
-    _storage, monkeypatch
-) -> None:
-    """Retries are bounded: past the bound the write is refused, the row untouched."""
-    await storage.save_result("job-cas-fail", "", "running", _payload(failure_count=20))
-    before = (await _stored(_storage, "job-cas-fail"))["result_json"]
+async def test_an_expectation_that_moved_refuses_the_transition(_storage) -> None:
+    """A transition decided from one status is refused over a newer one.
 
-    async def never_settles(*args: Any, **kwargs: Any) -> bool:
-        return False
+    The abort endpoint decides from the status it re-read; the write takes that
+    status as its guard rather than whatever the row holds by then (see
+    ``_write_status``), so a job that finished meanwhile is never ended over.
+    """
+    await storage.save_result("job-expect", "", "running", _payload(failure_count=20))
+    assert await storage.update_status("job-expect", "completed") is True
 
-    monkeypatch.setattr(storage, "_stored_payload_unchanged", never_settles)
-    real_dump = storage._dump_result_json
-    encodes = 0
-
-    def counting_dump(result: dict) -> Any:
-        nonlocal encodes
-        encodes += 1
-        return real_dump(result)
-
-    monkeypatch.setattr(storage, "_dump_result_json", counting_dump)
-    with pytest.raises(storage.ConcurrentResultWriteError, match="nothing was written"):
-        await storage.save_result(
-            "job-cas-fail", "", "completed", _payload(failure_count=20, summary="new")
-        )
-
-    assert encodes == storage._MAX_RESULT_WRITE_ATTEMPTS
-    assert (await _stored(_storage, "job-cas-fail"))["result_json"] == before
+    assert (
+        await storage.update_status("job-expect", "aborted", expect_status="running")
+        is False
+    )
+    stored = await storage.get_result("job-expect")
+    assert stored["status"] == "completed"
+    assert stored["result"]["summary"] == "many failures"
 
 
 async def test_a_status_only_update_never_touches_the_payload(
@@ -1301,14 +1293,15 @@ async def test_a_status_only_update_never_touches_the_payload(
     assert (await _stored(_storage, "job-status-only"))["result_json"] == before
 
 
-async def test_usage_recorded_during_the_encode_is_in_the_committed_payload(
+async def test_usage_recorded_after_the_snapshot_is_merged_by_the_next_write(
     _storage, monkeypatch
 ) -> None:
-    """Usage merged before the unlocked encode is re-merged when more landed.
+    """The payload summarizes the usage recorded before its write, no more.
 
-    ``record_token_usage`` inserts on its own connection, so a call that finishes
-    while the report is being encoded would be missing from a payload committed
-    without re-reading the rows it summarized.
+    ``record_token_usage`` inserts on its own connection and does not take the
+    job's write lock, so a call that finishes while a payload is encoded is not
+    in that payload. It is not lost: it is in the usage rows, which the next write
+    merges -- the cost of serialising writes instead of compare-and-swapping them.
     """
     await storage.save_result(
         "job-usage-race", "", "running", _payload(failure_count=20)
@@ -1348,7 +1341,17 @@ async def test_usage_recorded_during_the_encode_is_in_the_committed_payload(
         job_id="job-usage-race",
     )
     assert committed["summary"] == "finishing"
-    assert committed["token_usage"]["total_input_tokens"] == 7, (
-        "usage recorded during the encode is missing from the committed payload"
+    assert "total_input_tokens" not in committed["token_usage"], (
+        "the row landed after the snapshot"
     )
-    assert len(encodes) == 2, "the write did not re-merge the usage that landed"
+
+    await storage.update_status(
+        "job-usage-race", "completed", _payload(failure_count=20, summary="finishing")
+    )
+    merged = storage.parse_result_json(
+        (await _stored(_storage, "job-usage-race"))["result_json"],
+        job_id="job-usage-race",
+    )
+    assert merged["token_usage"]["total_input_tokens"] == 7, (
+        "the next write must merge the usage recorded since the snapshot"
+    )

@@ -1,7 +1,6 @@
 """SQLite storage for analysis results."""
 
 import asyncio
-import contextlib
 import hashlib
 import hmac
 import json
@@ -12,6 +11,7 @@ import secrets
 import sqlite3
 import time
 import uuid
+import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Sequence
 from compression import zstd
 from contextlib import asynccontextmanager
@@ -304,21 +304,26 @@ def _hash_session_token(token: str) -> str:
 _RESULT_ZSTD_MIN_BYTES = 1024  # below this a frame is never smaller
 _RESULT_ZSTD_LEVEL = 3  # 9.1x at 0.21 ms/row; level 9 buys 8% for 3x the CPU
 
-# A result write encodes without the lock, so it re-reads and re-encodes when the
-# row moved under it. Bounded: past this the write is refused, not forced. Five
-# matters for patches: clone progress fires many read-modify-writes at one row,
-# and a caller that treats a refusal as "best effort" would lose the update.
-_MAX_RESULT_WRITE_ATTEMPTS = 5
+# Every ``result_json`` write for a job holds that job's lock from the read to the
+# commit, so no write can move the row between the two and nothing has to detect
+# what moved under an encode. The lock is per job: a slow encode delays only that
+# job's writers, and the SQLite write lock is still taken after the encode.
+_job_write_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
 
 
-class ConcurrentResultWriteError(RuntimeError):
-    """``result_json`` changed under every write attempt, so nothing was written.
+def _job_write_lock(job_id: str) -> asyncio.Lock:
+    """Return the lock that serialises every ``result_json`` write for *job_id*.
 
-    The payload is encoded outside the write lock and compared-and-swapped
-    inside it. When the row moved under every attempt, writing would overwrite
-    another writer's newer payload instead of merging into it, so the write is
-    refused and the caller is told it did not happen.
+    Weakly held, so a finished job's lock is collected as soon as no task holds or
+    waits for it: the registry cannot grow with the number of jobs.
     """
+    lock = _job_write_locks.get(job_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _job_write_locks[job_id] = lock
+    return lock
 
 
 def _encode_result_text(raw: str) -> bytes | str:
@@ -3024,9 +3029,9 @@ def _build_status_update_clause(status: str) -> tuple[list[str], list[Any]]:
     """Build the SET clause parts and params for the status half of a write.
 
     Returns the set-clause fragments and the corresponding parameter list.
-    The caller must append the trailing ``job_id`` parameter, and is expected to
-    guard the statement with the status the transition was decided from -- see
-    :func:`_write_status_transition`.
+    The caller must append the trailing ``job_id`` parameter, and may guard the
+    statement with the status its transition was decided from -- see
+    :func:`_write_status`.
 
     Args:
         status: New status value.
@@ -3108,31 +3113,6 @@ async def _sync_result_token_usage(
     await _attach_failure_usage(db, job_id, result)
 
 
-async def _token_usage_fingerprint(
-    db: aiosqlite.Connection, job_id: str
-) -> tuple[int, int]:
-    """Identify the per-call usage rows a payload was merged with.
-
-    The compare-and-swap token for token usage, taken before the payload is
-    encoded: usage rows are only ever inserted or deleted (``record_token_usage``
-    uses its own connection), so their count plus newest ``rowid`` changes with
-    every one of them.
-    """
-    cursor = await db.execute(
-        "SELECT COUNT(*), COALESCE(MAX(rowid), 0) FROM ai_token_usage WHERE job_id = ?",
-        (job_id,),
-    )
-    row = await cursor.fetchone()
-    return (row[0], row[1])
-
-
-async def _token_usage_unchanged(
-    db: aiosqlite.Connection, job_id: str, expected: tuple[int, int]
-) -> bool:
-    """Return whether no usage row landed since *expected* was taken."""
-    return await _token_usage_fingerprint(db, job_id) == expected
-
-
 async def _attach_failure_usage(
     db: aiosqlite.Connection, job_id: str, result: dict[str, Any]
 ) -> None:
@@ -3156,16 +3136,14 @@ async def _row_exists(db: aiosqlite.Connection, job_id: str) -> bool:
     return await cursor.fetchone() is not None
 
 
-async def _read_result_snapshot(
+async def _read_stored_result(
     db: aiosqlite.Connection, job_id: str
-) -> tuple[bytes | str | None, dict[str, Any] | None, str | None]:
-    """Return the raw stored ``result_json``, the payload parsed from it, and ``status``.
+) -> dict[str, Any] | None:
+    """Return the payload stored for *job_id*, or None when there is none.
 
-    The raw value is the compare-and-swap token: the payload is encoded without
-    the write lock, so the write that follows only lands when the column still
-    holds exactly this value (see :func:`_stored_payload_unchanged`). ``status``
-    is the state the write's own status transition is decided from, re-checked
-    the same way (see :func:`_write_status_transition`).
+    Read while holding the job's write lock, so it stays the payload the write
+    lands on and needs no compare-and-swap to prove it (see
+    :func:`_job_write_lock`).
 
     A damaged frame reads as "no previous payload", so a damaged row can never
     block its own job's updates: the write that follows repairs it. The one
@@ -3178,78 +3156,19 @@ async def _read_result_snapshot(
             repair but data to leave alone -- see :func:`_refuse_write`.
     """
     cursor = await db.execute(
-        "SELECT result_json, status FROM results WHERE job_id = ?", (job_id,)
+        "SELECT result_json FROM results WHERE job_id = ?", (job_id,)
     )
     row = await cursor.fetchone()
-    raw = row[0] if row else None
-    status = row[1] if row else None
-    if not raw:
-        return raw, None, status
+    if not row or not row[0]:
+        return None
     try:
-        return raw, parse_result_json(raw, job_id=job_id), status
+        return parse_result_json(row[0], job_id=job_id)
     except DamagedResultEncoding as exc:
         logger.warning(
             f"job_id={job_id}: previous result_json is damaged "
             f"({type(exc).__name__}) and is replaced by this write"
         )
-        return raw, None, status
-
-
-async def _stored_payload_unchanged(
-    db: aiosqlite.Connection,
-    job_id: str,
-    expected_json: bytes | str | None,
-    expected_status: str | None = None,
-) -> bool:
-    """Return whether the row still holds what the encode was based on.
-
-    The compare-and-swap of the result writers, made inside the write
-    transaction with the comparison the schema already offers: the raw
-    ``result_json`` bytes (plus ``status`` when the writer's decision to write
-    depended on it).
-    """
-    cursor = await db.execute(
-        "SELECT result_json, status FROM results WHERE job_id = ?", (job_id,)
-    )
-    row = await cursor.fetchone()
-    if row is None:
-        return expected_json is None
-    if row[0] != expected_json:
-        return False
-    return expected_status is None or row[1] == expected_status
-
-
-async def _stale_snapshot_reason(
-    db: aiosqlite.Connection,
-    job_id: str,
-    stored_json: bytes | str | None,
-    usage_rows: tuple[int, int] | None,
-) -> str:
-    """Return what moved under the encode, or "" when the snapshot still holds.
-
-    The payload and its token usage are the two things a result write reads
-    before it encodes and then writes back; either moving means the encoded value
-    is stale, so the write re-reads and re-encodes (bounded by
-    ``_MAX_RESULT_WRITE_ATTEMPTS``). The status it moves is guarded where it is
-    written instead -- see :func:`_write_status_transition`.
-
-    Args:
-        db: Connection holding the write transaction.
-        job_id: Job whose row is about to be written.
-        stored_json: Raw payload the encode was based on.
-        usage_rows: Per-call usage fingerprint the payload was merged with; None
-            when the write carries no payload.
-
-    Returns:
-        The reason, for the retry log line.
-    """
-    if not await _stored_payload_unchanged(db, job_id, stored_json):
-        return "result_json changed"
-    if usage_rows is not None and not await _token_usage_unchanged(
-        db, job_id, usage_rows
-    ):
-        return "token usage was recorded"
-    return ""
+        return None
 
 
 def _refuse_write(
@@ -3284,33 +3203,6 @@ def _refuse_write(
     raise exc
 
 
-def _retry_after_conflict(
-    job_id: str, attempt: int, *, writer: str, reason: str = "result_json changed"
-) -> None:
-    """Report a CAS miss whose encode is about to be redone.
-
-    Args:
-        job_id: Job whose snapshot moved.
-        attempt: Attempt that missed, counting from 1.
-        writer: Name of the writer, for the log line.
-        reason: What moved under the encode, for the log line.
-
-    Raises:
-        ConcurrentResultWriteError: the attempt bound is spent, so the write is
-            refused instead of landing stale.
-    """
-    if attempt >= _MAX_RESULT_WRITE_ATTEMPTS:
-        raise ConcurrentResultWriteError(
-            f"job_id={job_id}: {reason} under all "
-            f"{_MAX_RESULT_WRITE_ATTEMPTS} {writer} attempts, so nothing was written"
-        )
-    logger.info(
-        f"job_id={job_id}: {reason} while the payload was encoded "
-        f"(attempt {attempt}/{_MAX_RESULT_WRITE_ATTEMPTS} of {writer}), re-reading "
-        "and re-encoding before the write"
-    )
-
-
 async def save_result(
     job_id: str,
     build_url: str = "",
@@ -3318,7 +3210,7 @@ async def save_result(
     result: dict[str, Any] | None = None,
     *,
     jenkins_url: str | None = None,
-) -> bool:
+) -> None:
     """Save or update an analysis result.
 
     Args:
@@ -3328,44 +3220,25 @@ async def save_result(
         result: Optional result data to store.
         jenkins_url: Deprecated alias for ``build_url``.
 
-    Nothing is written when the row already holds a payload this build cannot
-    decode but a newer one can (a rollback): see :func:`_refuse_write`. The
-    write lock is never held across an encode; the payload is encoded first and
-    the row is CAS-checked inside the transaction that writes it.
-
-    Returns:
-        True when the row was written, False when the status transition lost the
-        race and the write was refused instead of reverting a newer status (see
-        :func:`_write_status_transition`).
+    The read, the merge, the encode and the write all hold the job's write lock
+    (see :func:`_job_write_lock`), so a concurrent patch cannot be replaced by a
+    payload encoded from an older one. Nothing is written when the row already
+    holds a payload this build cannot decode (a rollback): see
+    :func:`_refuse_write`.
 
     Raises:
         UnsupportedResultEncoding: the save was refused for that reason, so
-            nothing was written.
-        ConcurrentResultWriteError: the row changed under every attempt, so
-            nothing was written.
+            nothing was written and the caller must not treat it as saved.
     """
     if jenkins_url is not None:
         build_url = jenkins_url
     logger.debug(f"Saving result for job_id: {job_id} (status: {status})")
-    for attempt in range(1, _MAX_RESULT_WRITE_ATTEMPTS + 1):
+    async with _job_write_lock(job_id):
         result_json: bytes | str | None = None
-        stored_json: bytes | str | None = None
-        stored_status: str | None = None
-        usage_rows: tuple[int, int] | None = None
         if result is not None:
             try:
-                # The write lock is never held across an encode: the payload is
-                # read, merged and encoded first, and the row is CAS-checked
-                # inside the transaction that writes it. Reading the stored
-                # links here (not under the lock) is why the write re-checks them.
                 async with _connect_db() as db:
-                    # Taken before the merge: usage rows inserted while the
-                    # payload is encoded move this fingerprint, and the write
-                    # then re-merges instead of committing without them.
-                    usage_rows = await _token_usage_fingerprint(db, job_id)
-                    stored_json, previous, stored_status = await _read_result_snapshot(
-                        db, job_id
-                    )
+                    previous = await _read_stored_result(db, job_id)
                     if previous:
                         _preserve_reanalysis_forward_links(previous, result)
                     await _sync_result_token_usage(db, job_id, result)
@@ -3375,30 +3248,10 @@ async def save_result(
             result_json = await asyncio.to_thread(_dump_result_json, result)
         async with _connect_db() as db:
             await db.execute("BEGIN IMMEDIATE")
-            reason = (
-                await _stale_snapshot_reason(db, job_id, stored_json, usage_rows)
-                if result is not None
-                else ""
+            await _write_saved_result(
+                db, job_id, build_url, status, result, result_json
             )
-            if reason:
-                await db.execute("ROLLBACK")
-                _retry_after_conflict(
-                    job_id, attempt, writer="save_result", reason=reason
-                )
-                continue
-            written = await _write_saved_result(
-                db, job_id, build_url, status, result, result_json, stored_status
-            )
-            if not written:
-                await db.execute("ROLLBACK")
-                return False
             await db.commit()
-            return True
-    # Unreachable: the last attempt either returns or is refused by
-    # _retry_after_conflict.
-    raise ConcurrentResultWriteError(
-        f"job_id={job_id}: save_result exhausted its attempts, so nothing was written"
-    )
 
 
 async def _write_saved_result(
@@ -3408,8 +3261,7 @@ async def _write_saved_result(
     status: str,
     result: dict[str, Any] | None,
     result_json: bytes | str | None,
-    expected_status: str | None,
-) -> bool:
+) -> None:
     """Insert and update the row for :func:`save_result` inside its transaction."""
     # Insert the row if it doesn't exist yet (preserves created_at / analysis_started_at).
     (
@@ -3446,40 +3298,37 @@ async def _write_saved_result(
             _RESULTS_DENORM_VERSION,
         ),
     )
-    # The transition first, so a write that lost it never lands the payload that
-    # describes it; both statements are in this transaction either way.
-    if not await _write_status_transition(
-        db, job_id, status, expected_status, writer="save_result"
-    ):
-        return False
+    # The transition first, so the payload never lands without the status it
+    # describes; both statements are in this transaction either way.
+    await _write_status(db, job_id, status, writer="save_result")
     payload_parts, payload_params = _build_payload_update_clause(result_json, result)
     payload_parts.insert(0, "build_url = COALESCE(NULLIF(?, ''), build_url)")
     payload_params.insert(0, build_url)
     payload_params.append(job_id)
     sql = f"UPDATE results SET {', '.join(payload_parts)} WHERE job_id = ?"
     await db.execute(sql, payload_params)
-    return True
 
 
-async def _write_status_transition(
+async def _write_status(
     db: aiosqlite.Connection,
     job_id: str,
     status: str,
-    expected_status: str | None,
     *,
     writer: str,
+    expect_status: str | None = None,
 ) -> bool:
-    """Write the status half of a result write, guarded by its predecessor.
+    """Write the status half of a result write inside its transaction.
 
-    The guard is the ``WHERE`` clause the transition was decided from: a writer
-    that read ``running`` only moves a row that is still ``running``, so a slow
-    one cannot assign ``failed`` over a ``completed`` another worker set while its
-    payload was encoded. ``expected_status`` is None when the write read no state
-    to guard against (a row this call inserts).
+    *expect_status* is the status the caller's decision was made from, passed by a
+    transition that only makes sense against exactly that state: an abort must not
+    end a job that completed while the abort was being decided. The caller passes
+    what it read itself -- re-reading the status here and guarding against that
+    read would guard against the state the write replaces instead of the state the
+    decision needed, which is how a retried write once turned a completed job
+    ``aborted``.
 
-    A lost race is never retried -- the value to write is the caller's, decided
-    from the state that is gone, so re-encoding would only repeat the same stale
-    transition. It is reported and the caller drops the whole write.
+    A missed expectation is never retried: the value to write was decided from a
+    state that is gone, so writing it anyway would revert a newer one.
 
     Returns:
         Whether the transition landed.
@@ -3487,13 +3336,13 @@ async def _write_status_transition(
     set_parts, params = _build_status_update_clause(status)
     params.append(job_id)
     sql = f"UPDATE results SET {', '.join(set_parts)} WHERE job_id = ?"
-    if expected_status is not None:
+    if expect_status is not None:
         sql += " AND status = ?"
-        params.append(expected_status)
+        params.append(expect_status)
     cursor = await db.execute(sql, params)
     if cursor.rowcount == 1:
         return True
-    if not await _row_exists(db, job_id):
+    if expect_status is None:
         logger.warning(f"{writer}: no row found for job_id={job_id}")
         return False
     row = await (
@@ -3501,7 +3350,7 @@ async def _write_status_transition(
     ).fetchone()
     logger.warning(
         f"job_id={job_id}: {writer} to '{status}' was decided from status "
-        f"'{expected_status}' but the row is now '{row[0] if row else '?'}', so the "
+        f"'{expect_status}' but the row is now '{row[0] if row else '?'}', so the "
         "newer status is kept and this write was refused rather than reverting it"
     )
     return False
@@ -3517,8 +3366,8 @@ def _preserve_reanalysis_forward_links(
     copy a finishing job read earlier must not replace the newer stored list —
     that would resurrect a deleted link or drop a re-analysis enqueued
     mid-flight.  The stored list is always the newer one, and both
-    ``save_result`` and ``update_status`` merge it inside their own write
-    transaction.
+    ``save_result`` and ``update_status`` merge it while holding the job's write
+    lock, so nothing can append to it in between.
     """
     stored_params = previous.get("request_params")
     params = result.get("request_params")
@@ -3535,6 +3384,7 @@ async def update_status(
     result: dict[str, Any] | None = None,
     *,
     refusal_log_level: int = logging.ERROR,
+    expect_status: str | None = None,
 ) -> bool:
     """Update the status of an existing analysis result.
 
@@ -3552,41 +3402,30 @@ async def update_status(
         result: Optional result data to store. When None, result_json is not modified.
         refusal_log_level: Log level for a refused payload write; ERROR unless the
             caller's operation survives the refusal (see :func:`_refuse_write`).
+        expect_status: The status the caller's decision was made from, for a
+            transition that only makes sense against that state (see
+            :func:`_write_status`). It is refused rather than reverted over a
+            newer one, and never re-read here.
 
-    As in :func:`save_result`, a stored payload a newer build can decode but this
-    one cannot is left untouched instead of being replaced, and a payload that
-    changes while it is encoded is re-read rather than overwritten stale.
-
-    A status is written as one statement, so nothing else can undo it: the guard
-    that keeps a payload write from reverting a newer status is described in
-    :func:`_write_status_transition`.
+    As in :func:`save_result`, the read, the merge, the encode and the write all
+    hold the job's write lock, and a stored payload a newer build can decode but
+    this one cannot is left untouched instead of being replaced.
 
     Returns:
-        True when the row was written, False when the status transition lost the
-        race and the write was refused instead of reverting a newer status (see
-        :func:`_write_status_transition`).
+        True when the row was written, False when *expect_status* no longer held
+        (see :func:`_write_status`).
 
     Raises:
         UnsupportedResultEncoding: the update was refused for that reason, so
             nothing was written -- not the status either.
-        ConcurrentResultWriteError: the row changed under every attempt.
     """
     logger.debug(f"Updating status for job_id: {job_id} (status: {status})")
-    for attempt in range(1, _MAX_RESULT_WRITE_ATTEMPTS + 1):
+    async with _job_write_lock(job_id):
         result_json: bytes | str | None = None
-        stored_json: bytes | str | None = None
-        stored_status: str | None = None
-        usage_rows: tuple[int, int] | None = None
         if result is not None:
             try:
-                # Same shape as save_result: no write lock across the encode, and
-                # the payload, the usage rows it merged and the status it moves
-                # are all CAS-checked inside the transaction that writes it.
                 async with _connect_db() as db:
-                    usage_rows = await _token_usage_fingerprint(db, job_id)
-                    stored_json, previous, stored_status = await _read_result_snapshot(
-                        db, job_id
-                    )
+                    previous = await _read_stored_result(db, job_id)
                     if previous:
                         for key in ("progress_phase", "progress_log", "cloning_repos"):
                             if key in previous:
@@ -3600,19 +3439,12 @@ async def update_status(
             result_json = await asyncio.to_thread(_dump_result_json, result)
         async with _connect_db() as db:
             await db.execute("BEGIN IMMEDIATE")
-            reason = (
-                await _stale_snapshot_reason(db, job_id, stored_json, usage_rows)
-                if result_json is not None
-                else ""
-            )
-            if reason:
-                await db.execute("ROLLBACK")
-                _retry_after_conflict(
-                    job_id, attempt, writer="update_status", reason=reason
-                )
-                continue
-            if not await _write_status_transition(
-                db, job_id, status, stored_status, writer="update_status"
+            if not await _write_status(
+                db,
+                job_id,
+                status,
+                writer="update_status",
+                expect_status=expect_status,
             ):
                 await db.execute("ROLLBACK")
                 return False
@@ -3627,11 +3459,6 @@ async def update_status(
                 )
             await db.commit()
             return True
-    # Unreachable: the last attempt either returns or is refused by
-    # _retry_after_conflict.
-    raise ConcurrentResultWriteError(
-        f"job_id={job_id}: update_status exhausted its attempts, so nothing was written"
-    )
 
 
 def _end_active_clone_operations(
@@ -3948,24 +3775,23 @@ async def patch_result_json(
 ) -> None:
     """Atomically read-modify-write the ``result_json`` blob for *job_id*.
 
-        The *patch_fn* is called with the parsed ``result`` dict and is expected
-    to mutate it in place.  The payload is read, patched and encoded without the
-        write lock, and the write is compare-and-swapped against the raw payload
-        the patch was applied to: a row that changed meanwhile is re-read and
-        re-patched, so a patch never lands on a stale base.
+    The *patch_fn* is called with the parsed ``result`` dict and is expected to
+    mutate it in place. The read, the patch and the encode hold the job's write
+    lock (see :func:`_job_write_lock`), so a patch always lands on the payload it
+    was applied to: nothing else can write that row in between.
 
-                After *patch_fn* returns, denormalized identity columns (``job_name``,
-                ``build_number``, ``build_id``) are synced from the patched dict using
-                key-presence semantics: only keys present in the result update their
-                columns — missing keys leave existing column values unchanged.
+    After *patch_fn* returns, denormalized identity columns (``job_name``,
+    ``build_number``, ``build_id``) are synced from the patched dict using
+    key-presence semantics: only keys present in the result update their columns
+    — missing keys leave existing column values unchanged.
 
     If the row does not exist or ``result_json`` is empty, this is a no-op.
-        ``skip_terminal`` prevents patches to terminal jobs; ``allow_completed``
-        permits completed jobs when a reanalysis updates clone progress. Identified
-        re-analysis updates require a running failure regardless of parent status.
-        ``require_job_id`` makes the patch conditional: when set and that job row no
-        longer exists, the patch is skipped, so a link can never be created for an
-        already-deleted result.
+    ``skip_terminal`` prevents patches to terminal jobs; ``allow_completed``
+    permits completed jobs when a reanalysis updates clone progress. Identified
+    re-analysis updates require a running failure regardless of parent status.
+    ``require_job_id`` makes the patch conditional: when set and that job row no
+    longer exists, the patch is skipped, so a link can never be created for an
+    already-deleted result.
 
     A damaged frame is replaced by the patched result; a payload a newer build can
     decode but this one cannot is left untouched and the patch is refused.
@@ -3973,10 +3799,8 @@ async def patch_result_json(
     Raises:
         UnsupportedResultEncoding: the patch was refused for that reason, so the
             stored payload is unchanged.
-        ConcurrentResultWriteError: the row changed under every attempt, so
-            nothing was written.
     """
-    for attempt in range(1, _MAX_RESULT_WRITE_ATTEMPTS + 1):
+    async with _job_write_lock(job_id):
         async with _connect_db() as db:
             cursor = await db.execute(
                 "SELECT result_json, status FROM results WHERE job_id = ?", (job_id,)
@@ -3997,9 +3821,8 @@ async def patch_result_json(
             )
         ):
             return
-        stored_json, stored_status = row[0], row[1]
         try:
-            result_data = parse_result_json(stored_json, job_id=job_id)
+            result_data = parse_result_json(row[0], job_id=job_id)
         except DamagedResultEncoding as exc:
             # A patch is applied to the stored payload; with a damaged frame
             # there is none readable, so the patch starts from an empty
@@ -4027,37 +3850,23 @@ async def patch_result_json(
                 return
         patch_fn(result_data)
         set_parts = ["result_json = ?"]
-        # Encoded before the transaction, so the write lock never spans it. Unlike
-        # save_result/update_status this encode stays on the loop: a patch runs
-        # from request handlers that already hold the payload, and a thread hop
-        # here would appear in every caller that stubs ``asyncio.to_thread``.
+        # Encoded before the transaction, so the SQLite write lock never spans it.
+        # Unlike save_result/update_status this encode stays on the loop: a patch
+        # runs from request handlers that already hold the payload, and a thread
+        # hop here would appear in every caller that stubs ``asyncio.to_thread``.
         params: list[Any] = [_dump_result_json(result_data)]
         _append_denormalized_set_parts(result_data, set_parts, params)
         params.append(job_id)
         async with _connect_db() as db:
             await db.execute("BEGIN IMMEDIATE")
-            try:
-                if require_job_id and not await _row_exists(db, require_job_id):
-                    await db.execute("ROLLBACK")
-                    return
-                if not await _stored_payload_unchanged(
-                    db, job_id, stored_json, stored_status
-                ):
-                    await db.execute("ROLLBACK")
-                    _retry_after_conflict(job_id, attempt, writer="patch_result_json")
-                    continue
-                await db.execute(
-                    f"UPDATE results SET {', '.join(set_parts)} WHERE job_id = ?",
-                    params,
-                )
-                await db.commit()
+            if require_job_id and not await _row_exists(db, require_job_id):
+                await db.execute("ROLLBACK")
                 return
-            except Exception:
-                # A refused write rolled back already; a second rollback must not
-                # mask the refusal with "no transaction is active".
-                with contextlib.suppress(aiosqlite.Error):
-                    await db.execute("ROLLBACK")
-                raise
+            await db.execute(
+                f"UPDATE results SET {', '.join(set_parts)} WHERE job_id = ?",
+                params,
+            )
+            await db.commit()
 
 
 def _backfill_child_uuids(child: dict[str, Any]) -> bool:
