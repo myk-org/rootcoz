@@ -22,6 +22,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 from rootcoz import ai_client, main, monitoring, storage
@@ -2738,6 +2739,47 @@ def test_feedback_create_without_a_token_is_audited(app_client) -> None:
         "kind": "github_issue",
     }
     assert "A body" not in json.dumps(event)
+
+
+def test_feedback_create_upstream_failure_is_audited_with_its_status(
+    app_client,
+) -> None:
+    """An upstream failure names the status that tells it from a lost token."""
+    admin_login(app_client)
+    request = httpx.Request("POST", "https://api.github.com/repos/o/r/issues")
+    response = httpx.Response(503, json={"message": "Server Error"}, request=request)
+    exc = httpx.HTTPStatusError(
+        "GitHub returned 503", request=request, response=response
+    )
+    with (
+        patch.object(
+            storage,
+            "get_user_tokens",
+            AsyncMock(return_value={"github_token": "gh-token-0123456789"}),
+        ),
+        patch.object(main, "create_feedback_from_preview", AsyncMock(side_effect=exc)),
+    ):
+        refused = app_client.post(
+            "/api/feedback/create",
+            json={
+                "title": "A title",
+                "body": "body text that must not be audited",
+                "labels": ["feedback"],
+            },
+        )
+
+    assert refused.status_code == 502, refused.text
+    event = _events(action="feedback.create")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {
+        "reason": "upstream_failure",
+        "kind": "github_issue",
+        "upstream_status": 503,
+    }
+    stored = json.dumps(event)
+    assert "gh-token-0123456789" not in stored
+    assert "Server Error" not in stored
+    assert "body text" not in stored
 
 
 def test_global_model_refresh_is_audited(app_client) -> None:

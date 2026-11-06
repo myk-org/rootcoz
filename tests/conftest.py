@@ -1,8 +1,10 @@
 """Shared fixtures for rootcoz tests."""
 
+import logging
 import os
 import tempfile
 from collections.abc import Awaitable, Callable, Generator
+from contextlib import contextmanager
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -88,6 +90,18 @@ def build_test_env(**overrides: str) -> dict[str, str]:
     }
     base.update(overrides)
     return base
+
+
+@contextmanager
+def capture_main_logs(caplog: pytest.LogCaptureFixture) -> Generator[None]:
+    """Capture ``rootcoz.main`` logs (python-simple-logger sets propagate=False)."""
+    logger = logging.getLogger("rootcoz.main")
+    with caplog.at_level(logging.WARNING, logger="rootcoz.main"):
+        logger.propagate = True
+        try:
+            yield
+        finally:
+            logger.propagate = False
 
 
 def make_test_client(

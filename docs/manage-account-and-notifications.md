@@ -63,15 +63,17 @@ The registration key is the only credential that signs you in; the tracker token
 
    | Field | What it is used for |
    | --- | --- |
-   | `GitHub Token` | Personal access token with `repo` scope. Used to create GitHub issues. It is **not** what enriches comment badges: `enrich_comments` reads the server's `GITHUB_TOKEN` from Server Settings, so status badges resolve against the server-wide credential, not yours. |
+   | `GitHub Token` | Personal access token with `repo` scope. Required to create GitHub issues — they are always filed with this, never with the server's `GITHUB_TOKEN`, and without it issue creation is refused with `400`. It is **not** what enriches comment badges: `enrich_comments` reads the server's `GITHUB_TOKEN` from Server Settings, so status badges resolve against the server-wide credential, not yours. |
    | `Jira Email` | Your Atlassian account email, required for Jira Cloud API-token auth. |
-   | `Jira Token` | Jira Cloud API token, or a personal access token on Jira Server/Data Center. |
+   | `Jira Token` | Jira Cloud API token, or a personal access token on Jira Server/Data Center. Required to create Jira tickets — they are always filed with your token (or your service-account token), never with the server's Jira credential, and without one ticket creation is refused with `400`. |
 
    Validation happens through `POST /api/validate-token`, and a failed validation leaves the stored value unchanged. The two entry points differ, though. The Settings form (`ProfileForm.handleSubmit`) validates any non-empty GitHub or Jira token that is not already known-good and **aborts the save** if the check fails, so a bad token typed there is never stored. The registration flow does not: `RegisterPage` sends whatever you typed straight to `PUT /api/user/tokens`, which stores it as supplied. A mistyped or already-revoked token entered at registration therefore persists and only fails later, when a tracker action tries to use it. They are kept in your browser for convenience and synced to the server encrypted at rest, so a second browser picks them up automatically.
 
    > **Clearing a token:** clear the field and save. An empty field in the body of `PUT /api/user/tokens` clears that one credential on the server; the fields you do not send keep their stored values, so clearing your GitHub token leaves your Jira credentials alone. Sending `null` for a field clears it the same way an empty string does, and a request that omits every field changes nothing and reports `"saved": false`. There is no separate `DELETE` route — an empty or `null` field is the clear.
 
    > **Tip:** Without a tracker token you can still preview generated issue content, but you cannot submit it. See [Creating Follow-Up Issues and Pushing Results](create-follow-up-issues-and-push-results.html) for details.
+
+   > **Tip:** A token that cannot reach the target is reported as a credential problem, not a server failure: GitHub answers `404` for a repository the token cannot see, and RootCoz passes that on as a repository-access error pointing back here. A Jira project the token cannot see fails the same way, refused as a project-access error that names both a wrong project key and a token without access — because Jira's `404` does not say which it is. Both mean the token needs access to that repository or project — not that RootCoz is down.
 
 5. **Rotate your own API key.**
 
