@@ -1461,6 +1461,53 @@ class TestChatCleanup:
         assert not workspace.exists()
         assert not dump.exists()
 
+    @pytest.mark.asyncio
+    async def test_undeletable_symlink_is_counted_not_raised(
+        self, tmp_path, monkeypatch
+    ):
+        """An EACCES on one symlink must not abort the workspace cleanup (#424)."""
+        import errno
+        from functools import partial
+
+        from rootcoz.engine import chat
+        from rootcoz.temp_paths import (
+            CleanupOutcome,
+            PathStateUnknown,
+            cleanup_path_off_loop,
+            delete_marker,
+        )
+
+        workspace = tmp_path / "rootcoz-chat-job-eacces"
+        workspace.mkdir()
+        (workspace / "note.txt").write_text("x")
+        link = workspace / "build-artifacts"
+        link.symlink_to(tmp_path / "artifact-target")
+        real_unlink = os.unlink
+
+        def refuse_link(path, *args, **kwargs):
+            if Path(os.fspath(path)).name == link.name:
+                raise PermissionError(
+                    errno.EACCES, "Permission denied", os.fspath(path)
+                )
+            return real_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "unlink", refuse_link)
+        monkeypatch.setattr(chat, "get_chat_workspace", lambda *a, **k: workspace)
+
+        # A survivor is folded into the result, so the step itself completes.
+        result = chat.cleanup_chat_workspace("job-eacces")
+        assert result.failed >= 1
+
+        outcome = await cleanup_path_off_loop(
+            "job-eacces", workspace, partial(chat.cleanup_chat_workspace, "job-eacces")
+        )
+        assert outcome is CleanupOutcome.INCOMPLETE
+        assert not (workspace / "note.txt").exists(), "the tree delete never ran"
+        assert delete_marker(workspace).exists(), "a half-deleted tree must stay marked"
+        with pytest.raises(PathStateUnknown):
+            async with chat.chat_workspace_lock("job-eacces"):
+                pass
+
 
 @pytest.mark.asyncio
 async def test_cleanup_deleted_job_offloads_blocking_cleanup(monkeypatch):

@@ -935,13 +935,13 @@ def build_admin_custom_tools(
 
 
 def _unlink_counted(path: Path) -> DeleteResult:
-    """Unlink ``path`` and report what that freed; an entry already gone frees nothing."""
-    try:
-        nbytes = path.lstat().st_size
-        path.unlink()
-    except FileNotFoundError:
-        return DeleteResult(0, 0)
-    return DeleteResult(nbytes, 1)
+    """Unlink ``path`` and report what that freed; an entry already gone frees nothing.
+
+    ``delete_tree`` on a single path, so a refusal (EPERM, EBUSY) is counted in
+    ``failed`` with its errno instead of raising: a raise here aborted the rest of
+    the workspace cleanup, leaving the paths behind this one untried.
+    """
+    return delete_tree(path)
 
 
 def _safe_remove_symlink(link: Path) -> DeleteResult:

@@ -333,9 +333,20 @@ class RepositoryManager:
         """
         logger.debug("Cleaning up temporary directories")
         total = DeleteResult(0, 0)
+        survivors: list[Path] = []
         for temp_dir in self.temp_dirs:
-            total = total.plus(delete_tree(temp_dir))
-        self.temp_dirs.clear()
+            result = delete_tree(temp_dir)
+            total = total.plus(result)
+            # Only what is really gone is forgotten: a dir a failed delete left
+            # behind stays tracked, so the next cleanup retries it instead of
+            # leaking it silently.
+            if result.failed or temp_dir.exists():
+                survivors.append(temp_dir)
+        self.temp_dirs[:] = survivors
+        if survivors:
+            logger.warning(
+                f"Keeping {len(survivors)} temp dir(s) tracked after a partial cleanup"
+            )
         return total
 
     def __enter__(self) -> Self:

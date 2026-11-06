@@ -1,5 +1,6 @@
 """Tests for repository management."""
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import git.exc
@@ -102,6 +103,38 @@ class TestRepositoryManager:
         # Cleanup should not raise an error
         manager.cleanup()
         assert manager.temp_dirs == []
+
+    def test_cleanup_keeps_a_dir_it_could_not_delete(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A partial cleanup keeps the survivor tracked so the next one retries it."""
+        import errno
+        import os
+
+        manager = RepositoryManager()
+        kept = tmp_path / "kept"
+        gone = tmp_path / "gone"
+        kept.mkdir()
+        gone.mkdir()
+        (kept / "stuck.txt").write_text("x")
+        (gone / "ok.txt").write_text("x")
+        manager.temp_dirs.extend([kept, gone])
+        real_unlink = os.unlink
+
+        def refuse_stuck(path, *args, **kwargs):
+            if Path(os.fspath(path)).name == "stuck.txt":
+                raise PermissionError(
+                    errno.EACCES, "Permission denied", os.fspath(path)
+                )
+            return real_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "unlink", refuse_stuck)
+
+        result = manager.cleanup()
+
+        assert result.failed >= 1
+        assert manager.temp_dirs == [kept], "a failed dir must stay tracked for retry"
+        assert not gone.exists()
 
     @patch("rootcoz.repository.Repo")
     def test_context_manager_enter(self, _mock_repo: MagicMock) -> None:

@@ -56,13 +56,14 @@ def cleanup_extract_dir(
     if extract_path is None or not extract_path.exists():
         return
     logger.info("Cleaning up %s: %s", label, extract_path)
-    nbytes, entries, _ = delete_tree(extract_path)
-    logger.info(
-        "Cleanup complete: %s reclaimed=%d (%s) entries=%d",
-        extract_path,
-        nbytes,
-        f"{nbytes / 1048576:.1f} MiB",
-        entries,
+    nbytes, entries, failed = delete_tree(extract_path)
+    # Formatted inline for the reason ``delete_tree`` gives: a template-keyed
+    # dedupe filter would drop the second extract dir of one submission.
+    logger.log(
+        logging.WARNING if failed else logging.INFO,
+        f"Cleanup {'incomplete' if failed else 'complete'}: {extract_path} "
+        f"reclaimed={nbytes} ({nbytes / 1048576:.1f} MiB) entries={entries}"
+        + (f" survived={failed} (left for the next sweep)" if failed else ""),
     )
 
 
