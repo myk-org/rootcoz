@@ -26,7 +26,7 @@ from rootcoz.cli.config import (
 )
 from rootcoz.cli.output import print_output
 from rootcoz.config import parse_additional_repos, parse_peer_configs
-from rootcoz.storage import VALID_ROLES
+from rootcoz.storage import MAX_INCOMPLETE_LIST_LIMIT, VALID_ROLES
 
 # -- App and sub-command groups -----------------------------------------------
 
@@ -1033,17 +1033,25 @@ def results_incomplete(
         columns=["job_id", "job_name", "build_number", "incomplete_count"],
     )
     if isinstance(data, dict) and data.get("truncated"):
+        scanned = data.get("scanned", 0)
         if data.get("truncated_by") == "scan_ceiling":
             typer.echo(
-                f"Listing truncated after {data.get('scanned', 0)} row(s); "
+                f"Listing truncated after {scanned} row(s); "
                 "the server's scan ceiling stopped the scan, so older jobs "
                 "were not examined.",
                 err=True,
             )
+        elif limit > MAX_INCOMPLETE_LIST_LIMIT:
+            # The server clamps to the cap, so a larger --limit returns nothing.
+            typer.echo(
+                f"Listing truncated after {scanned} row(s); --limit {limit} "
+                f"exceeds the server's cap of {MAX_INCOMPLETE_LIST_LIMIT}, so "
+                "a larger value returns no more jobs.",
+                err=True,
+            )
         else:
             typer.echo(
-                f"Listing truncated after {data.get('scanned', 0)} row(s); "
-                "raise --limit to see more.",
+                f"Listing truncated after {scanned} row(s); raise --limit to see more.",
                 err=True,
             )
 

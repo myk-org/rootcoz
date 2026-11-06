@@ -295,6 +295,21 @@ class TestResultsCommands:
         assert "42" in result.output
         assert "raise --limit" in result.output
 
+    def test_results_incomplete_above_the_cap_does_not_advise_raising_limit(
+        self, mock_client
+    ):
+        """The server clamps the limit, so a bigger value cannot return more."""
+        mock_client.list_incomplete_analyses.return_value = {
+            "jobs": [],
+            "truncated": True,
+            "truncated_by": "limit",
+            "scanned": 500,
+        }
+        result = runner.invoke(app, ["results", "incomplete", "--limit", "5000"])
+        assert result.exit_code == 0
+        assert "raise --limit" not in result.output
+        assert "cap of 500" in result.output
+
     def test_results_incomplete_json_includes_test_names(self, mock_client):
         mock_client.list_incomplete_analyses.return_value = [
             {
