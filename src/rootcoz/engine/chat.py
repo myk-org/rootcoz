@@ -1017,7 +1017,8 @@ def cleanup_chat_workspace(
     """Delete the entire chat workspace including sessions.
 
     :data:`ABANDON` means a live graph builder still owns the tree, so the
-    caller's whole-tree delete is skipped and the next sweep picks it up.
+    caller's whole-tree delete is skipped and the next create's recovery picks it
+    up.
     """
     workspace = get_chat_workspace(job_id, username)
     targets = _chat_mcp_lock_targets(workspace)

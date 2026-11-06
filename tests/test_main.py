@@ -5928,6 +5928,56 @@ class TestLifespanResumesWaitingJobs:
             assert r1["status"] == "failed"
 
 
+class TestStartupWorkspaceReclaim:
+    """Startup is the one moment no builder can still own a workspace (#424)."""
+
+    async def test_abandoned_workspace_and_its_graph_root_are_reclaimed(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """An analysis whose cleanup abandoned must not survive the next start.
+
+        ``ABANDON`` stops ``repo_manager.cleanup``, so the uuid workspace and its
+        sibling graph root stay on disk with no owner: nothing in a later process
+        ever looks at that name again.
+        """
+        from rootcoz import main as main_mod
+        from rootcoz import temp_paths
+
+        base = tmp_path / "rootcoz"
+        workspace = base / "workspace-abandoned"
+        (workspace / "tests-repo" / ".git").mkdir(parents=True)
+        (workspace / "tests-repo" / "file.py").write_text("x")
+        graph = base / ".workspace-abandoned.rootcoz-graft"
+        (graph / "tests-repo" / "graph").mkdir(parents=True)
+        chat = base / "chat-job-1" / "alice"
+        chat.mkdir(parents=True)
+        # The leftovers predate this process: only then is nothing building them.
+        for stale in (workspace, graph):
+            os.utime(stale, (1, 1))
+        monkeypatch.setattr(temp_paths, "rootcoz_temp_base", lambda: base)
+
+        assert await main_mod._reclaim_abandoned_workspaces() == 1
+
+        assert not workspace.exists(), "the abandoned clone tree survived the restart"
+        assert not graph.exists(), "the abandoned graph root survived the restart"
+        assert chat.exists(), "a chat workspace keeps its session across a restart"
+
+    async def test_a_workspace_created_after_start_is_left_alone(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A workspace this process created (or another replica's) is not a leftover."""
+        from rootcoz import main as main_mod
+        from rootcoz import temp_paths
+
+        base = tmp_path / "rootcoz"
+        live = base / "workspace-live"
+        (live / "tests-repo").mkdir(parents=True)
+        monkeypatch.setattr(temp_paths, "rootcoz_temp_base", lambda: base)
+
+        assert await main_mod._reclaim_abandoned_workspaces() == 0
+        assert live.exists(), "the reclaim deleted a workspace it does not own"
+
+
 class TestPeerAnalysisParams:
     """Tests for peer analysis parameter pass-through."""
 

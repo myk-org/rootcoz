@@ -301,6 +301,7 @@ from rootcoz.storage import (
 )
 from rootcoz.temp_paths import (
     DeleteResult,
+    PathStateUnknown,
     cleanup_off_loop,
     cleanup_path_off_loop,
     delete_tree,
@@ -2229,6 +2230,10 @@ def _reconstruct_from_params(
 
 _background_tasks: set[asyncio.Task[Any]] = set()
 
+#: When this process started. A workspace written after this cannot be a leftover
+#: of a dead process, so the startup reclaim leaves it alone.
+_PROCESS_STARTED_AT = _time.time()
+
 # Track analysis background tasks by job_id for abort support
 _job_tasks: dict[str, asyncio.Task[Any]] = {}
 
@@ -2490,6 +2495,54 @@ async def _backfill_job_metadata(rules: list[dict[str, Any]]) -> None:
         logger.debug("Failed to backfill job metadata", exc_info=True)
 
 
+async def _reclaim_abandoned_workspaces() -> int:
+    """Delete the analysis workspaces a previous process abandoned; return the count.
+
+    A ``finally`` that meets a live graph build returns ``ABANDON``, which stops
+    ``repo_manager.cleanup``: the uuid workspace and its sibling graph root then
+    stay on disk with no owner, because nothing in a later process ever looks at
+    that name again. Process start is the one moment no builder can still hold
+    the tree, so the leftovers are reaped here, off the loop, through the same
+    reaper as every other delete.
+
+    Only ``workspace-*`` trees are reclaimed: a ``chat-{job}`` workspace is reused
+    across sessions and keeps its clones and graph across a restart.
+    """
+    from rootcoz.engine.graft import _root
+    from rootcoz.temp_paths import rootcoz_temp_base
+
+    base = rootcoz_temp_base()
+    try:
+        # Snapshot before the first await: a job resumed from the DB clones into
+        # a *new* workspace in this directory, and that one must not be in the list.
+        leftovers = sorted(
+            path
+            for path in base.iterdir()
+            if path.name.startswith("workspace-")
+            and path.lstat().st_mtime < _PROCESS_STARTED_AT
+        )
+    except OSError:
+        logger.warning(
+            "Startup reclaim: cannot list %s, abandoned workspaces stay on disk",
+            base,
+            exc_info=True,
+        )
+        return 0
+    for workspace in leftovers:
+        await cleanup_off_loop(
+            workspace.name,
+            partial(delete_tree, _root(workspace)),
+            partial(delete_tree, workspace),
+        )
+    if leftovers:
+        logger.info(
+            "Startup reclaim: deleted %d abandoned workspace(s) under %s",
+            len(leftovers),
+            base,
+        )
+    return len(leftovers)
+
+
 async def _deferred_resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> None:
     """Resume waiting jobs after startup is complete.
 
@@ -2676,6 +2729,11 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     try:
         cleanup_task = asyncio.create_task(_periodic_session_cleanup())
+        # Created before any job is resumed: an abandoned workspace from the
+        # previous process is reaped while nothing can be building it.
+        reclaim_task = asyncio.create_task(_reclaim_abandoned_workspaces())
+        _background_tasks.add(reclaim_task)
+        reclaim_task.add_done_callback(_background_tasks.discard)
         # One sampler for the event-loop lag the admin status page reports.
         server_status.start_loop_lag_watchdog()
 
@@ -20052,6 +20110,25 @@ async def _index_chat_repositories(
     await index_workspace_graph(workspace, job_id=job_id, repos=repos)
 
 
+def _chat_workspace_unknown_message(job_id: str, username: str) -> str:
+    """What to tell a user whose chat workspace could not be established.
+
+    ``PathStateUnknown`` means a leftover workspace is still owned by a live
+    graph build, or an interrupted delete left paths in it, so starting a chat
+    into it would corrupt the tree. The user cannot clear it, so the text names
+    the path and says who has to remove it.
+    """
+    from rootcoz.engine.chat import get_chat_workspace
+
+    return (
+        "The chat workspace could not be prepared: "
+        f"{get_chat_workspace(job_id, username)} is still in use by a running "
+        "workspace build, or a cleanup could not delete all of it. Wait for the "
+        "build to finish and try again. If it keeps failing, an administrator has "
+        "to remove that directory."
+    )
+
+
 async def _init_chat_under_barrier(
     job_id: str, username: str, body: ChatInitRequest
 ) -> dict[str, Any]:
@@ -20091,8 +20168,19 @@ async def _init_chat_under_barrier(
             credential_source,
             allow_empty=True,
         )
-        async with chat_workspace_lock(job_id, username):
-            workspace = ensure_chat_workspace(job_id, username=username)
+        try:
+            async with chat_workspace_lock(job_id, username):
+                workspace = ensure_chat_workspace(job_id, username=username)
+        except PathStateUnknown as exc:
+            logger.warning(
+                "Chat init blocked by an unestablished workspace for job %s, user %s",
+                job_id,
+                username,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=_chat_workspace_unknown_message(job_id, username),
+            ) from exc
 
     decrypted_params: dict[str, Any] = {}
     try:
@@ -20792,8 +20880,25 @@ async def _process_chat_message(
                                 )
                                 break
 
-                        async with chat_workspace_lock(job_id, username):
-                            workspace = ensure_chat_workspace(job_id, username=username)
+                        try:
+                            async with chat_workspace_lock(job_id, username):
+                                workspace = ensure_chat_workspace(
+                                    job_id, username=username
+                                )
+                        except PathStateUnknown:
+                            logger.warning(
+                                "Chat message blocked by an unestablished "
+                                "workspace for job %s, user %s",
+                                job_id,
+                                username,
+                            )
+                            await _fail_chat_assistant_placeholder(
+                                assistant_msg_id,
+                                job_id,
+                                username,
+                                f"Error: {_chat_workspace_unknown_message(job_id, username)}",
+                            )
+                            return
 
                         decrypted_params = {}
                         try:
@@ -21292,8 +21397,18 @@ async def init_admin_chat(
             credential_source,
             allow_empty=True,
         )
-        async with chat_workspace_lock(ADMIN_CHAT_JOB_ID, username):
-            workspace = ensure_chat_workspace(ADMIN_CHAT_JOB_ID, username=username)
+        try:
+            async with chat_workspace_lock(ADMIN_CHAT_JOB_ID, username):
+                workspace = ensure_chat_workspace(ADMIN_CHAT_JOB_ID, username=username)
+        except PathStateUnknown as exc:
+            logger.warning(
+                "Admin chat init blocked by an unestablished workspace for user %s",
+                username,
+            )
+            raise HTTPException(
+                status_code=409,
+                detail=_chat_workspace_unknown_message(ADMIN_CHAT_JOB_ID, username),
+            ) from exc
         if not await _available_chat_session(ADMIN_CHAT_JOB_ID, username):
             custom_tools: list[dict[str, Any]] = []
             auth_header = await _create_ai_auth_header(username, is_admin=True)
@@ -21568,8 +21683,25 @@ async def _process_admin_chat_message(
                     )
                     break
 
-            async with chat_workspace_lock(ADMIN_CHAT_JOB_ID, username):
-                workspace = ensure_chat_workspace(ADMIN_CHAT_JOB_ID, username=username)
+            try:
+                async with chat_workspace_lock(ADMIN_CHAT_JOB_ID, username):
+                    workspace = ensure_chat_workspace(
+                        ADMIN_CHAT_JOB_ID, username=username
+                    )
+            except PathStateUnknown:
+                logger.warning(
+                    "Admin chat message blocked by an unestablished workspace "
+                    "for user %s",
+                    username,
+                )
+                await _fail_chat_assistant_placeholder(
+                    assistant_msg_id,
+                    ADMIN_CHAT_JOB_ID,
+                    username,
+                    "Error: "
+                    + _chat_workspace_unknown_message(ADMIN_CHAT_JOB_ID, username),
+                )
+                return
 
             settings = get_settings()
 

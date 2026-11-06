@@ -2228,6 +2228,39 @@ class TestChatEndpoints:
         response = test_client.get("/api/chat/nonexistent-job")
         assert response.status_code == 404
 
+    async def test_init_names_the_workspace_it_could_not_establish(
+        self, test_client, temp_db_path: Path, tmp_path, monkeypatch
+    ):
+        """A leftover workspace must be reported, not raised as a bare 500 (#424).
+
+        ``reusable_path_lock`` raises ``PathStateUnknown`` when a marked workspace
+        is still owned by a live builder or a delete left paths behind. Init used
+        to let that escape as an unhandled server error, so the user learned
+        nothing about the leftover tree that blocks them.
+        """
+        from rootcoz.engine import chat
+        from rootcoz.temp_paths import PathStateUnknown
+
+        await _save_job(temp_db_path, "chat-blocked-job")
+        workspace = tmp_path / "rootcoz-chat-chat-blocked-job" / "admin"
+        monkeypatch.setattr(chat, "get_chat_workspace", lambda *a, **k: workspace)
+
+        def blocked(*_args, **_kwargs):
+            raise PathStateUnknown("workspace could not be established as whole")
+
+        monkeypatch.setattr(chat, "chat_workspace_lock", blocked)
+
+        response = test_client.post(
+            "/api/chat/chat-blocked-job/init",
+            json={"ai_provider": "claude", "ai_model": "sonnet-4"},
+        )
+
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert str(workspace) in detail, "the error does not name the blocked workspace"
+        assert "try again" in detail.lower(), "the error says nothing the user can do"
+        assert "administrator" in detail.lower(), detail
+
     async def test_get_chat_history_empty(self, test_client, temp_db_path: Path):
         await _save_job(temp_db_path, "chat-test-job")
         response = test_client.get("/api/chat/chat-test-job")

@@ -1236,3 +1236,20 @@ async def test_reanalyze_finally_does_not_block_the_loop(tmp_path, monkeypatch) 
 
     assert manager.return_value.cleanup.called
     assert ticks >= 10, "the event loop was blocked during the re-analyze finally"
+
+
+async def test_clearing_a_chat_that_never_ran_is_a_clean_noop(tmp_path, caplog) -> None:
+    """A workspace nobody ever created has nothing to mark, delete or warn about.
+
+    ``_mark_deleting`` writes beside the tree, so a per-user ``chat-{job}/{user}``
+    whose parent ``chat-{job}`` does not exist raised ENOENT, logged a warning and
+    returned :data:`ABANDON`: clearing a chat that never started read as an
+    incomplete cleanup with nothing left on disk (#424).
+    """
+    never_created = tmp_path / "chat-job-never" / "alice"
+
+    outcome = await cleanup_path_off_loop("job-never", never_created)
+
+    assert outcome is CleanupOutcome.CLEAN
+    assert "could not write the delete marker" not in caplog.text, caplog.text
+    assert not never_created.parent.exists(), "the cleanup created the missing parent"

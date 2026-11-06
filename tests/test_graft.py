@@ -6,12 +6,57 @@ import os
 import subprocess
 import threading
 import time
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 
 import pytest
 
 from rootcoz import temp_paths
 from rootcoz.engine import graft
+
+
+@pytest.fixture
+def graft_tree(tmp_path: Path) -> tuple[Path, Path]:
+    """A workspace, its sibling graph root and one snapshot, as a build leaves them.
+
+    One definition for every reaper test: the graph root's layout (a sibling of
+    the workspace, never inside it) is what those tests are about.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    root = graft._root(workspace)
+    root.mkdir()
+    (root / "snapshot.py").write_text("source")
+    return workspace, root
+
+
+@contextmanager
+def _builder_holding(workspace: Path) -> Iterator[threading.Event]:
+    """Hold ``workspace``'s install lock from another thread, as a live build does.
+
+    Yields the release event so a test can decide when the builder finishes; the
+    lock is released and the thread joined on the way out.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    from rootcoz.engine.http_mcp import _workspace_install_lock
+
+    entered, release = threading.Event(), threading.Event()
+
+    def build() -> None:
+        with _workspace_install_lock(workspace):
+            entered.set()
+            assert release.wait(3)
+
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        builder = pool.submit(build)
+        assert entered.wait(2)
+        try:
+            yield release
+        finally:
+            release.set()
+            builder.result(timeout=2)
 
 
 def deterministic_disk_size(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -672,20 +717,16 @@ def test_query_lock_wait_is_bounded(tmp_path, monkeypatch):
 
 
 def test_reap_graph_abandons_the_delete_while_a_builder_holds_the_lock(
-    tmp_path, monkeypatch, caplog
+    graft_tree, monkeypatch, caplog
 ):
     """A live build owns the tree: the reaper logs, deletes nothing, returns None."""
-    from concurrent.futures import ThreadPoolExecutor
-
-    from rootcoz.engine.http_mcp import _workspace_install_lock
-
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    root = graft._root(workspace)
-    root.mkdir()
-    (root / "snapshot.py").write_text("source")
+    workspace, root = graft_tree
     monkeypatch.setattr(graft, "GRAPH_LOCK_SECONDS", 0.05)
     monkeypatch.setattr(graft.logger, "propagate", True)
+    # simple_logger's DuplicateFilter keys on the format string and keeps its
+    # state for the whole session, so an earlier test's timeout line would
+    # swallow this one when the files run in one process.
+    monkeypatch.setattr(graft.logger, "filters", [])
     deleted: list[Path] = []
 
     def record_delete(path: Path) -> tuple[int, int]:
@@ -693,81 +734,34 @@ def test_reap_graph_abandons_the_delete_while_a_builder_holds_the_lock(
         return (0, 0)
 
     monkeypatch.setattr(graft, "delete_tree", record_delete)
-    entered, release = threading.Event(), threading.Event()
 
-    def build():
-        with _workspace_install_lock(workspace):
-            entered.set()
-            assert release.wait(3)
-
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        builder = pool.submit(build)
-        assert entered.wait(2)
-        try:
-            with caplog.at_level(logging.WARNING):
-                assert graft.reap_graph("job-1", workspace) is temp_paths.ABANDON
-        finally:
-            release.set()
-        builder.result(timeout=2)
+    with _builder_holding(workspace), caplog.at_level(logging.WARNING):
+        assert graft.reap_graph("job-1", workspace) is temp_paths.ABANDON
 
     assert deleted == []
     assert root.exists()
     assert "graph-lock-timeout job_id=job-1" in caplog.text
 
 
-def test_reap_graph_deletes_after_the_builder_releases_the_lock(tmp_path, monkeypatch):
-    from concurrent.futures import ThreadPoolExecutor
-
-    from rootcoz.engine.http_mcp import _workspace_install_lock
-
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    root = graft._root(workspace)
-    root.mkdir()
-    (root / "snapshot.py").write_text("source")
+def test_reap_graph_deletes_after_the_builder_releases_the_lock(
+    graft_tree, monkeypatch
+):
+    workspace, root = graft_tree
     monkeypatch.setattr(graft, "GRAPH_LOCK_SECONDS", 0.05)
-    entered, release = threading.Event(), threading.Event()
 
-    def build():
-        with _workspace_install_lock(workspace):
-            entered.set()
-            assert release.wait(3)
-
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        builder = pool.submit(build)
-        assert entered.wait(2)
-        try:
-            assert graft.reap_graph("job-2", workspace) is temp_paths.ABANDON
-        finally:
-            release.set()
-        builder.result(timeout=2)
+    with _builder_holding(workspace):
+        assert graft.reap_graph("job-2", workspace) is temp_paths.ABANDON
 
     nbytes, _entries, _failed = graft.reap_graph("job-2", workspace)
     assert nbytes > 0
     assert not root.exists()
 
 
-def test_cleanup_graph_without_a_deadline_still_waits_and_succeeds(tmp_path):
+def test_cleanup_graph_without_a_deadline_still_waits_and_succeeds(graft_tree):
     """The default keeps the old blocking contract for direct callers."""
-    from concurrent.futures import ThreadPoolExecutor
+    workspace, root = graft_tree
 
-    from rootcoz.engine.http_mcp import _workspace_install_lock
-
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    root = graft._root(workspace)
-    root.mkdir()
-    (root / "snapshot.py").write_text("source")
-    entered, release = threading.Event(), threading.Event()
-
-    def build():
-        with _workspace_install_lock(workspace):
-            entered.set()
-            assert release.wait(3)
-
-    with ThreadPoolExecutor(max_workers=1) as pool:
-        builder = pool.submit(build)
-        assert entered.wait(2)
+    with _builder_holding(workspace) as release:
         timer = threading.Timer(0.2, release.set)
         timer.start()
         try:
@@ -776,8 +770,6 @@ def test_cleanup_graph_without_a_deadline_still_waits_and_succeeds(tmp_path):
             waited = time.monotonic() - started
         finally:
             timer.cancel()
-            release.set()
-        builder.result(timeout=2)
 
     assert waited >= 0.1
     assert nbytes > 0

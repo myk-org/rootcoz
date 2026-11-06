@@ -36,8 +36,10 @@ class _Abandoned:
 
 
 #: A cleanup step returns this to stop the rest of this submission's steps.
-#: The tree is left for the next sweep instead of being deleted under a live
-#: builder; the runner still runs the ``always`` steps that must not be skipped.
+#: The tree is left for a later reclaim instead of being deleted under a live
+#: builder — the startup reclaim for a per-use workspace, or the next create's
+#: recovery for a reusable one; the runner still runs the ``always`` steps that
+#: must not be skipped.
 ABANDON = _Abandoned()
 
 
@@ -172,7 +174,14 @@ def _mark_deleting(path: Path) -> _Abandoned | None:
     workspace, so the next create reuses whatever is left of it. A marker we
     could not write therefore stops the delete: a tree that is still whole is
     safe to reuse, a half-deleted one nobody can recognise is not.
+
+    A path that is not there needs no marker, and must not read as an abandoned
+    delete: the marker lives *beside* the tree, in a ``chat-{job}`` parent that a
+    per-user workspace never creates, so clearing a chat nobody ever opened raised
+    ENOENT and reported an incomplete cleanup with nothing on disk (#424).
     """
+    if not os.path.lexists(path):
+        return None
     try:
         delete_marker(path).write_text("", encoding="utf-8")
     except OSError as exc:
@@ -252,7 +261,7 @@ def delete_tree(path: Path) -> DeleteResult:
     return value is the only thing that can tell a caller the tree is gone —
     ``failed > 0`` means at least one path survived (EPERM, ENOTEMPTY, EBUSY, or an
     entry that vanished and reappeared). Raising instead would abort the reaper's
-    remaining steps for a tree the next sweep can finish.
+    remaining steps for a tree a later reclaim can finish.
 
     No second pass and no ``statvfs``: the size is accumulated by the walk itself,
     so it is attributable to this tree even on a shared volume.
@@ -271,7 +280,7 @@ def delete_tree(path: Path) -> DeleteResult:
         code = exc.errno or 0
         if code == errno.ENOENT:
             # Gone between our ``scandir`` and our ``unlink`` — a live agent
-            # deleting in its own workspace, or a second sweep. Nothing is left
+            # deleting in its own workspace, or a second delete. Nothing is left
             # to delete, so this is not a path the reaper failed on.
             return
         # The OS reason, not ``exc.strerror``: the raiser may have replaced it.
@@ -360,7 +369,7 @@ def reap_reusable_path(what: str, path: Path) -> DeleteResult | _Abandoned:
     Recovery used to run the whole-tree delete with no lock at all — i.e. under the
     very builder whose flock is why the first delete abandoned. Bounded exactly
     like ``reap_graph``: on timeout :data:`ABANDON` leaves the tree *and* its
-    marker for the next sweep, because the builder still owns them.
+    marker for the next create's recovery, because the builder still owns them.
     """
     # Local imports: ``graft`` imports this module at import time.
     from rootcoz.engine.graft import GRAPH_LOCK_SECONDS
@@ -374,7 +383,7 @@ def reap_reusable_path(what: str, path: Path) -> DeleteResult | _Abandoned:
     except TimeoutError:
         logger.warning(
             "cleanup: %s still owned by a live builder after %ss; leaving the "
-            "interrupted delete's tree and marker for the next sweep",
+            "interrupted delete's tree and marker for the next create to recover",
             what,
             GRAPH_LOCK_SECONDS,
         )
@@ -448,7 +457,7 @@ def _run_cleanup(
             clean = False
             logger.warning(
                 f"cleanup_abandoned what={what} step={_step_name(step)}: leaving "
-                "the rest of this submission's steps to the next sweep"
+                "the rest of this submission's steps to a later reclaim"
             )
             break
     for step in always:

@@ -31,7 +31,7 @@ BUILD_SECONDS = 120
 #: a time, and one trail build is bounded by ``BUILD_SECONDS``; the usual
 #: five-clone job is ``ceil(5 / 4)`` batches, so a builder's own worst case is
 #: ``2 * BUILD_SECONDS``. Waiting exactly that long abandons the delete only when
-#: the build has outrun its bound, and the next sweep picks the graph up.
+#: the build has outrun its bound, and the startup reclaim picks the graph up.
 GRAPH_LOCK_SECONDS = BUILD_SECONDS * 2
 FAILED_RETRY_SECONDS = 300
 QUERY_SECONDS = 45
@@ -1012,15 +1012,15 @@ def reap_graph(job_id: str, workspace: Path) -> DeleteResult | _Abandoned:
 
     :data:`ABANDON` means the delete was abandoned, so the caller must not keep
     deleting the rest of a workspace a live builder is reading; the leftovers
-    belong to the next sweep. One shared worker runs every queued delete, so an
-    unbounded wait here is what stalled them all (#402).
+    belong to the startup reclaim. One shared worker runs every queued delete, so
+    an unbounded wait here is what stalled them all (#402).
     """
     try:
         return cleanup_graph(workspace, deadline=time.monotonic() + GRAPH_LOCK_SECONDS)
     except TimeoutError:
         logger.warning(
             "graph-lock-timeout job_id=%s: graph build still holds the workspace "
-            "lock after %ds; leaving the graph for the next sweep",
+            "lock after %ds; leaving the graph for the startup reclaim",
             job_id,
             GRAPH_LOCK_SECONDS,
         )

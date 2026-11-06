@@ -63,7 +63,7 @@ def cleanup_extract_dir(
         logging.WARNING if failed else logging.INFO,
         f"Cleanup {'incomplete' if failed else 'complete'}: {extract_path} "
         f"reclaimed={nbytes} ({nbytes / 1048576:.1f} MiB) entries={entries}"
-        + (f" survived={failed} (left for the next sweep)" if failed else ""),
+        + (f" survived={failed} (left for a later reclaim)" if failed else ""),
     )
 
 
