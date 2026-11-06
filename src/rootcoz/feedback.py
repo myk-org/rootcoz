@@ -47,7 +47,18 @@ _ASSIGNMENT_VALUE = rf"(?:(?:[^\r\n]*\r?\n)?{_PEM_BLOCK}|[^\r\n]*)"
 # `user:a/b+c@host` must not be cut short at the `/`; a `/` after the `@` ends
 # the authority. Greedy, so the host is still what follows the *last* `@`
 # (`user:p@ss@host`) (#399).
-_USERINFO = r"[^\s/]*(?:/[^\s/]*)*"
+#
+# One greedy class, not `[^\s/]*(?:/[^\s/]*)*`: both match the same run of
+# non-whitespace, but the nested form cost two backtracking steps per `/` and,
+# with no `@` in reach, re-scanned the rest of the text from every `:` the bare
+# pattern anchors on -- quadratic, and the scrubber runs on log excerpts and
+# issue bodies, so a crafted excerpt could burn seconds of CPU per request
+# (#397). The `{0,2048}` cap makes the work per start position constant, so a
+# scan is linear in the text.
+# shortcut: a userinfo longer than 2048 chars matches nothing and is left
+# unredacted -- no real URL authority is that long, and the alternative is an
+# unbounded backtracking run. Widen only together with the timing test.
+_USERINFO = r"[^\s]{0,2048}"
 
 # Patterns for sensitive data scrubbing.
 # Order matters: more specific patterns first to avoid partial matches.

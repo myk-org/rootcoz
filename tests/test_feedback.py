@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 from typing import ClassVar
 from unittest.mock import AsyncMock, patch
 
@@ -266,6 +267,21 @@ class TestScrubSensitiveData:
             scrub_sensitive_data("fatal: user:p@ss@git.example.com:org/repo.git")
             == "fatal: [REDACTED]@git.example.com:org/repo.git"
         )
+
+    def test_scrubbing_is_linear_on_adversarial_userinfo(self):
+        """The userinfo pattern matched the right text but the wrong way: with
+        no `@` in reach the greedy nested quantifier re-scanned the rest of the
+        excerpt from every `:` the bare pattern anchors on, so `a:`*k cost
+        quadratic time in attacker-supplied text (0.23 s at 4 000 chars,
+        3.7 s at 16 000) (#397). Both sizes must fit the same generous bound,
+        which only a linear scan can do -- the point is to catch the blowup,
+        not to police microseconds."""
+        for size in (4000, 16000):
+            adversarial = ("a:" * (size // 2))[:size]
+            start = time.perf_counter()
+            scrub_sensitive_data(adversarial)
+            elapsed = time.perf_counter() - start
+            assert elapsed < 0.5, f"{size}-char adversarial input took {elapsed:.2f}s"
 
     def test_redacts_quoted_compound_keys(self):
         """A quoted JSON/literal key must not hide a secret behind its `_`."""
