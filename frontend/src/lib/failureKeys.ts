@@ -72,7 +72,10 @@ export const PROVIDER_FAILURE_DETAILS = 'Analysis failed; check server logs for 
  *  failed AI call. Mirrors `countUnclassifiedFailures`: a reviewer override
  *  classifies a provider placeholder, so it must drop out of this total too —
  *  otherwise the banner blames the provider for failures that are no longer
- *  incomplete. */
+ *  incomplete. The placeholder is shared with a group whose answer carried no
+ *  usable classification (engine/core._failed_group_analyses), which explains
+ *  itself in `analysis_error`; only a row without a reason is a provider
+ *  outage, so the banner stops blaming credentials for a narration-only reply. */
 export function countProviderFailures(
   failures: { test_name: string; analysis?: AnalysisDetail }[],
   children: ChildJobAnalysis[],
@@ -84,6 +87,7 @@ export function countProviderFailures(
   walkChildTree(failures, children, (nodeFailures, jobName, buildNumber) => {
     for (const f of nodeFailures) {
       if ((f as FailureAnalysis).analysis?.details !== PROVIDER_FAILURE_DETAILS) continue
+      if ((f as FailureAnalysis).analysis_error) continue
       const stored = (f as FailureAnalysis).analysis?.classification ?? ''
       const effective = classifications[reviewKey(f.test_name, jobName, buildNumber)] ?? stored
       if (!effective.trim()) count += 1

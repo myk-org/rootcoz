@@ -19,6 +19,7 @@ function showReport(
   analysisState?: 'submitted' | 'analyzed',
   details: string | string[] = '',
   overrides: Array<{ test_name: string; classification: string }> = [],
+  analysisError = 'AI analysis incomplete: response has no usable classification',
 ) {
   const response: ResultResponse = {
     job_id: 'job-1', jenkins_url: null, status: 'completed', created_at: '', base_url: null, result_url: null,
@@ -35,7 +36,7 @@ function showReport(
           details: Array.isArray(details) ? (details[i] ?? '') : details,
           artifacts_evidence: '',
         },
-        analysis_error: 'AI analysis incomplete: response has no usable classification',
+        analysis_error: analysisError,
         error_signature: `sig-${i}`,
       })),
       child_job_analyses: [], request_params: { ai_provider: '', ai_model: '' },
@@ -84,10 +85,21 @@ describe('incomplete analysis banner', () => {
   })
 
   it('blames the provider when the AI call failed', async () => {
-    showReport(2, 'analyzed', 'Analysis failed; check server logs for details')
+    // A provider failure stores the placeholder with no reason on the row.
+    showReport(2, 'analyzed', 'Analysis failed; check server logs for details', [], '')
     const banner = await screen.findByTestId('incomplete-analysis-banner')
     expect(banner).toHaveTextContent('the AI provider call failed')
     expect(banner).not.toHaveTextContent('the model returned nothing')
+  })
+
+  it('does not blame the provider when the model returned nothing classifiable', async () => {
+    // Same placeholder, but the row carries the reason the analysis is missing:
+    // the answer arrived and carried no classification (#397).
+    showReport(2, 'analyzed', PROVIDER_FAILURE_DETAILS)
+    const banner = await screen.findByTestId('incomplete-analysis-banner')
+    expect(banner).toHaveTextContent('the model returned nothing that could be classified')
+    expect(banner).not.toHaveTextContent('the AI provider call failed')
+    expect(banner).not.toHaveTextContent('had a failed AI provider call')
   })
 
   it('shows the banner for the same failures once an analysis produced nothing', async () => {
