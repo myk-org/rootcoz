@@ -169,6 +169,30 @@ describe('countUnclassifiedFailures', () => {
     expect(countUnclassifiedFailures([], [child], { 'test-x': 'CODE ISSUE' })).toBe(1)
   })
 
+  it('counts unclassified failures at every depth of the child tree', () => {
+    // Pins the shared `walkChildTree` traversal: a hand-rolled walk that stops
+    // after one level would drift from `countAllFailures` here.
+    const grandchild = {
+      ...makeChild('grandchild', 9),
+      failures: [makeFailure('test-g', ''), makeFailure('test-h', '  ')],
+    }
+    const child = {
+      ...makeChild('child', 5),
+      failures: [makeFailure('test-c', '')],
+      failed_children: [grandchild],
+    }
+    const failures = [makeFailure('test-p', ''), makeFailure('test-ok', 'CODE ISSUE')]
+
+    expect(countUnclassifiedFailures(failures, [child], {})).toBe(4)
+    // A reviewer override at any depth still clears exactly its own failure.
+    expect(
+      countUnclassifiedFailures(failures, [child], {
+        'grandchild#9::test-g': 'PRODUCT BUG',
+        'child#5::test-c': 'CODE ISSUE',
+      }),
+    ).toBe(2)
+  })
+
   it('never counts an ingest-only job, whose analysis has not run yet', () => {
     // Same empty classifications as a failed analysis, but the model was never
     // asked — mirrors the server's `incomplete_failures` analysis-state gate.
