@@ -341,6 +341,68 @@ This keeps the service internal to the cluster and gives you temporary browser a
 - With no Route or TLS Ingress, the chart automatically falls back to non-secure cookies for this HTTP-only access pattern.
 - When you are ready to publish it, switch to the Route or Ingress recipe instead of editing the Service directly.
 
+## Sizing
+
+Default resources (`1 CPU / 4Gi` request, `2 CPU / 8Gi` limit) suit evaluation clusters. For
+concurrent AI analysis work apply the shipped production profile, which is reproducible from
+`chart/examples/values-production.yaml` and validated by the chart tests:
+
+```bash
+    helm upgrade rootcoz ./chart -n rootcoz \
+      -f "$VALUES_DIR/values.generated.yaml" \
+      -f chart/examples/values-production.yaml \
+      -f "$VALUES_DIR/values.secrets.yaml"
+```
+
+It sets `4 CPU / 32Gi / 16Gi ephemeral-storage` on both `requests` and `limits`.
+
+| Resource | Value | Basis |
+|---|---|---|
+| CPU | `4` | The live deployment's limit is `4000m`; CPU throttling stays under 1% of periods. |
+| Memory | `32Gi` | Peak usage is ~6 GiB. Size a smaller pod with **~1 GiB baseline + ~2 GiB per concurrent analysis** (default `max_concurrent_ai_calls` is 3). |
+| ephemeral-storage | `16Gi` | A judgement from the configured ceilings, not a measurement: 1 GiB graph index per analysis workspace × concurrency 3, up to 10 concurrent repo clones, plus CI artifacts and the writable layer. Keep it at or below the node's ephemeral allocatable. |
+
+**Guaranteed versus Burstable.** `requests == limits` gives Guaranteed QoS (computed from cpu and
+memory only) and raises the scheduling floor to 32Gi memory + 16Gi ephemeral, so the node must have
+that allocatable. On smaller nodes request `16Gi` memory instead — Burstable, which is what the dev
+deployment uses. The live `.dev/openshift/deployment.yaml` request is therefore deliberately
+different from this profile.
+
+**Upgrading to this chart version.** The default render is byte-identical for installs that do not set
+`sidecar.agentDir`, so those do not roll. Installs that set it get **one pod restart**: the
+`copy-sidecar-agent` init container's request and limit are now equal (`10m/32Mi`) where they were
+`10m/16Mi` and `100m/128Mi`, and that equality is what keeps a Guaranteed pod Guaranteed. With one
+replica on `Recreate` and a 30 s grace period, an analysis in flight at that moment is interrupted and
+has to be re-submitted.
+
+**Clearing a request does not remove the floor.** Setting `resources.requests.memory=""` drops only
+the explicit request; Kubernetes copies the matching limit into the request when no admission policy
+supplies one, so the default profile still schedules for `8Gi`. Clear the limit too for a genuine
+no-floor pod, or let a namespace `LimitRange` default the request.
+
+**Persistent storage.** Database growth is ~83 KB per stored result with no retention yet (#409); the
+PVC size is not part of the production profile, because applying it over a live release either no-ops
+or triggers a PVC resize.
+
+**Ephemeral storage and `/tmp`.** Repo clones and code-graph indexes live under `/tmp`. Setting an
+`ephemeral-storage` **limit** makes the chart mount a `/tmp` `emptyDir` with `sizeLimit` equal to that
+limit (and `TMPDIR=/tmp`), so a runaway clone fails at a known number instead of filling the node.
+Exceeding either the container limit or the `sizeLimit` is a **kubelet eviction, not a throttle**: the
+whole pod goes down mid-analysis, in-flight analyses are lost, and the pod returns through the
+`Recreate` strategy. The SQLite database survives on the PVC and recovers through WAL replay. Prefer a
+limit over no limit — an uncapped pod causes node `DiskPressure`, which evicts every pod on the node.
+
+**Single replica consequence.** One replica on a ReadWriteOnce PVC, `Recreate` strategy, no HA: any
+restart — eviction, upgrade, node drain — interrupts running analyses. Track them on the dashboard
+and re-submit after the rollout.
+
+Extended resources (`nvidia.com/gpu`, `hugepages-*`) are supported in `resources.requests` / `limits`.
+`memory` and `ephemeral-storage` need a unit (`4Gi`); a bare number is read as bytes. `cpu` takes a
+bare number or a quantity string (`4`, `500m`, `2.5`) — a typo such as `not-a-quantity` fails schema
+validation at render, not after install at the API server. See
+[the chart README](https://github.com/myk-org/rootcoz/blob/main/chart/README.md) for the full
+rationale.
+
 ## Upgrade and smoke-test a Helm release
 
 Apply new values, wait for the rollout, and run the chart’s built-in health test after any deployment change.
@@ -1816,7 +1878,7 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    Click `Push to Report Portal` in the report header, confirm, and RootCoz matches the job to its Report Portal launch, updates the matching test items, and reports how many classifications were pushed, plus any items pushed as `TO INVESTIGATE` and any errors.
 
-   A failure whose classification is empty or unknown is not dropped from the push: it has no defect type to map to, so it is pushed with the neutral `TO INVESTIGATE` defect type. With `RP_PUSH_CLASSIFICATIONS` enabled that item is also listed under `defaulted` as `<item name> (classification: <value>)` — `<value>` is `none` when the classification is empty. With classification pushing disabled every item is sent as `TO INVESTIGATE`, so there is nothing to single out and `defaulted` stays empty.
+   A failure whose classification is empty or unknown is not dropped from the push: it has no defect type to map to, so it is pushed with the neutral `TO INVESTIGATE` defect type. The exception is a test the project history already classifies as `INFRASTRUCTURE` (a recorded `rootcoz classify` entry): that history classification takes precedence whatever the AI said, so the item is pushed with the `INFRASTRUCTURE` → `SYSTEM_ISSUE` (System Issue) defect type and is neither neutral nor listed under `defaulted`. With `RP_PUSH_CLASSIFICATIONS` enabled such an item is also listed under `defaulted` as `<item name> (classification: <value>)` — `<value>` is `none` when the classification is empty. With classification pushing disabled every item is sent as `TO INVESTIGATE`, so there is nothing to single out and `defaulted` stays empty.
 
    `defaulted` is informational: those items were pushed, so they never count as skipped and never shrink the batch. `unmatched` is always empty — nothing is left out for want of a classification — and `errors` names anything that could not be pushed at all. Because nothing is skipped, the dialog never shows a skipped count or a `Pushed N · skipped M` split, and it never says a test had "no classification to map to a Report Portal defect type". It phrases the defaulted items as `N test(s) were pushed as TO INVESTIGATE because they have no classification`.
 

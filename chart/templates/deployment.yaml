@@ -5,6 +5,12 @@
 {{- /* Resolved credentials Secret data (chart values + existing-Secret fallbacks),
        resolved once and reused for both the checksum and the envFrom gate. */ -}}
 {{- $credentials := include "rootcoz.credentialsSecretData" . -}}
+{{- /* Ephemeral-storage limit doubles as the /tmp emptyDir sizeLimit: one number,
+       no second key to keep in sync. Absent → no /tmp volume, no mount, no TMPDIR. */ -}}
+{{- $ephemeralLimit := "" -}}
+{{- with .Values.resources.limits -}}
+{{- $ephemeralLimit = index . "ephemeral-storage" | default "" -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -67,13 +73,15 @@ spec:
           resources:
             # Small but explicit: quota-enforced namespaces (LimitRange /
             # ResourceQuota without defaults) reject containers without
-            # requests.
+            # requests. requests == limits is deliberate — QoS is computed
+            # across init containers too, so any gap here makes the pod
+            # Burstable even when the app container is Guaranteed.
             requests:
               cpu: 10m
-              memory: 16Mi
+              memory: 32Mi
             limits:
-              cpu: 100m
-              memory: 128Mi
+              cpu: 10m
+              memory: 32Mi
           command:
             - /bin/sh
             - -c
@@ -126,6 +134,12 @@ spec:
             {{- end }}
             - name: PI_SIDECAR_TRANSCRIPTS_DIR
               value: {{ .Values.env.sidecarTranscriptsDir | default (printf "%s/pi-sidecar/transcripts" .Values.env.xdgDataHome) | quote }}
+            {{- if $ephemeralLimit }}
+            # Clones and graph indexes land under /tmp; TMPDIR keeps tempfile on the
+            # capped volume instead of assuming the interpreter default.
+            - name: TMPDIR
+              value: /tmp
+            {{- end }}
           envFrom:
             - configMapRef:
                 name: {{ include "rootcoz.configMapName" . }}
@@ -171,7 +185,7 @@ spec:
             failureThreshold: 5
             successThreshold: 1
           resources:
-            {{- toYaml .Values.resources | nindent 12 }}
+            {{- include "rootcoz.containerResources" . | nindent 12 }}
           volumeMounts:
             - name: data
               mountPath: {{ .Values.env.xdgDataHome }}
@@ -189,7 +203,16 @@ spec:
             - name: sidecar-agent
               mountPath: /etc/pi-sidecar-agent
             {{- end }}
+            {{- if $ephemeralLimit }}
+            - name: tmp
+              mountPath: /tmp
+            {{- end }}
       volumes:
+        {{- if $ephemeralLimit }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: {{ $ephemeralLimit | quote }}
+        {{- end }}
         {{- if .Values.persistence.enabled }}
         - name: data
           persistentVolumeClaim:
