@@ -1,0 +1,35 @@
+# Production resource profile — overlay, not a default.
+#
+# Apply it on top of an install recipe:
+#   helm upgrade --install rootcoz ./chart -n rootcoz \
+#     -f chart/examples/values-openshift.yaml \
+#     -f chart/examples/values-production.yaml \
+#     -f ~/.config/rootcoz/helm/values.secrets.yaml
+#
+# Basis (see chart/README.md → Production Sizing):
+#   cpu 4               — the live deployment's limit is 4000m and CPU throttling
+#                         stays under 1% of periods.
+#   memory 32Gi         — peak usage (analysis + graph indexing + sidecar) is ~6 GiB;
+#                         32Gi is headroom to raise max_concurrent_ai_calls above the
+#                         default 3 (~1 GiB baseline + ~2 GiB per concurrent analysis).
+#   ephemeral-storage   — 16Gi is a judgement from the configured ceilings, not a
+#                          measurement: 1 GiB graph index per analysis workspace x
+#                          default concurrency 3, plus up to 10 concurrent repo clones,
+#                          plus Jenkins/Prow artifacts and the container writable layer.
+#
+# Caveats:
+#   * requests == limits gives Guaranteed QoS for cpu/memory and raises the scheduling
+#     floor to 32Gi memory + 16Gi ephemeral — the node must have that allocatable.
+#     For smaller nodes request 16Gi memory instead (Burstable, as the dev deployment does).
+#   * Keep ephemeral-storage at or below the node's ephemeral capacity.
+#   * Setting the ephemeral-storage limit also mounts a /tmp emptyDir with the same
+#     sizeLimit; exceeding either is a kubelet eviction, not a throttle.
+resources:
+  requests:
+    cpu: "4"
+    memory: 32Gi
+    ephemeral-storage: 16Gi
+  limits:
+    cpu: "4"
+    memory: 32Gi
+    ephemeral-storage: 16Gi
