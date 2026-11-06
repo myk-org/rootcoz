@@ -15,6 +15,7 @@ import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Sequence
 from compression import zstd
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -43,6 +44,28 @@ logger = get_child_logger(__name__)
 
 
 DB_PATH = Path(os.getenv("DB_PATH", "/data/results.db"))
+
+# A task that outlives whatever spawned it must keep writing the database it was
+# started against. DB_PATH is a module global, so a rebind mid-flight -- a test's
+# monkeypatch, a reload -- would otherwise move every later connection of a
+# running backfill to another file, and the shutdown drain would wait on a write
+# into a database nobody asked about (#409).
+_PINNED_DB_PATH: ContextVar[Path | None] = ContextVar("rootcoz_db_path", default=None)
+
+
+def pin_db_path(path: Path | None = None) -> None:
+    """Freeze this context (and everything it spawns) on *path*.
+
+    Defaults to the live ``DB_PATH`` -- call it where a background task is
+    created, so the task carries the path it starts on.
+    """
+    _PINNED_DB_PATH.set(Path(DB_PATH if path is None else path))
+
+
+def current_db_path() -> Path:
+    """The database this context writes to: the pinned path, else ``DB_PATH``."""
+    return _PINNED_DB_PATH.get() or DB_PATH
+
 
 ANALYSIS_STATE_SUBMITTED: Literal["submitted"] = "submitted"
 ANALYSIS_STATE_ANALYZED: Literal["analyzed"] = "analyzed"
@@ -152,9 +175,19 @@ def signature_match(hashes: Any, alias: str = "") -> tuple[str, list[str]]:
 
 
 @asynccontextmanager
-async def _connect_db() -> AsyncIterator[aiosqlite.Connection]:
-    """Open a database connection with WAL mode and busy_timeout."""
-    async with aiosqlite.connect(DB_PATH) as db:
+async def _connect_db(
+    db_path: Path | None = None,
+) -> AsyncIterator[aiosqlite.Connection]:
+    """Open a database connection with WAL mode and busy_timeout.
+
+    Args:
+        db_path: File to open; this context's pinned path (else ``DB_PATH``) by
+            default. A caller opening several connections resolves
+            ``current_db_path()`` once and passes it, so one pass cannot be
+            split across two files.
+    """
+    path = Path(db_path) if db_path is not None else current_db_path()
+    async with aiosqlite.connect(path) as db:
         # busy_timeout first: the WAL switch needs exclusive access, and without
         # it set the switch uses sqlite's default timeout and fails on a lock.
         await db.execute("PRAGMA busy_timeout=5000")
@@ -875,7 +908,7 @@ def _denorm_row_params(
 
 
 async def _derive_denorm_pages(
-    where: str, where_params: Sequence[Any], batch_size: int
+    where: str, where_params: Sequence[Any], batch_size: int, db_path: Path
 ) -> int:
     """Derive one pending set, keyset-paged, one transaction per page.
 
@@ -885,7 +918,7 @@ async def _derive_denorm_pages(
     rowid = 0
     done = 0
     while True:
-        async with _connect_db() as db:
+        async with _connect_db(db_path) as db:
             cursor = await db.execute(
                 "SELECT rowid AS rid, job_id, result_json FROM results"
                 f" WHERE rowid > ? AND {where} ORDER BY rowid LIMIT ?",
@@ -933,7 +966,10 @@ async def backfill_results_denorm(batch_size: int = 200) -> int:
     """
     if batch_size <= 0:
         raise ValueError("batch_size must be > 0")
-    async with _connect_db() as db:
+    # One path for the whole pass: a DB_PATH rebind mid-sweep must not send the
+    # next page to another database.
+    db_path = current_db_path()
+    async with _connect_db(db_path) as db:
         cursor = await db.execute(
             "SELECT COUNT(*) FROM results WHERE"
             f" ({_DENORM_PENDING_BELOW}) OR ({_DENORM_PENDING_UNPROVEN})",
@@ -946,11 +982,11 @@ async def backfill_results_denorm(batch_size: int = 200) -> int:
         "Migration: deriving denormalized columns for %d results row(s)", pending
     )
     done = await _derive_denorm_pages(
-        _DENORM_PENDING_UNPROVEN, (_RESULTS_DENORM_VERSION,), batch_size
+        _DENORM_PENDING_UNPROVEN, (_RESULTS_DENORM_VERSION,), batch_size, db_path
     )
     # Second: rows an older build inserted and never derived at all.
     done += await _derive_denorm_pages(
-        _DENORM_PENDING_BELOW, (_RESULTS_DENORM_VERSION,), batch_size
+        _DENORM_PENDING_BELOW, (_RESULTS_DENORM_VERSION,), batch_size, db_path
     )
     logger.info("Migration: derived denormalized columns for %d results row(s)", done)
     return done
@@ -981,14 +1017,14 @@ async def _eligible_result_bytes(db: aiosqlite.Connection) -> int:
     return (await cursor.fetchone())[0]
 
 
-async def _db_storage_report(db: aiosqlite.Connection) -> str:
+async def _db_storage_report(db: aiosqlite.Connection, db_path: Path) -> str:
     """File size plus free pages — the space a VACUUM could return."""
     cursor = await db.execute("PRAGMA freelist_count")
     free_pages = (await cursor.fetchone())[0]
     cursor = await db.execute("PRAGMA page_size")
     page_size = (await cursor.fetchone())[0]
     return (
-        f"{DB_PATH.stat().st_size} bytes on disk, {free_pages * page_size} bytes free"
+        f"{db_path.stat().st_size} bytes on disk, {free_pages * page_size} bytes free"
     )
 
 
@@ -1025,14 +1061,18 @@ async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, i
     if batch_size <= 0:
         raise ValueError("batch_size must be > 0")
     stats = {"rows": 0, "bytes_before": 0, "bytes_after": 0}
-    async with _connect_db() as db:
+    # Resolved once, before the first await and every page after it: the sweep
+    # outlives whatever changed DB_PATH, and it must keep writing -- and
+    # reporting -- the file it started on.
+    db_path = current_db_path()
+    async with _connect_db(db_path) as db:
         if not await _migration_applied(db, _RESULTS_DENORM_KEY):
             logger.warning(
                 "result_json compression skipped: denormalized columns not derived"
             )
             return stats
         stats["bytes_before"] = await _eligible_result_bytes(db)
-        on_disk_before = await _db_storage_report(db)
+        on_disk_before = await _db_storage_report(db, db_path)
     stats["bytes_after"] = stats["bytes_before"]
     logger.info(
         "result_json compression: starting (%d bytes of legacy results, database %s)",
@@ -1041,7 +1081,7 @@ async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, i
     )
     rowid = 0
     while True:
-        async with _connect_db() as db:
+        async with _connect_db(db_path) as db:
             cursor = await db.execute(
                 _RESULT_JSON_COMPRESSION_SELECT,
                 (rowid, _RESULTS_DENORM_VERSION, _RESULT_ZSTD_MIN_BYTES, batch_size),
@@ -1055,7 +1095,7 @@ async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, i
         params_page = await asyncio.to_thread(_compress_result_rows, rows)
         if not params_page:
             continue
-        async with _connect_db() as db:
+        async with _connect_db(db_path) as db:
             await db.execute("BEGIN IMMEDIATE")
             for params in params_page:
                 # Compare-and-swap on the payload, not just on its type: a
@@ -1074,8 +1114,8 @@ async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, i
             stats["rows"],
             rowid,
         )
-    async with _connect_db() as db:
-        on_disk_after = await _db_storage_report(db)
+    async with _connect_db(db_path) as db:
+        on_disk_after = await _db_storage_report(db, db_path)
     logger.info(
         "result_json compression: done, %d row(s) compressed, %d -> %d bytes,"
         " database %s -> %s",

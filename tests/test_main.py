@@ -2121,6 +2121,83 @@ class TestAppLifespan:
             await asyncio.gather(*main._background_tasks, return_exceptions=True)
             main._background_tasks.clear()
 
+    @pytest.mark.asyncio
+    async def test_a_backfill_writes_the_database_it_started_on(
+        self, mock_settings, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A DB_PATH rebind mid-flight cannot redirect a running background task.
+
+        The shutdown drain only closes this window at shutdown: while the app is
+        up, a task that re-reads the module-global DB_PATH per connection follows
+        a rebind (a test's monkeypatch, a reload) into another file, and the drain
+        then awaits a write nobody asked about (#409). The sweep must finish the
+        database it started on and never touch the new one.
+        """
+        from rootcoz import main
+
+        started_on = tmp_path / "started-on.db"
+        moved_to = tmp_path / "moved-to.db"
+        for path in (started_on, moved_to):
+            with patch.object(storage, "DB_PATH", path):
+                await storage.init_db()
+        # A row the way a pre-compression build wrote it: inline TEXT, columns
+        # underived, so both passes of the sweep have work to do.
+        with patch.object(storage, "DB_PATH", started_on):
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "INSERT INTO results (job_id, status, result_json)"
+                    " VALUES ('job-legacy', 'completed', ?)",
+                    (json.dumps({"summary": "legacy", "details": "x" * 4000}),),
+                )
+                await db.commit()
+
+        real_sweep = main._compress_stored_results
+        started = asyncio.Event()
+        release = asyncio.Event()
+        finished = asyncio.Event()
+
+        async def _gated_sweep() -> None:
+            """Hold the sweep at its start so the global can move underneath it."""
+            started.set()
+            await release.wait()
+            try:
+                await real_sweep()
+            finally:
+                finished.set()
+
+        monkeypatch.setattr(main, "_compress_stored_results", _gated_sweep)
+        try:
+            with patch.object(storage, "DB_PATH", started_on):
+                async with main.lifespan(main.app):
+                    await asyncio.wait_for(started.wait(), 5)
+                    monkeypatch.setattr(storage, "DB_PATH", moved_to)
+                    release.set()
+                    await asyncio.wait_for(finished.wait(), 10)
+        finally:
+            release.set()
+            for task in list(main._background_tasks):
+                task.cancel()
+            await asyncio.gather(*main._background_tasks, return_exceptions=True)
+            main._background_tasks.clear()
+
+        with patch.object(storage, "DB_PATH", started_on):
+            async with storage._connect_db() as db:
+                row = await (
+                    await db.execute(
+                        "SELECT typeof(result_json) AS kind FROM results"
+                        " WHERE job_id = 'job-legacy'"
+                    )
+                ).fetchone()
+        assert row["kind"] == "blob", (
+            "the sweep followed DB_PATH away from the database it started on"
+        )
+        with patch.object(storage, "DB_PATH", moved_to):
+            async with storage._connect_db() as db:
+                written = (
+                    await (await db.execute("SELECT COUNT(*) FROM results")).fetchone()
+                )[0]
+        assert written == 0, "the sweep wrote into the database it was moved to"
+
 
 class TestOpenAPISchema:
     """Tests for OpenAPI schema."""

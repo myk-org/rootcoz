@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import contextvars
 import copy
 import csv
 import hashlib
@@ -2250,6 +2251,22 @@ def _register_job_task(job_id: str, task: asyncio.Task[Any]) -> None:
     _job_tasks[job_id] = task
 
 
+def _spawn_background(coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
+    """Track *coro* as a background task pinned to the database it starts on.
+
+    A background task outlives the request or the startup pass that spawned it,
+    so it must not follow a later ``DB_PATH`` rebind into another file: the
+    shutdown drain would then be waiting on a write into a database that is not
+    the one the app serves (#409).
+    """
+    context = contextvars.copy_context()
+    context.run(storage.pin_db_path)
+    task = asyncio.create_task(coro, context=context)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
 async def _preserve_request_params(job_id: str, result_data: dict[str, Any]) -> None:
     """Copy persisted enqueue-time fields from the stored result into result_data.
 
@@ -2433,7 +2450,7 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> None:
             or ""
         )
 
-        task = asyncio.create_task(
+        task = _spawn_background(
             _process_ci_source_analysis(
                 job_id=job["job_id"],
                 body=body,
@@ -2694,30 +2711,24 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         raise RuntimeError("Startup configuration validation failed")
 
     try:
-        cleanup_task = asyncio.create_task(_periodic_session_cleanup())
+        cleanup_task = _spawn_background(_periodic_session_cleanup())
         # One sampler for the event-loop lag the admin status page reports.
         server_status.start_loop_lag_watchdog()
 
         # Pre-populate cursor models in background (don't block startup)
-        task = asyncio.create_task(_safe_preload_cursor_models())
-        _background_tasks.add(task)
-        task.add_done_callback(_background_tasks.discard)
+        _spawn_background(_safe_preload_cursor_models())
 
         # Retroactively assign metadata to jobs that don't have it yet
         settings = get_settings()
         if settings.admin_wait_approve_msg:
             logger.info("[startup] ADMIN_WAIT_APPROVE_MSG configured")
         if settings.metadata_rules:
-            task = asyncio.create_task(_backfill_job_metadata(settings.metadata_rules))
-            _background_tasks.add(task)
-            task.add_done_callback(_background_tasks.discard)
+            _spawn_background(_backfill_job_metadata(settings.metadata_rules))
 
         # Compress legacy result_json rows written before they were stored
         # compressed (#409). Background, chunked and off the event loop: a
         # multi-GB sweep must not delay startup or /health.
-        task = asyncio.create_task(_compress_stored_results())
-        _background_tasks.add(task)
-        task.add_done_callback(_background_tasks.discard)
+        _spawn_background(_compress_stored_results())
 
         waiting_jobs, recovered_jobs = await storage.mark_stale_results_failed()
         for rj in recovered_jobs:
@@ -2731,9 +2742,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         if waiting_jobs:
             # Schedule resumption as a background task so it runs after the
             # app is fully started and ready to serve internal API requests.
-            task = asyncio.create_task(_deferred_resume_waiting_jobs(waiting_jobs))
-            _background_tasks.add(task)
-            task.add_done_callback(_background_tasks.discard)
+            _spawn_background(_deferred_resume_waiting_jobs(waiting_jobs))
 
         yield
     finally:
@@ -2784,7 +2793,7 @@ class ErrorTrackingMiddleware(BaseHTTPMiddleware):
             server_errors = snap.get("error_counts", {}).get("5xx", 0)
             server_error_rate = server_errors / total_requests if total_requests else 0
             if server_error_rate > 0.5 and total_requests >= 10:
-                task = asyncio.create_task(
+                _spawn_background(
                     dispatch_alert(
                         "high_error_rate",
                         f"\u26a0\ufe0f rootcoz high 5xx error rate: {server_error_rate:.0%} "
@@ -2792,8 +2801,6 @@ class ErrorTrackingMiddleware(BaseHTTPMiddleware):
                         f"in {snap['window_seconds']}s window)",
                     )
                 )
-                _background_tasks.add(task)
-                task.add_done_callback(_background_tasks.discard)
         except Exception:  # alert scheduling must never break request handling
             logger.debug("Failed to schedule high-error-rate alert", exc_info=True)
 
@@ -3211,9 +3218,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # Track user activity only for authenticated identities
         if has_valid_session and username:
-            task = asyncio.create_task(_safe_track_user(username))
-            _background_tasks.add(task)
-            task.add_done_callback(_background_tasks.discard)
+            _spawn_background(_safe_track_user(username))
 
         # Admin-only path enforcement
         if path.startswith("/api/admin/") and not authenticated_admin:
@@ -4908,7 +4913,7 @@ async def _enqueue_ci_source_analysis(
     notify_dashboard_changed()
 
     # Spawn background task
-    task = asyncio.create_task(
+    task = _spawn_background(
         _process_ci_source_analysis(
             job_id=job_id,
             body=body,
@@ -7696,7 +7701,7 @@ async def re_analyze_failure(
     notify_job_status_changed(parent_job_id)
 
     # Start background task
-    task = asyncio.create_task(
+    task = _spawn_background(
         _reanalyze_failure_background(
             job_id=parent_job_id,
             failure_uuid=failure_uuid,
@@ -8091,7 +8096,7 @@ async def add_comment(
     if settings.web_push_enabled and username and mentioned:
         vapid_cfg = get_vapid_config()
         if vapid_cfg and "private_key" in vapid_cfg and "claim_email" in vapid_cfg:
-            task = asyncio.create_task(
+            _spawn_background(
                 send_mention_notifications(
                     mentioned_usernames=mentioned,
                     comment_author=username,
@@ -8102,8 +8107,6 @@ async def add_comment(
                     public_base_url=settings.public_base_url,
                 )
             )
-            _background_tasks.add(task)
-            task.add_done_callback(_background_tasks.discard)
 
     # Notify mentioned users for SSE badge updates
     for mentioned_user in mentioned:
