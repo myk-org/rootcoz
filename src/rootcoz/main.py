@@ -10596,7 +10596,7 @@ async def create_github_issue_endpoint(
         message=f"User '{username}' created GitHub issue {issue_url} for job {job_id}",
         target_type="job",
         target_id=job_id,
-        details={"tracker": "github", "test_name": body.test_name},
+        details=_filed_issue_details("github", result, test_name=body.test_name),
         request=request,
     )
 
@@ -10650,11 +10650,34 @@ async def create_jira_bug_endpoint(
         message=f"User '{username}' created Jira issue {issue_url} for job {job_id}",
         target_type="job",
         target_id=job_id,
-        details={"tracker": "jira", "test_name": body.test_name},
+        details=_filed_issue_details("jira", result, test_name=body.test_name),
         request=request,
     )
 
     return {**result, "comment_id": comment_id}
+
+
+def _filed_issue_details(
+    tracker: str, result: dict[str, Any], **details: Any
+) -> dict[str, Any]:
+    """``details`` for a filed issue, naming the subject: ``url`` and ``number``/``key``.
+
+    The URL is what a reader clicks to reach the issue the row is about, so a
+    success row carries it; the issue's own title and body never do. The Jira
+    identifier is ``key`` (``_AUDIT_SAFE_DETAIL_KEYS``), never ``issue_key``: a
+    detail named ``*_key`` is dropped as credential-shaped by
+    :func:`_redact_details`, and an issue key is not a credential.
+    """
+    filed: dict[str, Any] = {
+        "tracker": tracker,
+        "result": "success",
+        "url": result.get("url", ""),
+    }
+    if tracker == "github":
+        filed["number"] = result.get("number", 0)
+    else:
+        filed["key"] = result.get("key", "")
+    return {**details, **filed}
 
 
 def _refused_issue_details(
@@ -10966,12 +10989,12 @@ async def create_chat_issue(
         message=f"{message}: {result['url']}",
         target_type="chat",
         target_id=None,
-        details={
-            "tracker": tracker,
-            "repo": destination.get("repo", ""),
-            "job_id": body.job_id,
-            "result": "success",
-        },
+        details=_filed_issue_details(
+            tracker,
+            result,
+            repo=destination.get("repo", ""),
+            job_id=body.job_id,
+        ),
         request=request,
     )
     return result

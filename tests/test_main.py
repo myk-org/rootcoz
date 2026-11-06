@@ -4934,6 +4934,15 @@ class TestChatIssueEndpoint:
         assert event["details"]["tracker"] == "github"
         assert event["target_id"] is None
         assert event["outcome"] == "success"
+        # The row names the issue it filed: a reader reaches it from the row
+        # alone, and the clickable URL is derivable from repo + number.
+        assert event["details"]["repo"] == "org/repo"
+        assert event["details"]["number"] == 7
+        assert event["details"]["url"] == "https://github.com/org/repo/issues/7"
+        assert event["details"]["url"] == (
+            f"https://github.com/{event['details']['repo']}"
+            f"/issues/{event['details']['number']}"
+        )
 
     @pytest.mark.asyncio
     async def test_github_without_a_row_token_refuses_and_audits(self, test_client):
@@ -5252,6 +5261,15 @@ class TestChatIssueEndpoint:
                 )
         assert response.status_code == 201, response.text
         assert response.json()["key"] == "PROJ-7"
+        # ``key``, not ``issue_key``: a ``*_key`` detail is dropped as a secret.
+        assert (await self._chat_audit())["events"][0]["details"] == {
+            "tracker": "jira",
+            "result": "success",
+            "repo": "",
+            "job_id": "",
+            "key": "PROJ-7",
+            "url": "https://jira.example.com/browse/PROJ-7",
+        }
         call_settings = mock_create.call_args[1]["settings"]
         assert call_settings.jira_api_token.get_secret_value() == "user_jira_token"
         assert call_settings.jira_auth_mode == "basic"
@@ -6389,9 +6407,11 @@ class TestChatIssueEndpoint:
                         "/api/chat-issue", json=draft, headers=headers
                     )
             assert response.status_code in (403, 429), response.text
-            assert (await self._chat_audit())["events"][0]["details"][
-                "upstream_status"
-            ] == upstream
+            refused = (await self._chat_audit())["events"][0]
+            assert refused["details"]["upstream_status"] == upstream
+            # A create that filed nothing names no issue.
+            assert "url" not in refused["details"]
+            assert "number" not in refused["details"]
 
     @pytest.mark.asyncio
     async def test_a_full_draft_store_audits_the_refused_proposal(

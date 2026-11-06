@@ -3127,6 +3127,8 @@ def test_issue_create_is_audited(app_client) -> None:
     assert len(events) == 1
     assert events[0]["details"]["tracker"] == "github"
     assert events[0]["target_id"] == "job-1"
+    # The row names the issue it filed, so the trail is where a reader finds it.
+    assert events[0]["details"]["url"] == "https://github.com/o/r/issues/1"
 
 
 def test_a_pending_users_issue_attempt_leaves_a_row(temp_db_path: Path) -> None:
