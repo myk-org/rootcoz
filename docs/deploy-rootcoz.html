@@ -409,6 +409,77 @@ kubectl<span class="w"> </span>port-forward<span class="w"> </span>svc/rootcoz<s
 <li>With no Route or TLS Ingress, the chart automatically falls back to non-secure cookies for this HTTP-only access pattern.</li>
 <li>When you are ready to publish it, switch to the Route or Ingress recipe instead of editing the Service directly.</li>
 </ul>
+<h2 id="sizing">Sizing</h2>
+<p>Default resources (<code>1 CPU / 4Gi</code> request, <code>2 CPU / 8Gi</code> limit) suit evaluation clusters. For
+concurrent AI analysis work apply the shipped production profile, which is reproducible from
+<code>chart/examples/values-production.yaml</code> and validated by the chart tests:</p>
+<div class="highlight"><pre><span></span><code>helm<span class="w"> </span>upgrade<span class="w"> </span>rootcoz<span class="w"> </span>./chart<span class="w"> </span>-n<span class="w"> </span>rootcoz<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span><span class="s2">"</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.generated.yaml"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span>chart/examples/values-production.yaml<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-f<span class="w"> </span><span class="s2">"</span><span class="nv">$VALUES_DIR</span><span class="s2">/values.secrets.yaml"</span>
+</code></pre></div>
+
+<p>It sets <code>4 CPU / 32Gi / 16Gi ephemeral-storage</code> on both <code>requests</code> and <code>limits</code>.</p>
+<div class="table-wrap"><table>
+<thead>
+<tr>
+<th>Resource</th>
+<th>Value</th>
+<th>Basis</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>CPU</td>
+<td><code>4</code></td>
+<td>The live deployment's limit is <code>4000m</code>; CPU throttling stays under 1% of periods.</td>
+</tr>
+<tr>
+<td>Memory</td>
+<td><code>32Gi</code></td>
+<td>Peak usage is ~6 GiB. Size a smaller pod with <strong>~1 GiB baseline + ~2 GiB per concurrent analysis</strong> (default <code>max_concurrent_ai_calls</code> is 3).</td>
+</tr>
+<tr>
+<td>ephemeral-storage</td>
+<td><code>16Gi</code></td>
+<td>A judgement from the configured ceilings, not a measurement: 1 GiB graph index per analysis workspace × concurrency 3, up to 10 concurrent repo clones, plus CI artifacts and the writable layer. Keep it at or below the node's ephemeral allocatable.</td>
+</tr>
+</tbody>
+</table></div>
+<p><strong>Guaranteed versus Burstable.</strong> <code>requests == limits</code> gives Guaranteed QoS (computed from cpu and
+memory only) and raises the scheduling floor to 32Gi memory + 16Gi ephemeral, so the node must have
+that allocatable. On smaller nodes request <code>16Gi</code> memory instead — Burstable, which is what the dev
+deployment uses. The live <code>.dev/openshift/deployment.yaml</code> request is therefore deliberately
+different from this profile.</p>
+<p><strong>Upgrading to this chart version.</strong> The default render is byte-identical for installs that do not set
+<code>sidecar.agentDir</code>, so those do not roll. Installs that set it get <strong>one pod restart</strong>: the
+<code>copy-sidecar-agent</code> init container's request and limit are now equal (<code>10m/32Mi</code>) where they were
+<code>10m/16Mi</code> and <code>100m/128Mi</code>, and that equality is what keeps a Guaranteed pod Guaranteed. With one
+replica on <code>Recreate</code> and a 30 s grace period, an analysis in flight at that moment is interrupted and
+has to be re-submitted.</p>
+<p><strong>Clearing a request does not remove the floor.</strong> Setting <code>resources.requests.memory=""</code> drops only
+the explicit request; Kubernetes copies the matching limit into the request when no admission policy
+supplies one, so the default profile still schedules for <code>8Gi</code>. Clear the limit too for a genuine
+no-floor pod, or let a namespace <code>LimitRange</code> default the request.</p>
+<p><strong>Persistent storage.</strong> Database growth is ~83 KB per stored result with no retention yet (#409); the
+PVC size is not part of the production profile, because applying it over a live release either no-ops
+or triggers a PVC resize.</p>
+<p><strong>Ephemeral storage and <code>/tmp</code>.</strong> Repo clones and code-graph indexes live under <code>/tmp</code>. Setting an
+<code>ephemeral-storage</code> <strong>limit</strong> makes the chart mount a <code>/tmp</code> <code>emptyDir</code> with <code>sizeLimit</code> equal to that
+limit (and <code>TMPDIR=/tmp</code>), so a runaway clone fails at a known number instead of filling the node.
+Exceeding either the container limit or the <code>sizeLimit</code> is a <strong>kubelet eviction, not a throttle</strong>: the
+whole pod goes down mid-analysis, in-flight analyses are lost, and the pod returns through the
+<code>Recreate</code> strategy. The SQLite database survives on the PVC and recovers through WAL replay. Prefer a
+limit over no limit — an uncapped pod causes node <code>DiskPressure</code>, which evicts every pod on the node.</p>
+<p><strong>Single replica consequence.</strong> One replica on a ReadWriteOnce PVC, <code>Recreate</code> strategy, no HA: any
+restart — eviction, upgrade, node drain — interrupts running analyses. Track them on the dashboard
+and re-submit after the rollout.</p>
+<p>Extended resources (<code>nvidia.com/gpu</code>, <code>hugepages-*</code>) are supported in <code>resources.requests</code> / <code>limits</code>.
+<code>memory</code> and <code>ephemeral-storage</code> need a unit (<code>4Gi</code>); a bare number is read as bytes. <code>cpu</code> takes a
+bare number or a quantity string (<code>4</code>, <code>500m</code>, <code>2.5</code>) — a typo such as <code>not-a-quantity</code> fails schema
+validation at render, not after install at the API server. See
+<a href="https://github.com/myk-org/rootcoz/blob/main/chart/README.md">the chart README</a> for the full
+rationale.</p>
 <h2 id="upgrade-and-smoke-test-a-helm-release">Upgrade and smoke-test a Helm release</h2>
 <p>Apply new values, wait for the rollout, and run the chart’s built-in health test after any deployment change.</p>
 <div class="highlight"><pre><span></span><code><span class="nv">VALUES_DIR</span><span class="o">=</span><span class="s2">"</span><span class="nv">$HOME</span><span class="s2">/.config/rootcoz/helm"</span>
@@ -586,6 +657,7 @@ kubectl<span class="w"> </span>-n<span class="w"> </span>rootcoz<span class="w">
 <li><a href="#install-on-openshift-with-a-route">Install on OpenShift with a Route</a></li>
 <li><a href="#install-on-kubernetes-with-tls-ingress">Install on Kubernetes with TLS Ingress</a></li>
 <li><a href="#run-a-private-clusterip-only-release-and-port-forward-it">Run a private ClusterIP-only release and port-forward it</a></li>
+<li><a href="#sizing">Sizing</a></li>
 <li><a href="#upgrade-and-smoke-test-a-helm-release">Upgrade and smoke-test a Helm release</a><ul>
 <li><a href="#roll-back-to-an-older-build">Roll back to an older build</a></li>
 </ul>
