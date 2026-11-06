@@ -949,7 +949,7 @@ class JenkinsSource(CISource):
                             wrote_any = True
                 except _JENKINS_FETCH_WITH_OS:
                     logger.warning("Chat: failed to download artifacts", exc_info=True)
-                    self.cleanup()
+                    await self.cleanup_async()
 
         return wrote_any
 
@@ -1200,7 +1200,7 @@ async def analyze_child_job(
         logger.error(
             "Child job %s #%d build info fetch failed: %s", job_name, build_number, e
         )
-        source.cleanup()
+        await source.cleanup_async()
         return ChildJobResult(
             analysis=ChildJobAnalysis(
                 job_name=job_name,
@@ -1235,7 +1235,7 @@ async def analyze_child_job(
             ingest_only=ingest_only,
         )
     finally:
-        source.cleanup()
+        await source.cleanup_async()
 
 
 async def _analyze_grouped_failures(

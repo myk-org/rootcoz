@@ -304,6 +304,13 @@ from rootcoz.storage import (
     stamp_build_url,
     update_status,
 )
+from rootcoz.temp_paths import (
+    DeleteResult,
+    PathStateUnknown,
+    cleanup_off_loop,
+    cleanup_path_off_loop,
+    delete_tree,
+)
 from rootcoz.token_tracking import (
     build_token_usage_summary,
     child_usage_scope,
@@ -2247,6 +2254,10 @@ def _reconstruct_from_params(
 
 _background_tasks: set[asyncio.Task[Any]] = set()
 
+#: When this process started. A workspace written after this cannot be a leftover
+#: of a dead process, so the startup reclaim leaves it alone.
+_PROCESS_STARTED_AT = _time.time()
+
 # Track analysis background tasks by job_id for abort support
 _job_tasks: dict[str, asyncio.Task[Any]] = {}
 
@@ -2508,6 +2519,101 @@ async def _backfill_job_metadata(rules: list[dict[str, Any]]) -> None:
         logger.debug("Failed to backfill job metadata", exc_info=True)
 
 
+async def _reclaim_abandoned_workspaces() -> int:
+    """Delete the analysis workspaces a previous process abandoned; return the count.
+
+    A ``finally`` that meets a live graph build returns ``ABANDON``, which stops
+    ``repo_manager.cleanup``: the uuid workspace and its sibling graph root then
+    stay on disk with no owner, because nothing in a later process ever looks at
+    that name again. Process start is the one moment no builder can still hold
+    the tree, so the leftovers are reaped here, off the loop, through the same
+    reaper as every other delete.
+
+    Only ``workspace-*`` trees are reclaimed unconditionally: an intact
+    ``chat-{job}`` workspace is reused across sessions and keeps its clones and
+    graph across a restart. One carrying a delete marker is reclaimed too — the
+    delete that wrote it died, and for a *deleted* job no create ever reaches
+    the recovery that would reap it, because the job row is gone and every init
+    404s first.
+
+    Returned count is what was really deleted: a step that abandons or leaves
+    paths behind reclaims nothing, and reporting it as deleted would hide a tree
+    that stays until the next restart.
+
+    Ownership is *single-process*: newest mtime versus this process's start, with
+    no cross-process check, so a second live server sharing the temp dir would
+    lose its workspaces. That is sound only because the product forbids a second
+    replica (``chart/templates/deployment.yaml`` ``replicas: 1``,
+    ``chart/templates/NOTES.txt`` "Do not scale replicas above 1",
+    ``docs/deploy-rootcoz.md``). Deliberately no lock protocol: it would guard a
+    deployment the chart and docs rule out.
+    """
+    from rootcoz.engine.graft import _root
+    from rootcoz.temp_paths import CleanupOutcome, delete_marker, rootcoz_temp_base
+
+    base = rootcoz_temp_base()
+
+    def abandoned(path: Path) -> bool:
+        # Never follow a link: ``_root`` resolves the entry, so a stale
+        # ``workspace-*`` link into a chat workspace would delete *that* chat's
+        # graph tree while the chat itself is deliberately never reclaimed.
+        if path.is_symlink() or not path.is_dir():
+            return False
+        try:
+            marker = delete_marker(path)
+            # The newest of the tree and its marker: a delete queued by *this*
+            # process writes a fresh marker for a tree it still owns.
+            newest = path.lstat().st_mtime
+            if marker.exists():
+                newest = max(newest, marker.lstat().st_mtime)
+            elif not path.name.startswith("workspace-"):
+                return False
+        except OSError:
+            return False
+        return newest < _PROCESS_STARTED_AT
+
+    try:
+        # Snapshot before the first await: a job resumed from the DB clones into
+        # a *new* workspace in this directory, and that one must not be in the list.
+        leftovers = sorted(path for path in base.iterdir() if abandoned(path))
+    except FileNotFoundError:
+        # ``rootcoz_temp_base`` only joins a path; the base is created lazily by
+        # the first ``RepositoryManager``, i.e. *after* this task runs. A fresh
+        # container has no base, and that means no abandoned workspace — not a
+        # listing failure.
+        return 0
+    except OSError:
+        logger.warning(
+            "Startup reclaim: cannot list %s, abandoned workspaces stay on disk",
+            base,
+            exc_info=True,
+        )
+        return 0
+    reclaimed = 0
+    for workspace in leftovers:
+        outcome = await cleanup_off_loop(
+            workspace.name,
+            partial(delete_tree, _root(workspace)),
+            partial(delete_tree, workspace),
+        )
+        if outcome is CleanupOutcome.CLEAN:
+            reclaimed += 1
+    if reclaimed:
+        logger.info(
+            "Startup reclaim: deleted %d abandoned workspace(s) under %s",
+            reclaimed,
+            base,
+        )
+    if survivors := len(leftovers) - reclaimed:
+        logger.warning(
+            "Startup reclaim: %d abandoned workspace(s) under %s survived their "
+            "delete and stay until the next restart",
+            survivors,
+            base,
+        )
+    return reclaimed
+
+
 async def _deferred_resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> None:
     """Resume waiting jobs after startup is complete.
 
@@ -2694,6 +2800,17 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     try:
         cleanup_task = asyncio.create_task(_periodic_session_cleanup())
+        # Created before any job is resumed: an abandoned workspace from the
+        # previous process is reaped while nothing can be building it. Ownership
+        # there is mtime versus process start, which holds only for one process
+        # on the temp dir — the single replica the chart and docs require.
+        logger.info(
+            "[startup] Workspace reclaim assumes a single server process "
+            "(single-replica deployment)"
+        )
+        reclaim_task = asyncio.create_task(_reclaim_abandoned_workspaces())
+        _background_tasks.add(reclaim_task)
+        reclaim_task.add_done_callback(_background_tasks.discard)
         # One sampler for the event-loop lag the admin status page reports.
         server_status.start_loop_lag_watchdog()
 
@@ -4368,7 +4485,8 @@ async def _resolve_settings_json_before_analysis(
         job_id,
     )
     clone_ok = False
-    with RepositoryManager() as repo_manager:
+    repo_manager = RepositoryManager()
+    try:
         workspace = repo_manager.create_workspace()
         target = workspace / "tests-repo-early"
         tests_path: Path | None = target
@@ -4405,6 +4523,9 @@ async def _resolve_settings_json_before_analysis(
             logger.error("Invalid .rootcoz/settings.json (details redacted)")
             await _fail_job(str(exc))
             return None
+    finally:
+        # Off the loop: this clone tree is a full repository checkout.
+        await cleanup_off_loop(job_id, repo_manager.cleanup)
 
     if not effective.ai_provider or not effective.ai_model:
         if not clone_ok:
@@ -5399,6 +5520,55 @@ def _count_failed_child_groups(children: list[ChildJobAnalysis]) -> int:
     return total
 
 
+async def _reap_analysis_workspace(
+    *,
+    job_id: str,
+    auth_header: str,
+    source: CISource | None,
+    repo_manager: RepositoryManager | None,
+    repo_path: Path | None,
+) -> None:
+    """Revoke the AI session and reap one analysis run's workspace, off the loop.
+
+    The single copy of the whole sequence both analysis ``finally`` blocks run:
+    the graph/artifact steps first, then the session revoke. Kept here because
+    the ordering only holds if it is edited in one place — the two copies had
+    already drifted (#424).
+
+    The revoke is last on purpose: a run cancelled mid-prompt leaves the sidecar
+    executing a prompt whose history tools authenticate with this token, and
+    analyses never abort their sidecar session (only chat does, ``client.abort``),
+    so revoking first only makes that prompt's tool calls fail. Revoking last
+    still guarantees the token is gone — ``create_task`` is not an await, so no
+    cancellation can skip it, and ``shield`` keeps the revoke running after the
+    caller's cancellation is delivered.
+    """
+    logger.debug(f"Cleaning up workspace for job_id={job_id}")
+    steps: list[Callable[[], object]] = []
+    # Downloaded CI artifacts are not the tree a live graph builder owns, so an
+    # abandoned graph delete must not skip them: nothing else sweeps that dir.
+    always: tuple[Callable[[], object], ...] = (
+        (source.cleanup,) if source is not None else ()
+    )
+    if repo_manager is not None:
+        from rootcoz.engine.graft import reap_graph
+        from rootcoz.engine.graft_http import unregister_workspace
+
+        if repo_path is not None:
+            steps += [
+                partial(unregister_workspace, repo_path),
+                partial(reap_graph, job_id, repo_path),
+            ]
+        steps.append(repo_manager.cleanup)
+    try:
+        if steps or always:
+            await cleanup_off_loop(job_id, *steps, always=always)
+    finally:
+        # Created in the ``finally`` so a cancelled cleanup cannot skip the
+        # revoke, and after the steps so the token outlives them.
+        await asyncio.shield(asyncio.create_task(_cleanup_ai_session(auth_header)))
+
+
 async def _process_ci_source_analysis(
     *,
     job_id: str,
@@ -6049,18 +6219,13 @@ async def _process_ci_source_analysis(
         notify_token_usage_changed()
 
     finally:
-        logger.debug(f"Cleaning up workspace for job_id={job_id}")
-        if repo_manager is not None:
-            from rootcoz.engine.graft import cleanup_graph
-            from rootcoz.engine.graft_http import unregister_workspace
-
-            if repo_path is not None:
-                unregister_workspace(repo_path)
-                cleanup_graph(repo_path)
-            repo_manager.cleanup()
-        if source is not None:
-            source.cleanup()
-        await _cleanup_ai_session(auth_header)
+        await _reap_analysis_workspace(
+            job_id=job_id,
+            auth_header=auth_header,
+            source=source,
+            repo_manager=repo_manager,
+            repo_path=repo_path,
+        )
 
 
 def _resolve_request_display_name(body: UnifiedAnalyzeRequest) -> str:
@@ -7498,24 +7663,13 @@ async def _reanalyze_failure_background(
 
     finally:
         notify_job_status_changed(job_id)
-        await _cleanup_ai_session(auth_header)
-        if repo_manager:
-            try:
-                from rootcoz.engine.graft import cleanup_graph
-                from rootcoz.engine.graft_http import unregister_workspace
-
-                if repo_path is not None:
-                    unregister_workspace(repo_path)
-                    cleanup_graph(repo_path)
-                repo_manager.cleanup()
-            except Exception:
-                logger.warning("Failed to cleanup repos", exc_info=True)
-        # Clean up downloaded source artifacts
-        if source is not None:
-            try:
-                source.cleanup()
-            except Exception:
-                logger.warning("Failed to cleanup source artifacts", exc_info=True)
+        await _reap_analysis_workspace(
+            job_id=job_id,
+            auth_header=auth_header,
+            source=source,
+            repo_manager=repo_manager,
+            repo_path=repo_path,
+        )
 
 
 @app.post(
@@ -20262,6 +20416,49 @@ async def _index_chat_repositories(
     await index_workspace_graph(workspace, job_id=job_id, repos=repos)
 
 
+def _chat_workspace_unknown_message(job_id: str, username: str) -> str:
+    """What to tell a user whose chat workspace could not be established.
+
+    ``PathStateUnknown`` means a leftover workspace is still owned by a live
+    graph build, or an interrupted delete left paths in it, so starting a chat
+    into it would corrupt the tree. The user cannot clear it, so the text names
+    the path and says who has to remove it.
+    """
+    from rootcoz.engine.chat import get_chat_workspace
+
+    return (
+        "The chat workspace could not be prepared: "
+        f"{get_chat_workspace(job_id, username)} is still in use by a running "
+        "workspace build, or a cleanup could not delete all of it. Wait for the "
+        "build to finish and try again. If it keeps failing, an administrator has "
+        "to remove that directory."
+    )
+
+
+async def _enter_chat_workspace(job_id: str, username: str, what: str) -> Path | None:
+    """Create the chat workspace under its path lock, or ``None`` if it cannot be.
+
+    One lock scope and one ``PathStateUnknown`` translation for every chat route:
+    the lock has to cover the create/reuse decision, and the exception means a
+    live builder owns the tree or an interrupted delete left paths in it, so
+    nothing may build on it. Only the vehicle that tells the user differs, so
+    the caller picks it; ``what`` names the route in the warning.
+    """
+    from rootcoz.engine.chat import chat_workspace_lock, ensure_chat_workspace
+
+    try:
+        async with chat_workspace_lock(job_id, username):
+            return ensure_chat_workspace(job_id, username=username)
+    except PathStateUnknown:
+        logger.warning(
+            "%s blocked by an unestablished workspace for job %s, user %s",
+            what,
+            job_id,
+            username,
+        )
+        return None
+
+
 async def _init_chat_under_barrier(
     job_id: str, username: str, body: ChatInitRequest
 ) -> dict[str, Any]:
@@ -20275,7 +20472,6 @@ async def _init_chat_under_barrier(
         build_chat_custom_tools,
         build_welcome_message,
         clone_chat_repos,
-        ensure_chat_workspace,
         init_chat_session,
     )
     from rootcoz.engine.graft_http import cloned_graph_roots
@@ -20300,7 +20496,20 @@ async def _init_chat_under_barrier(
             credential_source,
             allow_empty=True,
         )
-        workspace = ensure_chat_workspace(job_id, username=username)
+
+    # Outside the barrier: a marked workspace queues the recovery delete on the
+    # single reaper (``reap_graph``/``reap_reusable_path`` wait up to
+    # GRAPH_LOCK_SECONDS), and this barrier is shared by every init for the job
+    # and by job deletion — holding it across that wait stalls all of them. The
+    # workspace's own per-path lock already orders this against deletion's
+    # cleanup, and deletion cancels this task before it takes the barrier.
+    _raise_if_chat_job_deleted(job_id)
+    workspace = await _enter_chat_workspace(job_id, username, "Chat init")
+    if workspace is None:
+        raise HTTPException(
+            status_code=409,
+            detail=_chat_workspace_unknown_message(job_id, username),
+        )
 
     decrypted_params: dict[str, Any] = {}
     try:
@@ -20676,13 +20885,20 @@ async def _cleanup_deleted_job_chat_workspaces(job_id: str) -> None:
     barrier are dropped; the job row is already gone so a later init cannot
     recreate workspace state.
     """
-    from rootcoz.engine.chat import cleanup_chat_workspace
+    from rootcoz.engine.chat import cleanup_chat_workspace, get_chat_workspace
 
     _chat_jobs_deleting.add(job_id)
     try:
         await _cancel_tracked_chat_job_tasks(job_id)
         async with _get_chat_job_barrier(job_id):
-            await asyncio.to_thread(cleanup_chat_workspace, job_id)
+            # Marker + per-path lock are inside the helper: this path is
+            # deterministic and reused, so a queued delete must finish before the
+            # next session creates into it, and a partial one must not be reused.
+            await cleanup_path_off_loop(
+                job_id,
+                get_chat_workspace(job_id),
+                partial(cleanup_chat_workspace, job_id),
+            )
     except Exception:
         logger.warning("Failed to cleanup chat workspace for %s", job_id, exc_info=True)
     finally:
@@ -20901,7 +21117,6 @@ async def _process_chat_message(
         build_chat_custom_tools,
         chat_with_ai,
         clone_chat_repos,
-        ensure_chat_workspace,
     )
     from rootcoz.sources.chat_workspace import setup_ci_build_workspace
 
@@ -20992,7 +21207,17 @@ async def _process_chat_message(
                                 )
                                 break
 
-                        workspace = ensure_chat_workspace(job_id, username=username)
+                        workspace = await _enter_chat_workspace(
+                            job_id, username, "Chat message"
+                        )
+                        if workspace is None:
+                            await _fail_chat_assistant_placeholder(
+                                assistant_msg_id,
+                                job_id,
+                                username,
+                                f"Error: {_chat_workspace_unknown_message(job_id, username)}",
+                            )
+                            return
 
                         decrypted_params = {}
                         try:
@@ -21242,7 +21467,7 @@ async def clear_chat_history(job_id: str, request: Request) -> dict[str, Any]:
     """Clear chat messages for the current user on a job."""
     _check_allow_list(request)
     _require_reviewer(request)
-    from rootcoz.engine.chat import cleanup_chat_repos
+    from rootcoz.engine.chat import cleanup_chat_repos, get_chat_workspace
 
     stored = await get_result(job_id)
     if not stored:
@@ -21257,15 +21482,13 @@ async def clear_chat_history(job_id: str, request: Request) -> dict[str, Any]:
         count = await storage.delete_chat_messages(job_id, username=username)
         await _cleanup_revoked_ai_sessions()
         notify_chat_changed(job_id, username=username)
-        try:
-            cleanup_chat_repos(job_id, username=username)
-        except Exception:
-            logger.warning(
-                "Failed to cleanup chat repos for %s/%s",
-                job_id,
-                username,
-                exc_info=True,
-            )
+        # Marker-aware: the helper also drops the workspace itself (session dirs
+        # included), so a failed delete is re-created instead of reused.
+        await cleanup_path_off_loop(
+            job_id,
+            get_chat_workspace(job_id, username),
+            partial(cleanup_chat_repos, job_id, username=username),
+        )
 
     _cleanup_chat_state(f"{job_id}:{username}")
     logger.info(
@@ -21473,7 +21696,6 @@ async def init_admin_chat(
         )
     from rootcoz.engine.chat import (
         build_admin_custom_tools,
-        ensure_chat_workspace,
         init_admin_chat_session,
     )
 
@@ -21492,7 +21714,14 @@ async def init_admin_chat(
             credential_source,
             allow_empty=True,
         )
-        workspace = ensure_chat_workspace(ADMIN_CHAT_JOB_ID, username=username)
+        workspace = await _enter_chat_workspace(
+            ADMIN_CHAT_JOB_ID, username, "Admin chat init"
+        )
+        if workspace is None:
+            raise HTTPException(
+                status_code=409,
+                detail=_chat_workspace_unknown_message(ADMIN_CHAT_JOB_ID, username),
+            )
         if not await _available_chat_session(ADMIN_CHAT_JOB_ID, username):
             custom_tools: list[dict[str, Any]] = []
             auth_header = await _create_ai_auth_header(username, is_admin=True)
@@ -21708,7 +21937,6 @@ async def _process_admin_chat_message(
     from rootcoz.engine.chat import (
         admin_chat_with_ai,
         build_admin_custom_tools,
-        ensure_chat_workspace,
     )
 
     auth_header = ""
@@ -21766,7 +21994,18 @@ async def _process_admin_chat_message(
                     )
                     break
 
-            workspace = ensure_chat_workspace(ADMIN_CHAT_JOB_ID, username=username)
+            workspace = await _enter_chat_workspace(
+                ADMIN_CHAT_JOB_ID, username, "Admin chat message"
+            )
+            if workspace is None:
+                await _fail_chat_assistant_placeholder(
+                    assistant_msg_id,
+                    ADMIN_CHAT_JOB_ID,
+                    username,
+                    "Error: "
+                    + _chat_workspace_unknown_message(ADMIN_CHAT_JOB_ID, username),
+                )
+                return
 
             settings = get_settings()
 
@@ -21948,21 +22187,26 @@ def _get_admin_artifacts_dir(username: str) -> Path:
     return _ADMIN_ARTIFACTS_BASE / safe_user
 
 
-def _cleanup_admin_artifacts(username: str) -> None:
-    """Delete all artifacts for an admin user."""
-    import shutil
+def _cleanup_admin_artifacts(username: str) -> DeleteResult:
+    """Delete all artifacts for an admin user; a reaper step, never inline.
 
+    ``delete_tree`` reports failed paths in ``DeleteResult.failed`` instead of
+    raising, so that count — not the absence of an exception — says whether the
+    artifacts are gone.
+    """
     artifacts_dir = _get_admin_artifacts_dir(username)
-    if artifacts_dir.exists():
-        try:
-            shutil.rmtree(artifacts_dir)
-            logger.info("Admin chat: cleaned up artifacts for %s", username)
-        except OSError:
-            logger.warning(
-                "Admin chat: failed to clean up artifacts for %s",
-                username,
-                exc_info=True,
-            )
+    if not artifacts_dir.exists():
+        return DeleteResult(0, 0)
+    reclaimed = delete_tree(artifacts_dir)
+    if reclaimed.failed:
+        logger.warning(
+            "Admin chat: %d artifact path(s) for %s survived their delete",
+            reclaimed.failed,
+            username,
+        )
+    else:
+        logger.info("Admin chat: cleaned up artifacts for %s", username)
+    return reclaimed
 
 
 class SaveArtifactRequest(BaseModel):
@@ -22061,7 +22305,7 @@ async def get_admin_chat_artifact(
 async def clear_admin_chat_history(request: Request) -> dict[str, Any]:
     """Clear admin chat messages for the current user."""
     _require_admin(request)
-    from rootcoz.engine.chat import cleanup_chat_repos
+    from rootcoz.engine.chat import cleanup_chat_repos, get_chat_workspace
 
     username = request.state.username
 
@@ -22070,16 +22314,17 @@ async def clear_admin_chat_history(request: Request) -> dict[str, Any]:
         count = await storage.delete_chat_messages(ADMIN_CHAT_JOB_ID, username=username)
         await _cleanup_revoked_ai_sessions()
         notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
-        try:
-            cleanup_chat_repos(ADMIN_CHAT_JOB_ID, username=username)
-        except Exception:
-            logger.warning(
-                "Failed to cleanup admin chat repos for %s",
-                username,
-                exc_info=True,
-            )
+        # Marker-aware: the helper also drops the workspace itself (session dirs
+        # included), so a failed delete is re-created instead of reused.
+        await cleanup_path_off_loop(
+            ADMIN_CHAT_JOB_ID,
+            get_chat_workspace(ADMIN_CHAT_JOB_ID, username),
+            partial(cleanup_chat_repos, ADMIN_CHAT_JOB_ID, username=username),
+        )
 
-    _cleanup_admin_artifacts(username)
+    await cleanup_off_loop(
+        ADMIN_CHAT_JOB_ID, partial(_cleanup_admin_artifacts, username)
+    )
     _cleanup_chat_state(f"{ADMIN_CHAT_JOB_ID}:{username}")
     logger.info("Admin chat: cleared %d messages for user %s", count, username)
     return {"deleted": count}

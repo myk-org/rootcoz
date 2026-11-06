@@ -5,10 +5,9 @@ Builds job-scoped system prompts and manages AI CLI conversations.
 
 import asyncio
 import base64
-import shutil
 import tempfile
-from collections.abc import Callable
-from contextlib import ExitStack
+from collections.abc import AsyncIterator, Callable
+from contextlib import ExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -32,6 +31,14 @@ from rootcoz.jira import (
     resolve_jira_connection_from_params,
 )
 from rootcoz.storage import AI_SYSTEM_USERNAME
+from rootcoz.temp_paths import (
+    ABANDON,
+    DeleteResult,
+    PathState,
+    _Abandoned,
+    delete_tree,
+    reusable_path_lock,
+)
 
 logger = get_child_logger(__name__)
 
@@ -71,6 +78,25 @@ def ensure_chat_workspace(job_id: str, username: str = "") -> Path:
     workspace.chmod(0o700)
     logger.info("Chat workspace created: %s", workspace)
     return workspace
+
+
+@asynccontextmanager
+async def chat_workspace_lock(
+    job_id: str, username: str = ""
+) -> AsyncIterator[PathState]:
+    """Hold the chat workspace's path lock for the create/reuse decision.
+
+    The path is deterministic and reused across messages, so a queued delete of
+    ``chat-{job}/{user}`` must finish before the next message creates into it.
+    Yields the :class:`~rootcoz.temp_paths.PathState` and raises
+    :class:`~rootcoz.temp_paths.PathStateUnknown` when a live builder still owns
+    a marked tree, or the recovery could not delete every path in it, so no caller
+    reaches repository preparation on a half-deleted workspace.
+    """
+    async with reusable_path_lock(
+        job_id, get_chat_workspace(job_id, username)
+    ) as state:
+        yield state
 
 
 def _resolve_chat_repo_target(workspace: Path, repo_name: str) -> tuple[str, Path]:
@@ -908,50 +934,70 @@ def build_admin_custom_tools(
     ]
 
 
-def _safe_remove_symlink(link: Path) -> None:
+def _unlink_counted(path: Path) -> DeleteResult:
+    """Unlink ``path`` and report what that freed; an entry already gone frees nothing.
+
+    ``delete_tree`` on a single path, so a refusal (EPERM, EBUSY) is counted in
+    ``failed`` with its errno instead of raising: a raise here aborted the rest of
+    the workspace cleanup, leaving the paths behind this one untried.
+    """
+    return delete_tree(path)
+
+
+def _safe_remove_symlink(link: Path) -> DeleteResult:
     """Remove a symlink and its target directory if safe.
 
     Only deletes the target when it resolves to a path under the process
     temp root (``tempfile.gettempdir()``, honors ``TMPDIR``) to prevent
     accidental deletion of system directories if the symlink was manipulated.
+    The link itself is counted too: it is an entry this call really removed.
     """
     target = link.resolve()
-    link.unlink(missing_ok=True)
+    removed = _unlink_counted(link)
     if target.exists() and target.is_dir():
         tmp_root = _tmp_root()
         if target.is_relative_to(tmp_root):
-            shutil.rmtree(target, ignore_errors=True)
-        else:
-            logger.warning(
-                "Chat cleanup: refusing to delete symlink target outside %s: %s",
-                tmp_root,
-                target,
-            )
+            return removed.plus(delete_tree(target))
+        logger.warning(
+            "Chat cleanup: refusing to delete symlink target outside %s: %s",
+            tmp_root,
+            target,
+        )
+    return removed
 
 
-def cleanup_chat_repos(job_id: str, username: str = "") -> None:
-    """Delete cloned repos and artifacts from chat workspace but keep session files."""
+def cleanup_chat_repos(job_id: str, username: str = "") -> DeleteResult | _Abandoned:
+    """Delete cloned repos, graphs and symlinked artifact targets from a workspace.
+
+    A reaper step, never inline. The workspace itself (sessions included) is the
+    whole-tree ``delete_tree`` step the caller queues right after this one;
+    :data:`ABANDON` stops that step when a live graph builder owns the tree.
+    """
     workspace = get_chat_workspace(job_id, username)
-    from rootcoz.engine.graft import cleanup_graph
+    from rootcoz.engine.graft import reap_graph
     from rootcoz.engine.graft_http import unregister_workspace
 
     unregister_workspace(workspace)
-    cleanup_graph(workspace)
+    graph = reap_graph(job_id, workspace)
+    if isinstance(graph, _Abandoned):
+        return ABANDON
+    total = graph
     if not workspace.exists():
-        return
+        return total
 
     # Delete everything except hidden dirs (which contain session data)
     for item in workspace.iterdir():
         if item.name.startswith("."):
             continue  # Keep .claude/, .cursor/ etc (session data)
         if item.is_symlink():
-            _safe_remove_symlink(item)
+            total = total.plus(_safe_remove_symlink(item))
         elif item.is_dir():
-            shutil.rmtree(item, ignore_errors=True)
+            total = total.plus(delete_tree(item))
         else:
-            item.unlink(missing_ok=True)
+            total = total.plus(_unlink_counted(item))
 
-    logger.info(f"Cleaned up chat repos for job {job_id} (kept sessions)")
+    logger.info(f"Cleaned up chat repos for job {job_id}")
+    return total
 
 
 def _chat_mcp_lock_targets(workspace: Path) -> list[Path]:
@@ -965,16 +1011,26 @@ def _chat_mcp_lock_targets(workspace: Path) -> list[Path]:
     return list(dict.fromkeys(targets))
 
 
-def cleanup_chat_workspace(job_id: str, username: str = "") -> None:
-    """Delete the entire chat workspace including sessions."""
+def cleanup_chat_workspace(
+    job_id: str, username: str = ""
+) -> DeleteResult | _Abandoned:
+    """Delete the entire chat workspace including sessions.
+
+    :data:`ABANDON` means a live graph builder still owns the tree, so the
+    caller's whole-tree delete is skipped and the next create's recovery picks it
+    up.
+    """
     workspace = get_chat_workspace(job_id, username)
     targets = _chat_mcp_lock_targets(workspace)
-    from rootcoz.engine.graft import cleanup_graph
+    from rootcoz.engine.graft import reap_graph
     from rootcoz.engine.graft_http import unregister_workspace
 
     unregister_workspace(workspace)
-    cleanup_graph(workspace)
-    # Hold each workspace's MCP install lock for the whole rmtree + dump
+    graph = reap_graph(job_id, workspace)
+    if isinstance(graph, _Abandoned):
+        return ABANDON
+    total = graph
+    # Hold each workspace's MCP install lock for the whole delete + dump
     # unlink so an in-flight installer cannot recreate credentials after
     # the job (or nested user dir) was removed.
     with ExitStack() as stack:
@@ -982,15 +1038,16 @@ def cleanup_chat_workspace(job_id: str, username: str = "") -> None:
             stack.enter_context(_workspace_install_lock(target))
         if workspace.exists():
             # Resolve symlinks before removing workspace tree — symlinked
-            # artifact dirs live outside the workspace and won't be cleaned
-            # by shutil.rmtree (which removes the symlink, not its target).
+            # artifact dirs live outside the workspace and are not reached by
+            # the tree walk (which unlinks the symlink, not its target).
             for item in workspace.iterdir():
                 if item.is_symlink():
-                    _safe_remove_symlink(item)
-            shutil.rmtree(workspace, ignore_errors=True)
+                    total = total.plus(_safe_remove_symlink(item))
+            total = total.plus(delete_tree(workspace))
         for target in targets:
             cleanup_http_tools_mcp(target)
     logger.info(f"Deleted chat workspace for job {job_id}")
+    return total
 
 
 # -- Shared prompt building helpers --
