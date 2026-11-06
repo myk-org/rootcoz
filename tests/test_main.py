@@ -4480,7 +4480,7 @@ class TestCreateGithubIssueApiErrors:
             "job-gh-net-err", "http://jenkins", "completed", result_data
         )
         with patch("rootcoz.main.create_github_issue") as mock_create:
-            mock_create.side_effect = httpx.RequestError(
+            mock_create.side_effect = httpx.ConnectError(
                 "Connection refused",
                 request=httpx.Request("POST", "https://api.github.com"),
             )
@@ -4611,7 +4611,7 @@ class TestCreateJiraBugApiErrors:
             "job-jira-net-err", "http://jenkins", "completed", result_data
         )
         with patch("rootcoz.main.create_jira_bug") as mock_create:
-            mock_create.side_effect = httpx.RequestError(
+            mock_create.side_effect = httpx.ConnectError(
                 "Connection refused",
                 request=httpx.Request("POST", "https://jira.example.com"),
             )
@@ -5596,6 +5596,9 @@ class TestChatIssueEndpoint:
         assert self._CHAT["title"] in shown
         assert self._CHAT["body"] in shown
         assert f"Confirmation code: {draft['confirmation_code']}" in shown
+        # A rebuilt AI session keeps only stored chat text: the proposal id has
+        # to be in the notice too, or the confirmed draft can never be filed.
+        assert f"Proposal id: {draft['confirmation_id']}" in shown
         # Consent is bound to that row: the code has to arrive after it.
         assert (
             main_mod._chat_issue_drafts[draft["confirmation_id"]]["watermark"]
@@ -5970,6 +5973,60 @@ class TestChatIssueEndpoint:
         assert drafts[0]["confirmation_id"] not in main_mod._chat_issue_drafts
 
     @pytest.mark.asyncio
+    async def test_a_draft_evicted_while_its_notice_is_written_is_refused(
+        self, test_client
+    ):
+        """A burst at the cap must not return a preview that can file nothing.
+
+        The draft is inserted before the server-notice write is awaited, so a
+        proposal in between can evict it. The id then answers "unknown, expired
+        or already used" although the user was shown a live-looking preview: the
+        proposal now takes that notice back and refuses instead.
+        """
+        from rootcoz import main as main_mod
+
+        headers = await self._admin("chat-evict-post", github_token="ghp_row_token")
+        for _ in range(main_mod._ISSUE_DRAFTS_PER_USER):
+            await self._propose_only(test_client, "github", headers)
+        real_post = main_mod._post_issue_consent_request
+        posted_codes: list[str] = []
+
+        async def _evict_during_post(**kwargs: str) -> int:
+            """Write the notice, then let a newer proposal evict that draft."""
+            message_id = await real_post(**kwargs)
+            posted_codes.append(kwargs["code"])
+            for draft_id, draft in list(main_mod._chat_issue_drafts.items()):
+                if draft["code"] == kwargs["code"]:
+                    main_mod._chat_issue_drafts.pop(draft_id)
+            return message_id
+
+        with (
+            patch(
+                "rootcoz.main._post_issue_consent_request",
+                side_effect=_evict_during_post,
+            ),
+            _with_github_issue_config(),
+        ):
+            response = test_client.post(
+                "/api/chat-issue/propose",
+                json={
+                    **self._CHAT,
+                    "target": "github",
+                    "conversation": self._ADMIN_CHAT,
+                },
+                headers=headers,
+            )
+        assert response.status_code == 503, response.text
+        assert "propose the issue again" in response.json()["detail"].lower()
+        # The confirmed preview was taken back, so no code in this chat is dead.
+        messages = await storage.get_chat_messages(
+            self._ADMIN_CHAT, username="chat-evict-post"
+        )
+        assert not [
+            message for message in messages if posted_codes[0] in message["content"]
+        ], messages
+
+    @pytest.mark.asyncio
     async def test_parallel_proposals_cannot_exceed_the_per_account_cap(
         self, test_client
     ):
@@ -5977,7 +6034,9 @@ class TestChatIssueEndpoint:
 
         Every proposal is held inside the watermark read together: the caps used
         to be checked before that read and the insert after it, so all of them
-        passed and all of them inserted.
+        passed and all of them inserted. A proposal a burst evicted while its
+        server notice was being written is refused (503), never returned with a
+        code whose draft is already gone.
         """
         import threading
         from concurrent.futures import ThreadPoolExecutor
@@ -6013,7 +6072,8 @@ class TestChatIssueEndpoint:
                 for future in [pool.submit(_propose) for _ in range(8)]
             ]
 
-        assert statuses == [201] * 8, statuses
+        assert set(statuses) <= {201, 503}, statuses
+        assert statuses.count(201) >= 1, statuses
         live = [
             draft
             for draft in main_mod._chat_issue_drafts.values()
@@ -6209,6 +6269,55 @@ class TestChatIssueEndpoint:
                     "/api/chat-issue", json=draft, headers=headers
                 )
         assert retried.status_code == 201, retried.text
+
+    @pytest.mark.asyncio
+    async def test_a_dropped_read_spends_the_confirmation(self, test_client):
+        """The POST reached GitHub and the answer was lost: the draft is spent.
+
+        A read error happens after the request was sent, so nothing proves it
+        filed nothing — releasing the draft would let the same confirmation file
+        the issue a second time.
+        """
+        headers = await self._admin("chat-read-error", github_token="ghp_row_token")
+        draft = await self._propose(test_client, "github", headers)
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.side_effect = httpx.ReadError("connection reset")
+            with _with_github_issue_config():
+                failed = test_client.post(
+                    "/api/chat-issue", json=draft, headers=headers
+                )
+        assert failed.status_code == 502, failed.text
+        assert "may have been filed" in failed.json()["detail"]
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            retried = test_client.post("/api/chat-issue", json=draft, headers=headers)
+        assert retried.status_code == 400, retried.text
+        assert "unknown, expired or already used" in retried.json()["detail"]
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_answer_spends_the_confirmation(self, test_client):
+        """A 2xx whose body cannot be parsed may still have filed the issue."""
+        headers = await self._admin("chat-parse-error", github_token="ghp_row_token")
+        draft = await self._propose(test_client, "github", headers)
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.side_effect = KeyError("html_url")
+            with _with_github_issue_config():
+                failed = test_client.post(
+                    "/api/chat-issue", json=draft, headers=headers
+                )
+        assert failed.status_code == 502, failed.text
+        assert "may have been filed" in failed.json()["detail"]
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            retried = test_client.post("/api/chat-issue", json=draft, headers=headers)
+        assert retried.status_code == 400, retried.text
+        assert "unknown, expired or already used" in retried.json()["detail"]
+        mock_create.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_a_reply_from_before_the_draft_does_not_confirm(self, test_client):

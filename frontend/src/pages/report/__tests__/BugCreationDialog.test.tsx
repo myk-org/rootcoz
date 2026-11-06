@@ -290,6 +290,31 @@ describe('BugCreationDialog submit retry', () => {
     )
   })
 
+  it('does not warn when the 5xx detail says the issue was not filed', async () => {
+    // The server's own outage refusal already tells the user to retry, so an
+    // amber "may already have been filed" under it would contradict it.
+    const user = userEvent.setup()
+    mockCreateFlow('github', new ApiError(502, 'Bad Gateway', {
+      detail: 'GitHub is unavailable right now, so your bug report was not filed. Try again in a few minutes.',
+    }))
+    await openGeneratedPreview(user)
+
+    await user.click(screen.getByRole('button', { name: /create github issue/i }))
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'your bug report was not filed. Try again in a few minutes.',
+    )
+    expect(screen.queryByText(/may already have been filed/i)).not.toBeInTheDocument()
+  })
+
+  it('warns when no server answer came back at all', async () => {
+    const user = userEvent.setup()
+    mockCreateFlow('github', new TypeError('Failed to fetch'))
+    await openGeneratedPreview(user)
+
+    await user.click(screen.getByRole('button', { name: /create github issue/i }))
+    expect(await screen.findByRole('status')).toHaveTextContent('may already have been filed')
+  })
+
   it('does not warn when a 4xx refusal proves nothing was filed', async () => {
     const user = userEvent.setup()
     mockCreateFlow('github', new ApiError(403, 'Forbidden', { detail: 'GitHub token is missing the repo scope.' }))

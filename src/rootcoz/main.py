@@ -9419,6 +9419,23 @@ _ISSUE_CREATE_REFUSALS: tuple[type[Exception], ...] = (
 )
 
 
+def _dropped_connection_refusal(label: str, what: str) -> HTTPException:
+    """502 for a tracker answer lost AFTER the request was accepted.
+
+    A read or protocol error happens after the POST reached the tracker, so
+    nothing proves it filed nothing: say so, so the user checks before a retry
+    that could create a duplicate.
+    """
+    return HTTPException(
+        status_code=502,
+        detail=(
+            f"{label} dropped the connection before answering, so {what} may "
+            f"have been filed. Check {label} before retrying — filing it again "
+            "could create a duplicate."
+        ),
+    )
+
+
 def _map_create_refusal(
     target: Literal["github", "jira"],
     exc: Exception,
@@ -9429,7 +9446,9 @@ def _map_create_refusal(
     """The refusal a failed tracker create answers with.
 
     A configuration error is a 400 (an unresolvable repo URL, an OAuth
-    credential that cannot mint); everything a tracker or the transport raises
+    credential that cannot mint), and a tracker answer that cannot be parsed is
+    a 502 saying the issue may exist — the tracker already answered, so nothing
+    proves it filed nothing. Everything else a tracker or the transport raises
     goes to that tracker's own refusal helper, so the feedback form, a report's
     bug report and chat cannot describe the same outage differently.
     ``JiraOAuthMintError`` is caught by none of those branches — it subclasses
@@ -9443,6 +9462,17 @@ def _map_create_refusal(
     label = "GitHub" if github else "Jira"
     if isinstance(exc, JiraOAuthMintError):
         return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, (json.JSONDecodeError, TypeError, KeyError)):
+        # The tracker answered and its answer could not be read, so it may have
+        # filed the issue: this is not the "try again" wording.
+        return HTTPException(
+            status_code=502,
+            detail=(
+                f"{label} answered with something this server could not read, so "
+                f"your {subject} may have been filed. Check {label} before "
+                "retrying — filing it again could create a duplicate."
+            ),
+        )
     if isinstance(exc, ValueError):
         return HTTPException(
             status_code=400,
@@ -9453,7 +9483,11 @@ def _map_create_refusal(
     if not github and isinstance(exc, httpx.HTTPStatusError):
         return _jira_bug_refusal(exc)
     if isinstance(exc, httpx.RequestError):
-        return HTTPException(status_code=502, detail=f"{label} API unreachable: {exc}")
+        if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+            return HTTPException(
+                status_code=502, detail=f"{label} API unreachable: {exc}"
+            )
+        return _dropped_connection_refusal(label, "the bug")
     return HTTPException(
         status_code=502,
         detail=f"{label} API returned unexpected response: {exc}",
@@ -9871,18 +9905,32 @@ def _release_issue_draft(confirmation_id: str, draft: dict[str, Any]) -> None:
 def _create_may_have_filed(exc: BaseException) -> bool:
     """True when a failed create cannot prove the tracker filed nothing.
 
-    A timeout after the request was sent, or an answer the tracker gave without
-    a usable issue url, means the issue may exist: handing the draft back would
-    let the same confirmation file it a second time without the user approving
-    a retry, so such a draft is spent instead. A connect error never reached the
-    tracker, and a refusal (an ``HTTPStatusError``) is its own "nothing filed".
+    Only a failure that provably happened BEFORE the request reached the
+    tracker hands the draft back: a connect error never sent it, and a refusal
+    (an ``HTTPStatusError``, or a gate raised before the create call) is its own
+    "nothing filed". Everything after the POST — a timeout, a connection dropped
+    while reading the answer, an answer that could not be parsed — may have
+    filed the issue, and spending the draft is what stops the same confirmation
+    from filing it a second time.
     """
+    if getattr(exc, "issue_may_exist", False):
+        return True
     cause = exc.__cause__
     if isinstance(cause, (httpx.ConnectError, httpx.ConnectTimeout)):
         return False
-    if isinstance(cause, httpx.TimeoutException):
-        return True
-    return bool(getattr(exc, "issue_may_exist", False))
+    if isinstance(cause, httpx.HTTPStatusError):
+        return False
+    if isinstance(exc, HTTPException) and cause is None:
+        # A gate inside _create_issue_from_text (a disabled tracker, no
+        # credential, an unresolved repo) raises before the create call.
+        return False
+    # Configuration errors raised before the call prove nothing was sent: an
+    # unmintable OAuth credential, an unusable repo URL. A JSON decode error is
+    # NOT one of them — that is a tracker answer that could not be read.
+    return not (
+        isinstance(cause, (JiraOAuthMintError, ValueError))
+        and not isinstance(cause, json.JSONDecodeError)
+    )
 
 
 def _prune_issue_drafts(now: float) -> None:
@@ -9985,6 +10033,7 @@ async def _post_issue_consent_request(
     *,
     conversation: str,
     username: str,
+    confirmation_id: str,
     kind: str,
     shown: str,
     code: str,
@@ -9999,7 +10048,8 @@ async def _post_issue_consent_request(
     written here, by this server, into the conversation the draft belongs to:
     what the user approves is text the model cannot write, and the returned id
     is the draft's watermark, so only a USER message newer than this one counts
-    as consent.
+    as consent. The proposal id is in the message too, so a rebuilt AI session —
+    which keeps only stored chat text — can still file exactly what was approved.
     """
     message_id = await storage.add_chat_message(
         conversation,
@@ -10009,7 +10059,8 @@ async def _post_issue_consent_request(
             f"{shown}\n\n"
             "To file exactly this, reply in this chat with the confirmation "
             f"code {code} within {minutes} minutes. Nothing is filed until that "
-            "reply arrives, and only a reply from you can confirm it."
+            "reply arrives, and only a reply from you can confirm it.\n\n"
+            f"Proposal id: {confirmation_id}"
         ),
         username=username,
     )
@@ -10166,14 +10217,38 @@ async def _store_issue_draft(
             # narration of it. Written on the draft object, not via the map: a
             # concurrent proposal may evict this draft while the message is
             # being stored, and that must not turn into a 500 after the fact.
-            draft["watermark"] = await _post_issue_consent_request(
+            message_id = await _post_issue_consent_request(
                 conversation=conversation,
                 username=username,
+                confirmation_id=draft_id,
                 kind=kind,
                 shown=shown,
                 code=code,
                 minutes=minutes,
             )
+            if _chat_issue_drafts.get(draft_id) is not draft:
+                # A proposal in between evicted this draft (the per-user cap), so
+                # the notice just written authorises nothing: take it back and
+                # refuse, instead of returning a code that only answers "unknown
+                # or already used".
+                try:
+                    await storage.delete_chat_message_by_id(message_id)
+                except Exception:
+                    logger.warning(
+                        "Could not delete the evicted issue preview %s for %s",
+                        message_id,
+                        username,
+                        exc_info=True,
+                    )
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "No issue was drafted: this account proposed too many "
+                        "issues at once, so this preview was replaced by a newer "
+                        "one. Propose the issue again."
+                    ),
+                )
+            draft["watermark"] = message_id
         except BaseException:
             # Without the recorded preview there is nothing to consent to, so the
             # draft must not linger as a code the user never saw.
@@ -10288,9 +10363,9 @@ def _require_draft_matches(
     Echoing the title and body EXACTLY is required on purpose: that is what
     binds the filed text to the approved text, so a paraphrase is refused and
     has to be proposed and approved again. The draft is process state (a restart
-    drops it) and the confirmation id reaches the model only in the proposal
-    result; the code and the exact text stay in the chat's consent message, so a
-    rebuilt AI session can still read them back from the history.
+    drops it), but the proposal id, the code and the exact text stay in the
+    chat's consent message, so a rebuilt AI session can still read them back from
+    the history.
     """
     if draft["username"] != username:
         # Never a 404 and never a success: the id is real but not this caller's.
@@ -21078,11 +21153,15 @@ def _github_issue_refusal(
         )
     if isinstance(exc, httpx.RequestError):
         logger.warning(
-            "GitHub API unreachable for the issue creation: %s: %s",
+            "GitHub API failed the issue creation: %s: %s",
             type(exc).__name__,
             exc,
         )
-        return HTTPException(status_code=502, detail=f"GitHub API unreachable: {exc}")
+        if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+            return HTTPException(
+                status_code=502, detail=f"GitHub API unreachable: {exc}"
+            )
+        return _dropped_connection_refusal("GitHub", f"your {subject}")
     logger.exception("Failed to create feedback issue")
     return HTTPException(status_code=500, detail="Failed to create feedback issue")
 

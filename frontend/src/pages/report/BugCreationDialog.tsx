@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
-import { api, ApiError, extractApiDetail } from '@/lib/api'
-import { createIssueFailureMessage } from '@/lib/issueCreateError'
+import { api, extractApiDetail } from '@/lib/api'
+import { createIssueFailureMessage, createOutcomeUnknown } from '@/lib/issueCreateError'
 import { IssueCreateError } from '@/components/shared/IssueCreateError'
 import { useSubmitGuard } from '@/lib/useSubmitGuard'
 import { reviewKey } from '@/lib/reviewKey'
@@ -252,9 +252,9 @@ export function BugCreationDialog({
           return
         }
         setCreateError(createIssueFailureMessage(err))
-        // A refusal (4xx) is the server saying it filed nothing; anything else
-        // leaves the outcome unknown, which the user has to check first.
-        setCreateMaybeFiled(!(err instanceof ApiError) || err.status >= 500)
+        // What the server said decides: its own "was not filed" refusal is not
+        // an unknown outcome, so the dialog must not contradict it.
+        setCreateMaybeFiled(createOutcomeUnknown(err))
         setPhase('preview')
       }
     })
@@ -413,7 +413,7 @@ export function BugCreationDialog({
             {createError && <IssueCreateError message={createError} />}
             {createError && createMaybeFiled && (
               <p role="status" className="text-xs text-signal-amber">
-                This attempt did not get an answer from the server, so the issue may already
+                The server could not confirm this attempt, so the issue may already
                 have been filed. Check {label} before you retry — submitting it again could
                 create a duplicate.
               </p>
