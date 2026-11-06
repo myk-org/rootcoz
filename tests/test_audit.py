@@ -3207,6 +3207,74 @@ def test_a_credential_inside_a_url_detail_is_still_scrubbed() -> None:
     assert redacted["url"].startswith("https://github.com/o/r?t=")
 
 
+@pytest.mark.parametrize("name", ["repo", "site", "jira_project"])
+def test_a_credential_shaped_destination_name_is_kept(name: str) -> None:
+    """A field whose job is to name a destination is not free text (#416)."""
+    value = "OpenShiftVirtualization2024"
+    assert len(value) >= 24
+    assert main._redact_details({name: value}) == {name: value}
+
+
+@pytest.mark.parametrize("name", ["repo", "url"])
+def test_a_credential_inside_a_destination_detail_is_still_scrubbed(
+    name: str,
+) -> None:
+    """Keeping a destination name does not keep a token pasted into it."""
+    token = "ghp_9f8e7d6c5b4a39281706f5e4d3c2b1a0ffee"  # pragma: allowlist secret  # gitleaks:allow
+
+    redacted = main._redact_details(
+        {name: f"https://github.com/o/OpenShiftVirtualization2024?t={token}"}
+    )
+
+    assert redacted[name] == (
+        "https://github.com/o/OpenShiftVirtualization2024?t=[redacted]"
+    )
+
+
+def _create_jira_issue_for(
+    app_client, issue_url: str
+) -> tuple[dict[str, Any], AsyncMock]:
+    """File one Jira issue through the report endpoint; return its audit row."""
+    admin_login(app_client)
+    _use_jira_oauth_settings()
+    create = AsyncMock(return_value={"key": "PROJ-1", "url": issue_url})
+    with (
+        patch.object(
+            main, "_load_effective_failure", AsyncMock(return_value=(None, {}, None))
+        ),
+        patch.object(main, "create_jira_bug", create),
+        patch.object(main, "_add_tracker_comment", AsyncMock(return_value=1)),
+    ):
+        response = app_client.post(
+            "/results/job-1/create-jira-bug",
+            json={
+                "test_name": "test_a",
+                "title": "T",
+                "body": "B",
+                "jira_token": "ATOA-test-secret",  # pragma: allowlist secret
+            },
+        )
+    assert response.status_code == 201, response.text
+    events = _events(action="issue.create")
+    assert len(events) == 1
+    return events[0]["details"], create
+
+
+def test_a_malformed_jira_site_still_records_the_filed_issue(app_client) -> None:
+    """A URL that cannot be parsed must not fail a create that already happened.
+
+    ``urlparse`` raises ``ValueError`` on an unclosed IPv6 host, and the Jira
+    link is built straight from the raw site setting. The row keeps the link,
+    leaves the unparseable host empty, and the issue is filed exactly once.
+    """
+    details, create = _create_jira_issue_for(app_client, "https://[::1/browse/PROJ-1")
+
+    assert details["result"] == "success"
+    assert details["url"] == "https://[::1/browse/PROJ-1"
+    assert details["site"] == ""
+    assert create.await_count == 1
+
+
 def test_a_pending_users_issue_attempt_leaves_a_row(temp_db_path: Path) -> None:
     """REQUIRE_APPROVAL blocks the handler, so the auth layer must audit it.
 

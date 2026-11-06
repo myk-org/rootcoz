@@ -1413,11 +1413,14 @@ _AUDIT_RUN_RE = re.compile(r"[A-Za-z0-9_-]{24,}")
 # scrubbed like any other run.
 _AUDIT_HEX_DIGEST_RE = re.compile(r"\A[0-9a-f]{24,}\Z")
 _AUDIT_DIGEST_DETAIL_KEYS: frozenset[str] = frozenset({"sql_hash"})
-# A detail that is a link the tracker returned. Its path segments are
-# identifiers, and a repository named ``OpenShiftVirtualization2024`` is
-# credential-shaped to the bare-run heuristic below — which would leave the
-# row's own link pointing nowhere. A known credential prefix is still scrubbed.
-_AUDIT_URL_DETAIL_KEYS: frozenset[str] = frozenset({"url"})
+# A detail that names a destination the create call used (the tracker's link,
+# repository, site or project). Those are identifiers, and a repository named
+# ``OpenShiftVirtualization2024`` is credential-shaped to the bare-run heuristic
+# below — which would leave the row's own destination unreadable. A known
+# credential prefix is still scrubbed.
+_AUDIT_DESTINATION_DETAIL_KEYS: frozenset[str] = frozenset(
+    {"url", "repo", "site", "jira_project"}
+)
 # A lowercase letters-and-digits run of this length with no separator is the
 # shape of a hex/base32 blob, the one id-like form that is also credential-like.
 _AUDIT_BARE_BLOB_MIN_LENGTH = 32
@@ -1466,14 +1469,17 @@ def _looks_like_secret_run(run: str) -> bool:
     return changes / transitions >= 0.5
 
 
-def _scrub_audit_text(value: str, *, digest: bool = False, link: bool = False) -> str:
+def _scrub_audit_text(
+    value: str, *, digest: bool = False, destination: bool = False
+) -> str:
     """Replace credential-shaped substrings in one free-text value.
 
     ``digest`` keeps a whole-value lowercase hex digest. Only
     :func:`_redact_details` sets it, and only for
     :data:`_AUDIT_DIGEST_DETAIL_KEYS` — hashes this process computes itself.
-    ``link`` keeps the bare runs of a value named in
-    :data:`_AUDIT_URL_DETAIL_KEYS`: those are URL path segments, not free text.
+    ``destination`` keeps the bare runs of a value named in
+    :data:`_AUDIT_DESTINATION_DETAIL_KEYS`: those name a destination, not free
+    text.
 
     Detail values only: identity is not a detail. A username is what the trail
     exists to show ("what did user X do", "which name is under attack"), so
@@ -1482,7 +1488,7 @@ def _scrub_audit_text(value: str, *, digest: bool = False, link: bool = False) -
     if digest and _AUDIT_HEX_DIGEST_RE.match(value):
         return value
     scrubbed = _AUDIT_SECRET_RE.sub("[redacted]", value)
-    if link:
+    if destination:
         return scrubbed
     return _AUDIT_RUN_RE.sub(
         lambda match: (
@@ -1492,14 +1498,16 @@ def _scrub_audit_text(value: str, *, digest: bool = False, link: bool = False) -
     )
 
 
-def _redact_audit_value(value: Any, *, digest: bool = False, link: bool = False) -> Any:
+def _redact_audit_value(
+    value: Any, *, digest: bool = False, destination: bool = False
+) -> Any:
     """Scrub one detail value: names for dicts, text for strings, else as-is."""
     if isinstance(value, dict):
         return _redact_details(value)
     if isinstance(value, list):
         return [_redact_audit_value(item) for item in value]
     if isinstance(value, str):
-        return _scrub_audit_text(value, digest=digest, link=link)
+        return _scrub_audit_text(value, digest=digest, destination=destination)
     return value
 
 
@@ -1516,7 +1524,7 @@ def _redact_details(details: dict[str, Any] | None) -> dict[str, Any]:
         name: _redact_audit_value(
             value,
             digest=name in _AUDIT_DIGEST_DETAIL_KEYS,
-            link=name in _AUDIT_URL_DETAIL_KEYS,
+            destination=name in _AUDIT_DESTINATION_DETAIL_KEYS,
         )
         for name, value in (details or {}).items()
         if name in _AUDIT_SAFE_DETAIL_KEYS or not is_sensitive_key(name)
@@ -10845,6 +10853,9 @@ def _filed_issue_details(
     (``_AUDIT_SAFE_DETAIL_KEYS``), never ``issue_key``: a detail named ``*_key``
     is dropped as credential-shaped by :func:`_redact_details`, and an issue key
     is not a credential.
+
+    These details are best-effort decoration on an issue that is already filed:
+    nothing here may raise, because the caller cannot undo a successful create.
     """
     url = str(result.get("url", ""))
     filed: dict[str, Any] = {
@@ -10859,8 +10870,20 @@ def _filed_issue_details(
         filed["key"] = result.get("key", "")
         filed["jira_project"] = result.get("jira_project", "")
         # The site the link points at; userinfo never reaches the trail.
-        filed["site"] = urlparse(url).hostname or ""
+        filed["site"] = _audit_url_host(url)
     return {**details, **filed}
+
+
+def _audit_url_host(url: str) -> str:
+    """Host of ``url`` for an audit row; ``""`` when it cannot be parsed.
+
+    A malformed site setting must not turn a filed issue into a failed request:
+    the audit row is decoration on a create that already happened.
+    """
+    try:
+        return urlparse(url).hostname or ""
+    except ValueError:
+        return ""
 
 
 def _refused_issue_details(
