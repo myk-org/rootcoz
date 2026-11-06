@@ -293,6 +293,45 @@ class TestScrubSensitiveData:
         # Header plus one window went, the rest of the run is left alone.
         assert len(result) <= _PEM_WINDOW + len("[REDACTED]")
 
+    def test_bare_public_pem_block_is_left_intact(self):
+        """The bare pattern took any `-----BEGIN…-----`, so a TLS-failure report
+        lost the certificate it is reporting about. Only a private key's body is
+        a secret, so a bare public block survives — while the assignment case,
+        where over-redacting is the safe side, still eats it (#399)."""
+        cert = (
+            "-----BEGIN CERTIFICATE-----\n"
+            "MIIDdzCCAl+gAwIBAgIEpublicbody\n"
+            "-----END CERTIFICATE-----"
+        )
+        public_key = (
+            "-----BEGIN PUBLIC KEY-----\n"
+            "MIIBIjANBgkqhkipublicbody\n"
+            "-----END PUBLIC KEY-----"
+        )
+        report = f"TLS handshake failed: x509: unknown authority\n{cert}"
+        assert scrub_sensitive_data(report) == report
+        assert scrub_sensitive_data(public_key) == public_key
+        # After an assignment the broad header stays: the value is the secret.
+        assert scrub_sensitive_data(f"PRIVATE_KEY={cert}") == "PRIVATE_KEY=[REDACTED]"
+
+    def test_footerless_bare_public_pem_is_left_intact(self):
+        """The fail-closed window must not widen the bare case back to every
+        header: with no footer in reach a bare public block is still untouched
+        (#399)."""
+        text = "-----BEGIN CERTIFICATE-----\n" + "Z" * (2 * _PEM_WINDOW)
+        assert scrub_sensitive_data(text) == text
+
+    def test_every_bare_private_key_header_is_redacted(self):
+        """Narrowing the bare header must not lose a private-key flavour: with
+        or without a leading token, and with or without encryption (#399)."""
+        for prefix in ("RSA ", "EC ", "DSA ", "OPENSSH ", "ENCRYPTED ", ""):
+            block = (
+                f"-----BEGIN {prefix}PRIVATE KEY-----\n"
+                "MIIEowIBAAKCAQEAsecretbody\n"
+                f"-----END {prefix}PRIVATE KEY-----"
+            )
+            assert scrub_sensitive_data(block) == "[REDACTED]", prefix
+
     def test_bare_begin_word_is_not_a_pem_header(self):
         """Only the `-----` markers make a header; the word alone is prose."""
         text = "the log said BEGIN and then the test failed\nEND"

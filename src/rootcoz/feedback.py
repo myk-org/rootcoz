@@ -40,22 +40,35 @@ _FEEDBACK_REPO_URL = "https://github.com/myk-org/rootcoz"
 # 4096-bit key) so a header whose footer never arrives cannot swallow the log.
 _PEM_WINDOW = 8192
 _PEM_HEADER = r"-----BEGIN[A-Z0-9 ]*-----"
-_PEM_BLOCK = rf"{_PEM_HEADER}[\s\S]{{0,{_PEM_WINDOW}}}?-----END[A-Z0-9 ]*-----"
-# A header whose footer is missing (or past the window) must not fall back to
-# "redact the header line only": the body is the secret, and it survived in
-# full. The unterminated branch eats the header plus the same fixed window, so
-# the bound fails closed without costing more than the block branch (#399).
-_PEM_UNTERMINATED = rf"{_PEM_HEADER}[\s\S]{{0,{_PEM_WINDOW}}}"
+
+
+def _pem_branches(header: str) -> str:
+    """Header through its footer, else header plus one window (see below)."""
+    return (
+        rf"{header}[\s\S]{{0,{_PEM_WINDOW}}}?-----END[A-Z0-9 ]*-----"
+        # A header whose footer is missing (or past the window) must not fall
+        # back to "redact the header line only": the body is the secret, and it
+        # survived in full. The unterminated branch eats the header plus the
+        # same fixed window, so the bound fails closed without costing more than
+        # the terminated branch (#399).
+        rf"|{header}[\s\S]{{0,{_PEM_WINDOW}}}"
+    )
+
+
 # A PEM block pasted on its own -- no `KEY=`/`key:` in front, which is how a log
 # excerpt, a `kubectl describe` dump or an issue body carries one -- never
 # reached `_ASSIGNMENT_VALUE`, so the header and the whole body shipped
-# verbatim. Same two branches, so a footer inside the window ends the match and
-# the text after the block survives, and a missing footer fails closed (#399).
-_PEM_BARE = rf"{_PEM_BLOCK}|{_PEM_UNTERMINATED}"
-# Header on the value's own line, or on the line right after it.
-_ASSIGNMENT_VALUE = (
-    rf"(?:(?:[^\r\n]*\r?\n)?(?:{_PEM_BLOCK}|{_PEM_UNTERMINATED})|[^\r\n]*)"
-)
+# verbatim. The private-only header keeps the bare pattern narrower than the
+# assignment one on purpose: a `CERTIFICATE` or `PUBLIC KEY` block is public,
+# often the very thing a TLS-failure report is about, while after a `KEY=`/`key:`
+# assignment over-redacting is the safe side. A footer inside the window ends the
+# match and the text after the block survives; a missing footer fails closed
+# (#399).
+_PEM_PRIVATE_HEADER = r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----"
+_PEM_BARE = _pem_branches(_PEM_PRIVATE_HEADER)
+# Header on the value's own line, or on the line right after it. Broad header:
+# whatever follows `PRIVATE_KEY=`/`key:` is treated as the secret.
+_ASSIGNMENT_VALUE = rf"(?:(?:[^\r\n]*\r?\n)?(?:{_pem_branches(_PEM_HEADER)})|[^\r\n]*)"
 
 # Userinfo of a credential URL, shared by the two URL patterns below. A `/`
 # before an `@` is credential text (base64 secrets contain them), so
@@ -132,7 +145,8 @@ _SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         ),
         r"\1[REDACTED]",
     ),
-    # A bare PEM block (see `_PEM_BARE`). After the assignment patterns above,
+    # A bare *private* PEM block (see `_PEM_BARE`); a public `CERTIFICATE` or
+    # `PUBLIC KEY` block stays readable. After the assignment patterns above,
     # which already end the match at the block; ahead of the URL ones so the
     # body is not parsed for userinfo.
     (re.compile(_PEM_BARE), "[REDACTED]"),
