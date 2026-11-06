@@ -1207,7 +1207,8 @@ class RootCozClient:
         return self._request("PUT", f"/results/{job_id}/reviewed", json=body)
 
     def enrich_comments(self, job_id: str) -> dict[str, Any]:
-        """Enrich comments with live PR/ticket statuses. GET /results/{job_id}/enrich-comments"""
+        """Refresh PR/ticket statuses from GitHub and Jira; a result may be served from the
+        server's 60 s per-job cache. GET /results/{job_id}/enrich-comments"""
         return self._request("GET", f"/results/{job_id}/enrich-comments")
 
     # -- Bug Creation ---------------------------------------------------------
