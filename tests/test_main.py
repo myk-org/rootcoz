@@ -4328,24 +4328,6 @@ class TestCreateGithubIssueApiErrors:
         assert (await storage.list_audit_events(action="issue.create"))["events"] == []
 
     @pytest.mark.asyncio
-    async def test_github_error_text_cannot_forge_a_log_record(
-        self, test_client, caplog
-    ):
-        """A newline in GitHub's own message stays inside one WARNING record."""
-        exc = self._raise_status(
-            503, json={"message": "Server Error\nFAKE LOG LINE: token=leaked"}
-        )
-        with capture_main_logs(caplog):
-            response = await self._post_with_github_failure(
-                test_client, "job-gh-forge", exc
-            )
-
-        assert response.status_code == 502
-        offenders = [r for r in caplog.records if "FAKE LOG LINE" in r.getMessage()]
-        assert len(offenders) == 1
-        assert "\n" not in offenders[0].getMessage()
-
-    @pytest.mark.asyncio
     async def test_github_404_points_at_the_configured_repository(
         self, test_client, caplog
     ):
@@ -4415,6 +4397,28 @@ class TestCreateGithubIssueApiErrors:
             "GitHub API rate limit reached. Try again later."
         )
         assert _REPORT_GITHUB_TOKEN not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_github_message_cannot_forge_a_log_line(self, test_client, caplog):
+        """A tracker message is data, never a second log line."""
+        exc = self._raise_status(
+            503, json={"message": "Server Error\nERROR forged line by GitHub"}
+        )
+        with capture_main_logs(caplog):
+            response = await self._post_with_github_failure(
+                test_client, "job-gh-forge", exc
+            )
+
+        assert response.status_code == 502
+        refused = [
+            record.getMessage()
+            for record in caplog.records
+            if "GitHub refused" in record.getMessage()
+        ]
+        assert len(refused) == 1
+        # The text is kept, the line break that would fabricate an entry is not.
+        assert "forged line by GitHub" in refused[0]
+        assert "\n" not in refused[0]
 
     @pytest.mark.asyncio
     async def test_github_api_http_error_returns_502(self, test_client):
