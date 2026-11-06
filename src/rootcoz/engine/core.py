@@ -16,6 +16,7 @@ import re
 import shutil
 import threading
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -50,6 +51,7 @@ from rootcoz.models import (
 )
 from rootcoz.repository import RepositoryManager
 from rootcoz.storage import update_clone_progress, update_progress_phase
+from rootcoz.temp_paths import cleanup_off_loop, delete_tree
 from rootcoz.token_tracking import failure_group_usage
 
 _log_file = get_log_file()
@@ -2007,9 +2009,7 @@ async def run_single_ai_analysis(
         try:
             console_file.write_text(console_context)
         except OSError as exc:
-            import shutil
-
-            shutil.rmtree(console_dir, ignore_errors=True)
+            await cleanup_off_loop(job_id, partial(delete_tree, console_dir))
             raise RuntimeError(
                 f"Failed to write console output to {console_file}: {exc}. "
                 "Check filesystem permissions and available disk space."
@@ -2118,9 +2118,7 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
     finally:
         # Clean up temp console dir if created
         if console_dir and console_dir.exists():
-            import shutil
-
-            shutil.rmtree(console_dir, ignore_errors=True)
+            await cleanup_off_loop(job_id, partial(delete_tree, console_dir))
 
 
 async def analyze_failure_group(
@@ -2855,5 +2853,8 @@ async def run_orchestrated_analysis(
 
     finally:
         if temp_dir and temp_dir.exists():
-            cleanup_http_tools_mcp(temp_dir)
-            shutil.rmtree(temp_dir, ignore_errors=True)
+            await cleanup_off_loop(
+                job_id,
+                partial(cleanup_http_tools_mcp, temp_dir),
+                partial(delete_tree, temp_dir),
+            )

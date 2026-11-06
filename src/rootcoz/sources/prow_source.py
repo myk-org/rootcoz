@@ -13,10 +13,10 @@ import contextlib
 import json
 import os
 import re
-import shutil
 import tempfile
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
+from functools import partial
 from pathlib import Path
 from typing import Any
 from xml.etree.ElementTree import ParseError
@@ -38,6 +38,7 @@ from rootcoz.sources.base import (
     link_artifacts_to_workspace,
     write_console_output_file,
 )
+from rootcoz.temp_paths import cleanup_off_loop, delete_tree
 from rootcoz.xml_enrichment import (
     TestExtractionResult,
     extract_all_tests_from_xml,
@@ -762,11 +763,11 @@ async def _download_gcs_artifacts(
                     warnings.append(msg)
                 break
     except Exception:
-        shutil.rmtree(dest_dir, ignore_errors=True)
+        await cleanup_off_loop(artifacts_prefix, partial(delete_tree, dest_dir))
         raise
 
     if files_downloaded == 0:
-        shutil.rmtree(dest_dir, ignore_errors=True)
+        await cleanup_off_loop(artifacts_prefix, partial(delete_tree, dest_dir))
         return None
 
     logger.info(
@@ -1537,7 +1538,7 @@ class ProwSource(CISource):
                     logger.warning(
                         "Chat: failed to download Prow artifacts", exc_info=True
                     )
-                    self.cleanup()
+                    await self.cleanup_async()
 
         return True  # CI data is present (written now or previously)
 
