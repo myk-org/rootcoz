@@ -35,14 +35,24 @@ jobs:
           # docs/foo.md -> docs/index.html is caught too.
           # -z emits `status\0path\0` (`R100\0old\0new\0` for a rename), so the status tokens are
           # dropped by shape, not by column — there is no column left after NUL splitting.
-          offenders="$(tr '\0' '\n' < "$diff_file" \
-            | grep -vE '^[ACDMRTUXB][0-9]*$' \
-            | grep -vE '^(docs/(.*/)?[^/]+\.md|docs/nav\.json)$' \
-            | grep -E '^docs/' || true)"
+          # The fields are matched as they arrive and never re-joined with newlines: a path CAN
+          # itself contain a newline, and converting NUL -> newline splits `docs/evil\nx.html`
+          # into two lines that match none of the patterns — the generated file would slip
+          # through. `read -d ''` fails at EOF, which only ends this while condition (set -e does
+          # not apply to a loop condition), so the last field is not dropped.
+          offenders=()
+          while IFS= read -r -d '' field; do
+            # Status tokens: no path under docs/ can look like one, they all start with `docs/`.
+            [[ "$field" =~ ^[ACDMRTUXB][0-9]*$ ]] && continue
+            [[ "$field" == docs/* ]] || continue
+            [[ "$field" == docs/nav.json ]] && continue
+            [[ "$field" =~ ^docs/(.*/)?[^/]+\.md$ ]] && continue
+            offenders+=("$field")
+          done < "$diff_file"
 
-          if [ -n "$offenders" ]; then
+          if [ "${#offenders[@]}" -gt 0 ]; then
             echo "::error::Generated docs must not be committed — the site is built on main from the docs sources."
-            printf '%s\n' "$offenders"
+            printf '%s\n' "${offenders[@]}"
             echo "Everything under docs/ other than docs/**/*.md and docs/nav.json is build output of"
             echo ".github/workflows/docs.yml — edit the markdown source instead."
             exit 1
