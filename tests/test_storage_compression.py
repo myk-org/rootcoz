@@ -1191,6 +1191,50 @@ async def test_a_payload_changed_during_the_encode_is_re_read(
     assert "changed while the payload was encoded" in storage_logs.text
 
 
+async def test_a_slow_result_write_never_reverts_a_newer_status(
+    _storage, monkeypatch, storage_logs
+) -> None:
+    """The status a write was decided from guards the transition it writes.
+
+    A payload writer stages its report without the lock, so a status-only update
+    that lands inside that window is the newer state: it must survive, and the
+    losing write is refused (payload and all) instead of reverting it.
+    """
+    await storage.save_result(
+        "job-status-race", "", "running", _payload(failure_count=20)
+    )
+    real_dump = storage._dump_result_json
+    encoding = threading.Event()
+    encodes: list[int] = []
+
+    def slow_first_dump(result: dict[str, Any]) -> Any:
+        encodes.append(len(encodes))
+        if len(encodes) == 1:
+            encoding.set()
+            time.sleep(0.4)  # the status-only writer lands inside this window
+        return real_dump(result)
+
+    monkeypatch.setattr(storage, "_dump_result_json", slow_first_dump)
+    failing = asyncio.create_task(
+        storage.update_status(
+            "job-status-race",
+            "failed",
+            _payload(failure_count=20, summary="boom"),
+        )
+    )
+    await asyncio.to_thread(encoding.wait)
+    assert await storage.update_status("job-status-race", "completed") is True
+    assert await failing is False, "the losing transition must say it did not land"
+
+    stored = await storage.get_result("job-status-race")
+    assert stored["status"] == "completed", "a slow writer reverted a newer status"
+    assert stored["result"]["summary"] == "many failures", (
+        "the refused write still landed its payload under the newer status"
+    )
+    assert len(encodes) == 1, "a lost transition must not be retried"
+    assert "was decided from status 'running'" in storage_logs.text
+
+
 async def test_a_payload_that_never_settles_is_refused_not_overwritten(
     _storage, monkeypatch
 ) -> None:
@@ -1255,3 +1299,56 @@ async def test_a_status_only_update_never_touches_the_payload(
         )[0]
     assert status == "failed"
     assert (await _stored(_storage, "job-status-only"))["result_json"] == before
+
+
+async def test_usage_recorded_during_the_encode_is_in_the_committed_payload(
+    _storage, monkeypatch
+) -> None:
+    """Usage merged before the unlocked encode is re-merged when more landed.
+
+    ``record_token_usage`` inserts on its own connection, so a call that finishes
+    while the report is being encoded would be missing from a payload committed
+    without re-reading the rows it summarized.
+    """
+    await storage.save_result(
+        "job-usage-race", "", "running", _payload(failure_count=20)
+    )
+    real_dump = storage._dump_result_json
+    encoding = threading.Event()
+    encodes: list[int] = []
+
+    def slow_first_dump(result: dict[str, Any]) -> Any:
+        encodes.append(len(encodes))
+        if len(encodes) == 1:
+            encoding.set()
+            time.sleep(0.4)  # the usage row lands inside this window
+        return real_dump(result)
+
+    monkeypatch.setattr(storage, "_dump_result_json", slow_first_dump)
+    finishing = asyncio.create_task(
+        storage.update_status(
+            "job-usage-race",
+            "completed",
+            _payload(failure_count=20, summary="finishing"),
+        )
+    )
+    await asyncio.to_thread(encoding.wait)
+    await storage.record_token_usage(
+        "job-usage-race",
+        "claude",
+        "opus",
+        "primary",
+        input_tokens=7,
+        output_tokens=3,
+    )
+    assert await finishing is True
+
+    committed = storage.parse_result_json(
+        (await _stored(_storage, "job-usage-race"))["result_json"],
+        job_id="job-usage-race",
+    )
+    assert committed["summary"] == "finishing"
+    assert committed["token_usage"]["total_input_tokens"] == 7, (
+        "usage recorded during the encode is missing from the committed payload"
+    )
+    assert len(encodes) == 2, "the write did not re-merge the usage that landed"

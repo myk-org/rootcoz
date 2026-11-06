@@ -7628,6 +7628,11 @@ async def re_analyze_failure(
 
         def _patch_running(result_data: dict[str, Any]) -> None:
             nonlocal already_running
+            # Re-decided on every attempt: patch_result_json re-applies this to a
+            # re-read payload after a CAS miss, and only the last attempt's verdict
+            # matches the state it wrote. A verdict from a discarded attempt would
+            # answer 409 for a `running` mark that was never kept.
+            already_running = False
             failure = _find_failure_by_uuid_in_result(result_data, failure_uuid)
             if failure:
                 if failure.get("reanalysis_status") == "running":
@@ -7642,6 +7647,7 @@ async def re_analyze_failure(
         await patch_result_json(parent_job_id, _patch_running)
 
         if already_running:
+            # Nothing was written for this attempt, so refusing here costs no work.
             raise HTTPException(
                 status_code=409,
                 detail=f"Failure {failure_uuid} is already being re-analyzed",
