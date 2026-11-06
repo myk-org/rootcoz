@@ -273,7 +273,7 @@ rootcoz<span class="w"> </span>push<span class="w"> </span>JOB_ID<span class="w"
 </ul>
 <p>Creation uses your own credentials. A missing or expired token returns an error that points back to your profile settings.</p>
 <p>If creation fails, the dialog stays on the preview with the generated <code>Title</code> and <code>Body</code> — and the repository, Jira project, issue type, and security level you chose — still filled in and editable. The primary action becomes <code>Retry</code>, which resubmits that same content; the model is not called again, so a retry neither costs AI tokens nor rewrites the draft. Retrying is the whole fix for a transient failure. A credential problem is refused again with the same message until the token is corrected, and any message mentioning a token gets a link to <code>Profile Settings</code> next to it.</p>
-<p>A failure is refused with a fixed detail instead of a generic string, and the dialog shows that wording verbatim. GitHub uses one shared set of refusals for both entry points — <code>Create GitHub Issue</code> on a failure and the <code>Feedback</code> form — and only the word changes: your <em>bug report</em> was not filed on a failure, your <em>feedback</em> was not filed on the feedback form.</p>
+<p>A failure is refused with a fixed detail instead of a generic string, and the dialog shows that wording verbatim. GitHub shares one set of refusals between both entry points — <code>Create GitHub Issue</code> on a failure and the <code>Feedback</code> form — and for most statuses only the word changes: your <em>bug report</em> was not filed on a failure, your <em>feedback</em> was not filed on the feedback form. The <code>404</code> is the exception: the two entry points create issues in different places, so each names the repository it could not see.</p>
 <div class="table-wrap"><table>
 <thead>
 <tr>
@@ -295,8 +295,8 @@ rootcoz<span class="w"> </span>push<span class="w"> </span>JOB_ID<span class="w"
 </tr>
 <tr>
 <td><code>404</code></td>
-<td><code>GitHub cannot see the repository in TESTS_REPO_URL, so your bug report was not filed. Check that the repository exists and that your token can access it in Profile Settings.</code> — a <code>403</code></td>
-<td>GitHub answers <code>404</code>, not <code>403</code>, for a repository the token cannot see — and for one the deployment's <code>TESTS_REPO_URL</code> names that does not exist, which the wording names too because the status alone cannot tell them apart. A retry will not change either.</td>
+<td>A failure: <code>GitHub cannot see the repository in TESTS_REPO_URL, so your bug report was not filed. Check that the repository exists and that your token can access it in Profile Settings.</code> The <code>Feedback</code> form: <code>GitHub token cannot access the feedback repository. Regenerate it in Profile Settings with access to that repository.</code> — a <code>403</code></td>
+<td>GitHub answers <code>404</code>, not <code>403</code>, for a repository the token cannot see — and for one the deployment's <code>TESTS_REPO_URL</code> names that does not exist, which the failure wording names too because the status alone cannot tell them apart. So on a failure report check that the <code>TESTS_REPO_URL</code> repository exists and is visible to your token; on the feedback form check that your token can access the feedback repository. A retry will not change either.</td>
 </tr>
 <tr>
 <td><code>401</code></td>
