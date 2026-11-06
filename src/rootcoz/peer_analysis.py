@@ -37,7 +37,6 @@ from rootcoz.engine.core import (
 from rootcoz.engine.http_mcp import (
     cleanup_http_tools_mcp,
 )
-from rootcoz.feedback import scrub_sensitive_data
 from rootcoz.models import (
     AiConfigEntry,
     AnalysisDetail,
@@ -518,7 +517,6 @@ async def analyze_failure_group_with_peers(
     # Why the primary answer carried no analysis, when it didn't. Kept off the
     # analysis/details fields and onto the rows that end up unclassified.
     incomplete_reason = ""
-    primary_narration = ""
     try:
         parsed_analysis, error_signature = await run_single_ai_analysis(
             failures=failures,
@@ -540,15 +538,15 @@ async def analyze_failure_group_with_peers(
         # The main model narrated instead of answering. That is not a reason to
         # abort the debate: the peers can still classify the group, and
         # _peer_consensus_fallback needs their votes. Run with no primary
-        # analysis; the narration is passed to the peers as context only --
-        # narration must never be stored as the group's analysis (#397).
+        # analysis. The narration itself is never forwarded: peers already get
+        # the console output, failure details and artifacts from files, and the
+        # narration can quote CI credentials that a peer provider must not see.
         logger.warning(
             "Peer analysis: main AI produced no usable analysis (%s); "
             "letting the peers analyze the failure",
             exc,
         )
         incomplete_reason = str(exc)
-        primary_narration = exc.raw_text
         parsed_analysis = AnalysisDetail()
         error_signature = exc.error_signature
 
@@ -650,15 +648,6 @@ async def analyze_failure_group_with_peers(
                 f"Classification: {parsed_analysis.classification}\n"
                 f"Details: {parsed_analysis.details}"
             )
-            if primary_narration:
-                # The peer prompt never embeds console/artifact data -- peers read
-                # it from files. Narration can quote that data, so it is scrubbed
-                # before it becomes prompt text sent to another provider.
-                orchestrator_analysis_text += (
-                    "\nPrimary model narration (it gave no classification; "
-                    "read it as context, do not store it): "
-                    f"{scrub_sensitive_data(primary_narration)}"
-                )
 
             # Record orchestrator entry for this round
             all_rounds.append(

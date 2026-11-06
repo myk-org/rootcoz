@@ -245,7 +245,7 @@ class TestSubmittedJobsAreNotIncomplete:
 
         resp = client.get("/api/results/incomplete", headers=_ADMIN_HEADERS)
         assert resp.status_code == 200
-        assert resp.json() == []
+        assert resp.json()["jobs"] == []
 
     async def test_the_same_job_is_incomplete_after_a_fruitless_analysis(
         self, client: TestClient, temp_db_path: Path
@@ -265,7 +265,7 @@ class TestSubmittedJobsAreNotIncomplete:
         assert rows["job-1"]["incomplete_count"] == 1
 
         resp = client.get("/api/results/incomplete", headers=_ADMIN_HEADERS)
-        assert [j["job_id"] for j in resp.json()] == ["job-1"]
+        assert [j["job_id"] for j in resp.json()["jobs"]] == ["job-1"]
 
     def test_an_analysed_job_with_classifications_is_not_incomplete(self) -> None:
         payload = _result_payload(
@@ -335,7 +335,8 @@ class TestIncompleteListingEndpoint:
 
         resp = client.get("/api/results/incomplete", headers=_ADMIN_HEADERS)
         assert resp.status_code == 200
-        jobs = resp.json()
+        jobs = resp.json()["jobs"]
+        assert resp.json()["truncated"] is False
         assert [j["job_id"] for j in jobs] == ["job-bad"]
         assert jobs[0]["job_name"] == "example-job"
         assert jobs[0]["build_number"] == 7
@@ -361,13 +362,15 @@ class TestIncompleteListingEndpoint:
             headers=_ADMIN_HEADERS,
         )
         assert resp.status_code == 200
-        assert {j["job_id"] for j in resp.json()} == {"job-a", "job-b"}
+        assert {j["job_id"] for j in resp.json()["jobs"]} == {"job-a", "job-b"}
+        assert resp.json()["truncated"] is False
 
         resp = client.get(
             "/api/results/incomplete", params={"limit": 1}, headers=_ADMIN_HEADERS
         )
         assert resp.status_code == 200
-        assert len(resp.json()) == 1
+        assert len(resp.json()["jobs"]) == 1
+        assert resp.json()["truncated"] is True
 
     async def test_the_cap_is_applied_not_just_accepted(
         self,
@@ -384,7 +387,24 @@ class TestIncompleteListingEndpoint:
             "/api/results/incomplete", params={"limit": 100}, headers=_ADMIN_HEADERS
         )
         assert resp.status_code == 200
-        assert len(resp.json()) == 2
+        assert len(resp.json()["jobs"]) == 2
+        assert resp.json()["truncated"] is True
+
+    async def test_limit_marks_the_listing_truncated(
+        self, client: TestClient, temp_db_path: Path
+    ) -> None:
+        """A cut listing must say so, not look complete."""
+        for job_id in ("job-a", "job-b", "job-c"):
+            await self._seed(temp_db_path, job_id, _failure(f"t-{job_id}"))
+
+        resp = client.get(
+            "/api/results/incomplete", params={"limit": 2}, headers=_ADMIN_HEADERS
+        )
+        assert resp.status_code == 200
+        body = resp.json()
+        assert len(body["jobs"]) == 2
+        assert body["truncated"] is True
+        assert body["scanned"] >= 2
 
 
 class TestOverridesClearIncompleteness:
@@ -444,7 +464,7 @@ class TestOverridesClearIncompleteness:
 
         resp = client.get("/api/results/incomplete", headers=_ADMIN_HEADERS)
         assert resp.status_code == 200
-        assert resp.json() == []
+        assert resp.json()["jobs"] == []
 
     async def test_analysis_error_text_does_not_keep_it_incomplete(
         self, client: TestClient, temp_db_path: Path
@@ -467,7 +487,7 @@ class TestOverridesClearIncompleteness:
             )
 
         resp = client.get("/api/results/incomplete", headers=_ADMIN_HEADERS)
-        assert resp.json() == []
+        assert resp.json()["jobs"] == []
 
     async def test_legacy_plain_text_analysis_gets_the_override(
         self, client: TestClient, temp_db_path: Path
@@ -521,7 +541,7 @@ class TestOverridesClearIncompleteness:
             )
 
         resp = client.get("/api/results/incomplete", headers=_ADMIN_HEADERS)
-        assert resp.json() == []
+        assert resp.json()["jobs"] == []
 
 
 class TestListingScanIsBounded:
@@ -554,7 +574,7 @@ class TestListingScanIsBounded:
 
         resp = client.get("/api/results/incomplete", headers=_ADMIN_HEADERS)
         assert resp.status_code == 200
-        assert [j["job_id"] for j in resp.json()] == ["job-0"]
+        assert [j["job_id"] for j in resp.json()["jobs"]] == ["job-0"]
 
     async def test_limit_stops_the_scan_early(
         self, client: TestClient, temp_db_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -576,8 +596,33 @@ class TestListingScanIsBounded:
             "/api/results/incomplete", params={"limit": 1}, headers=_ADMIN_HEADERS
         )
         assert resp.status_code == 200
-        assert len(resp.json()) == 1
+        assert len(resp.json()["jobs"]) == 1
+        assert resp.json()["truncated"] is True
         assert len(visited) <= 1 + batch
+
+    async def test_override_lookups_are_batched(
+        self,
+        client: TestClient,
+        temp_db_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """One chunked lookup for the batch, never one query per job."""
+        await self._seed(temp_db_path, 3)
+
+        async def _per_job_query(_job_id: str):
+            raise AssertionError("listing must not query overrides per job")
+
+        monkeypatch.setattr(
+            storage, "get_all_effective_classifications", _per_job_query
+        )
+
+        resp = client.get("/api/results/incomplete", headers=_ADMIN_HEADERS)
+        assert resp.status_code == 200
+        assert {j["job_id"] for j in resp.json()["jobs"]} == {
+            "job-0",
+            "job-1",
+            "job-2",
+        }
 
     async def test_storage_zero_limit_is_unreachable_from_the_api(
         self, client: TestClient, temp_db_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -616,7 +661,8 @@ class TestListingScanIsBounded:
         )
         assert resp.status_code == 200
         # Every seeded row matches, so only the ceiling can stop the scan.
-        assert len(resp.json()) < 20
+        assert len(resp.json()["jobs"]) < 20
+        assert resp.json()["truncated"] is True
         assert len(visited) <= 3 + 2
 
 

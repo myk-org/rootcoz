@@ -13,7 +13,7 @@ vi.mock('@/lib/auth', () => ({
   useAuth: () => ({ role: auth.isOperator ? 'operator' : 'viewer', isOperator: auth.isOperator }),
 }))
 
-function showReport(incompleteCount: number, analysisState?: 'submitted' | 'analyzed') {
+function showReport(incompleteCount: number, analysisState?: 'submitted' | 'analyzed', details = '') {
   const response: ResultResponse = {
     job_id: 'job-1', jenkins_url: null, status: 'completed', created_at: '', base_url: null, result_url: null,
     result: {
@@ -24,7 +24,7 @@ function showReport(incompleteCount: number, analysisState?: 'submitted' | 'anal
       // override classifies a failure without refetching the result.
       failures: Array.from({ length: incompleteCount }, (_, i) => ({
         id: `id-${i}`, test_name: `test-${i}`, error: 'boom',
-        analysis: { classification: '', pattern: '', affected_tests: [], details: '', artifacts_evidence: '' },
+        analysis: { classification: '', pattern: '', affected_tests: [], details, artifacts_evidence: '' },
         analysis_error: 'AI analysis incomplete: response has no usable classification',
         error_signature: `sig-${i}`,
       })),
@@ -63,6 +63,13 @@ describe('incomplete analysis banner', () => {
     showReport(2, 'submitted')
     expect(await screen.findByText('Awaiting AI analysis')).toBeInTheDocument()
     expect(screen.queryByTestId('incomplete-analysis-banner')).not.toBeInTheDocument()
+  })
+
+  it('blames the provider when the AI call failed', async () => {
+    showReport(2, 'analyzed', 'Analysis failed; check server logs for details')
+    const banner = await screen.findByTestId('incomplete-analysis-banner')
+    expect(banner).toHaveTextContent('the AI provider call failed')
+    expect(banner).not.toHaveTextContent('the model returned nothing')
   })
 
   it('shows the banner for the same failures once an analysis produced nothing', async () => {

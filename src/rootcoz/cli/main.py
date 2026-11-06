@@ -1020,11 +1020,24 @@ def results_incomplete(
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """List jobs with failures that have no usable classification."""
-    _run_client_command(
+    data = _run_client_command(
         json_output,
         lambda c: c.list_incomplete_analyses(limit=limit),
+        emit_output=False,
+    )
+    if _state.get("json", False):
+        return
+    jobs = data.get("jobs", []) if isinstance(data, dict) else data
+    print_output(
+        jobs,
         columns=["job_id", "job_name", "build_number", "incomplete_count"],
     )
+    if isinstance(data, dict) and data.get("truncated"):
+        typer.echo(
+            f"Listing truncated after {data.get('scanned', 0)} row(s); "
+            "raise --limit to see more.",
+            err=True,
+        )
 
 
 @results_app.command("submitters")

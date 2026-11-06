@@ -21,7 +21,7 @@ import { CrossFailurePatterns } from './report/CrossFailurePatterns'
 import { TestListSection } from './report/TestListSection'
 import { AllReviewedPrompt } from './report/AllReviewedPrompt'
 import { collectChildExpandKeys, expandKey } from '@/lib/childJobHash'
-import { collectAllTestKeys, countAllFailures, countUnclassifiedFailures, reviewedKeyCount } from '@/lib/failureKeys'
+import { collectAllTestKeys, countAllFailures, countProviderFailures, countUnclassifiedFailures, reviewedKeyCount } from '@/lib/failureKeys'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -386,6 +386,12 @@ function ReportContent() {
     () => (result ? collectAllTestKeys(result.failures ?? [], result.child_job_analyses ?? []) : []),
     [result],
   )
+  const providerFailureCount = useMemo(
+    () => (result
+      ? countProviderFailures(result.failures ?? [], result.child_job_analyses ?? [])
+      : 0),
+    [result],
+  )
   const repoUrls = useMemo<RepoUrl[]>(
     () => buildRepoUrls(result?.request_params),
     [result?.request_params],
@@ -643,7 +649,13 @@ function ReportContent() {
         >
           <div className="flex flex-wrap items-center justify-between gap-2">
             <p className="text-xs text-text-tertiary">
-              {incompleteCount} failure(s) have no usable analysis — the model returned nothing that could be classified. Re-analyze to classify them.
+              {incompleteCount} failure(s) have no usable analysis —{' '}
+              {providerFailureCount === 0
+                ? 'the model returned nothing that could be classified.'
+                : providerFailureCount >= incompleteCount
+                  ? 'the AI provider call failed, so no analysis was produced.'
+                  : `${providerFailureCount} of them had a failed AI provider call, and the rest returned nothing classifiable.`}{' '}
+              Re-analyze to classify them.
             </p>
             {isOperator && result.request_params && (
               <Button

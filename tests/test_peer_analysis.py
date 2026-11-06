@@ -3191,12 +3191,12 @@ class TestOrchestratorEmptyFallback:
         )
 
     @pytest.mark.asyncio
-    async def test_peer_prompt_gets_scrubbed_narration(self) -> None:
-        """Narration quoting CI output must not reach a peer prompt verbatim.
+    async def test_peer_prompt_does_not_carry_primary_narration(self) -> None:
+        """The primary model's narration never reaches another provider.
 
-        A peer prompt embeds no console or artifact data -- peers read it from
-        files -- so a credential quoted in the narration is new prompt text and
-        is scrubbed before it is sent to another provider.
+        Peers read the console output, failure details and artifacts from files,
+        so forwarding narration adds no data they cannot get themselves -- while
+        it can quote CI credentials that must not cross a provider boundary.
         """
         from unittest.mock import AsyncMock
 
@@ -3233,8 +3233,10 @@ class TestOrchestratorEmptyFallback:
         assert prompts
         for prompt in prompts:
             assert "hunter2" not in prompt
-            # The rest of the narration stays readable as context.
-            assert "The deploy log said password=[REDACTED]" in prompt
+            assert "The deploy log said" not in prompt
+            assert "Primary model narration" not in prompt
+            # The peer still gets the failure-details file pointer.
+            assert "FAILURE SUMMARY" in prompt
 
     @pytest.mark.asyncio
     async def test_unclassified_group_keeps_the_incomplete_reason(self) -> None:

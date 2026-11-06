@@ -794,10 +794,13 @@ class RootCozClient:
         """List allowlisted sparse field paths. GET /api/results/fields"""
         return self._request("GET", "/api/results/fields")
 
-    def list_incomplete_analyses(self, limit: int = 100) -> list[dict[str, Any]]:
+    def list_incomplete_analyses(
+        self, limit: int = 100
+    ) -> dict[str, Any] | list[dict[str, Any]]:
         """List jobs with failures that have no usable classification.
 
-        GET /api/results/incomplete
+        GET /api/results/incomplete. Current servers return ``{"jobs": [...],
+        "truncated": bool, "scanned": int}``; older servers return a bare list.
         """
         params: dict[str, Any] | None = None
         if limit != 100:

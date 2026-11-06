@@ -6729,11 +6729,13 @@ async def api_incomplete_analyses(
             "this listing reads result_json (see #392)."
         ),
     ),
-) -> list[dict[str, Any]]:
+) -> dict[str, Any]:
     """List jobs whose stored failures have no usable classification (viewer+).
 
     Read-only: identifies analyses that were never classified (or whose AI
-    answer carried nothing classifiable) so they can be re-analyzed.
+    answer carried nothing classifiable) so they can be re-analyzed. The
+    response carries ``jobs`` plus ``truncated``/``scanned``, so a caller can
+    tell that the listing stopped before examining every row.
     """
     return await storage.list_incomplete_analyses(
         limit=min(limit, MAX_INCOMPLETE_LIST_LIMIT)

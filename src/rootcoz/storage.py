@@ -5015,7 +5015,7 @@ MAX_INCOMPLETE_LIST_LIMIT = 500
 _INCOMPLETE_SCAN_MAX_ROWS = 5000
 
 
-async def list_incomplete_analyses(limit: int = 100) -> list[dict[str, Any]]:
+async def list_incomplete_analyses(limit: int = 100) -> dict[str, Any]:
     """List jobs holding failures with no usable classification.
 
     Newest first, review overrides applied — the same effective-classification
@@ -5026,24 +5026,30 @@ async def list_incomplete_analyses(limit: int = 100) -> list[dict[str, Any]]:
     Cost is proportional to the rows visited, not to ``limit``: the predicate
     is derived from ``result_json`` (an unindexed JSON column) with overrides in
     another table, so there is no index to seek on. Rows are streamed in
-    batches of :data:`_INCOMPLETE_SCAN_BATCH`, the scan stops as soon as
-    ``limit`` matches are collected or :data:`_INCOMPLETE_SCAN_MAX_ROWS` rows
-    have been examined, whichever comes first. Denormalising the count onto
-    ``results`` is what would turn this into one indexed query (issue #392).
+    batches of :data:`_INCOMPLETE_SCAN_BATCH`; overrides for the candidates in
+    a batch are fetched with one chunked lookup, never one query per job. The
+    scan stops as soon as ``limit`` matches are collected or
+    :data:`_INCOMPLETE_SCAN_MAX_ROWS` rows have been examined, whichever comes
+    first. Denormalising the count onto ``results`` is what would turn this
+    into one indexed query (issue #392).
 
     Args:
         limit: Maximum number of matching jobs to return.  ``0`` means no
             limit, i.e. scan every row up to the scan ceiling.
 
     Returns:
-        Dicts with ``job_id``, ``job_name``, ``build_number``,
-        ``incomplete_count``, and the ``test_names`` still unclassified.
+        Dict with ``jobs`` (the matching rows), ``truncated`` (``True`` when
+        the scan stopped at ``limit`` or the scan ceiling before examining
+        every row, so more matching jobs may exist) and ``scanned`` (rows
+        examined). There is deliberately no total: counting every match would
+        require the full-table scan this bound exists to prevent.
     """
     if limit < 0:
         raise ValueError("limit must be >= 0")
 
     jobs: list[dict[str, Any]] = []
     visited = 0
+    truncated = False
     async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT job_id, result_json, COALESCE(analysis_state, 'analyzed') "
@@ -5054,6 +5060,7 @@ async def list_incomplete_analyses(limit: int = 100) -> list[dict[str, Any]]:
             rows = await cursor.fetchmany(_INCOMPLETE_SCAN_BATCH)
             if not rows:
                 break
+            candidates: list[tuple[Any, dict[str, Any], list[str]]] = []
             for row in rows:
                 visited += 1
                 # Lenient: one result written by a newer build must not abort
@@ -5063,9 +5070,24 @@ async def list_incomplete_analyses(limit: int = 100) -> list[dict[str, Any]]:
                 )
                 if not result_data:
                     continue
-                test_names = await incomplete_failures_for_job(
-                    row["job_id"], result_data, analysis_state=row["analysis_state"]
+                test_names = incomplete_failures(
+                    result_data, analysis_state=row["analysis_state"]
                 )
+                if test_names:
+                    candidates.append((row, result_data, test_names))
+
+            # One chunked lookup for the whole batch instead of one per job.
+            overrides_by_job = await get_effective_classifications_bulk(
+                [row["job_id"] for row, _result_data, _names in candidates]
+            )
+            for row, result_data, test_names in candidates:
+                overrides = overrides_by_job.get(row["job_id"])
+                if overrides:
+                    test_names = incomplete_failures(
+                        result_data,
+                        overrides,
+                        analysis_state=row["analysis_state"],
+                    )
                 if not test_names:
                     continue
                 jobs.append(
@@ -5079,8 +5101,11 @@ async def list_incomplete_analyses(limit: int = 100) -> list[dict[str, Any]]:
                     }
                 )
                 if limit and len(jobs) >= limit:
-                    return jobs
-    return jobs
+                    return {"jobs": jobs, "truncated": True, "scanned": visited}
+        else:
+            # Stopped at the scan ceiling with rows still unexamined.
+            truncated = True
+    return {"jobs": jobs, "truncated": truncated, "scanned": visited}
 
 
 async def list_results_for_dashboard_filtered(

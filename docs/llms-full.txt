@@ -1820,6 +1820,8 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    `defaulted` is informational: those items were pushed, so they never count as skipped and never shrink the batch. `unmatched` is always empty — nothing is left out for want of a classification — and `errors` names anything that could not be pushed at all. Because nothing is skipped, the dialog never shows a skipped count or a `Pushed N · skipped M` split, and it never says a test had "no classification to map to a Report Portal defect type". It phrases the defaulted items as `N test(s) were pushed as TO INVESTIGATE because they have no classification`.
 
+   Those statements describe the current server's push response. A historical push result, or a response from an older server, may still carry `unmatched`; the dialog renders that case honestly with its `Pushed N · skipped M` split, because those tests really were not pushed.
+
    You can also check what is available before pushing:
 
    ```bash

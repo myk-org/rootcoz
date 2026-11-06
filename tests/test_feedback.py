@@ -170,6 +170,42 @@ class TestScrubSensitiveData:
         result = scrub_sensitive_data(text)
         assert "https://api.example.com/v1/users" in result
 
+    def test_redacts_authenticated_url_userinfo(self):
+        text = "git clone https://user:s3cr3t-token@git.example.com/org/repo.git"  # pragma: allowlist secret
+        result = scrub_sensitive_data(text)
+        assert "s3cr3t-token" not in result
+        assert "user:" not in result
+        # The scheme, host and path survive so the log still names the repo.
+        assert "https://[REDACTED]@git.example.com/org/repo.git" in result
+
+    def test_redacts_bare_userinfo_in_a_clone_url(self):
+        text = "fatal: could not read user:s3cr3t-token@git.example.com:org/repo.git"
+        result = scrub_sensitive_data(text)
+        assert "s3cr3t-token" not in result
+        assert "[REDACTED]@git.example.com:org/repo.git" in result
+
+    def test_preserves_unauthenticated_urls(self):
+        text = "git clone https://git.example.com/org/repo.git"
+        assert scrub_sensitive_data(text) == text
+
+    def test_preserves_harmless_settings(self):
+        for text in (
+            "MAX_TOKENS=2000",
+            "max_tokens=2000",
+            "TOKENIZERS_PARALLELISM=false",
+        ):
+            assert scrub_sensitive_data(text) == text
+        # The narrowing must not lose a real env-style credential.
+        assert (
+            scrub_sensitive_data(
+                "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"  # pragma: allowlist secret
+            )
+            == ("AWS_SECRET_ACCESS_KEY=[REDACTED]")
+        )
+        assert scrub_sensitive_data(
+            "GITHUB_TOKEN=ghp_abcdefghij1234567890"  # pragma: allowlist secret
+        ) == ("GITHUB_TOKEN=[REDACTED]")
+
     def test_preserves_test_names(self):
         text = "tests.auth.test_login.TestLogin.test_valid_credentials"
         result = scrub_sensitive_data(text)

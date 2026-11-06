@@ -65,6 +65,23 @@ export function countUnclassifiedFailures(
   return count
 }
 
+/** The placeholder a group carries when the provider call itself failed. */
+export const PROVIDER_FAILURE_DETAILS = 'Analysis failed; check server logs for details'
+
+/** Recursively count failures whose analysis is missing because the AI call failed. */
+export function countProviderFailures(
+  failures: { test_name: string; analysis?: AnalysisDetail }[],
+  children: ChildJobAnalysis[],
+): number {
+  let count = 0
+  walkChildTree(failures, children, (nodeFailures) => {
+    for (const f of nodeFailures) {
+      if ((f as FailureAnalysis).analysis?.details === PROVIDER_FAILURE_DETAILS) count += 1
+    }
+  })
+  return count
+}
+
 /** How many of the given review keys are marked reviewed. */
 export function reviewedKeyCount(
   keys: string[],

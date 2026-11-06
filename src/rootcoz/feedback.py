@@ -47,19 +47,21 @@ _SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     ),
     # Secret-looking environment variables: `AWS_SECRET_ACCESS_KEY=…`,
     # `GITHUB_TOKEN=…`. The keyword is not followed directly by the separator,
-    # so the assignment patterns below miss them. Over-redacts harmless flags
-    # such as `MAX_TOKENS=2000`; that is the safe direction for a log excerpt.
+    # so the assignment patterns below miss them. Harmless settings such as
+    # `MAX_TOKENS=2000` keep their value: the keyword must be a whole word at
+    # that point, so the plural `TOKENS` is not a credential name.
     (
         re.compile(
-            r"\b([A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY)[A-Za-z0-9_]*\s*[:=]\s*[\"']?)\S+",
+            r"\b([A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY)(?![A-Za-z0-9])(?:_[A-Za-z0-9_]*)?\s*[:=]\s*[\"']?)\S+",
             re.IGNORECASE,
         ),
         r"\1[REDACTED]",
     ),
-    # API keys/tokens in query params or assignments
+    # API keys/tokens in query params or assignments. The key must be a standalone
+    # name, so the plural setting `max_tokens` is not matched here.
     (
         re.compile(
-            r"((?:api_key|apikey|api_token|access_token|token|secret|auth_token)[\"']?\s*[:=]\s*[\"']?)\S+",
+            r"(?<![A-Za-z0-9_])((?:api_key|apikey|api_token|access_token|token|secret|auth_token)[\"']?\s*[:=]\s*[\"']?)\S+",
             re.IGNORECASE,
         ),
         r"\1[REDACTED]",
@@ -76,6 +78,13 @@ _SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"\b(?:ghp_|gho_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]+\b"),
         "[REDACTED_GITHUB_TOKEN]",
     ),
+    # URL userinfo: keep the scheme and host, redact the credentials.
+    (
+        re.compile(r"(\b[a-zA-Z][a-zA-Z0-9+.\-]*://)[^\s/@]+@"),
+        r"\1[REDACTED]@",
+    ),
+    # Bare `user:secret@` in a clone URL, e.g. `user:pass@host:path`.
+    (re.compile(r"\b[^\s/:@]+:[^\s/@]+@"), "[REDACTED]@"),
     # Generic long hex/base64 secrets (40+ chars, likely tokens)
     (re.compile(r"\b[A-Fa-f0-9]{40,}\b"), "[REDACTED_HEX_TOKEN]"),
 ]
