@@ -3496,17 +3496,19 @@ async def _write_status(
     status: str,
     *,
     writer: str,
-    expect_status: str | None = None,
+    expect_status: str | Sequence[str] | None = None,
 ) -> bool:
     """Write the status half of a result write inside its transaction.
 
-    *expect_status* is the status the caller's decision was made from, passed by a
-    transition that only makes sense against exactly that state: an abort must not
-    end a job that completed while the abort was being decided. The caller passes
-    what it read itself -- re-reading the status here and guarding against that
-    read would guard against the state the write replaces instead of the state the
-    decision needed, which is how a retried write once turned a completed job
-    ``aborted``.
+    *expect_status* is the status -- or the set of statuses -- the caller's
+    decision was made from, passed by a transition that only makes sense against
+    exactly that state: an abort must not end a job that completed while the abort
+    was being decided. The caller passes what it read itself -- re-reading the
+    status here and guarding against that read would guard against the state the
+    write replaces instead of the state the decision needed, which is how a
+    retried write once turned a completed job ``aborted``. An abort names
+    ``ACTIVE_STATUSES``: any of them is a job it may legitimately end, so a job
+    that merely started (``waiting`` -> ``running``) does not void the abort.
 
     A missed expectation is never retried: the value to write was decided from a
     state that is gone, so writing it anyway would revert a newer one.
@@ -3517,9 +3519,13 @@ async def _write_status(
     set_parts, params = _build_status_update_clause(status)
     params.append(job_id)
     sql = f"UPDATE results SET {', '.join(set_parts)} WHERE job_id = ?"
+    expected: tuple[str, ...] = ()
     if expect_status is not None:
-        sql += " AND status = ?"
-        params.append(expect_status)
+        expected = (
+            (expect_status,) if isinstance(expect_status, str) else tuple(expect_status)
+        )
+        sql += f" AND status IN ({', '.join('?' * len(expected))})"
+        params.extend(expected)
     cursor = await db.execute(sql, params)
     if cursor.rowcount == 1:
         return True
@@ -3529,10 +3535,11 @@ async def _write_status(
     row = await (
         await db.execute("SELECT status FROM results WHERE job_id = ?", (job_id,))
     ).fetchone()
+    wanted = "/".join(expected)
     logger.warning(
         f"job_id={job_id}: {writer} to '{status}' was decided from status "
-        f"'{expect_status}' but the row is now '{row[0] if row else '?'}', so the "
-        "newer status is kept and this write was refused rather than reverting it"
+        f"'{wanted}' but the row is now '{row[0] if row else '?'}', so "
+        "the newer status is kept and this write was refused rather than reverting it"
     )
     return False
 
@@ -3565,7 +3572,7 @@ async def update_status(
     result: dict[str, Any] | None = None,
     *,
     refusal_log_level: int = logging.ERROR,
-    expect_status: str | None = None,
+    expect_status: str | Sequence[str] | None = None,
 ) -> bool:
     """Update the status of an existing analysis result.
 
@@ -3583,9 +3590,9 @@ async def update_status(
         result: Optional result data to store. When None, result_json is not modified.
         refusal_log_level: Log level for a refused payload write; ERROR unless the
             caller's operation survives the refusal (see :func:`_refuse_write`).
-        expect_status: The status the caller's decision was made from, for a
-            transition that only makes sense against that state (see
-            :func:`_write_status`). It is refused rather than reverted over a
+        expect_status: The status, or set of statuses, the caller's decision was
+            made from, for a transition that only makes sense against that state
+            (see :func:`_write_status`). It is refused rather than reverted over a
             newer one, and never re-read here.
 
     As in :func:`save_result`, the read, the merge, the encode and the write all
@@ -3736,7 +3743,7 @@ async def fail_job_without_result_write(job_id: str, reason: str) -> None:
                 f"job_id={job_id}: no row to mark failed without writing result_json"
             )
             return "refused"
-        if expect[1] in ("completed", "failed", "aborted"):
+        if expect[1] in ENDED_STATUSES:
             logger.warning(
                 f"job_id={job_id}: the job already ended as '{expect[1]}', so the "
                 "refused result_json write did not mark it failed -- the newer "
@@ -4425,18 +4432,22 @@ async def get_job_submitters(job_ids: list[str]) -> dict[str, str]:
             (*pending, _RESULTS_DENORM_VERSION),
         )
         for row in await cursor.fetchall():
-            payload = parse_result_json_lenient(
-                row["result_json"], job_id=row["job_id"]
-            )
-            derived = dict(
-                zip(
-                    _DENORM_COLUMNS,
-                    _extract_denormalized_fields(payload),
-                    strict=True,
-                )
-            )
-            submitters[row["job_id"]] = derived["submitted_by"]
+            submitters[row["job_id"]] = _derived_columns(row)["submitted_by"]
     return submitters
+
+
+def _derived_columns(row: aiosqlite.Row) -> dict[str, Any]:
+    """Derive the denormalized columns from a row's own inline payload.
+
+    The upgrade window's reader: a row an older build wrote (or rewrote) still has
+    ``''`` in those columns until ``backfill_results_denorm`` reaches it, so the
+    payload is the only truthful answer. Lenient, so a damaged payload reads as
+    empty columns instead of failing the caller.
+    """
+    payload = parse_result_json_lenient(row["result_json"], job_id=row["job_id"])
+    return dict(
+        zip(_DENORM_COLUMNS, _extract_denormalized_fields(payload), strict=True)
+    )
 
 
 def _find_failure_by_uuid_in_failures(
@@ -5851,6 +5862,7 @@ async def get_job_stats(job_name: str, exclude_job_id: str = "") -> dict[str, An
 
 
 ACTIVE_STATUSES = ("running", "pending", "waiting")
+ENDED_STATUSES = ("completed", "failed", "aborted")
 
 # Statuses whose background task is irrecoverably lost after a restart.
 # These are a subset of ACTIVE_STATUSES — "waiting" is excluded because
@@ -11823,6 +11835,13 @@ def _is_job_uuid(ref: str) -> bool:
     return True
 
 
+# The audit list's upgrade-window fallback: an underived legacy row holds ``''``
+# in ``display_name``/``job_name``, so a reference to its name has to be searched
+# in the payload text. TEXT only -- a frame is never read by SQL, the same rule as
+# ``_FIND_FAILURE_BY_UUID_SQL``.
+_AUDIT_LEGACY_NAME_MATCH_SQL = "INSTR(result_json, ?) > 0"
+
+
 async def _audit_target_jobs(
     db: aiosqlite.Connection, refs: Sequence[str]
 ) -> dict[str, tuple[str, str | None]]:
@@ -11835,9 +11854,13 @@ async def _audit_target_jobs(
     more than once.
 
     Reads at list time, never stored, and read from the denormalized columns so
-    a compressed payload is never decoded for it. ``origin_job_name`` is not a
-    name form here: it is computed per response (``main._attach_origin_job_info``)
-    and never stored, so matching it could only ever match nothing.
+    a compressed payload is never decoded for it. A legacy row whose columns are
+    still empty (a row a pre-compression build inserted or rewrote before the
+    sweep reached it) is read from its inline payload instead — the same
+    upgrade-window fallback ``_FIND_FAILURE_BY_UUID_SQL`` and
+    :func:`get_job_submitters` use. ``origin_job_name`` is not a name form here:
+    it is computed per response (``main._attach_origin_job_info``) and never
+    stored, so matching it could only ever match nothing.
     """
     if not refs:
         return {}
@@ -11847,23 +11870,48 @@ async def _audit_target_jobs(
     names = ("display_name", "job_name")
     name_expr = {name: f"NULLIF({name}, '')" for name in names}
     label_expr = "COALESCE(" + ", ".join(name_expr[name] for name in names) + ")"
+    # The upgrade window: a legacy row holds ``''`` in both columns until the
+    # denorm sweep reaches it, so a reference to its name has to match the payload
+    # text. Bound that to the rows the sweep has not derived yet and to inline TEXT
+    # -- a frame is never read by SQL, the same rule as the failure-UUID prefilter
+    # -- and fetch the payload only for those, never for a compressed row.
+    pending = (
+        f"COALESCE(denorm_version, 0) < {_RESULTS_DENORM_VERSION}"
+        " AND typeof(result_json) = 'text'"
+    )
     cursor = await db.execute(
         f"SELECT job_id, {label_expr} AS label,"
-        f" {', '.join(name_expr[name] + ' AS ' + name for name in names)}"
+        f" {', '.join(name_expr[name] + ' AS ' + name for name in names)},"
+        f" CASE WHEN {pending} THEN result_json END AS result_json"
         " FROM results"
         f" WHERE (job_id IN ({marks})"
-        f" OR {' OR '.join(name_expr[name] + f' IN ({marks})' for name in names)})"
+        f" OR {' OR '.join(name_expr[name] + f' IN ({marks})' for name in names)}"
+        f" OR ({pending}"
+        f" AND ({' OR '.join(_AUDIT_LEGACY_NAME_MATCH_SQL for _ in refs)})))"
         " ORDER BY created_at, rowid",
-        [*refs] * (len(names) + 1),
+        [*refs] * (len(names) + 2),
     )
     rows = await cursor.fetchall()
-    # Name keys first, so an id that is also some row's name stays the id.
     resolved: dict[str, tuple[str, str | None]] = {}
+    labelled: list[tuple[str, str | None, list[str]]] = []
     for row in rows:  # oldest first, so the newest row's label wins
-        for name in names:
-            if row[name]:
-                resolved[str(row[name])] = (row["job_id"], row["label"])
-    resolved.update({row["job_id"]: (row["job_id"], row["label"]) for row in rows})
+        row_names = [row[name] for name in names]
+        if row["result_json"]:
+            # An underived row's names are only in its payload: its columns are
+            # still empty, so they cannot be matched or shown from the row alone.
+            derived = _derived_columns(row)
+            row_names = [
+                have or derived[name]
+                for have, name in zip(row_names, names, strict=True)
+            ]
+        label = next((name for name in row_names if name), None)
+        labelled.append((row["job_id"], label, row_names))
+    # Name keys first, so an id that is also some row's name stays the id.
+    for job_id, label, row_names in labelled:
+        for name in row_names:
+            if name:
+                resolved[str(name)] = (job_id, label)
+    resolved.update({job_id: (job_id, label) for job_id, label, _ in labelled})
     return resolved
 
 

@@ -1871,6 +1871,54 @@ class TestAbortEndpoint:
             assert stored["status"] == "aborted"
 
     @pytest.mark.asyncio
+    async def test_abort_lands_when_the_job_started_meanwhile(
+        self, test_client, temp_db_path
+    ):
+        """A waiting->running transition is still a legitimate abort.
+
+        The status the abort was decided from is no longer the row's, but the job
+        is still active, so refusing the abort and answering "Job finished as
+        running" would report a status the abort never wrote.
+        """
+        from rootcoz import main
+
+        original = main.update_status
+
+        async def _start_the_job_first(*args, **kwargs):
+            # The race the abort has to survive: the job starts after the abort
+            # read the status it decides from, before its write lands.
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "UPDATE results SET status = 'running' WHERE job_id = ?",
+                    ("job-started",),
+                )
+                await db.commit()
+            return await original(*args, **kwargs)
+
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            await storage.save_result(
+                job_id="job-started",
+                jenkins_url="http://jenkins",
+                status="waiting",
+                result={
+                    "job_name": "test",
+                    "build_number": 1,
+                    "request_params": {"submitted_by": "testuser"},
+                },
+            )
+            with patch.object(main, "update_status", _start_the_job_first):
+                resp = test_client.post(
+                    "/results/job-started/abort",
+                    cookies={"rootcoz_username": "testuser"},
+                )
+
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "aborted"
+            stored = await storage.get_result("job-started")
+            assert stored["status"] == "aborted"
+
+    @pytest.mark.asyncio
     async def test_abort_completed_job_is_noop(self, test_client, temp_db_path):
         """Aborting a completed job returns its current status."""
         with patch.object(storage, "DB_PATH", temp_db_path):

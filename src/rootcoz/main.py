@@ -283,6 +283,7 @@ from rootcoz.storage import (
     ANALYSIS_STATE_ANALYZED,
     ANALYSIS_STATE_SUBMITTED,
     DB_PATH,
+    ENDED_STATUSES,
     UnsupportedResultEncoding,
     backfill_result_json_compression,
     backfill_results_denorm,
@@ -11105,7 +11106,7 @@ async def abort_analysis(
         )
 
     status = result.get("status", "")
-    if status in ("completed", "failed", "aborted"):
+    if status in ENDED_STATUSES:
         return {"status": status, "message": f"Job already {status}"}
 
     # Cancel the background task if it exists
@@ -11147,23 +11148,23 @@ async def abort_analysis(
 
     # Re-check status — task may have completed between cancel and here
     current = await storage.get_result(job_id)
-    decided_from = current["status"] if current else None
-    if decided_from in ("completed", "failed"):
+    if current and current["status"] in ENDED_STATUSES:
         logger.info(f"Job {job_id} completed/failed during abort — not overwriting")
         return {
-            "status": decided_from,
-            "message": f"Job finished as {decided_from} during abort",
+            "status": current["status"],
+            "message": f"Job finished as {current['status']} during abort",
         }
 
-    # The status this abort was decided from guards the write, so a job that
-    # finishes while the abort waits for its write lock is not ended over.
+    # The abort is valid against any active status, so a job that merely started
+    # (``waiting`` -> ``running``) does not refuse it; a terminal one does, and its
+    # own status is reported instead of a status the abort did not write.
     try:
         aborted = await update_status(
             job_id,
             "aborted",
             abort_data,
             refusal_log_level=logging.WARNING,
-            expect_status=decided_from,
+            expect_status=ACTIVE_STATUSES,
         )
     except UnsupportedResultEncoding:
         # The abort is the status transition, and the job's task is already gone,
@@ -11171,16 +11172,33 @@ async def abort_analysis(
         # that stored report belongs to a build with a newer codec, so it stays
         # byte-identical and the job is ended with a status-only update. The
         # refusal was already logged (once, at WARNING) by the write itself.
-        aborted = await update_status(job_id, "aborted", expect_status=decided_from)
+        aborted = await update_status(job_id, "aborted", expect_status=ACTIVE_STATUSES)
     if not aborted:
         # A status newer than the one this abort was decided from landed first;
         # reporting the job as aborted would contradict the row.
         current = await storage.get_result(job_id)
-        finished = current["status"] if current else "gone"
-        logger.info(f"Job {job_id} reached {finished} during abort — not overwriting")
+        current_status = current["status"] if current else None
+        if current_status in ENDED_STATUSES:
+            logger.info(
+                f"Job {job_id} reached {current_status} during abort — not overwriting"
+            )
+            return {
+                "status": current_status,
+                "message": f"Job finished as {current_status} during abort",
+            }
+        # Still active: the abort lost the race to other writes, not to an ended
+        # job, so say that instead of claiming a status that was never written.
+        logger.warning(
+            f"Job {job_id} is still {current_status or 'gone'} after the abort "
+            "attempts, so the abort was not applied"
+        )
         return {
-            "status": finished,
-            "message": f"Job finished as {finished} during abort",
+            "status": current_status or "gone",
+            "message": (
+                f"Job is {current_status} and the abort was not applied; retry"
+                if current_status
+                else "Job no longer exists and the abort was not applied"
+            ),
         }
     notify_active_count_changed()
     notify_dashboard_changed()
@@ -21384,11 +21402,16 @@ def _admin_row_value(value: Any) -> Any:
                     remaining, max_length=_ADMIN_PREVIEW_MAX_BYTES + 1 - total
                 )
             )
-            if total > _ADMIN_PREVIEW_MAX_BYTES or not decompressor.eof:
+            if total > _ADMIN_PREVIEW_MAX_BYTES:
                 return (
                     f"<{len(value)}-byte frame, decoded payload over"
                     f" {_ADMIN_PREVIEW_MAX_BYTES} bytes: not shown>"
                 )
+            if not decompressor.eof:
+                # Not the cap: a truncated frame stops short of its own end
+                # without raising, and calling that "oversized" would hide the
+                # damage this console exists to look into.
+                return f"<{len(value)} undecodable frame>"
             remaining = decompressor.unused_data
     except zstd.ZstdError:
         return f"<{len(value)} undecodable frame>"

@@ -1080,6 +1080,25 @@ async def test_audit_labels_a_compressed_row(_storage) -> None:
     assert "origin-only" not in resolved
 
 
+async def test_audit_labels_a_row_the_sweep_has_not_reached(_storage) -> None:
+    """A legacy row's names are only in its payload until the sweep fills them.
+
+    Startup does not await that sweep, so reading the columns alone would lose the
+    audit link for a reference to the name (and label a job-id reference with no
+    name at all).
+    """
+    await _insert_legacy("job-legacy-audit", _payload(failure_count=1))
+    assert (await _stored(_storage, "job-legacy-audit"))["kind"] == "text"
+
+    async with storage._connect_db() as db:
+        resolved = await storage._audit_target_jobs(
+            db, ["job-legacy-audit", "Human Name", "big-job"]
+        )
+    assert resolved["job-legacy-audit"] == ("job-legacy-audit", "Human Name")
+    assert resolved["Human Name"] == ("job-legacy-audit", "Human Name")
+    assert resolved["big-job"] == ("job-legacy-audit", "Human Name")
+
+
 async def test_find_failure_by_uuid_reads_a_compressed_row(_storage) -> None:
     await storage.save_result("job-uuid", "", "completed", _payload(failure_count=5))
     assert (await _stored(_storage, "job-uuid"))["kind"] == "blob"
@@ -1147,15 +1166,17 @@ async def test_get_job_submitters_reads_a_row_the_sweep_has_not_reached(
 async def test_no_sql_site_still_parses_result_json(_storage) -> None:
     """Every site that reads the payload must go through parse_result_json.
 
-    Two blocks are allowlisted, both guarded by ``typeof(...) = 'text'`` so neither
+    Three blocks are allowlisted, all guarded by ``typeof(...) = 'text'`` so none
     can ever read a frame: the ``failure_history`` build-id candidate CTE, which
-    runs inside ``init_db``, and the failure-UUID prefilter's fallback for a row the
-    denorm sweep has not reached yet.
+    runs inside ``init_db``; the failure-UUID prefilter's fallback for a row the
+    denorm sweep has not reached yet; and the audit list's legacy name-match
+    fragment for the same upgrade window.
     """
     source = Path(storage.__file__).read_text()
     for allowed in (
         storage._FH_BUILD_ID_CANDIDATES_CTE,
         storage._FIND_FAILURE_BY_UUID_SQL,
+        storage._AUDIT_LEGACY_NAME_MATCH_SQL,
     ):
         assert source.count(allowed) == 1
         source = source.replace(allowed, "")

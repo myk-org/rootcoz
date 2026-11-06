@@ -3229,6 +3229,17 @@ def test_admin_db_query_preview_bounds_a_crafted_frame() -> None:
     assert main._admin_row_value(damaged) == f"<{len(damaged)} undecodable frame>"
 
 
+def test_admin_db_query_preview_labels_a_truncated_frame_as_damaged() -> None:
+    """A truncated frame is damaged, not oversized.
+
+    Both end with ``eof`` False, so the size cap cannot be the branch that names
+    it: a damaged stored row is exactly what the console is used to look into.
+    """
+    frame = zstd.compress(json.dumps({"job_name": "j"}).encode())
+    damaged = frame[: len(frame) // 2]
+    assert main._admin_row_value(damaged) == f"<{len(damaged)} undecodable frame>"
+
+
 def test_admin_db_query_preview_bounds_concatenated_frames() -> None:
     """A tiny first frame must not carry a huge second one past the cap (#419).
 
