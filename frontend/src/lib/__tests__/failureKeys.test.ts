@@ -1,15 +1,40 @@
 import { describe, expect, it } from 'vitest'
-import { countUnclassifiedFailures, countUnreviewedFailures } from '@/lib/failureKeys'
+import {
+  PROVIDER_FAILURE_DETAILS,
+  countProviderFailures,
+  countUnclassifiedFailures,
+  countUnreviewedFailures,
+} from '@/lib/failureKeys'
 import type { ChildJobAnalysis, FailureAnalysis, ReviewState } from '@/types'
 
 /** One failure with the classification the server stored for it. */
-function makeFailure(testName: string, classification: string): FailureAnalysis {
+function makeFailure(
+  testName: string,
+  classification: string,
+  extra: Partial<FailureAnalysis> = {},
+): FailureAnalysis {
   return {
     id: `${testName}-id`,
     test_name: testName,
     error: 'boom',
     analysis: { classification, pattern: '', affected_tests: [], details: '', artifacts_evidence: '' },
     error_signature: 'sig',
+    ...extra,
+  }
+}
+
+/** One failure the provider placeholder was stored on, unclassified. */
+function makeProviderFailure(testName: string, analysisError?: string): FailureAnalysis {
+  return {
+    ...makeFailure(testName, ''),
+    analysis: {
+      classification: '',
+      pattern: '',
+      affected_tests: [],
+      details: PROVIDER_FAILURE_DETAILS,
+      artifacts_evidence: '',
+    },
+    ...(analysisError ? { analysis_error: analysisError } : {}),
   }
 }
 
@@ -200,5 +225,51 @@ describe('countUnclassifiedFailures', () => {
     expect(countUnclassifiedFailures(failures, [], {}, 'submitted')).toBe(0)
     // ...and the same failures after an analysis that produced nothing do count.
     expect(countUnclassifiedFailures(failures, [], {}, 'analyzed')).toBe(2)
+  })
+})
+
+describe('countProviderFailures', () => {
+  it('counts only failures carrying the provider placeholder', () => {
+    // Same traversal as `countUnclassifiedFailures`, narrower predicate.
+    const failures = [makeProviderFailure('test-a'), makeFailure('test-b', '')]
+    expect(countProviderFailures(failures, [], {})).toBe(1)
+    expect(countUnclassifiedFailures(failures, [], {})).toBe(2)
+  })
+
+  it('skips a placeholder row that explains itself in analysis_error', () => {
+    // A narration-only reply shares the placeholder but is not a provider
+    // outage, so the banner must not blame credentials for it.
+    const failures = [makeProviderFailure('test-a'), makeProviderFailure('test-b', 'no classification')]
+    expect(countProviderFailures(failures, [], {})).toBe(1)
+    expect(countUnclassifiedFailures(failures, [], {})).toBe(2)
+  })
+
+  it('lets a live reviewer override clear a provider placeholder', () => {
+    const failures = [makeProviderFailure('test-a')]
+    expect(countProviderFailures(failures, [], { 'test-a': 'PRODUCT BUG' })).toBe(0)
+  })
+
+  it('counts placeholders through their own review key in the child tree', () => {
+    const grandchild = {
+      ...makeChild('grandchild', 9),
+      failures: [makeProviderFailure('test-g')],
+    }
+    const child = {
+      ...makeChild('child', 5),
+      failures: [makeProviderFailure('test-c')],
+      failed_children: [grandchild],
+    }
+    expect(countProviderFailures([makeProviderFailure('test-p')], [child], {})).toBe(3)
+    // A child-scoped override clears exactly its own failure, at any depth.
+    expect(countProviderFailures([makeProviderFailure('test-p')], [child], {
+      'grandchild#9::test-g': 'CODE ISSUE',
+      'test-p': 'PRODUCT BUG',
+    })).toBe(1)
+  })
+
+  it('never counts an ingest-only job', () => {
+    const failures = [makeProviderFailure('test-a')]
+    expect(countProviderFailures(failures, [], {}, 'submitted')).toBe(0)
+    expect(countProviderFailures(failures, [], {}, 'analyzed')).toBe(1)
   })
 })

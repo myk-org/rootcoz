@@ -41,21 +41,24 @@ export function countAllFailures(failures: { test_name: string }[], children: Ch
   return count
 }
 
-/** Failures with no effective classification, mirroring the server's
- *  `incomplete_count`: a live reviewer override wins over the stored
- *  classification, so classifying a failure clears it from this total without
- *  a refetch. A `submitted` job never counts: its analysis has not run, so its
- *  empty classifications are not a failed analysis (storage.incomplete_failures). */
-export function countUnclassifiedFailures(
+/** One traversal behind both incomplete-failure counts: walk the child tree and
+ *  count the failures `include` selects that have no effective classification.
+ *  A live reviewer override wins over the stored classification, so classifying
+ *  a failure clears it from either total without a refetch. A `submitted` job
+ *  never counts: its analysis has not run, so its empty classifications are not
+ *  a failed analysis (storage.incomplete_failures). */
+function countIncompleteFailures(
   failures: { test_name: string; analysis?: AnalysisDetail }[],
   children: ChildJobAnalysis[],
   classifications: Record<string, string>,
-  analysisState?: string,
+  analysisState: string | undefined,
+  include: (f: FailureAnalysis) => boolean,
 ): number {
   if (analysisState === 'submitted') return 0
   let count = 0
   walkChildTree(failures, children, (nodeFailures, jobName, buildNumber) => {
     for (const f of nodeFailures) {
+      if (!include(f as FailureAnalysis)) continue
       const stored = (f as FailureAnalysis).analysis?.classification ?? ''
       const effective = classifications[reviewKey(f.test_name, jobName, buildNumber)] ?? stored
       // The server strips before deciding (storage._effective_classification).
@@ -63,6 +66,17 @@ export function countUnclassifiedFailures(
     }
   })
   return count
+}
+
+/** Failures with no effective classification, mirroring the server's
+ *  `incomplete_count`. */
+export function countUnclassifiedFailures(
+  failures: { test_name: string; analysis?: AnalysisDetail }[],
+  children: ChildJobAnalysis[],
+  classifications: Record<string, string>,
+  analysisState?: string,
+): number {
+  return countIncompleteFailures(failures, children, classifications, analysisState, () => true)
 }
 
 /** The placeholder a group carries when the provider call itself failed. */
@@ -82,18 +96,13 @@ export function countProviderFailures(
   classifications: Record<string, string>,
   analysisState?: string,
 ): number {
-  if (analysisState === 'submitted') return 0
-  let count = 0
-  walkChildTree(failures, children, (nodeFailures, jobName, buildNumber) => {
-    for (const f of nodeFailures) {
-      if ((f as FailureAnalysis).analysis?.details !== PROVIDER_FAILURE_DETAILS) continue
-      if ((f as FailureAnalysis).analysis_error) continue
-      const stored = (f as FailureAnalysis).analysis?.classification ?? ''
-      const effective = classifications[reviewKey(f.test_name, jobName, buildNumber)] ?? stored
-      if (!effective.trim()) count += 1
-    }
-  })
-  return count
+  return countIncompleteFailures(
+    failures,
+    children,
+    classifications,
+    analysisState,
+    (f) => f.analysis?.details === PROVIDER_FAILURE_DETAILS && !f.analysis_error,
+  )
 }
 
 /** How many of the given review keys are marked reviewed. */
