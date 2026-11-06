@@ -1676,9 +1676,7 @@ class TestRBACRoles:
         GitHub/Jira badges rendered beside comment links.
         """
         _, viewer_cookies = _create_user_with_role(client, "viewer_enrich", "viewer")
-        resp = client.post(
-            "/results/job-v/enrich-comments", json=None, cookies=viewer_cookies
-        )
+        resp = client.get("/results/job-v/enrich-comments", cookies=viewer_cookies)
         assert resp.status_code == 200
         # Real success shape: comment_id -> list of {type, key, status}.
         # The job has no comments, so the mapping is empty -- not a 404/403.
