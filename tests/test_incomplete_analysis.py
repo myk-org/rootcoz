@@ -601,6 +601,31 @@ class TestListingScanIsBounded:
         assert resp.json()["truncated_by"] == "limit"
         assert len(visited) <= 1 + batch
 
+    async def test_no_truncation_when_the_listing_ends_at_the_bound(
+        self,
+        _init_db,
+        temp_db_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A listing whose last match is the bound has no next page.
+
+        Both causes claimed truncation without probing for a leftover row: the
+        limit branch stopped on ``len(jobs) >= limit`` and the ceiling branch
+        assumed every ceiling stop had rows behind it (#399).
+        """
+        await self._seed(temp_db_path, 3)
+
+        exact_limit = await storage.list_incomplete_analyses(limit=3)
+        assert len(exact_limit["jobs"]) == 3
+        assert exact_limit["truncated"] is False
+        assert exact_limit["truncated_by"] is None
+
+        monkeypatch.setattr(storage, "_INCOMPLETE_SCAN_MAX_ROWS", 3)
+        exact_ceiling = await storage.list_incomplete_analyses(limit=500)
+        assert len(exact_ceiling["jobs"]) == 3
+        assert exact_ceiling["truncated"] is False
+        assert exact_ceiling["truncated_by"] is None
+
     async def test_override_lookups_are_batched(
         self,
         client: TestClient,

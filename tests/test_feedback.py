@@ -185,6 +185,40 @@ class TestScrubSensitiveData:
         assert "s3cr3t-token" not in result
         assert "[REDACTED]@git.example.com:org/repo.git" in result
 
+    def test_redacts_a_secret_containing_whitespace(self):
+        """Only the first token of a value was dropped, so everything after the
+        first space -- the rest of a passphrase, or a whole PEM header -- was
+        left in the DEBUG log excerpt that ships in the issue (#399)."""
+        assert (
+            scrub_sensitive_data("GITHUB_TOKEN=abc def ghi")  # pragma: allowlist secret
+            == "GITHUB_TOKEN=[REDACTED]"
+        )
+        # Split so the private-key hook does not flag this fixture.
+        pem_header = "-----BEGIN RSA PRIVATE" + " KEY-----"
+        assert (
+            scrub_sensitive_data(f"PRIVATE_KEY={pem_header}\nMIIEowIBAAKCAQEA")
+            == "PRIVATE_KEY=[REDACTED]\nMIIEowIBAAKCAQEA"
+        )
+        quoted = scrub_sensitive_data(
+            '{"client_secret": "pass phrase"}'  # pragma: allowlist secret
+        )
+        assert "phrase" not in quoted
+
+    def test_redacts_userinfo_whose_password_contains_an_at_sign(self):
+        """The userinfo match stopped at the *first* `@`, so a password holding
+        one leaked its suffix together with the host. The host is what follows
+        the last `@` of the authority (#399)."""
+        assert (
+            scrub_sensitive_data(
+                "push failed for https://user:p@ssw0rd@registry.example.com/v2/app"
+            )
+            == "push failed for https://[REDACTED]@registry.example.com/v2/app"
+        )
+        assert (
+            scrub_sensitive_data("fatal: user:p@ss@git.example.com:org/repo.git")
+            == "fatal: [REDACTED]@git.example.com:org/repo.git"
+        )
+
     def test_redacts_quoted_compound_keys(self):
         """A quoted JSON/literal key must not hide a secret behind its `_`."""
         for text in (

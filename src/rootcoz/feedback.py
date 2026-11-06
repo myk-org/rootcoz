@@ -28,6 +28,14 @@ _FEEDBACK_REPO_URL = "https://github.com/myk-org/rootcoz"
 # the signed preview-time provenance all live there so feedback creation and
 # the shared issue creator cannot disagree about who gets credit.
 
+# The value half of a credential assignment: the whole value, not just its
+# first token. `\S+` stopped at the first space, so the rest of a passphrase, a
+# `KEY=abc def` value or a `-----BEGIN …` PEM header stayed in the DEBUG log
+# excerpt attached to the issue. Stopping at the newline keeps the narrowing of
+# a quoted key intact, and a quoted value's closing quote is consumed with it:
+# over-redacting the remainder of that one line is the safe direction (#399).
+_ASSIGNMENT_VALUE = r"[^\r\n]*"
+
 # Patterns for sensitive data scrubbing.
 # Order matters: more specific patterns first to avoid partial matches.
 _SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
@@ -55,7 +63,8 @@ _SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # that point, so the plural `TOKENS` is not a credential name.
     (
         re.compile(
-            r"\b([A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY)(?![A-Za-z0-9])(?:_[A-Za-z0-9_]*)?[\"']?\s*[:=]\s*[\"']?)\S+",
+            r"\b([A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY)(?![A-Za-z0-9])(?:_[A-Za-z0-9_]*)?[\"']?\s*[:=]\s*[\"']?)"
+            + _ASSIGNMENT_VALUE,
             re.IGNORECASE,
         ),
         r"\1[REDACTED]",
@@ -64,7 +73,8 @@ _SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # name, so the plural setting `max_tokens` is not matched here.
     (
         re.compile(
-            r"(?<![A-Za-z0-9_])((?:api_key|apikey|api_token|access_token|token|secret|auth_token)[\"']?\s*[:=]\s*[\"']?)\S+",
+            r"(?<![A-Za-z0-9_])((?:api_key|apikey|api_token|access_token|token|secret|auth_token)[\"']?\s*[:=]\s*[\"']?)"
+            + _ASSIGNMENT_VALUE,
             re.IGNORECASE,
         ),
         r"\1[REDACTED]",
@@ -72,7 +82,8 @@ _SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # Passwords in query params or assignments
     (
         re.compile(
-            r"((?:password|passwd|pwd)[\"']?\s*[:=]\s*[\"']?)\S+", re.IGNORECASE
+            r"((?:password|passwd|pwd)[\"']?\s*[:=]\s*[\"']?)" + _ASSIGNMENT_VALUE,
+            re.IGNORECASE,
         ),
         r"\1[REDACTED]",
     ),
@@ -81,9 +92,12 @@ _SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"\b(?:ghp_|gho_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]+\b"),
         "[REDACTED_GITHUB_TOKEN]",
     ),
-    # URL userinfo: keep the scheme and host, redact the credentials.
+    # URL userinfo: keep the scheme and host, redact the credentials. The host
+    # is what follows the *last* `@` of the authority, so the userinfo match is
+    # greedy up to the `/` that ends it: `user:p@ss@host` had its password
+    # suffix leak when the match stopped at the first `@` (#399).
     (
-        re.compile(r"(\b[a-zA-Z][a-zA-Z0-9+.\-]*://)[^\s/@]+@"),
+        re.compile(r"(\b[a-zA-Z][a-zA-Z0-9+.\-]*://)[^\s/]*@"),
         r"\1[REDACTED]@",
     ),
     # Bare `user:secret@` in a clone URL, e.g. `user:pass@host:path`. The host
@@ -96,7 +110,7 @@ _SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # same, so widen only with a rule that still spares `@sha256:…`.
     (
         re.compile(
-            r"\b(?!mailto:)[^\s/:@]+:[^\s/@]+@"
+            r"\b(?!mailto:)[^\s/:@]+:[^\s/]*@"
             r"(?=[^\s/@:]+(?:\.[^\s/@:]+)+|localhost\b)"
         ),
         "[REDACTED]@",

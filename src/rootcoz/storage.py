@@ -5013,9 +5013,10 @@ async def list_incomplete_analyses(limit: int = 100) -> dict[str, Any]:
             limit, i.e. scan every row up to the scan ceiling.
 
     Returns:
-        Dict with ``jobs`` (the matching rows), ``truncated`` (``True`` when
-        the scan stopped at ``limit`` or the scan ceiling before examining
-        every row, so more matching jobs may exist), ``truncated_by``
+        Dict with ``jobs`` (the matching rows), ``truncated`` (``True`` when a
+        next row actually exists beyond what was returned, so more matching
+        jobs may exist; a listing that ends exactly at ``limit`` or at the scan
+        ceiling is complete, not truncated), ``truncated_by``
         (``"limit"`` or ``"scan_ceiling"``, the cause of ``truncated``; ``None``
         when not truncated) and ``scanned`` (rows examined). There is
         deliberately no total: counting every match would require the
@@ -5027,6 +5028,9 @@ async def list_incomplete_analyses(limit: int = 100) -> dict[str, Any]:
     jobs: list[dict[str, Any]] = []
     visited = 0
     truncated_by: str | None = None
+    # Candidates left unexamined in the batch where ``limit`` was reached: they
+    # are possible next rows, so the lookahead below must not deny them.
+    pending_candidates = 0
     async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT job_id, result_json, COALESCE(analysis_state, 'analyzed') "
@@ -5057,7 +5061,7 @@ async def list_incomplete_analyses(limit: int = 100) -> dict[str, Any]:
             overrides_by_job = await get_effective_classifications_bulk(
                 [row["job_id"] for row, _result_data, _names in candidates]
             )
-            for row, result_data, test_names in candidates:
+            for position, (row, result_data, test_names) in enumerate(candidates):
                 overrides = overrides_by_job.get(row["job_id"])
                 if overrides:
                     test_names = incomplete_failures(
@@ -5078,15 +5082,23 @@ async def list_incomplete_analyses(limit: int = 100) -> dict[str, Any]:
                     }
                 )
                 if limit and len(jobs) >= limit:
-                    return {
-                        "jobs": jobs,
-                        "truncated": True,
-                        "truncated_by": "limit",
-                        "scanned": visited,
-                    }
+                    truncated_by = "limit"
+                    pending_candidates = len(candidates) - position - 1
+                    break
+            if truncated_by:
+                break
         else:
             # Stopped at the scan ceiling with rows still unexamined.
             truncated_by = "scan_ceiling"
+        if (
+            truncated_by
+            and not pending_candidates
+            # One-row lookahead: reaching ``limit`` (or the ceiling) does not
+            # prove a leftover row -- the listing may end exactly there. Only a
+            # row still in the stream does, and it is never parsed (#399).
+            and await cursor.fetchone() is None
+        ):
+            truncated_by = None
     return {
         "jobs": jobs,
         "truncated": truncated_by is not None,
