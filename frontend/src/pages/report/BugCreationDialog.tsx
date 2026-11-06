@@ -1,5 +1,9 @@
 import { useEffect, useState } from 'react'
 import { api, extractApiDetail } from '@/lib/api'
+import { createIssueFailureMessage } from '@/lib/issueCreateError'
+import { IssueCreateError } from '@/components/shared/IssueCreateError'
+import { useSubmitGuard } from '@/lib/useSubmitGuard'
+import { reviewKey } from '@/lib/reviewKey'
 import {
   Dialog,
   DialogContent,
@@ -16,7 +20,7 @@ import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { TokenRequiredBanner } from '@/components/shared/TokenRequiredBanner'
 import { CheckCircle2, ExternalLink, AlertTriangle } from 'lucide-react'
-import type { PreviewIssueResponse, CreateIssueResponse, SimilarIssue, CommentsAndReviews } from '@/types'
+import type { PreviewIssueResponse, CreateIssueResponse, SimilarIssue, CommentsAndReviews, TrackedInEntry } from '@/types'
 import { getGithubToken, getJiraToken, getJiraEmail, getJiraSaToken } from '@/lib/cookies'
 import { useReportDispatch, useRefreshEnrichments } from '@/pages/report/reportState'
 import { useAiSelection } from '@/lib/useAiSelection'
@@ -71,7 +75,7 @@ export function BugCreationDialog({
 }: BugCreationDialogProps) {
   const dispatch = useReportDispatch()
   const refreshEnrichments = useRefreshEnrichments()
-  const { canUseServerProviders, canUseFreeProviders } = useAuth()
+  const { username, canUseServerProviders, canUseFreeProviders } = useAuth()
   const { aiProvider, aiModel, setAiPair } = useAiSelection(defaultAiProvider, defaultAiModel)
   const { providers, providerStatus } = useProviderCatalog()
   const [phase, setPhase] = useState<Phase>('idle')
@@ -89,6 +93,10 @@ export function BugCreationDialog({
   const [similar, setSimilar] = useState<SimilarIssue[]>([])
   const [createdUrl, setCreatedUrl] = useState('')
   const [errorMsg, setErrorMsg] = useState('')
+  // A failed create returns to the preview with the generated issue intact, so the
+  // same title/body/type can be retried without regenerating it.
+  const [createError, setCreateError] = useState('')
+  const guardSubmit = useSubmitGuard()
   const [selectedRepo, setSelectedRepo] = useState(availableRepos?.[0]?.url ?? '')
   const [jiraProjectKey, setJiraProjectKey] = useState(defaultProjectKey || '')
   const [confirmedProjectKey, setConfirmedProjectKey] = useState(defaultProjectKey || '')
@@ -211,31 +219,80 @@ export function BugCreationDialog({
   }
 
   async function handleCreate() {
-    setPhase('creating')
+    await guardSubmit(async () => {
+      setCreateError('')
+      setPhase('creating')
+      // Snapshot the tracker links that already exist so a failure can be told
+      // apart from "nothing was filed" before the retry button offers a resubmit.
+      const linksBefore = await trackerLinkIds()
+      try {
+        const res = await api.post<CreateIssueResponse>(`/results/${jobId}/${createPath}`, {
+          test_name: testName,
+          title,
+          body,
+          child_job_name: childJobName ?? '',
+          child_build_number: childBuildNumber ?? 0,
+          ...getTrackerCredentials(),
+        })
+        markCreated(res.url)
+      } catch (err) {
+        // A lost response or an intermediary error is not proof that nothing was
+        // filed: the server writes the tracked-in link in the same request. Adopt
+        // a link that appeared meanwhile instead of resubmitting into a duplicate.
+        // Without a snapshot we cannot tell a new link from an old one, so the
+        // retry stays available.
+        const filedUrl = linksBefore ? await newTrackerLinkUrl(linksBefore) : null
+        if (filedUrl) {
+          markCreated(filedUrl)
+          return
+        }
+        setCreateError(createIssueFailureMessage(err))
+        setPhase('preview')
+      }
+    })
+  }
+
+  function markCreated(url: string) {
+    setCreatedUrl(url)
+    setPhase('success')
+    onIssueCreated?.(url)
+
+    // After creation, refresh comments to get the server-added comment
+    api.get<CommentsAndReviews>(`/results/${jobId}/comments`)
+      .then((commentsRes) => dispatch({ type: 'SET_COMMENTS_AND_REVIEWS', payload: commentsRes }))
+      .catch(() => {})
+
+    // Also refresh enrichments for the link badges
+    refreshEnrichments(jobId)
+  }
+
+  /** Ids of this failure's tracked-in links, or null when they cannot be read. */
+  async function trackerLinkIds(): Promise<Set<number> | null> {
     try {
-      const res = await api.post<CreateIssueResponse>(`/results/${jobId}/${createPath}`, {
-        test_name: testName,
-        title,
-        body,
-        child_job_name: childJobName ?? '',
-        child_build_number: childBuildNumber ?? 0,
-        ...getTrackerCredentials(),
-      })
-      setCreatedUrl(res.url)
-      setPhase('success')
-      onIssueCreated?.(res.url)
-
-      // After successful creation, refresh comments to get the server-added comment
-      api.get<CommentsAndReviews>(`/results/${jobId}/comments`)
-        .then((commentsRes) => dispatch({ type: 'SET_COMMENTS_AND_REVIEWS', payload: commentsRes }))
-        .catch(() => {})
-
-      // Also refresh enrichments for the link badges
-      refreshEnrichments(jobId)
-    } catch (err) {
-      setErrorMsg(extractApiDetail(err) ?? (err instanceof Error ? err.message : 'Creation failed'))
-      setPhase('error')
+      return new Set((await failureLinks()).map((link) => link.id))
+    } catch {
+      return null
     }
+  }
+
+  /** The link a create added while it was reporting a failure, if there is one. */
+  async function newTrackerLinkUrl(before: Set<number>): Promise<string | null> {
+    try {
+      return (await failureLinks()).find((link) => !before.has(link.id))?.tracked_in_url ?? null
+    } catch {
+      // Cannot tell — the retry stays available rather than claiming success.
+      return null
+    }
+  }
+
+  /** This failure's links this user filed: another test's link — or another
+   *  user's issue for this failure — appearing while our POST failed is not
+   *  ours to report as a success. An empty username matches nothing, so the
+   *  retry stays available. */
+  async function failureLinks(): Promise<TrackedInEntry[]> {
+    const res = await api.get<{ tracked_in: Record<string, TrackedInEntry[]> }>(`/results/${jobId}/tracked-in`)
+    const scoped = res.tracked_in?.[reviewKey(testName, childJobName, childBuildNumber)] ?? []
+    return scoped.filter((link) => link.tracked_in_type === target && link.tracked_in_by === username)
   }
 
   const isBusy = promptPhase === 'loading-prompt' || promptPhase === 'loading' || promptPhase === 'prompt' || promptPhase === 'preview' || promptPhase === 'creating'
@@ -249,6 +306,7 @@ export function BugCreationDialog({
       setSimilar([])
       setCreatedUrl('')
       setErrorMsg('')
+      setCreateError('')
       setSelectedRepo(availableRepos?.[0]?.url ?? '')
       setJiraProjectKey(defaultProjectKey || '')
       setConfirmedProjectKey(defaultProjectKey || '')
@@ -343,6 +401,7 @@ export function BugCreationDialog({
         {/* Preview */}
         {promptPhase === 'preview' && (
           <div className="space-y-4">
+            {createError && <IssueCreateError message={createError} />}
             {target === 'github' && availableRepos && availableRepos.length > 1 && (
               <div className="space-y-2">
                 <label htmlFor="bug-repo" className="text-xs font-display uppercase tracking-widest text-text-tertiary">Repository</label>
@@ -558,7 +617,7 @@ export function BugCreationDialog({
           {promptPhase === 'preview' && (
             <div className="flex gap-2 sm:ml-auto">
               <Button variant="outline" onClick={() => handleCancel()}>Cancel</Button>
-              <Button onClick={handleCreate} disabled={!title.trim() || !hasToken || (target === 'jira' && jiraIssueType === '__custom__' && !customIssueType.trim())}>Create {label}</Button>
+              <Button onClick={handleCreate} disabled={!title.trim() || !hasToken || (target === 'jira' && jiraIssueType === '__custom__' && !customIssueType.trim())}>{createError ? 'Retry' : `Create ${label}`}</Button>
             </div>
           )}
           {promptPhase === 'prompt' && (

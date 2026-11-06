@@ -31,7 +31,7 @@ from rootcoz.models import (
     FeedbackResponse,
     PageState,
 )
-from tests.conftest import host_env
+from tests.conftest import capture_main_logs, host_env
 
 _TEST_GITHUB_TOKEN = "test-token-placeholder"
 
@@ -43,6 +43,7 @@ _TEST_HMAC_KEY = "test-encryption-key-for-hmac"  # pragma: allowlist secret
 _GITHUB_FOOTER_MARKER = (
     "Generated using AI with [rootcoz](https://github.com/myk-org/rootcoz)"
 )
+
 
 # The host variables the app-under-test may legitimately see now come from
 # conftest.host_env(), shared with every other test module that hands an
@@ -931,9 +932,14 @@ class TestFeedbackEndpoint:
     # -- Create endpoint tests ------------------------------------------------
 
     def test_create_without_user_github_token_returns_400(self, _init_db, temp_db_path):
-        """User without a stored GitHub token gets 400 on create."""
+        """Registered user without a stored GitHub token gets 400 on create."""
         for client in self._make_client(temp_db_path):
-            with patch.object(storage, "get_user_tokens", return_value={}):
+            with (
+                patch.object(storage, "get_user_tokens", return_value={}),
+                patch.object(
+                    storage, "get_user_by_username", return_value={"username": "u"}
+                ),
+            ):
                 resp = client.post(
                     "/api/feedback/create",
                     json={
@@ -945,6 +951,62 @@ class TestFeedbackEndpoint:
             assert resp.status_code == 400
             assert "GitHub token is required" in resp.json()["detail"]
             assert "Profile Settings" in resp.json()["detail"]
+
+    def test_create_without_a_profile_does_not_point_at_profile_settings(
+        self, _init_db, temp_db_path
+    ):
+        """#400: the bootstrap ``admin`` has no row, so PUT /api/user/tokens 404s.
+
+        Sending that account to Profile Settings is a dead end — the refusal has
+        to name a path it can actually take, and it must still not fall back to
+        the server token.
+        """
+        for client in self._make_client(temp_db_path, github_token=_TEST_GITHUB_TOKEN):
+            with (
+                patch.object(storage, "get_user_tokens", return_value={}),
+                patch("rootcoz.feedback.create_github_issue") as mock_create,
+            ):
+                resp = client.post(
+                    "/api/feedback/create",
+                    json={
+                        "title": "Test title",
+                        "body": "Test body",
+                        "labels": ["bug"],
+                    },
+                )
+            assert resp.status_code == 400
+            detail = resp.json()["detail"]
+            assert "GitHub token is required" in detail
+            assert "no profile to store one" in detail
+            assert "Set up your token in Profile Settings" not in detail
+            mock_create.assert_not_called()
+
+    def test_create_never_falls_back_to_the_server_github_token(
+        self, _init_db, temp_db_path
+    ):
+        """#398: a configured server token is never used to file an issue.
+
+        The bootstrap ``admin`` (ADMIN_KEY auth, no users row) was the one
+        caller a fallback served: with GITHUB_TOKEN set on the server it filed
+        the feedback under the deployment's identity. Issue creation is the
+        user's own credential or a blocked request — never a server token.
+        """
+        for client in self._make_client(temp_db_path, github_token=_TEST_GITHUB_TOKEN):
+            with (
+                patch.object(storage, "get_user_tokens", return_value={}),
+                patch("rootcoz.feedback.create_github_issue") as mock_create,
+            ):
+                resp = client.post(
+                    "/api/feedback/create",
+                    json={
+                        "title": "Test title",
+                        "body": "Test body",
+                        "labels": ["bug"],
+                    },
+                )
+            assert resp.status_code == 400
+            assert "GitHub token is required" in resp.json()["detail"]
+            mock_create.assert_not_called()
 
     def test_create_successful(self, _init_db, temp_db_path):
         for client in self._make_client(temp_db_path):
@@ -1193,12 +1255,55 @@ class TestFeedbackEndpoint:
         assert resp.status_code == 502
         assert "GitHub API error: 422" in resp.json()["detail"]
 
-    def test_create_unreachable_github_stays_502(self, _init_db, temp_db_path):
+    def test_create_github_outage_is_retryable_and_logged(
+        self, _init_db, temp_db_path, caplog
+    ):
+        """A GitHub 5xx is an outage: retryable detail, reason in the log."""
+        exc = self._raise_status(
+            503,
+            json={
+                "message": "Server Error",
+                "documentation_url": "https://docs.github.com/rest",
+            },
+        )
+        with capture_main_logs(caplog):
+            resp = self._create_with_github_failure(temp_db_path, exc)
+
+        assert resp.status_code == 502
+        detail = resp.json()["detail"]
+        assert detail == (
+            "GitHub is unavailable right now, so your feedback was not filed. "
+            "Try again in a few minutes."
+        )
+        assert "503" not in detail
+        assert "status=503" in caplog.text
+        assert "Server Error" in caplog.text
+        assert _TEST_GITHUB_TOKEN not in caplog.text
+
+    def test_create_github_404_names_repository_access(
+        self, _init_db, temp_db_path, caplog
+    ):
+        """GitHub hides a repository the token cannot see behind a 404."""
+        exc = self._raise_status(404, json={"message": "Not Found"})
+        with capture_main_logs(caplog):
+            resp = self._create_with_github_failure(temp_db_path, exc)
+
+        assert resp.status_code == 403
+        detail = resp.json()["detail"]
+        assert "cannot access the feedback repository" in detail
+        assert "Regenerate" in detail
+        assert "unavailable" not in detail.lower()
+        assert "404" not in detail
+        assert "status=404" in caplog.text
+
+    def test_create_unreachable_github_stays_502(self, _init_db, temp_db_path, caplog):
         """502 remains reserved for a genuinely unreachable GitHub API."""
         exc = httpx.RequestError("connection refused")
-        resp = self._create_with_github_failure(temp_db_path, exc)
+        with capture_main_logs(caplog):
+            resp = self._create_with_github_failure(temp_db_path, exc)
         assert resp.status_code == 502
         assert "unreachable" in resp.json()["detail"]
+        assert "RequestError" in caplog.text
 
 
 # ---------------------------------------------------------------------------
