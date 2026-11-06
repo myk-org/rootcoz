@@ -176,6 +176,36 @@ class TestDashboardRowExposesCount:
         assert "incomplete_count" not in rows["job-2"]
 
 
+class TestDashboardOverridesAreFetchedOnce:
+    async def test_page_opens_one_extra_query_for_all_jobs(
+        self, _init_db, temp_db_path: Path
+    ) -> None:
+        """A page of unclassified jobs must not add a query per job."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            for i in range(3):
+                await storage.save_result(
+                    job_id=f"job-{i}",
+                    build_url=f"https://ci.example.com/job/example-job/{i}/",
+                    status="completed",
+                    result=_result_payload([_failure(f"t{i}")]),
+                )
+
+        real_connect = storage._connect_db
+        connections = 0
+
+        def counting_connect():
+            nonlocal connections
+            connections += 1
+            return real_connect()
+
+        with patch.object(storage, "_connect_db", counting_connect):
+            rows = await storage.list_results_for_dashboard(limit=10)
+
+        assert [row["incomplete_count"] for row in rows] == [1, 1, 1]
+        # One page query plus one overrides query, not one per job.
+        assert connections == 2
+
+
 class TestIncompleteListingEndpoint:
     async def _seed(self, temp_db_path: Path, job_id: str, *failures: dict[str, Any]):
         with patch.object(storage, "DB_PATH", temp_db_path):

@@ -4869,12 +4869,15 @@ async def list_distinct_job_names() -> set[str]:
         return {row[0] for row in rows if row[0]}
 
 
-async def _parse_dashboard_row(row: aiosqlite.Row) -> dict[str, Any]:
+def _parse_dashboard_row(
+    row: aiosqlite.Row,
+    overrides: Mapping[tuple[str, str, int], str] | None = None,
+) -> dict[str, Any]:
     """Parse a single dashboard result row into a dict with summary data.
 
-    Async because ``incomplete_count`` resolves review overrides: the dashboard
-    must report the same number as the result payload and the incomplete
-    listing, or a job classified by override keeps showing as unclassified.
+    ``overrides`` is the row's job overrides, fetched for the whole page in one
+    query by the listing (see :func:`get_effective_classifications_bulk`) so a
+    page of unclassified jobs does not add a query per job.
     """
     row_data = dict(row)
     entry: dict[str, Any] = {
@@ -4897,9 +4900,7 @@ async def _parse_dashboard_row(row: aiosqlite.Row) -> dict[str, Any]:
         if result_data.get("build_id"):
             entry["build_id"] = result_data["build_id"]
         entry["failure_count"] = count_all_failures(result_data)
-        incomplete_count = len(
-            await incomplete_failures_for_job(row["job_id"], result_data)
-        )
+        incomplete_count = len(incomplete_failures(result_data, overrides))
         if incomplete_count:
             entry["incomplete_count"] = incomplete_count
         child_jobs = result_data.get("child_job_analyses", [])
@@ -4974,7 +4975,10 @@ async def list_results_for_dashboard(
             params.append(offset)
         cursor = await db.execute(sql, params)
         rows = await cursor.fetchall()
-        return [await _parse_dashboard_row(row) for row in rows]
+    overrides = await get_effective_classifications_bulk(
+        [row["job_id"] for row in rows]
+    )
+    return [_parse_dashboard_row(row, overrides.get(row["job_id"])) for row in rows]
 
 
 #: Rows fetched per round-trip while scanning for incomplete analyses. The
@@ -5200,10 +5204,16 @@ async def list_results_for_dashboard_filtered(
 
         cursor = await db.execute(sql, fetch_params)
         rows = await cursor.fetchall()
-        return {
-            "jobs": [await _parse_dashboard_row(row) for row in rows],
-            "total": total,
-        }
+
+    overrides = await get_effective_classifications_bulk(
+        [row["job_id"] for row in rows]
+    )
+    return {
+        "jobs": [
+            _parse_dashboard_row(row, overrides.get(row["job_id"])) for row in rows
+        ],
+        "total": total,
+    }
 
 
 # The dashboard endpoint caps one submitted_by value at this many characters. The
@@ -6072,23 +6082,46 @@ async def get_all_effective_classifications(
         Dict mapping (test_name, child_job_name, child_build_number) to
         the effective classification string.
     """
+    return (await get_effective_classifications_bulk([job_id])).get(job_id, {})
+
+
+async def get_effective_classifications_bulk(
+    job_ids: Sequence[str],
+) -> dict[str, dict[tuple[str, str, int], str]]:
+    """Return effective classification overrides for many jobs in one query.
+
+    The dashboard reads ``incomplete_count`` for every row it returns, so the
+    overrides are fetched for the whole page instead of per job.
+
+    Args:
+        job_ids: Job identifiers to fetch overrides for.
+
+    Returns:
+        Map of job id to its (test_name, child_job_name, child_build_number)
+        to effective classification mapping. Jobs without overrides are absent.
+    """
+    ids = list(dict.fromkeys(job_ids))
+    if not ids:
+        return {}
+    placeholders = ",".join("?" for _ in ids)
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT test_name, job_name, child_build_number, classification "
+            "SELECT job_id, test_name, job_name, child_build_number, classification "
             "FROM test_classifications "
-            "WHERE job_id = ? AND visible = 1 "
+            f"WHERE job_id IN ({placeholders}) AND visible = 1 "
             f"AND classification IN {_PRIMARY_CLASSIFICATIONS_SQL} "
             "ORDER BY created_at DESC, id DESC",
-            (job_id,),
+            ids,
         )
         rows = await cursor.fetchall()
 
-    # Keep only the latest override per (test_name, job_name, child_build_number)
-    result: dict[tuple[str, str, int], str] = {}
+    # Keep only the latest override per (job, test_name, child_job_name, build).
+    result: dict[str, dict[tuple[str, str, int], str]] = {}
     for row in rows:
+        per_job = result.setdefault(row["job_id"], {})
         key = (row["test_name"], row["job_name"], row["child_build_number"])
-        if key not in result:
-            result[key] = row["classification"]
+        if key not in per_job:
+            per_job[key] = row["classification"]
     return result
 
 

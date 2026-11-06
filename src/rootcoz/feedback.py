@@ -45,6 +45,17 @@ _SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"(Authorization[\"']?\s*[:=]\s*[\"']?)\S+", re.IGNORECASE),
         r"\1[REDACTED]",
     ),
+    # Secret-looking environment variables: `AWS_SECRET_ACCESS_KEY=…`,
+    # `GITHUB_TOKEN=…`. The keyword is not followed directly by the separator,
+    # so the assignment patterns below miss them. Over-redacts harmless flags
+    # such as `MAX_TOKENS=2000`; that is the safe direction for a log excerpt.
+    (
+        re.compile(
+            r"\b([A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY)[A-Za-z0-9_]*\s*[:=]\s*[\"']?)\S+",
+            re.IGNORECASE,
+        ),
+        r"\1[REDACTED]",
+    ),
     # API keys/tokens in query params or assignments
     (
         re.compile(

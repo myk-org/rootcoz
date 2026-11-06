@@ -628,7 +628,7 @@ function ReportContent() {
         <div role="alert" className="rounded-lg border-l-4 border-l-signal-amber bg-signal-amber/5 p-4 animate-slide-up">
           <h2 className="text-sm font-medium text-signal-amber">Partial analysis</h2>
           <p className="mt-1 text-xs text-text-secondary">
-            {result.failed_analysis_groups} group(s) failed; check server logs. Successful analyses remain available below.
+            {result.failed_analysis_groups} group(s) could not be analyzed. Re-analyze the job, or classify the failures manually. Successful analyses remain available below.
           </p>
         </div>
       ) : null}

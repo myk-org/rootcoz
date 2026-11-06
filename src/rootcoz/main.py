@@ -5880,7 +5880,10 @@ async def _process_ci_source_analysis(
             f"{len(all_analyses) - len(failed_tests)} analyzed successfully."
         )
         if failed_analyses:
-            summary += f" {failed_analyses} group(s) failed; check server logs."
+            summary += (
+                f" {failed_analyses} group(s) could not be analyzed: "
+                "re-analyze the job, or classify them manually."
+            )
         if child_job_analyses:
             summary = (
                 f"{summary} Additionally, {len(child_job_analyses)} failed child "

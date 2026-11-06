@@ -37,6 +37,7 @@ from rootcoz.engine.core import (
 from rootcoz.engine.http_mcp import (
     cleanup_http_tools_mcp,
 )
+from rootcoz.feedback import scrub_sensitive_data
 from rootcoz.models import (
     AiConfigEntry,
     AnalysisDetail,
@@ -650,9 +651,13 @@ async def analyze_failure_group_with_peers(
                 f"Details: {parsed_analysis.details}"
             )
             if primary_narration:
+                # The peer prompt never embeds console/artifact data -- peers read
+                # it from files. Narration can quote that data, so it is scrubbed
+                # before it becomes prompt text sent to another provider.
                 orchestrator_analysis_text += (
                     "\nPrimary model narration (it gave no classification; "
-                    f"read it as context, do not store it): {primary_narration}"
+                    "read it as context, do not store it): "
+                    f"{scrub_sensitive_data(primary_narration)}"
                 )
 
             # Record orchestrator entry for this round

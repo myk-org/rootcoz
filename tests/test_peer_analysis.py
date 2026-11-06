@@ -3191,6 +3191,52 @@ class TestOrchestratorEmptyFallback:
         )
 
     @pytest.mark.asyncio
+    async def test_peer_prompt_gets_scrubbed_narration(self) -> None:
+        """Narration quoting CI output must not reach a peer prompt verbatim.
+
+        A peer prompt embeds no console or artifact data -- peers read it from
+        files -- so a credential quoted in the narration is new prompt text and
+        is scrubbed before it is sent to another provider.
+        """
+        from unittest.mock import AsyncMock
+
+        from rootcoz.engine.core import AnalysisIncompleteError
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
+
+        prompts: list[str] = []
+
+        async def mock_peer_call(prompt, **_kwargs):
+            prompts.append(prompt)
+            return AIResult(success=False, text="CLI error")
+
+        mock_orchestrator = AsyncMock(
+            side_effect=AnalysisIncompleteError(
+                "AI analysis incomplete: response has no usable classification",
+                error_signature="sig123",
+                raw_text="The deploy log said password=hunter2 before it failed.",
+            )
+        )
+        with (
+            patch("rootcoz.peer_analysis.run_single_ai_analysis", mock_orchestrator),
+            _patch_peer_ai_calls(mock_peer_call),
+        ):
+            await analyze_failure_group_with_peers(
+                failures=[_make_failure()],
+                console_context="console output",
+                repo_path=None,
+                main_ai_provider="claude",
+                main_ai_model="claude-sonnet-4-20250514",
+                peer_ai_configs=_peer_configs(),
+                max_rounds=1,
+            )
+
+        assert prompts
+        for prompt in prompts:
+            assert "hunter2" not in prompt
+            # The rest of the narration stays readable as context.
+            assert "The deploy log said password=[REDACTED]" in prompt
+
+    @pytest.mark.asyncio
     async def test_unclassified_group_keeps_the_incomplete_reason(self) -> None:
         """A narration-only primary with no usable peer vote explains itself.
 

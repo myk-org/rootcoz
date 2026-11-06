@@ -1980,10 +1980,12 @@ async def _call_ai_with_retry(
                 len(result.text or ""),
                 hashlib.sha256((result.text or "").encode()).hexdigest()[:12],
             )
+            # Scrub the WHOLE answer, then cut: truncating first can leave a
+            # token fragment the pattern no longer matches.
             logger.debug(
                 "AI answer with no usable classification, first %d chars: %s",
                 AI_LOG_EXCERPT_CHARS,
-                scrub_sensitive_data((result.text or "")[:AI_LOG_EXCERPT_CHARS]),
+                scrub_sensitive_data(result.text or "")[:AI_LOG_EXCERPT_CHARS],
             )
             if attempt >= max_attempts:
                 break

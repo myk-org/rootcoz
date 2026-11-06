@@ -438,21 +438,15 @@ class TestRunSingleAiAnalysis:
             )
         assert mock_cli.await_count == 2
 
-    @pytest.mark.asyncio
-    async def test_narration_logged_as_fingerprint_not_raw_text(
+    async def _narration_debug_excerpts(
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
-    ) -> None:
-        """WARNING carries length + sha256 only; the excerpt is DEBUG and bounded.
-
-        Model narration can quote CI logs, artifacts or tokens, so it must never
-        land in a WARNING line.
-        """
-        from rootcoz.engine.core import AI_LOG_EXCERPT_CHARS
+        narration: str,
+    ) -> list[str]:
+        """Log a narration-only answer and return its DEBUG excerpt messages."""
         from rootcoz.engine.core import logger as core_logger
 
-        narration = "QUOTED-CI-LOG " + "x" * (AI_LOG_EXCERPT_CHARS + 500)
         mock_cli = AsyncMock(
             side_effect=lambda *a, **kw: AIResult(success=True, text=narration)
         )
@@ -484,6 +478,30 @@ class TestRunSingleAiAnalysis:
         finally:
             core_logger.removeHandler(caplog.handler)
             core_logger.setLevel(original_level)
+
+        return [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.DEBUG
+            and "first" in r.getMessage()
+            and "chars" in r.getMessage()
+        ]
+
+    @pytest.mark.asyncio
+    async def test_narration_logged_as_fingerprint_not_raw_text(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """WARNING carries length + sha256 only; the excerpt is DEBUG and bounded.
+
+        Model narration can quote CI logs, artifacts or tokens, so it must never
+        land in a WARNING line.
+        """
+        from rootcoz.engine.core import AI_LOG_EXCERPT_CHARS
+
+        narration = "QUOTED-CI-LOG " + "x" * (AI_LOG_EXCERPT_CHARS + 500)
+        excerpts = await self._narration_debug_excerpts(monkeypatch, caplog, narration)
 
         warnings = [
             r
@@ -498,70 +516,68 @@ class TestRunSingleAiAnalysis:
             assert hashlib.sha256(narration.encode()).hexdigest()[:12] in message
             assert str(len(narration)) in message
 
-        excerpts = [
-            r.getMessage()
-            for r in caplog.records
-            if r.levelno == logging.DEBUG and "QUOTED-CI-LOG" in r.getMessage()
-        ]
         assert excerpts, "DEBUG keeps a bounded excerpt for diagnosis"
         for excerpt in excerpts:
             # Exactly the named bound, never the whole runaway answer.
             assert excerpt.count("x") == AI_LOG_EXCERPT_CHARS - len("QUOTED-CI-LOG ")
 
+    @pytest.mark.parametrize(
+        ("narration", "secret"),
+        [
+            # A password assignment, which the assignment pattern covers.
+            ("Now let me read the deploy log: password=hunter2 it failed", "hunter2"),
+            # An env-style credential the assignment pattern misses.
+            (
+                (
+                    "Now let me read the deploy log: "
+                    "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIunlikelyEXAMPLE it failed"
+                ),
+                "wJalrXUtnFEMI",
+            ),
+        ],
+    )
     @pytest.mark.asyncio
     async def test_narration_excerpt_is_scrubbed_before_logging(
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
+        narration: str,
+        secret: str,
     ) -> None:
         """The DEBUG excerpt must not copy a credential the model quoted."""
-        from rootcoz.engine.core import logger as core_logger
-
-        # Narration quoting a CI log, which is how a credential reaches here.
-        narration = "Now let me read the deploy log: password=hunter2 it failed"
-        mock_cli = AsyncMock(
-            side_effect=lambda *a, **kw: AIResult(success=True, text=narration)
+        excerpt_messages = await self._narration_debug_excerpts(
+            monkeypatch, caplog, narration
         )
-        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_cli)
-
-        original_level = core_logger.level
-        core_logger.setLevel(logging.DEBUG)
-        core_logger.addHandler(caplog.handler)
-        try:
-            with pytest.raises(AnalysisIncompleteError):
-                await run_single_ai_analysis(
-                    failures=[
-                        FailedTest(
-                            test_name="test_foo",
-                            error_message="timeout",
-                            stack_trace="st",
-                        )
-                    ],
-                    console_context="",
-                    repo_path=None,
-                    ai_provider="cursor",
-                    ai_model="cursor:grok",
-                    ai_call_timeout=None,
-                    custom_prompt="",
-                    artifacts_context="",
-                    server_url="",
-                    job_id="job-1",
-                )
-        finally:
-            core_logger.removeHandler(caplog.handler)
-            core_logger.setLevel(original_level)
-
-        excerpt_messages = [
-            r.getMessage()
-            for r in caplog.records
-            if "first" in r.getMessage() and "chars" in r.getMessage()
-        ]
         assert excerpt_messages, "the excerpt still reaches DEBUG"
         for message in excerpt_messages:
-            assert "hunter2" not in message
+            assert secret[:5] not in message
             assert "[REDACTED]" in message
         # The rest of the excerpt stays readable for diagnosis.
         assert "deploy log" in excerpt_messages[0]
+
+    @pytest.mark.asyncio
+    async def test_credential_past_the_excerpt_boundary_is_scrubbed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        """Scrub before truncating, or a cut token fragment reaches the log.
+
+        The token starts before the excerpt boundary and runs past it, so
+        truncating first leaves a fragment the 40-char pattern no longer matches.
+        """
+        from rootcoz.engine.core import AI_LOG_EXCERPT_CHARS
+
+        secret = (
+            "deadbeef" * 5
+        )  # 40 hex chars: the generic token pattern  # pragma: allowlist secret
+        narration = "y" * (AI_LOG_EXCERPT_CHARS - 6) + " " + secret
+        excerpt_messages = await self._narration_debug_excerpts(
+            monkeypatch, caplog, narration
+        )
+        assert excerpt_messages, "the excerpt still reaches DEBUG"
+        for message in excerpt_messages:
+            assert secret[:5] not in message
 
     @pytest.mark.asyncio
     async def test_narration_then_valid_answer_uses_second_response(
