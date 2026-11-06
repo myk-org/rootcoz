@@ -16,8 +16,6 @@ concurrency:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 jobs:
   build:
@@ -26,12 +24,19 @@ jobs:
     # a manual run is still how the first deploy after the Pages switch is triggered.
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # Building needs nothing but the sources: publish rights live on the deploy job alone, so
+    # whatever the build step runs can never reach Pages.
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@v4
       - uses: astral-sh/setup-uv@v6
       - name: Build site from docs/*.md
+        # Always the newest release: docs should not wait on a bump commit, and this job holds no
+        # publish rights (they are on `deploy`), so the blast radius of a bad upstream upload is a
+        # failed build, not a compromised deployment.
         run: >-
-          uvx pi-docsite --docs-dir docs
+          uvx pi-docsite@latest --docs-dir docs
           --tagline "AI-powered CI failure analysis for Jenkins, Prow, and JUnit XML"
       - uses: actions/upload-pages-artifact@v3
         with:
@@ -41,6 +46,10 @@ jobs:
     needs: build
     if: github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
+    # The only job that publishes.
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
