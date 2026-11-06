@@ -1,6 +1,7 @@
 """SQLite storage for analysis results."""
 
 import asyncio
+import copy
 import hashlib
 import hmac
 import json
@@ -56,10 +57,12 @@ _PINNED_DB_PATH: ContextVar[Path | None] = ContextVar("rootcoz_db_path", default
 def pin_db_path(path: Path | None = None) -> None:
     """Freeze this context (and everything it spawns) on *path*.
 
-    Defaults to the live ``DB_PATH`` -- call it where a background task is
-    created, so the task carries the path it starts on.
+    With no *path* the pin this context inherited is kept -- the live ``DB_PATH``
+    only when it is not pinned yet. Call it where a background task is created:
+    the task carries the path it starts on, and a task spawned from inside it
+    keeps that path instead of following the global into another file.
     """
-    _PINNED_DB_PATH.set(Path(DB_PATH if path is None else path))
+    _PINNED_DB_PATH.set(Path(path) if path is not None else current_db_path())
 
 
 def current_db_path() -> Path:
@@ -3339,6 +3342,35 @@ def _refuse_write(
     raise exc
 
 
+def _payload_for_attempt(
+    result: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """A private copy of the caller's payload for one write attempt.
+
+    An attempt merges stored fields into the dict it encodes, and
+    :func:`_write_result` re-runs it after a ``"stale"`` outcome: without a copy,
+    a key merged on one attempt would survive into the next even when the newer
+    stored payload no longer has it. The caller's dict is only ever refreshed from
+    a payload that landed (see :func:`_adopt_written_payload`).
+    """
+    return None if result is None else copy.deepcopy(result)
+
+
+def _adopt_written_payload(
+    result: dict[str, Any] | None, written: dict[str, Any] | None
+) -> None:
+    """Leave the caller holding what the landed write stored.
+
+    The attempts work on copies (see :func:`_payload_for_attempt`), so the caller's
+    dict is refreshed from the payload that landed -- it still carries the merged
+    progress fields and the token usage the write attached to it, as it did when
+    the attempt encoded the caller's dict in place.
+    """
+    if result is not None and written is not None:
+        result.clear()
+        result.update(written)
+
+
 async def save_result(
     job_id: str,
     build_url: str = "",
@@ -3371,30 +3403,36 @@ async def save_result(
         build_url = jenkins_url
     logger.debug(f"Saving result for job_id: {job_id} (status: {status})")
 
+    written: dict[str, Any] | None = None
+
     async def attempt() -> _WriteOutcome:
+        nonlocal written
         result_json: bytes | str | None = None
+        payload = _payload_for_attempt(result)
         async with _connect_db() as db:
             expect = await _read_write_state(db, job_id)
-            if result is not None:
+            if payload is not None:
                 try:
                     previous = _parse_stored_result(job_id, expect)
                     if previous:
-                        _preserve_reanalysis_forward_links(previous, result)
-                    await _sync_result_token_usage(db, job_id, result)
+                        _preserve_reanalysis_forward_links(previous, payload)
+                    await _sync_result_token_usage(db, job_id, payload)
                 except UnsupportedResultEncoding as exc:
                     # No transaction is open, so nothing to roll back.
                     _refuse_write(job_id, exc)
-                result_json = await asyncio.to_thread(_dump_result_json, result)
+                result_json = await asyncio.to_thread(_dump_result_json, payload)
         async with _connect_db() as db:
             if not await _begin_guarded_write(db, job_id, expect):
                 return "stale"
             await _write_saved_result(
-                db, job_id, build_url, status, result, result_json
+                db, job_id, build_url, status, payload, result_json
             )
             await db.commit()
+        written = payload
         return "landed"
 
     await _write_result(job_id, "save_result", attempt)
+    _adopt_written_payload(result, written)
 
 
 async def _write_saved_result(
@@ -3565,24 +3603,28 @@ async def update_status(
     """
     logger.debug(f"Updating status for job_id: {job_id} (status: {status})")
 
+    written: dict[str, Any] | None = None
+
     async def attempt() -> _WriteOutcome:
+        nonlocal written
         result_json: bytes | str | None = None
+        payload = _payload_for_attempt(result)
         async with _connect_db() as db:
             expect = await _read_write_state(db, job_id)
-            if result is not None:
+            if payload is not None:
                 try:
                     previous = _parse_stored_result(job_id, expect)
                     if previous:
                         for key in ("progress_phase", "progress_log", "cloning_repos"):
                             if key in previous:
-                                result[key] = previous[key]
-                        _preserve_reanalysis_forward_links(previous, result)
-                    _end_active_clone_operations(job_id, status, result)
-                    await _sync_result_token_usage(db, job_id, result)
+                                payload[key] = previous[key]
+                        _preserve_reanalysis_forward_links(previous, payload)
+                    _end_active_clone_operations(job_id, status, payload)
+                    await _sync_result_token_usage(db, job_id, payload)
                 except UnsupportedResultEncoding as exc:
                     # No transaction is open, so nothing to roll back.
                     _refuse_write(job_id, exc, log_level=refusal_log_level)
-                result_json = await asyncio.to_thread(_dump_result_json, result)
+                result_json = await asyncio.to_thread(_dump_result_json, payload)
         async with _connect_db() as db:
             if not await _begin_guarded_write(db, job_id, expect):
                 return "stale"
@@ -3596,7 +3638,7 @@ async def update_status(
                 await db.execute("ROLLBACK")
                 return "refused"
             payload_parts, payload_params = _build_payload_update_clause(
-                result_json, result
+                result_json, payload
             )
             if payload_parts:
                 payload_params.append(job_id)
@@ -3605,9 +3647,12 @@ async def update_status(
                     payload_params,
                 )
             await db.commit()
+        written = payload
         return "landed"
 
-    return await _write_result(job_id, "update_status", attempt)
+    landed = await _write_result(job_id, "update_status", attempt)
+    _adopt_written_payload(result, written)
+    return landed
 
 
 def _end_active_clone_operations(

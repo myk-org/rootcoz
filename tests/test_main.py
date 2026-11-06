@@ -2199,6 +2199,76 @@ class TestAppLifespan:
         assert written == 0, "the sweep wrote into the database it was moved to"
 
 
+class TestBackgroundTaskDatabasePin:
+    """A background task writes the database it was spawned on (#409)."""
+
+    async def test_a_grandchild_keeps_the_pin_its_parent_was_spawned_with(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A child spawned inside a pinned task stays on the parent's database.
+
+        ``_spawn_background`` pins the database into the context it spawns from. A
+        task that spawns its own child does that while already pinned, so the pin
+        must be kept rather than re-read from the module global: a ``DB_PATH``
+        rebind while the parent sleeps would otherwise move the grandchild into
+        another file (#409).
+        """
+        from rootcoz import main
+
+        started_on = tmp_path / "started-on.db"
+        moved_to = tmp_path / "moved-to.db"
+        for path in (started_on, moved_to):
+            with patch.object(storage, "DB_PATH", path):
+                await storage.init_db()
+
+        spawned = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _grandchild() -> None:
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "INSERT INTO results (job_id, status)"
+                    " VALUES ('grandchild', 'completed')"
+                )
+                await db.commit()
+
+        async def _parent() -> None:
+            """Pinned when spawned; spawns its own child after the rebind."""
+            spawned.set()
+            await release.wait()
+            await main._spawn_background(_grandchild())
+
+        try:
+            with patch.object(storage, "DB_PATH", started_on):
+                parent = main._spawn_background(_parent())
+                await asyncio.wait_for(spawned.wait(), 5)
+                monkeypatch.setattr(storage, "DB_PATH", moved_to)
+                release.set()
+                await asyncio.wait_for(parent, 10)
+        finally:
+            release.set()
+            for task in list(main._background_tasks):
+                task.cancel()
+            await asyncio.gather(*main._background_tasks, return_exceptions=True)
+            main._background_tasks.clear()
+
+        for path, expected in ((started_on, 1), (moved_to, 0)):
+            with patch.object(storage, "DB_PATH", path):
+                async with storage._connect_db() as db:
+                    found = (
+                        await (
+                            await db.execute(
+                                "SELECT COUNT(*) FROM results"
+                                " WHERE job_id = 'grandchild'"
+                            )
+                        ).fetchone()
+                    )[0]
+            assert found == expected, (
+                f"the grandchild wrote {path.name}, not the database its pinned "
+                "parent was spawned on"
+            )
+
+
 class TestOpenAPISchema:
     """Tests for OpenAPI schema."""
 

@@ -3521,3 +3521,72 @@ class TestUnreadableResultJson:
             assert await _failure_history_row_ids(temp_db_path) == settled
 
         assert "Migration: 1 job(s) skipped (frame-1)" in storage_logs.text
+
+
+class TestStaleRetryStartsFromTheCallersPayload:
+    """A stale retry must not re-write what a newer stored payload dropped."""
+
+    async def test_retry_does_not_carry_a_field_the_newer_payload_dropped(
+        self, setup_test_db: Path, monkeypatch
+    ) -> None:
+        """A field merged on attempt one cannot survive into attempt two.
+
+        ``_write_result`` re-runs the same attempt closure after a lost race, and
+        the closure merges stored progress fields into the dict it encodes. Without
+        a per-attempt copy that merge lands in the caller's payload, so the second
+        attempt re-writes a ``progress_phase`` the newer stored result no longer
+        has.
+        """
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                "job-retry",
+                status="running",
+                result={"summary": "older", "progress_phase": "cloning"},
+            )
+            real_guard = storage._begin_guarded_write
+            attempts = 0
+
+            async def _lose_the_first_race(db: Any, job_id: str, expect: Any) -> bool:
+                nonlocal attempts
+                attempts += 1
+                if attempts > 1:
+                    return await real_guard(db, job_id, expect)
+                # The rival write drops the phase the first attempt just merged in.
+                async with storage._connect_db() as rival:
+                    await rival.execute(
+                        "UPDATE results SET result_json = ? WHERE job_id = ?",
+                        (json.dumps({"summary": "newer"}), job_id),
+                    )
+                    await rival.commit()
+                return False
+
+            monkeypatch.setattr(storage, "_begin_guarded_write", _lose_the_first_race)
+
+            payload: dict[str, Any] = {"summary": "final"}
+            assert await storage.update_status("job-retry", "completed", payload)
+            assert attempts == 2
+
+            stored = await storage.get_result("job-retry")
+
+        assert "progress_phase" not in stored["result"], (
+            "the retry restored a progress_phase the newer payload had dropped"
+        )
+        assert "progress_phase" not in payload, (
+            "the attempt closure mutated the caller's payload"
+        )
+
+
+async def test_pin_db_path_without_a_path_keeps_the_inherited_pin(
+    tmp_path: Path,
+) -> None:
+    """A no-argument re-pin keeps the current pin; it does not re-read the global.
+
+    ``_spawn_background`` re-pins inside the context it copies, so a task spawned
+    from an already pinned task must stay on its parent's database (#409).
+    """
+    started_on = tmp_path / "started-on.db"
+    moved_to = tmp_path / "moved-to.db"
+    storage.pin_db_path(started_on)
+    with patch.object(storage, "DB_PATH", moved_to):
+        storage.pin_db_path()
+        assert storage.current_db_path() == started_on
