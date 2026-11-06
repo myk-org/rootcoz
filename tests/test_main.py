@@ -1938,6 +1938,12 @@ class TestOpenAPISchema:
         assert len(ops) == len(set(ops))
         assert all(not (o.endswith(("_get", "_post", "_put"))) for o in ops)
 
+    def test_enrich_comments_operation_id(self, test_client) -> None:
+        """The enrichment route pins its operationId for generated clients."""
+        schema = test_client.get("/openapi.json").json()
+        route = schema["paths"]["/results/{job_id}/enrich-comments"]
+        assert route["get"]["operationId"] == "enrichComments"
+
     def test_docs_available(self, test_client) -> None:
         """Test that docs endpoint is available."""
         response = test_client.get("/docs")

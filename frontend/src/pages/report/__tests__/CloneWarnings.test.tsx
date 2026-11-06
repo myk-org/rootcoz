@@ -29,9 +29,9 @@ function showReport(log?: Log, warnings?: string[]) {
     if (path === '/results/job-1/comments') return { comments: [], reviews: {} }
     if (path === '/api/ai-models') return { providers: {} }
     if (path.startsWith('/history/classifications')) return { classifications: [] }
+    if (path === '/results/job-1/enrich-comments') return { enrichments: {} }
     throw new Error(`Unexpected request: ${path}`)
   })
-  vi.mocked(api.post).mockResolvedValue({ enrichments: {} })
   render(<MemoryRouter initialEntries={['/report/job-1']}><Routes><Route path="/report/:jobId" element={<ReportPage />} /></Routes></MemoryRouter>)
   return response
 }
