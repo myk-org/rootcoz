@@ -2743,6 +2743,47 @@ def test_issue_create_is_audited(app_client) -> None:
     assert events[0]["target_id"] == "job-1"
 
 
+def test_a_pending_users_issue_attempt_leaves_a_row(temp_db_path: Path) -> None:
+    """REQUIRE_APPROVAL blocks the handler, so the auth layer must audit it.
+
+    The approval-status refusal returns before either chat-issue endpoint runs,
+    which makes this the only place those attempts can reach the trail.
+    """
+    with patch.object(main, "create_github_issue") as mock_create:
+        for client in make_app_client(temp_db_path, {"REQUIRE_APPROVAL": "true"}):
+            registered = client.post(
+                "/api/auth/register", json={"username": "pending-issue"}
+            )
+            assert registered.status_code == 200, registered.text
+            headers = {"Authorization": f"Bearer {registered.json()['api_key']}"}
+            asyncio.run(storage.set_user_status("pending-issue", "pending"))
+            steps = {}
+            for path, step in (
+                ("/api/chat-issue/propose", "propose"),
+                ("/api/chat-issue", "create"),
+            ):
+                blocked = client.post(
+                    path,
+                    json={"target": "github", "title": "t", "body": "b"},
+                    headers=headers,
+                )
+                assert blocked.status_code == 403, blocked.text
+                steps[step] = True
+
+            events = _events(action="issue.create")
+            assert len(events) == 2, events
+            for event in events:
+                assert event["outcome"] == "denied"
+                assert event["actor"] == "pending-issue"
+                assert event["details"] == {
+                    "reason": "account_pending",
+                    "result": "refused",
+                    "step": event["details"]["step"],
+                }
+            assert {event["details"]["step"] for event in events} == set(steps)
+    mock_create.assert_not_called()
+
+
 def test_admin_db_query_is_audited_without_raw_sql(
     app_client, temp_db_path: Path
 ) -> None:

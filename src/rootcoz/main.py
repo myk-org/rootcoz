@@ -3266,6 +3266,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
             user_status = await storage.get_user_status(username)
             blocked = _blocked_user_status_response(user_status)
             if blocked is not None:
+                # Pending/rejected is a refusal the handler never sees, so this
+                # is the only place its issue attempt can reach the trail.
+                await _audit_refused_issue_call(
+                    request, username, f"account_{user_status}"
+                )
                 return blocked
 
         username_token = ai_username.set(username)
@@ -9126,10 +9131,14 @@ def _require_tracker_url(result: dict[str, Any], tracker_name: str) -> str:
     """
     issue_url = str(result.get("url", ""))
     if not issue_url:
-        raise HTTPException(
+        exc = HTTPException(
             status_code=502,
             detail=f"{tracker_name} API returned unexpected response: missing url",
         )
+        # The tracker answered, so it may have filed the issue even though the
+        # answer carried no url: a caller must not read this as "nothing filed".
+        exc.issue_may_exist = True
+        raise exc
     return issue_url
 
 
@@ -9223,6 +9232,15 @@ _CHAT_NO_REPO_DETAIL = (
     "Nowhere to file this issue: this chat has no GitHub repository it may use. "
     "Name a repository the run may file in, or ask an administrator to set "
     "TESTS_REPO_URL."
+)
+
+#: The same refusal for a JOB chat, which never falls back to ``TESTS_REPO_URL``:
+#: only the run's own test repo and additional repos may receive its issue, so
+#: pointing at that setting sends the user somewhere that cannot enable it.
+_CHAT_NO_RUN_REPO_DETAIL = (
+    "Nowhere to file this issue: this run has no GitHub test repository and no "
+    "additional repo, and an issue from job chat may only go to them. A token "
+    "cannot add one."
 )
 
 
@@ -9327,6 +9345,7 @@ def _chat_tracker_gate(
     user_tokens: dict[str, str],
     *,
     github_repo_available: bool = True,
+    job_chat: bool = False,
 ) -> tuple[str, HTTPException | None]:
     """``(reason, refusal)``: why chat cannot file in ``target``, else ``('', None)``.
 
@@ -9343,7 +9362,9 @@ def _chat_tracker_gate(
     ``github_repo_available`` answers "is there a repository this caller may
     file in?". The tool list knows its run's repos and says so; a create request
     keeps the default, because it resolves its destination itself and its own
-    refusal names the run, the allow-list or ``TESTS_REPO_URL``.
+    refusal names the run, the allow-list or ``TESTS_REPO_URL``. ``job_chat``
+    says the caller is a run's chat, whose empty repo set has its own reason: a
+    job chat never files in ``TESTS_REPO_URL``, so no setting can fix it.
     """
     try:
         _require_tracker_enabled(target, settings)
@@ -9353,6 +9374,10 @@ def _chat_tracker_gate(
         if not user_tokens.get("github_token"):
             return "no_token", None
         if not github_repo_available:
+            if job_chat:
+                return "no_run_repository", HTTPException(
+                    status_code=400, detail=_CHAT_NO_RUN_REPO_DETAIL
+                )
             return "no_repository", HTTPException(
                 status_code=400, detail=_CHAT_NO_REPO_DETAIL
             )
@@ -9385,6 +9410,7 @@ def _chat_tracker_state(
     *,
     github_repo_available: bool,
     has_profile: bool = True,
+    job_chat: bool = False,
 ) -> tuple[tuple[str, ...], dict[str, str]]:
     """``(trackers chat may offer this user, why each other tracker is absent)``.
 
@@ -9398,13 +9424,18 @@ def _chat_tracker_state(
     token cannot fix a tracker an administrator turned off. ``has_profile`` is
     ``False`` for an account with no ``users`` row (the bootstrap ``admin``),
     which gets its own reason code — the prompt must not send it to Profile
-    Settings, which answers 404 for it.
+    Settings, which answers 404 for it. ``job_chat`` reaches
+    :func:`_chat_tracker_gate` so a run's empty repo set reads as its own reason.
     """
     targets: list[str] = []
     unavailable: dict[str, str] = {}
     for target in ("github", "jira"):
         reason, _refusal = _chat_tracker_gate(
-            target, settings, user_tokens, github_repo_available=github_repo_available
+            target,
+            settings,
+            user_tokens,
+            github_repo_available=github_repo_available,
+            job_chat=job_chat,
         )
         if reason:
             unavailable[target] = (
@@ -9694,6 +9725,23 @@ def _release_issue_draft(confirmation_id: str, draft: dict[str, Any]) -> None:
     _chat_issue_drafts[confirmation_id] = draft
 
 
+def _create_may_have_filed(exc: BaseException) -> bool:
+    """True when a failed create cannot prove the tracker filed nothing.
+
+    A timeout after the request was sent, or an answer the tracker gave without
+    a usable issue url, means the issue may exist: handing the draft back would
+    let the same confirmation file it a second time without the user approving
+    a retry, so such a draft is spent instead. A connect error never reached the
+    tracker, and a refusal (an ``HTTPStatusError``) is its own "nothing filed".
+    """
+    cause = exc.__cause__
+    if isinstance(cause, (httpx.ConnectError, httpx.ConnectTimeout)):
+        return False
+    if isinstance(cause, httpx.TimeoutException):
+        return True
+    return bool(getattr(exc, "issue_may_exist", False))
+
+
 def _prune_issue_drafts(now: float) -> None:
     """Drop every draft past its expiry, so the map cannot outgrow its use."""
     for draft_id, draft in list(_chat_issue_drafts.items()):
@@ -9784,6 +9832,54 @@ async def _chat_last_message_id(conversation: str, username: str) -> int:
 #: it is looked for in the next page rather than read past.
 _CONFIRM_SCAN_MESSAGES = 50
 
+#: The role of the server-authored consent message. The model never writes this
+#: role, the chat renders it as a notice, and the consent scan reads only
+#: ``user`` rows — so a draft can never be confirmed by this message itself.
+_ISSUE_CONSENT_ROLE = "system"
+
+
+async def _post_issue_consent_request(
+    *,
+    conversation: str,
+    username: str,
+    kind: str,
+    shown: str,
+    code: str,
+    minutes: int,
+) -> int:
+    """Store the consent request in the chat itself and return its message id.
+
+    The ``preview`` handed back to the model is narration: a model steered by
+    job or database content can summarise it wrongly, leave the destination out,
+    or tell the user to "reply with the code to cancel" — and the code it holds
+    still authorises the stored draft. So the same words the preview states are
+    written here, by this server, into the conversation the draft belongs to:
+    what the user approves is text the model cannot write, and the returned id
+    is the draft's watermark, so only a USER message newer than this one counts
+    as consent.
+    """
+    message_id = await storage.add_chat_message(
+        conversation,
+        role=_ISSUE_CONSENT_ROLE,
+        content=(
+            f"Proposed {kind} issue — nothing has been filed yet.\n\n"
+            f"{shown}\n\n"
+            "To file exactly this, reply in this chat with the confirmation "
+            f"code {code} within {minutes} minutes. Nothing is filed until that "
+            "reply arrives, and only a reply from you can confirm it."
+        ),
+        username=username,
+    )
+    if not message_id:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "No issue was drafted: the preview could not be recorded in "
+                "this chat. Propose the issue again."
+            ),
+        )
+    return message_id
+
 
 async def _user_replied_with_code(
     *, conversation: str, username: str, code: str, after_id: int
@@ -9792,11 +9888,14 @@ async def _user_replied_with_code(
 
     Only the persisted chat row counts: the model writes assistant messages and
     tool calls, never user rows, so the model cannot confirm its own draft.
-    Bounded query: only this user's user-role messages newer than the watermark
-    are read (the storage query filters on ``id > after_id``, the role and the
-    username), ``_CONFIRM_SCAN_MESSAGES`` at a time, and the scan stops at the
-    first page that holds the code or is shorter than the page size — so a
-    confirmation followed by any number of later replies still counts.
+    ``after_id`` is the id of the server's own consent message, so the code has
+    to arrive in a reply NEWER than the preview the user was shown — consent
+    binds to the server's text, not to the model's summary of it. Bounded query:
+    only this user's user-role messages newer than the watermark are read (the
+    storage query filters on ``id > after_id``, the role and the username),
+    ``_CONFIRM_SCAN_MESSAGES`` at a time, and the scan stops at the first page
+    that holds the code or is shorter than the page size — so a confirmation
+    followed by any number of later replies still counts.
     """
     if not conversation:
         return False
@@ -9832,12 +9931,13 @@ async def _store_issue_draft(
 ) -> tuple[str, str, str]:
     """Store a scrubbed draft and return ``(confirmation_id, code, preview)``.
 
-    The preview is what the user is asked to approve, so it states the tracker,
-    the RESOLVED destination, the exact title and body, and the code the user
-    has to reply with — what is shown is what would be filed. ``conversation``
-    is the chat the draft belongs to (``""`` for a direct, non-chat call): the
-    create call only redeems a chat draft once a user message in that chat
-    carries the code.
+    The preview states the tracker, the RESOLVED destination, the exact title and
+    body, and the code the user has to reply with — what is shown is what would
+    be filed. For a chat draft (``conversation`` non-empty) the same words are
+    also stored IN that chat by this server, and that message — not the model's
+    echo of this text — is what the user approves: the draft's watermark is its
+    id, so only a user message newer than it can confirm. ``""`` is a direct,
+    non-chat call (the CLI), where the human typing the code is the confirmation.
 
     Bounded: a proposal is title and body held until it expires, so this
     account's oldest draft is evicted before it exceeds
@@ -9876,7 +9976,7 @@ async def _store_issue_draft(
         _chat_issue_drafts.pop(draft_id, None)
     code = _new_issue_code(conversation=conversation)
     draft_id = uuid.uuid4().hex
-    _chat_issue_drafts[draft_id] = {
+    draft: dict[str, Any] = {
         "username": username,
         "target": target,
         "title": title,
@@ -9887,6 +9987,7 @@ async def _store_issue_draft(
         "watermark": watermark,
         "expires_at": now + _ISSUE_DRAFT_TTL_SECONDS,
     }
+    _chat_issue_drafts[draft_id] = draft
     kind = "GitHub" if target == "github" else "Jira"
     if target == "github":
         where = f"Destination: GitHub repository {destination['repo']}"
@@ -9898,17 +9999,43 @@ async def _store_issue_draft(
         if destination.get("jira_security_level"):
             where += f", security level {destination['jira_security_level']}"
     minutes = _ISSUE_DRAFT_TTL_SECONDS // 60
+    shown = (
+        f"Tracker: {kind}\n{where}\nTitle: {title}\n\nBody:\n{body}\n\n"
+        f"Confirmation code: {code}"
+    )
     preview = (
         f"Proposed {kind} issue — nothing has been filed yet.\n\n"
-        f"Tracker: {kind}\n{where}\nTitle: {title}\n\nBody:\n{body}\n\n"
-        f"Confirmation code: {code}\n\n"
+        f"{shown}\n\n"
         "To file exactly this, the user has to reply in this chat with the "
-        f"confirmation code {code} within {minutes} minutes. Nothing is filed "
-        "until that reply arrives, and the code has to come from the user.\n\n"
+        f"confirmation code {code} within {minutes} minutes. The server has "
+        "posted this preview to the chat itself: show it to the user and wait "
+        "for their reply. Nothing is filed until that reply arrives, and the "
+        "code has to come from the user.\n\n"
         f"Then call create_{target}_issue with confirmation_id {draft_id} and "
         f"confirmation_code {code}, with the title, body and destination above "
         "unchanged."
     )
+    if conversation:
+        try:
+            # The text the user approves is written by THIS server into the chat
+            # itself, and its id becomes the draft's watermark. Consent is
+            # therefore bound to what was posted here, never to the model's
+            # narration of it. Written on the draft object, not via the map: a
+            # concurrent proposal may evict this draft while the message is
+            # being stored, and that must not turn into a 500 after the fact.
+            draft["watermark"] = await _post_issue_consent_request(
+                conversation=conversation,
+                username=username,
+                kind=kind,
+                shown=shown,
+                code=code,
+                minutes=minutes,
+            )
+        except BaseException:
+            # Without the recorded preview there is nothing to consent to, so the
+            # draft must not linger as a code the user never saw.
+            _chat_issue_drafts.pop(draft_id, None)
+            raise
     return draft_id, code, preview
 
 
@@ -9926,11 +10053,12 @@ async def _consume_issue_draft(
 
     This is the consent gate, and consent is something the model cannot supply:
     a create call without a live draft of its own files nothing, the code must
-    match the one the preview showed the user, and a chat draft is only live
-    once a USER-authored message in that chat carries the code. A model that
-    proposes and creates in one turn therefore gets a refusal naming the step
-    it skipped. The draft also binds the destination, so an approved "this text
-    for this repo" cannot authorise another repo, run or Jira project.
+    match the one the server posted, and a chat draft is only live once a
+    USER-authored message newer than the server's own consent message carries
+    the code. A model that proposes and creates in one turn therefore gets a
+    refusal naming the step it skipped. The draft also binds the destination, so
+    an approved "this text for this repo" cannot authorise another repo, run or
+    Jira project.
 
     The claim is atomic: the draft is popped before the first ``await``, so of
     two concurrent creates with the same id exactly one wins it and the other
@@ -9980,8 +10108,8 @@ async def _consume_issue_draft(
             after_id=draft["watermark"],
         ):
             # The structural half: the code alone proves nothing, because the
-            # model reads it in the preview it composes. Only a stored USER
-            # message does.
+            # model reads it in the proposal result. Only a stored USER message
+            # newer than the server's own preview counts.
             raise HTTPException(
                 status_code=400,
                 detail=(
@@ -10012,7 +10140,15 @@ def _require_draft_matches(
     destination: dict[str, str],
     propose: str,
 ) -> None:
-    """Refuse a claim whose caller, code, text or destination is not the draft's."""
+    """Refuse a claim whose caller, code, text or destination is not the draft's.
+
+    Echoing the title and body EXACTLY is required on purpose: that is what
+    binds the filed text to the approved text, so a paraphrase is refused and
+    has to be proposed and approved again. The draft is process state (a restart
+    drops it) and the confirmation id reaches the model only in the proposal
+    result; the code and the exact text stay in the chat's consent message, so a
+    rebuilt AI session can still read them back from the history.
+    """
     if draft["username"] != username:
         # Never a 404 and never a success: the id is real but not this caller's.
         raise HTTPException(
@@ -10425,11 +10561,12 @@ async def propose_chat_issue(
     Step one of the two-step gate. The scrubbed title and body are kept under a
     single-use id for this caller together with the RESOLVED destination they
     were written for and a confirmation code; the returned ``preview`` states
-    the tracker, that destination, the title and the code, because it is what
-    the user is asked to approve. ``POST /api/chat-issue`` files that exact text
-    only with a live id, the same code and a user message in this chat carrying
-    that code — so an injected instruction cannot file an issue the user never
-    saw, nor redirect an approved one.
+    the tracker, that destination, the title and the code, and the same words
+    are posted to the chat by the server, which is what the user is asked to
+    approve. ``POST /api/chat-issue`` files that exact text only with a live id,
+    the same code and a user message NEWER than that posted preview carrying the
+    code — so an injected instruction cannot file an issue the user never saw,
+    nor redirect an approved one.
     """
     username = request.state.username
     tracker = body.target
@@ -10446,6 +10583,18 @@ async def propose_chat_issue(
         destination, _repo_url = await _chat_issue_resolved_destination(
             request, body, settings, user_tokens
         )
+        # Also inside: a full draft store (503) or a storage failure is an
+        # attempt too, and the trail promises a row for every one of them.
+        title = scrub_sensitive_data(body.title)
+        issue_body = scrub_sensitive_data(body.body)
+        confirmation_id, code, preview = await _store_issue_draft(
+            username=username,
+            target=tracker,
+            title=title,
+            body=issue_body,
+            destination=destination,
+            conversation=body.conversation,
+        )
     except HTTPException as exc:
         logger.info("Chat issue draft refused for %s: %s", username, exc.detail)
         # The tracker and the destination asked for — never the draft text.
@@ -10458,16 +10607,17 @@ async def propose_chat_issue(
             details=_refused_issue_details(body, tracker, "propose"),
         )
         raise
-    title = scrub_sensitive_data(body.title)
-    issue_body = scrub_sensitive_data(body.body)
-    confirmation_id, code, preview = await _store_issue_draft(
-        username=username,
-        target=tracker,
-        title=title,
-        body=issue_body,
-        destination=destination,
-        conversation=body.conversation,
-    )
+    except Exception:
+        # A scrubbing or draft-storage failure is not a decision, but it is still
+        # one attempt: record it, then let the caller see the same error.
+        await _record_failed_attempt(
+            action="issue.create",
+            request=request,
+            message=message,
+            target_type="chat",
+            details={"tracker": tracker},
+        )
+        raise
     logger.info(
         "Chat issue draft %s prepared for %s (%s, conversation=%r, "
         "destination=%s, %d chars)",
@@ -10553,14 +10703,15 @@ async def create_chat_issue(
                 via="rootcoz chat",
                 subject="issue",
             )
-        except Exception:
+        except Exception as exc:
             # An outage or a refusal is not a decision: the confirmation survives
             # so the user can retry it once the tracker is back, and only a filed
-            # issue spends it.
-            # shortcut: a create that failed AFTER the tracker accepted it can be
-            # retried into a duplicate — the alternative is making the user
-            # approve the same text again on every upstream blip.
-            _release_issue_draft(body.confirmation_id, draft)
+            # issue spends it. A timeout, or an answer that carried no issue url,
+            # may already have filed it — that one spends the draft, because the
+            # same code would otherwise file the issue twice without the user
+            # approving a retry.
+            if not _create_may_have_filed(exc):
+                _release_issue_draft(body.confirmation_id, draft)
             raise
     except HTTPException as exc:
         details: dict[str, Any] = _refused_issue_details(body, tracker, "create")
@@ -21398,6 +21549,7 @@ async def _init_chat_under_barrier(
             # TESTS_REPO_URL can still file into the job's test repo.
             github_repo_available=bool(issue_repos),
             has_profile=await _account_has_profile(username),
+            job_chat=True,
         )
         auth_header = await _create_ai_auth_header(username)
         if auth_header:
@@ -22108,6 +22260,7 @@ async def _process_chat_message(
                             await storage.get_user_tokens(username),
                             github_repo_available=bool(issue_repos),
                             has_profile=await _account_has_profile(username),
+                            job_chat=True,
                         )
                         # A resumed session keeps its creation-time tools, so a
                         # token saved or a tracker toggled mid-chat only reaches

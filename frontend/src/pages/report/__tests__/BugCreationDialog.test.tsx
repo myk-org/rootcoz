@@ -279,6 +279,27 @@ describe('BugCreationDialog submit retry', () => {
     expect(alert).not.toHaveTextContent('Bad Gateway')
   })
 
+  it('warns that a 5xx create may already have filed the issue', async () => {
+    const user = userEvent.setup()
+    mockCreateFlow('github', new ApiError(502, 'Bad Gateway', { detail: 'GitHub did not answer.' }))
+    await openGeneratedPreview(user)
+
+    await user.click(screen.getByRole('button', { name: /create github issue/i }))
+    expect(await screen.findByRole('status')).toHaveTextContent(
+      'the issue may already have been filed. Check GitHub Issue before you retry',
+    )
+  })
+
+  it('does not warn when a 4xx refusal proves nothing was filed', async () => {
+    const user = userEvent.setup()
+    mockCreateFlow('github', new ApiError(403, 'Forbidden', { detail: 'GitHub token is missing the repo scope.' }))
+    await openGeneratedPreview(user)
+
+    await user.click(screen.getByRole('button', { name: /create github issue/i }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('missing the repo scope')
+    expect(screen.queryByText(/may already have been filed/i)).not.toBeInTheDocument()
+  })
+
   it('adopts an issue filed while the create was failing instead of duplicating it', async () => {
     const user = userEvent.setup()
     mockCreateFlow('github', new ApiError(502, 'Bad Gateway', { detail: 'GitHub is unavailable right now.' }))

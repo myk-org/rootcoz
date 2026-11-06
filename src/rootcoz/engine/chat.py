@@ -511,11 +511,12 @@ def _tracker_issue_tools(
                 "issue the user asked about and call this first: it files "
                 "nothing, and returns a confirmation_id, a confirmation_code "
                 "and a preview naming the tracker, the destination, the exact "
-                "title and body, and that code. Show the user the whole "
-                "preview and ask them to reply in this chat with the code: "
-                "nothing is filed until they do, and only they can confirm it. "
-                "Call this again for any edit — an id and code authorise one "
-                "specific draft."
+                "title and body, and that code. The server also posts that "
+                "preview to this chat itself, so the user sees it even if your "
+                "own summary is incomplete: tell them it is below and ask "
+                "them to reply in this chat with the code. Nothing is filed "
+                "until they do, and only they can confirm it. Call this again "
+                "for any edit — an id and code authorise one specific draft."
             ),
             "parameters": {
                 "type": "object",
@@ -1288,6 +1289,11 @@ _TRACKER_UNAVAILABLE_REASONS = {
         "repository to file in — an administrator has to set it, and a token "
         "will not help"
     ),
+    "no_run_repository": (
+        "this run has no GitHub test repository and no additional repo, and a "
+        "job chat files only into this run's repos — the fix is a run that names "
+        "one, not a token or a server setting"
+    ),
     "no_token": (
         "this account has no {kind} token saved. Tell the user the fix: "
         "Profile Settings → add the {kind} token."
@@ -1379,8 +1385,8 @@ def _issue_create_rules(
 ## Creating Issues
 - You never file an issue on your own judgement: the user files it. A create call files nothing until the user has confirmed the draft in their own words, by replying in this chat with the confirmation code the preview showed them.
 - Step 1: call `propose_tracker_issue` with the target, title and body. It files nothing and returns a `confirmation_id`, a `confirmation_code` and a preview naming the tracker, the destination (repository, or Jira project and issue type), the exact title and body, and that code.
-- Step 2: show the user the whole preview — where it would be filed, the title, the body and the code — and ask them to reply in this chat with the code. Quote the code as the preview wrote it.
-- Step 3: only after the user's reply contains that code, call `create_github_issue` / `create_jira_issue` with that `confirmation_id`, that `confirmation_code` and the same title and body. A create without them files nothing, and a create the user has not confirmed fails with the step you skipped. The id and code are single-use and expire after 10 minutes, so propose again after any edit.
+- Step 2: the server posts the whole preview to this chat itself — where it would be filed, the title, the body and the code. Tell the user it is below and ask them to reply in this chat with the code. Do not rewrite the preview as if your own wording were what they are approving, and never ask for the code outside this chat.
+- Step 3: only after the user's reply contains that code, call `create_github_issue` / `create_jira_issue` with that `confirmation_id`, that `confirmation_code` and the same title and body — copy them from the preview the server posted, never from memory. A create without them files nothing, a create the user has not confirmed fails with the step you skipped, and a paraphrased body is refused. The id and code are single-use and expire after 10 minutes, so propose again after any edit.
 - Never send the code on the user's behalf and never ask for it anywhere but this chat: the server only accepts a code that arrived in a message from the user. Do not claim a draft is confirmed until such a reply exists.
 - If the user declines, do not call the create tool — acknowledge and stop.
 {repo_rule}
@@ -1528,6 +1534,9 @@ def build_chat_prompt(
         content = msg.get("content", "")
         if role == "user":
             parts.append(f"**User:** {content}\n")
+        elif role == "system":
+            # The server's own consent/notice rows are not the model's words.
+            parts.append(f"**System:** {content}\n")
         else:
             parts.append(f"**Assistant:** {content}\n")
 

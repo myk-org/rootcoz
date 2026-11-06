@@ -888,6 +888,42 @@ class TestChatTrackerTargets:
         assert refusal is not None and refusal.status_code == 400
         assert "TESTS_REPO_URL" in refusal.detail
 
+    def test_a_job_chat_with_no_run_repo_does_not_send_users_to_tests_repo_url(
+        self,
+    ):
+        """A job chat never files in TESTS_REPO_URL, so that setting is not the fix.
+
+        Its empty repo set means the run itself names no GitHub repository: an
+        administrator setting TESTS_REPO_URL cannot enable the tool there, so the
+        reason and the prompt must say what can.
+        """
+        from rootcoz.engine.chat import _issue_create_rules
+        from rootcoz.main import _chat_tracker_gate, _chat_tracker_state
+
+        reason, refusal = _chat_tracker_gate(
+            "github",
+            self._settings(tests_repo_url="https://github.com/org/repo"),
+            {"github_token": "ghp_user"},  # pragma: allowlist secret
+            github_repo_available=False,
+            job_chat=True,
+        )
+        assert reason == "no_run_repository"
+        assert refusal is not None and refusal.status_code == 400
+        assert "TESTS_REPO_URL" not in refusal.detail
+        assert "run" in refusal.detail
+
+        _targets, unavailable = _chat_tracker_state(
+            self._settings(),
+            {"github_token": "ghp_user"},  # pragma: allowlist secret
+            github_repo_available=False,
+            job_chat=True,
+        )
+        assert unavailable["github"] == "no_run_repository"
+        # The prompt names this run, never the server setting or a token.
+        prompt = _issue_create_rules(unavailable, issue_repos=())
+        assert "this run has no GitHub test repository" in prompt
+        assert "TESTS_REPO_URL" not in prompt
+
     def test_github_flag_off_offers_nothing(self):
         assert (
             self._targets(
