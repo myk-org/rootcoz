@@ -305,9 +305,17 @@ _RESULT_ZSTD_MIN_BYTES = 1024  # below this a frame is never smaller
 _RESULT_ZSTD_LEVEL = 3  # 9.1x at 0.21 ms/row; level 9 buys 8% for 3x the CPU
 
 # Every ``result_json`` write for a job holds that job's lock from the read to the
-# commit, so no write can move the row between the two and nothing has to detect
-# what moved under an encode. The lock is per job: a slow encode delays only that
-# job's writers, and the SQLite write lock is still taken after the encode.
+# commit, so no write of this process can move the row between the two. The lock is
+# per job: a slow encode delays only that job's writers, and the SQLite write lock is
+# still taken after the encode.
+#
+# The lock is process-local, so it orders this process's writers and nobody else's:
+# two uvicorn workers writing the same job do not see each other's lock, and their
+# read/merge/encode happens before SQLite's write lock. That is why every write also
+# proves inside its transaction that the row still is the one it encoded -- see
+# :func:`_write_result` and :func:`_begin_guarded_write`. This is not the
+# compare-on-every-read design: the lock keeps this process's ordering, the guard
+# covers the other process.
 _job_write_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
     weakref.WeakValueDictionary()
 )
@@ -324,6 +332,83 @@ def _job_write_lock(job_id: str) -> asyncio.Lock:
         lock = asyncio.Lock()
         _job_write_locks[job_id] = lock
     return lock
+
+
+#: What a write's read and encode were based on: ``(result_json, status)``.
+_WriteState = tuple[bytes | str | None, str | None]
+
+#: What one write attempt did. ``"stale"`` means the row moved under the encode, so
+#: the attempt is redone on a fresh read instead of landing.
+_WriteOutcome = Literal["landed", "stale", "refused"]
+
+#: Attempts per write before a rival's write stands. Bounded on purpose: a row that
+#: another process keeps moving is left to that process -- a lost race, not a loop.
+_RESULT_WRITE_ATTEMPTS = 3
+
+
+async def _read_write_state(db: aiosqlite.Connection, job_id: str) -> _WriteState:
+    """Return the ``(result_json, status)`` a write on *job_id* is based on."""
+    row = await (
+        await db.execute(
+            "SELECT result_json, status FROM results WHERE job_id = ?", (job_id,)
+        )
+    ).fetchone()
+    return (None, None) if row is None else (row[0], row[1])
+
+
+async def _begin_guarded_write(
+    db: aiosqlite.Connection, job_id: str, expect: _WriteState
+) -> bool:
+    """Open the write transaction, refusing it when the row moved since *expect*.
+
+    ``BEGIN IMMEDIATE`` holds SQLite's write lock, so this compare and the write
+    that follows are one step for every other process as well: a payload encoded
+    from *expect* can never land on a row another process already changed. Compare
+    the payload and the status, because a decision encoded from either (a
+    ``skip_terminal`` check, a merged status) is void once either moved.
+    """
+    await db.execute("BEGIN IMMEDIATE")
+    if await _read_write_state(db, job_id) == expect:
+        return True
+    await db.execute("ROLLBACK")
+    return False
+
+
+async def _write_result(
+    job_id: str,
+    writer: str,
+    attempt: Callable[[], Awaitable[_WriteOutcome]],
+) -> bool:
+    """Run *attempt* under the job's write lock until it lands on the row it read.
+
+    A ``"stale"`` attempt re-reads, re-merges and re-encodes inside the same lock,
+    so the retry is decided from the row the other process left behind rather than
+    from the read that no longer applies.
+
+    Returns:
+        True when the write landed, False when it was refused or the race was lost
+        (bounded retries, then the rival's write stands -- stated outcome).
+    """
+    async with _job_write_lock(job_id):
+        tries_left = _RESULT_WRITE_ATTEMPTS
+        while True:
+            outcome = await attempt()
+            if outcome == "landed":
+                return True
+            tries_left -= 1
+            if outcome == "refused" or tries_left <= 0:
+                if outcome == "stale":
+                    logger.warning(
+                        f"job_id={job_id}: {writer} lost the write race after "
+                        f"{_RESULT_WRITE_ATTEMPTS} attempts -- another process wrote "
+                        "the row every time, so its payload is kept and this write "
+                        "was dropped"
+                    )
+                return False
+            logger.warning(
+                f"job_id={job_id}: {writer} found the row changed by another process "
+                "since it read it (payload or status), re-reading and retrying"
+            )
 
 
 def _encode_result_text(raw: str) -> bytes | str:
@@ -3136,14 +3221,12 @@ async def _row_exists(db: aiosqlite.Connection, job_id: str) -> bool:
     return await cursor.fetchone() is not None
 
 
-async def _read_stored_result(
-    db: aiosqlite.Connection, job_id: str
-) -> dict[str, Any] | None:
-    """Return the payload stored for *job_id*, or None when there is none.
+def _parse_stored_result(job_id: str, expect: _WriteState) -> dict[str, Any] | None:
+    """Return the payload *expect* reports, or None when the row holds none.
 
-    Read while holding the job's write lock, so it stays the payload the write
-    lands on and needs no compare-and-swap to prove it (see
-    :func:`_job_write_lock`).
+    Read while holding the job's write lock, so it is the payload the write lands
+    on; the state is what :func:`_begin_guarded_write` proves again inside the
+    transaction for the other processes (see :func:`_write_result`).
 
     A damaged frame reads as "no previous payload", so a damaged row can never
     block its own job's updates: the write that follows repairs it. The one
@@ -3155,14 +3238,11 @@ async def _read_stored_result(
             build with a result_json codec this one lacks. That is not damage to
             repair but data to leave alone -- see :func:`_refuse_write`.
     """
-    cursor = await db.execute(
-        "SELECT result_json FROM results WHERE job_id = ?", (job_id,)
-    )
-    row = await cursor.fetchone()
-    if not row or not row[0]:
+    raw = expect[0]
+    if not raw:
         return None
     try:
-        return parse_result_json(row[0], job_id=job_id)
+        return parse_result_json(raw, job_id=job_id)
     except DamagedResultEncoding as exc:
         logger.warning(
             f"job_id={job_id}: previous result_json is damaged "
@@ -3221,10 +3301,11 @@ async def save_result(
         jenkins_url: Deprecated alias for ``build_url``.
 
     The read, the merge, the encode and the write all hold the job's write lock
-    (see :func:`_job_write_lock`), so a concurrent patch cannot be replaced by a
-    payload encoded from an older one. Nothing is written when the row already
-    holds a payload this build cannot decode (a rollback): see
-    :func:`_refuse_write`.
+    (see :func:`_job_write_lock`), and the write only lands on the row it was
+    encoded from (see :func:`_write_result`), so neither a patch here nor a write
+    from another process can be replaced by a payload encoded from an older one.
+    Nothing is written when the row already holds a payload this build cannot
+    decode (a rollback): see :func:`_refuse_write`.
 
     Raises:
         UnsupportedResultEncoding: the save was refused for that reason, so
@@ -3233,25 +3314,31 @@ async def save_result(
     if jenkins_url is not None:
         build_url = jenkins_url
     logger.debug(f"Saving result for job_id: {job_id} (status: {status})")
-    async with _job_write_lock(job_id):
+
+    async def attempt() -> _WriteOutcome:
         result_json: bytes | str | None = None
-        if result is not None:
-            try:
-                async with _connect_db() as db:
-                    previous = await _read_stored_result(db, job_id)
+        async with _connect_db() as db:
+            expect = await _read_write_state(db, job_id)
+            if result is not None:
+                try:
+                    previous = _parse_stored_result(job_id, expect)
                     if previous:
                         _preserve_reanalysis_forward_links(previous, result)
                     await _sync_result_token_usage(db, job_id, result)
-            except UnsupportedResultEncoding as exc:
-                # No transaction is open, so nothing to roll back.
-                _refuse_write(job_id, exc)
-            result_json = await asyncio.to_thread(_dump_result_json, result)
+                except UnsupportedResultEncoding as exc:
+                    # No transaction is open, so nothing to roll back.
+                    _refuse_write(job_id, exc)
+                result_json = await asyncio.to_thread(_dump_result_json, result)
         async with _connect_db() as db:
-            await db.execute("BEGIN IMMEDIATE")
+            if not await _begin_guarded_write(db, job_id, expect):
+                return "stale"
             await _write_saved_result(
                 db, job_id, build_url, status, result, result_json
             )
             await db.commit()
+        return "landed"
+
+    await _write_result(job_id, "save_result", attempt)
 
 
 async def _write_saved_result(
@@ -3408,8 +3495,9 @@ async def update_status(
             newer one, and never re-read here.
 
     As in :func:`save_result`, the read, the merge, the encode and the write all
-    hold the job's write lock, and a stored payload a newer build can decode but
-    this one cannot is left untouched instead of being replaced.
+    hold the job's write lock, the write only lands on the row it was encoded from,
+    and a stored payload a newer build can decode but this one cannot is left
+    untouched instead of being replaced.
 
     Returns:
         True when the row was written, False when *expect_status* no longer held
@@ -3420,12 +3508,14 @@ async def update_status(
             nothing was written -- not the status either.
     """
     logger.debug(f"Updating status for job_id: {job_id} (status: {status})")
-    async with _job_write_lock(job_id):
+
+    async def attempt() -> _WriteOutcome:
         result_json: bytes | str | None = None
-        if result is not None:
-            try:
-                async with _connect_db() as db:
-                    previous = await _read_stored_result(db, job_id)
+        async with _connect_db() as db:
+            expect = await _read_write_state(db, job_id)
+            if result is not None:
+                try:
+                    previous = _parse_stored_result(job_id, expect)
                     if previous:
                         for key in ("progress_phase", "progress_log", "cloning_repos"):
                             if key in previous:
@@ -3433,12 +3523,13 @@ async def update_status(
                         _preserve_reanalysis_forward_links(previous, result)
                     _end_active_clone_operations(job_id, status, result)
                     await _sync_result_token_usage(db, job_id, result)
-            except UnsupportedResultEncoding as exc:
-                # No transaction is open, so nothing to roll back.
-                _refuse_write(job_id, exc, log_level=refusal_log_level)
-            result_json = await asyncio.to_thread(_dump_result_json, result)
+                except UnsupportedResultEncoding as exc:
+                    # No transaction is open, so nothing to roll back.
+                    _refuse_write(job_id, exc, log_level=refusal_log_level)
+                result_json = await asyncio.to_thread(_dump_result_json, result)
         async with _connect_db() as db:
-            await db.execute("BEGIN IMMEDIATE")
+            if not await _begin_guarded_write(db, job_id, expect):
+                return "stale"
             if not await _write_status(
                 db,
                 job_id,
@@ -3447,7 +3538,7 @@ async def update_status(
                 expect_status=expect_status,
             ):
                 await db.execute("ROLLBACK")
-                return False
+                return "refused"
             payload_parts, payload_params = _build_payload_update_clause(
                 result_json, result
             )
@@ -3458,7 +3549,9 @@ async def update_status(
                     payload_params,
                 )
             await db.commit()
-            return True
+        return "landed"
+
+    return await _write_result(job_id, "update_status", attempt)
 
 
 def _end_active_clone_operations(
@@ -3778,7 +3871,9 @@ async def patch_result_json(
     The *patch_fn* is called with the parsed ``result`` dict and is expected to
     mutate it in place. The read, the patch and the encode hold the job's write
     lock (see :func:`_job_write_lock`), so a patch always lands on the payload it
-    was applied to: nothing else can write that row in between.
+    was applied to: nothing else in this process can write that row in between, and
+    another process's write is caught by the guard the write lands under (see
+    :func:`_write_result`) -- the patch is then redone on the payload it finds.
 
     After *patch_fn* returns, denormalized identity columns (``job_name``,
     ``build_number``, ``build_id``) are synced from the patched dict using
@@ -3800,7 +3895,8 @@ async def patch_result_json(
         UnsupportedResultEncoding: the patch was refused for that reason, so the
             stored payload is unchanged.
     """
-    async with _job_write_lock(job_id):
+
+    async def attempt() -> _WriteOutcome:
         async with _connect_db() as db:
             cursor = await db.execute(
                 "SELECT result_json, status FROM results WHERE job_id = ?", (job_id,)
@@ -3820,7 +3916,7 @@ async def patch_result_json(
                 )
             )
         ):
-            return
+            return "refused"
         try:
             result_data = parse_result_json(row[0], job_id=job_id)
         except DamagedResultEncoding as exc:
@@ -3836,7 +3932,7 @@ async def patch_result_json(
             # No transaction is open: the refusal is the whole outcome.
             _refuse_write(job_id, exc)
         if result_data is None:
-            return
+            return "refused"
         if active_reanalysis_failure_id:
             failure = _find_failure_by_uuid_in_failures(
                 result_data.get("failures", []), active_reanalysis_failure_id
@@ -3847,7 +3943,7 @@ async def patch_result_json(
                     active_reanalysis_failure_id,
                 )
             if not failure or failure.get("reanalysis_status") != "running":
-                return
+                return "refused"
         patch_fn(result_data)
         set_parts = ["result_json = ?"]
         # Encoded before the transaction, so the SQLite write lock never spans it.
@@ -3858,15 +3954,19 @@ async def patch_result_json(
         _append_denormalized_set_parts(result_data, set_parts, params)
         params.append(job_id)
         async with _connect_db() as db:
-            await db.execute("BEGIN IMMEDIATE")
+            if not await _begin_guarded_write(db, job_id, (row[0], row[1])):
+                return "stale"
             if require_job_id and not await _row_exists(db, require_job_id):
                 await db.execute("ROLLBACK")
-                return
+                return "refused"
             await db.execute(
                 f"UPDATE results SET {', '.join(set_parts)} WHERE job_id = ?",
                 params,
             )
             await db.commit()
+        return "landed"
+
+    await _write_result(job_id, "patch_result_json", attempt)
 
 
 def _backfill_child_uuids(child: dict[str, Any]) -> bool:
@@ -3895,8 +3995,8 @@ def _backfill_child_uuids(child: dict[str, Any]) -> bool:
     return changed
 
 
-async def _backfill_failure_uuids(job_id: str, result_data: dict[str, Any]) -> bool:
-    """Assign stable UUIDs to failures and child analyses that lack them.
+def _assign_missing_uuids(result_data: dict[str, Any]) -> bool:
+    """Assign a UUID to every failure and child analysis that lacks one.
 
     Legacy ``result_json`` rows pre-date the ``id`` field on
     :class:`~rootcoz.models.FailureAnalysis` and
@@ -3904,15 +4004,11 @@ async def _backfill_failure_uuids(job_id: str, result_data: dict[str, Any]) -> b
     Pydantic's ``default_factory`` generates a *transient* UUID that is never
     persisted — so the ID changes on every read.
 
-    This helper detects missing ``id`` fields, assigns UUIDs, and persists them
-    back so subsequent reads return stable identifiers.
-
     Args:
-        job_id: The analysis job identifier (used for the DB update).
         result_data: Parsed result dict (mutated in place).
 
     Returns:
-        ``True`` if any UUIDs were added (and the DB was updated).
+        ``True`` if any UUIDs were added.
     """
     changed = False
     for f in result_data.get("failures", []):
@@ -3926,20 +4022,64 @@ async def _backfill_failure_uuids(job_id: str, result_data: dict[str, Any]) -> b
             continue
         if _backfill_child_uuids(child):
             changed = True
-    if changed:
+    return changed
+
+
+async def _backfill_failure_uuids(
+    job_id: str, result_data: dict[str, Any]
+) -> dict[str, Any]:
+    """Persist stable UUIDs for a legacy payload and return the payload now stored.
+
+    A read is what notices the missing ids, but it must not write back the payload
+    it read: a writer may have patched the row since, and committing the older
+    payload would erase that patch. So the fix is a write of its own -- it holds
+    the job's write lock, adds the ids to the payload the row holds *now* (see
+    :func:`_write_result`), and the read returns what that write stored, so the
+    ids it reports are the persisted ones.
+
+    A stored payload this build cannot decode is left alone: the read path never
+    replaces a payload, it only hands out stable ids.
+
+    Args:
+        job_id: The analysis job identifier.
+        result_data: The parsed payload this read is about to return (mutated in
+            place, so a refused backfill still returns stable ids).
+
+    Returns:
+        The payload as stored after the backfill, or *result_data* when there was
+        nothing to backfill or the write was refused.
+    """
+    if not _assign_missing_uuids(result_data):
+        return result_data
+    stored: dict[str, Any] = {}
+
+    async def attempt() -> _WriteOutcome:
+        nonlocal stored
+        async with _connect_db() as db:
+            expect = await _read_write_state(db, job_id)
+        payload = _parse_stored_result(job_id, expect)
+        if not payload or not _assign_missing_uuids(payload):
+            return "refused"
         set_parts = ["result_json = ?"]
-        params: list[Any] = [_dump_result_json(result_data)]
+        params: list[Any] = [await asyncio.to_thread(_dump_result_json, payload)]
         # The payload itself changed, so its derived columns move with it.
-        _append_denormalized_set_parts(result_data, set_parts, params)
+        _append_denormalized_set_parts(payload, set_parts, params)
         params.append(job_id)
         async with _connect_db() as db:
+            if not await _begin_guarded_write(db, job_id, expect):
+                return "stale"
             await db.execute(
                 f"UPDATE results SET {', '.join(set_parts)} WHERE job_id = ?",
                 params,
             )
             await db.commit()
-        logger.info(f"Backfilled missing failure UUIDs for job_id={job_id}")
-    return changed
+        stored = payload
+        return "landed"
+
+    if not await _write_result(job_id, "failure id backfill", attempt):
+        return result_data
+    logger.info(f"Backfilled missing failure UUIDs for job_id={job_id}")
+    return stored
 
 
 def _analysis_identity_key(item: dict[str, Any], *fields: str) -> tuple[Any, ...]:
@@ -4030,7 +4170,7 @@ async def get_result(
             # result instead of failing the whole read.
             parsed = parse_result_json_lenient(row["result_json"], job_id=job_id)
             if parsed:
-                await _backfill_failure_uuids(job_id, parsed)
+                parsed = await _backfill_failure_uuids(job_id, parsed)
                 if summary := await _token_usage_snapshot(db, job_id):
                     parsed["token_usage"] = summary
                 await _attach_failure_usage(db, job_id, parsed)

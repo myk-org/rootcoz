@@ -1355,3 +1355,123 @@ async def test_usage_recorded_after_the_snapshot_is_merged_by_the_next_write(
     assert merged["token_usage"]["total_input_tokens"] == 7, (
         "the next write must merge the usage recorded since the snapshot"
     )
+
+
+# --- one row, two writers ---------------------------------------------------
+#
+# Every ``result_json`` write holds its job's asyncio lock from the read to the
+# commit, but that lock is process-local: a second uvicorn worker has its own, and
+# its read/merge/encode happens before SQLite's write lock. So the write also
+# proves inside its transaction that the row still is the one it encoded, and
+# redoes itself on the payload it finds when it is not.
+
+
+async def test_a_legacy_read_backfill_does_not_clobber_a_concurrent_patch(
+    _storage, monkeypatch
+) -> None:
+    """A read that backfills ids must never commit the payload it parsed.
+
+    ``get_result`` is the one read that writes: it stores the ids a legacy payload
+    lacks. Committing the payload it parsed would erase a patch a writer landed in
+    between, so the backfill is a write of its own -- it re-reads the row under the
+    job's write lock and the read returns what that write stored.
+    """
+    legacy = _payload(failure_count=3)
+    for failure in legacy["failures"]:
+        failure.pop("id")
+    await _insert_legacy("job-legacy-read", legacy)
+
+    real_connect = storage._connect_db
+    opened = 0
+    patch_task: asyncio.Task[None] | None = None
+
+    async def apply_patch() -> None:
+        await storage.patch_result_json(
+            "job-legacy-read", lambda data: data.update({"summary": "patched"})
+        )
+
+    @contextlib.asynccontextmanager
+    async def racing_connect():
+        # Connection 2 is the backfill, which has read its payload and not written
+        # it yet: the window a patch must not be erased from.
+        nonlocal opened, patch_task
+        opened += 1
+        if opened == 2:
+            patch_task = asyncio.create_task(apply_patch())
+            with contextlib.suppress(TimeoutError):
+                # The backfill holds the job's write lock here, so the patch waits
+                # for it instead of landing in the middle of the read.
+                await asyncio.wait_for(asyncio.shield(patch_task), 0.2)
+        async with real_connect() as db:
+            yield db
+
+    monkeypatch.setattr(storage, "_connect_db", racing_connect)
+    read = await storage.get_result("job-legacy-read")
+    assert patch_task is not None
+    await patch_task
+
+    stored = storage.parse_result_json(
+        (await _stored(_storage, "job-legacy-read"))["result_json"],
+        job_id="job-legacy-read",
+    )
+    assert stored["summary"] == "patched", (
+        "the read committed the payload it parsed over a patch"
+    )
+    ids = [failure["id"] for failure in stored["failures"]]
+    assert len(set(ids)) == 3, "the legacy ids are persisted"
+    # The ids the read reports are the ones it stored, so the next read is stable.
+    assert [failure["id"] for failure in read["result"]["failures"]] == ids
+
+
+async def test_two_processes_editing_one_job_keep_both_edits(
+    _storage, monkeypatch
+) -> None:
+    """A second worker's write must not be lost to the first worker's stale read.
+
+    A fresh lock per write is what two processes see: same row, no shared lock, so
+    nothing serialises their read/encode. The guard inside the write transaction
+    does -- the writer whose row moved re-reads and lands on top of the other edit.
+    """
+    await storage.save_result(
+        "job-two-workers", "", "running", _payload(failure_count=2)
+    )
+    monkeypatch.setattr(storage, "_job_write_lock", lambda _job_id: asyncio.Lock())
+
+    real_connect = storage._connect_db
+    opened = 0
+    first_read = asyncio.Event()
+    second_written = asyncio.Event()
+
+    @contextlib.asynccontextmanager
+    async def pausing_connect():
+        # Connection 2 is the first worker's write: it has encoded a payload from
+        # the read it did before, and has not taken SQLite's write lock yet.
+        nonlocal opened
+        opened += 1
+        if opened == 2:
+            first_read.set()
+            await second_written.wait()
+        async with real_connect() as db:
+            yield db
+
+    monkeypatch.setattr(storage, "_connect_db", pausing_connect)
+    first = asyncio.create_task(
+        storage.patch_result_json(
+            "job-two-workers", lambda data: data.update({"first": True})
+        )
+    )
+    await asyncio.wait_for(first_read.wait(), 5)
+    await storage.patch_result_json(
+        "job-two-workers", lambda data: data.update({"second": True})
+    )
+    second_written.set()
+    await first
+
+    stored = storage.parse_result_json(
+        (await _stored(_storage, "job-two-workers"))["result_json"],
+        job_id="job-two-workers",
+    )
+    assert stored["first"] is True, "the first worker's edit was overwritten"
+    assert stored["second"] is True, (
+        "the second worker's edit was silently overwritten by the first"
+    )
