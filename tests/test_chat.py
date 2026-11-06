@@ -1571,6 +1571,40 @@ async def test_index_chat_repositories_discovers_and_logs_off_loop(
 
 
 @pytest.mark.asyncio
+async def test_chat_routes_share_one_lock_scope_and_translation(monkeypatch) -> None:
+    """One lock scope and one ``PathStateUnknown`` translation, not four (#424).
+
+    The two init routes and the two message handlers differ only in the vehicle
+    that tells the user, so a change to the lock scope or the translation has to
+    land in one place.
+    """
+    import inspect
+    from contextlib import asynccontextmanager
+
+    from rootcoz import main as main_mod
+    from rootcoz.temp_paths import PathStateUnknown
+
+    source = inspect.getsource(main_mod)
+    assert source.count("async with chat_workspace_lock(") == 1
+    assert source.count("except PathStateUnknown") == 1
+    for route in (
+        main_mod._init_chat_under_barrier,
+        main_mod._process_chat_message,
+        main_mod.init_admin_chat,
+        main_mod._process_admin_chat_message,
+    ):
+        assert "_enter_chat_workspace(" in inspect.getsource(route), route.__name__
+
+    @asynccontextmanager
+    async def unknown(job_id, username=""):
+        raise PathStateUnknown("half-deleted")
+        yield  # pragma: no cover - the lock never yields
+
+    monkeypatch.setattr("rootcoz.engine.chat.chat_workspace_lock", unknown)
+    assert await main_mod._enter_chat_workspace("job-1", "alice", "Chat init") is None
+
+
+@pytest.mark.asyncio
 async def test_init_chat_under_barrier_rejects_deleting_job():
     from fastapi import HTTPException
 

@@ -2505,22 +2505,45 @@ async def _reclaim_abandoned_workspaces() -> int:
     the tree, so the leftovers are reaped here, off the loop, through the same
     reaper as every other delete.
 
-    Only ``workspace-*`` trees are reclaimed: a ``chat-{job}`` workspace is reused
-    across sessions and keeps its clones and graph across a restart.
+    Only ``workspace-*`` trees are reclaimed unconditionally: an intact
+    ``chat-{job}`` workspace is reused across sessions and keeps its clones and
+    graph across a restart. One carrying a delete marker is reclaimed too — the
+    delete that wrote it died, and for a *deleted* job no create ever reaches
+    the recovery that would reap it, because the job row is gone and every init
+    404s first.
+
+    Returned count is what was really deleted: a step that abandons or leaves
+    paths behind reclaims nothing, and reporting it as deleted would hide a tree
+    that stays until the next restart.
     """
     from rootcoz.engine.graft import _root
-    from rootcoz.temp_paths import rootcoz_temp_base
+    from rootcoz.temp_paths import CleanupOutcome, delete_marker, rootcoz_temp_base
 
     base = rootcoz_temp_base()
+
+    def abandoned(path: Path) -> bool:
+        # Never follow a link: ``_root`` resolves the entry, so a stale
+        # ``workspace-*`` link into a chat workspace would delete *that* chat's
+        # graph tree while the chat itself is deliberately never reclaimed.
+        if path.is_symlink() or not path.is_dir():
+            return False
+        try:
+            marker = delete_marker(path)
+            # The newest of the tree and its marker: a delete queued by *this*
+            # process writes a fresh marker for a tree it still owns.
+            newest = path.lstat().st_mtime
+            if marker.exists():
+                newest = max(newest, marker.lstat().st_mtime)
+            elif not path.name.startswith("workspace-"):
+                return False
+        except OSError:
+            return False
+        return newest < _PROCESS_STARTED_AT
+
     try:
         # Snapshot before the first await: a job resumed from the DB clones into
         # a *new* workspace in this directory, and that one must not be in the list.
-        leftovers = sorted(
-            path
-            for path in base.iterdir()
-            if path.name.startswith("workspace-")
-            and path.lstat().st_mtime < _PROCESS_STARTED_AT
-        )
+        leftovers = sorted(path for path in base.iterdir() if abandoned(path))
     except OSError:
         logger.warning(
             "Startup reclaim: cannot list %s, abandoned workspaces stay on disk",
@@ -2528,19 +2551,29 @@ async def _reclaim_abandoned_workspaces() -> int:
             exc_info=True,
         )
         return 0
+    reclaimed = 0
     for workspace in leftovers:
-        await cleanup_off_loop(
+        outcome = await cleanup_off_loop(
             workspace.name,
             partial(delete_tree, _root(workspace)),
             partial(delete_tree, workspace),
         )
-    if leftovers:
+        if outcome is CleanupOutcome.CLEAN:
+            reclaimed += 1
+    if reclaimed:
         logger.info(
             "Startup reclaim: deleted %d abandoned workspace(s) under %s",
-            len(leftovers),
+            reclaimed,
             base,
         )
-    return len(leftovers)
+    if survivors := len(leftovers) - reclaimed:
+        logger.warning(
+            "Startup reclaim: %d abandoned workspace(s) under %s survived their "
+            "delete and stay until the next restart",
+            survivors,
+            base,
+        )
+    return reclaimed
 
 
 async def _deferred_resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> None:
@@ -20129,6 +20162,30 @@ def _chat_workspace_unknown_message(job_id: str, username: str) -> str:
     )
 
 
+async def _enter_chat_workspace(job_id: str, username: str, what: str) -> Path | None:
+    """Create the chat workspace under its path lock, or ``None`` if it cannot be.
+
+    One lock scope and one ``PathStateUnknown`` translation for every chat route:
+    the lock has to cover the create/reuse decision, and the exception means a
+    live builder owns the tree or an interrupted delete left paths in it, so
+    nothing may build on it. Only the vehicle that tells the user differs, so
+    the caller picks it; ``what`` names the route in the warning.
+    """
+    from rootcoz.engine.chat import chat_workspace_lock, ensure_chat_workspace
+
+    try:
+        async with chat_workspace_lock(job_id, username):
+            return ensure_chat_workspace(job_id, username=username)
+    except PathStateUnknown:
+        logger.warning(
+            "%s blocked by an unestablished workspace for job %s, user %s",
+            what,
+            job_id,
+            username,
+        )
+        return None
+
+
 async def _init_chat_under_barrier(
     job_id: str, username: str, body: ChatInitRequest
 ) -> dict[str, Any]:
@@ -20141,9 +20198,7 @@ async def _init_chat_under_barrier(
     from rootcoz.engine.chat import (
         build_chat_custom_tools,
         build_welcome_message,
-        chat_workspace_lock,
         clone_chat_repos,
-        ensure_chat_workspace,
         init_chat_session,
     )
     from rootcoz.engine.graft_http import cloned_graph_roots
@@ -20168,19 +20223,12 @@ async def _init_chat_under_barrier(
             credential_source,
             allow_empty=True,
         )
-        try:
-            async with chat_workspace_lock(job_id, username):
-                workspace = ensure_chat_workspace(job_id, username=username)
-        except PathStateUnknown as exc:
-            logger.warning(
-                "Chat init blocked by an unestablished workspace for job %s, user %s",
-                job_id,
-                username,
-            )
+        workspace = await _enter_chat_workspace(job_id, username, "Chat init")
+        if workspace is None:
             raise HTTPException(
                 status_code=409,
                 detail=_chat_workspace_unknown_message(job_id, username),
-            ) from exc
+            )
 
     decrypted_params: dict[str, Any] = {}
     try:
@@ -20787,9 +20835,7 @@ async def _process_chat_message(
     from rootcoz.engine.chat import (
         build_chat_custom_tools,
         chat_with_ai,
-        chat_workspace_lock,
         clone_chat_repos,
-        ensure_chat_workspace,
     )
     from rootcoz.sources.chat_workspace import setup_ci_build_workspace
 
@@ -20880,18 +20926,10 @@ async def _process_chat_message(
                                 )
                                 break
 
-                        try:
-                            async with chat_workspace_lock(job_id, username):
-                                workspace = ensure_chat_workspace(
-                                    job_id, username=username
-                                )
-                        except PathStateUnknown:
-                            logger.warning(
-                                "Chat message blocked by an unestablished "
-                                "workspace for job %s, user %s",
-                                job_id,
-                                username,
-                            )
+                        workspace = await _enter_chat_workspace(
+                            job_id, username, "Chat message"
+                        )
+                        if workspace is None:
                             await _fail_chat_assistant_placeholder(
                                 assistant_msg_id,
                                 job_id,
@@ -21377,8 +21415,6 @@ async def init_admin_chat(
         )
     from rootcoz.engine.chat import (
         build_admin_custom_tools,
-        chat_workspace_lock,
-        ensure_chat_workspace,
         init_admin_chat_session,
     )
 
@@ -21397,18 +21433,14 @@ async def init_admin_chat(
             credential_source,
             allow_empty=True,
         )
-        try:
-            async with chat_workspace_lock(ADMIN_CHAT_JOB_ID, username):
-                workspace = ensure_chat_workspace(ADMIN_CHAT_JOB_ID, username=username)
-        except PathStateUnknown as exc:
-            logger.warning(
-                "Admin chat init blocked by an unestablished workspace for user %s",
-                username,
-            )
+        workspace = await _enter_chat_workspace(
+            ADMIN_CHAT_JOB_ID, username, "Admin chat init"
+        )
+        if workspace is None:
             raise HTTPException(
                 status_code=409,
                 detail=_chat_workspace_unknown_message(ADMIN_CHAT_JOB_ID, username),
-            ) from exc
+            )
         if not await _available_chat_session(ADMIN_CHAT_JOB_ID, username):
             custom_tools: list[dict[str, Any]] = []
             auth_header = await _create_ai_auth_header(username, is_admin=True)
@@ -21624,8 +21656,6 @@ async def _process_admin_chat_message(
     from rootcoz.engine.chat import (
         admin_chat_with_ai,
         build_admin_custom_tools,
-        chat_workspace_lock,
-        ensure_chat_workspace,
     )
 
     auth_header = ""
@@ -21683,17 +21713,10 @@ async def _process_admin_chat_message(
                     )
                     break
 
-            try:
-                async with chat_workspace_lock(ADMIN_CHAT_JOB_ID, username):
-                    workspace = ensure_chat_workspace(
-                        ADMIN_CHAT_JOB_ID, username=username
-                    )
-            except PathStateUnknown:
-                logger.warning(
-                    "Admin chat message blocked by an unestablished workspace "
-                    "for user %s",
-                    username,
-                )
+            workspace = await _enter_chat_workspace(
+                ADMIN_CHAT_JOB_ID, username, "Admin chat message"
+            )
+            if workspace is None:
                 await _fail_chat_assistant_placeholder(
                     assistant_msg_id,
                     ADMIN_CHAT_JOB_ID,

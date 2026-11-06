@@ -5977,6 +5977,83 @@ class TestStartupWorkspaceReclaim:
         assert await main_mod._reclaim_abandoned_workspaces() == 0
         assert live.exists(), "the reclaim deleted a workspace it does not own"
 
+    async def test_a_workspace_symlink_into_a_chat_is_never_followed(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A stale ``workspace-*`` link must not aim the graph delete at a chat.
+
+        ``_root`` resolves its argument, so reclaiming the link would delete
+        ``chat-job-1/.alice.rootcoz-graft`` — the graph of a chat workspace the
+        reclaim deliberately never touches.
+        """
+        from rootcoz import main as main_mod
+        from rootcoz import temp_paths
+
+        base = tmp_path / "rootcoz"
+        chat = base / "chat-job-1" / "alice"
+        chat.mkdir(parents=True)
+        graph = base / "chat-job-1" / ".alice.rootcoz-graft"
+        (graph / "alice" / "graph").mkdir(parents=True)
+        (graph / "alice" / "graph" / "index.bin").write_text("graph")
+        link = base / "workspace-fake"
+        link.symlink_to(chat)
+        for stale in (link, graph):
+            os.utime(stale, (1, 1), follow_symlinks=False)
+        monkeypatch.setattr(temp_paths, "rootcoz_temp_base", lambda: base)
+
+        reclaimed = await main_mod._reclaim_abandoned_workspaces()
+
+        assert graph.exists(), "startup followed a workspace link into a chat graph"
+        assert link.is_symlink(), "a link is not a leftover workspace to delete"
+        assert reclaimed == 0
+
+    async def test_a_deleted_jobs_marked_chat_workspace_is_reclaimed(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """No init can recover it: the job row is gone, so every init 404s first.
+
+        An abandoned delete leaves the chat tree and its marker behind, and
+        recovery only runs for a create of a job that still exists.
+        """
+        from rootcoz import main as main_mod
+        from rootcoz import temp_paths
+        from rootcoz.temp_paths import delete_marker
+
+        base = tmp_path / "rootcoz"
+        chat = base / "chat-job-1"
+        (chat / "alice" / "repo" / ".git").mkdir(parents=True)
+        marker = delete_marker(chat)
+        marker.write_text("", encoding="utf-8")
+        for stale in (chat, marker):
+            os.utime(stale, (1, 1))
+        monkeypatch.setattr(temp_paths, "rootcoz_temp_base", lambda: base)
+
+        assert await main_mod._reclaim_abandoned_workspaces() == 1
+        assert not chat.exists(), "a deleted job's marked chat survived the restart"
+
+    async def test_an_incomplete_reclaim_is_not_reported_as_deleted(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A delete that leaves paths behind reclaimed nothing; the count says so."""
+        from rootcoz import main as main_mod
+        from rootcoz import temp_paths
+        from rootcoz.temp_paths import DeleteResult
+
+        base = tmp_path / "rootcoz"
+        workspace = base / "workspace-stuck"
+        workspace.mkdir(parents=True)
+        os.utime(workspace, (1, 1))
+        monkeypatch.setattr(temp_paths, "rootcoz_temp_base", lambda: base)
+        # Paths survive: the delete reports them instead of raising (delete_tree).
+        monkeypatch.setattr(
+            main_mod, "delete_tree", lambda path: DeleteResult(0, 0, failed=1)
+        )
+
+        assert await main_mod._reclaim_abandoned_workspaces() == 0, (
+            "a workspace whose delete failed is reported as deleted"
+        )
+        assert workspace.exists()
+
 
 class TestPeerAnalysisParams:
     """Tests for peer analysis parameter pass-through."""
