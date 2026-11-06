@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 import os
 import socket
 from contextlib import contextmanager
@@ -26,11 +27,16 @@ from rootcoz.models import (
     FailureAnalysis,
 )
 from rootcoz.sources.jenkins_source import JenkinsError
-from tests.conftest import make_test_client
+from tests.conftest import capture_main_logs, make_test_client
 
 # Fake credentials for tests — annotated once to suppress Ruff S105/S106 globally.
 FAKE_JENKINS_PASSWORD = "not-a-real-password"  # pragma: allowlist secret
 FAKE_GITHUB_TOKEN = "not-a-real-token"
+
+# The submitted content and credential a create-github-issue test sends, so a
+# log or detail that echoes either one can be asserted against.
+_REPORT_GITHUB_TOKEN = "ghp_report_token_0123456789"  # pragma: allowlist secret
+_REPORT_BODY = "REPORT-BODY-MUST-NOT-BE-LOGGED"
 
 
 def _patch_preflight():
@@ -4247,45 +4253,181 @@ class TestBugCreationIntegration:
 
 
 class TestCreateGithubIssueApiErrors:
-    """Finding 4: create-github-issue should catch external API errors and return 502."""
+    """create-github-issue reports the same refusals as the feedback form."""
+
+    @staticmethod
+    def _raise_status(status: int, *, json: dict | None = None):
+        """Build a create_github_issue side effect raising HTTPStatusError."""
+        request = httpx.Request("POST", "https://api.github.com/repos/o/r/issues")
+        return httpx.HTTPStatusError(
+            f"GitHub returned {status}",
+            request=request,
+            response=httpx.Response(status, json=json, request=request),
+        )
+
+    async def _post_with_github_failure(self, test_client, job_id, exc):
+        """Create an issue for a real job while GitHub answers ``exc``."""
+        await storage.save_result(
+            job_id,
+            "http://jenkins",
+            "completed",
+            {
+                "status": "completed",
+                "summary": "",
+                "failures": [
+                    {
+                        "test_name": "test_foo",
+                        "error": "err",
+                        "analysis": {"classification": "CODE ISSUE"},
+                    }
+                ],
+            },
+        )
+        with (
+            patch("rootcoz.main.create_github_issue", side_effect=exc),
+            _with_github_issue_config(),
+        ):
+            return test_client.post(
+                f"/results/{job_id}/create-github-issue",
+                json={
+                    "test_name": "test_foo",
+                    "title": "Bug",
+                    "body": _REPORT_BODY,
+                    "github_token": _REPORT_GITHUB_TOKEN,
+                },
+            )
+
+    @pytest.mark.asyncio
+    async def test_github_5xx_is_a_retryable_outage(self, test_client, caplog):
+        """A 5xx is an outage: retryable detail, reason in the log."""
+        exc = self._raise_status(
+            503,
+            json={
+                "message": "Server Error",
+                "documentation_url": "https://docs.github.com/rest",
+            },
+        )
+        with capture_main_logs(caplog):
+            response = await self._post_with_github_failure(
+                test_client, "job-gh-503", exc
+            )
+
+        assert response.status_code == 502
+        detail = response.json()["detail"]
+        assert detail == (
+            "GitHub is unavailable right now, so your bug report was not filed. "
+            "Try again in a few minutes."
+        )
+        assert "503" not in detail
+        assert "status=503" in caplog.text
+        assert "Server Error" in caplog.text
+        assert _REPORT_GITHUB_TOKEN not in caplog.text
+        assert _REPORT_BODY not in caplog.text
+        # This endpoint records no row for a refusal, so nothing there can echo
+        # the submitted body either.
+        assert (await storage.list_audit_events(action="issue.create"))["events"] == []
+
+    @pytest.mark.asyncio
+    async def test_github_404_points_at_the_configured_repository(
+        self, test_client, caplog
+    ):
+        """A report's issue goes to TESTS_REPO_URL, so a 404 is not always the token.
+
+        GitHub hides an unreadable repository behind a 404, but a mistyped or
+        deleted one in the deployment setting answers the same way — that is
+        not something the user can fix in Profile Settings alone.
+        """
+        exc = self._raise_status(404, json={"message": "Not Found"})
+        with capture_main_logs(caplog):
+            response = await self._post_with_github_failure(
+                test_client, "job-gh-404", exc
+            )
+
+        assert response.status_code == 403
+        detail = response.json()["detail"]
+        assert "TESTS_REPO_URL" in detail
+        assert "cannot see the repository" in detail
+        assert "unavailable" not in detail.lower()
+        assert "404" not in detail
+        assert "status=404" in caplog.text
+        assert _REPORT_GITHUB_TOKEN not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_github_401_still_names_the_token(self, test_client, caplog):
+        """An upstream 401 keeps saying the token is bad, never 'unavailable'."""
+        with capture_main_logs(caplog):
+            response = await self._post_with_github_failure(
+                test_client, "job-gh-401", self._raise_status(401)
+            )
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == (
+            "GitHub token is invalid or expired. "
+            "Generate a new token in Profile Settings."
+        )
+        assert "status=401" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_github_403_still_names_the_scope(self, test_client, caplog):
+        """A 403 without a rate-limit signal is the missing `repo` scope."""
+        exc = self._raise_status(
+            403, json={"message": "Resource not accessible by personal access token"}
+        )
+        with capture_main_logs(caplog):
+            response = await self._post_with_github_failure(
+                test_client, "job-gh-403", exc
+            )
+
+        assert response.status_code == 403
+        detail = response.json()["detail"]
+        assert "scope" in detail.lower()
+        assert "unavailable" not in detail.lower()
+        assert "status=403" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_github_429_still_names_the_rate_limit(self, test_client, caplog):
+        """429 stays a rate limit, not an outage."""
+        with capture_main_logs(caplog):
+            response = await self._post_with_github_failure(
+                test_client, "job-gh-429", self._raise_status(429)
+            )
+
+        assert response.status_code == 429
+        assert response.json()["detail"] == (
+            "GitHub API rate limit reached. Try again later."
+        )
+        assert _REPORT_GITHUB_TOKEN not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_github_message_cannot_forge_a_log_line(self, test_client, caplog):
+        """A tracker message is data, never a second log line."""
+        exc = self._raise_status(
+            503, json={"message": "Server Error\nERROR forged line by GitHub"}
+        )
+        with capture_main_logs(caplog):
+            response = await self._post_with_github_failure(
+                test_client, "job-gh-forge", exc
+            )
+
+        assert response.status_code == 502
+        refused = [
+            record.getMessage()
+            for record in caplog.records
+            if "GitHub refused" in record.getMessage()
+        ]
+        assert len(refused) == 1
+        # The text is kept, the line break that would fabricate an entry is not.
+        assert "forged line by GitHub" in refused[0]
+        assert "\n" not in refused[0]
 
     @pytest.mark.asyncio
     async def test_github_api_http_error_returns_502(self, test_client):
-        """HTTPStatusError from GitHub API (non-auth) should surface as 502."""
-        import httpx
+        """A status outside the outage classes keeps its generic 502."""
+        exc = self._raise_status(422, json={"message": "Validation Failed"})
+        response = await self._post_with_github_failure(test_client, "job-gh-err", exc)
 
-        result_data = {
-            "status": "completed",
-            "summary": "",
-            "failures": [
-                {
-                    "test_name": "test_foo",
-                    "error": "err",
-                    "analysis": {"classification": "CODE ISSUE"},
-                }
-            ],
-        }
-        await storage.save_result(
-            "job-gh-err", "http://jenkins", "completed", result_data
-        )
-        with patch("rootcoz.main.create_github_issue") as mock_create:
-            mock_create.side_effect = httpx.HTTPStatusError(
-                "Internal Server Error",
-                request=httpx.Request("POST", "https://api.github.com"),
-                response=httpx.Response(500),
-            )
-            with _with_github_issue_config():
-                response = test_client.post(
-                    "/results/job-gh-err/create-github-issue",
-                    json={
-                        "test_name": "test_foo",
-                        "title": "Bug",
-                        "body": "Details",
-                        "github_token": "ghp_user_token",
-                    },
-                )
         assert response.status_code == 502
-        assert "GitHub API error" in response.json()["detail"]
+        assert response.json()["detail"] == "GitHub API error: 422"
 
     @pytest.mark.asyncio
     async def test_github_api_request_error_returns_502(self, test_client):
@@ -4326,13 +4468,11 @@ class TestCreateGithubIssueApiErrors:
 
 
 class TestCreateJiraBugApiErrors:
-    """Finding 4: create-jira-bug should catch external API errors and return 502."""
+    """create-jira-bug keeps its own wording, but a 5xx is an outage too."""
 
     @pytest.mark.asyncio
-    async def test_jira_api_http_error_returns_502(self, test_client):
-        """HTTPStatusError from Jira API (non-auth) should surface as 502."""
-        import httpx
-
+    async def test_jira_5xx_is_a_retryable_outage(self, test_client, caplog):
+        """A Jira 5xx says 'unavailable, retry' instead of a bare status."""
         result_data = {
             "status": "completed",
             "summary": "",
@@ -4347,15 +4487,67 @@ class TestCreateJiraBugApiErrors:
         await storage.save_result(
             "job-jira-err", "http://jenkins", "completed", result_data
         )
+        request = httpx.Request("POST", "https://jira.example.com/rest/api/2/issue")
+        exc = httpx.HTTPStatusError(
+            "Internal Server Error",
+            request=request,
+            response=httpx.Response(
+                503,
+                json={"errorMessages": ["Jira is down for maintenance"]},
+                request=request,
+            ),
+        )
+        with (
+            capture_main_logs(caplog),
+            patch("rootcoz.main.create_jira_bug", side_effect=exc),
+            _enable_feature("jira_enabled"),
+        ):
+            response = test_client.post(
+                "/results/job-jira-err/create-jira-bug",
+                json={
+                    "test_name": "test_foo",
+                    "title": "Bug",
+                    "body": _REPORT_BODY,
+                    "jira_token": "user_jira_token",
+                },
+            )
+        assert response.status_code == 502
+        assert response.json()["detail"] == (
+            "Jira is unavailable right now, so the bug was not filed. "
+            "Try again in a few minutes."
+        )
+        assert "status=503" in caplog.text
+        assert "Jira is down for maintenance" in caplog.text
+        assert _REPORT_BODY not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_jira_api_http_error_returns_502(self, test_client):
+        """A non-outage, non-auth status keeps its generic 502."""
+        import httpx
+
+        result_data = {
+            "status": "completed",
+            "summary": "",
+            "failures": [
+                {
+                    "test_name": "test_foo",
+                    "error": "err",
+                    "analysis": {"classification": "PRODUCT BUG"},
+                }
+            ],
+        }
+        await storage.save_result(
+            "job-jira-bad-request", "http://jenkins", "completed", result_data
+        )
         with patch("rootcoz.main.create_jira_bug") as mock_create:
             mock_create.side_effect = httpx.HTTPStatusError(
-                "Internal Server Error",
+                "Bad Request",
                 request=httpx.Request("POST", "https://jira.example.com"),
-                response=httpx.Response(500),
+                response=httpx.Response(400),
             )
             with _enable_feature("jira_enabled"):
                 response = test_client.post(
-                    "/results/job-jira-err/create-jira-bug",
+                    "/results/job-jira-bad-request/create-jira-bug",
                     json={
                         "test_name": "test_foo",
                         "title": "Bug",
@@ -4364,7 +4556,7 @@ class TestCreateJiraBugApiErrors:
                     },
                 )
         assert response.status_code == 502
-        assert "Jira API error" in response.json()["detail"]
+        assert response.json()["detail"] == "Jira API error: 400"
 
     @pytest.mark.asyncio
     async def test_jira_api_request_error_returns_502(self, test_client):
@@ -4402,6 +4594,113 @@ class TestCreateJiraBugApiErrors:
                 )
         assert response.status_code == 502
         assert "Jira API unreachable" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_jira_404_is_a_project_access_refusal(self, test_client, caplog):
+        """A Jira 404 is a hidden project the token cannot see, not a 502.
+
+        Jira answers 404 (not 403) for a project key the token cannot see, so
+        the detail must point at the credential and the log must keep the
+        upstream status and Jira's message while leaking neither token nor body.
+        """
+        result_data = {
+            "status": "completed",
+            "summary": "",
+            "failures": [
+                {
+                    "test_name": "test_foo",
+                    "error": "err",
+                    "analysis": {"classification": "PRODUCT BUG"},
+                }
+            ],
+        }
+        await storage.save_result(
+            "job-jira-404", "http://jenkins", "completed", result_data
+        )
+        request = httpx.Request("POST", "https://jira.example.com/rest/api/2/issue")
+        exc = httpx.HTTPStatusError(
+            "Not Found",
+            request=request,
+            response=httpx.Response(
+                404,
+                json={"errorMessages": ["Project 'MISSING' does not exist"]},
+                request=request,
+            ),
+        )
+        with (
+            capture_main_logs(caplog),
+            patch("rootcoz.main.create_jira_bug", side_effect=exc),
+            _enable_feature("jira_enabled"),
+        ):
+            response = test_client.post(
+                "/results/job-jira-404/create-jira-bug",
+                json={
+                    "test_name": "test_foo",
+                    "title": "Bug",
+                    "body": _REPORT_BODY,
+                    "jira_token": "secret_jira_token",
+                },
+            )
+        assert response.status_code == 403
+        detail = response.json()["detail"]
+        assert detail == (
+            "Jira token cannot access that Jira project. Check the project "
+            "key and update your token in settings so it can see the project."
+        )
+        assert "Jira API error" not in detail
+        assert "status=404" in caplog.text
+        assert "Project 'MISSING' does not exist" in caplog.text
+        assert "secret_jira_token" not in caplog.text
+        assert _REPORT_BODY not in caplog.text
+        assert "secret_jira_token" not in detail
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("status", [401, 403])
+    async def test_jira_auth_statuses_stay_specific(
+        self, test_client, caplog, status: int
+    ):
+        """A Jira 401/403 keeps the credential detail it always had."""
+        result_data = {
+            "status": "completed",
+            "summary": "",
+            "failures": [
+                {
+                    "test_name": "test_foo",
+                    "error": "err",
+                    "analysis": {"classification": "PRODUCT BUG"},
+                }
+            ],
+        }
+        await storage.save_result(
+            f"job-jira-auth-{status}", "http://jenkins", "completed", result_data
+        )
+        request = httpx.Request("POST", "https://jira.example.com/rest/api/2/issue")
+        exc = httpx.HTTPStatusError(
+            "Unauthorized",
+            request=request,
+            response=httpx.Response(status, request=request),
+        )
+        with (
+            capture_main_logs(caplog),
+            patch("rootcoz.main.create_jira_bug", side_effect=exc),
+            _enable_feature("jira_enabled"),
+        ):
+            response = test_client.post(
+                f"/results/job-jira-auth-{status}/create-jira-bug",
+                json={
+                    "test_name": "test_foo",
+                    "title": "Bug",
+                    "body": _REPORT_BODY,
+                    "jira_token": "secret_jira_token",
+                },
+            )
+        assert response.status_code == 401
+        assert response.json()["detail"] == (
+            "Jira token is invalid or expired. Update your token in settings."
+        )
+        assert f"status={status}" in caplog.text
+        assert "secret_jira_token" not in caplog.text
+        assert _REPORT_BODY not in caplog.text
 
 
 class TestHistoryEndpoints:
@@ -10128,7 +10427,6 @@ class TestAdminSettingsEndpoints:
         self, test_client, monkeypatch, caplog
     ) -> None:
         """A cold catalog plus no discovery answer must not reject a save."""
-        import logging
 
         from rootcoz import ai_client
 
@@ -10159,7 +10457,6 @@ class TestAdminSettingsEndpoints:
         self, test_client, monkeypatch, caplog
     ) -> None:
         """A warm catalog whose deployment credentials cannot be read fails open."""
-        import logging
 
         _no_key_providers(monkeypatch)
         monkeypatch.setattr(
@@ -10713,7 +11010,6 @@ class TestEnumeratedSettings:
         self, test_client, monkeypatch, caplog
     ) -> None:
         """A cold registry must not block an admin — accept, but warn."""
-        import logging
 
         from rootcoz import main
 
@@ -12256,7 +12552,6 @@ class TestIntegrationConnectionEndpoints:
         self, test_client, caplog
     ) -> None:
         """The catch-all log keeps the redacted message, never a raw traceback."""
-        import logging
 
         secret_url = (
             "https://user:secretpass@jenkins.example.com/"  # pragma: allowlist secret
