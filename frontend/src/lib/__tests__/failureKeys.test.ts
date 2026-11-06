@@ -168,4 +168,13 @@ describe('countUnclassifiedFailures', () => {
     // A top-level override for the same test name never covers a child scope.
     expect(countUnclassifiedFailures([], [child], { 'test-x': 'CODE ISSUE' })).toBe(1)
   })
+
+  it('never counts an ingest-only job, whose analysis has not run yet', () => {
+    // Same empty classifications as a failed analysis, but the model was never
+    // asked — mirrors the server's `incomplete_failures` analysis-state gate.
+    const failures = [makeFailure('test-a', ''), makeFailure('test-b', '')]
+    expect(countUnclassifiedFailures(failures, [], {}, 'submitted')).toBe(0)
+    // ...and the same failures after an analysis that produced nothing do count.
+    expect(countUnclassifiedFailures(failures, [], {}, 'analyzed')).toBe(2)
+  })
 })

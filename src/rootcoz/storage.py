@@ -3519,6 +3519,8 @@ def _effective_classification(
 def incomplete_failures(
     result_data: dict[str, Any],
     overrides: Mapping[tuple[str, str, int], str] | None = None,
+    *,
+    analysis_state: str | None = None,
 ) -> list[str]:
     """Return test names of failures whose effective classification is empty.
 
@@ -3528,17 +3530,29 @@ def incomplete_failures(
     The count is ``len()`` of this list — callers must not re-implement the
     predicate.
 
+    A job whose analysis never ran (``analysis_state == 'submitted'``) is never
+    incomplete: its failures carry empty classifications because the model was
+    not asked yet, not because it returned nothing. Only a ran analysis can be
+    incomplete.
+
     Args:
         result_data: Parsed result dictionary from result_json.
         overrides: Map of ``(test_name, child_job_name, child_build_number)`` to
             the reviewer's classification, as stored by
             :func:`get_all_effective_classifications`. Omit when the caller
             already applied them to ``result_data``.
+        analysis_state: Analysis state to gate on. Defaults to the state stored
+            in ``result_data``; pass the ``results.analysis_state`` column when
+            the caller has it, so the count can never disagree with the row.
 
     Returns:
         Test names across ``failures``, ``child_job_analyses`` and nested
         ``failed_children``.
     """
+    if analysis_state is None:
+        analysis_state = result_data.get("analysis_state")
+    if _coerce_analysis_state(analysis_state) != ANALYSIS_STATE_ANALYZED:
+        return []
     names: list[str] = []
     for failure, child_job, child_build in _iter_all_failures(result_data):
         if not isinstance(failure, dict):
@@ -3550,7 +3564,7 @@ def incomplete_failures(
 
 
 async def incomplete_failures_for_job(
-    job_id: str, result_data: dict[str, Any]
+    job_id: str, result_data: dict[str, Any], *, analysis_state: str | None = None
 ) -> list[str]:
     """Return a stored job's unclassified test names, overrides applied.
 
@@ -3565,13 +3579,13 @@ async def incomplete_failures_for_job(
     Returns:
         Test names whose effective classification is empty.
     """
-    candidates = incomplete_failures(result_data)
+    candidates = incomplete_failures(result_data, analysis_state=analysis_state)
     if not candidates:
         return []
     overrides = await get_all_effective_classifications(job_id)
     if not overrides:
         return candidates
-    return incomplete_failures(result_data, overrides)
+    return incomplete_failures(result_data, overrides, analysis_state=analysis_state)
 
 
 def _resolve_history_build_fields(result_data: dict[str, Any]) -> tuple[str, int]:
@@ -4900,7 +4914,11 @@ def _parse_dashboard_row(
         if result_data.get("build_id"):
             entry["build_id"] = result_data["build_id"]
         entry["failure_count"] = count_all_failures(result_data)
-        incomplete_count = len(incomplete_failures(result_data, overrides))
+        incomplete_count = len(
+            incomplete_failures(
+                result_data, overrides, analysis_state=entry["analysis_state"]
+            )
+        )
         if incomplete_count:
             entry["incomplete_count"] = incomplete_count
         child_jobs = result_data.get("child_job_analyses", [])
@@ -5028,7 +5046,8 @@ async def list_incomplete_analyses(limit: int = 100) -> list[dict[str, Any]]:
     visited = 0
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT job_id, result_json FROM results "
+            "SELECT job_id, result_json, COALESCE(analysis_state, 'analyzed') "
+            "AS analysis_state FROM results "
             "WHERE result_json IS NOT NULL ORDER BY created_at DESC"
         )
         while visited < _INCOMPLETE_SCAN_MAX_ROWS:
@@ -5045,7 +5064,7 @@ async def list_incomplete_analyses(limit: int = 100) -> list[dict[str, Any]]:
                 if not result_data:
                     continue
                 test_names = await incomplete_failures_for_job(
-                    row["job_id"], result_data
+                    row["job_id"], result_data, analysis_state=row["analysis_state"]
                 )
                 if not test_names:
                     continue
@@ -6070,6 +6089,12 @@ async def get_effective_classification(
         return fh_row[0] if fh_row and fh_row[0] else ""
 
 
+#: Job ids per ``IN`` query. SQLite's default bound-variable limit is 999, so
+#: the set is chunked well below it — a dashboard request with ``limit=0``
+#: sends every job id at once.
+_JOB_ID_QUERY_CHUNK = 400
+
+
 async def get_all_effective_classifications(
     job_id: str,
 ) -> dict[tuple[str, str, int], str]:
@@ -6088,7 +6113,7 @@ async def get_all_effective_classifications(
 async def get_effective_classifications_bulk(
     job_ids: Sequence[str],
 ) -> dict[str, dict[tuple[str, str, int], str]]:
-    """Return effective classification overrides for many jobs in one query.
+    """Return effective classification overrides for many jobs, chunked.
 
     The dashboard reads ``incomplete_count`` for every row it returns, so the
     overrides are fetched for the whole page instead of per job.
@@ -6101,27 +6126,30 @@ async def get_effective_classifications_bulk(
         to effective classification mapping. Jobs without overrides are absent.
     """
     ids = list(dict.fromkeys(job_ids))
-    if not ids:
-        return {}
-    placeholders = ",".join("?" for _ in ids)
-    async with _connect_db() as db:
-        cursor = await db.execute(
-            "SELECT job_id, test_name, job_name, child_build_number, classification "
-            "FROM test_classifications "
-            f"WHERE job_id IN ({placeholders}) AND visible = 1 "
-            f"AND classification IN {_PRIMARY_CLASSIFICATIONS_SQL} "
-            "ORDER BY created_at DESC, id DESC",
-            ids,
-        )
-        rows = await cursor.fetchall()
-
-    # Keep only the latest override per (job, test_name, child_job_name, build).
     result: dict[str, dict[tuple[str, str, int], str]] = {}
-    for row in rows:
-        per_job = result.setdefault(row["job_id"], {})
-        key = (row["test_name"], row["job_name"], row["child_build_number"])
-        if key not in per_job:
-            per_job[key] = row["classification"]
+    if not ids:
+        return result
+    async with _connect_db() as db:
+        # A dashboard page may carry every job (``limit=0``), so the ids are
+        # chunked: one placeholder per job id would exceed SQLite's
+        # bound-variable limit (999 on a default build) and fail the request.
+        for start in range(0, len(ids), _JOB_ID_QUERY_CHUNK):
+            chunk = ids[start : start + _JOB_ID_QUERY_CHUNK]
+            placeholders = ",".join("?" for _ in chunk)
+            cursor = await db.execute(
+                "SELECT job_id, test_name, job_name, child_build_number, "
+                "classification FROM test_classifications "
+                f"WHERE job_id IN ({placeholders}) AND visible = 1 "
+                f"AND classification IN {_PRIMARY_CLASSIFICATIONS_SQL} "
+                "ORDER BY created_at DESC, id DESC",
+                chunk,
+            )
+            # Keep only the latest override per
+            # (job, test_name, child_job_name, build).
+            for row in await cursor.fetchall():
+                per_job = result.setdefault(row["job_id"], {})
+                key = (row["test_name"], row["job_name"], row["child_build_number"])
+                per_job.setdefault(key, row["classification"])
     return result
 
 

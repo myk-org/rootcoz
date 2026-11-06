@@ -44,12 +44,15 @@ export function countAllFailures(failures: { test_name: string }[], children: Ch
 /** Failures with no effective classification, mirroring the server's
  *  `incomplete_count`: a live reviewer override wins over the stored
  *  classification, so classifying a failure clears it from this total without
- *  a refetch. */
+ *  a refetch. A `submitted` job never counts: its analysis has not run, so its
+ *  empty classifications are not a failed analysis (storage.incomplete_failures). */
 export function countUnclassifiedFailures(
   failures: { test_name: string; analysis?: AnalysisDetail }[],
   children: ChildJobAnalysis[],
   classifications: Record<string, string>,
+  analysisState?: string,
 ): number {
+  if (analysisState === 'submitted') return 0
   let count = 0
   walkChildTree(failures, children, (nodeFailures, jobName, buildNumber) => {
     for (const f of nodeFailures) {

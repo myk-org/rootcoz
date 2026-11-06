@@ -374,10 +374,11 @@ function ReportContent() {
     [result],
   )
   // Live count, not `result.incomplete_count`: a reviewer override classifies a
-  // failure without a refetch, and the banner must clear with the card.
+  // failure without a refetch, and the banner must clear with the card. A
+  // `submitted` job's empty classifications mean analysis has not run yet.
   const incompleteCount = useMemo(
     () => (result
-      ? countUnclassifiedFailures(result.failures ?? [], result.child_job_analyses ?? [], state.classifications)
+      ? countUnclassifiedFailures(result.failures ?? [], result.child_job_analyses ?? [], state.classifications, result.analysis_state)
       : 0),
     [result, state.classifications],
   )

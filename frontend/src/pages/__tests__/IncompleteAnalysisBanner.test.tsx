@@ -13,12 +13,13 @@ vi.mock('@/lib/auth', () => ({
   useAuth: () => ({ role: auth.isOperator ? 'operator' : 'viewer', isOperator: auth.isOperator }),
 }))
 
-function showReport(incompleteCount: number) {
+function showReport(incompleteCount: number, analysisState?: 'submitted' | 'analyzed') {
   const response: ResultResponse = {
     job_id: 'job-1', jenkins_url: null, status: 'completed', created_at: '', base_url: null, result_url: null,
     result: {
       job_id: 'job-1', job_name: 'example', build_number: 1, jenkins_url: null,
       status: 'completed', summary: 'done', ai_provider: '', ai_model: '',
+      analysis_state: analysisState,
       // The banner reads the failures, not `incomplete_count`: a reviewer
       // override classifies a failure without refetching the result.
       failures: Array.from({ length: incompleteCount }, (_, i) => ({
@@ -56,6 +57,19 @@ describe('incomplete analysis banner', () => {
     showReport(0)
     expect(await screen.findByText('example')).toBeInTheDocument()
     expect(screen.queryByTestId('incomplete-analysis-banner')).not.toBeInTheDocument()
+  })
+
+  it('hides the banner for a submitted job, whose analysis has not run', async () => {
+    showReport(2, 'submitted')
+    expect(await screen.findByText('Awaiting AI analysis')).toBeInTheDocument()
+    expect(screen.queryByTestId('incomplete-analysis-banner')).not.toBeInTheDocument()
+  })
+
+  it('shows the banner for the same failures once an analysis produced nothing', async () => {
+    showReport(2, 'analyzed')
+    expect(await screen.findByTestId('incomplete-analysis-banner')).toHaveTextContent(
+      '2 failure(s) have no usable analysis',
+    )
   })
 
   it('hides the Re-Analyze action from a viewer', async () => {

@@ -206,6 +206,115 @@ class TestDashboardOverridesAreFetchedOnce:
         assert connections == 2
 
 
+class TestSubmittedJobsAreNotIncomplete:
+    """Incompleteness means the analysis ran and produced nothing — never that
+    it has not run yet. An ingest-only (``submitted``) job stores every failure
+    with an empty classification, which is not a failed analysis."""
+
+    async def _seed(
+        self, temp_db_path: Path, *failures: dict[str, Any], state: str
+    ) -> None:
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.save_result(
+                job_id="job-1",
+                build_url="https://ci.example.com/job/example-job/7/",
+                status="completed",
+                result=_result_payload(list(failures), analysis_state=state),
+            )
+
+    def test_predicate_skips_an_ingest_only_job(self) -> None:
+        payload = _result_payload(
+            [_failure("t1"), _failure("t2")], analysis_state="submitted"
+        )
+        assert storage.incomplete_failures(payload) == []
+
+    async def test_results_dashboard_and_listing_agree_on_submitted(
+        self, client: TestClient, temp_db_path: Path
+    ) -> None:
+        await self._seed(temp_db_path, _failure("t1"), state="submitted")
+
+        resp = client.get("/results/job-1", headers=_ADMIN_HEADERS)
+        assert resp.status_code == 200
+        assert resp.json()["result"]["incomplete_count"] == 0
+
+        resp = client.get("/api/dashboard", headers=_ADMIN_HEADERS)
+        assert resp.status_code == 200
+        rows = {row["job_id"]: row for row in resp.json()}
+        assert rows["job-1"]["analysis_state"] == "submitted"
+        assert "incomplete_count" not in rows["job-1"]
+
+        resp = client.get("/api/results/incomplete", headers=_ADMIN_HEADERS)
+        assert resp.status_code == 200
+        assert resp.json() == []
+
+    async def test_the_same_job_is_incomplete_after_a_fruitless_analysis(
+        self, client: TestClient, temp_db_path: Path
+    ) -> None:
+        """Same failures, but the analysis ran and classified none of them."""
+        await self._seed(
+            temp_db_path,
+            _failure("t1", analysis_error="model returned no usable analysis"),
+            state="analyzed",
+        )
+
+        resp = client.get("/results/job-1", headers=_ADMIN_HEADERS)
+        assert resp.json()["result"]["incomplete_count"] == 1
+
+        resp = client.get("/api/dashboard", headers=_ADMIN_HEADERS)
+        rows = {row["job_id"]: row for row in resp.json()}
+        assert rows["job-1"]["incomplete_count"] == 1
+
+        resp = client.get("/api/results/incomplete", headers=_ADMIN_HEADERS)
+        assert [j["job_id"] for j in resp.json()] == ["job-1"]
+
+    def test_an_analysed_job_with_classifications_is_not_incomplete(self) -> None:
+        payload = _result_payload(
+            [_failure("t1", classification="CODE ISSUE")], analysis_state="analyzed"
+        )
+        assert storage.incomplete_failures(payload) == []
+
+
+class TestBulkOverridesChunking:
+    """A dashboard page may carry every job (``limit=0``): the overrides query
+    must not put one bound variable per job in a single statement."""
+
+    async def _seed_overrides(self, temp_db_path: Path, job_ids: list[str]) -> None:
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+        async with aiosqlite.connect(temp_db_path) as db:
+            await db.executemany(
+                "INSERT INTO test_classifications "
+                "(job_id, test_name, classification, visible) VALUES (?, ?, ?, 1)",
+                [(job_id, "t1", "CODE ISSUE") for job_id in job_ids],
+            )
+            await db.commit()
+
+    async def test_ids_are_looked_up_across_chunks(
+        self, temp_db_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        job_ids = [f"job-{i}" for i in range(5)]
+        await self._seed_overrides(temp_db_path, job_ids)
+        monkeypatch.setattr(storage, "_JOB_ID_QUERY_CHUNK", 2)
+
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            overrides = await storage.get_effective_classifications_bulk(job_ids)
+
+        assert set(overrides) == set(job_ids)
+        assert overrides["job-4"] == {("t1", "", 0): "CODE ISSUE"}
+
+    async def test_a_large_job_set_does_not_exceed_the_variable_limit(
+        self, temp_db_path: Path
+    ) -> None:
+        """An unlimited dashboard page binds every job id. Unchunked, this set
+        exceeds SQLite's compiled bound-variable limit (32766 here) and the
+        request dies with ``too many SQL variables``."""
+        job_ids = [f"job-{i}" for i in range(40000)]
+
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            assert await storage.get_effective_classifications_bulk(job_ids) == {}
+
+
 class TestIncompleteListingEndpoint:
     async def _seed(self, temp_db_path: Path, job_id: str, *failures: dict[str, Any]):
         with patch.object(storage, "DB_PATH", temp_db_path):
