@@ -1423,6 +1423,42 @@ async def test_a_legacy_read_backfill_does_not_clobber_a_concurrent_patch(
     assert [failure["id"] for failure in read["result"]["failures"]] == ids
 
 
+async def test_a_refused_backfill_returns_the_ids_the_row_stored(_storage) -> None:
+    """A backfill that loses the row to a rival must report the stored ids.
+
+    Two reads of one legacy job each assign ids locally; the first lands them, so
+    the second finds ids already persisted and refuses its write. What it returns
+    still has to be what the row holds: otherwise ``get_result`` serves ids no
+    payload contains, and the failure lookup that verifies against the stored
+    payload cannot find them.
+    """
+    legacy = _payload(failure_count=3)
+    for failure in legacy["failures"]:
+        failure.pop("id")
+    await _insert_legacy("job-refused-backfill", legacy)
+    # The second request's read: parsed before the rival persisted any id.
+    second_read = storage.parse_result_json_lenient(
+        json.dumps(legacy), job_id="job-refused-backfill"
+    )
+
+    first = await storage.get_result("job-refused-backfill")
+    refused = await storage._backfill_failure_uuids("job-refused-backfill", second_read)
+
+    stored = storage.parse_result_json(
+        (await _stored(_storage, "job-refused-backfill"))["result_json"],
+        job_id="job-refused-backfill",
+    )
+    stored_ids = [failure["id"] for failure in stored["failures"]]
+    assert [failure["id"] for failure in first["result"]["failures"]] == stored_ids
+    assert [failure["id"] for failure in refused["failures"]] == stored_ids, (
+        "the refused backfill returned ids it never stored"
+    )
+    for failure_id in (failure["id"] for failure in refused["failures"]):
+        assert await storage.find_failure_by_uuid(failure_id) is not None, (
+            f"reported id {failure_id} is not in the stored payload"
+        )
+
+
 async def test_two_processes_editing_one_job_keep_both_edits(
     _storage, monkeypatch
 ) -> None:

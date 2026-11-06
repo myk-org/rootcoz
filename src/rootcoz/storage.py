@@ -4043,11 +4043,12 @@ async def _backfill_failure_uuids(
     Args:
         job_id: The analysis job identifier.
         result_data: The parsed payload this read is about to return (mutated in
-            place, so a refused backfill still returns stable ids).
+            place; only returned when the row holds no readable payload).
 
     Returns:
-        The payload as stored after the backfill, or *result_data* when there was
-        nothing to backfill or the write was refused.
+        The payload as stored after the backfill, or -- when the write did not land
+        -- the payload the row holds, so the ids reported are always the stored
+        ones. *result_data* is returned only when the row holds no readable payload.
     """
     if not _assign_missing_uuids(result_data):
         return result_data
@@ -4077,7 +4078,12 @@ async def _backfill_failure_uuids(
         return "landed"
 
     if not await _write_result(job_id, "failure id backfill", attempt):
-        return result_data
+        # Another writer got the ids in first, so the row holds its payload, not
+        # this read's: report the stored ids, or the read hands out ids nothing
+        # contains and the failure lookup cannot find them.
+        async with _connect_db() as db:
+            expect = await _read_write_state(db, job_id)
+        return parse_result_json_lenient(expect[0], job_id=job_id) or result_data
     logger.info(f"Backfilled missing failure UUIDs for job_id={job_id}")
     return stored
 
