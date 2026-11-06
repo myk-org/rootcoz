@@ -1,0 +1,26 @@
+name: Docs Guard
+
+on: pull_request
+
+permissions:
+  contents: read
+
+jobs:
+  no-generated-docs:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Reject generated docs in the PR
+        env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if git diff --name-only "origin/${BASE_REF}...HEAD" \
+            | grep -E '^(docs/[^/]+\.html|docs/assets/.*|docs/llms(-full)?\.txt|docs/search-index\.json)$'; then
+            echo "::error::Generated docs must not be committed — the site is built on main from docs/*.md."
+            echo "HTML, assets/, llms*.txt and search-index.json are build output of .github/workflows/docs.yml."
+            echo "Remove them from the PR and edit the docs/*.md source instead."
+            exit 1
+          fi
+          echo "No generated docs in the diff."
