@@ -20,7 +20,7 @@ from typing import Any
 
 from rootcoz import get_child_logger
 from rootcoz.engine.http_mcp import _workspace_install_lock
-from rootcoz.temp_paths import ABANDON, _Abandoned, delete_tree
+from rootcoz.temp_paths import ABANDON, DeleteResult, _Abandoned, delete_tree
 
 logger = get_child_logger(__name__)
 
@@ -988,11 +988,12 @@ def indexed_roots(workspace: Path) -> dict[str, Path]:
         }
 
 
-def cleanup_graph(workspace: Path, *, deadline: float | None = None) -> tuple[int, int]:
+def cleanup_graph(workspace: Path, *, deadline: float | None = None) -> DeleteResult:
     """Delete graphs and snapshots outside the AI-visible workspace.
 
-    Returns ``(bytes, entries)`` reclaimed. Sync on purpose — this takes a
-    blocking ``flock`` and is a reaper step, never called from the event loop.
+    Returns what was reclaimed and what could not be removed. Sync on purpose —
+    this takes a blocking ``flock`` and is a reaper step, never called from the
+    event loop.
 
     ``deadline`` bounds the wait for that ``flock``; ``None`` waits forever, which
     is what a direct caller without a builder to race expects. When it expires
@@ -1003,10 +1004,10 @@ def cleanup_graph(workspace: Path, *, deadline: float | None = None) -> tuple[in
     with _workspace_install_lock(Path(workspace).resolve(), deadline=deadline):
         if root.is_dir() and not root.is_symlink():
             return delete_tree(root)
-        return (0, 0)
+        return DeleteResult(0, 0)
 
 
-def reap_graph(job_id: str, workspace: Path) -> tuple[int, int] | _Abandoned:
+def reap_graph(job_id: str, workspace: Path) -> DeleteResult | _Abandoned:
     """``cleanup_graph`` as the reaper runs it: bounded, never under a builder.
 
     :data:`ABANDON` means the delete was abandoned, so the caller must not keep

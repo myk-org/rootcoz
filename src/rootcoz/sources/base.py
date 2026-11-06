@@ -56,7 +56,7 @@ def cleanup_extract_dir(
     if extract_path is None or not extract_path.exists():
         return
     logger.info("Cleaning up %s: %s", label, extract_path)
-    nbytes, entries = delete_tree(extract_path)
+    nbytes, entries, _ = delete_tree(extract_path)
     logger.info(
         "Cleanup complete: %s reclaimed=%d (%s) entries=%d",
         extract_path,

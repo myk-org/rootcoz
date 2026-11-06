@@ -15,7 +15,7 @@ from git.exc import GitCommandError
 from pydantic import HttpUrl
 
 from rootcoz import get_child_logger
-from rootcoz.temp_paths import delete_tree, rootcoz_temp_base
+from rootcoz.temp_paths import DeleteResult, delete_tree, rootcoz_temp_base
 
 if TYPE_CHECKING:
     from rootcoz.models import AdditionalRepo
@@ -325,21 +325,18 @@ class RepositoryManager:
         logger.info(f"Created workspace directory: {workspace_dir}")
         return workspace_dir
 
-    def cleanup(self) -> tuple[int, int]:
-        """Remove all cloned repositories; return ``(bytes, entries)`` reclaimed.
+    def cleanup(self) -> DeleteResult:
+        """Remove all cloned repositories; return what went and what did not.
 
         Sync on purpose — it is a reaper step, called from
         ``temp_paths.cleanup_off_loop`` and never from the event loop.
         """
         logger.debug("Cleaning up temporary directories")
-        reclaimed = 0
-        entries = 0
+        total = DeleteResult(0, 0)
         for temp_dir in self.temp_dirs:
-            nbytes, count = delete_tree(temp_dir)
-            reclaimed += nbytes
-            entries += count
+            total = total.plus(delete_tree(temp_dir))
         self.temp_dirs.clear()
-        return (reclaimed, entries)
+        return total
 
     def __enter__(self) -> Self:
         """Enter context manager."""

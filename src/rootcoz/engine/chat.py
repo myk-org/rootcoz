@@ -33,6 +33,7 @@ from rootcoz.jira import (
 from rootcoz.storage import AI_SYSTEM_USERNAME
 from rootcoz.temp_paths import (
     ABANDON,
+    DeleteResult,
     PathState,
     _Abandoned,
     delete_tree,
@@ -89,8 +90,8 @@ async def chat_workspace_lock(
     ``chat-{job}/{user}`` must finish before the next message creates into it.
     Yields the :class:`~rootcoz.temp_paths.PathState` and raises
     :class:`~rootcoz.temp_paths.PathStateUnknown` when a live builder still owns
-    a marked tree, so no caller reaches repository preparation on a half-deleted
-    workspace.
+    a marked tree, or the recovery could not delete every path in it, so no caller
+    reaches repository preparation on a half-deleted workspace.
     """
     async with reusable_path_lock(
         job_id, get_chat_workspace(job_id, username)
@@ -933,17 +934,17 @@ def build_admin_custom_tools(
     ]
 
 
-def _unlink_counted(path: Path) -> tuple[int, int]:
+def _unlink_counted(path: Path) -> DeleteResult:
     """Unlink ``path`` and report what that freed; an entry already gone frees nothing."""
     try:
         nbytes = path.lstat().st_size
         path.unlink()
     except FileNotFoundError:
-        return (0, 0)
-    return (nbytes, 1)
+        return DeleteResult(0, 0)
+    return DeleteResult(nbytes, 1)
 
 
-def _safe_remove_symlink(link: Path) -> tuple[int, int]:
+def _safe_remove_symlink(link: Path) -> DeleteResult:
     """Remove a symlink and its target directory if safe.
 
     Only deletes the target when it resolves to a path under the process
@@ -952,21 +953,20 @@ def _safe_remove_symlink(link: Path) -> tuple[int, int]:
     The link itself is counted too: it is an entry this call really removed.
     """
     target = link.resolve()
-    nbytes, entries = _unlink_counted(link)
+    removed = _unlink_counted(link)
     if target.exists() and target.is_dir():
         tmp_root = _tmp_root()
         if target.is_relative_to(tmp_root):
-            target_bytes, target_entries = delete_tree(target)
-            return (nbytes + target_bytes, entries + target_entries)
+            return removed.plus(delete_tree(target))
         logger.warning(
             "Chat cleanup: refusing to delete symlink target outside %s: %s",
             tmp_root,
             target,
         )
-    return (nbytes, entries)
+    return removed
 
 
-def cleanup_chat_repos(job_id: str, username: str = "") -> tuple[int, int] | _Abandoned:
+def cleanup_chat_repos(job_id: str, username: str = "") -> DeleteResult | _Abandoned:
     """Delete cloned repos, graphs and symlinked artifact targets from a workspace.
 
     A reaper step, never inline. The workspace itself (sessions included) is the
@@ -981,29 +981,23 @@ def cleanup_chat_repos(job_id: str, username: str = "") -> tuple[int, int] | _Ab
     graph = reap_graph(job_id, workspace)
     if isinstance(graph, _Abandoned):
         return ABANDON
-    nbytes, entries = graph
+    total = graph
     if not workspace.exists():
-        return (nbytes, entries)
+        return total
 
     # Delete everything except hidden dirs (which contain session data)
     for item in workspace.iterdir():
         if item.name.startswith("."):
             continue  # Keep .claude/, .cursor/ etc (session data)
         if item.is_symlink():
-            item_bytes, item_entries = _safe_remove_symlink(item)
-            nbytes += item_bytes
-            entries += item_entries
+            total = total.plus(_safe_remove_symlink(item))
         elif item.is_dir():
-            item_bytes, item_entries = delete_tree(item)
-            nbytes += item_bytes
-            entries += item_entries
+            total = total.plus(delete_tree(item))
         else:
-            item_bytes, item_entries = _unlink_counted(item)
-            nbytes += item_bytes
-            entries += item_entries
+            total = total.plus(_unlink_counted(item))
 
     logger.info(f"Cleaned up chat repos for job {job_id}")
-    return (nbytes, entries)
+    return total
 
 
 def _chat_mcp_lock_targets(workspace: Path) -> list[Path]:
@@ -1019,7 +1013,7 @@ def _chat_mcp_lock_targets(workspace: Path) -> list[Path]:
 
 def cleanup_chat_workspace(
     job_id: str, username: str = ""
-) -> tuple[int, int] | _Abandoned:
+) -> DeleteResult | _Abandoned:
     """Delete the entire chat workspace including sessions.
 
     :data:`ABANDON` means a live graph builder still owns the tree, so the
@@ -1034,7 +1028,7 @@ def cleanup_chat_workspace(
     graph = reap_graph(job_id, workspace)
     if isinstance(graph, _Abandoned):
         return ABANDON
-    nbytes, entries = graph
+    total = graph
     # Hold each workspace's MCP install lock for the whole delete + dump
     # unlink so an in-flight installer cannot recreate credentials after
     # the job (or nested user dir) was removed.
@@ -1047,16 +1041,12 @@ def cleanup_chat_workspace(
             # the tree walk (which unlinks the symlink, not its target).
             for item in workspace.iterdir():
                 if item.is_symlink():
-                    item_bytes, item_entries = _safe_remove_symlink(item)
-                    nbytes += item_bytes
-                    entries += item_entries
-            tree_bytes, tree_entries = delete_tree(workspace)
-            nbytes += tree_bytes
-            entries += tree_entries
+                    total = total.plus(_safe_remove_symlink(item))
+            total = total.plus(delete_tree(workspace))
         for target in targets:
             cleanup_http_tools_mcp(target)
     logger.info(f"Deleted chat workspace for job {job_id}")
-    return (nbytes, entries)
+    return total
 
 
 # -- Shared prompt building helpers --

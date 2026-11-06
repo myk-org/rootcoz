@@ -1302,9 +1302,9 @@ class TestChatCleanup:
         (tmp_path / "console-output.txt").write_text("x" * 64)
 
         with patch("rootcoz.engine.chat.get_chat_workspace", return_value=tmp_path):
-            nbytes, entries = cleanup_chat_repos("job-count")
+            nbytes, entries, failed = cleanup_chat_repos("job-count")
 
-        assert (nbytes, entries) == (64, 1)
+        assert (nbytes, entries, failed) == (64, 1, 0)
 
     def test_cleanup_repos_removes_graph_when_workspace_missing(
         self, tmp_path, monkeypatch

@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
+from typing import NamedTuple
 
 from rootcoz import get_child_logger
 from rootcoz.url_utils import mask_url_credentials_in_text
@@ -38,6 +39,26 @@ class _Abandoned:
 #: The tree is left for the next sweep instead of being deleted under a live
 #: builder; the runner still runs the ``always`` steps that must not be skipped.
 ABANDON = _Abandoned()
+
+
+class DeleteResult(NamedTuple):
+    """What a delete removed, and how many paths it could **not** remove.
+
+    ``failed`` is the number of distinct paths left behind, so ``0`` is the only
+    value that says the tree is gone. A caller deciding about reuse reads it; a
+    caller that only reports reclaiming reads ``nbytes``/``entries``.
+    """
+
+    nbytes: int
+    entries: int
+    failed: int = 0
+
+    def plus(self, other: DeleteResult) -> DeleteResult:
+        return DeleteResult(
+            self.nbytes + other.nbytes,
+            self.entries + other.entries,
+            self.failed + other.failed,
+        )
 
 
 class CleanupOutcome(enum.Enum):
@@ -201,8 +222,8 @@ def _collapse_ancestors(paths: set[str]) -> list[str]:
     return kept
 
 
-def delete_tree(path: Path) -> tuple[int, int]:
-    """Delete ``path`` in one post-order walk; return ``(bytes, entries)``.
+def delete_tree(path: Path) -> DeleteResult:
+    """Delete ``path`` in one post-order walk; return what went and what did not.
 
     Symlinks are unlinked, never descended into — a symlinked root included, so a
     planted link cannot turn a workspace delete into its target's delete. Every
@@ -227,12 +248,18 @@ def delete_tree(path: Path) -> tuple[int, int]:
     through the same template was dropped and only surfaced as ``repeated N times``
     on the next record (#402).
 
+    Failures are *reported*, never raised: a partial delete still returns, so the
+    return value is the only thing that can tell a caller the tree is gone —
+    ``failed > 0`` means at least one path survived (EPERM, ENOTEMPTY, EBUSY, or an
+    entry that vanished and reappeared). Raising instead would abort the reaper's
+    remaining steps for a tree the next sweep can finish.
+
     No second pass and no ``statvfs``: the size is accumulated by the walk itself,
     so it is attributable to this tree even on a shared volume.
     """
     top = os.fspath(path)
     if not os.path.lexists(top):
-        return (0, 0)
+        return DeleteResult(0, 0)
     size = 0
     entries = 0
     # errno -> (distinct paths that failed, strerror); insertion order gives the example
@@ -302,17 +329,17 @@ def delete_tree(path: Path) -> tuple[int, int]:
         entries += 1
 
     remove(top, None, top)
+    failed = 0
     if failures:
         # Formatted inline, not %-args: the content must be in ``record.msg`` or a
         # template-keyed dedupe filter swallows the whole line.
         parts: list[str] = []
-        total = 0
         for code, (paths, reason) in sorted(failures.items()):
             # Only ENOTEMPTY nests: an ancestor above a surviving entry repeats it.
             kept = (
                 _collapse_ancestors(paths) if code == errno.ENOTEMPTY else list(paths)
             )
-            total += len(kept)
+            failed += len(kept)
             parts.append(f"errno={code} {reason}: {len(kept)} e.g. {kept[0]}")
         detail = ", ".join(parts)
         # A directory we could not open reads as one path otherwise, hiding the
@@ -323,11 +350,11 @@ def delete_tree(path: Path) -> tuple[int, int]:
             if not_descended
             else ""
         )
-        logger.warning(f"cleanup: {total} paths not deleted ({detail}){skipped}")
-    return (size, entries)
+        logger.warning(f"cleanup: {failed} paths not deleted ({detail}){skipped}")
+    return DeleteResult(size, entries, failed)
 
 
-def reap_reusable_path(what: str, path: Path) -> tuple[int, int] | _Abandoned:
+def reap_reusable_path(what: str, path: Path) -> DeleteResult | _Abandoned:
     """``delete_tree`` for a path whose earlier delete abandoned, under its lock.
 
     Recovery used to run the whole-tree delete with no lock at all — i.e. under the
@@ -368,7 +395,9 @@ def _run_cleanup(
 
     The returned :class:`CleanupOutcome` is what a caller that decides about
     reuse has to read: ``INCOMPLETE`` means the delete did not establish that the
-    tree is gone, so it must never be treated as reusable.
+    tree is gone, so it must never be treated as reusable. A step that returns a
+    delete result with paths it could not remove is that case too — it logged
+    them and returned, so nothing raised.
     """
     clean = True
 
@@ -395,14 +424,20 @@ def _run_cleanup(
         elapsed = int((time.monotonic() - started) * 1000)
         if result is ABANDON:
             return result
-        if isinstance(result, tuple) and len(result) == 2:
-            nbytes, entries = result
+        if isinstance(result, tuple) and len(result) >= 2:
+            nbytes, entries = result[0], result[1]
+            failed = getattr(result, "failed", 0)
+            if failed:
+                # The step reported paths it could not delete, so it did not
+                # establish that the tree is gone: this is not a clean delete.
+                clean = False
             # Inline for the same reason: two steps reclaiming bytes through one
             # template would log once and hide the other's figure.
             logger.log(
                 logging.INFO if nbytes else logging.DEBUG,
                 f"cleanup what={what} step={name} reclaimed={nbytes} "
-                f"({_human(nbytes)}) entries={entries} ms={elapsed}",
+                f"({_human(nbytes)}) entries={entries} ms={elapsed}"
+                + (f" failed={failed}" if failed else ""),
             )
         else:
             logger.debug(f"cleanup what={what} step={name} ms={elapsed}")
@@ -534,7 +569,9 @@ async def _reuse_state(what: str, path: Path) -> PathState:
     Recovery is a reaper step too: :func:`reap_reusable_path` waits, bounded, for
     the builder's install lock and abandons — tree and marker untouched — when
     that builder is still running, and a marker we could not write stops the
-    delete the same way. Both leave a tree whose contents nobody can vouch for.
+    delete the same way. Both leave a tree whose contents nobody can vouch for,
+    and so does a delete that could not remove every path: it reports ``INCOMPLETE``
+    through :func:`delete_tree`'s ``failed`` count.
     """
     if not delete_marker(path).exists():
         return PathState.REUSABLE
@@ -567,7 +604,8 @@ async def reusable_path_lock(what: str, path: Path) -> AsyncIterator[PathState]:
     caller creates it from scratch (:attr:`PathState.NOT_REUSABLE`).
 
     Raises :class:`PathStateUnknown` instead of yielding when the delete could not
-    establish the tree is gone — a live builder still owns it — because creating
+    establish the tree is gone — a live builder still owns it, or the delete left
+    paths behind — because creating
     into a half-deleted tree under a builder is worse than refusing the request.
     """
     key, entry = _lock_for(path)
@@ -576,7 +614,8 @@ async def reusable_path_lock(what: str, path: Path) -> AsyncIterator[PathState]:
             state = await _reuse_state(what, path)
             if state is PathState.UNKNOWN:
                 raise PathStateUnknown(
-                    f"{what}: a live builder still owns {path.name}; refusing to "
+                    f"{what}: {path.name} could not be established as whole (a live "
+                    "builder, or a delete that left paths behind); refusing to "
                     "reuse a tree whose contents cannot be established"
                 )
             yield state

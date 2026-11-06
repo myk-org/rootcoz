@@ -300,6 +300,7 @@ from rootcoz.storage import (
     update_status,
 )
 from rootcoz.temp_paths import (
+    DeleteResult,
     cleanup_off_loop,
     cleanup_path_off_loop,
     delete_tree,
@@ -21623,11 +21624,11 @@ def _get_admin_artifacts_dir(username: str) -> Path:
     return _ADMIN_ARTIFACTS_BASE / safe_user
 
 
-def _cleanup_admin_artifacts(username: str) -> tuple[int, int]:
+def _cleanup_admin_artifacts(username: str) -> DeleteResult:
     """Delete all artifacts for an admin user; a reaper step, never inline."""
     artifacts_dir = _get_admin_artifacts_dir(username)
     if not artifacts_dir.exists():
-        return (0, 0)
+        return DeleteResult(0, 0)
     try:
         reclaimed = delete_tree(artifacts_dir)
         logger.info("Admin chat: cleaned up artifacts for %s", username)
@@ -21638,7 +21639,7 @@ def _cleanup_admin_artifacts(username: str) -> tuple[int, int]:
             username,
             exc_info=True,
         )
-        return (0, 0)
+        return DeleteResult(0, 0)
 
 
 class SaveArtifactRequest(BaseModel):

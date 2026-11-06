@@ -742,7 +742,7 @@ def test_reap_graph_deletes_after_the_builder_releases_the_lock(tmp_path, monkey
             release.set()
         builder.result(timeout=2)
 
-    nbytes, _entries = graft.reap_graph("job-2", workspace)
+    nbytes, _entries, _failed = graft.reap_graph("job-2", workspace)
     assert nbytes > 0
     assert not root.exists()
 
@@ -772,7 +772,7 @@ def test_cleanup_graph_without_a_deadline_still_waits_and_succeeds(tmp_path):
         timer.start()
         try:
             started = time.monotonic()
-            nbytes, _entries = graft.cleanup_graph(workspace)
+            nbytes, _entries, _failed = graft.cleanup_graph(workspace)
             waited = time.monotonic() - started
         finally:
             timer.cancel()

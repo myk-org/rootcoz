@@ -424,10 +424,11 @@ def test_delete_tree_reports_size_and_entries(tmp_path) -> None:
     (root / "a" / "b" / "file.bin").write_text("x" * 200)
     (root / "top.txt").write_text("y" * 50)
 
-    nbytes, entries = delete_tree(root)
+    nbytes, entries, failed = delete_tree(root)
 
     assert nbytes == 250
-    assert entries == 5  # tree, a, b, file.bin, top.txt
+    assert entries == 5
+    assert failed == 0  # tree, a, b, file.bin, top.txt
     assert not root.exists()
 
 
@@ -454,11 +455,11 @@ def test_delete_tree_unlinks_a_symlinked_root_without_its_target(tmp_path) -> No
     link = tmp_path / "workspace"
     link.symlink_to(outside)
 
-    nbytes, entries = delete_tree(link)
+    nbytes, entries, failed = delete_tree(link)
 
     assert (outside / "keep.txt").read_text() == "keep me"
     assert not link.is_symlink()
-    assert (nbytes, entries) == (len(os.fspath(outside)), 1)
+    assert (nbytes, entries, failed) == (len(os.fspath(outside)), 1, 0)
 
 
 def test_a_directory_swapped_for_a_symlink_is_not_followed(
@@ -515,11 +516,12 @@ def test_a_file_that_vanished_mid_walk_is_not_reported_as_undeleted(
         return real_unlink(name, *args, **kwargs)
 
     monkeypatch.setattr(os, "unlink", unlink)
-    nbytes, entries = delete_tree(root)
+    nbytes, entries, failed = delete_tree(root)
     monkeypatch.undo()
 
     assert not root.exists(), "a vanished entry stopped the walk"
     assert (nbytes, entries) == (0, 2)
+    assert failed == 0, "a vanished entry is not a failed delete"
     assert "paths not deleted" not in caplog.text, caplog.text
 
 
@@ -538,11 +540,12 @@ def test_a_failed_delete_is_not_reported_as_reclaimed(
         return real_unlink(name, *args, **kwargs)
 
     monkeypatch.setattr(os, "unlink", unlink)
-    nbytes, entries = delete_tree(root)
+    nbytes, entries, failed = delete_tree(root)
     monkeypatch.undo()
 
     assert not (root / "good").exists(), "the rest of the tree was abandoned"
     assert (root / "stuck.txt").exists()
+    assert failed == 2, "the stuck file and its root rmdir are the only failures"
     # ``reclaimed`` is what is really gone: the stuck file's 7 bytes and the root
     # directory (ENOTEMPTY) are excluded, the readable half is still counted.
     assert (nbytes, entries) == (100, 2)
@@ -566,11 +569,12 @@ def test_unreadable_entry_does_not_abandon_the_tree(
         return real_open(name, flags, *args, **kwargs)
 
     monkeypatch.setattr(os, "open", open_dir)
-    nbytes, entries = delete_tree(root)
+    nbytes, entries, failed = delete_tree(root)
     monkeypatch.undo()
 
     assert nbytes >= 100, "the readable half of the tree was not deleted"
     assert entries >= 2
+    assert failed, "an unreadable directory is not a deleted one"
     assert not (root / "good").exists()
     assert caplog.text.count("errno=13") == 1
     # The poisoned directory's contents are unknown, not one entry.
@@ -598,8 +602,9 @@ def test_a_scan_error_does_not_abandon_the_rest_of_the_tree(
         return real_scandir(target)
 
     monkeypatch.setattr(os, "scandir", scandir)
-    nbytes, entries = delete_tree(root)
+    nbytes, entries, failed = delete_tree(root)
     monkeypatch.undo()
+    assert failed, "an unscannable directory leaves the tree behind"
 
     assert not sibling.exists(), "the sibling after the unscannable dir was abandoned"
     assert (poisoned / "stuck.txt").exists()
@@ -645,11 +650,12 @@ def test_two_distinct_errnos_are_one_aggregated_warning(
     (root / "stuck.txt").write_text("y" * 7)
     _fail_unlink_of({"stuck.txt"}, monkeypatch)
 
-    nbytes, entries = delete_tree(root)
+    nbytes, entries, failed = delete_tree(root)
     monkeypatch.undo()
 
     # Accounting is unchanged: only what is really gone is counted.
     assert (nbytes, entries) == (100, 2)
+    assert failed == 2, "the aggregated warning counts these same two paths"
     warnings = _cleanup_warnings(caplog)
     assert len(warnings) == 1, warnings
     line = warnings[0]
@@ -669,10 +675,11 @@ def test_repeated_errnos_are_counted_not_logged_per_entry(
     (root / "stuck-b.txt").write_text("b")
     _fail_unlink_of({"stuck-a.txt", "stuck-b.txt"}, monkeypatch)
 
-    nbytes, entries = delete_tree(root)
+    nbytes, entries, failed = delete_tree(root)
     monkeypatch.undo()
 
     assert (nbytes, entries) == (0, 0)
+    assert failed == 3
     warnings = _cleanup_warnings(caplog)
     assert len(warnings) == 1, warnings
     assert warnings[0].startswith("cleanup: 3 paths not deleted ("), warnings[0]
@@ -698,7 +705,7 @@ def test_one_stuck_file_at_depth_four_counts_paths_not_operations(
     (deep / "stuck.txt").write_text("x")
     _fail_unlink_of({"stuck.txt"}, monkeypatch)
 
-    assert delete_tree(root) == (0, 0)
+    assert delete_tree(root)[:2] == (0, 0)
     monkeypatch.undo()
 
     warnings = _cleanup_warnings(caplog)
@@ -739,7 +746,7 @@ def test_many_stuck_siblings_cost_no_more_than_the_walk_itself(
     stuck_root = walk("stuck-walk")
     _fail_unlink_of({"stuck.txt"}, monkeypatch)
     started = time.perf_counter()
-    assert delete_tree(stuck_root) == (0, 0)
+    assert delete_tree(stuck_root)[:2] == (0, 0)
     stuck_seconds = time.perf_counter() - started
     monkeypatch.undo()
 
@@ -762,12 +769,12 @@ def test_a_clean_walk_logs_nothing(tmp_path, caplog) -> None:
     (root / "dir").mkdir(parents=True)
     (root / "dir" / "file.txt").write_text("x" * 10)
 
-    assert delete_tree(root) == (10, 3)  # dirs report 0 bytes on this fs
+    assert delete_tree(root) == (10, 3, 0)  # dirs report 0 bytes on this fs
     assert caplog.records == []
 
 
 def test_delete_tree_on_a_missing_path_is_a_no_op(tmp_path) -> None:
-    assert delete_tree(tmp_path / "never-existed") == (0, 0)
+    assert delete_tree(tmp_path / "never-existed") == (0, 0, 0)
 
 
 # -- The two analysis ``finally`` blocks ----------------------------------
@@ -1025,6 +1032,63 @@ async def test_recovery_deletes_after_the_builder_releases_the_lock(
         assert state is PathState.NOT_REUSABLE
         assert not path.exists(), "the marked tree was reused"
     assert not delete_marker(path).exists()
+
+
+async def test_a_clean_recovery_still_reports_not_reusable(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """Nothing left behind: the delete reports no failure, so reuse is refused.
+
+    The guard for the case below: reporting the failure must not turn a delete
+    that really removed the tree into ``UNKNOWN``.
+    """
+    from rootcoz.engine import chat
+
+    workspace = tmp_path / "chat-job" / "alice"
+    (workspace / "repo").mkdir(parents=True)
+    (workspace / "repo" / "old.txt").write_text("x")
+    delete_marker(workspace).write_text("", encoding="utf-8")
+    monkeypatch.setattr(chat, "get_chat_workspace", lambda *args, **kwargs: workspace)
+
+    async with chat.chat_workspace_lock("job-clean", "alice") as state:
+        assert state is PathState.NOT_REUSABLE
+        assert not workspace.exists(), "a clean recovery kept the old tree"
+    assert not delete_marker(workspace).exists()
+    assert delete_tree(workspace) == (0, 0, 0), "a gone path reports no failure"
+    assert "paths not deleted" not in caplog.text, caplog.text
+
+
+async def test_a_partial_recovery_never_hands_back_the_residual_repo(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """One unlinkable path makes the recovery incomplete, so init must not reuse.
+
+    ``delete_tree`` logged the failed unlink and returned normally, so the step
+    read as ``CLEAN``, ``_reuse_state`` answered ``NOT_REUSABLE``, and chat init
+    went on to skip cloning into the repo directory the failed delete left.
+    """
+    from rootcoz.engine import chat
+
+    workspace = tmp_path / "chat-job" / "alice"
+    (workspace / "repo").mkdir(parents=True)
+    (workspace / "repo" / "leftover.txt").write_text("stale")
+    (workspace / "repo" / "stuck.txt").write_text("x")
+    delete_marker(workspace).write_text("", encoding="utf-8")
+    monkeypatch.setattr(chat, "get_chat_workspace", lambda *args, **kwargs: workspace)
+    _fail_unlink_of({"stuck.txt"}, monkeypatch)
+    reached: list[object] = []
+
+    with pytest.raises(PathStateUnknown):
+        async with chat.chat_workspace_lock("job-partial", "alice") as state:
+            # ``main.py``'s chat init from here on: create, then clone.
+            reached.append(state)
+            reached.append(chat.ensure_chat_workspace("job-partial", "alice"))
+    monkeypatch.undo()
+
+    assert reached == [], "chat init went ahead on a half-deleted workspace"
+    assert (workspace / "repo" / "stuck.txt").exists(), "the residue is still here"
+    assert f"errno={errno.EACCES}" in caplog.text, caplog.text
+    assert "failed=2" in caplog.text, caplog.text
 
 
 async def test_an_abandoned_cleanup_keeps_the_marker_while_a_builder_holds_the_lock(
