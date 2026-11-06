@@ -598,6 +598,7 @@ class TestListingScanIsBounded:
         assert resp.status_code == 200
         assert len(resp.json()["jobs"]) == 1
         assert resp.json()["truncated"] is True
+        assert resp.json()["truncated_by"] == "limit"
         assert len(visited) <= 1 + batch
 
     async def test_override_lookups_are_batched(
@@ -663,6 +664,7 @@ class TestListingScanIsBounded:
         # Every seeded row matches, so only the ceiling can stop the scan.
         assert len(resp.json()["jobs"]) < 20
         assert resp.json()["truncated"] is True
+        assert resp.json()["truncated_by"] == "scan_ceiling"
         assert len(visited) <= 3 + 2
 
 

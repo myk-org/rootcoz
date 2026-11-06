@@ -1033,11 +1033,19 @@ def results_incomplete(
         columns=["job_id", "job_name", "build_number", "incomplete_count"],
     )
     if isinstance(data, dict) and data.get("truncated"):
-        typer.echo(
-            f"Listing truncated after {data.get('scanned', 0)} row(s); "
-            "raise --limit to see more.",
-            err=True,
-        )
+        if data.get("truncated_by") == "scan_ceiling":
+            typer.echo(
+                f"Listing truncated after {data.get('scanned', 0)} row(s); "
+                "the server's scan ceiling stopped the scan, so older jobs "
+                "were not examined.",
+                err=True,
+            )
+        else:
+            typer.echo(
+                f"Listing truncated after {data.get('scanned', 0)} row(s); "
+                "raise --limit to see more.",
+                err=True,
+            )
 
 
 @results_app.command("submitters")

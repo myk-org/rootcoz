@@ -800,7 +800,8 @@ class RootCozClient:
         """List jobs with failures that have no usable classification.
 
         GET /api/results/incomplete. Current servers return ``{"jobs": [...],
-        "truncated": bool, "scanned": int}``; older servers return a bare list.
+        "truncated": bool, "truncated_by": str | None, "scanned": int}``;
+        older servers return a bare list.
         """
         params: dict[str, Any] | None = None
         if limit != 100:

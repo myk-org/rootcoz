@@ -265,6 +265,36 @@ class TestResultsCommands:
         assert "2" in result.output
         mock_client.list_incomplete_analyses.assert_called_once_with(limit=10)
 
+    def test_results_incomplete_scan_ceiling_does_not_advise_raising_limit(
+        self, mock_client
+    ):
+        """The ceiling, not ``limit``, stopped the scan: raising it cannot help."""
+        mock_client.list_incomplete_analyses.return_value = {
+            "jobs": [],
+            "truncated": True,
+            "truncated_by": "scan_ceiling",
+            "scanned": 5000,
+        }
+        result = runner.invoke(app, ["results", "incomplete", "--limit", "500"])
+        assert result.exit_code == 0
+        assert "5000" in result.output
+        assert "ceiling" in result.output
+        assert "--limit" not in result.output
+
+    def test_results_incomplete_limit_truncation_advises_raising_limit(
+        self, mock_client
+    ):
+        mock_client.list_incomplete_analyses.return_value = {
+            "jobs": [],
+            "truncated": True,
+            "truncated_by": "limit",
+            "scanned": 42,
+        }
+        result = runner.invoke(app, ["results", "incomplete", "--limit", "10"])
+        assert result.exit_code == 0
+        assert "42" in result.output
+        assert "raise --limit" in result.output
+
     def test_results_incomplete_json_includes_test_names(self, mock_client):
         mock_client.list_incomplete_analyses.return_value = [
             {

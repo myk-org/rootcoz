@@ -5015,16 +5015,18 @@ async def list_incomplete_analyses(limit: int = 100) -> dict[str, Any]:
     Returns:
         Dict with ``jobs`` (the matching rows), ``truncated`` (``True`` when
         the scan stopped at ``limit`` or the scan ceiling before examining
-        every row, so more matching jobs may exist) and ``scanned`` (rows
-        examined). There is deliberately no total: counting every match would
-        require the full-table scan this bound exists to prevent.
+        every row, so more matching jobs may exist), ``truncated_by``
+        (``"limit"`` or ``"scan_ceiling"``, the cause of ``truncated``; ``None``
+        when not truncated) and ``scanned`` (rows examined). There is
+        deliberately no total: counting every match would require the
+        full-table scan this bound exists to prevent.
     """
     if limit < 0:
         raise ValueError("limit must be >= 0")
 
     jobs: list[dict[str, Any]] = []
     visited = 0
-    truncated = False
+    truncated_by: str | None = None
     async with _connect_db() as db:
         cursor = await db.execute(
             "SELECT job_id, result_json, COALESCE(analysis_state, 'analyzed') "
@@ -5076,11 +5078,21 @@ async def list_incomplete_analyses(limit: int = 100) -> dict[str, Any]:
                     }
                 )
                 if limit and len(jobs) >= limit:
-                    return {"jobs": jobs, "truncated": True, "scanned": visited}
+                    return {
+                        "jobs": jobs,
+                        "truncated": True,
+                        "truncated_by": "limit",
+                        "scanned": visited,
+                    }
         else:
             # Stopped at the scan ceiling with rows still unexamined.
-            truncated = True
-    return {"jobs": jobs, "truncated": truncated, "scanned": visited}
+            truncated_by = "scan_ceiling"
+    return {
+        "jobs": jobs,
+        "truncated": truncated_by is not None,
+        "truncated_by": truncated_by,
+        "scanned": visited,
+    }
 
 
 async def list_results_for_dashboard_filtered(
