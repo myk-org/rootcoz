@@ -386,11 +386,19 @@ function ReportContent() {
     () => (result ? collectAllTestKeys(result.failures ?? [], result.child_job_analyses ?? []) : []),
     [result],
   )
+  // Same overrides and state gate as `incompleteCount`: a reviewer override
+  // classifies a provider placeholder, so the banner must stop blaming the
+  // provider for it.
   const providerFailureCount = useMemo(
     () => (result
-      ? countProviderFailures(result.failures ?? [], result.child_job_analyses ?? [])
+      ? countProviderFailures(
+        result.failures ?? [],
+        result.child_job_analyses ?? [],
+        state.classifications,
+        result.analysis_state,
+      )
       : 0),
-    [result],
+    [result, state.classifications],
   )
   const repoUrls = useMemo<RepoUrl[]>(
     () => buildRepoUrls(result?.request_params),

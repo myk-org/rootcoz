@@ -3563,31 +3563,6 @@ def incomplete_failures(
     return names
 
 
-async def incomplete_failures_for_job(
-    job_id: str, result_data: dict[str, Any], *, analysis_state: str | None = None
-) -> list[str]:
-    """Return a stored job's unclassified test names, overrides applied.
-
-    An override can only fill in a classification, never blank one, so a result
-    whose stored classifications are all non-empty is complete without a
-    database round-trip.
-
-    Args:
-        job_id: Analysis job identifier.
-        result_data: Parsed result dictionary from result_json.
-
-    Returns:
-        Test names whose effective classification is empty.
-    """
-    candidates = incomplete_failures(result_data, analysis_state=analysis_state)
-    if not candidates:
-        return []
-    overrides = await get_all_effective_classifications(job_id)
-    if not overrides:
-        return candidates
-    return incomplete_failures(result_data, overrides, analysis_state=analysis_state)
-
-
 def _resolve_history_build_fields(result_data: dict[str, Any]) -> tuple[str, int]:
     """Extract build_id and build_number for failure_history rows."""
     build_id = str(result_data.get("build_id") or "")
