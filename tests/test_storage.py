@@ -1398,6 +1398,46 @@ class TestFindFailureByUuid:
             assert result is None
 
 
+async def test_fail_job_without_result_write_keeps_a_newer_terminal_status(
+    setup_test_db: Path,
+) -> None:
+    """The status-only fallback must not end a job an abort already ended (#419).
+
+    It exists because a write to an unsupported payload was refused, so it is a
+    consequence of the refusal and not a decision about the job: a terminal status
+    that landed first is newer than that refusal and keeps its error. A job still
+    running is still marked failed. Both go through the guarded write path every
+    other status write uses.
+    """
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.save_result("job-aborted-first", "", "running")
+        await storage.update_status("job-aborted-first", "aborted")
+        await storage.fail_job_without_result_write("job-aborted-first", "refused")
+
+        await storage.save_result("job-running", "", "running")
+        await storage.fail_job_without_result_write("job-running", "refused")
+
+        async def stored(job_id: str) -> Any:
+            async with storage._connect_db() as db:
+                return await (
+                    await db.execute(
+                        "SELECT status, error, completed_at FROM results"
+                        " WHERE job_id = ?",
+                        (job_id,),
+                    )
+                ).fetchone()
+
+        aborted = await stored("job-aborted-first")
+        failed = await stored("job-running")
+
+    assert aborted["status"] == "aborted"
+    assert not aborted["error"]
+    assert not aborted["completed_at"], "the fallback stamped an unrelated job"
+    assert failed["status"] == "failed"
+    assert failed["error"] == "refused"
+    assert failed["completed_at"]
+
+
 @pytest.mark.asyncio
 async def test_list_distinct_job_names(setup_test_db: Path):
     """list_distinct_job_names returns unique non-empty job names."""

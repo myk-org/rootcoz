@@ -549,14 +549,14 @@ async def test_compression_does_not_overwrite_a_concurrent_patch(_storage) -> No
     newer = {"job_name": "newer", "request_params": {}, "failures": []}
     compress = storage._compress_result_rows
 
-    def race(rows: list) -> list:
+    def race(rows: list, **kwargs: Any) -> list:
         # Another writer replaces the payload after this batch was read.
         with sqlite3.connect(_storage) as conn:
             conn.execute(
                 "UPDATE results SET result_json = ? WHERE job_id = 'job-race'",
                 (json.dumps(newer),),
             )
-        return compress(rows)
+        return compress(rows, **kwargs)
 
     with patch.object(storage, "_compress_result_rows", race):
         stats = await storage.backfill_result_json_compression()
@@ -721,6 +721,40 @@ async def test_denorm_sweep_repairs_a_row_an_old_build_rewrote(_storage) -> None
 
     # Converged: a further pass parses the row but no longer writes it.
     assert await storage.backfill_results_denorm() == 0
+
+
+async def test_compression_rederives_a_row_an_old_build_rewrote(_storage) -> None:
+    """A frame only ever lands with the columns derived from that same payload.
+
+    The denorm sweep runs first, then a pre-compression build rewrites a row it
+    will not revisit: framing that text with the columns of the older payload would
+    leave the filters stale in a row no later sweep visits, because a frame at the
+    current version is final.
+    """
+    await _insert_legacy("job-old-writer-compress", _payload(failure_count=20))
+    assert await storage.backfill_results_denorm() == 1
+
+    newer = _payload(failure_count=20, summary="newer summary", job_name="renamed")
+    newer["request_params"]["submitted_by"] = "dana"
+    newer["failures"].append(
+        {"id": "failure-old-writer", "test_name": "t", "error": "e"}
+    )
+    async with storage._connect_db() as db:
+        await db.execute(
+            "UPDATE results SET result_json = ? WHERE job_id = ?",
+            (json.dumps(newer), "job-old-writer-compress"),
+        )
+        await db.commit()
+    stale = await _stored(_storage, "job-old-writer-compress")
+    assert (stale["summary"], stale["submitted_by"]) == ("many failures", "yuval")
+
+    assert (await storage.backfill_result_json_compression())["rows"] == 1
+
+    row = await _stored(_storage, "job-old-writer-compress")
+    assert row["kind"] == "blob"
+    assert (row["summary"], row["submitted_by"]) == ("newer summary", "dana")
+    assert "failure-old-writer" in row["failure_ids"]
+    assert storage.parse_result_json(row["result_json"]) == newer
 
 
 async def test_denorm_sweep_survives_an_undecodable_row(_storage, storage_logs) -> None:
@@ -1063,15 +1097,66 @@ async def test_find_failure_by_uuid_reads_a_compressed_row(_storage) -> None:
     assert await storage.find_failure_by_uuid("not-a-uuid-at-all") is None
 
 
+async def test_find_failure_by_uuid_finds_a_row_the_sweep_has_not_reached(
+    _storage,
+) -> None:
+    """A legacy row holds ``''`` in ``failure_ids`` until the sweep reaches it.
+
+    Startup does not await that sweep, so the derived column cannot be the only way
+    in: failure lookup is how both re-analysis endpoints resolve their target.
+    """
+    await _insert_legacy("job-legacy-lookup", _payload(failure_count=3))
+    row = await _stored(_storage, "job-legacy-lookup")
+    assert (row["failure_ids"], row["denorm_version"]) == ("", 0)
+
+    top = await storage.find_failure_by_uuid("failure-1")
+    assert top is not None
+    assert top["job_id"] == "job-legacy-lookup"
+
+    child = await storage.find_failure_by_uuid("child-failure-1")
+    assert child is not None
+    assert child["child_job_name"] == "child-job"
+
+    # Derived now, so the prefilter finds it without looking at the payload.
+    assert await storage.backfill_results_denorm() == 1
+    found = await storage.find_failure_by_uuid("failure-1")
+    assert found is not None
+    assert found["job_id"] == "job-legacy-lookup"
+
+
+async def test_get_job_submitters_reads_a_row_the_sweep_has_not_reached(
+    _storage,
+) -> None:
+    """Ownership checks read the payload of an underived legacy row.
+
+    The column is empty until the sweep fills it, which would refuse an operator
+    the delete of their own job for as long as the sweep takes.
+    """
+    await _insert_legacy("job-legacy-submitter", _payload(failure_count=1))
+    assert (await _stored(_storage, "job-legacy-submitter"))["submitted_by"] == ""
+
+    expected = {"job-legacy-submitter": "yuval"}
+    assert await storage.get_job_submitters(["job-legacy-submitter"]) == expected
+
+    assert await storage.backfill_results_denorm() == 1
+    assert await storage.get_job_submitters(["job-legacy-submitter"]) == expected
+    # A job that does not exist is still absent, not an empty submitter.
+    assert await storage.get_job_submitters(["job-missing"]) == {}
+
+
 async def test_no_sql_site_still_parses_result_json(_storage) -> None:
     """Every site that reads the payload must go through parse_result_json.
 
-    One maintenance-only block is allowlisted: the ``failure_history`` build-id
-    candidate CTE, which runs inside ``init_db`` and carries a
-    ``typeof(...) = 'text'`` guard for the boot after the compression sweep.
+    Two blocks are allowlisted, both guarded by ``typeof(...) = 'text'`` so neither
+    can ever read a frame: the ``failure_history`` build-id candidate CTE, which
+    runs inside ``init_db``, and the failure-UUID prefilter's fallback for a row the
+    denorm sweep has not reached yet.
     """
     source = Path(storage.__file__).read_text()
-    for allowed in (storage._FH_BUILD_ID_CANDIDATES_CTE,):
+    for allowed in (
+        storage._FH_BUILD_ID_CANDIDATES_CTE,
+        storage._FIND_FAILURE_BY_UUID_SQL,
+    ):
         assert source.count(allowed) == 1
         source = source.replace(allowed, "")
 

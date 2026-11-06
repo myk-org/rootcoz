@@ -182,8 +182,8 @@ Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pat
 | GET | `/results/{job_id}/issue-prompt` | viewer | Custom `.rootcoz/ROOTCOZ_ISSUE_PROMPT.md` for the repo |
 | POST | `/results/{job_id}/preview-github-issue` | reviewer | `test_name`, `include_links`, AI overrides; returns preview content |
 | POST | `/results/{job_id}/preview-jira-bug` | reviewer | Same shape, Jira flavour |
-| POST | `/results/{job_id}/create-github-issue` | reviewer | `test_name`, `title`, `body`; returns `201` |
-| POST | `/results/{job_id}/create-jira-bug` | reviewer | Adds `jira_issue_type`; returns `201` |
+| POST | `/results/{job_id}/create-github-issue` | reviewer | `test_name`, `title`, `body`; returns `201`. Files with the caller's own token only — a missing one is a `400`, never the server's `GITHUB_TOKEN`. Same refusal classes as `POST /api/feedback/create` — `502` when GitHub is unreachable or failing, `403` when the token cannot see `TESTS_REPO_URL` (GitHub answers `404` for that), lacks the `repo` scope, or is invalid or expired, `429` when rate limited |
+| POST | `/results/{job_id}/create-jira-bug` | reviewer | Adds `jira_issue_type`; returns `201`. Files with the caller's own Jira token or service-account token only — `400` when neither is supplied, never a server Jira credential; server settings supply only the project key and site URL. `401` for an invalid or expired Jira token, `403` when the token cannot access the Jira project (Jira answers `404` for that), `502` with a retryable `Jira is unavailable right now…` detail on an upstream `5xx`, `502 Jira API error: <status>` for anything else |
 | PUT | `/results/{job_id}/tracked-in` | reviewer | `test_name`, `url`, `type` |
 | GET | `/results/{job_id}/tracked-in` | reviewer | Current tracker links |
 | DELETE | `/results/{job_id}/tracked-in/{link_id}` | reviewer | Remove one link |
@@ -268,7 +268,13 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | GET | `/api/capabilities` | viewer | Feature toggles and whether server credentials exist |
 | GET | `/api/default-server-settings` | viewer | Non-sensitive settings and defaults only |
 | POST | `/api/feedback/preview` | viewer | AI-drafted feedback issue |
-| POST | `/api/feedback/create` | viewer | Creates the GitHub issue; returns `201` |
+| POST | `/api/feedback/create` | viewer | Creates the GitHub issue; returns `201`. `503` when feedback is disabled, `400` when the caller has no GitHub token of their own stored (the server's `GITHUB_TOKEN` is never used, not even for the bootstrap `admin`), `429` when GitHub rate-limited, `403` when the token is invalid, lacks the `repo` scope, or cannot see the repository, `502` when GitHub is unreachable or failing |
+
+> **Note:** `POST /api/feedback/create` and `POST /results/{job_id}/create-github-issue` share one refusal helper, so both keep `502` for GitHub trouble (unreachable, timeout, any `5xx`) and `403` for credential trouble, including a `404` from GitHub — that is how GitHub answers a repository the token cannot see, and reporting it as `403` keeps it away from the gateway-failure class. The two are separated on purpose: `502` means retry, `403` means fix the token. Only the subject differs — a refused feedback submission says the feedback was not filed, a refused failure issue says the bug report was not filed. Each refusal is logged at `WARNING` — the upstream status and the tracker's own `message` when there was an answer, the exception type and text when the call never landed — never the token and never the submitted body.
+>
+> `POST /results/{job_id}/create-jira-bug` applies the same split to Jira: `401` for an invalid or expired token, `403` for a project the token cannot access — Jira hides it behind a `404`, the same trick GitHub plays — and `502` with a retryable outage detail on an upstream `5xx`. Anything else stays `502 Jira API error: <status>`, with no rate-limit wording invented. Its refusals are logged the same way, including Jira's own `errorMessages`.
+>
+> Auditing is narrower than that: a refused `feedback.create` is recorded as a `denied` event with reason `forbidden` for the mapped `401`/`403` refusals (an invalid token, a missing `repo` scope, a repository the token cannot see), and as a `failure` event for the rest — `upstream_failure` for a `502`, `http_429` for the rate limit. Its `details` carries `upstream_status` only when the upstream status is not already named by that reason code — `401`, `403`, and `429` are omitted, every other status (a `404`, a `5xx`, a `422`) is recorded. Refusals on `create-github-issue` are not audited at all; only a successful create writes an `issue.create` row, so that path has no `upstream_status` to read.
 
 ### Admin
 

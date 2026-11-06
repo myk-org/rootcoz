@@ -23,6 +23,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 from rootcoz import ai_client, main, monitoring, storage
@@ -2355,6 +2356,47 @@ def test_feedback_create_without_a_token_is_audited(app_client) -> None:
     assert "A body" not in json.dumps(event)
 
 
+def test_feedback_create_upstream_failure_is_audited_with_its_status(
+    app_client,
+) -> None:
+    """An upstream failure names the status that tells it from a lost token."""
+    admin_login(app_client)
+    request = httpx.Request("POST", "https://api.github.com/repos/o/r/issues")
+    response = httpx.Response(503, json={"message": "Server Error"}, request=request)
+    exc = httpx.HTTPStatusError(
+        "GitHub returned 503", request=request, response=response
+    )
+    with (
+        patch.object(
+            storage,
+            "get_user_tokens",
+            AsyncMock(return_value={"github_token": "gh-token-0123456789"}),
+        ),
+        patch.object(main, "create_feedback_from_preview", AsyncMock(side_effect=exc)),
+    ):
+        refused = app_client.post(
+            "/api/feedback/create",
+            json={
+                "title": "A title",
+                "body": "body text that must not be audited",
+                "labels": ["feedback"],
+            },
+        )
+
+    assert refused.status_code == 502, refused.text
+    event = _events(action="feedback.create")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {
+        "reason": "upstream_failure",
+        "kind": "github_issue",
+        "upstream_status": 503,
+    }
+    stored = json.dumps(event)
+    assert "gh-token-0123456789" not in stored
+    assert "Server Error" not in stored
+    assert "body text" not in stored
+
+
 def test_global_model_refresh_is_audited(app_client) -> None:
     admin_login(app_client)
     sidecar = SimpleNamespace(refresh_models=AsyncMock(return_value={"claude": []}))
@@ -2799,6 +2841,22 @@ def test_admin_db_query_preview_bounds_a_crafted_frame() -> None:
     # a read path, so a damaged stored row must not fail the admin query.
     damaged = b"\x28\xb5\x2f\xfd" + b"\x00\x01\x02\x03rest-of-frame"
     assert main._admin_row_value(damaged) == f"<{len(damaged)} undecodable frame>"
+
+
+def test_admin_db_query_preview_bounds_concatenated_frames() -> None:
+    """A tiny first frame must not carry a huge second one past the cap (#419).
+
+    ``ZstdDecompressor.eof`` only vouches for the frame it stopped at, while the
+    preview decodes every frame: the cap has to bound the total decoded size, or a
+    crafted ``x'...'`` literal passes the check on frame one and then inflates the
+    rest on the request path.
+    """
+    bomb = zstd.compress(b"0" * (4 << 20))
+    tiny = zstd.compress(b"")
+    assert "not shown" in main._admin_row_value(tiny + bomb)
+    # Two frames whose total fits still decode, so the cap is not a frame count.
+    small = zstd.compress(b'{"job_name": "j"}')
+    assert main._admin_row_value(small) == {"job_name": "j"}
 
 
 def test_admin_db_query_rejection_is_audited_as_denied(

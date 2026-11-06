@@ -755,6 +755,7 @@ async def _claim_migration(db: aiosqlite.Connection, key: str) -> bool:
 # the same values: one no-op UPDATE per boot, never a lost or a stuck column.
 _RESULTS_DENORM_UPDATE_SQL = (
     "UPDATE results SET"
+    " result_json = COALESCE(:frame, result_json),"
     " job_name = CASE WHEN :job_name_present"
     " THEN :job_name ELSE job_name END,"
     " build_number = CASE WHEN :build_number_present"
@@ -772,7 +773,8 @@ _RESULTS_DENORM_UPDATE_SQL = (
     " denorm_version = :denorm_version"
     " WHERE rowid = :rid AND typeof(result_json) = 'text'"
     " AND result_json = :payload"
-    " AND (denorm_version IS NOT :denorm_version"
+    " AND (:frame IS NOT NULL"
+    " OR denorm_version IS NOT :denorm_version"
     " OR (job_name, build_number, build_id, submitted_by, summary, display_name,"
     " failure_ids) IS NOT (:job_name, :build_number, :build_id, :submitted_by,"
     " :summary, :display_name, :failure_ids))"
@@ -826,11 +828,20 @@ _RESULTS_DENORM_KEY = "backfill_results_denorm_v2"
 _SUBMITTED_BY_INDEX_KEY = "results_submitted_by_index_plain_v1"
 
 
-def _denorm_row_params(rows: Sequence[aiosqlite.Row]) -> list[dict[str, Any]]:
+def _denorm_row_params(
+    rows: Sequence[aiosqlite.Row], *, compress: bool = False
+) -> list[dict[str, Any]]:
     """``UPDATE`` parameters for one page, parsed off the event loop.
 
     Keyed by name: the UPDATE reuses each derived value to tell whether the row
     already matches its payload.
+
+    *compress* also frames the payload in the same parameters, so the frame and
+    the columns derived from that exact payload are written by one statement. That
+    is what lets a compressed row at the current version mean "these columns came
+    from this payload": a pre-compression build can still rewrite a TEXT row after
+    the sweep passed it, and framing that text without re-deriving would leave its
+    filters stale in a row no later sweep visits.
     """
     params: list[dict[str, Any]] = []
     for row in rows:
@@ -843,10 +854,13 @@ def _denorm_row_params(rows: Sequence[aiosqlite.Row]) -> list[dict[str, Any]]:
             continue
         values = dict(zip(_DENORM_COLUMNS, _extract_denormalized_fields(payload)))
         present = _denorm_presence(payload)
+        frame = _encode_result_text(row["result_json"]) if compress else None
         params.append(
             {
                 **values,
                 **{f"{column}_present": present[column] for column in values},
+                # A payload that would not shrink stays TEXT: ``None`` keeps it.
+                "frame": frame if isinstance(frame, bytes) else None,
                 "denorm_version": _RESULTS_DENORM_VERSION,
                 "rid": row["rid"],
                 "payload": row["result_json"],
@@ -946,7 +960,7 @@ _RESULT_JSON_COMPRESSION_WHERE = (
     " AND length(CAST(result_json AS BLOB)) >= ?"
 )
 _RESULT_JSON_COMPRESSION_SELECT = (
-    "SELECT rowid AS rid, result_json FROM results"
+    "SELECT rowid AS rid, job_id, result_json FROM results"
     f" WHERE rowid > ? AND {_RESULT_JSON_COMPRESSION_WHERE}"
     " ORDER BY rowid LIMIT ?"
 )
@@ -975,28 +989,26 @@ async def _db_storage_report(db: aiosqlite.Connection) -> str:
 
 def _compress_result_rows(
     rows: Sequence[aiosqlite.Row],
-) -> list[tuple[int, bytes, str]]:
-    """Compress one batch's stored text as-is.
+) -> list[dict[str, Any]]:
+    """Derive one batch's columns and frame the payload they were derived from.
 
-    Returns:
-        ``(rowid, frame, text it replaces)``; a row a frame would grow is left
-        out, so it stays TEXT and is retried on the next boot.
+    Returns the ``_RESULTS_DENORM_UPDATE_SQL`` parameters for the batch: ``frame``
+    is ``None`` for a row a frame would grow, so that row stays TEXT and is retried
+    on the next boot while its columns are still derived.
     """
-    pairs: list[tuple[int, bytes, str]] = []
-    for row in rows:
-        encoded = _encode_result_text(row["result_json"])
-        if isinstance(encoded, bytes):
-            pairs.append((row["rid"], encoded, row["result_json"]))
-    return pairs
+    return _denorm_row_params(rows, compress=True)
 
 
 async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, int]:
     """Compress legacy TEXT ``result_json`` rows in resumable batches.
 
     Keyset pagination, so it always terminates and a killed run resumes where it
-    stopped. It stores the frame of the bytes already in the row (no parse, no
-    re-dump), so decoding returns the payload byte for byte. A row a frame would
-    grow stays TEXT and is retried on the next boot; a row whose denormalized
+    stopped. It stores the frame of the bytes already in the row (no re-dump), so
+    decoding returns the payload byte for byte, and it derives the denormalized
+    columns from that same payload in the same statement -- a row an older build
+    rewrote after the denorm sweep passed it is repaired here instead of being
+    framed with stale columns in a row no later sweep would visit. A row a frame
+    would grow stays TEXT and is retried on the next boot; a row whose denormalized
     columns are not derived yet is skipped until they are.
 
     Args:
@@ -1033,25 +1045,24 @@ async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, i
         if not rows:
             break
         rowid = rows[-1]["rid"]
-        # Encode off the event loop (#402): /health must answer between batches.
-        pairs = await asyncio.to_thread(_compress_result_rows, rows)
-        if not pairs:
+        # Derive and encode off the event loop (#402): /health must answer between
+        # batches.
+        params_page = await asyncio.to_thread(_compress_result_rows, rows)
+        if not params_page:
             continue
         async with _connect_db() as db:
             await db.execute("BEGIN IMMEDIATE")
-            for rid, frame, text in pairs:
+            for params in params_page:
                 # Compare-and-swap on the payload, not just on its type: a
-                # concurrent patch — or a write from a pre-compression replica —
-                # must win over a frame built from the older text.
-                cursor = await db.execute(
-                    "UPDATE results SET result_json = ?"
-                    " WHERE rowid = ? AND typeof(result_json) = 'text'"
-                    " AND result_json = ?",
-                    (frame, rid, text),
-                )
-                if cursor.rowcount:
+                # concurrent patch -- or a write from a pre-compression replica --
+                # must win over a frame built from the older text, and the columns
+                # this statement writes are the ones derived from that text.
+                cursor = await db.execute(_RESULTS_DENORM_UPDATE_SQL, params)
+                if cursor.rowcount and params["frame"] is not None:
                     stats["rows"] += 1
-                    stats["bytes_after"] += len(frame) - len(text.encode())
+                    stats["bytes_after"] += len(params["frame"]) - len(
+                        params["payload"].encode()
+                    )
             await db.commit()
         logger.debug(
             "result_json compression: %d row(s) so far, cursor rowid=%d",
@@ -3621,18 +3632,52 @@ async def fail_job_without_result_write(job_id: str, reason: str) -> None:
     this one cannot decode, so it is left exactly as found. Exists so a refused
     write ends the job with the reason visible instead of leaving it in the
     status it was refused from.
+
+    A job that already reached a terminal status keeps it: this fallback is a
+    consequence of a refused write, not a decision about the job, so it must not
+    end one an abort or a completion already ended (see :func:`_write_status`).
     """
-    async with _connect_db() as db:
-        await db.execute(
-            "UPDATE results SET status = 'failed', error = ?, completed_at = ? "
-            "WHERE job_id = ?",
-            (reason, datetime.now(UTC).isoformat(), job_id),
+
+    async def attempt() -> _WriteOutcome:
+        async with _connect_db() as db:
+            expect = await _read_write_state(db, job_id)
+        if expect[1] is None:
+            logger.warning(
+                f"job_id={job_id}: no row to mark failed without writing result_json"
+            )
+            return "refused"
+        if expect[1] in ("completed", "failed", "aborted"):
+            logger.warning(
+                f"job_id={job_id}: the job already ended as '{expect[1]}', so the "
+                "refused result_json write did not mark it failed -- the newer "
+                "status and its error are kept"
+            )
+            return "refused"
+        async with _connect_db() as db:
+            if not await _begin_guarded_write(db, job_id, expect):
+                return "stale"
+            landed = await _write_status(
+                db,
+                job_id,
+                "failed",
+                writer="fail_job_without_result_write",
+                expect_status=expect[1],
+            )
+            if not landed:
+                await db.execute("ROLLBACK")
+                return "refused"
+            await db.execute(
+                "UPDATE results SET error = ?, completed_at = ? WHERE job_id = ?",
+                (reason, datetime.now(UTC).isoformat(), job_id),
+            )
+            await db.commit()
+        return "landed"
+
+    if await _write_result(job_id, "fail_job_without_result_write", attempt):
+        logger.info(
+            f"job_id={job_id}: marked failed without writing result_json (only the "
+            "status columns changed)"
         )
-        await db.commit()
-    logger.info(
-        f"job_id={job_id}: marked failed without writing result_json (only the "
-        "status columns changed)"
-    )
 
 
 async def claim_submitted_job_for_analyze(job_id: str) -> bool:
@@ -4260,7 +4305,15 @@ def _submitted_by_predicate(values: set[str]) -> tuple[str, list[str]]:
 
 
 async def get_job_submitters(job_ids: list[str]) -> dict[str, str]:
-    """Return {job_id: submitted_by} for multiple jobs in one query."""
+    """Return {job_id: submitted_by} for multiple jobs in one query.
+
+    A row whose column is still empty because ``backfill_results_denorm`` has not
+    reached it yet (a row a pre-compression build inserted) is read from its
+    payload instead: ownership checks run against these ids, so an operator would
+    otherwise be refused the delete of their own legacy job for as long as the
+    background sweep takes. Bounded by *job_ids*, so this never parses more rows
+    than the caller named.
+    """
     if not job_ids:
         return {}
     placeholders = ", ".join("?" for _ in job_ids)
@@ -4271,7 +4324,29 @@ async def get_job_submitters(job_ids: list[str]) -> dict[str, str]:
             job_ids,
         )
         rows = await cursor.fetchall()
-    return {row["job_id"]: row["submitter"] or "" for row in rows}
+        submitters = {row["job_id"]: row["submitter"] or "" for row in rows}
+        pending = [job_id for job_id, name in submitters.items() if not name]
+        if not pending:
+            return submitters
+        placeholders = ", ".join("?" for _ in pending)
+        cursor = await db.execute(
+            "SELECT job_id, result_json FROM results"
+            f" WHERE job_id IN ({placeholders}) AND COALESCE(denorm_version, 0) < ?",
+            (*pending, _RESULTS_DENORM_VERSION),
+        )
+        for row in await cursor.fetchall():
+            payload = parse_result_json_lenient(
+                row["result_json"], job_id=row["job_id"]
+            )
+            derived = dict(
+                zip(
+                    _DENORM_COLUMNS,
+                    _extract_denormalized_fields(payload),
+                    strict=True,
+                )
+            )
+            submitters[row["job_id"]] = derived["submitted_by"]
+    return submitters
 
 
 def _find_failure_by_uuid_in_failures(
@@ -4312,13 +4387,22 @@ def _find_failure_by_uuid_in_children(
     return None, "", 0
 
 
+# Failure-UUID prefilter. ``failure_ids`` is the derived column, and the second
+# branch is the upgrade window: a row the background denorm sweep has not reached
+# still holds its payload inline with ``''`` in that column, so the UUID is looked
+# for in that text instead. Only TEXT is searched there -- a frame is never read by
+# SQL, the same rule as ``_FH_BUILD_ID_CANDIDATES_CTE``.
+_FIND_FAILURE_BY_UUID_SQL = "SELECT job_id, result_json FROM results WHERE INSTR(failure_ids, :uuid) > 0 OR (COALESCE(denorm_version, 0) < :denorm_version AND typeof(result_json) = 'text' AND INSTR(result_json, :uuid) > 0)"
+
+
 async def find_failure_by_uuid(
     failure_uuid: str,
 ) -> dict[str, Any] | None:
     """Search all stored results for a failure with the given UUID.
 
-    Uses SQLite ``INSTR`` on the derived ``failure_ids`` column to pre-filter
-    rows that *might* contain the UUID (a compressed payload cannot be
+    Uses SQLite ``INSTR`` on the derived ``failure_ids`` column -- and, for a row
+    the denorm sweep has not reached yet, on its inline payload text -- to
+    pre-filter rows that *might* contain the UUID (a compressed payload cannot be
     scanned), then verifies in Python.
 
     Returns:
@@ -4327,8 +4411,8 @@ async def find_failure_by_uuid(
     """
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT job_id, result_json FROM results WHERE INSTR(failure_ids, ?) > 0",
-            (failure_uuid,),
+            _FIND_FAILURE_BY_UUID_SQL,
+            {"uuid": failure_uuid, "denorm_version": _RESULTS_DENORM_VERSION},
         )
         async for row in cursor:
             result_data = parse_result_json_lenient(
