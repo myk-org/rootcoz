@@ -5,7 +5,7 @@
 # Use the default gitleaks config as a base
 useDefault = true
 
-[allowlist]
+[[allowlists]]
 # Allowlist test files that contain fake/mock credentials for unit tests
 paths = [
     # Auto-generated docs contain placeholder API keys that trigger false positives
@@ -25,8 +25,13 @@ paths = [
 regexTarget = "line"
 regexes = [
     '''migration_key\s*=\s*"[^"]+"''',
-    # Example Atlassian cloud-ID placeholders (UUIDs), not secrets
-    '''ATLASSIAN_OAUTH_CLOUD_ID\s*=\s*"?[0-9a-f-]{36}"?''',
-    # lowercase settings attribute variant used in unit tests
-    '''atlassian_oauth_cloud_id\s*=\s*"[0-9a-f-]{36}"''',
+]
+
+[[allowlists]]
+# The fixture Atlassian cloud-ID placeholder (UUID) is not a secret. Matched
+# against the finding itself, never the line, so a real credential sharing the
+# line is still reported.
+regexTarget = "match"
+regexes = [
+    '''(?i)atlassian_oauth_cloud_id"?\s*[:=]\s*"?2b9e35e3-6bd3-4cec-b838-f4249ee02432"?''',
 ]

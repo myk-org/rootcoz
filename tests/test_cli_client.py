@@ -1203,7 +1203,7 @@ class TestRootCozClientReview:
 
     def test_enrich_comments(self):
         def handler(request):
-            assert request.method == "POST"
+            assert request.method == "GET"
             assert "/results/job-1/enrich-comments" in str(request.url)
             return httpx.Response(200, json={"enriched": 3})
 

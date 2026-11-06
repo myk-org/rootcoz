@@ -30,7 +30,7 @@ export function ReportProvider({ children }: { children: ReactNode }) {
       enrichmentInFlightRef.current = true
       pendingEnrichmentJobIdRef.current = null
       const seq = ++enrichmentSeqRef.current
-      void api.post<{ enrichments: Record<string, CommentEnrichment[]> }>(`/results/${target}/enrich-comments`)
+      void api.get<{ enrichments: Record<string, CommentEnrichment[]> }>(`/results/${target}/enrich-comments`)
         .then((res) => {
           if (seq === enrichmentSeqRef.current) {
             dispatch({ type: 'SET_ENRICHMENTS', payload: res.enrichments ?? {} })

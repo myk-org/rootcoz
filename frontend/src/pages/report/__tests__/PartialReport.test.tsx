@@ -28,6 +28,7 @@ function showReport(childOnly = false) {
     if (path === '/results/job-1/comments') return { comments: [], reviews: {} }
     if (path === '/api/ai-models') return { providers: {} }
     if (path.startsWith('/history/classifications')) return { classifications: [] }
+    if (path === '/results/job-1/enrich-comments') return { enrichments: {} }
     throw new Error(`Unexpected request: ${path}`)
   })
   render(<MemoryRouter initialEntries={['/results/job-1']}><Routes>

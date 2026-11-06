@@ -131,7 +131,7 @@ Related lifecycle commands:
 | `set-reviewed JOB_ID` | `--test`/`-t`, `--reviewed`/`--not-reviewed`, `--child-job`, `--child-build` | Mark one failure reviewed. |
 | `set-tracked-in JOB_ID` | `--test`/`-t`, `--url`/`-u`, `--type` (`jira` or `github`; omit for auto-detection), `--child-job`, `--child-build` | Link a failure to a ticket. |
 | `delete-tracked-in JOB_ID` | `--link-id` | Remove one tracked-in link. |
-| `enrich-comments JOB_ID` | — | Refresh live PR and ticket status on comments. |
+| `enrich-comments JOB_ID` | — | Refresh PR and ticket status on comments; a repeat read may be served from the server's per-job cache (see [API Reference](api-reference.html#comments-and-mentions)). |
 | `delete [JOB_ID ...]` | `--all`, `--confirm` | Delete jobs and related data. `--all` requires `--confirm`. |
 
 Sparse field paths include `result.summary`, `result.failed_count`, `result.failures.test_name`, `result.failures.classification`, `result.failures.details`, and `result.incomplete_count`. Unknown paths are rejected with HTTP 400, so run `rootcoz results fields` first.
