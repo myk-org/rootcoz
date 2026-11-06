@@ -46,13 +46,16 @@ _SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         r"\1[REDACTED]",
     ),
     # Secret-looking environment variables: `AWS_SECRET_ACCESS_KEY=…`,
-    # `GITHUB_TOKEN=…`. The keyword is not followed directly by the separator,
-    # so the assignment patterns below miss them. Harmless settings such as
-    # `MAX_TOKENS=2000` keep their value: the keyword must be a whole word at
+    # `GITHUB_TOKEN=…`, and their quoted JSON/literal-key form
+    # (`"client_secret": "…"`). The keyword is not followed directly by the
+    # separator, so the assignment patterns below miss them, and the optional
+    # quote before the separator is what keeps a quoted key (which the `_` in a
+    # compound name hides from those patterns) redacted. Harmless settings such
+    # as `MAX_TOKENS=2000` keep their value: the keyword must be a whole word at
     # that point, so the plural `TOKENS` is not a credential name.
     (
         re.compile(
-            r"\b([A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY)(?![A-Za-z0-9])(?:_[A-Za-z0-9_]*)?\s*[:=]\s*[\"']?)\S+",
+            r"\b([A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY)(?![A-Za-z0-9])(?:_[A-Za-z0-9_]*)?[\"']?\s*[:=]\s*[\"']?)\S+",
             re.IGNORECASE,
         ),
         r"\1[REDACTED]",
@@ -83,8 +86,21 @@ _SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"(\b[a-zA-Z][a-zA-Z0-9+.\-]*://)[^\s/@]+@"),
         r"\1[REDACTED]@",
     ),
-    # Bare `user:secret@` in a clone URL, e.g. `user:pass@host:path`.
-    (re.compile(r"\b[^\s/:@]+:[^\s/@]+@"), "[REDACTED]@"),
+    # Bare `user:secret@` in a clone URL, e.g. `user:pass@host:path`. The host
+    # after `@` must be a dotted name (or localhost), which is what separates
+    # credentials from a docker digest tag (`img:v4.18@sha256:…` has no host,
+    # only an algorithm). `mailto:` is exempt: a scheme without `//` is an
+    # address, not credentials.
+    # shortcut: a credential URL whose host is neither dotted nor localhost
+    # (`user:token@jenkins:8080/x`) is not caught here -- a digest tag looks the
+    # same, so widen only with a rule that still spares `@sha256:…`.
+    (
+        re.compile(
+            r"\b(?!mailto:)[^\s/:@]+:[^\s/@]+@"
+            r"(?=[^\s/@:]+(?:\.[^\s/@:]+)+|localhost\b)"
+        ),
+        "[REDACTED]@",
+    ),
     # Generic long hex/base64 secrets (40+ chars, likely tokens)
     (re.compile(r"\b[A-Fa-f0-9]{40,}\b"), "[REDACTED_HEX_TOKEN]"),
 ]

@@ -185,6 +185,34 @@ class TestScrubSensitiveData:
         assert "s3cr3t-token" not in result
         assert "[REDACTED]@git.example.com:org/repo.git" in result
 
+    def test_redacts_quoted_compound_keys(self):
+        """A quoted JSON/literal key must not hide a secret behind its `_`."""
+        for text in (
+            '{"client_secret": "credential-value"}',  # pragma: allowlist secret
+            "{'api_key': 'credential-value'}",  # pragma: allowlist secret
+            '{"access_token": "credential-value"}',  # pragma: allowlist secret
+            '{"aws_secret_access_key": "credential-value"}',  # pragma: allowlist secret
+        ):
+            result = scrub_sensitive_data(text)
+            assert "credential-value" not in result, result
+            assert "[REDACTED]" in result, result
+
+    def test_quoted_key_narrowing_spares_prose(self):
+        for text in (
+            "the client_secret and api_key fields are documented",
+            'see "client_secret" in the settings reference',
+        ):
+            assert scrub_sensitive_data(text) == text
+
+    def test_preserves_docker_digest_tag(self):
+        text = "docker pull registry.example.com/app:v4.18@sha256:" + "f" * 64
+        result = scrub_sensitive_data(text)
+        assert "app:v4.18@sha256:" in result
+
+    def test_preserves_mailto_address(self):
+        text = "contact mailto:user@example.com for access"
+        assert scrub_sensitive_data(text) == text
+
     def test_preserves_unauthenticated_urls(self):
         text = "git clone https://git.example.com/org/repo.git"
         assert scrub_sensitive_data(text) == text
