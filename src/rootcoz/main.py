@@ -1329,11 +1329,29 @@ logger = get_logger(
 _job_id_filter = JobIdFilter()
 
 
+def _known_loggers() -> list[logging.Logger]:
+    """Every registered logger, plus the root — never a loggerDict PlaceHolder.
+
+    A bare ``logging.getLogger(placeholder_name)`` builds a real logger, and
+    simple_logger's logger class defaults to INFO. That newly built logger
+    then parents every child of that name (``rootcoz.engine`` capping
+    ``rootcoz.engine.core``), silently overriding the ``rootcoz`` parent
+    level that is the single level authority (#347).
+    """
+    return [
+        logging.root,
+        *(
+            obj
+            for obj in logging.Logger.manager.loggerDict.values()
+            if isinstance(obj, logging.Logger)
+        ),
+    ]
+
+
 def _install_job_id_filter() -> None:
     """Attach JobIdFilter to every handler on every known logger."""
-    for name in [None, *list(logging.Logger.manager.loggerDict)]:
-        _logger = logging.getLogger(name)
-        for handler in getattr(_logger, "handlers", []):
+    for _logger in _known_loggers():
+        for handler in _logger.handlers:
             if _job_id_filter not in handler.filters:
                 handler.addFilter(_job_id_filter)
 
@@ -14182,19 +14200,16 @@ def _install_sse_log_handler() -> None:
     handler = _SSELogHandler()
     handler.setLevel(logging.DEBUG)
     # Copy formatter from the first RotatingFileHandler we find
-    for name in [None, *list(logging.Logger.manager.loggerDict)]:
-        lg = logging.getLogger(name)
-        for h in getattr(lg, "handlers", []):
+    for lg in _known_loggers():
+        for h in lg.handlers:
             if isinstance(h, logging.handlers.RotatingFileHandler) and h.formatter:
                 handler.setFormatter(h.formatter)
                 break
         if handler.formatter:
             break
     # Attach to every logger
-    for name in [None, *list(logging.Logger.manager.loggerDict)]:
-        lg = logging.getLogger(name)
-        if hasattr(lg, "addHandler"):
-            lg.addHandler(handler)
+    for lg in _known_loggers():
+        lg.addHandler(handler)
     _sse_log_handler = handler
 
 
