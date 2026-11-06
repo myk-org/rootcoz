@@ -1,6 +1,7 @@
 """Tests for the chat feature."""
 
 import asyncio
+import logging
 import os
 from pathlib import Path
 from unittest.mock import AsyncMock, call, patch
@@ -1605,6 +1606,51 @@ async def test_chat_routes_share_one_lock_scope_and_translation(monkeypatch) -> 
 
 
 @pytest.mark.asyncio
+async def test_chat_init_workspace_recovery_runs_outside_the_job_barrier(
+    monkeypatch,
+) -> None:
+    """Workspace reuse can queue a recovery delete on the single reaper.
+
+    That wait is bounded by ``GRAPH_LOCK_SECONDS`` and the barrier is shared by
+    every init for the job and by job deletion, so holding it there stalls all of
+    them (#424).
+    """
+    from rootcoz import main as main_mod
+
+    class _Stop(Exception):
+        pass
+
+    held: list[bool] = []
+
+    async def fake_enter(job_id, username, what):
+        held.append(main_mod._get_chat_job_barrier(job_id).locked())
+        raise _Stop
+
+    async def fake_validate(body, username):
+        return "claude", "sonnet-4"
+
+    async def fake_choice(*args, **kwargs):
+        return None, None
+
+    async def fake_result(job_id, **kwargs):
+        return {"result": {"request_params": {}}}
+
+    monkeypatch.setattr(main_mod, "get_result", fake_result)
+    monkeypatch.setattr(main_mod, "_validate_chat_selection", fake_validate)
+    monkeypatch.setattr(main_mod, "_check_chat_session_choice", fake_choice)
+    monkeypatch.setattr(main_mod, "_enter_chat_workspace", fake_enter)
+
+    with pytest.raises(_Stop):
+        await main_mod._init_chat_under_barrier(
+            "job-barrier",
+            "alice",
+            ChatInitRequest(ai_provider="claude", ai_model="sonnet-4"),
+        )
+
+    assert held == [False], "chat init held the job barrier across workspace recovery"
+
+
+@pytest.mark.asyncio
 async def test_init_chat_under_barrier_rejects_deleting_job():
     from fastapi import HTTPException
 
@@ -2634,6 +2680,33 @@ class TestAdminChatArtifactEndpoints:
     def test_download_artifact_path_traversal_blocked(self, test_client):
         response = test_client.get("/api/admin-chat/artifacts/../../etc/passwd")
         assert response.status_code == 404
+
+    def test_artifact_cleanup_reports_paths_it_could_not_delete(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """``delete_tree`` returns its failures: report them, do not claim success."""
+        from rootcoz import main as main_mod
+        from rootcoz.temp_paths import DeleteResult
+
+        artifacts = tmp_path / "alice"
+        artifacts.mkdir()
+        monkeypatch.setattr(main_mod, "_get_admin_artifacts_dir", lambda u: artifacts)
+        monkeypatch.setattr(
+            main_mod, "delete_tree", lambda path: DeleteResult(0, 0, failed=2)
+        )
+
+        with caplog.at_level(logging.INFO, logger="rootcoz.main"):
+            logging.getLogger("rootcoz.main").propagate = True
+            try:
+                result = main_mod._cleanup_admin_artifacts("alice")
+            finally:
+                logging.getLogger("rootcoz.main").propagate = False
+
+        assert result.failed == 2
+        assert "2 artifact path(s) for alice survived their delete" in caplog.text
+        assert "cleaned up artifacts" not in caplog.text, (
+            "a partial delete was logged as a completed cleanup"
+        )
 
     def test_artifact_cleanup_on_clear(self, test_client):
         # Save an artifact

@@ -123,7 +123,7 @@ async def test_a_failing_step_does_not_lose_the_rest(caplog) -> None:
 async def test_a_cancelled_caller_loses_neither_the_delete_nor_the_session_revoke() -> (
     None
 ):
-    """Post-cancel ordering: the delete is shielded and the DB call is its own task."""
+    """Post-cancel ordering: the delete is shielded, and so is the revoke after it."""
     submitted = threading.Event()
     deleted = threading.Event()
     session_calls: list[str] = []
@@ -140,9 +140,15 @@ async def test_a_cancelled_caller_loses_neither_the_delete_nor_the_session_revok
         try:
             await asyncio.sleep(10)
         finally:
-            session_task = asyncio.create_task(fake_cleanup_ai_session("Bearer token"))
-            await cleanup_off_loop("job-1", slow_delete)
-            await asyncio.shield(session_task)
+            # The real sequence (``_reap_analysis_workspace``): the revoke is
+            # created in the ``finally`` so a cancel cannot skip it, and after
+            # the delete so the token outlives it.
+            try:
+                await cleanup_off_loop("job-1", slow_delete)
+            finally:
+                await asyncio.shield(
+                    asyncio.create_task(fake_cleanup_ai_session("Bearer token"))
+                )
 
     task = asyncio.create_task(body())
     await asyncio.sleep(0.05)

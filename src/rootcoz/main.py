@@ -2516,6 +2516,14 @@ async def _reclaim_abandoned_workspaces() -> int:
     Returned count is what was really deleted: a step that abandons or leaves
     paths behind reclaims nothing, and reporting it as deleted would hide a tree
     that stays until the next restart.
+
+    Ownership is *single-process*: newest mtime versus this process's start, with
+    no cross-process check, so a second live server sharing the temp dir would
+    lose its workspaces. That is sound only because the product forbids a second
+    replica (``chart/templates/deployment.yaml`` ``replicas: 1``,
+    ``chart/templates/NOTES.txt`` "Do not scale replicas above 1",
+    ``docs/deploy-rootcoz.md``). Deliberately no lock protocol: it would guard a
+    deployment the chart and docs rule out.
     """
     from rootcoz.engine.graft import _root
     from rootcoz.temp_paths import CleanupOutcome, delete_marker, rootcoz_temp_base
@@ -2545,6 +2553,12 @@ async def _reclaim_abandoned_workspaces() -> int:
         # Snapshot before the first await: a job resumed from the DB clones into
         # a *new* workspace in this directory, and that one must not be in the list.
         leftovers = sorted(path for path in base.iterdir() if abandoned(path))
+    except FileNotFoundError:
+        # ``rootcoz_temp_base`` only joins a path; the base is created lazily by
+        # the first ``RepositoryManager``, i.e. *after* this task runs. A fresh
+        # container has no base, and that means no abandoned workspace — not a
+        # listing failure.
+        return 0
     except OSError:
         logger.warning(
             "Startup reclaim: cannot list %s, abandoned workspaces stay on disk",
@@ -2764,7 +2778,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     try:
         cleanup_task = asyncio.create_task(_periodic_session_cleanup())
         # Created before any job is resumed: an abandoned workspace from the
-        # previous process is reaped while nothing can be building it.
+        # previous process is reaped while nothing can be building it. Ownership
+        # there is mtime versus process start, which holds only for one process
+        # on the temp dir — the single replica the chart and docs require.
+        logger.info(
+            "[startup] Workspace reclaim assumes a single server process "
+            "(single-replica deployment)"
+        )
         reclaim_task = asyncio.create_task(_reclaim_abandoned_workspaces())
         _background_tasks.add(reclaim_task)
         reclaim_task.add_done_callback(_background_tasks.discard)
@@ -5485,14 +5505,19 @@ async def _reap_analysis_workspace(
     """Revoke the AI session and reap one analysis run's workspace, off the loop.
 
     The single copy of the whole sequence both analysis ``finally`` blocks run:
-    revoke task first, then the graph/artifact steps, then the shielded revoke.
-    Kept here because the ordering only holds if it is edited in one place — the
-    two copies had already drifted (#424).
+    the graph/artifact steps first, then the session revoke. Kept here because
+    the ordering only holds if it is edited in one place — the two copies had
+    already drifted (#424).
+
+    The revoke is last on purpose: a run cancelled mid-prompt leaves the sidecar
+    executing a prompt whose history tools authenticate with this token, and
+    analyses never abort their sidecar session (only chat does, ``client.abort``),
+    so revoking first only makes that prompt's tool calls fail. Revoking last
+    still guarantees the token is gone — ``create_task`` is not an await, so no
+    cancellation can skip it, and ``shield`` keeps the revoke running after the
+    caller's cancellation is delivered.
     """
     logger.debug(f"Cleaning up workspace for job_id={job_id}")
-    # Created before any await: a cancellation cancels every later await in this
-    # block, and the revoke must not be lost on the cancel path.
-    session_task = asyncio.create_task(_cleanup_ai_session(auth_header))
     steps: list[Callable[[], object]] = []
     # Downloaded CI artifacts are not the tree a live graph builder owns, so an
     # abandoned graph delete must not skip them: nothing else sweeps that dir.
@@ -5509,9 +5534,13 @@ async def _reap_analysis_workspace(
                 partial(reap_graph, job_id, repo_path),
             ]
         steps.append(repo_manager.cleanup)
-    if steps or always:
-        await cleanup_off_loop(job_id, *steps, always=always)
-    await asyncio.shield(session_task)
+    try:
+        if steps or always:
+            await cleanup_off_loop(job_id, *steps, always=always)
+    finally:
+        # Created in the ``finally`` so a cancelled cleanup cannot skip the
+        # revoke, and after the steps so the token outlives them.
+        await asyncio.shield(asyncio.create_task(_cleanup_ai_session(auth_header)))
 
 
 async def _process_ci_source_analysis(
@@ -20383,12 +20412,20 @@ async def _init_chat_under_barrier(
             credential_source,
             allow_empty=True,
         )
-        workspace = await _enter_chat_workspace(job_id, username, "Chat init")
-        if workspace is None:
-            raise HTTPException(
-                status_code=409,
-                detail=_chat_workspace_unknown_message(job_id, username),
-            )
+
+    # Outside the barrier: a marked workspace queues the recovery delete on the
+    # single reaper (``reap_graph``/``reap_reusable_path`` wait up to
+    # GRAPH_LOCK_SECONDS), and this barrier is shared by every init for the job
+    # and by job deletion — holding it across that wait stalls all of them. The
+    # workspace's own per-path lock already orders this against deletion's
+    # cleanup, and deletion cancels this task before it takes the barrier.
+    _raise_if_chat_job_deleted(job_id)
+    workspace = await _enter_chat_workspace(job_id, username, "Chat init")
+    if workspace is None:
+        raise HTTPException(
+            status_code=409,
+            detail=_chat_workspace_unknown_message(job_id, username),
+        )
 
     decrypted_params: dict[str, Any] = {}
     try:
@@ -22067,21 +22104,25 @@ def _get_admin_artifacts_dir(username: str) -> Path:
 
 
 def _cleanup_admin_artifacts(username: str) -> DeleteResult:
-    """Delete all artifacts for an admin user; a reaper step, never inline."""
+    """Delete all artifacts for an admin user; a reaper step, never inline.
+
+    ``delete_tree`` reports failed paths in ``DeleteResult.failed`` instead of
+    raising, so that count — not the absence of an exception — says whether the
+    artifacts are gone.
+    """
     artifacts_dir = _get_admin_artifacts_dir(username)
     if not artifacts_dir.exists():
         return DeleteResult(0, 0)
-    try:
-        reclaimed = delete_tree(artifacts_dir)
-        logger.info("Admin chat: cleaned up artifacts for %s", username)
-        return reclaimed
-    except OSError:
+    reclaimed = delete_tree(artifacts_dir)
+    if reclaimed.failed:
         logger.warning(
-            "Admin chat: failed to clean up artifacts for %s",
+            "Admin chat: %d artifact path(s) for %s survived their delete",
+            reclaimed.failed,
             username,
-            exc_info=True,
         )
-        return DeleteResult(0, 0)
+    else:
+        logger.info("Admin chat: cleaned up artifacts for %s", username)
+    return reclaimed
 
 
 class SaveArtifactRequest(BaseModel):

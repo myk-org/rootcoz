@@ -6037,6 +6037,29 @@ class TestStartupWorkspaceReclaim:
         assert await main_mod._reclaim_abandoned_workspaces() == 1
         assert not chat.exists(), "a deleted job's marked chat survived the restart"
 
+    async def test_a_missing_base_directory_is_not_a_listing_failure(
+        self, tmp_path, monkeypatch, caplog
+    ) -> None:
+        """A fresh container has no base yet: nothing to reclaim, no warning.
+
+        ``rootcoz_temp_base`` only joins a path and the first ``mkdir`` happens in
+        ``RepositoryManager.__init__``, i.e. after this task starts, so a first
+        boot always lists a directory that does not exist.
+        """
+        from rootcoz import main as main_mod
+        from rootcoz import temp_paths
+
+        base = tmp_path / "rootcoz"
+        monkeypatch.setattr(temp_paths, "rootcoz_temp_base", lambda: base)
+
+        with capture_main_logs(caplog):
+            assert await main_mod._reclaim_abandoned_workspaces() == 0
+
+        assert "reclaimed" not in caplog.text
+        assert "abandoned workspaces stay on disk" not in caplog.text, (
+            "a first boot claimed abandoned workspaces it could not list"
+        )
+
     async def test_an_incomplete_reclaim_is_not_reported_as_deleted(
         self, tmp_path, monkeypatch
     ) -> None:
@@ -6059,6 +6082,50 @@ class TestStartupWorkspaceReclaim:
             "a workspace whose delete failed is reported as deleted"
         )
         assert workspace.exists()
+
+
+class TestAnalysisWorkspaceReap:
+    """The one reap sequence both analysis ``finally`` blocks run (#424)."""
+
+    async def test_the_ai_session_token_outlives_the_cleanup_steps(
+        self, monkeypatch
+    ) -> None:
+        """Revoke last: a cancelled run's sidecar prompt may still call tools.
+
+        Analyses never abort their sidecar session (only chat does), so revoking
+        the few-minute-old token before the workspace delete only makes that
+        prompt's history tools fail while it is still executing.
+        """
+        from rootcoz import main as main_mod
+        from rootcoz.temp_paths import CleanupOutcome
+
+        order: list[str] = []
+
+        async def fake_cleanup_off_loop(what, *steps, always=()):
+            # The queued delete is still running when the revoke used to be
+            # scheduled, which is the window this pins.
+            await asyncio.sleep(0.05)
+            for step in steps:
+                step()
+            return CleanupOutcome.CLEAN
+
+        async def fake_cleanup_ai_session(auth_header: str) -> None:
+            order.append("revoke")
+
+        monkeypatch.setattr(main_mod, "cleanup_off_loop", fake_cleanup_off_loop)
+        monkeypatch.setattr(main_mod, "_cleanup_ai_session", fake_cleanup_ai_session)
+
+        await main_mod._reap_analysis_workspace(
+            job_id="job-1",
+            auth_header="Bearer token",
+            source=None,
+            repo_manager=SimpleNamespace(cleanup=lambda: order.append("delete")),
+            repo_path=None,
+        )
+
+        assert order == ["delete", "revoke"], (
+            "the token was revoked before the workspace delete finished"
+        )
 
 
 class TestPeerAnalysisParams:
