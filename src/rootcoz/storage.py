@@ -155,8 +155,13 @@ def signature_match(hashes: Any, alias: str = "") -> tuple[str, list[str]]:
 async def _connect_db() -> AsyncIterator[aiosqlite.Connection]:
     """Open a database connection with WAL mode and busy_timeout."""
     async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA journal_mode=WAL")
+        # busy_timeout first: the WAL switch needs exclusive access, and without
+        # it set the switch uses sqlite's default timeout and fails on a lock.
         await db.execute("PRAGMA busy_timeout=5000")
+        # Fetch the row: an unread journal_mode cursor keeps a schema read lock,
+        # so DDL on this connection then fails with "database table is locked".
+        cursor = await db.execute("PRAGMA journal_mode=WAL")
+        await cursor.fetchone()
         db.row_factory = aiosqlite.Row
         yield db
 

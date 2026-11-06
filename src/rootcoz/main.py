@@ -2738,6 +2738,14 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         server_status.stop_loop_lag_watchdog()
+        # Nothing tracked may outlive the app: a surviving task keeps reading the
+        # module-global DB_PATH and races whatever runs next in this process.
+        pending = list(_background_tasks)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        _background_tasks.clear()
         cleanup_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await cleanup_task

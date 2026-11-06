@@ -2086,6 +2086,41 @@ class TestAppLifespan:
                 # After startup, DB should exist with results table
                 assert temp_db_path.exists()
 
+    @pytest.mark.asyncio
+    async def test_shutdown_cancels_and_awaits_tracked_background_tasks(
+        self, mock_settings, temp_db_path: Path, monkeypatch
+    ) -> None:
+        """A tracked task still running at shutdown is cancelled, not leaked.
+
+        A task that outlives the app keeps reading the module-global DB_PATH and
+        races whatever the next app (or test) does with that file (#409). Driven
+        through the lifespan directly: TestClient ends its loop on exit, which
+        cancels everything anyway and would hide the leak.
+        """
+        from rootcoz import main
+
+        started = asyncio.Event()
+
+        async def _stuck() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(main, "_compress_stored_results", _stuck)
+        tracked: list[asyncio.Task[Any]] = []
+        try:
+            with patch.object(storage, "DB_PATH", temp_db_path):
+                async with main.lifespan(main.app):
+                    await asyncio.wait_for(started.wait(), 5)
+                    tracked = [t for t in main._background_tasks if not t.done()]
+                    assert tracked
+                assert not main._background_tasks
+            assert all(t.cancelled() for t in tracked)
+        finally:
+            for task in list(main._background_tasks):
+                task.cancel()
+            await asyncio.gather(*main._background_tasks, return_exceptions=True)
+            main._background_tasks.clear()
+
 
 class TestOpenAPISchema:
     """Tests for OpenAPI schema."""
