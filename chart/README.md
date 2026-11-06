@@ -173,17 +173,116 @@ AI API keys, Vertex SA JSON, Cursor `auth.json`, and sidecar agent-dir files sup
 
 ## Production Sizing
 
-Default resources (`1 CPU / 4Gi` request, `2 CPU / 8Gi` limit) suit evaluation clusters. For concurrent AI analysis workloads, use:
+Default resources (`1 CPU / 4Gi` request, `2 CPU / 8Gi` limit) suit evaluation clusters. For
+concurrent AI analysis workloads apply the shipped production profile — an overlay, never a
+default:
 
-```yaml
-resources:
-  requests:
-    cpu: "4"
-    memory: 32Gi
-  limits:
-    cpu: "4"
-    memory: 32Gi
+```bash
+helm upgrade --install rootcoz ./chart -n rootcoz \
+  -f chart/examples/values-openshift.yaml \
+  -f chart/examples/values-production.yaml \
+  -f ~/.config/rootcoz/helm/values.secrets.yaml
 ```
+
+`chart/examples/values-production.yaml` sets `4 CPU / 32Gi / 16Gi ephemeral-storage` on **both**
+`requests` and `limits`. Where the numbers come from:
+
+| Resource | Value | Basis |
+|---|---|---|
+| CPU | `4` | The live deployment's limit is `4000m` and CPU throttling stays under 1% of periods. |
+| Memory | `32Gi` | Peak usage (analysis + graph indexing + sidecar) is ~6 GiB. 32Gi is headroom to raise `max_concurrent_ai_calls` above the default 3; the rule for sizing a smaller pod is **~1 GiB baseline + ~2 GiB per concurrent analysis**. |
+| ephemeral-storage | `16Gi` | **A judgement, not a measurement**: 1 GiB graph-index budget per analysis workspace × default concurrency 3, plus up to 10 concurrent repo clones of arbitrary size, plus Jenkins/Prow artifacts and the container writable layer. Must stay at or below the node's ephemeral allocatable. |
+
+The PVC size is deliberately *not* in the profile: the example is applied over a live release, where
+changing `persistence.size` either no-ops or triggers a PVC resize. Database growth is tracked in #409
+(~83 KB per stored result).
+
+**Why `requests == limits`:** the deployment is a single stateful replica, so predictable scheduling
+beats burst. Guaranteed QoS is computed from cpu and memory only (ephemeral-storage does not
+affect it) **and across init containers too** — the `copy-sidecar-agent` init container matches its own
+requests and limits for exactly that reason, so enabling `sidecar.agentDir` cannot quietly downgrade a
+Guaranteed pod to Burstable. Those init-container numbers are new (`10m/32Mi` on both sides, previously
+`10m/16Mi` request against `100m/128Mi` limit), which is why that pod template rolls once on upgrade —
+see [Rollout on upgrade](#rollout-on-upgrade). The third value is matched for a different reason —
+the request drives scheduling and the limit drives kubelet eviction, so one number describes both
+thresholds. The cost is a scheduling floor of 32Gi memory + 16Gi ephemeral: the node must have that
+allocatable. The repo's dev deployment requests `16Gi` instead (`1000m` CPU) — Burstable, the fallback
+for smaller nodes.
+
+### `/tmp` and ephemeral storage
+
+Clones and code-graph indexes live under `/tmp`. Setting `resources.limits["ephemeral-storage"]`
+makes the chart mount a dedicated `/tmp` `emptyDir` with `sizeLimit` equal to that limit, verbatim,
+plus `TMPDIR=/tmp`. There is no second value to keep in sync.
+
+**Ownership vs. #402 C1.** This chart owns the `/tmp` cap: the number is
+`resources.limits["ephemeral-storage"]` and there is no separate `workspace.sizeLimit` key. #402 C1
+applies the same `/tmp` `emptyDir` + `sizeLimit` to the live deployment, so that deployment must carry
+the same number as the profile it runs (the production example uses `16Gi`). Two values for one
+threshold is exactly the drift the single-source rule above prevents.
+
+Behaviour and failure mode: exceeding the container's ephemeral-storage limit **or** the `emptyDir`
+`sizeLimit` is a **kubelet eviction, not a throttle** — the whole pod goes down mid-analysis. In flight,
+analyses in that process are lost (results are written on completion), pi-sidecar transcripts end
+mid-file, and the pod returns through the `Recreate` strategy; there is no second replica to absorb
+the work. The SQLite database survives: it lives on the PVC at `/data`, and SQLite WAL recovery
+handles the interrupted write.
+
+A limit is still the right choice over no limit: with no cap the failure is node `DiskPressure`,
+which evicts *every* pod on the node, including unrelated workloads. The `/tmp` cap is a bound on
+`/tmp` specifically — a runaway clone or extract dir fails at a known number instead of filling the
+node. Which of the two thresholds reports first is not deterministic and does not need to be: the
+response to both is to raise the number. An `ephemeral-storage` **request** without a limit still
+constrains scheduling but mounts nothing.
+
+Media unchanged by this: `/data` (PVC) and `PI_SIDECAR_TRANSCRIPTS_DIR` stay on the data volume.
+`XDG_CONFIG_HOME` already pointed at `/tmp/config`, so its lifetime is unchanged.
+
+**Opt-in only.** The default profile is untouched: defaults set no `ephemeral-storage` and the
+evaluation recipes render byte-identically. Setting the ephemeral limit mounts `/tmp` and rolls the
+pod once.
+
+### Rollout on upgrade
+
+The byte-identical default render holds for installs that **do not** set `sidecar.agentDir`. Installs
+that do get **one pod restart** from this chart version alone: the `copy-sidecar-agent` init
+container's request and limit changed (`10m/16Mi` request + `100m/128Mi` limit → `10m/32Mi` on both
+sides), and any pod-template change is a rollout. The equality is the point — without it the pod is
+Burstable whenever the sidecar agent dir is set, so the restart is what buys Guaranteed QoS. It is
+still a restart: one replica, `Recreate`, 30 s grace period, so an analysis running at that moment is
+interrupted and has to be re-submitted (results are written on completion; SQLite recovers via WAL).
+
+### Extended resources
+
+`resources.requests` / `resources.limits` accept qualified extended resources (`nvidia.com/gpu`,
+`amd.com/gpu`) and `hugepages-*` in addition to `cpu`, `memory` and `ephemeral-storage`. Unknown
+*unqualified* keys are rejected by the schema, so `resources.limit.cpu=4` (a typo) fails at render
+instead of producing a pod the API server refuses.
+
+**Units:** the schema accepts the Kubernetes [Quantity
+grammar](https://kubernetes.io/docs/reference/kubernetes-api/definitions/quantity-resource/) for
+`cpu`, `memory` and `ephemeral-storage`: `4Gi`, `512Mi`, `.5Gi`, `500m`, `2.5`, `1e3`, plus a bare
+number. A unit-less value — a bare number (`memory: 4`) or a numeric string (`"4"`) — is **bytes**
+for `memory` and `ephemeral-storage`, so `memory: 4` is 4 bytes and an OOM-kill on start: always give
+memory and storage a unit. Anything the grammar does not accept, such as
+`--set resources.limits.cpu=not-a-quantity` or `4GiB`, is schema-rejected at render instead of
+reaching the API server. Setting a key to `""` omits **that key** from the render — an empty quantity
+is invalid, so the chart drops it instead of emitting one.
+
+**A cleared request is not "no floor".** Dropping the request key does not stop the **limit** from
+becoming the effective request: Kubernetes defaults a missing request to the matching limit, so
+`--set resources.requests.memory=""` on the default profile (`limits.memory: 8Gi`) still schedules for
+`8Gi`. Only a namespace `LimitRange` defaulting the request supplies a different number, and the chart
+renders nothing that would. A genuine no-floor pod needs **both** sides cleared
+(`resources.requests.memory=""` and `resources.limits.memory=""`); clearing the request alone just
+removes the explicit value.
+
+Full sizing guidance for operators: [Deploying rootcoz → Sizing](../docs/deploy-rootcoz.md#sizing).
+
+**Out of scope, recorded so nobody "fixes" one side blindly:** `chart/README.md` (this section) and
+`.dev/openshift/deployment.yaml` disagree on the *request* — Guaranteed `32Gi` here versus a Burstable
+`16Gi` request on the live deployment. The live manifest is not chart-managed and changing a live
+deployment's requests is a rollout decision.
 
 ## Constraints
 
@@ -284,6 +383,25 @@ helm lint chart/
 uvx --with tox-uv tox -e chart
 helm test rootcoz -n rootcoz   # requires running release
 ```
+
+The `chart` tox env lints the chart, renders every recipe and fixture, renders
+`chart/examples/values-production.yaml` and asserts its resources plus the quoted `/tmp` `sizeLimit`
+(and that the `/tmp` mount never reaches the init container). The default render — `chart/` with only
+`ai.provider`, `ai.model` and the required secrets, no overlay — has a **baseline assertion**: its
+container `resources` block must equal the chart defaults (`requests` `1`/`4Gi`, `limits` `2`/`8Gi`),
+and it must carry no `ephemeral-storage`, no `sizeLimit`, no `/tmp` mount and no `TMPDIR`, so a
+values or template change that alters the default pod template fails CI instead of silently rolling
+every install. The env also asserts the schema negatives (`resources.limit.cpu`,
+`resources.requests.cpuu`, a bad `memory` unit `4GiB`), the quantity positives (numeric `cpu`/`memory`
+and `ephemeral-storage`, `.5Gi`, `1e3`, `4m`, an explicit string quantity, extended resources —
+`nvidia.com/gpu`, `hugepages-2Mi`, a mixed-case name `example.com/GPU_2`, and the rejection of a
+malformed one), and that a bad cpu quantity (`not-a-quantity` on both `requests` and `limits`) is
+rejected. Two negatives cover wrong **types** rather than wrong keys or strings: a list where a
+quantity goes (`resources.limits.memory=[1]`), and a non-string value in `podAnnotations` /
+`podLabels` / `nodeSelector`, which are string→string maps. Further checks cover the pod-integrity
+rules: `--set resources.requests.memory=""` renders no `memory`
+request (empty means omit), and with the sidecar agent dir configured the init container's `requests`
+equal its `limits`, so a Guaranteed app container keeps Guaranteed QoS for the whole pod.
 
 ## Limitations
 
