@@ -8,12 +8,14 @@ blocks, so a delete inline there stalls the probes (#402).
 from __future__ import annotations
 
 import asyncio
+import enum
 import errno
 import logging
 import os
 import stat
 import tempfile
 import time
+import traceback
 from collections.abc import AsyncIterator, Callable
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import asynccontextmanager
@@ -21,6 +23,7 @@ from functools import partial
 from pathlib import Path
 
 from rootcoz import get_child_logger
+from rootcoz.url_utils import mask_url_credentials_in_text
 
 logger = get_child_logger(__name__)
 
@@ -35,6 +38,40 @@ class _Abandoned:
 #: The tree is left for the next sweep instead of being deleted under a live
 #: builder; the runner still runs the ``always`` steps that must not be skipped.
 ABANDON = _Abandoned()
+
+
+class CleanupOutcome(enum.Enum):
+    """How a queued cleanup ended: only ``CLEAN`` says the trees are gone.
+
+    A bool would be read as "fine" the moment a caller skips it, and a skipped
+    step (:data:`ABANDON`) is exactly the case where nothing may be assumed.
+    """
+
+    #: Every step ran and none raised — a reusable path is now really deleted.
+    CLEAN = "clean"
+    #: A step abandoned or raised, so what is left on disk is unknown.
+    INCOMPLETE = "incomplete"
+
+
+class PathState(enum.Enum):
+    """Three-valued state of a reusable path, after :func:`reusable_path_lock`."""
+
+    #: No delete in flight: the tree is the previous session's and can be reused.
+    REUSABLE = "reusable"
+    #: A dead delete was reaped: the caller must create the tree from scratch.
+    NOT_REUSABLE = "not-reusable"
+    #: A live builder owns the tree, so its contents cannot be established.
+    UNKNOWN = "unknown"
+
+
+class PathStateUnknown(RuntimeError):
+    """A reusable path could not be established as whole, so it must not be reused.
+
+    Raised instead of yielding :attr:`PathState.UNKNOWN`, so no caller can read
+    "cannot tell" as "go ahead": an abandoned recovery leaves a half-deleted
+    tree under a live builder, and creating into it destroys that builder's work.
+    """
+
 
 # Under process temp root so chat symlink cleanup (honors TMPDIR) can delete it.
 ROOTCOZ_TEMP_DIRNAME = "rootcoz"
@@ -93,16 +130,43 @@ def _step_name(step: Callable[..., object]) -> str:
     return getattr(func, "__name__", type(func).__name__)
 
 
-def _mark_deleting(path: Path) -> None:
+def _frames(exc: BaseException) -> str:
+    """The failing call site as ``file:line:name <- ...``, never the message.
+
+    Without it a failure whose errno says nothing (a bug, not a filesystem
+    refusal) is undiagnosable. The frames, not ``exc_info``: an ``OSError`` from a
+    clone path carries its URL — and the token in that URL's userinfo — in the
+    message, and this log is not a place to leak it.
+    """
+    return " <-".join(
+        f"{Path(frame.filename).name}:{frame.lineno}:{frame.name}"
+        for frame in traceback.extract_tb(exc.__traceback__)
+    )
+
+
+def _mark_deleting(path: Path) -> _Abandoned | None:
+    """Write the delete marker, or :data:`ABANDON` instead of deleting unmarked.
+
+    Unmarked, a delete that dies mid-tree is indistinguishable from an intact
+    workspace, so the next create reuses whatever is left of it. A marker we
+    could not write therefore stops the delete: a tree that is still whole is
+    safe to reuse, a half-deleted one nobody can recognise is not.
+    """
     try:
         delete_marker(path).write_text("", encoding="utf-8")
     except OSError as exc:
-        # A missing parent just means there is nothing left to delete.
-        logger.debug(
-            "cleanup: could not write delete marker for %s (%s)",
+        logger.warning(
+            "cleanup: could not write the delete marker for %s, leaving the tree "
+            "whole rather than deleting it unmarked (error=%s at=%s: %s)",
             path,
             type(exc).__name__,
+            _frames(exc),
+            # The message names the path that was refused, and that path can be a
+            # credentialed clone URL before ``_scrub_credentials`` has run.
+            mask_url_credentials_in_text(str(exc)),
         )
+        return ABANDON
+    return None
 
 
 def _drop_deleting(path: Path) -> None:
@@ -294,30 +358,38 @@ def _run_cleanup(
     what: str,
     *steps: Callable[[], object],
     always: tuple[Callable[[], object], ...] = (),
-) -> None:
+) -> CleanupOutcome:
     """Run ``steps`` in the caller's order, one failure not losing the rest.
 
     A step returning :data:`ABANDON` stops the remaining ``steps`` — the tree
     belongs to a live builder, so deleting it here would race that builder. The
     ``always`` steps still run: dropping a marker is safe only when the tree is
     really gone, and ``_drop_deleting`` checks exactly that.
+
+    The returned :class:`CleanupOutcome` is what a caller that decides about
+    reuse has to read: ``INCOMPLETE`` means the delete did not establish that the
+    tree is gone, so it must never be treated as reusable.
     """
+    clean = True
 
     def run(step: Callable[[], object]) -> object:
+        nonlocal clean
         name = _step_name(step)
         started = time.monotonic()
         try:
             result = step()
         except Exception as exc:  # noqa: BLE001 - a delete failure must not lose later steps
+            clean = False
             elapsed = int((time.monotonic() - started) * 1000)
-            # Type and errno only: the message can carry a repo URL before
-            # ``_scrub_credentials`` has run, and this log is not a place to leak it.
-            # Formatted inline: the step name is data, and a template-keyed dedupe
-            # filter would swallow the second failing step of one submission.
+            # Type, errno and the failing call site only: the message can carry
+            # a repo URL before ``_scrub_credentials`` has run, and this log is
+            # not a place to leak it. Formatted inline: the step name is data, and
+            # a template-keyed dedupe filter would swallow the second failing step
+            # of one submission.
             logger.warning(
                 f"cleanup_failed what={what} step={name} "
                 f"error={type(exc).__name__} errno={getattr(exc, 'errno', None)} "
-                f"ms={elapsed}"
+                f"ms={elapsed} at={_frames(exc)}"
             )
             return None
         elapsed = int((time.monotonic() - started) * 1000)
@@ -338,6 +410,7 @@ def _run_cleanup(
 
     for step in steps:
         if run(step) is ABANDON:
+            clean = False
             logger.warning(
                 f"cleanup_abandoned what={what} step={_step_name(step)}: leaving "
                 "the rest of this submission's steps to the next sweep"
@@ -345,13 +418,14 @@ def _run_cleanup(
             break
     for step in always:
         run(step)
+    return CleanupOutcome.CLEAN if clean else CleanupOutcome.INCOMPLETE
 
 
 async def cleanup_off_loop(
     what: str,
     *steps: Callable[[], object],
     always: tuple[Callable[[], object], ...] = (),
-) -> None:
+) -> CleanupOutcome:
     """Delete workspace artefacts off the loop; order preserved, survives cancellation.
 
     ``always`` steps run even when a ``steps`` entry returns :data:`ABANDON`: they
@@ -368,9 +442,12 @@ async def cleanup_off_loop(
 
     ``what`` is a server-generated id (job id), never a user-supplied name, so a
     crafted job name cannot forge a log line.
+
+    Returns :class:`CleanupOutcome`; a caller deciding whether a reusable path may
+    be used must read it (:func:`reusable_path_lock` does).
     """
     loop = asyncio.get_running_loop()
-    await asyncio.shield(
+    return await asyncio.shield(
         loop.run_in_executor(
             _CLEANUP_POOL, partial(_run_cleanup, what, *steps, always=always)
         )
@@ -396,7 +473,7 @@ def _drop_lock(key: str, entry: _PathLock) -> None:
 
 async def cleanup_path_off_loop(
     what: str, path: Path, *steps: Callable[[], object]
-) -> None:
+) -> CleanupOutcome:
     """Delete the reusable ``path``: marker, ``steps``, whole tree — one reaper job.
 
     The marker outside the tree is what tells a later creator that a delete died
@@ -442,7 +519,7 @@ async def cleanup_path_off_loop(
     # Unlock before dropping the reference: a released lock with a queued waiter
     # is still in use, and the waiter's own reference is what keeps the entry.
     future.add_done_callback(lambda _f: _release_path_lock(key, entry))
-    await asyncio.shield(future)
+    return await asyncio.shield(future)
 
 
 def _release_path_lock(key: str, entry: _PathLock) -> None:
@@ -451,28 +528,57 @@ def _release_path_lock(key: str, entry: _PathLock) -> None:
     _drop_lock(key, entry)
 
 
-@asynccontextmanager
-async def reusable_path_lock(what: str, path: Path) -> AsyncIterator[None]:
-    """Hold ``path``'s lock for a create/reuse decision, re-creating after a dead delete.
-
-    Only the marker decides re-creation: an intact workspace is reused untouched,
-    because chat workspaces deliberately persist sessions and clones across
-    messages.
+async def _reuse_state(what: str, path: Path) -> PathState:
+    """Reap a dead delete of ``path``; ``UNKNOWN`` when the delete did not finish.
 
     Recovery is a reaper step too: :func:`reap_reusable_path` waits, bounded, for
-    the builder's install lock, and yields — tree and marker untouched — when that
-    builder is still running.
+    the builder's install lock and abandons — tree and marker untouched — when
+    that builder is still running, and a marker we could not write stops the
+    delete the same way. Both leave a tree whose contents nobody can vouch for.
+    """
+    if not delete_marker(path).exists():
+        return PathState.REUSABLE
+    logger.info("cleanup: re-creating %s after an interrupted delete", what)
+    # Local import: ``graft`` imports this module at import time.
+    from rootcoz.engine.graft import reap_graph
+
+    outcome = await cleanup_off_loop(
+        what,
+        # The graph root is a *sibling* of the workspace, so a workspace-only
+        # recovery would leak the graph tree the abandoned delete never reached.
+        partial(reap_graph, what, path),
+        partial(reap_reusable_path, what, path),
+        partial(_drop_deleting, path),
+    )
+    return (
+        PathState.UNKNOWN
+        if outcome is CleanupOutcome.INCOMPLETE
+        else PathState.NOT_REUSABLE
+    )
+
+
+@asynccontextmanager
+async def reusable_path_lock(what: str, path: Path) -> AsyncIterator[PathState]:
+    """Hold ``path``'s lock for a create/reuse decision, re-creating after a dead delete.
+
+    Only the marker decides re-creation: an intact workspace is reused untouched
+    (:attr:`PathState.REUSABLE`), because chat workspaces deliberately persist
+    sessions and clones across messages. A marked one is deleted first, so the
+    caller creates it from scratch (:attr:`PathState.NOT_REUSABLE`).
+
+    Raises :class:`PathStateUnknown` instead of yielding when the delete could not
+    establish the tree is gone — a live builder still owns it — because creating
+    into a half-deleted tree under a builder is worse than refusing the request.
     """
     key, entry = _lock_for(path)
     try:
         async with entry.lock:
-            if delete_marker(path).exists():
-                logger.info("cleanup: re-creating %s after an interrupted delete", what)
-                await cleanup_off_loop(
-                    what,
-                    partial(reap_reusable_path, what, path),
-                    partial(_drop_deleting, path),
+            state = await _reuse_state(what, path)
+            if state is PathState.UNKNOWN:
+                raise PathStateUnknown(
+                    f"{what}: a live builder still owns {path.name}; refusing to "
+                    "reuse a tree whose contents cannot be established"
                 )
-            yield
+            yield state
     finally:
         _drop_lock(key, entry)

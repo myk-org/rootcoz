@@ -1295,6 +1295,17 @@ class TestChatCleanup:
             assert not link.exists()
             assert not target.exists()
 
+    def test_cleanup_counts_the_loose_files_it_unlinks(self, tmp_path):
+        """``reclaimed=`` must include the regular files this cleanup really unlinked."""
+        from rootcoz.engine.chat import cleanup_chat_repos
+
+        (tmp_path / "console-output.txt").write_text("x" * 64)
+
+        with patch("rootcoz.engine.chat.get_chat_workspace", return_value=tmp_path):
+            nbytes, entries = cleanup_chat_repos("job-count")
+
+        assert (nbytes, entries) == (64, 1)
+
     def test_cleanup_repos_removes_graph_when_workspace_missing(
         self, tmp_path, monkeypatch
     ):

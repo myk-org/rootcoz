@@ -31,7 +31,13 @@ from rootcoz.jira import (
     resolve_jira_connection_from_params,
 )
 from rootcoz.storage import AI_SYSTEM_USERNAME
-from rootcoz.temp_paths import ABANDON, _Abandoned, delete_tree, reusable_path_lock
+from rootcoz.temp_paths import (
+    ABANDON,
+    PathState,
+    _Abandoned,
+    delete_tree,
+    reusable_path_lock,
+)
 
 logger = get_child_logger(__name__)
 
@@ -74,14 +80,22 @@ def ensure_chat_workspace(job_id: str, username: str = "") -> Path:
 
 
 @asynccontextmanager
-async def chat_workspace_lock(job_id: str, username: str = "") -> AsyncIterator[None]:
+async def chat_workspace_lock(
+    job_id: str, username: str = ""
+) -> AsyncIterator[PathState]:
     """Hold the chat workspace's path lock for the create/reuse decision.
 
     The path is deterministic and reused across messages, so a queued delete of
     ``chat-{job}/{user}`` must finish before the next message creates into it.
+    Yields the :class:`~rootcoz.temp_paths.PathState` and raises
+    :class:`~rootcoz.temp_paths.PathStateUnknown` when a live builder still owns
+    a marked tree, so no caller reaches repository preparation on a half-deleted
+    workspace.
     """
-    async with reusable_path_lock(job_id, get_chat_workspace(job_id, username)):
-        yield
+    async with reusable_path_lock(
+        job_id, get_chat_workspace(job_id, username)
+    ) as state:
+        yield state
 
 
 def _resolve_chat_repo_target(workspace: Path, repo_name: str) -> tuple[str, Path]:
@@ -919,25 +933,37 @@ def build_admin_custom_tools(
     ]
 
 
+def _unlink_counted(path: Path) -> tuple[int, int]:
+    """Unlink ``path`` and report what that freed; an entry already gone frees nothing."""
+    try:
+        nbytes = path.lstat().st_size
+        path.unlink()
+    except FileNotFoundError:
+        return (0, 0)
+    return (nbytes, 1)
+
+
 def _safe_remove_symlink(link: Path) -> tuple[int, int]:
     """Remove a symlink and its target directory if safe.
 
     Only deletes the target when it resolves to a path under the process
     temp root (``tempfile.gettempdir()``, honors ``TMPDIR``) to prevent
     accidental deletion of system directories if the symlink was manipulated.
+    The link itself is counted too: it is an entry this call really removed.
     """
     target = link.resolve()
-    link.unlink(missing_ok=True)
+    nbytes, entries = _unlink_counted(link)
     if target.exists() and target.is_dir():
         tmp_root = _tmp_root()
         if target.is_relative_to(tmp_root):
-            return delete_tree(target)
+            target_bytes, target_entries = delete_tree(target)
+            return (nbytes + target_bytes, entries + target_entries)
         logger.warning(
             "Chat cleanup: refusing to delete symlink target outside %s: %s",
             tmp_root,
             target,
         )
-    return (0, 0)
+    return (nbytes, entries)
 
 
 def cleanup_chat_repos(job_id: str, username: str = "") -> tuple[int, int] | _Abandoned:
@@ -972,7 +998,9 @@ def cleanup_chat_repos(job_id: str, username: str = "") -> tuple[int, int] | _Ab
             nbytes += item_bytes
             entries += item_entries
         else:
-            item.unlink(missing_ok=True)
+            item_bytes, item_entries = _unlink_counted(item)
+            nbytes += item_bytes
+            entries += item_entries
 
     logger.info(f"Cleaned up chat repos for job {job_id}")
     return (nbytes, entries)

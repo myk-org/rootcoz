@@ -22,6 +22,9 @@ import pytest
 
 from rootcoz.temp_paths import (
     ABANDON,
+    CleanupOutcome,
+    PathState,
+    PathStateUnknown,
     cleanup_off_loop,
     cleanup_path_off_loop,
     delete_marker,
@@ -884,10 +887,10 @@ async def test_the_normal_path_still_deletes_and_reports_bytes(
     assert not delete_marker(path).exists()
 
 
-async def test_recovery_yields_while_a_builder_holds_the_lock(
+async def test_recovery_refuses_to_reuse_while_a_builder_holds_the_lock(
     tmp_path, monkeypatch
 ) -> None:
-    """The builder that caused the abandon still owns the tree: recovery yields."""
+    """The builder that caused the abandon still owns the tree: refuse to reuse it."""
     from rootcoz import temp_paths
     from rootcoz.engine import graft
 
@@ -902,12 +905,105 @@ async def test_recovery_yields_while_a_builder_holds_the_lock(
     )
 
     with _builder_holding(path):
-        async with reusable_path_lock("job-recover", path):
-            assert deleted == [], "recovery deleted under a live builder"
+        with pytest.raises(PathStateUnknown):
+            async with reusable_path_lock("job-recover", path):
+                pytest.fail("a half-deleted tree was handed to the caller")
+        assert deleted == [], "recovery deleted under a live builder"
         assert temp_paths.reap_reusable_path("job-recover", path) is ABANDON
 
     assert path.exists()
-    assert delete_marker(path).exists(), "a yielded recovery dropped the marker"
+    assert delete_marker(path).exists(), "a refused recovery dropped the marker"
+
+
+async def test_recovery_reaps_the_sibling_graph_tree(tmp_path) -> None:
+    """A recovered chat must not keep the graph tree its abandoned delete skipped."""
+    from rootcoz.engine.graft import _root
+
+    path = tmp_path / "chat-job" / "alice"
+    (path / "repo").mkdir(parents=True)
+    (path / "repo" / "file.txt").write_text("x")
+    graph = _root(path)
+    (graph / "snapshot").mkdir(parents=True)
+    (graph / "snapshot" / "source.py").write_text("x")
+    delete_marker(path).write_text("", encoding="utf-8")
+
+    async with reusable_path_lock("job-graph", path) as state:
+        assert state is PathState.NOT_REUSABLE
+
+    assert not path.exists()
+    assert not graph.exists(), "recovery dropped the marker but kept the graph tree"
+    assert not delete_marker(path).exists()
+
+
+async def test_a_marker_that_cannot_be_written_never_deletes_the_tree(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """No marker, no delete: an unrecognisable half-delete is worse than a leak."""
+    from rootcoz import temp_paths
+
+    path = tmp_path / "chat-job" / "alice"
+    (path / "repo").mkdir(parents=True)
+    (path / "repo" / "file.txt").write_text("x")
+    monkeypatch.setattr(
+        temp_paths,
+        "delete_marker",
+        lambda target: tmp_path / "missing-parent" / f".{target.name}.marker",
+    )
+
+    outcome = await cleanup_path_off_loop("job-mark", path)
+
+    assert outcome is CleanupOutcome.INCOMPLETE
+    assert (path / "repo" / "file.txt").read_text() == "x", (
+        "the tree was deleted without a marker, so a later create would reuse "
+        "whatever a dying delete left"
+    )
+    assert "could not write the delete marker" in caplog.text
+
+
+async def test_a_permission_error_carrying_an_authenticated_url_logs_no_token(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    """The refusal names the path it could not write — never the token in its URL."""
+    from rootcoz import temp_paths
+
+    secret = "https://x-token-auth:s3cr3t@example.com/repo"  # pragma: allowlist secret
+    path = tmp_path / "chat-job" / "alice"
+    path.mkdir(parents=True)
+
+    class _RefusedMarker:
+        def write_text(self, *_args: object, **_kwargs: object) -> None:
+            raise PermissionError(errno.EACCES, f"Permission denied: '{secret}'")
+
+    monkeypatch.setattr(temp_paths, "delete_marker", lambda _target: _RefusedMarker())
+
+    outcome = await cleanup_path_off_loop("job-secret", path)
+
+    assert outcome is CleanupOutcome.INCOMPLETE
+    assert "s3cr3t" not in caplog.text, "the marker failure logged the token"
+    assert "x-token-auth" not in caplog.text
+    # Still diagnosable: the type is the reason, the frame chain is the site.
+    assert "could not write the delete marker" in caplog.text
+    assert "error=PermissionError" in caplog.text
+    assert "_mark_deleting" in caplog.text
+
+
+async def test_a_failing_step_logs_the_failing_call_site(caplog) -> None:
+    """A step that dies without an errno is only diagnosable with its frame chain."""
+
+    def _exploding_step() -> None:
+        raise RuntimeError("nothing an errno could explain")
+
+    await cleanup_off_loop("job-traceback", _exploding_step)
+
+    failed = [
+        record
+        for record in caplog.records
+        if "cleanup_failed what=job-traceback" in record.getMessage()
+    ]
+    assert failed, "the failing step left no log line"
+    message = failed[0].getMessage()
+    assert "_exploding_step" in message, "the line names no failing call site"
+    assert "temp_paths.py:" in message
 
 
 async def test_recovery_deletes_after_the_builder_releases_the_lock(
@@ -925,7 +1021,8 @@ async def test_recovery_deletes_after_the_builder_releases_the_lock(
     with _builder_holding(path):
         pass  # The abandoning builder's lock, then released.
 
-    async with reusable_path_lock("job-recover", path):
+    async with reusable_path_lock("job-recover", path) as state:
+        assert state is PathState.NOT_REUSABLE
         assert not path.exists(), "the marked tree was reused"
     assert not delete_marker(path).exists()
 
@@ -949,9 +1046,11 @@ async def test_an_abandoned_cleanup_keeps_the_marker_while_a_builder_holds_the_l
     assert path.exists(), "the abandoned tree was deleted"
     assert delete_marker(path).exists(), "an abandoned delete dropped its marker"
     with _builder_holding(path):
-        async with reusable_path_lock("job-marker", path):
-            assert path.exists(), "recovery deleted a live builder's tree"
-            assert delete_marker(path).exists(), "recovery dropped the marker early"
+        with pytest.raises(PathStateUnknown):
+            async with reusable_path_lock("job-marker", path):
+                pytest.fail("a live builder's tree was handed to the caller")
+        assert path.exists(), "recovery deleted a live builder's tree"
+        assert delete_marker(path).exists(), "recovery dropped the marker early"
 
 
 async def test_ci_source_analysis_finally_does_not_block_the_loop(
