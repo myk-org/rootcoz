@@ -182,24 +182,22 @@ Every new environment variable added to `Settings` in `config.py` **MUST** also 
 
 ### Documentation Site (`docs/`)
 
-`docs/` is a [pi-docsite](https://pypi.org/project/pi-docsite) site, served from the `main` branch by GitHub Pages.
+`docs/` is a [pi-docsite](https://pypi.org/project/pi-docsite) site published at <https://myk-org.github.io/rootcoz/>. Only its **sources** live in git: `docs/*.md` and `docs/nav.json`, both hand-authored. The built site is produced by CI, never by a contributor's working tree.
 
-**This replaces the previous docsfy rule.** Under docsfy the `.md` files were themselves generated output, so editing them by hand was wrong. Under pi-docsite the Markdown is the source: it is a markdown-source generator, not a code-comment extractor. The generated half of `docs/` is still strictly off limits, and that is the half the rule below protects — but hand-authoring `docs/*.md` is now correct and necessary, not a violation. A generation-from-code approach is what produced 11 of the 16 pages as `*Documentation generation failed.*` placeholders.
-
-**Authored sources** (edit these):
+**Authored sources** (edit these, in the PR):
 
 - `docs/*.md` — one page each, exactly one H1 that becomes its sidebar title
 - `docs/nav.json` — sidebar layout; array order is display order, a slug with no `.md` is a build error
 
-**Generated files** (`*.html`, `assets/`, `llms.txt`, `llms-full.txt`, `search-index.json`) — **NEVER edit these by hand**; they are overwritten on every build and are excluded from AI review via the `[ignore] glob` list in `.pr_agent.toml`.
+**Generated output** (`docs/*.html`, `docs/index.html`, `docs/assets/`, `docs/llms.txt`, `docs/llms-full.txt`, `docs/search-index.json`) is **not in git and must not be committed**. It is gitignored, so a local build cannot dirty the tree.
 
-Rebuild and commit the generated files together with the source change:
+Rules:
 
-```bash
-uvx pi-docsite --docs-dir docs --tagline "AI-powered CI failure analysis for Jenkins, Prow, and JUnit XML"
-```
+- **A PR never runs `pi-docsite` and never commits generated files.** Edit the `.md`, push, done. There is no rebuild step in a contributor's workflow.
+- The site is built and deployed by `.github/workflows/docs.yml` after merge — on every push to `main` that touches `docs/**.md` or `docs/nav.json`.
+- `.github/workflows/docs-guard.yml` fails any PR whose diff contains a generated path, and tells the author to edit the source instead.
 
-Output is byte-for-byte reproducible — churn in untouched files means something else changed. Link between pages with `.html` extensions (`[Quickstart](quickstart.html)`), not `.md`.
+Link between pages with `.html` extensions (`[Quickstart](quickstart.html)`), not `.md` — the built site serves `.html`. Links from outside `docs/` point at the published URL (`https://myk-org.github.io/rootcoz/<page>.html`), never at a `docs/*.html` path.
 
 ### Project Customization (`.rootcoz/` folder)
 
@@ -402,7 +400,7 @@ When adding an endpoint, a setting, a background action or a permission change:
 2. Never store a credential value, a message body, a comment text or SQL text — names, ids, keys and reasons only. Identity (actor, target, message) is stored verbatim, never redacted.
 3. Add the action id to the coverage contract in issue #379, and let `tests/test_audit_coverage.py` enforce it: a mutating route that is neither audited nor exempt-with-a-reason fails the build.
 4. Extend `.pi/tmp/e2e-audit-plan.md` and its runners **before writing the code**, with an ID that triggers the new behaviour against a running server and asserts it (success **and** refusal path). An ID in the plan that does not run fails the run; a behaviour without an ID is an incomplete change.
-5. Update `docs/` (`manage-users-and-server-settings.md` for behaviour, `api-reference.md` for fields, `cli-reference.md` for commands) and regenerate with `uvx pi-docsite`.
+5. Update `docs/` (`manage-users-and-server-settings.md` for behaviour, `api-reference.md` for fields, `cli-reference.md` for commands) — edit the `.md` only; CI builds the site.
 
 Gating/admin controls (lockout thresholds, allow-lists, enable/disable) are security changes: they need the audit row, the setting entry in Server Settings metadata, and a CLI equivalent under the "Configuration Parity" rule.
 
