@@ -5262,13 +5262,16 @@ class TestChatIssueEndpoint:
         assert response.status_code == 201, response.text
         assert response.json()["key"] == "PROJ-7"
         # ``key``, not ``issue_key``: a ``*_key`` detail is dropped as a secret.
+        # ``jira_project`` and ``site`` say what the link belongs to, also a
+        # non-``*_key`` name for the same reason.
         assert (await self._chat_audit())["events"][0]["details"] == {
             "tracker": "jira",
             "result": "success",
-            "repo": "",
             "job_id": "",
             "key": "PROJ-7",
             "url": "https://jira.example.com/browse/PROJ-7",
+            "jira_project": "TEST",
+            "site": "jira.example.com",
         }
         call_settings = mock_create.call_args[1]["settings"]
         assert call_settings.jira_api_token.get_secret_value() == "user_jira_token"
