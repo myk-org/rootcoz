@@ -1,5 +1,6 @@
 """Tests for repository management."""
 
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import git.exc
@@ -102,6 +103,38 @@ class TestRepositoryManager:
         # Cleanup should not raise an error
         manager.cleanup()
         assert manager.temp_dirs == []
+
+    def test_cleanup_keeps_a_dir_it_could_not_delete(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A partial cleanup keeps the survivor tracked so the next one retries it."""
+        import errno
+        import os
+
+        manager = RepositoryManager()
+        kept = tmp_path / "kept"
+        gone = tmp_path / "gone"
+        kept.mkdir()
+        gone.mkdir()
+        (kept / "stuck.txt").write_text("x")
+        (gone / "ok.txt").write_text("x")
+        manager.temp_dirs.extend([kept, gone])
+        real_unlink = os.unlink
+
+        def refuse_stuck(path, *args, **kwargs):
+            if Path(os.fspath(path)).name == "stuck.txt":
+                raise PermissionError(
+                    errno.EACCES, "Permission denied", os.fspath(path)
+                )
+            return real_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "unlink", refuse_stuck)
+
+        result = manager.cleanup()
+
+        assert result.failed >= 1
+        assert manager.temp_dirs == [kept], "a failed dir must stay tracked for retry"
+        assert not gone.exists()
 
     @patch("rootcoz.repository.Repo")
     def test_context_manager_enter(self, _mock_repo: MagicMock) -> None:
@@ -508,6 +541,47 @@ class TestCloneWithSslRetryCleanup:
         assert not partial_file.exists()
         # Target dir should still exist (recreated for the retry)
         assert target.exists()
+
+    @pytest.mark.parametrize(
+        "reported", [True, False], ids=["delete-reported-failed", "delete-no-op"]
+    )
+    def test_retry_refused_when_the_partial_clone_survives(
+        self, tmp_path, reported: bool
+    ) -> None:
+        """A delete that left the tree behind must fail the retry, not clone into it.
+
+        ``delete_tree`` reports failures instead of raising, so a dropped
+        ``DeleteResult`` let the retry clone into the residue it could not remove
+        (#424). Both halves of the guard are checked: a reported ``failed`` count
+        and a delete that silently removed nothing.
+        """
+        from rootcoz.repository import DeleteResult, _clone_with_ssl_retry
+
+        target = tmp_path / "repo"
+        target.mkdir()
+        residue = target / "residue"
+        residue.write_text("stuck")
+        result = DeleteResult(0, 1, 1) if reported else DeleteResult(0, 0, 0)
+        delete = patch("rootcoz.repository.delete_tree", return_value=result)
+
+        with (
+            delete as mock_delete,
+            patch("rootcoz.repository.Repo.clone_from") as mock_clone,
+        ):
+            mock_clone.side_effect = [
+                GitCommandError(
+                    "git clone",
+                    128,
+                    stderr="server verification failed: certificate signer not trusted",
+                ),
+                MagicMock(),
+            ]
+            with pytest.raises(OSError, match="could not be removed"):
+                _clone_with_ssl_retry("https://example.com/repo", target)
+
+        mock_delete.assert_called_once_with(target)
+        assert mock_clone.call_count == 1, "retried the clone into the residue"
+        assert residue.exists()
 
 
 class TestRedactUrl:

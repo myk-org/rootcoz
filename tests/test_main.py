@@ -5934,6 +5934,200 @@ class TestLifespanResumesWaitingJobs:
             assert r1["status"] == "failed"
 
 
+class TestStartupWorkspaceReclaim:
+    """Startup is the one moment no builder can still own a workspace (#424)."""
+
+    async def test_abandoned_workspace_and_its_graph_root_are_reclaimed(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """An analysis whose cleanup abandoned must not survive the next start.
+
+        ``ABANDON`` stops ``repo_manager.cleanup``, so the uuid workspace and its
+        sibling graph root stay on disk with no owner: nothing in a later process
+        ever looks at that name again.
+        """
+        from rootcoz import main as main_mod
+        from rootcoz import temp_paths
+
+        base = tmp_path / "rootcoz"
+        workspace = base / "workspace-abandoned"
+        (workspace / "tests-repo" / ".git").mkdir(parents=True)
+        (workspace / "tests-repo" / "file.py").write_text("x")
+        graph = base / ".workspace-abandoned.rootcoz-graft"
+        (graph / "tests-repo" / "graph").mkdir(parents=True)
+        chat = base / "chat-job-1" / "alice"
+        chat.mkdir(parents=True)
+        # The leftovers predate this process: only then is nothing building them.
+        for stale in (workspace, graph):
+            os.utime(stale, (1, 1))
+        monkeypatch.setattr(temp_paths, "rootcoz_temp_base", lambda: base)
+
+        assert await main_mod._reclaim_abandoned_workspaces() == 1
+
+        assert not workspace.exists(), "the abandoned clone tree survived the restart"
+        assert not graph.exists(), "the abandoned graph root survived the restart"
+        assert chat.exists(), "a chat workspace keeps its session across a restart"
+
+    async def test_a_workspace_created_after_start_is_left_alone(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A workspace this process created (or another replica's) is not a leftover."""
+        from rootcoz import main as main_mod
+        from rootcoz import temp_paths
+
+        base = tmp_path / "rootcoz"
+        live = base / "workspace-live"
+        (live / "tests-repo").mkdir(parents=True)
+        monkeypatch.setattr(temp_paths, "rootcoz_temp_base", lambda: base)
+
+        assert await main_mod._reclaim_abandoned_workspaces() == 0
+        assert live.exists(), "the reclaim deleted a workspace it does not own"
+
+    async def test_a_workspace_symlink_into_a_chat_is_never_followed(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A stale ``workspace-*`` link must not aim the graph delete at a chat.
+
+        ``_root`` resolves its argument, so reclaiming the link would delete
+        ``chat-job-1/.alice.rootcoz-graft`` — the graph of a chat workspace the
+        reclaim deliberately never touches.
+        """
+        from rootcoz import main as main_mod
+        from rootcoz import temp_paths
+
+        base = tmp_path / "rootcoz"
+        chat = base / "chat-job-1" / "alice"
+        chat.mkdir(parents=True)
+        graph = base / "chat-job-1" / ".alice.rootcoz-graft"
+        (graph / "alice" / "graph").mkdir(parents=True)
+        (graph / "alice" / "graph" / "index.bin").write_text("graph")
+        link = base / "workspace-fake"
+        link.symlink_to(chat)
+        for stale in (link, graph):
+            os.utime(stale, (1, 1), follow_symlinks=False)
+        monkeypatch.setattr(temp_paths, "rootcoz_temp_base", lambda: base)
+
+        reclaimed = await main_mod._reclaim_abandoned_workspaces()
+
+        assert graph.exists(), "startup followed a workspace link into a chat graph"
+        assert link.is_symlink(), "a link is not a leftover workspace to delete"
+        assert reclaimed == 0
+
+    async def test_a_deleted_jobs_marked_chat_workspace_is_reclaimed(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """No init can recover it: the job row is gone, so every init 404s first.
+
+        An abandoned delete leaves the chat tree and its marker behind, and
+        recovery only runs for a create of a job that still exists.
+        """
+        from rootcoz import main as main_mod
+        from rootcoz import temp_paths
+        from rootcoz.temp_paths import delete_marker
+
+        base = tmp_path / "rootcoz"
+        chat = base / "chat-job-1"
+        (chat / "alice" / "repo" / ".git").mkdir(parents=True)
+        marker = delete_marker(chat)
+        marker.write_text("", encoding="utf-8")
+        for stale in (chat, marker):
+            os.utime(stale, (1, 1))
+        monkeypatch.setattr(temp_paths, "rootcoz_temp_base", lambda: base)
+
+        assert await main_mod._reclaim_abandoned_workspaces() == 1
+        assert not chat.exists(), "a deleted job's marked chat survived the restart"
+
+    async def test_a_missing_base_directory_is_not_a_listing_failure(
+        self, tmp_path, monkeypatch, caplog
+    ) -> None:
+        """A fresh container has no base yet: nothing to reclaim, no warning.
+
+        ``rootcoz_temp_base`` only joins a path and the first ``mkdir`` happens in
+        ``RepositoryManager.__init__``, i.e. after this task starts, so a first
+        boot always lists a directory that does not exist.
+        """
+        from rootcoz import main as main_mod
+        from rootcoz import temp_paths
+
+        base = tmp_path / "rootcoz"
+        monkeypatch.setattr(temp_paths, "rootcoz_temp_base", lambda: base)
+
+        with capture_main_logs(caplog):
+            assert await main_mod._reclaim_abandoned_workspaces() == 0
+
+        assert "reclaimed" not in caplog.text
+        assert "abandoned workspaces stay on disk" not in caplog.text, (
+            "a first boot claimed abandoned workspaces it could not list"
+        )
+
+    async def test_an_incomplete_reclaim_is_not_reported_as_deleted(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A delete that leaves paths behind reclaimed nothing; the count says so."""
+        from rootcoz import main as main_mod
+        from rootcoz import temp_paths
+        from rootcoz.temp_paths import DeleteResult
+
+        base = tmp_path / "rootcoz"
+        workspace = base / "workspace-stuck"
+        workspace.mkdir(parents=True)
+        os.utime(workspace, (1, 1))
+        monkeypatch.setattr(temp_paths, "rootcoz_temp_base", lambda: base)
+        # Paths survive: the delete reports them instead of raising (delete_tree).
+        monkeypatch.setattr(
+            main_mod, "delete_tree", lambda path: DeleteResult(0, 0, failed=1)
+        )
+
+        assert await main_mod._reclaim_abandoned_workspaces() == 0, (
+            "a workspace whose delete failed is reported as deleted"
+        )
+        assert workspace.exists()
+
+
+class TestAnalysisWorkspaceReap:
+    """The one reap sequence both analysis ``finally`` blocks run (#424)."""
+
+    async def test_the_ai_session_token_outlives_the_cleanup_steps(
+        self, monkeypatch
+    ) -> None:
+        """Revoke last: a cancelled run's sidecar prompt may still call tools.
+
+        Analyses never abort their sidecar session (only chat does), so revoking
+        the few-minute-old token before the workspace delete only makes that
+        prompt's history tools fail while it is still executing.
+        """
+        from rootcoz import main as main_mod
+        from rootcoz.temp_paths import CleanupOutcome
+
+        order: list[str] = []
+
+        async def fake_cleanup_off_loop(what, *steps, always=()):
+            # The queued delete is still running when the revoke used to be
+            # scheduled, which is the window this pins.
+            await asyncio.sleep(0.05)
+            for step in steps:
+                step()
+            return CleanupOutcome.CLEAN
+
+        async def fake_cleanup_ai_session(auth_header: str) -> None:
+            order.append("revoke")
+
+        monkeypatch.setattr(main_mod, "cleanup_off_loop", fake_cleanup_off_loop)
+        monkeypatch.setattr(main_mod, "_cleanup_ai_session", fake_cleanup_ai_session)
+
+        await main_mod._reap_analysis_workspace(
+            job_id="job-1",
+            auth_header="Bearer token",
+            source=None,
+            repo_manager=SimpleNamespace(cleanup=lambda: order.append("delete")),
+            repo_path=None,
+        )
+
+        assert order == ["delete", "revoke"], (
+            "the token was revoked before the workspace delete finished"
+        )
+
+
 class TestPeerAnalysisParams:
     """Tests for peer analysis parameter pass-through."""
 
@@ -8557,6 +8751,12 @@ class TestReAnalyzeFailure:
                 with pytest.raises(asyncio.CancelledError):
                     await asyncio.wait_for(task, 2)
                 assert finished.is_set()
+                # The delete is a queued reaper step now, so wait for it instead of
+                # depending on worker-thread scheduling.
+                for _ in range(200):
+                    if manager.return_value.cleanup.called:
+                        break
+                    await asyncio.sleep(0.01)
                 manager.return_value.cleanup.assert_called_once()
             result = (await storage.get_result("job-cancel-tests"))["result"]
             assert result["cloning_repos"] == []
@@ -14645,3 +14845,138 @@ class TestAdminUsersPaging:
     )
     def test_out_of_range_paging_is_rejected(self, test_client, params) -> None:
         assert test_client.get("/api/admin/users", params=params).status_code == 422
+
+
+class TestAnalysisReaperIsOneCopy:
+    """Both analysis ``finally`` blocks reap through one helper (#424).
+
+    The sequence — revoke task first, then the graph/artifact steps, then the
+    shielded revoke — is only correct when it is edited in one place. Two copies
+    had already drifted (``if repo_manager:`` vs ``if repo_manager is not None:``),
+    so the contract asserted here is the shared call, not a shape of the source.
+    """
+
+    #: The whole surface of the helper: no call site may grow a private variant.
+    _KWARGS: ClassVar[set[str]] = {
+        "job_id",
+        "auth_header",
+        "source",
+        "repo_manager",
+        "repo_path",
+    }
+
+    async def test_ci_source_analysis_reaps_through_the_shared_helper(
+        self, temp_db_path: Path, monkeypatch
+    ) -> None:
+        from rootcoz.main import _process_ci_source_analysis
+        from rootcoz.models import UnifiedAnalyzeRequest
+        from rootcoz.sources.base import CISourceResult
+
+        monkeypatch.setattr(storage, "DB_PATH", temp_db_path)
+        body = UnifiedAnalyzeRequest(
+            type="jenkins",
+            job_name="my-job",
+            build_number=1,
+            ai_provider="claude",
+            ai_model="test-model",
+        )
+        merged = _build_wait_settings(
+            jenkins_url="https://jenkins.example.com", wait_for_completion=False
+        )
+        with (
+            patch.object(storage, "DB_PATH", temp_db_path),
+            patch(
+                "rootcoz.sources.jenkins_source.JenkinsSource.fetch",
+                new_callable=AsyncMock,
+                return_value=CISourceResult(
+                    failures=[], identity={"job_name": "my-job"}
+                ),
+            ),
+            patch("rootcoz.main.safe_update_progress", new_callable=AsyncMock),
+            _patch_preflight(),
+            patch(
+                "rootcoz.main._reap_analysis_workspace", new_callable=AsyncMock
+            ) as reap,
+        ):
+            await storage.init_db()
+            await storage.save_result("job-one-copy", "", "pending", {})
+            await _process_ci_source_analysis(
+                job_id="job-one-copy",
+                body=body,
+                merged=merged,
+                display_name="my-job",
+                ai_provider="claude",
+                ai_model="test-model",
+                peer_ai_configs=None,
+                tests_repo_url="",
+                tests_repo_ref="",
+                resolved_tests_repo_token="",
+                additional_repos_list=[],
+                base_url="",
+            )
+
+        reap.assert_awaited_once()
+        kwargs = reap.await_args.kwargs
+        assert set(kwargs) == self._KWARGS
+        assert kwargs["job_id"] == "job-one-copy"
+        # The clone workspace the run created is handed to the reaper, not lost.
+        assert kwargs["repo_manager"] is not None
+        assert kwargs["repo_path"] is not None
+
+    async def test_reanalysis_reaps_through_the_shared_helper(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        from rootcoz.main import _reanalyze_failure_background
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "one-copy.db")
+        with (
+            patch("rootcoz.main.RepositoryManager") as manager,
+            patch(
+                "rootcoz.main._create_ai_auth_header",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            patch(
+                "rootcoz.main._resolve_settings_json_before_analysis",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+            patch(
+                "rootcoz.main._reap_analysis_workspace", new_callable=AsyncMock
+            ) as reap,
+        ):
+            manager.return_value.create_workspace.return_value = tmp_path / "workspace"
+            manager.return_value.clone_into.return_value = None
+            await storage.init_db()
+            await storage.save_result(
+                "job-one-copy-2",
+                "",
+                "completed",
+                {"failures": [{"id": "failure-id", "reanalysis_status": "running"}]},
+            )
+            await _reanalyze_failure_background(
+                "job-one-copy-2",
+                "failure-id",
+                {},
+                "claude",
+                "opus",
+                None,
+                "",
+                None,
+                0,
+                "https://example.com/tests",
+                "main",
+                "",
+                None,
+                "admin",
+                1,
+            )
+
+        reap.assert_awaited_once()
+        kwargs = reap.await_args.kwargs
+        assert set(kwargs) == self._KWARGS
+        assert kwargs["job_id"] == "job-one-copy-2"
+        # Same manager and workspace the re-analyze run used: an inline `if
+        # repo_manager:` copy would at best drift again, at worst skip the reaper.
+        assert kwargs["repo_manager"] is manager.return_value
+        assert kwargs["repo_path"] == tmp_path / "workspace"

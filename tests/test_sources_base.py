@@ -379,3 +379,34 @@ class TestCISourceCleanup:
         assert called["path"] == extract
         assert called["label"] == "Prow artifacts"
         assert source._extract_path is None
+
+
+def test_cleanup_extract_dir_reports_survivors(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """A cleanup that left paths behind must not log ``Cleanup complete``."""
+    import errno
+    import logging
+    import os
+    import re
+
+    from rootcoz.sources.base import cleanup_extract_dir
+
+    extract = tmp_path / "extract"
+    extract.mkdir()
+    (extract / "stuck.txt").write_text("x")
+    real_unlink = os.unlink
+
+    def refuse_stuck(path, *args, **kwargs):
+        if Path(os.fspath(path)).name == "stuck.txt":
+            raise PermissionError(errno.EACCES, "Permission denied", os.fspath(path))
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", refuse_stuck)
+    with caplog.at_level(logging.INFO):
+        cleanup_extract_dir(extract, label="extracted artifacts")
+
+    assert "Cleanup complete" not in caplog.text
+    survived = re.search(r"survived=(\d+)", caplog.text)
+    assert survived and int(survived.group(1)) >= 1
+    assert extract.exists()
