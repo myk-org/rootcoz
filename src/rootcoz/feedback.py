@@ -46,6 +46,12 @@ _PEM_BLOCK = rf"{_PEM_HEADER}[\s\S]{{0,{_PEM_WINDOW}}}?-----END[A-Z0-9 ]*-----"
 # full. The unterminated branch eats the header plus the same fixed window, so
 # the bound fails closed without costing more than the block branch (#399).
 _PEM_UNTERMINATED = rf"{_PEM_HEADER}[\s\S]{{0,{_PEM_WINDOW}}}"
+# A PEM block pasted on its own -- no `KEY=`/`key:` in front, which is how a log
+# excerpt, a `kubectl describe` dump or an issue body carries one -- never
+# reached `_ASSIGNMENT_VALUE`, so the header and the whole body shipped
+# verbatim. Same two branches, so a footer inside the window ends the match and
+# the text after the block survives, and a missing footer fails closed (#399).
+_PEM_BARE = rf"{_PEM_BLOCK}|{_PEM_UNTERMINATED}"
 # Header on the value's own line, or on the line right after it.
 _ASSIGNMENT_VALUE = (
     rf"(?:(?:[^\r\n]*\r?\n)?(?:{_PEM_BLOCK}|{_PEM_UNTERMINATED})|[^\r\n]*)"
@@ -126,6 +132,10 @@ _SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         ),
         r"\1[REDACTED]",
     ),
+    # A bare PEM block (see `_PEM_BARE`). After the assignment patterns above,
+    # which already end the match at the block; ahead of the URL ones so the
+    # body is not parsed for userinfo.
+    (re.compile(_PEM_BARE), "[REDACTED]"),
     # GitHub tokens (ghp_, gho_, ghs_, ghr_, github_pat_)
     (
         re.compile(r"\b(?:ghp_|gho_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]+\b"),

@@ -16,6 +16,7 @@ from rootcoz.attribution import AiProvenance, read_provenance
 from rootcoz.config import get_settings
 from rootcoz.encryption import get_hmac_secret
 from rootcoz.feedback import (
+    _PEM_WINDOW,
     _build_fallback_feedback,
     _derive_fallback_labels,
     _parse_json_response,
@@ -262,6 +263,40 @@ class TestScrubSensitiveData:
             result = scrub_sensitive_data(text)
             assert secret not in result
             assert "[REDACTED]" in result, result
+
+    def test_redacts_a_bare_pem_block(self):
+        """A key pasted on its own -- no `KEY=`/`key:` in front, the shape of a
+        log excerpt, a `kubectl describe` dump or an issue body -- never
+        reached `_ASSIGNMENT_VALUE`, so header and body shipped verbatim. The
+        block goes header through footer, and the text after it survives
+        (#399)."""
+        block = (
+            "-----BEGIN RSA PRIVATE" + " KEY-----\n"
+            "MIIEowIBAAKCAQEAsecretbody\n"
+            "-----END RSA PRIVATE" + " KEY-----"
+        )
+        assert (
+            scrub_sensitive_data(f"kubectl describe secret db\n{block}\nafter line")
+            == "kubectl describe secret db\n[REDACTED]\nafter line"
+        )
+
+    def test_footerless_bare_pem_redacts_its_body(self):
+        """With no footer in reach the bare header must fail closed like the
+        assignment case: header plus its whole window goes, so no body byte
+        survives, and the window is what bounds it (#399)."""
+        header = "-----BEGIN RSA PRIVATE" + " KEY-----"
+        assert scrub_sensitive_data(header + "\n" + "MIIEowIBAAKCAQEA" * 188) == (
+            "[REDACTED]"
+        )
+        result = scrub_sensitive_data(header + "\n" + "A" * (2 * _PEM_WINDOW))
+        assert result.startswith("[REDACTED]")
+        # Header plus one window went, the rest of the run is left alone.
+        assert len(result) <= _PEM_WINDOW + len("[REDACTED]")
+
+    def test_bare_begin_word_is_not_a_pem_header(self):
+        """Only the `-----` markers make a header; the word alone is prose."""
+        text = "the log said BEGIN and then the test failed\nEND"
+        assert scrub_sensitive_data(text) == text
 
     def test_pem_redaction_is_marker_and_length_bounded(self):
         """Only a `-----BEGIN` value followed by its `-----END` is eaten: a bare
