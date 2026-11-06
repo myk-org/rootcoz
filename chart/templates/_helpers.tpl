@@ -164,6 +164,28 @@ Validate chart values: routing, AI config.
 {{- end }}
 
 {{/*
+Container resources with empty-string entries dropped: "" means "omit this
+resource" (a Kubernetes quantity cannot be empty), so
+--set resources.requests.memory="" removes the key instead of rendering an
+invalid cpu: "".
+*/}}
+{{- define "rootcoz.containerResources" -}}
+{{- $out := dict -}}
+{{- range $section := list "requests" "limits" -}}
+{{- $clean := dict -}}
+{{- range $key, $value := (index $.Values.resources $section | default dict) -}}
+{{- if ne (toString $value) "" -}}
+{{- $_ := set $clean $key $value -}}
+{{- end -}}
+{{- end -}}
+{{- if $clean -}}
+{{- $_ := set $out $section $clean -}}
+{{- end -}}
+{{- end -}}
+{{- toYaml $out -}}
+{{- end }}
+
+{{/*
 Auto-derive SECURE_COOKIES unless explicitly set in values.
 */}}
 {{- define "rootcoz.secureCookies" -}}

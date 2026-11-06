@@ -109,8 +109,18 @@ persistence:
     helm.sh/resource-policy: keep
 
 resources:
-  # Modest defaults for dev/evaluation clusters. For production AI workloads use
-  # requests/limits of 4 CPU and 32Gi memory (see chart/README.md).
+  # Modest defaults for dev/evaluation clusters. For production AI workloads apply
+  # chart/examples/values-production.yaml (4 CPU / 32Gi / 16Gi ephemeral-storage);
+  # sizing basis in chart/README.md. ephemeral-storage is optional and goes on both
+  # requests and limits — the limit also becomes the /tmp emptyDir sizeLimit
+  # (setting it mounts /tmp and rolls the pod once). "" drops a key, but a cleared
+  # request is not "no floor": Kubernetes copies the limit into the request, so
+  # requests.memory: "" still schedules for limits.memory. Clear both for a real
+  # no-floor pod (a LimitRange default also supplies the request).
+  # Ownership: this chart owns the /tmp sizeLimit and derives it from
+  # limits.ephemeral-storage — there is no separate workspace.sizeLimit key. #402 C1
+  # puts the same emptyDir cap on the live deployment, so both must carry the same
+  # number (the production example uses 16Gi).
   requests:
     cpu: "1"
     memory: 4Gi
