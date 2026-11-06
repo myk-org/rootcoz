@@ -1818,6 +1818,10 @@ _NON_RETRYABLE_AI_ERRORS = (
 #: The excerpt is scrubbed before it is logged (see ``scrub_sensitive_data``).
 AI_LOG_EXCERPT_CHARS = 2000
 
+#: Leading hex characters of the answer's SHA-256 kept in the WARNING line. The
+#: width is part of the log format: same answer, same fingerprint, every run.
+AI_LOG_DIGEST_CHARS = 12
+
 
 async def _call_ai_with_retry(
     prompt: str,
@@ -1978,7 +1982,9 @@ async def _call_ai_with_retry(
                 call_type,
                 job_id,
                 len(result.text or ""),
-                hashlib.sha256((result.text or "").encode()).hexdigest()[:12],
+                hashlib.sha256((result.text or "").encode()).hexdigest()[
+                    :AI_LOG_DIGEST_CHARS
+                ],
             )
             # Scrub the WHOLE answer, then cut: truncating first can leave a
             # token fragment the pattern no longer matches.

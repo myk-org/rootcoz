@@ -498,7 +498,7 @@ class TestRunSingleAiAnalysis:
         Model narration can quote CI logs, artifacts or tokens, so it must never
         land in a WARNING line.
         """
-        from rootcoz.engine.core import AI_LOG_EXCERPT_CHARS
+        from rootcoz.engine.core import AI_LOG_DIGEST_CHARS, AI_LOG_EXCERPT_CHARS
 
         narration = "QUOTED-CI-LOG " + "x" * (AI_LOG_EXCERPT_CHARS + 500)
         excerpts = await self._narration_debug_excerpts(monkeypatch, caplog, narration)
@@ -510,10 +510,14 @@ class TestRunSingleAiAnalysis:
             and "no usable classification" in r.getMessage()
         ]
         assert warnings, "the narration-only answer must be reported"
+        digest = hashlib.sha256(narration.encode()).hexdigest()
         for record in warnings:
             message = record.getMessage()
             assert "QUOTED-CI-LOG" not in message
-            assert hashlib.sha256(narration.encode()).hexdigest()[:12] in message
+            # The fingerprint width is part of the log format, not a bare literal.
+            logged_digest = message.rsplit("text_sha256=", 1)[1]
+            assert logged_digest == digest[:AI_LOG_DIGEST_CHARS]
+            assert len(logged_digest) == AI_LOG_DIGEST_CHARS
             assert str(len(narration)) in message
 
         assert excerpts, "DEBUG keeps a bounded excerpt for diagnosis"
