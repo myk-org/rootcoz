@@ -142,7 +142,10 @@ from rootcoz.engine.core import (
     safe_update_progress,
     set_progress_callback,
 )
-from rootcoz.error_messages import make_user_friendly_error
+from rootcoz.error_messages import (
+    make_user_friendly_error,
+    tracker_credential_message,
+)
 from rootcoz.exporters.base import ExportContext, Exporter
 from rootcoz.exporters.datadog import (
     DATADOG_SITES,
@@ -2865,6 +2868,37 @@ async def _record_account_blocked(
     )
 
 
+#: Chat issue endpoints whose every attempt is audited (#407, row G2). The auth
+#: layer can refuse one before the handler runs, and that refusal is an attempt
+#: the trail promises a row for — no other action names it.
+_AUDITED_ISSUE_PATHS = frozenset({"/api/chat-issue", "/api/chat-issue/propose"})
+
+
+async def _audit_refused_issue_call(
+    request: Request, username: str, reason: str
+) -> None:
+    """One ``issue.create`` row for an issue attempt the auth layer refused.
+
+    The handler never ran, so this is the only place the attempt can be
+    recorded. ``reason`` and ``step`` are fixed codes — never the request body,
+    which is where a pasted credential would be.
+    """
+    path = request.url.path.rstrip("/")
+    if path not in _AUDITED_ISSUE_PATHS:
+        return
+    step = "propose" if path.endswith("propose") else "create"
+    await record_audit(
+        action="issue.create",
+        actor=username,
+        message=f"Refused {step} {path} for '{username}' (denied: {reason})",
+        target_type="chat",
+        target_id=username or None,
+        outcome="denied",
+        details={"reason": reason, "result": "refused", "step": step},
+        request=request,
+    )
+
+
 def _account_block_reason(user: dict[str, Any] | None) -> str | None:
     """``"disabled"`` / ``"locked"`` for a row that must not log in (#379).
 
@@ -3147,6 +3181,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 role=resolved_role,
                 request=request,
             )
+            await _audit_refused_issue_call(request, username, "account_disabled")
             return _unauthenticated_response(request, path)
 
         request.state.username = username
@@ -3189,6 +3224,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # Require authentication for all non-public, non-optional paths
         if not has_valid_session and not self._is_public_path(path):
+            await _audit_refused_issue_call(request, username, "unauthenticated")
             return _unauthenticated_response(request, path)
 
         # Check pending user status when REQUIRE_APPROVAL is enabled.
@@ -9148,17 +9184,10 @@ async def _add_tracker_comment(
     return comment_id
 
 
-#: The 400 for a missing tracker credential, in two wordings: the caller that
-#: gets it must be able to follow it. An account with no users row (the
-#: bootstrap ``admin``) cannot save a token at all — ``PUT /api/user/tokens``
-#: answers 404 for it, so pointing it at Profile Settings is a dead end.
-_TRACKER_CREDENTIAL_DETAIL = (
-    "{kind} token is required. Set up your token in Profile Settings."
-)
-_TRACKER_CREDENTIAL_NO_PROFILE_DETAIL = (
-    "{kind} token is required, and this account has no profile to store one. "
-    "Sign in with your own account and add the token in Profile Settings."
-)
+#: The chat prompt's reason code for a caller with no ``users`` row: it cannot
+#: save a token at all, so neither the 400 nor the prompt may point it at
+#: Profile Settings (see :func:`tracker_credential_message`).
+_CHAT_NO_PROFILE_REASON = "no_token_no_profile"
 
 #: The draft-time refusal when this caller has nowhere to file a GitHub issue.
 #: Both steps resolve the destination (the proposal shows it, the create files
@@ -9170,15 +9199,23 @@ _CHAT_NO_REPO_DETAIL = (
 )
 
 
+async def _account_has_profile(username: str) -> bool:
+    """Whether this caller has a ``users`` row — false only for the bootstrap
+    ``admin``, which has nowhere to save a token."""
+    return bool(username) and await storage.get_user_by_username(username) is not None
+
+
 async def _require_user_tracker_credential(username: str, kind: str) -> str:
     """The 400 detail for a caller with no *kind* credential in their account.
 
     Returns the detail instead of raising, so a caller can attach its own
     follow-up context; ``kind`` is the tracker name (``"GitHub"``/``"Jira"``).
     """
-    if username and await storage.get_user_by_username(username) is None:
-        return _TRACKER_CREDENTIAL_NO_PROFILE_DETAIL.format(kind=kind)
-    return _TRACKER_CREDENTIAL_DETAIL.format(kind=kind)
+    if not username:
+        return tracker_credential_message(kind)
+    return tracker_credential_message(
+        kind, has_profile=await _account_has_profile(username)
+    )
 
 
 #: Everything a tracker create call can raise for a handled reason. Anything
@@ -9320,6 +9357,7 @@ def _chat_tracker_state(
     user_tokens: dict[str, str],
     *,
     github_repo_available: bool,
+    has_profile: bool = True,
 ) -> tuple[tuple[str, ...], dict[str, str]]:
     """``(trackers chat may offer this user, why each other tracker is absent)``.
 
@@ -9330,7 +9368,10 @@ def _chat_tracker_state(
 
     The reasons are what the system prompt needs to tell a server-disabled
     tracker from a token this account has not saved: telling a user to add a
-    token cannot fix a tracker an administrator turned off.
+    token cannot fix a tracker an administrator turned off. ``has_profile`` is
+    ``False`` for an account with no ``users`` row (the bootstrap ``admin``),
+    which gets its own reason code — the prompt must not send it to Profile
+    Settings, which answers 404 for it.
     """
     targets: list[str] = []
     unavailable: dict[str, str] = {}
@@ -9339,7 +9380,11 @@ def _chat_tracker_state(
             target, settings, user_tokens, github_repo_available=github_repo_available
         )
         if reason:
-            unavailable[target] = reason
+            unavailable[target] = (
+                _CHAT_NO_PROFILE_REASON
+                if reason == "no_token" and not has_profile
+                else reason
+            )
         else:
             targets.append(target)
     return tuple(targets), unavailable
@@ -10008,13 +10053,13 @@ async def _create_issue_from_text(
         if not (github_token or "").strip():
             raise HTTPException(
                 status_code=400,
-                detail=_TRACKER_CREDENTIAL_DETAIL.format(kind=label),
+                detail=tracker_credential_message(label),
             )
     else:
         if not (jira_token or "").strip() and not (jira_sa_token or "").strip():
             raise HTTPException(
                 status_code=400,
-                detail=_TRACKER_CREDENTIAL_DETAIL.format(kind=label),
+                detail=tracker_credential_message(label),
             )
         # A legacy (non-ATOA) service-account secret must be rejected, not
         # silently dropped (which would file the bug under the SERVER's Jira
@@ -10210,6 +10255,27 @@ async def create_jira_bug_endpoint(
     return {**result, "comment_id": comment_id}
 
 
+def _refused_issue_details(
+    body: ChatIssueRequest | ChatIssueProposeRequest, tracker: str, step: str
+) -> dict[str, Any]:
+    """Audit details for a refused chat issue attempt: what and where, never the text.
+
+    The job and the destination the caller asked for, so a refusal row names its
+    subject; the draft's title and body are deliberately absent, and a pasted
+    credential in ``repo`` is scrubbed by :func:`record_audit`.
+    """
+    return {
+        "tracker": tracker,
+        "result": "refused",
+        "step": step,
+        "job_id": body.job_id,
+        "repo": body.repo if tracker == "github" else "",
+        # Not ``jira_project_key``: a detail named ``*_key`` is dropped as
+        # credential-shaped by ``_redact_details``, and a project key is not one.
+        "jira_project": body.jira_project_key if tracker == "jira" else "",
+    }
+
+
 async def _chat_issue_tracker_tokens(
     username: str,
     tracker: Literal["github", "jira"],
@@ -10319,17 +10385,30 @@ async def propose_chat_issue(
     """
     username = request.state.username
     tracker = body.target
-    _require_reviewer(request)
-    _check_allow_list(request)
-    if tracker == "github":
-        _require_repo_slug(body.repo)
+    message = f"User '{username}' proposed a {tracker} issue from chat"
     try:
+        # Inside the try on purpose: a viewer, an allow-list or a credential
+        # refusal is an attempt the trail promises a row for — a proposal is the
+        # half of the gate a chat model reaches most often.
+        _require_reviewer(request)
+        _check_allow_list(request)
+        if tracker == "github":
+            _require_repo_slug(body.repo)
         user_tokens = await _chat_issue_tracker_tokens(username, tracker, settings)
         destination, _repo_url = await _chat_issue_resolved_destination(
             request, body, settings, user_tokens
         )
     except HTTPException as exc:
         logger.info("Chat issue draft refused for %s: %s", username, exc.detail)
+        # The tracker and the destination asked for — never the draft text.
+        await _record_refused_attempt(
+            action="issue.create",
+            request=request,
+            message=message,
+            target_type="chat",
+            exc=exc,
+            details=_refused_issue_details(body, tracker, "propose"),
+        )
         raise
     title = scrub_sensitive_data(body.title)
     issue_body = scrub_sensitive_data(body.body)
@@ -10436,7 +10515,7 @@ async def create_chat_issue(
             _release_issue_draft(body.confirmation_id, draft)
             raise
     except HTTPException as exc:
-        details: dict[str, Any] = {"tracker": tracker, "result": "refused"}
+        details: dict[str, Any] = _refused_issue_details(body, tracker, "create")
         upstream_status = _upstream_status(exc)
         if upstream_status is not None:
             # The number that tells an outage from a lost token; never the
@@ -21270,6 +21349,7 @@ async def _init_chat_under_barrier(
             # This run's own repos are a destination too: a deployment with no
             # TESTS_REPO_URL can still file into the job's test repo.
             github_repo_available=bool(issue_repos),
+            has_profile=await _account_has_profile(username),
         )
         auth_header = await _create_ai_auth_header(username)
         if auth_header:
@@ -21979,6 +22059,7 @@ async def _process_chat_message(
                             settings,
                             await storage.get_user_tokens(username),
                             github_repo_available=bool(issue_repos),
+                            has_profile=await _account_has_profile(username),
                         )
                         # A resumed session keeps its creation-time tools, so a
                         # token saved or a tracker toggled mid-chat only reaches
@@ -22454,6 +22535,7 @@ async def init_admin_chat(
                 # TESTS_REPO_URL is a destination it can rely on, and the
                 # tool list asks the same parser the create call uses.
                 github_repo_available=_settings_github_repo_available(get_settings()),
+                has_profile=await _account_has_profile(username),
             )
             auth_header = await _create_ai_auth_header(username, is_admin=True)
             if auth_header:
@@ -22755,6 +22837,7 @@ async def _process_admin_chat_message(
                 settings,
                 await storage.get_user_tokens(username),
                 github_repo_available=_settings_github_repo_available(settings),
+                has_profile=await _account_has_profile(username),
             )
             # A resumed session keeps its creation-time tools (see
             # _enable_tools_for_session): rebuild when this user's set changed.

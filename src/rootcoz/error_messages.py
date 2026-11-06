@@ -76,6 +76,26 @@ def make_user_friendly_error(error: str | Exception) -> str:
     return "Analysis encountered an unexpected error. Please try again or contact an admin if the issue persists."
 
 
+def tracker_credential_message(kind: str, *, has_profile: bool = True) -> str:
+    """The missing-tracker-credential sentence, in a wording the reader can follow.
+
+    The bootstrap ``admin`` has no ``users`` row, so ``PUT /api/user/tokens``
+    answers 404 for it: pointing it at Profile Settings is a dead end. Both the
+    HTTP detail and the chat prompt use this wording, so a credential error
+    never sends an account somewhere it cannot go.
+
+    Args:
+        kind: The tracker name (``"GitHub"``/``"Jira"``).
+        has_profile: False for a caller with no ``users`` row to save a token in.
+    """
+    if has_profile:
+        return f"{kind} token is required. Set up your token in Profile Settings."
+    return (
+        f"{kind} token is required, and this account has no profile to store one. "
+        "Sign in with your own account and add the token in Profile Settings."
+    )
+
+
 def ai_not_configured_message(what: str, *, is_admin: bool = False) -> str:
     """Build a role-aware error message when AI provider/model is not configured."""
     if is_admin:

@@ -26,6 +26,7 @@ from rootcoz.engine.http_mcp import (
     cleanup_http_tools_mcp,
     install_http_tools_mcp_best_effort_async,
 )
+from rootcoz.error_messages import tracker_credential_message
 from rootcoz.jira import (
     JiraConnection,
     classify_jira_secret,
@@ -1275,7 +1276,8 @@ _COMMON_RULES = """- Do NOT modify any data — read-only. The one exception is 
 
 #: What to tell the user for each reason a tracker tool is missing from the list.
 #: `{kind}` is the tracker name. Only the missing-token case is fixed in Profile
-#: Settings — a disabled tracker or a missing repository is not.
+#: Settings — a disabled tracker or a missing repository is not, and an account
+#: with no ``users`` row has nowhere to save one at all.
 _TRACKER_UNAVAILABLE_REASONS = {
     "server_disabled": (
         "issue creation is disabled on this server, so no token can enable it — "
@@ -1289,6 +1291,11 @@ _TRACKER_UNAVAILABLE_REASONS = {
     "no_token": (
         "this account has no {kind} token saved. Tell the user the fix: "
         "Profile Settings → add the {kind} token."
+    ),
+    "no_token_no_profile": (
+        "this account has no {kind} token saved and no profile to store one in, "
+        "so it cannot save a token at all. Tell the user the fix in these words: "
+        + tracker_credential_message("{kind}", has_profile=False)
     ),
     "unusable_credential": (
         "this account's saved {kind} credential cannot be used with the "

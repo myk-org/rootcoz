@@ -4953,6 +4953,74 @@ class TestChatIssueEndpoint:
         assert audit["events"][0]["details"]["reason"] == "invalid_request"
 
     @pytest.mark.asyncio
+    async def test_every_refused_attempt_is_audited_not_just_the_create(
+        self, test_client
+    ):
+        """Row G2: a refusal leaves one row saying why, naming the subject — and
+        never carrying a credential.
+
+        Only ``POST /api/chat-issue`` wrote a row at #407: a refused proposal and
+        a call the auth layer refuses (a disabled account) left nothing.
+        """
+        pasted = "ghp_pasted_by_the_user_0123456789"  # pragma: allowlist secret
+        headers = await self._user("chat-audit-notoken")
+        job_id = await self._run(
+            "chat-audit-notoken-run", tests_repo_url="https://github.com/org/repo"
+        )
+        # 1. A proposal refused for the caller's missing credential.
+        proposal = test_client.post(
+            "/api/chat-issue/propose",
+            json={
+                "title": "t",
+                "body": f"the token is {pasted}",
+                "target": "github",
+                "repo": "org/elsewhere",
+                "job_id": job_id,
+                "conversation": job_id,
+            },
+            headers=headers,
+        )
+        assert proposal.status_code == 400, proposal.text
+
+        # 2. A create refused by the auth layer before the handler runs.
+        disabled = await self._user("chat-audit-disabled")
+        await storage.set_user_disabled("chat-audit-disabled", True)
+        refused = test_client.post(
+            "/api/chat-issue",
+            json={**self._CHAT, "target": "github"},
+            headers=disabled,
+        )
+        assert refused.status_code == 401, refused.text
+
+        audit = await self._chat_audit()
+        assert audit["total"] == 2, audit
+        by_step = {event["details"]["step"]: event for event in audit["events"]}
+
+        refused_proposal = by_step["propose"]
+        assert refused_proposal["outcome"] == "failure"
+        assert refused_proposal["actor"] == "chat-audit-notoken"
+        # The reason code and the destination asked for, never the draft text.
+        assert refused_proposal["details"] == {
+            "reason": "invalid_request",
+            "result": "refused",
+            "step": "propose",
+            "tracker": "github",
+            "job_id": job_id,
+            "repo": "org/elsewhere",
+            "jira_project": "",
+        }
+
+        auth_refusal = by_step["create"]
+        assert auth_refusal["outcome"] == "denied"
+        assert auth_refusal["actor"] == "chat-audit-disabled"
+        assert auth_refusal["details"] == {
+            "reason": "account_disabled",
+            "result": "refused",
+            "step": "create",
+        }
+        assert pasted not in json.dumps(audit)
+
+    @pytest.mark.asyncio
     async def test_bootstrap_admin_is_pointed_at_a_path_it_can_take(self, test_client):
         """The bootstrap admin has no users row, so Profile Settings is a dead end."""
         with (

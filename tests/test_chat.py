@@ -1181,6 +1181,47 @@ class TestChatIssueTools:
         # The token advice belongs only to the missing-token case.
         assert "Profile Settings → add" not in rules
 
+    def test_an_account_with_no_profile_is_not_sent_to_profile_settings(self):
+        """The bootstrap ``admin`` has no ``users`` row: ``PUT /api/user/tokens``
+        answers 404 for it, so the chat prompt must not name it as the fix.
+
+        Row D2: the API half already said "this account has no profile to store
+        one"; the chat half still said "Profile Settings → add the GitHub
+        token", a page the caller cannot use.
+        """
+        from rootcoz.main import _chat_tracker_state
+
+        tools = build_admin_custom_tools(
+            server_url="http://localhost:8000", auth_token="t"
+        )
+        rules = build_admin_system_prompt(
+            tools, tracker_unavailable={"github": "no_token_no_profile"}
+        ).split("## Creating Issues")[1]
+        # The reason the API gives, and what this account can actually do.
+        assert "no profile to store one" in rules
+        assert "Sign in with your own account" in rules
+        # Not this account's fix: no dead-end link.
+        assert "Profile Settings → add" not in rules
+
+        # The chat session reaches it: a caller with no users row is classified
+        # as such, not as a user that simply never saved a token.
+        settings = TestChatTrackerTargets._settings()
+        _targets, no_profile = _chat_tracker_state(
+            settings, {}, github_repo_available=True, has_profile=False
+        )
+        assert no_profile["github"] == "no_token_no_profile"
+
+        # A registered account keeps the wording it had.
+        _targets, registered = _chat_tracker_state(
+            settings, {}, github_repo_available=True
+        )
+        assert registered["github"] == "no_token"
+        user_rules = build_admin_system_prompt(
+            tools, tracker_unavailable=registered
+        ).split("## Creating Issues")[1]
+        assert "Profile Settings → add the GitHub token" in user_rules
+        assert "no profile to store one" not in user_rules
+
     def test_prompt_names_an_unusable_credential_as_a_credential_problem(self):
         """A saved-but-unusable Jira credential is not "no token saved"."""
         prompt = build_admin_system_prompt(
