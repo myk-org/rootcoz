@@ -1378,7 +1378,7 @@ def enrich_comments_cmd(
     job_id: str = typer.Argument(help="Job ID."),
     json_output: bool = _JSON_OPTION,
 ) -> None:
-    """Enrich comments with live PR/ticket statuses."""
+    """Refresh PR/ticket statuses from GitHub and Jira; a result may be served from the server's 60 s per-job cache."""
     data = _run_client_command(
         json_output,
         lambda c: c.enrich_comments(job_id),

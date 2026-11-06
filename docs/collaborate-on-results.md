@@ -66,7 +66,7 @@ This asks the job's assistant for a cross-failure answer and leaves the evidence
 
    Type `@` in the comment box to get a list of usernames you can mention. A mentioned teammate gets a navbar badge and unread entry in `Mentions`; if web push is configured on the server, they also get a push notification.
 
-   Jira keys and GitHub PR links pasted into a comment are enriched with their live status as a badge next to the link.
+   Jira keys and GitHub PR links pasted into a comment are enriched with their current status as a badge next to the link.
 
    > **Note:** After you post, RootCoz checks whether the comment suggests the failure is already resolved. If it does, it asks `Mark as reviewed?` and you confirm. That suggestion never marks anything on its own.
 
@@ -105,7 +105,7 @@ rootcoz mentions-mark-all-read
 rootcoz results enrich-comments JOB_ID
 ```
 
-`enrich-comments` refreshes the live status badges for Jira tickets and GitHub PRs found in that job's comments, and `analyze-comment-intent` returns the reviewed/not-reviewed judgment behind the `Mark as reviewed?` prompt:
+`enrich-comments` re-reads the status of the Jira tickets and GitHub PRs found in that job's comments, though a repeat read may be served from the server's short-lived per-job cache (see [API Reference](api-reference.html#comments-and-mentions)); `analyze-comment-intent` returns the reviewed/not-reviewed judgment behind the `Mark as reviewed?` prompt:
 
 ```bash
 rootcoz analyze-comment-intent "Fixed by updating the token fixture." --job-id JOB_ID
