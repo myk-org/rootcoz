@@ -1808,15 +1808,7 @@ def test_comment_add_denied_by_the_allow_list_is_audited(app_client) -> None:
 def test_comment_enrich_success_is_not_audited(app_client) -> None:
     """A read is not an event: the report page calls this on every load."""
     admin_login(app_client)
-    _store_job("job-enrich")
-    asyncio.run(
-        storage.add_comment(
-            job_id="job-enrich",
-            test_name="test_a",
-            comment="see https://github.com/o/r/pull/1",
-            username="admin",
-        )
-    )
+    _seed_comment("job-enrich", "see https://github.com/o/r/pull/1")
     with _github_pr_lookup(1):
         response = app_client.get("/results/job-enrich/enrich-comments")
     assert response.status_code == 200, response.text
@@ -1852,6 +1844,25 @@ def _github_pr_lookup(number: int, fetch: AsyncMock | None = None):
 def _cached_enrichment_job_ids() -> set[str]:
     """Job ids holding a cached snapshot (cache keys carry a settings hash)."""
     return {cache_key[0] for cache_key in main._enrichments_cache}
+
+
+def _seed_comment(job_id: str, comment: str) -> None:
+    """Store one completed job carrying a single comment, for the enrichment tests."""
+    _store_job(job_id)
+    asyncio.run(
+        storage.add_comment(
+            job_id=job_id, test_name="test_a", comment=comment, username="admin"
+        )
+    )
+
+
+def test_seed_comment_stores_the_job_and_its_one_comment(app_client) -> None:
+    """The shared enrichment fixture seeds a job whose comment the collector sees."""
+    _seed_comment("job-enrich-seeded", "see https://github.com/o/r/pull/1")
+    comments = asyncio.run(storage.get_comments_for_job("job-enrich-seeded"))
+    assert [(c["test_name"], c["comment"], c["username"]) for c in comments] == [
+        ("test_a", "see https://github.com/o/r/pull/1", "admin")
+    ]
 
 
 def _use_jira_oauth_settings() -> main.Settings:
@@ -1910,15 +1921,7 @@ def test_comment_enrich_failure_is_audited(app_client) -> None:
 def test_comment_enrich_second_read_uses_the_cache(app_client) -> None:
     """A second read within the TTL must not hit GitHub again."""
     admin_login(app_client)
-    _store_job("job-enrich-cached")
-    asyncio.run(
-        storage.add_comment(
-            job_id="job-enrich-cached",
-            test_name="test_a",
-            comment="see https://github.com/o/r/pull/2",
-            username="admin",
-        )
-    )
+    _seed_comment("job-enrich-cached", "see https://github.com/o/r/pull/2")
     fetch = AsyncMock(return_value={"state": "open"})
     with _github_pr_lookup(2, fetch):
         first = app_client.get("/results/job-enrich-cached/enrich-comments")
@@ -1980,15 +1983,7 @@ def test_comment_enrich_cache_is_bounded(app_client, monkeypatch) -> None:
 def test_comment_enrich_mid_collect_invalidation_is_not_overwritten(app_client) -> None:
     """A comment added mid-collect must not be hidden by the older snapshot."""
     admin_login(app_client)
-    _store_job("job-enrich-race")
-    asyncio.run(
-        storage.add_comment(
-            job_id="job-enrich-race",
-            test_name="test_a",
-            comment="see https://github.com/o/r/pull/3",
-            username="admin",
-        )
-    )
+    _seed_comment("job-enrich-race", "see https://github.com/o/r/pull/3")
 
     async def _comment_added_while_looking_up(*_args: Any, **_kwargs: Any) -> Any:
         # The user adds the link after the comments were read but before the
@@ -2010,15 +2005,7 @@ def test_comment_enrich_mid_collect_invalidation_is_not_overwritten(app_client) 
 def test_comment_enrich_failed_lookup_is_not_cached(app_client) -> None:
     """A badge-less lookup failure is retried, not replayed for a whole TTL."""
     admin_login(app_client)
-    _store_job("job-enrich-badge")
-    asyncio.run(
-        storage.add_comment(
-            job_id="job-enrich-badge",
-            test_name="test_a",
-            comment="see https://github.com/o/r/pull/4",
-            username="admin",
-        )
-    )
+    _seed_comment("job-enrich-badge", "see https://github.com/o/r/pull/4")
     fetch = AsyncMock(side_effect=[None, {"state": "open"}])
     with _github_pr_lookup(4, fetch):
         first = app_client.get("/results/job-enrich-badge/enrich-comments")
@@ -2036,15 +2023,7 @@ def test_comment_enrich_failed_lookup_is_not_cached(app_client) -> None:
 def test_comment_enrich_concurrent_loads_share_one_collection(app_client) -> None:
     """Two loads of the same uncached job run one set of lookups, not two."""
     admin_login(app_client)
-    _store_job("job-enrich-shared")
-    asyncio.run(
-        storage.add_comment(
-            job_id="job-enrich-shared",
-            test_name="test_a",
-            comment="see https://github.com/o/r/pull/5",
-            username="admin",
-        )
-    )
+    _seed_comment("job-enrich-shared", "see https://github.com/o/r/pull/5")
 
     async def _two_loads() -> tuple[Any, Any, int]:
         started = asyncio.Event()
@@ -2087,15 +2066,7 @@ def test_comment_enrich_cancelled_reader_keeps_the_collection_alive(
 ) -> None:
     """A reader whose client goes away must not cancel the shared collection."""
     admin_login(app_client)
-    _store_job("job-enrich-cancelled")
-    asyncio.run(
-        storage.add_comment(
-            job_id="job-enrich-cancelled",
-            test_name="test_a",
-            comment="see https://github.com/o/r/pull/6",
-            username="admin",
-        )
-    )
+    _seed_comment("job-enrich-cancelled", "see https://github.com/o/r/pull/6")
 
     async def _cancel_one_reader() -> dict[str, list[dict[str, Any]]]:
         started = asyncio.Event()
@@ -2134,15 +2105,7 @@ def test_comment_enrich_failed_jira_setup_is_not_cached(app_client) -> None:
     """An unusable Jira connection leaves the Jira badges out: retry, don't cache."""
     admin_login(app_client)
     settings = _use_jira_oauth_settings()
-    _store_job("job-enrich-jira")
-    asyncio.run(
-        storage.add_comment(
-            job_id="job-enrich-jira",
-            test_name="test_a",
-            comment="see PROJ-7",
-            username="admin",
-        )
-    )
+    _seed_comment("job-enrich-jira", "see PROJ-7")
     complete = AsyncMock(side_effect=main.JiraOAuthMintError("mint failed"))
     with patch.object(main, "complete_jira_connection", complete):
         first = asyncio.run(
@@ -2163,15 +2126,7 @@ def test_comment_enrich_github_only_job_is_cached_despite_a_jira_outage(
     """A Jira outage must not keep repeating a GitHub-only job's lookups."""
     admin_login(app_client)
     settings = _use_jira_oauth_settings()
-    _store_job("job-enrich-gh-only")
-    asyncio.run(
-        storage.add_comment(
-            job_id="job-enrich-gh-only",
-            test_name="test_a",
-            comment="see https://github.com/o/r/pull/9",
-            username="admin",
-        )
-    )
+    _seed_comment("job-enrich-gh-only", "see https://github.com/o/r/pull/9")
     fetch = AsyncMock(return_value={"state": "open"})
     complete = AsyncMock(side_effect=main.JiraOAuthMintError("mint failed"))
     with (
@@ -2194,15 +2149,7 @@ def test_comment_enrich_cache_follows_the_jira_settings(app_client) -> None:
     """Disabling Jira must drop the Jira badges on the next read, not in 60 s."""
     admin_login(app_client)
     _use_jira_oauth_settings()
-    _store_job("job-enrich-settings")
-    asyncio.run(
-        storage.add_comment(
-            job_id="job-enrich-settings",
-            test_name="test_a",
-            comment="see PROJ-10",
-            username="admin",
-        )
-    )
+    _seed_comment("job-enrich-settings", "see PROJ-10")
     fetch = AsyncMock(return_value="Open")
     with (
         # SA mode passes through: the cloud ID is configured, so no network.
@@ -2227,15 +2174,7 @@ def test_comment_enrich_cache_follows_the_jira_tls_setting(app_client) -> None:
     """Enabling cert verification must not replay an unverified Jira read."""
     admin_login(app_client)
     _use_jira_oauth_settings()
-    _store_job("job-enrich-tls")
-    asyncio.run(
-        storage.add_comment(
-            job_id="job-enrich-tls",
-            test_name="test_a",
-            comment="see PROJ-11",
-            username="admin",
-        )
-    )
+    _seed_comment("job-enrich-tls", "see PROJ-11")
     fetch = AsyncMock(return_value="Open")
     with (
         patch.object(
@@ -2262,15 +2201,7 @@ def test_comment_enrich_cache_is_evicted_when_the_job_is_deleted(app_client) -> 
     admin_login(app_client)
     fetch = AsyncMock(return_value={"state": "open"})
     for job_id in ("job-enrich-gone", "job-enrich-gone-bulk"):
-        _store_job(job_id)
-        asyncio.run(
-            storage.add_comment(
-                job_id=job_id,
-                test_name="test_a",
-                comment="see https://github.com/o/r/pull/8",
-                username="admin",
-            )
-        )
+        _seed_comment(job_id, "see https://github.com/o/r/pull/8")
     with _github_pr_lookup(8, fetch):
         for job_id in ("job-enrich-gone", "job-enrich-gone-bulk"):
             response = app_client.get(f"/results/{job_id}/enrich-comments")
@@ -2293,15 +2224,7 @@ def test_comment_enrich_cache_is_evicted_when_the_job_is_deleted(app_client) -> 
 def test_bulk_delete_invalidates_enrichments_before_the_cleanup(app_client) -> None:
     """A read during bulk-delete cleanup must not see the deleted job's badges."""
     admin_login(app_client)
-    _store_job("job-enrich-bulk-fast")
-    asyncio.run(
-        storage.add_comment(
-            job_id="job-enrich-bulk-fast",
-            test_name="test_a",
-            comment="see https://github.com/o/r/pull/11",
-            username="admin",
-        )
-    )
+    _seed_comment("job-enrich-bulk-fast", "see https://github.com/o/r/pull/11")
     with _github_pr_lookup(11):
         assert (
             app_client.get("/results/job-enrich-bulk-fast/enrich-comments").status_code
