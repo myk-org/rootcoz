@@ -84,8 +84,10 @@ function renderWithComments(comments: Comment[]) {
 beforeEach(async () => {
   vi.clearAllMocks()
   mockDelete.mockResolvedValue({})
-  mockPost.mockResolvedValue({ enrichments: {} })
-  mockGet.mockResolvedValue({ users: [] })
+  mockPost.mockResolvedValue({ id: 1 })
+  mockGet.mockImplementation(async (url: string) =>
+    url === '/results/job-1/enrich-comments' ? { enrichments: {} } : { users: [] },
+  )
   // Reset mention cache between tests
   const { _resetMentionCache } = await import('../mentionUsers')
   _resetMentionCache()
