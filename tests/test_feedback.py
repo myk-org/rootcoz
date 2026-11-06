@@ -194,11 +194,13 @@ class TestScrubSensitiveData:
             scrub_sensitive_data("GITHUB_TOKEN=abc def ghi")  # pragma: allowlist secret
             == "GITHUB_TOKEN=[REDACTED]"
         )
-        # Split so the private-key hook does not flag this fixture.
+        # Split so the private-key hook does not flag this fixture. A header
+        # with no footer in reach takes the fail-closed branch, so the body
+        # goes with it (see test_footerless_pem_redacts_its_body).
         pem_header = "-----BEGIN RSA PRIVATE" + " KEY-----"
         assert (
             scrub_sensitive_data(f"PRIVATE_KEY={pem_header}\nMIIEowIBAAKCAQEA")
-            == "PRIVATE_KEY=[REDACTED]\nMIIEowIBAAKCAQEA"
+            == "PRIVATE_KEY=[REDACTED]"
         )
         quoted = scrub_sensitive_data(
             '{"client_secret": "pass phrase"}'  # pragma: allowlist secret
@@ -234,6 +236,32 @@ class TestScrubSensitiveData:
             scrub_sensitive_data(f"crash log\nPRIVATE_KEY={block}\nafter line")
             == "crash log\nPRIVATE_KEY=[REDACTED]\nafter line"
         )
+
+    def test_footerless_pem_redacts_its_body(self):
+        """The bounded block fell through to "redact the header line only" when
+        the footer never arrived, which kept the key body -- the secret -- in
+        full (3 000 bytes came back untouched). With no footer in reach the
+        bound must fail closed and eat the header plus its whole window (#399)."""
+        body = "MIIEowIBAAKCAQEA" * 188
+        result = scrub_sensitive_data(
+            "PRIVATE_KEY=-----BEGIN RSA PRIVATE" + " KEY-----\n" + body
+        )
+        assert result == "PRIVATE_KEY=[REDACTED]", result
+
+    def test_redacts_userinfo_longer_than_the_scan_window(self):
+        """The scan window is 2 048 chars so a crafted excerpt cannot force a
+        backtracking run, but the bound failed open: a 2 049-char userinfo
+        matched nothing and the secret came back in full -- for the scheme
+        pattern and for the bare `user:<secret>@host` form. Over the window the
+        bound must fail closed and redact the whole run (#399)."""
+        secret = "u" * 2049
+        for text in (
+            f"git clone https://{secret}@git.example.com/org/repo.git",
+            f"fatal: user:{secret}@git.example.com:org/repo.git",
+        ):
+            result = scrub_sensitive_data(text)
+            assert secret not in result
+            assert "[REDACTED]" in result, result
 
     def test_pem_redaction_is_marker_and_length_bounded(self):
         """Only a `-----BEGIN` value followed by its `-----END` is eaten: a bare
@@ -273,7 +301,7 @@ class TestScrubSensitiveData:
         no `@` in reach the greedy nested quantifier re-scanned the rest of the
         excerpt from every `:` the bare pattern anchors on, so `a:`*k cost
         quadratic time in attacker-supplied text (0.23 s at 4 000 chars,
-        3.7 s at 16 000) (#397). Both sizes must fit the same generous bound,
+        1.73 s at 16 000) (#397). Both sizes must fit the same generous bound,
         which only a linear scan can do -- the point is to catch the blowup,
         not to police microseconds."""
         for size in (4000, 16000):

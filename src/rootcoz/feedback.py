@@ -38,9 +38,18 @@ _FEEDBACK_REPO_URL = "https://github.com/myk-org/rootcoz"
 # A PEM value is the exception: its body is the secret, so redacting the header
 # line alone leaked the key. The block is length-bounded (8192 chars, ~2x a
 # 4096-bit key) so a header whose footer never arrives cannot swallow the log.
-_PEM_BLOCK = r"-----BEGIN[A-Z0-9 ]*-----[\s\S]{0,8192}?-----END[A-Z0-9 ]*-----"
+_PEM_WINDOW = 8192
+_PEM_HEADER = r"-----BEGIN[A-Z0-9 ]*-----"
+_PEM_BLOCK = rf"{_PEM_HEADER}[\s\S]{{0,{_PEM_WINDOW}}}?-----END[A-Z0-9 ]*-----"
+# A header whose footer is missing (or past the window) must not fall back to
+# "redact the header line only": the body is the secret, and it survived in
+# full. The unterminated branch eats the header plus the same fixed window, so
+# the bound fails closed without costing more than the block branch (#399).
+_PEM_UNTERMINATED = rf"{_PEM_HEADER}[\s\S]{{0,{_PEM_WINDOW}}}"
 # Header on the value's own line, or on the line right after it.
-_ASSIGNMENT_VALUE = rf"(?:(?:[^\r\n]*\r?\n)?{_PEM_BLOCK}|[^\r\n]*)"
+_ASSIGNMENT_VALUE = (
+    rf"(?:(?:[^\r\n]*\r?\n)?(?:{_PEM_BLOCK}|{_PEM_UNTERMINATED})|[^\r\n]*)"
+)
 
 # Userinfo of a credential URL, shared by the two URL patterns below. A `/`
 # before an `@` is credential text (base64 secrets contain them), so
@@ -55,10 +64,16 @@ _ASSIGNMENT_VALUE = rf"(?:(?:[^\r\n]*\r?\n)?{_PEM_BLOCK}|[^\r\n]*)"
 # issue bodies, so a crafted excerpt could burn seconds of CPU per request
 # (#397). The `{0,2048}` cap makes the work per start position constant, so a
 # scan is linear in the text.
-# shortcut: a userinfo longer than 2048 chars matches nothing and is left
-# unredacted -- no real URL authority is that long, and the alternative is an
-# unbounded backtracking run. Widen only together with the timing test.
-_USERINFO = r"[^\s]{0,2048}"
+_USERINFO_WINDOW = 2048
+_USERINFO = rf"[^\s]{{0,{_USERINFO_WINDOW}}}"
+# Fail-closed guard for that cap: a userinfo *longer* than the window matched
+# nothing at all, so the secret came back untouched (2049 chars leaked in full).
+# A run over the window that holds a credential separator is therefore redacted
+# whole -- more aggressive, never less. `(?<!\S)` enters each run once and the
+# lookahead scans it once, so the guard stays linear (#399).
+_LONG_CREDENTIAL_RUN = re.compile(
+    rf"(?<!\S)(?=[^\s]*[@:])[^\s]{{{_USERINFO_WINDOW + 1},}}"
+)
 
 # Patterns for sensitive data scrubbing.
 # Order matters: more specific patterns first to avoid partial matches.
@@ -116,6 +131,10 @@ _SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"\b(?:ghp_|gho_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]+\b"),
         "[REDACTED_GITHUB_TOKEN]",
     ),
+    # Run too long for the bounded userinfo patterns below to inspect: if it
+    # holds `@` or `:`, redact it whole (see `_LONG_CREDENTIAL_RUN`). Ahead of
+    # them so a crafted run is also never re-scanned by them.
+    (_LONG_CREDENTIAL_RUN, "[REDACTED]"),
     # URL userinfo: keep the scheme and host, redact the credentials (see
     # `_USERINFO`).
     (
