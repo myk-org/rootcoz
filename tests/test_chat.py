@@ -3838,6 +3838,54 @@ class TestChatIssueRepoAllowList:
         assert response.status_code == 201, response.text
         assert self._filed_repo(mock_create) == "https://github.com/org/tests"
 
+    @pytest.mark.parametrize(
+        ("analysis_type", "own_fields"),
+        [
+            ("prow", {"prow_job_name": "periodic-job", "build_id": "123"}),
+            ("raw", {"failures": [{"test_name": "t", "error_message": "boom"}]}),
+            ("file", {"raw_xml": "<testsuite name='s'/>"}),
+        ],
+    )
+    def test_every_analysis_type_replays_the_fields_its_validator_needs(
+        self, analysis_type: str, own_fields: dict[str, Any]
+    ):
+        """A prow/raw/file run has no job_name/build_number to be replayed by.
+
+        Its type validator needs the fields that type itself stored
+        (``prow_job_name``/``build_id``, ``raw_xml``, ``failures``), and the
+        replay was the only thing building the repo allow-list: without them
+        the list came back empty and chat could not file an issue at all.
+        """
+        from rootcoz.main import _job_issue_repo_slugs
+
+        default, slugs = _job_issue_repo_slugs(
+            {
+                "analysis_type": analysis_type,
+                "tests_repo_url": "https://github.com/org/tests",
+                **own_fields,
+            }
+        )
+        assert default == "org/tests"
+        assert slugs == frozenset({"org/tests"})
+
+    def test_an_unreplayable_run_names_the_missing_field_in_the_log(self):
+        """A degraded chat says WHICH stored field stopped the replay.
+
+        The generic "cannot replay" warning made an unavailable feature
+        indistinguishable from a run with no repos at all.
+        """
+        from rootcoz.main import _job_issue_repo_slugs
+
+        with patch("rootcoz.main.logger.warning") as warn:
+            default, slugs = _job_issue_repo_slugs(
+                {
+                    "analysis_type": "prow",
+                    "tests_repo_url": "https://github.com/org/tests",
+                }
+            )
+        assert (default, slugs) == ("", frozenset())
+        assert "prow_job_name is required for type=prow" in str(warn.call_args)
+
     def test_job_prompt_lists_the_allowed_repos(self):
         repos = ("org/tests", "org/lib")
         prompt = build_system_prompt(

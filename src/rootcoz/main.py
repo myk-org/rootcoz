@@ -2147,6 +2147,23 @@ def _reconstruct_from_params(
         if jenkins_field in params:
             unified_fields[jenkins_field] = params[jenkins_field]
 
+    # The other types' own fields, stored by their source's
+    # ``build_request_params``: without them a replay of a prow/file/raw run
+    # fails its type validator, so the run cannot be replayed at all.
+    for type_field in (
+        "prow_job_name",
+        "build_id",
+        "prow_url",
+        "gcs_bucket",
+        "gcs_prefix",
+        "raw_xml",
+        "failures",
+        "passed_tests",
+        "skipped_tests",
+    ):
+        if type_field in params:
+            unified_fields[type_field] = params[type_field]
+
     body = UnifiedAnalyzeRequest(**unified_fields)
 
     # Build Settings from env defaults, then layer stored overrides
@@ -2882,15 +2899,23 @@ async def _audit_refused_issue_call(
     The handler never ran, so this is the only place the attempt can be
     recorded. ``reason`` and ``step`` are fixed codes — never the request body,
     which is where a pasted credential would be.
+
+    ``username`` is empty for a request the auth layer could not authenticate:
+    the only name such a request carries is the caller-supplied
+    ``rootcoz_username`` cookie, which is trusted only once a session, a bearer
+    key or a ``TRUST_PROXY_HEADERS`` proxy identity has authenticated it — so an
+    unauthenticated call site passes ``""``. ``record_audit`` stores that as
+    ``anonymous``, and the forged name reaches neither the row nor the message.
     """
     path = request.url.path.rstrip("/")
     if path not in _AUDITED_ISSUE_PATHS:
         return
     step = "propose" if path.endswith("propose") else "create"
+    subject = f"'{username}'" if username else "an unauthenticated caller"
     await record_audit(
         action="issue.create",
         actor=username,
-        message=f"Refused {step} {path} for '{username}' (denied: {reason})",
+        message=f"Refused {step} {path} for {subject} (denied: {reason})",
         target_type="chat",
         target_id=username or None,
         outcome="denied",
@@ -3224,7 +3249,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # Require authentication for all non-public, non-optional paths
         if not has_valid_session and not self._is_public_path(path):
-            await _audit_refused_issue_call(request, username, "unauthenticated")
+            # No identity: ``username`` here can only be the untrusted
+            # ``rootcoz_username`` cookie, so it must never be attributed.
+            await _audit_refused_issue_call(request, "", "unauthenticated")
             return _unauthenticated_response(request, path)
 
         # Check pending user status when REQUIRE_APPROVAL is enabled.
@@ -9485,6 +9512,26 @@ def _settings_github_repo_available(settings: Settings) -> bool:
     return bool(_github_repo_slug(_resolve_github_repo_url(settings)))
 
 
+def _replay_shortfall(exc: Exception) -> str:
+    """``field: message`` for each validation error — never the input value.
+
+    A replay fails on a field the stored params do not carry (``ValueError``
+    from the type validator) or cannot hold (Pydantic). Naming it makes the
+    degraded chat diagnosable; Pydantic's own error text quotes
+    ``input_value``, which for a stored request can be a credential, so only
+    the location and message are returned.
+    """
+    errors = getattr(exc, "errors", None)
+    if not callable(errors):
+        return str(exc)
+    parts = []
+    for err in errors():
+        loc = ".".join(str(part) for part in err.get("loc") or ())
+        msg = str(err.get("msg", ""))
+        parts.append(f"{loc}: {msg}" if loc else msg)
+    return "; ".join(parts) or str(exc)
+
+
 def _job_issue_repo_slugs(
     params: dict[str, Any],
 ) -> tuple[str, frozenset[str]]:
@@ -9497,7 +9544,8 @@ def _job_issue_repo_slugs(
     run, and a default changed after the analysis must not widen that set.
 
     A run whose stored params cannot be replayed yields ``('', frozenset())``
-    (logged), so such a chat cannot choose a repository.
+    (logged with the field that stopped it), so such a chat cannot choose a
+    repository.
     """
     try:
         body, merged = _reconstruct_from_params(
@@ -9507,10 +9555,10 @@ def _job_issue_repo_slugs(
                 "build_number": params.get("build_number"),
             }
         )
-    except Exception:
+    except Exception as exc:  # noqa: BLE001 - a run that cannot replay is logged, not raised
         logger.warning(
-            "Chat issue: cannot replay stored params to build the repo allow-list",
-            exc_info=True,
+            "Chat issue: cannot replay stored params to build the repo allow-list: %s",
+            _replay_shortfall(exc),
         )
         return "", frozenset()
     default = _github_repo_slug(resolve_tests_repo_url(body, merged))

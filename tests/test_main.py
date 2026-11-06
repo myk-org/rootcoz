@@ -5021,6 +5021,40 @@ class TestChatIssueEndpoint:
         assert pasted not in json.dumps(audit)
 
     @pytest.mark.asyncio
+    async def test_an_unauthenticated_refusal_names_no_caller_identity(
+        self, test_client
+    ):
+        """The auth layer's refusal row must not launder a forged cookie.
+
+        Line 3227 is reached only when no session/bearer/proxy identity was
+        authenticated, so the ``rootcoz_username`` cookie is caller-chosen:
+        attributing the row to it let ``Cookie: rootcoz_username=victim`` write
+        a denied ``issue.create`` row naming that victim.
+        """
+        forged = "chat-audit-victim"
+        response = test_client.post(
+            "/api/chat-issue",
+            json={**self._CHAT, "target": "github"},
+            headers={"Authorization": ""},
+            cookies={"rootcoz_username": forged},
+        )
+        assert response.status_code == 401, response.text
+
+        audit = await self._chat_audit()
+        assert audit["total"] == 1, audit
+        event = audit["events"][0]
+        assert event["outcome"] == "denied"
+        assert event["actor"] == "anonymous"
+        assert event["target_id"] is None
+        assert event["details"] == {
+            "reason": "unauthenticated",
+            "result": "refused",
+            "step": "create",
+        }
+        # Not in the actor, the target, the log line or the details.
+        assert forged not in json.dumps(audit)
+
+    @pytest.mark.asyncio
     async def test_bootstrap_admin_is_pointed_at_a_path_it_can_take(self, test_client):
         """The bootstrap admin has no users row, so Profile Settings is a dead end."""
         with (
