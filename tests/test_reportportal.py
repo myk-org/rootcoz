@@ -595,6 +595,8 @@ class TestPushClassifications:
             history_classifications={"test_network": "INFRASTRUCTURE"},
         )
         assert result["pushed"] == 1
+        # It does have a defect type to map to, so it is never listed as defaulted.
+        assert result["defaulted"] == []
         # Verify the PUT used the System Issue locator due to history classification
         payload = _extract_put_json(mock_session)
         assert payload is not None
