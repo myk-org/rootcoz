@@ -8,6 +8,7 @@ import json
 import re
 from collections import Counter
 from collections.abc import Coroutine
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast, get_args
 
@@ -45,6 +46,7 @@ from rootcoz.models import (
     PeerRound,
     TokenUsageEntry,
 )
+from rootcoz.temp_paths import cleanup_off_loop, delete_tree
 
 logger = get_child_logger(__name__)
 
@@ -1106,19 +1108,14 @@ async def analyze_failure_group_with_peers(
                     "Failed to delete peer session %s", peer_sid, exc_info=True
                 )
         # Remove ephemeral workspaces created when repo_path was missing
-        import shutil
-
-        for temp_dir in ephemeral_dirs:
-            try:
-                cleanup_http_tools_mcp(temp_dir)
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                logger.debug("Removed peer ephemeral workspace %s", temp_dir)
-            except Exception:
-                logger.debug(
-                    "Failed to remove peer ephemeral workspace %s",
-                    temp_dir,
-                    exc_info=True,
-                )
+        if ephemeral_dirs:
+            steps = [
+                partial(step, temp_dir)
+                for temp_dir in ephemeral_dirs
+                for step in (cleanup_http_tools_mcp, delete_tree)
+            ]
+            await cleanup_off_loop(job_id, *steps)
+            logger.debug("Removed %d peer ephemeral workspace(s)", len(ephemeral_dirs))
 
     # Apply analysis to all failures in the group.
     # Shared with the non-peer path: all failures share the same v2 signature

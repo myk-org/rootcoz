@@ -63,7 +63,7 @@ async def setup_ci_build_workspace(
     finally:
         # Drop any leftover extract dirs not transferred to the workspace
         # symlink (successful chat links nullify _extract_path first).
-        source.cleanup()
+        await source.cleanup_async()
 
 
 # Re-export for callers that imported SOURCE_REGISTRY from this module.

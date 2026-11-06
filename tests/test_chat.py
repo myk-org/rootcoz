@@ -1,6 +1,7 @@
 """Tests for the chat feature."""
 
 import asyncio
+import logging
 import os
 from pathlib import Path
 from typing import Any, ClassVar
@@ -1803,6 +1804,17 @@ class TestChatCleanup:
             assert not link.exists()
             assert not target.exists()
 
+    def test_cleanup_counts_the_loose_files_it_unlinks(self, tmp_path):
+        """``reclaimed=`` must include the regular files this cleanup really unlinked."""
+        from rootcoz.engine.chat import cleanup_chat_repos
+
+        (tmp_path / "console-output.txt").write_text("x" * 64)
+
+        with patch("rootcoz.engine.chat.get_chat_workspace", return_value=tmp_path):
+            nbytes, entries, failed = cleanup_chat_repos("job-count")
+
+        assert (nbytes, entries, failed) == (64, 1, 0)
+
     def test_cleanup_repos_removes_graph_when_workspace_missing(
         self, tmp_path, monkeypatch
     ):
@@ -1958,28 +1970,74 @@ class TestChatCleanup:
         assert not workspace.exists()
         assert not dump.exists()
 
+    @pytest.mark.asyncio
+    async def test_undeletable_symlink_is_counted_not_raised(
+        self, tmp_path, monkeypatch
+    ):
+        """An EACCES on one symlink must not abort the workspace cleanup (#424)."""
+        import errno
+        from functools import partial
+
+        from rootcoz.engine import chat
+        from rootcoz.temp_paths import (
+            CleanupOutcome,
+            PathStateUnknown,
+            cleanup_path_off_loop,
+            delete_marker,
+        )
+
+        workspace = tmp_path / "rootcoz-chat-job-eacces"
+        workspace.mkdir()
+        (workspace / "note.txt").write_text("x")
+        link = workspace / "build-artifacts"
+        link.symlink_to(tmp_path / "artifact-target")
+        real_unlink = os.unlink
+
+        def refuse_link(path, *args, **kwargs):
+            if Path(os.fspath(path)).name == link.name:
+                raise PermissionError(
+                    errno.EACCES, "Permission denied", os.fspath(path)
+                )
+            return real_unlink(path, *args, **kwargs)
+
+        monkeypatch.setattr(os, "unlink", refuse_link)
+        monkeypatch.setattr(chat, "get_chat_workspace", lambda *a, **k: workspace)
+
+        # A survivor is folded into the result, so the step itself completes.
+        result = chat.cleanup_chat_workspace("job-eacces")
+        assert result.failed >= 1
+
+        outcome = await cleanup_path_off_loop(
+            "job-eacces", workspace, partial(chat.cleanup_chat_workspace, "job-eacces")
+        )
+        assert outcome is CleanupOutcome.INCOMPLETE
+        assert not (workspace / "note.txt").exists(), "the tree delete never ran"
+        assert delete_marker(workspace).exists(), "a half-deleted tree must stay marked"
+        with pytest.raises(PathStateUnknown):
+            async with chat.chat_workspace_lock("job-eacces"):
+                pass
+
 
 @pytest.mark.asyncio
 async def test_cleanup_deleted_job_offloads_blocking_cleanup(monkeypatch):
     """Filesystem MCP locks must not run on the event loop."""
+    import asyncio
+
     from rootcoz import main as main_mod
 
     seen: list[str] = []
 
     def fake_cleanup(job_id: str, username: str = "") -> None:
+        # No running loop here proves the cleanup is off the loop; patching
+        # ``to_thread`` would only prove which helper was used.
+        with pytest.raises(RuntimeError):
+            asyncio.get_running_loop()
         seen.append(f"cleanup:{job_id}")
 
     monkeypatch.setattr("rootcoz.engine.chat.cleanup_chat_workspace", fake_cleanup)
-    orig_to_thread = main_mod.asyncio.to_thread
-
-    async def tracking_to_thread(fn, *args, **kwargs):
-        seen.append("to_thread")
-        return await orig_to_thread(fn, *args, **kwargs)
-
-    monkeypatch.setattr(main_mod.asyncio, "to_thread", tracking_to_thread)
     main_mod._chat_jobs_deleting.clear()
     await main_mod._cleanup_deleted_job_chat_workspaces("job-offload")
-    assert seen == ["to_thread", "cleanup:job-offload"]
+    assert seen == ["cleanup:job-offload"]
     assert "job-offload" not in main_mod._chat_jobs_deleting
     assert "job-offload" not in main_mod._chat_job_barriers
 
@@ -2019,6 +2077,85 @@ async def test_index_chat_repositories_discovers_and_logs_off_loop(
         (tmp_path, original_discover(tmp_path)),
         {"repo": {"status": "ready"}},
     ]
+
+
+@pytest.mark.asyncio
+async def test_chat_routes_share_one_lock_scope_and_translation(monkeypatch) -> None:
+    """One lock scope and one ``PathStateUnknown`` translation, not four (#424).
+
+    The two init routes and the two message handlers differ only in the vehicle
+    that tells the user, so a change to the lock scope or the translation has to
+    land in one place.
+    """
+    import inspect
+    from contextlib import asynccontextmanager
+
+    from rootcoz import main as main_mod
+    from rootcoz.temp_paths import PathStateUnknown
+
+    source = inspect.getsource(main_mod)
+    assert source.count("async with chat_workspace_lock(") == 1
+    assert source.count("except PathStateUnknown") == 1
+    for route in (
+        main_mod._init_chat_under_barrier,
+        main_mod._process_chat_message,
+        main_mod.init_admin_chat,
+        main_mod._process_admin_chat_message,
+    ):
+        assert "_enter_chat_workspace(" in inspect.getsource(route), route.__name__
+
+    @asynccontextmanager
+    async def unknown(job_id, username=""):
+        raise PathStateUnknown("half-deleted")
+        yield  # pragma: no cover - the lock never yields
+
+    monkeypatch.setattr("rootcoz.engine.chat.chat_workspace_lock", unknown)
+    assert await main_mod._enter_chat_workspace("job-1", "alice", "Chat init") is None
+
+
+@pytest.mark.asyncio
+async def test_chat_init_workspace_recovery_runs_outside_the_job_barrier(
+    monkeypatch,
+) -> None:
+    """Workspace reuse can queue a recovery delete on the single reaper.
+
+    That wait is bounded by ``GRAPH_LOCK_SECONDS`` and the barrier is shared by
+    every init for the job and by job deletion, so holding it there stalls all of
+    them (#424).
+    """
+    from rootcoz import main as main_mod
+
+    class _Stop(Exception):
+        pass
+
+    held: list[bool] = []
+
+    async def fake_enter(job_id, username, what):
+        held.append(main_mod._get_chat_job_barrier(job_id).locked())
+        raise _Stop
+
+    async def fake_validate(body, username):
+        return "claude", "sonnet-4"
+
+    async def fake_choice(*args, **kwargs):
+        return None, None
+
+    async def fake_result(job_id, **kwargs):
+        return {"result": {"request_params": {}}}
+
+    monkeypatch.setattr(main_mod, "get_result", fake_result)
+    monkeypatch.setattr(main_mod, "_validate_chat_selection", fake_validate)
+    monkeypatch.setattr(main_mod, "_check_chat_session_choice", fake_choice)
+    monkeypatch.setattr(main_mod, "_enter_chat_workspace", fake_enter)
+
+    with pytest.raises(_Stop):
+        await main_mod._init_chat_under_barrier(
+            "job-barrier",
+            "alice",
+            ChatInitRequest(ai_provider="claude", ai_model="sonnet-4"),
+        )
+
+    assert held == [False], "chat init held the job barrier across workspace recovery"
 
 
 @pytest.mark.asyncio
@@ -2679,6 +2816,39 @@ class TestChatEndpoints:
         response = test_client.get("/api/chat/nonexistent-job")
         assert response.status_code == 404
 
+    async def test_init_names_the_workspace_it_could_not_establish(
+        self, test_client, temp_db_path: Path, tmp_path, monkeypatch
+    ):
+        """A leftover workspace must be reported, not raised as a bare 500 (#424).
+
+        ``reusable_path_lock`` raises ``PathStateUnknown`` when a marked workspace
+        is still owned by a live builder or a delete left paths behind. Init used
+        to let that escape as an unhandled server error, so the user learned
+        nothing about the leftover tree that blocks them.
+        """
+        from rootcoz.engine import chat
+        from rootcoz.temp_paths import PathStateUnknown
+
+        await _save_job(temp_db_path, "chat-blocked-job")
+        workspace = tmp_path / "rootcoz-chat-chat-blocked-job" / "admin"
+        monkeypatch.setattr(chat, "get_chat_workspace", lambda *a, **k: workspace)
+
+        def blocked(*_args, **_kwargs):
+            raise PathStateUnknown("workspace could not be established as whole")
+
+        monkeypatch.setattr(chat, "chat_workspace_lock", blocked)
+
+        response = test_client.post(
+            "/api/chat/chat-blocked-job/init",
+            json={"ai_provider": "claude", "ai_model": "sonnet-4"},
+        )
+
+        assert response.status_code == 409
+        detail = response.json()["detail"]
+        assert str(workspace) in detail, "the error does not name the blocked workspace"
+        assert "try again" in detail.lower(), "the error says nothing the user can do"
+        assert "administrator" in detail.lower(), detail
+
     async def test_get_chat_history_empty(self, test_client, temp_db_path: Path):
         await _save_job(temp_db_path, "chat-test-job")
         response = test_client.get("/api/chat/chat-test-job")
@@ -3018,6 +3188,33 @@ class TestAdminChatArtifactEndpoints:
     def test_download_artifact_path_traversal_blocked(self, test_client):
         response = test_client.get("/api/admin-chat/artifacts/../../etc/passwd")
         assert response.status_code == 404
+
+    def test_artifact_cleanup_reports_paths_it_could_not_delete(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """``delete_tree`` returns its failures: report them, do not claim success."""
+        from rootcoz import main as main_mod
+        from rootcoz.temp_paths import DeleteResult
+
+        artifacts = tmp_path / "alice"
+        artifacts.mkdir()
+        monkeypatch.setattr(main_mod, "_get_admin_artifacts_dir", lambda u: artifacts)
+        monkeypatch.setattr(
+            main_mod, "delete_tree", lambda path: DeleteResult(0, 0, failed=2)
+        )
+
+        with caplog.at_level(logging.INFO, logger="rootcoz.main"):
+            logging.getLogger("rootcoz.main").propagate = True
+            try:
+                result = main_mod._cleanup_admin_artifacts("alice")
+            finally:
+                logging.getLogger("rootcoz.main").propagate = False
+
+        assert result.failed == 2
+        assert "2 artifact path(s) for alice survived their delete" in caplog.text
+        assert "cleaned up artifacts" not in caplog.text, (
+            "a partial delete was logged as a completed cleanup"
+        )
 
     def test_artifact_cleanup_on_clear(self, test_client):
         # Save an artifact
