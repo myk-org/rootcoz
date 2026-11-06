@@ -34,7 +34,20 @@ _FEEDBACK_REPO_URL = "https://github.com/myk-org/rootcoz"
 # excerpt attached to the issue. Stopping at the newline keeps the narrowing of
 # a quoted key intact, and a quoted value's closing quote is consumed with it:
 # over-redacting the remainder of that one line is the safe direction (#399).
-_ASSIGNMENT_VALUE = r"[^\r\n]*"
+#
+# A PEM value is the exception: its body is the secret, so redacting the header
+# line alone leaked the key. The block is length-bounded (8192 chars, ~2x a
+# 4096-bit key) so a header whose footer never arrives cannot swallow the log.
+_PEM_BLOCK = r"-----BEGIN[A-Z0-9 ]*-----[\s\S]{0,8192}?-----END[A-Z0-9 ]*-----"
+# Header on the value's own line, or on the line right after it.
+_ASSIGNMENT_VALUE = rf"(?:(?:[^\r\n]*\r?\n)?{_PEM_BLOCK}|[^\r\n]*)"
+
+# Userinfo of a credential URL, shared by the two URL patterns below. A `/`
+# before an `@` is credential text (base64 secrets contain them), so
+# `user:a/b+c@host` must not be cut short at the `/`; a `/` after the `@` ends
+# the authority. Greedy, so the host is still what follows the *last* `@`
+# (`user:p@ss@host`) (#399).
+_USERINFO = r"[^\s/]*(?:/[^\s/]*)*"
 
 # Patterns for sensitive data scrubbing.
 # Order matters: more specific patterns first to avoid partial matches.
@@ -92,25 +105,25 @@ _SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"\b(?:ghp_|gho_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]+\b"),
         "[REDACTED_GITHUB_TOKEN]",
     ),
-    # URL userinfo: keep the scheme and host, redact the credentials. The host
-    # is what follows the *last* `@` of the authority, so the userinfo match is
-    # greedy up to the `/` that ends it: `user:p@ss@host` had its password
-    # suffix leak when the match stopped at the first `@` (#399).
+    # URL userinfo: keep the scheme and host, redact the credentials (see
+    # `_USERINFO`).
     (
-        re.compile(r"(\b[a-zA-Z][a-zA-Z0-9+.\-]*://)[^\s/]*@"),
+        re.compile(r"(\b[a-zA-Z][a-zA-Z0-9+.\-]*://)" + _USERINFO + "@"),
         r"\1[REDACTED]@",
     ),
     # Bare `user:secret@` in a clone URL, e.g. `user:pass@host:path`. The host
     # after `@` must be a dotted name (or localhost), which is what separates
     # credentials from a docker digest tag (`img:v4.18@sha256:…` has no host,
     # only an algorithm). `mailto:` is exempt: a scheme without `//` is an
-    # address, not credentials.
+    # address, not credentials. A `:` followed by `/` is a scheme too, so
+    # `name://…` is left to the pattern above instead of being re-redacted
+    # here (which would eat the scheme).
     # shortcut: a credential URL whose host is neither dotted nor localhost
     # (`user:token@jenkins:8080/x`) is not caught here -- a digest tag looks the
     # same, so widen only with a rule that still spares `@sha256:…`.
     (
         re.compile(
-            r"\b(?!mailto:)[^\s/:@]+:[^\s/]*@"
+            r"\b(?!mailto:)[^\s/:@]+:(?!/)" + _USERINFO + "@"
             r"(?=[^\s/@:]+(?:\.[^\s/@:]+)+|localhost\b)"
         ),
         "[REDACTED]@",

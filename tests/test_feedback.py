@@ -204,6 +204,54 @@ class TestScrubSensitiveData:
         )
         assert "phrase" not in quoted
 
+    def test_redacts_userinfo_whose_password_contains_a_slash(self):
+        """The authority was scanned with `[^\\s/]*`, so a base64 password
+        holding a `/` broke the match before its `@` and the *whole*
+        `user:a/b+c@host` survived into the DEBUG log excerpt. A `/` before the
+        `@` is credential text; only a `/` after it ends the authority (#399)."""
+        assert (
+            scrub_sensitive_data(
+                "push failed for https://user:a/b+c@registry.example.com/v2/app"
+            )
+            == "push failed for https://[REDACTED]@registry.example.com/v2/app"
+        )
+        assert (
+            scrub_sensitive_data("fatal: user:a/b+c@git.example.com:org/repo.git")
+            == "fatal: [REDACTED]@git.example.com:org/repo.git"
+        )
+
+    def test_redacts_a_pem_block_after_an_assignment(self):
+        """The value pattern stopped at the newline, so `PRIVATE_KEY=-----BEGIN…`
+        lost only its header line and the key body -- the actual secret --
+        stayed in the DEBUG log excerpt shipped in the issue (#399)."""
+        block = (
+            "-----BEGIN RSA PRIVATE" + " KEY-----\n"
+            "MIIEowIBAAKCAQEAsecretbody\n"
+            "-----END RSA PRIVATE" + " KEY-----"
+        )
+        assert (
+            scrub_sensitive_data(f"crash log\nPRIVATE_KEY={block}\nafter line")
+            == "crash log\nPRIVATE_KEY=[REDACTED]\nafter line"
+        )
+
+    def test_pem_redaction_is_marker_and_length_bounded(self):
+        """Only a `-----BEGIN` value followed by its `-----END` is eaten: a bare
+        `BEGIN` word and an unterminated block must not swallow the log."""
+        assert (
+            scrub_sensitive_data("PRIVATE_KEY=BEGIN is not a header\nKEEP=kept")
+            == "PRIVATE_KEY=[REDACTED]\nKEEP=kept"
+        )
+        runaway = (
+            "PRIVATE_KEY=-----BEGIN RSA PRIVATE"
+            + " KEY-----\n"
+            + "A" * 20000
+            + "\n-----END RSA PRIVATE"
+            + " KEY-----\nTAIL"
+        )
+        result = scrub_sensitive_data(runaway)
+        assert "-----END RSA PRIVATE" + " KEY-----" in result
+        assert "TAIL" in result
+
     def test_redacts_userinfo_whose_password_contains_an_at_sign(self):
         """The userinfo match stopped at the *first* `@`, so a password holding
         one leaked its suffix together with the host. The host is what follows
