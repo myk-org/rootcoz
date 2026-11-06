@@ -867,12 +867,12 @@
 <tr>
 <td><code>rootcoz propose-chat-issue</code></td>
 <td><code>--target</code> (<code>github</code> or <code>jira</code>), <code>--title</code>, <code>--body</code>, <code>--repo</code>, <code>--job-id</code>, <code>--jira-project-key</code>, <code>--jira-security-level</code>, <code>--jira-issue-type</code> (default <code>Bug</code>)</td>
-<td>Draft the issue and print the confirmation id plus the <code>create-chat-issue</code> command that redeems it. Files nothing. The repo/run/project named here is part of the draft, so the create call must name the same one.</td>
+<td>Draft the issue and print the confirmation id, the confirmation code, and the <code>create-chat-issue</code> command that redeems them. Files nothing. The repo/run/project named here is part of the draft, so the create call must name the same one.</td>
 </tr>
 <tr>
 <td><code>rootcoz create-chat-issue</code></td>
-<td><code>--target</code> (<code>github</code> or <code>jira</code>), <code>--confirmation-id</code>, <code>--title</code>, <code>--body</code>, <code>--repo</code>, <code>--job-id</code>, <code>--jira-project-key</code>, <code>--jira-security-level</code>, <code>--jira-issue-type</code> (default <code>Bug</code>)</td>
-<td>File the issue drafted by <code>propose-chat-issue</code>. Deliberately exposes <strong>no</strong> token flags: the issue is created with the credentials saved in your account, so it can never be filed under a server token.</td>
+<td><code>--target</code> (<code>github</code> or <code>jira</code>), <code>--confirmation-id</code>, <code>--confirmation-code</code>, <code>--title</code>, <code>--body</code>, <code>--repo</code>, <code>--job-id</code>, <code>--jira-project-key</code>, <code>--jira-security-level</code>, <code>--jira-issue-type</code> (default <code>Bug</code>)</td>
+<td>File the issue drafted by <code>propose-chat-issue</code>, passing the confirmation id and the confirmation code it printed. Deliberately exposes <strong>no</strong> token flags: the issue is created with the credentials saved in your account, so it can never be filed under a server token.</td>
 </tr>
 <tr>
 <td><code>rootcoz validate-token github\|jira</code></td>

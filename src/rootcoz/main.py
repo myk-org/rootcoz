@@ -9395,7 +9395,9 @@ def _enable_tools_for_session(
         targets,
         session_id,
     )
-    _chat_session_tracker_targets.pop(session_id, None)
+    # Keep the stale entry: a failed or aborted rebuild never records the new
+    # session, so the next turn must still see this session as stale rather
+    # than as "unknown after a restart" and adopt its old tools.
     return None
 
 
@@ -9439,20 +9441,19 @@ def _settings_github_repo_available(settings: Settings) -> bool:
 
 
 def _job_issue_repo_slugs(
-    params: dict[str, Any], settings: Settings
+    params: dict[str, Any],
 ) -> tuple[str, frozenset[str]]:
     """``(the run's test repo slug, every slug a job chat may file into)``.
 
-    The run's stored ``tests_repo_url`` and ``additional_repos``, resolved by
-    the same helpers the analysis itself used, so the allow-list cannot drift
-    from the repos the run actually had. The deployment's own ``TESTS_REPO_URL``
-    joins the set too: it is the repo an empty ``repo`` resolves to.
+    Only the run's stored ``tests_repo_url`` and ``additional_repos``, resolved
+    by the same helpers the analysis itself used, so the allow-list cannot
+    drift from the repos the run actually had. The deployment's own
+    ``TESTS_REPO_URL`` is deliberately absent: a job chat is bounded by its
+    run, and a default changed after the analysis must not widen that set.
 
     A run whose stored params cannot be replayed yields ``('', frozenset())``
-    (logged): such a chat can still file in the server's default repo, but
-    cannot choose one.
+    (logged), so such a chat cannot choose a repository.
     """
-    server_slug = _github_repo_slug(_resolve_github_repo_url(settings))
     try:
         body, merged = _reconstruct_from_params(
             {
@@ -9466,9 +9467,9 @@ def _job_issue_repo_slugs(
             "Chat issue: cannot replay stored params to build the repo allow-list",
             exc_info=True,
         )
-        return "", frozenset({server_slug} if server_slug else set())
+        return "", frozenset()
     default = _github_repo_slug(resolve_tests_repo_url(body, merged))
-    slugs = {server_slug} if server_slug else set()
+    slugs: set[str] = set()
     if default:
         slugs.add(default)
     for repo in resolve_additional_repos(body, merged):
@@ -9478,9 +9479,7 @@ def _job_issue_repo_slugs(
     return default, frozenset(slugs)
 
 
-async def _chat_issue_repo_slugs(
-    job_id: str, settings: Settings
-) -> tuple[str, frozenset[str]]:
+async def _chat_issue_repo_slugs(job_id: str) -> tuple[str, frozenset[str]]:
     """The allow-list of the run a chat issue names (see _job_issue_repo_slugs)."""
     stored = await storage.get_result(job_id)
     params = ((stored or {}).get("result") or {}).get("request_params") or {}
@@ -9492,7 +9491,7 @@ async def _chat_issue_repo_slugs(
                 "repositories from."
             ),
         )
-    return _job_issue_repo_slugs(params, settings)
+    return _job_issue_repo_slugs(params)
 
 
 def _chat_issue_is_admin(request: Request) -> bool:
@@ -9515,7 +9514,6 @@ def _require_repo_slug(repo: str) -> str:
 async def _chat_issue_github_repo(
     request: Request,
     body: ChatIssueRequest | ChatIssueProposeRequest,
-    settings: Settings,
 ) -> str:
     """The repo URL this chat issue files into (``''`` = the server's own).
 
@@ -9534,10 +9532,21 @@ async def _chat_issue_github_repo(
                 "chat from a job analysis and ask again."
             ),
         )
-    default, allowed = await _chat_issue_repo_slugs(body.job_id, settings)
+    default, allowed = await _chat_issue_repo_slugs(body.job_id)
     if not repo:
-        # What chat filed before this allow-list existed: the run's test repo.
-        return f"https://github.com/{default}" if default else ""
+        # An empty repo is the run's test repo — never the deployment default,
+        # which is not part of this run and would escape the allow-list.
+        if default:
+            return f"https://github.com/{default}"
+        names = ", ".join(sorted(allowed)) or "none (this run has no GitHub repo)"
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No issue was filed: this run has no GitHub test repository to "
+                "file in by default, and an issue from job chat may only go to "
+                f"this run's test repo and additional repos: {names}."
+            ),
+        )
     if repo not in allowed:
         names = ", ".join(sorted(allowed)) or "none (this run has no GitHub repo)"
         raise HTTPException(
@@ -10244,17 +10253,17 @@ async def _chat_issue_resolved_destination(
 
     Both steps resolve it from the same request and the same settings, so the
     preview states the real destination (an omitted ``repo`` is the run's test
-    repo or ``TESTS_REPO_URL``, an omitted Jira project is the configured one)
-    and the create call can only file in the one the user approved. A change to
-    a default between the two steps therefore lands as a mismatch, not as a
-    silently different destination.
+    repo, or ``TESTS_REPO_URL`` for an admin's chat with no run; an omitted
+    Jira project is the configured one) and the create call can only file in
+    the one the user approved. A change to a default between the two steps
+    therefore lands as a mismatch, not as a silently different destination.
 
     The refusals are the create call's own (this chat may not use that repo,
     nowhere to file, no Jira project), moved to the proposal so they arrive
     before the user is asked to approve anything.
     """
     if body.target == "github":
-        repo_url = await _chat_issue_github_repo(request, body, settings)
+        repo_url = await _chat_issue_github_repo(request, body)
         # An empty ``repo_url`` stays empty: the create call falls back to
         # ``TESTS_REPO_URL`` itself, which is how a 404 knows that setting is the
         # repository in play and can name it.
@@ -20621,6 +20630,23 @@ def _github_issue_refusal(
         return HTTPException(
             status_code=502, detail=f"GitHub API error: {response.status_code}"
         )
+    if isinstance(exc, httpx.TimeoutException):
+        # A timeout is not a failed send: GitHub may have filed the issue and
+        # lost the answer, so a blind retry can file the same bug twice.
+        logger.warning(
+            "GitHub timed out during the issue creation: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        return HTTPException(
+            status_code=502,
+            detail=(
+                "GitHub did not answer before the request timed out: the "
+                f"request may have been sent and your {subject} may already "
+                "be filed. Check the repository before retrying — filing it "
+                "again could create a duplicate."
+            ),
+        )
     if isinstance(exc, httpx.RequestError):
         logger.warning(
             "GitHub API unreachable for the issue creation: %s: %s",
@@ -21237,7 +21263,7 @@ async def _init_chat_under_barrier(
     _raise_if_chat_job_deleted(job_id)
     if not await _available_chat_session(job_id, username):
         custom_tools: list[dict[str, Any]] = []
-        issue_repos = _job_issue_repo_slugs(decrypted_params, _settings)[1]
+        issue_repos = _job_issue_repo_slugs(decrypted_params)[1]
         tracker_targets, tracker_unavailable = _chat_tracker_state(
             _settings,
             await storage.get_user_tokens(username),
@@ -21948,9 +21974,7 @@ async def _process_chat_message(
                         server_url = _build_internal_server_url()
                         auth_header = await _create_ai_auth_header(username)
 
-                        issue_repos = _job_issue_repo_slugs(decrypted_params, settings)[
-                            1
-                        ]
+                        issue_repos = _job_issue_repo_slugs(decrypted_params)[1]
                         tracker_targets, tracker_unavailable = _chat_tracker_state(
                             settings,
                             await storage.get_user_tokens(username),

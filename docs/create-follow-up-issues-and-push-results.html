@@ -289,7 +289,12 @@ rootcoz<span class="w"> </span>push<span class="w"> </span>JOB_ID<span class="w"
 <td>An outage. Nothing is wrong with your draft or your token: <code>Retry</code> later.</td>
 </tr>
 <tr>
-<td>timeout, or no connection at all</td>
+<td>timeout</td>
+<td><code>GitHub did not answer before the request timed out: the request may have been sent and your bug report may already be filed. Check the repository before retrying — filing it again could create a duplicate.</code> — a <code>502</code></td>
+<td>A timeout can mean the issue was created after the answer was lost: check GitHub before <code>Retry</code>, or you may file it twice.</td>
+</tr>
+<tr>
+<td>no connection at all</td>
 <td><code>GitHub API unreachable: &lt;error&gt;</code> — the same <code>502</code> class</td>
 <td>Also worth a <code>Retry</code>; the request never reached GitHub.</td>
 </tr>

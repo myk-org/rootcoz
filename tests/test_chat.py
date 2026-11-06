@@ -1046,7 +1046,13 @@ class TestChatIssueTools:
         await _save_job(
             temp_db_path,
             "chat-issue-run",
-            {"request_params": {"tests_repo_url": "https://github.com/org/repo"}},
+            {
+                "request_params": {
+                    "job_name": "chat-issue-run",
+                    "build_number": 1,
+                    "tests_repo_url": "https://github.com/org/repo",
+                }
+            },
         )
         headers = {"Authorization": f"Bearer {api_key}"}
         proposal = test_client.post(
@@ -3657,6 +3663,72 @@ class TestChatIssueRepoAllowList:
         assert "only go to this run's test repo and additional repos" in detail
         mock_create.assert_not_called()
 
+    async def test_a_changed_server_default_does_not_widen_the_allow_list(
+        self, test_client, temp_db_path: Path, github_issue_config
+    ):
+        """A job chat may not name the deployment default; an admin still may.
+
+        ``github_issue_config`` sets ``TESTS_REPO_URL`` to ``org/repo``, which
+        this run never had. The job chat must refuse it and name the run's own
+        repos; the same request from an admin files there.
+        """
+        job_id = await self._save_run(temp_db_path, "job-repo-server-default")
+        headers = await self._reviewer("server-default-filer")
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            response = await self._draft(
+                test_client, headers, job_id=job_id, repo="org/repo"
+            )
+        assert response.status_code == 400, response.text
+        detail = response.json()["detail"]
+        assert "org/repo" in detail
+        assert "org/lib, org/tests" in detail
+        assert "only go to this run's test repo and additional repos" in detail
+        mock_create.assert_not_called()
+
+        admin, api_key = await storage.create_admin_user("server-default-admin")
+        await storage.save_user_tokens(
+            admin,
+            github_token="ghp_row_token",  # pragma: allowlist secret
+        )
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/6",
+                "number": 6,
+            }
+            response = await self._file(
+                test_client,
+                {"Authorization": f"Bearer {api_key}"},
+                repo="org/repo",
+            )
+        assert response.status_code == 201, response.text
+        assert self._filed_repo(mock_create) == "https://github.com/org/repo"
+
+    async def test_a_run_without_a_test_repo_cannot_use_the_server_default(
+        self, test_client, temp_db_path: Path, github_issue_config
+    ):
+        """An empty repo is the run's test repo — never the deployment fallback."""
+        job_id = await self._save_run(
+            temp_db_path,
+            "job-repo-no-default",
+            {
+                "job_name": "job",
+                "build_number": 1,
+                "tests_repo_url": "",
+                "additional_repos": [
+                    {"name": "lib", "url": "https://github.com/org/lib"}
+                ],
+            },
+        )
+        headers = await self._reviewer("no-default-filer")
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            response = await self._draft(test_client, headers, job_id=job_id)
+        assert response.status_code == 400, response.text
+        detail = response.json()["detail"]
+        assert "this run has no GitHub test repository" in detail
+        assert "org/lib" in detail
+        assert "org/repo" not in detail
+        mock_create.assert_not_called()
+
     async def test_a_malformed_repo_is_refused_as_a_url_or_a_bare_name(
         self, test_client, github_issue_config
     ):
@@ -3707,7 +3779,7 @@ class TestChatIssueRepoAllowList:
         from rootcoz.main import _chat_tracker_state, _job_issue_repo_slugs
 
         job_id = await self._save_run(temp_db_path, "job-repo-only")
-        _default, slugs = _job_issue_repo_slugs(self._PARAMS, get_settings())
+        _default, slugs = _job_issue_repo_slugs(self._PARAMS)
         targets, unavailable = _chat_tracker_state(
             get_settings(),
             {"github_token": "ghp_row_token"},  # pragma: allowlist secret
@@ -3780,6 +3852,19 @@ class TestChatSessionToolRefresh:
         main_mod._remember_chat_session_tools("sid-gone", ("github", "jira"))
         assert main_mod._enable_tools_for_session("sid-gone", ("github",)) is None
 
+    def test_a_failed_rebuild_does_not_resume_the_stale_session(self):
+        """#416: a rebuild whose turn fails must keep the session stale.
+
+        GitHub is disabled (or its token removed) and the turn that would have
+        rebuilt the session fails. The next message must still rebuild instead
+        of adopting the old session and offering its removed tool again.
+        """
+        from rootcoz import main as main_mod
+
+        main_mod._remember_chat_session_tools("sid-failed", ("github",))
+        assert main_mod._enable_tools_for_session("sid-failed", ()) is None
+        assert main_mod._enable_tools_for_session("sid-failed", ()) is None
+
     def test_an_unknown_session_is_adopted_then_rebuilt_on_a_change(self):
         """After a restart the creation-time set is unknown — adopt, do not churn."""
         from rootcoz import main as main_mod
@@ -3798,9 +3883,11 @@ class TestChatSessionToolRefresh:
 
         assert _enable_tools_for_session(None, ("github",)) is None
 
-    def test_a_rebuild_forgets_the_stale_targets(self):
+    def test_a_rebuild_keeps_the_stale_targets_known(self):
+        """A mismatch is remembered, so a failed rebuild is retried, not adopted."""
         from rootcoz import main as main_mod
 
         main_mod._remember_chat_session_tools("sid-stale", ("github",))
         assert main_mod._enable_tools_for_session("sid-stale", ("jira",)) is None
-        assert "sid-stale" not in main_mod._chat_session_tracker_targets
+        assert main_mod._chat_session_tracker_targets["sid-stale"] == ("github",)
+        assert main_mod._enable_tools_for_session("sid-stale", ("jira",)) is None

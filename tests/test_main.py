@@ -4426,6 +4426,31 @@ class TestCreateGithubIssueApiErrors:
         assert response.json()["detail"] == "GitHub API error: 422"
 
     @pytest.mark.asyncio
+    async def test_github_read_timeout_warns_the_issue_may_already_be_filed(
+        self, test_client, caplog
+    ):
+        """A timeout may have filed the issue: check before a duplicate retry."""
+        import httpx
+
+        exc = httpx.ReadTimeout(
+            "GitHub did not respond",
+            request=httpx.Request("POST", "https://api.github.com"),
+        )
+        with capture_main_logs(caplog):
+            response = await self._post_with_github_failure(
+                test_client, "job-gh-timeout", exc
+            )
+
+        assert response.status_code == 502
+        detail = response.json()["detail"]
+        assert "the request may have been sent" in detail
+        assert "may already be filed" in detail
+        assert "could create a duplicate" in detail
+        assert "bug report" in detail
+        assert _REPORT_GITHUB_TOKEN not in caplog.text
+        assert _REPORT_BODY not in caplog.text
+
+    @pytest.mark.asyncio
     async def test_github_api_request_error_returns_502(self, test_client):
         """RequestError (network unreachable) from GitHub should surface as 502."""
         import httpx
@@ -5027,7 +5052,7 @@ class TestChatIssueEndpoint:
                 headers=headers,
             )
         assert proposal.status_code == 400, proposal.text
-        assert "Nowhere to file this issue" in proposal.json()["detail"]
+        assert "this run has no GitHub test repository" in proposal.json()["detail"]
         mock_create.assert_not_called()
 
     @pytest.mark.asyncio
