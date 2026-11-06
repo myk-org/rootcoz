@@ -293,6 +293,72 @@ class TestScrubSensitiveData:
         # Header plus one window went, the rest of the run is left alone.
         assert len(result) <= _PEM_WINDOW + len("[REDACTED]")
 
+    def test_bare_pgp_private_key_block_is_redacted(self):
+        """The bare header required the block to end in `PRIVATE KEY-----`, so a
+        PGP block (`… PRIVATE KEY BLOCK-----`) matched nothing at all and its
+        body came back byte-identical (#399)."""
+        block = (
+            "-----BEGIN PGP PRIVATE" + " KEY BLOCK-----\n"
+            "lQOYBFsecretsecretsecret\n"
+            "-----END PGP PRIVATE" + " KEY BLOCK-----"
+        )
+        assert (
+            scrub_sensitive_data(f"gpg secret key dump\n{block}\nafter line")
+            == "gpg secret key dump\n[REDACTED]\nafter line"
+        )
+
+    def test_footerless_bare_pgp_private_key_block_redacts_its_body(self):
+        """The PGP header must fail closed like the other flavours: with no
+        footer in reach the header plus its whole window goes (#399)."""
+        header = "-----BEGIN PGP PRIVATE" + " KEY BLOCK-----"
+        assert scrub_sensitive_data(header + "\n" + "lQOYBFsecret" * 188) == (
+            "[REDACTED]"
+        )
+        result = scrub_sensitive_data(header + "\n" + "A" * (2 * _PEM_WINDOW))
+        assert result.startswith("[REDACTED]")
+        assert len(result) <= _PEM_WINDOW + len("[REDACTED]")
+
+    def test_bare_private_key_header_with_trailing_tokens_is_redacted(self):
+        """The private header only allowed the PGP `BLOCK` after `PRIVATE KEY`,
+        so any further token (`PRIVATE KEY BLOCK EXTRA`, a vendor flavour)
+        matched the bare branch not at all and the body shipped byte-identical
+        (#399)."""
+        block = (
+            "-----BEGIN PRIVATE" + " KEY BLOCK EXTRA-----\n"
+            "MIIEowIBAAKCAQEAsecretbody\n"
+            "-----END PRIVATE" + " KEY BLOCK EXTRA-----"
+        )
+        assert (
+            scrub_sensitive_data(f"vendor key dump\n{block}\nafter line")
+            == "vendor key dump\n[REDACTED]\nafter line"
+        )
+
+    def test_footerless_bare_private_key_header_with_trailing_tokens_redacts_body(
+        self,
+    ):
+        """A trailing-token header must fail closed like every other flavour:
+        with no footer in reach no body byte survives (#399)."""
+        header = "-----BEGIN PRIVATE" + " KEY BLOCK EXTRA-----"
+        assert scrub_sensitive_data(header + "\n" + "MIIEowIBAAKCAQEA" * 188) == (
+            "[REDACTED]"
+        )
+        result = scrub_sensitive_data(header + "\n" + "A" * (2 * _PEM_WINDOW))
+        assert result.startswith("[REDACTED]")
+        assert len(result) <= _PEM_WINDOW + len("[REDACTED]")
+
+    def test_bare_public_pem_forms_are_left_intact(self):
+        """An open-ended token list after `PRIVATE KEY` must not reach a public
+        block: none of these carries a `PRIVATE KEY` token sequence, and a
+        certificate, a public key or a signature is not a secret (#399)."""
+        for name, body in (
+            ("CERTIFICATE", "MIIDdzCCAl+gAwIBAgIEpublicbody"),
+            ("PUBLIC KEY", "MIIBIjANBgkqhkipublicbody"),
+            ("PGP PUBLIC KEY BLOCK", "mQINBFpublicbody"),
+            ("PGP SIGNATURE", "iQEzBAABsignaturebody"),
+        ):
+            text = f"-----BEGIN {name}-----\n{body}\n-----END {name}-----"
+            assert scrub_sensitive_data(text) == text, name
+
     def test_bare_public_pem_block_is_left_intact(self):
         """The bare pattern took any `-----BEGIN…-----`, so a TLS-failure report
         lost the certificate it is reporting about. Only a private key's body is

@@ -64,7 +64,10 @@ def _pem_branches(header: str) -> str:
 # assignment over-redacting is the safe side. A footer inside the window ends the
 # match and the text after the block survives; a missing footer fails closed
 # (#399).
-_PEM_PRIVATE_HEADER = r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY-----"
+# Any token list after `PRIVATE KEY` is the header, not just the PGP `BLOCK`:
+# a vendor flavour (`PRIVATE KEY BLOCK EXTRA`, ...) matched nothing and its
+# body leaked byte-identical, so the trailing list is open-ended (#399).
+_PEM_PRIVATE_HEADER = r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY(?: [A-Z0-9]+)*-----"
 _PEM_BARE = _pem_branches(_PEM_PRIVATE_HEADER)
 # Header on the value's own line, or on the line right after it. Broad header:
 # whatever follows `PRIVATE_KEY=`/`key:` is treated as the secret.
