@@ -131,7 +131,7 @@ Related lifecycle commands:
 | `set-reviewed JOB_ID` | `--test`/`-t`, `--reviewed`/`--not-reviewed`, `--child-job`, `--child-build` | Mark one failure reviewed. |
 | `set-tracked-in JOB_ID` | `--test`/`-t`, `--url`/`-u`, `--type` (`jira` or `github`; omit for auto-detection), `--child-job`, `--child-build` | Link a failure to a ticket. |
 | `delete-tracked-in JOB_ID` | `--link-id` | Remove one tracked-in link. |
-| `enrich-comments JOB_ID` | — | Refresh PR and ticket status on comments; a repeat read may be served from the server's per-job cache (see [API Reference](api-reference.html#comments-and-mentions)). |
+| `enrich-comments JOB_ID` | — | Refresh PR and ticket status on comments; a repeat read may be served from the server's per-job cache (see [API Reference](api-reference.html#comments-and-mentions)). Prints the comment and badge counts, then `Some lookups failed; these counts may be incomplete.` when the server reports a failed lookup, so an empty result is not read as nothing to enrich. Nothing extra is printed when no lookup failed, or against a server too old to send the flag. `--json` prints neither line: the payload's `failed` key is the signal there. |
 | `delete [JOB_ID ...]` | `--all`, `--confirm` | Delete jobs and related data. `--all` requires `--confirm`. |
 
 Sparse field paths include `result.summary`, `result.failed_count`, `result.failures.test_name`, `result.failures.classification`, `result.failures.details`, and `result.incomplete_count`. Unknown paths are rejected with HTTP 400, so run `rootcoz results fields` first.
