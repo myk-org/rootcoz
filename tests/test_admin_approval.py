@@ -585,14 +585,20 @@ async def _notify_every(listeners: set[asyncio.Event], interval: float) -> None:
             event.set()
 
 
-async def _drain_until(stream, sink: list[str], needle: str, timeout: float = 2.0):
-    """Consume SSE chunks into ``sink`` until one contains ``needle``."""
-    async with asyncio.timeout(timeout):
-        while True:
-            chunk = await stream.__anext__()
-            sink.append(chunk)
+async def _drain_watching(
+    stream, sink: list[str], watches: dict[str, asyncio.Event]
+) -> None:
+    """Consume SSE chunks into ``sink``, setting the event for each needle seen.
+
+    The caller decides when to stop (by cancelling this task) and waits on the
+    events, so a verdict is never drawn from a time window.
+    """
+    while True:
+        chunk = await stream.__anext__()
+        sink.append(chunk)
+        for needle, seen in watches.items():
             if needle in chunk:
-                return
+                seen.set()
 
 
 # SSE event name carrying the pending count, per endpoint.
@@ -853,24 +859,32 @@ class TestNavbarPendingCountStream:
                 pending.clear()
                 main.notify_pending_count_changed()
                 chunks: list[str] = []
+                # Set from the chunks the stream itself produced, so the verdict
+                # is "the chunk arrived", never "0.1 s elapsed".
+                busy = asyncio.Event()  # a dashboard chunk reached this stream
+                retried = asyncio.Event()  # a pending-count chunk did
                 # Both tasks are cancelled in the context manager's finally,
                 # so a failed assertion cannot leave them running.
                 async with _background(
-                    _drain_until(stream, chunks, event),
+                    _drain_watching(
+                        stream, chunks, {"dashboard": busy, event: retried}
+                    ),
                     _notify_every(main._dashboard_listeners, 0.05),
-                ) as tasks:
-                    drain = tasks[0]
+                ):
                     # A busy stream: another subscribed topic fires every 50ms,
-                    # so the 30s keepalive timeout is never reached.
-                    await asyncio.sleep(0.1)
-                    assert any("dashboard" in chunk for chunk in chunks)
+                    # so the 30s keepalive timeout is never reached.  Both bounds
+                    # are deadlock guards that only trip on a real hang, so a
+                    # loaded runner can never decide the verdict.
+                    await asyncio.wait_for(busy.wait(), 30)
                     assert not any(": keepalive" in chunk for chunk in chunks)
 
                     # The retry deadline comes due mid-traffic and delivers the
                     # count, without a keepalive or a new pending notification.
+                    # A retry postponed until the other topics go quiet never
+                    # arrives here, so this wait is what catches the bug.
                     fail.clear()
                     pending.append("p3")  # count is 1 until the retry lands
-                    await asyncio.wait_for(drain, 2)
+                    await asyncio.wait_for(retried.wait(), 30)
                     assert f"event: {event}\ndata: 1\n\n" in chunks
             finally:
                 await stream.aclose()
