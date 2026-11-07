@@ -93,6 +93,25 @@ _clone_lock = threading.Lock()
 _active_clones = 0
 
 
+def _job_clone_share(settings: Settings) -> int:
+    """How many additional-repo clones one analysis may run at once.
+
+    Policy, not physics: the share is the smaller of the process-wide clone
+    ceiling and the server default AI width, so one analysis cannot occupy the
+    host's whole clone budget (#461). Extra fan-out is not wasted -- the clones
+    are consumed by ``copy_rootcoz_pi_resources``, graph indexing and the prompt's
+    resource section before the first AI call -- it is traded for the other
+    job's slots, deliberately.
+
+    The caller passes the settings it already read for this admission attempt,
+    so one decision costs one ``get_settings()`` call and a live change applies
+    on the next attempt. A repo-side or per-submission ``max_concurrent_ai_calls``
+    override does not widen it: the clone budget is a host resource, not a job
+    preference.
+    """
+    return min(settings.max_concurrent_repo_clones, settings.max_concurrent_ai_calls)
+
+
 async def clone_additional_repos(
     repo_manager: RepositoryManager,
     additional_repos_list: list[AdditionalRepo],
@@ -115,26 +134,55 @@ async def clone_additional_repos(
         Tuple of (cloned repos dict mapping name to path, repo_path).
     """
     cloned: dict[str, Path] = {}
+    # This call's clones in flight; mutated under _clone_lock only.
+    active_here = 0
+    settings = get_settings()
+    logger.info(
+        "Cloning %d additional repo(s) at most %d at a time "
+        "(max_concurrent_repo_clones=%d, max_concurrent_ai_calls=%d, job_id=%s)",
+        len(additional_repos_list),
+        _job_clone_share(settings),
+        settings.max_concurrent_repo_clones,
+        settings.max_concurrent_ai_calls,
+        job_id or "-",
+    )
 
     async def _clone_into_subdir(ar: AdditionalRepo) -> None:
         target = repo_path / ar.name
         try:
             global _active_clones
+            nonlocal active_here
             while True:
+                # One snapshot per attempt, *before* the lock: the decision needs
+                # both numbers and re-reading settings while holding the lock
+                # pays for the same read twice on the hot path.
+                settings = get_settings()
+                share = _job_clone_share(settings)
                 with _clone_lock:
-                    if _active_clones < get_settings().max_concurrent_repo_clones:
+                    admitted = (
+                        _active_clones < settings.max_concurrent_repo_clones
+                        and active_here < share
+                    )
+                    if admitted:
                         _active_clones += 1
-                        break
+                        active_here += 1
+                if admitted:
+                    break
                 # ponytail: poll while full; replace with per-loop notifications if
                 # clone admission latency becomes material.
                 await asyncio.sleep(0.05)
 
-            def release_slot(task: asyncio.Task[Path]) -> None:
+            def _release() -> None:
                 global _active_clones
-                if not task.cancelled():
-                    task.exception()  # Observe failures even when the analysis was cancelled.
+                nonlocal active_here
                 with _clone_lock:
                     _active_clones -= 1
+                    active_here -= 1
+
+            def release_slot(task: asyncio.Task[Path]) -> None:
+                if not task.cancelled():
+                    task.exception()  # Observe failures even when the analysis was cancelled.
+                _release()
 
             clone_task = None
             outcome = "cancelled"
@@ -174,8 +222,7 @@ async def clone_additional_repos(
                 raise
             finally:
                 if clone_task is None:
-                    with _clone_lock:
-                        _active_clones -= 1
+                    _release()
                 if outcome == "cloned" and not reanalysis:
                     await safe_update_clone_progress(job_id, ar.name, False)
                 elif reanalysis:
@@ -202,7 +249,19 @@ async def clone_additional_repos(
                 type(e).__name__,
             )
 
-    await asyncio.gather(*[_clone_into_subdir(ar) for ar in additional_repos_list])
+    outcomes = await asyncio.gather(
+        *[_clone_into_subdir(ar) for ar in additional_repos_list],
+        return_exceptions=True,
+    )
+    for ar, outcome in zip(additional_repos_list, outcomes, strict=True):
+        if isinstance(outcome, BaseException) and not isinstance(
+            outcome, asyncio.CancelledError
+        ):
+            logger.warning(
+                "Additional repo '%s' failed unexpectedly: %s",
+                ar.name,
+                type(outcome).__name__,
+            )
 
     return cloned, repo_path
 
