@@ -229,12 +229,15 @@ def _db_uri(path: Path) -> str:
     return f"file:{quote(path.as_posix())}?mode=rw"
 
 
-async def _table_exists(db: aiosqlite.Connection, name: str) -> bool:
-    """Whether this connection carries a table called *name*."""
-    cursor = await db.execute(
-        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
-    )
-    return await cursor.fetchone() is not None
+async def _has_results_table(db: aiosqlite.Connection) -> bool:
+    """Whether this connection carries our ``results`` table, not a namesake.
+
+    A foreign database can define its own ``results``; the columns this sweep
+    queries are what make the file a rootcoz database. ``table_info`` on a
+    missing table returns no rows, so this also answers "is ``results`` there".
+    """
+    cursor = await db.execute("PRAGMA table_info(results)")
+    return {"job_id", "result_json"} <= {row[1] for row in await cursor.fetchall()}
 
 
 @dataclass
@@ -252,6 +255,7 @@ class _SweepDb:
     path: Path
     name: str
     gone: bool = False
+    identity: tuple[int, int] | None = None  # st_dev, st_ino of the first file we swept
 
     @asynccontextmanager
     async def open(self) -> AsyncIterator[aiosqlite.Connection | None]:
@@ -268,12 +272,29 @@ class _SweepDb:
 
     async def _connect(self) -> aiosqlite.Connection | None:
         """A configured connection to our database, or ``None`` when it is not there."""
+        if self.gone:  # a stopped pass stays stopped; the second stage must not resume
+            return None
+        try:
+            stat = self.path.stat()
+        except FileNotFoundError:
+            return None
+        if self.identity is None:
+            self.identity = (stat.st_dev, stat.st_ino)
+        elif (stat.st_dev, stat.st_ino) != self.identity:
+            # Another database at our path: sweeping it would count its bytes as
+            # the ones this pass started with.
+            return None
         try:
             db = await aiosqlite.connect(_db_uri(self.path), uri=True)
         except sqlite3.OperationalError:  # gone: rw refuses to create the file again
             return None
         try:
-            has_results = await _table_exists(db, "results")
+            has_results = await _has_results_table(db)
+        except sqlite3.OperationalError:
+            # A lock or an I/O fault, not a dead database: the caller logs it as
+            # the failure it is instead of this pass calling itself stopped.
+            await db.close()
+            raise
         except sqlite3.DatabaseError:  # corrupt: the connect is lazy, this read raises
             await db.close()
             return None

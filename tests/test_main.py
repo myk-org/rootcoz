@@ -2398,12 +2398,15 @@ async def test_the_db_fixture_fails_a_test_that_leaks_a_background_task() -> Non
     path = next(gen)  # setup half
     task = main._spawn_background(_never())  # tracked work that never finishes
     await asyncio.sleep(0)  # cooperative yield: let it start
-    with pytest.raises(AssertionError, match="still owned by 1 background task"):
-        next(gen)  # teardown half: must refuse
-    assert path.exists(), "a violation must leave the file behind for post-mortem"
-
-    task.cancel()
-    await asyncio.gather(task, return_exceptions=True)
+    try:
+        with pytest.raises(AssertionError, match="still owned by 1 background task"):
+            next(gen)  # teardown half: must refuse
+        assert path.exists(), "a violation must leave the file behind for post-mortem"
+    finally:
+        # The refused teardown never reached its unlink: this test owns the file.
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        path.unlink(missing_ok=True)
     gen = conftest.temp_db_path.__wrapped__()  # control half: drained work is silent
     path = next(gen)
     with pytest.raises(StopIteration):

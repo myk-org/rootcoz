@@ -673,6 +673,80 @@ async def test_a_sweep_stops_when_its_database_is_damaged_between_batches(
     ] == []
 
 
+async def test_a_sweep_stops_when_its_path_becomes_another_rootcoz_database(
+    _storage, storage_logs, tmp_path: Path
+) -> None:
+    """A schema match is not ownership: a swapped-in rootcoz database is not ours.
+
+    The bytes baseline of the pass describes the file it started on, so a
+    replacement -- even one that looks exactly like ours -- must stop the pass
+    instead of being swept as old.
+    """
+    db_path = _storage
+    await _insert_legacy("job-swapped-1", _payload(failure_count=20))
+    await _insert_legacy("job-swapped-2", _payload(failure_count=20))
+    await storage.backfill_results_denorm()
+    async with storage._connect_db() as db:  # a self-contained copy of a rootcoz db
+        await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    replacement = tmp_path / "replacement.db"
+    replacement_bytes = db_path.read_bytes()
+    replacement.write_bytes(replacement_bytes)
+
+    compress = storage._compress_result_rows
+    calls = 0
+
+    def swap_on_the_second_batch(rows: list, **kwargs: Any) -> list:
+        nonlocal calls
+        calls += 1
+        if calls == 2:  # a different inode, same schema: stat is the only tell
+            replacement.replace(db_path)
+        return compress(rows, **kwargs)
+
+    with patch.object(storage, "_compress_result_rows", swap_on_the_second_batch):
+        stats = await storage.backfill_result_json_compression(batch_size=1)
+
+    assert calls == 2, "the pass must have reached the second batch"
+    assert stats["rows"] == 1, "the committed batch must be kept"
+    stopped = [r for r in storage_logs.records if _STOPPED in r.getMessage()]
+    assert len(stopped) == 1, [r.getMessage() for r in storage_logs.records]
+    assert db_path.read_bytes() == replacement_bytes, (
+        "the sweep wrote into the database that replaced it"
+    )
+
+
+async def test_a_lock_error_on_the_check_is_not_a_vanished_database(_storage) -> None:
+    """A transient lock or I/O fault fails the pass loudly, it does not stop it."""
+    await _insert_legacy("job-locked", _payload(failure_count=20))
+    await storage.backfill_results_denorm()
+
+    with (
+        patch.object(
+            storage,
+            "_has_results_table",
+            side_effect=sqlite3.OperationalError("database is locked"),
+        ),
+        pytest.raises(sqlite3.OperationalError, match="database is locked"),
+    ):
+        await storage.backfill_result_json_compression()
+
+
+async def test_a_foreign_results_table_is_not_our_database(tmp_path: Path) -> None:
+    """A foreign table named ``results`` lacks our columns: configure nothing."""
+    foreign = tmp_path / "foreign-results.db"
+    conn = sqlite3.connect(foreign)
+    conn.execute("CREATE TABLE results (id INTEGER)")
+    conn.execute("INSERT INTO results VALUES (1)")
+    conn.commit()
+    conn.close()
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+
+    with patch.object(storage, "DB_PATH", foreign):
+        assert await storage.backfill_results_denorm() == 0
+        assert await storage.backfill_result_json_compression() == _EMPTY_STATS
+
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+
 async def test_a_sweep_never_creates_a_database_that_is_gone(tmp_path: Path) -> None:
     """Neither pass may manufacture the database it was told to sweep."""
     gone = tmp_path / "gone.db"
