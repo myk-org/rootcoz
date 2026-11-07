@@ -1384,8 +1384,12 @@ def enrich_comments_cmd(
         emit_output=False,
     )
     if not _state.get("json", False):
-        # Server sends {comment_id: [badges]}; count the comments that got any.
-        typer.echo(f"Enriched {len(data.get('enrichments') or {})} comment(s).")
+        # Server sends {comment_id: [badges]}; count the comments and their badges.
+        enrichments = data.get("enrichments") or {}
+        comments = len(enrichments)
+        badges = sum(len(badge_list) for badge_list in enrichments.values())
+        typer.echo(f"Enriched {comments} comment(s).")
+        typer.echo(f"Status badges: {badges}.")
 
 
 # -- Analyze ------------------------------------------------------------------

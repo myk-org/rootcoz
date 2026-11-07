@@ -785,14 +785,20 @@ class TestEnrichCommentsCommand:
         mock_client.enrich_comments.return_value = self._PAYLOAD
         result = runner.invoke(app, ["results", "enrich-comments", "job-1"])
         assert result.exit_code == 0
-        assert result.output.strip() == "Enriched 3 comment(s)."
+        assert result.output.split("\n")[:2] == [
+            "Enriched 3 comment(s).",
+            "Status badges: 4.",
+        ]
         mock_client.enrich_comments.assert_called_once_with("job-1")
 
     def test_enrich_comments_empty(self, mock_client):
         mock_client.enrich_comments.return_value = {"enrichments": {}}
         result = runner.invoke(app, ["results", "enrich-comments", "job-1"])
         assert result.exit_code == 0
-        assert result.output.strip() == "Enriched 0 comment(s)."
+        assert result.output.split("\n")[:2] == [
+            "Enriched 0 comment(s).",
+            "Status badges: 0.",
+        ]
 
     def test_enrich_comments_json(self, mock_client):
         mock_client.enrich_comments.return_value = self._PAYLOAD
