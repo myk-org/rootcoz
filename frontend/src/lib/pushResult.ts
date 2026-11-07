@@ -29,12 +29,14 @@ export function unmatchedFailure(
 
 /**
  * Copy for tests the backend pushed under the TO INVESTIGATE fallback because
- * their classification was empty or unmapped. They were pushed, so this is
- * information — never a warning, and never counted as skipped.
+ * their classification had no defect type to map to — either empty or one the
+ * backend does not know. They were pushed, so this is information — never a
+ * warning, and never counted as skipped. The detail line names the
+ * classification (`none` when it is empty), so the sentence must hold for both.
  */
 export function defaultedNotice(
   defaulted: string[],
 ): { message: string; detail: string } {
-  const message = `${defaulted.length} test(s) were pushed as TO INVESTIGATE because they have no classification`
+  const message = `${defaulted.length} test(s) were pushed as TO INVESTIGATE because they have no mappable classification`
   return { message, detail: listDetail(defaulted) }
 }

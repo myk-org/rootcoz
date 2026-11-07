@@ -235,7 +235,7 @@ describe('ReportPortalButton', () => {
 
     expect(await screen.findByText('Pushed 3 classifications to Report Portal.')).toBeDefined()
     expect(screen.getByTestId('reportportal-push-defaulted').textContent).toContain(
-      '1 test(s) were pushed as TO INVESTIGATE because they have no classification',
+      '1 test(s) were pushed as TO INVESTIGATE because they have no mappable classification',
     )
     expect(screen.getByTestId('reportportal-push-defaulted-items').textContent).toContain(
       'test-a (classification: none)',

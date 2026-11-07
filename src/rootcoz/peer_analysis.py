@@ -29,6 +29,7 @@ from rootcoz.engine.core import (
     build_other_groups_instruction,
     build_prompt_sections,
     build_signature_section,
+    log_scrubbed_answer,
     parse_json_response,
     run_single_ai_analysis,
     safe_update_progress,
@@ -547,6 +548,13 @@ async def analyze_failure_group_with_peers(
             "Peer analysis: main AI produced no usable analysis (%s); "
             "letting the peers analyze the failure",
             exc,
+        )
+        # Swallowed here, so this DEBUG line is the only place the answer itself
+        # survives — scrubbed, because it is exactly the kind of text that
+        # quotes credentials.
+        log_scrubbed_answer(
+            exc.raw_text,
+            why="Peer analysis: main AI answer with no usable classification",
         )
         incomplete_reason = str(exc)
         parsed_analysis = AnalysisDetail()

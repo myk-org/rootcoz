@@ -89,7 +89,10 @@ export const PROVIDER_FAILURE_DETAILS = 'Analysis failed; check server logs for 
  *  incomplete. The placeholder is shared with a group whose answer carried no
  *  usable classification (engine/core._failed_group_analyses), which explains
  *  itself in `analysis_error`; only a row without a reason is a provider
- *  outage, so the banner stops blaming credentials for a narration-only reply. */
+ *  outage, so the banner stops blaming credentials for a narration-only reply.
+ *  `analysis_error` is written from the error type alone
+ *  (engine/core.incomplete_reason), so its absence means "not the model" — a
+ *  crashed re-analysis keeps its message in `reanalysis_error` instead. */
 export function countProviderFailures(
   failures: { test_name: string; analysis?: AnalysisDetail }[],
   children: ChildJobAnalysis[],

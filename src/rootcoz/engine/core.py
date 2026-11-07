@@ -1814,15 +1814,25 @@ _NON_RETRYABLE_AI_ERRORS = (
 )
 
 
-#: Longest raw AI answer ever written to a log, and only at DEBUG. WARNING
-#: carries the length plus a fingerprint instead: model narration can quote CI
-#: logs, artifact contents or tokens, and this engine runs on server credentials.
-#: The excerpt is scrubbed before it is logged (see ``scrub_sensitive_data``).
-AI_LOG_EXCERPT_CHARS = 2000
-
 #: Leading hex characters of the answer's SHA-256 kept in the WARNING line. The
 #: width is part of the log format: same answer, same fingerprint, every run.
+#: The answer itself is never written at WARNING — it reaches DEBUG scrubbed and
+#: whole (see ``log_scrubbed_answer``): model narration can quote CI logs,
+#: artifact contents or tokens, and this engine runs on server credentials.
 AI_LOG_DIGEST_CHARS = 12
+
+
+def log_scrubbed_answer(answer: str, *, why: str) -> None:
+    """Write the *whole* scrubbed answer at DEBUG, the one record of model output.
+
+    WARNING carries only a length and a fingerprint, so this is what answers
+    "what did the model actually say?" for a job that failed at the default INFO
+    log level. Nothing is truncated — a cut answer hides the part that explains
+    the failure — and nothing is raw: the engine runs on server credentials, so
+    the text is scrubbed before it is logged. Guarded because the call is eager.
+    """
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("%s (scrubbed): %s", why, scrub_sensitive_data(answer))
 
 
 async def _call_ai_with_retry(
@@ -1972,7 +1982,7 @@ async def _call_ai_with_retry(
             ):
                 break
             # Narration without a final answer is not an analysis: retry it.
-            # The text itself stays out of WARNING (see AI_LOG_EXCERPT_CHARS).
+            # The text itself stays out of WARNING (see log_scrubbed_answer).
             logger.warning(
                 "AI answer has no usable classification (attempt=%d/%d) "
                 "provider=%s, model=%s, call_type=%s, job_id=%s, "
@@ -1988,16 +1998,9 @@ async def _call_ai_with_retry(
                     :AI_LOG_DIGEST_CHARS
                 ],
             )
-            # Scrub the WHOLE answer, then cut: truncating first can leave a
-            # token fragment the pattern no longer matches. Guarded because the
-            # argument is eager: at INFO this would scrub the entire answer for
-            # a line nobody emits.
-            if logger.isEnabledFor(logging.DEBUG):
-                logger.debug(
-                    "AI answer with no usable classification, first %d chars: %s",
-                    AI_LOG_EXCERPT_CHARS,
-                    scrub_sensitive_data(result.text or "")[:AI_LOG_EXCERPT_CHARS],
-                )
+            log_scrubbed_answer(
+                result.text or "", why="AI answer with no usable classification"
+            )
             if attempt >= max_attempts:
                 break
             continue

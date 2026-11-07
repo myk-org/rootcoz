@@ -92,6 +92,9 @@ The `AI Spend` section of the report page attributes what the job spent: a break
 - `The report shows "N failure(s) have no usable analysis".`  
   The model answered without a classification, so RootCoz stored the failure as analysis incomplete instead of treating its narration as a diagnosis. Use `Re-Analyze` to re-run the job, or `rootcoz results incomplete` to list every job in that state.
 
+- `I need to know what the model actually answered.`  
+  At the default `LOG_LEVEL=INFO` the server logs only the answer's length and a 12-character SHA-256 fingerprint — never the text, because narration can quote CI logs, artifacts or credentials. Raise `LOG_LEVEL` to `DEBUG` and the *whole* answer is logged, scrubbed first: `AI answer with no usable classification (scrubbed): …` for the analysis call, and `Peer analysis: main AI answer with no usable classification (scrubbed): …` when the main model narrated during a peer debate. Neither path stores the answer on the job, and it is never forwarded to another provider.
+
 - `My change affected several tests.`  
   That card represents a same-error group. RootCoz applies classification and pattern changes across the whole group, so confirm the `Affected Tests` list before you save.
 

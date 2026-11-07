@@ -132,7 +132,6 @@ from rootcoz.encryption import (
 )
 from rootcoz.engine.core import (
     ROOTCOZ_ISSUE_PROMPT_FILENAME,
-    AnalysisIncompleteError,
     _failed_group_analyses,
     analyze_failure_group,
     clone_additional_repos,
@@ -7830,11 +7829,13 @@ async def _reanalyze_failure_background(
         )
 
     except Exception as exc:
-        # A narration-only answer is our own diagnosis, not a crash: say it.
+        # Only a narration-only answer (AnalysisIncompleteError) is our own
+        # diagnosis. Any other failure is a crash whose text may echo a
+        # credential, so it keeps the generic message.
+        model_reason = incomplete_reason(exc)
         error_msg = (
-            str(exc)
-            if isinstance(exc, AnalysisIncompleteError)
-            else "Re-analysis failed unexpectedly. Check server logs for details."
+            model_reason
+            or "Re-analysis failed unexpectedly. Check server logs for details."
         )
         logger.exception(
             "Failure %s re-analysis failed in job %s: %s",
@@ -7849,13 +7850,16 @@ async def _reanalyze_failure_background(
             if failure:
                 failure["reanalysis_status"] = "failed"
                 failure["reanalysis_error"] = error_msg
-                # analysis_error explains a *missing* analysis; a classified row
-                # keeps the analysis it already had.
+                # analysis_error explains a *missing* analysis, and only the
+                # error type may write it: the report reads its presence as "the
+                # model answered without a classification"
+                # (frontend countProviderFailures), so a crash must not land
+                # there. A classified row keeps the analysis it already had.
                 analysis = failure.get("analysis")
-                if not (
+                if model_reason and not (
                     analysis.get("classification") if isinstance(analysis, dict) else ""
                 ):
-                    failure["analysis_error"] = error_msg
+                    failure["analysis_error"] = model_reason
 
         try:
             await patch_result_json(job_id, _patch_error)

@@ -3239,6 +3239,72 @@ class TestOrchestratorEmptyFallback:
             assert "FAILURE SUMMARY" in prompt
 
     @pytest.mark.asyncio
+    async def test_primary_narration_stays_inspectable_at_debug(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """The dropped narration is still reachable, scrubbed, at DEBUG.
+
+        The peer path swallows the ``AnalysisIncompleteError`` to keep the debate
+        going, and the narration must not reach another provider — but "what did
+        the model actually say?" has to be answerable without raising the global
+        log level, so the whole scrubbed answer goes to DEBUG (#399).
+        """
+        import logging
+        from unittest.mock import AsyncMock
+
+        from rootcoz.engine.core import AnalysisIncompleteError
+        from rootcoz.engine.core import logger as core_logger
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
+
+        narration = "The deploy log said password=hunter2\nthen " + "z" * 3000
+        mock_orchestrator = AsyncMock(
+            side_effect=AnalysisIncompleteError(
+                "AI analysis incomplete: response has no usable classification",
+                error_signature="sig123",
+                raw_text=narration,
+            )
+        )
+        mock_peer_call = AsyncMock(
+            return_value=AIResult(success=False, text="CLI error")
+        )
+
+        original_level = core_logger.level
+        core_logger.setLevel(logging.DEBUG)
+        core_logger.addHandler(caplog.handler)
+        try:
+            with (
+                patch(
+                    "rootcoz.peer_analysis.run_single_ai_analysis", mock_orchestrator
+                ),
+                _patch_peer_ai_calls(mock_peer_call),
+            ):
+                await analyze_failure_group_with_peers(
+                    failures=[_make_failure()],
+                    console_context="console output",
+                    repo_path=None,
+                    main_ai_provider="claude",
+                    main_ai_model="claude-sonnet-4-20250514",
+                    peer_ai_configs=_peer_configs(),
+                    max_rounds=1,
+                )
+        finally:
+            core_logger.removeHandler(caplog.handler)
+            core_logger.setLevel(original_level)
+
+        answers = [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.DEBUG
+            and "no usable classification (scrubbed)" in r.getMessage()
+        ]
+        assert answers, "the swallowed narration must still be inspectable at DEBUG"
+        for message in answers:
+            assert "hunter2" not in message
+            # Scrub before logging, and keep the whole answer, not a slice.
+            assert "[REDACTED]" in message
+            assert "z" * 3000 in message
+
+    @pytest.mark.asyncio
     async def test_unclassified_group_keeps_the_incomplete_reason(self) -> None:
         """A narration-only primary with no usable peer vote explains itself.
 

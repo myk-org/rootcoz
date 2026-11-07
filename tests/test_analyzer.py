@@ -483,8 +483,7 @@ class TestRunSingleAiAnalysis:
             r.getMessage()
             for r in caplog.records
             if r.levelno == logging.DEBUG
-            and "first" in r.getMessage()
-            and "chars" in r.getMessage()
+            and "no usable classification (scrubbed)" in r.getMessage()
         ]
 
     @pytest.mark.asyncio
@@ -493,14 +492,17 @@ class TestRunSingleAiAnalysis:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """WARNING carries length + sha256 only; the excerpt is DEBUG and bounded.
+        """WARNING carries length + sha256 only; DEBUG keeps the WHOLE scrubbed answer.
 
         Model narration can quote CI logs, artifacts or tokens, so it must never
-        land in a WARNING line.
+        land in a WARNING line — but the scrubbed answer at DEBUG is the only
+        record of what the model actually said, so it may not be cut either.
         """
-        from rootcoz.engine.core import AI_LOG_DIGEST_CHARS, AI_LOG_EXCERPT_CHARS
+        from rootcoz.engine.core import AI_LOG_DIGEST_CHARS
 
-        narration = "QUOTED-CI-LOG " + "x" * (AI_LOG_EXCERPT_CHARS + 500)
+        long_tail = 2500
+
+        narration = "QUOTED-CI-LOG " + "x" * long_tail
         excerpts = await self._narration_debug_excerpts(monkeypatch, caplog, narration)
 
         warnings = [
@@ -520,10 +522,11 @@ class TestRunSingleAiAnalysis:
             assert len(logged_digest) == AI_LOG_DIGEST_CHARS
             assert str(len(narration)) in message
 
-        assert excerpts, "DEBUG keeps a bounded excerpt for diagnosis"
+        assert excerpts, "DEBUG keeps the answer for diagnosis"
         for excerpt in excerpts:
-            # Exactly the named bound, never the whole runaway answer.
-            assert excerpt.count("x") == AI_LOG_EXCERPT_CHARS - len("QUOTED-CI-LOG ")
+            # The whole answer, never a truncated slice of it.
+            assert excerpt.count("x") == long_tail
+            assert excerpt.endswith(narration)
 
     @pytest.mark.parametrize(
         ("narration", "secret"),
@@ -560,28 +563,29 @@ class TestRunSingleAiAnalysis:
         assert "deploy log" in excerpt_messages[0]
 
     @pytest.mark.asyncio
-    async def test_credential_past_the_excerpt_boundary_is_scrubbed(
+    async def test_credential_deep_in_the_answer_is_still_scrubbed(
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
     ) -> None:
-        """Scrub before truncating, or a cut token fragment reaches the log.
+        """A credential far down the answer must not survive the DEBUG line.
 
-        The token starts before the excerpt boundary and runs past it, so
-        truncating first leaves a fragment the 40-char pattern no longer matches.
+        The whole answer is scrubbed before it is logged, so a secret late in a
+        long narration is redacted rather than shipped raw with the tail.
         """
-        from rootcoz.engine.core import AI_LOG_EXCERPT_CHARS
-
         secret = (
             "deadbeef" * 5
         )  # 40 hex chars: the generic token pattern  # pragma: allowlist secret
-        narration = "y" * (AI_LOG_EXCERPT_CHARS - 6) + " " + secret
+        narration = "y" * 5000 + " " + secret
         excerpt_messages = await self._narration_debug_excerpts(
             monkeypatch, caplog, narration
         )
-        assert excerpt_messages, "the excerpt still reaches DEBUG"
+        assert excerpt_messages, "the answer still reaches DEBUG"
         for message in excerpt_messages:
             assert secret[:5] not in message
+            assert "[REDACTED" in message
+            # The text before the credential is kept: scrubbing, not truncating.
+            assert "y" * 5000 in message
 
     @pytest.mark.asyncio
     async def test_excerpt_is_scrubbed_only_when_debug_is_enabled(
@@ -589,15 +593,14 @@ class TestRunSingleAiAnalysis:
     ) -> None:
         """Scrubbing the whole answer is DEBUG-only work, never paid at INFO.
 
-        The excerpt argument of the DEBUG line is evaluated eagerly, so an
+        The answer argument of the DEBUG line is evaluated eagerly, so an
         unguarded call pushes the entire answer (78K tokens on the job that
         opened this) through every redaction regex on the event loop for a line
         nobody emits (#399).
         """
-        from rootcoz.engine.core import AI_LOG_EXCERPT_CHARS
         from rootcoz.engine.core import logger as core_logger
 
-        narration = "Now let me read the log: " + "x" * (AI_LOG_EXCERPT_CHARS * 2)
+        narration = "Now let me read the log: " + "x" * 4000
         scrubbed: list[str] = []
 
         def counting_scrub(text: str) -> str:
@@ -644,8 +647,8 @@ class TestRunSingleAiAnalysis:
         finally:
             core_logger.setLevel(original_level)
 
-        assert scrubbed, "DEBUG still scrubs the excerpt"
-        # The whole answer, not a truncated slice: scrub first, cut after.
+        assert scrubbed, "DEBUG still scrubs the answer"
+        # The whole answer, not a truncated slice: scrub first, log after.
         assert set(scrubbed) == {narration}
 
     @pytest.mark.asyncio

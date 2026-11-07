@@ -5,9 +5,22 @@ describe('defaultedNotice', () => {
   it('describes TO INVESTIGATE defaulting as information, not a failure', () => {
     const { message, detail } = defaultedNotice(['test-a (classification: none)'])
     expect(message).toBe(
-      '1 test(s) were pushed as TO INVESTIGATE because they have no classification',
+      '1 test(s) were pushed as TO INVESTIGATE because they have no mappable classification',
     )
     expect(detail).toBe('test-a (classification: none)')
+  })
+
+  it('says the same thing for a classification nothing maps, not just an empty one', () => {
+    // The backend defaults an unmapped classification as well, so the copy must
+    // not claim the classification is absent when the detail names one.
+    const { message, detail } = defaultedNotice([
+      'test-b (classification: NEEDS MORE INVESTIGATION)',
+    ])
+    expect(message).toBe(
+      '1 test(s) were pushed as TO INVESTIGATE because they have no mappable classification',
+    )
+    expect(message).not.toContain('have no classification')
+    expect(detail).toBe('test-b (classification: NEEDS MORE INVESTIGATION)')
   })
 
   it('lists at most three entries and counts the rest', () => {
