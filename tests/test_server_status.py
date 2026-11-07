@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import time
 from pathlib import Path
 from unittest.mock import patch
 
@@ -544,16 +545,31 @@ class TestLoopLagWatchdog:
 # ---------------------------------------------------------------------------
 
 
+def test_no_probe_deadline_override_ships() -> None:
+    """The override map is test-only: shipping an entry must not go unnoticed.
+
+    A stray entry would shorten a real probe's deadline in production, so it
+    fails here and has to be a deliberate, reviewed change.
+    """
+    assert server_status._PROBE_DEADLINE_OVERRIDES == {}
+
+
 class TestCollectServerStatus:
     def _status(self, tmp_path, **kwargs):
-        return asyncio.run(
-            server_status.collect_server_status(
-                db_path=tmp_path / "results.db",
-                transcripts_dir=tmp_path / "transcripts",
-                log_dir=tmp_path / "logs",
-                **kwargs,
+        async def _snapshot():
+            # Generous outer bound: a probe that holds the snapshot open fails
+            # the test instead of hanging it. Only a real hang reaches it.
+            return await asyncio.wait_for(
+                server_status.collect_server_status(
+                    db_path=tmp_path / "results.db",
+                    transcripts_dir=tmp_path / "transcripts",
+                    log_dir=tmp_path / "logs",
+                    **kwargs,
+                ),
+                timeout=60,
             )
-        )
+
+        return asyncio.run(_snapshot())
 
     def test_shape(self, tmp_path, monkeypatch) -> None:
         cgroup, proc = _fake_roots(tmp_path)
@@ -627,20 +643,60 @@ class TestCollectServerStatus:
         assert status["sidecar"]["reachable"] is True
 
     def test_a_hanging_probe_times_out(self, tmp_path, monkeypatch) -> None:
-        """A stalled filesystem degrades its block instead of the request."""
-        import time as _time
+        """A probe that never returns degrades only its own block.
 
+        The stalled probe waits on an event this test never sets, so it cannot
+        finish before its deadline however loaded the runner is, and every other
+        probe keeps the deadline production uses. Nothing here is decided by a
+        10 ms window a descheduled runner can miss (issue #451).
+
+        The stalled probe is the async database read, not the threaded disk one:
+        a thread that never returns cannot be cancelled, only released.
+        """
         cgroup, proc = _fake_roots(tmp_path)
-        monkeypatch.setattr(server_status, "_PROBE_TIMEOUT_SECONDS", 0.01)
+        never = asyncio.Event()
+        monkeypatch.setitem(server_status._PROBE_DEADLINE_OVERRIDES, "database", 0.01)
         monkeypatch.setattr("rootcoz.server_status.read_data_usage", lambda _p: (1, 4))
         monkeypatch.setattr(server_status, "read_sidecar", _sidecar_up)
-        monkeypatch.setattr(
-            server_status, "read_disk", lambda *_a, **_k: _time.sleep(0.3) or {}
-        )
+
+        async def stalled_database(*_args, **_kwargs) -> dict:
+            await never.wait()
+            return {}
+
+        monkeypatch.setattr(server_status, "read_database", stalled_database)
 
         status = self._status(tmp_path, cgroup_root=cgroup, proc_self=proc)
+
+        assert status["database"]["available"] is False
+        assert "timed out" in status["database"]["reason"]
+        # The other blocks still answer: their deadlines were never shortened.
+        assert status["disk"]["available"] is True
+        assert status["cpu"]["available"] is True
+        assert status["memory"]["available"] is True
+
+    def test_a_hanging_thread_probe_times_out(self, tmp_path, monkeypatch) -> None:
+        """A threaded probe that overruns its deadline degrades only its block.
+
+        ``read_disk`` runs in a worker thread, so its timeout releases the await
+        instead of cancelling a coroutine — a different branch of ``_guarded``
+        than the async database probe above, and the only cover for it.
+
+        The sleep is 0.3 s against a 0.01 s deadline: a 30x margin, so a loaded
+        runner still sees the deadline fire first. Issue #451 was about a 10 ms
+        window racing a scheduler, not about that margin.
+        """
+        cgroup, proc = _fake_roots(tmp_path)
+        monkeypatch.setitem(server_status._PROBE_DEADLINE_OVERRIDES, "disk", 0.01)
+        monkeypatch.setattr("rootcoz.server_status.read_data_usage", lambda _p: (1, 4))
+        monkeypatch.setattr(server_status, "read_sidecar", _sidecar_up)
+        monkeypatch.setattr(server_status, "read_disk", _slow_disk)
+
+        status = self._status(tmp_path, cgroup_root=cgroup, proc_self=proc)
+
         assert status["disk"]["available"] is False
         assert "timed out" in status["disk"]["reason"]
+        # The other blocks keep the production deadline and still answer.
+        assert status["cpu"]["available"] is True
         assert status["memory"]["available"] is True
 
     def test_activity_omits_numbers_storage_cannot_give(
@@ -707,6 +763,12 @@ def _async(value):
 
 async def _sidecar_up() -> dict:
     return {"reachable": True, "models": 1, "free_models": 0}
+
+
+def _slow_disk(*_args, **_kwargs) -> dict:
+    """A disk probe that outlives a 0.01 s deadline by a wide margin."""
+    time.sleep(0.3)
+    return {"available": True}
 
 
 # ---------------------------------------------------------------------------
