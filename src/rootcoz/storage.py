@@ -266,11 +266,12 @@ class _SweepDb:
             return None
         try:
             has_results = await _table_exists(db, "results")
-        except (
-            sqlite3.OperationalError
-        ):  # corrupt: the connect is lazy, this read raises
+        except sqlite3.DatabaseError:  # corrupt: the connect is lazy, this read raises
             await db.close()
             return None
+        except BaseException:  # any other failure still closes before it propagates
+            await db.close()
+            raise
         if not has_results:  # a foreign sqlite database: leave it as it is
             await db.close()
             return None
