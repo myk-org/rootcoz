@@ -49,6 +49,12 @@ _LOOP_LAG_WARN_MS = 5000.0
 # A probe that cannot finish must degrade its block, not hold the request open.
 _PROBE_TIMEOUT_SECONDS = 15.0
 
+# A deadline one probe gets instead of the constant above, by probe name. Empty
+# in production; a test shortens a single probe so "a probe that never returns
+# degrades only its block" is decided by that probe being blocked for good, not
+# by the healthy probes answering inside a tiny window.
+_PROBE_DEADLINES: dict[str, float] = {}
+
 _FILESYSTEM_NOTE = (
     "Measured on the filesystem that holds the data directory, whatever "
     "storage backs it — not a per-volume quota. On a shared node filesystem "
@@ -668,19 +674,16 @@ async def _guarded(
     fallback: dict[str, Any],
 ) -> dict[str, Any]:
     """Run one probe; a crash in it must not fail the whole snapshot."""
+    deadline = _PROBE_DEADLINES.get(name, _PROBE_TIMEOUT_SECONDS)
     try:
         # shortcut: cancelling the wait does not kill a thread already inside
         # a filesystem walk, so the timeout frees the request, not the worker.
-        return await asyncio.wait_for(probe, timeout=_PROBE_TIMEOUT_SECONDS)
+        return await asyncio.wait_for(probe, timeout=deadline)
     except TimeoutError:
-        logger.warning(
-            "Server status probe %s timed out after %.0fs",
-            name,
-            _PROBE_TIMEOUT_SECONDS,
-        )
+        logger.warning("Server status probe %s timed out after %.0fs", name, deadline)
         return {
             **fallback,
-            "reason": f"probe timed out after {_PROBE_TIMEOUT_SECONDS:.0f}s",
+            "reason": f"probe timed out after {deadline:.0f}s",
         }
     except Exception as exc:
         logger.warning("Server status probe %s failed", name, exc_info=True)
