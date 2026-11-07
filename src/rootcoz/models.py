@@ -1,6 +1,7 @@
 """Pydantic request and response models."""
 
 import json
+import re
 from datetime import datetime
 from typing import Annotated, Any, Literal, Self
 from uuid import uuid4
@@ -1129,28 +1130,140 @@ class PreviewIssueRequest(_ChildJobFieldsValidator, _TrackerCredentialsMixin):
     )
 
 
+def _require_issue_title(v: str) -> str:
+    if not v.strip():
+        raise ValueError("title must not be empty")
+    return v
+
+
+def _default_issue_type(v: str) -> str:
+    stripped = v.strip()
+    return stripped if stripped else "Bug"
+
+
+#: Issue-creation text rules, shared by every body that files an issue.
+IssueTitle = Annotated[str, AfterValidator(_require_issue_title)]
+IssueTypeName = Annotated[str, AfterValidator(_default_issue_type)]
+
+
 class CreateIssueRequest(_ChildJobFieldsValidator, _TrackerCredentialsMixin):
     """Request body for creating a GitHub issue or Jira bug."""
 
     test_name: str
-    title: str
+    title: IssueTitle
     body: str
-    jira_issue_type: str = Field(
+    jira_issue_type: IssueTypeName = Field(
         default="Bug", description="Jira issue type name (e.g. Bug, Story, Task)"
     )
 
-    @field_validator("jira_issue_type")
-    @classmethod
-    def jira_issue_type_not_empty(cls, v: str) -> str:
-        stripped = v.strip()
-        return stripped if stripped else "Bug"
 
-    @field_validator("title")
+#: ``owner/name`` shape of a GitHub repository slug (never a URL). GitHub allows
+#: ``[A-Za-z0-9._-]`` in each half, an owner starts with a letter or digit, and
+#: neither half may be a dot path (``.`` or ``..``, which a checkout would treat
+#: as a directory) nor start with ``-``; an owner is at most 39 characters while
+#: a repository name is at most 100.
+_REPO_SLUG_RE = re.compile(
+    # Owner: GitHub caps it at 39 characters, and it starts with a letter or digit.
+    r"[A-Za-z0-9][A-Za-z0-9._-]{0,38}/"
+    # Name: at most 100, no leading '-', and not a dot path ('.' / '..'), which a
+    # checkout reads as a directory rather than a repository.
+    r"(?!-)(?!\.{1,2}\Z)[A-Za-z0-9._-]{1,100}"
+)
+
+_REPO_SLUG_ERROR = (
+    "repo must be a bare 'owner/name' GitHub repository (for example "
+    "'org/repo') — pass the slug, not a URL and not a repository name alone"
+)
+
+
+def _validate_repo_slug(v: str) -> str:
+    """Accept an empty value (the run's test repo) or a bare ``owner/name``.
+
+    Applied by the chat-issue endpoints, which answer a malformed value with a
+    400 whose detail the chat model relays to the user.
+    """
+    slug = v.strip() if isinstance(v, str) else v
+    if slug and not _REPO_SLUG_RE.fullmatch(slug):
+        raise ValueError(_REPO_SLUG_ERROR)
+    return slug
+
+
+class ChatIssueProposeRequest(BaseModel):
+    """Request body for drafting a chat issue the user has to approve.
+
+    Nothing is filed here: the server keeps the scrubbed title and body as a
+    single-use draft and returns the id and confirmation code the create call
+    must present. ``repo`` is the draft's target repository, so the preview
+    shows where it would file.
+
+    Every destination field (``repo``, ``job_id``, the Jira overrides) is bound
+    into the draft — as the value it RESOLVES to, not as sent — because a
+    confirmation id approves this text for THIS destination.
+
+    ``conversation`` is the chat the draft belongs to, and the chat tools inject
+    it server-side (a job's id, or the admin chat's); the model cannot set it,
+    and an empty value means a direct, non-chat caller (the CLI), which confirms
+    with the code itself.
+    """
+
+    target: Literal["github", "jira"]
+    title: IssueTitle
+    body: str
+    repo: str = ""
+    job_id: str = ""
+    conversation: str = ""
+    jira_project_key: str = ""
+    jira_security_level: str = ""
+    jira_issue_type: IssueTypeName = "Bug"
+
+    @field_validator(
+        "repo",
+        "job_id",
+        "conversation",
+        "jira_project_key",
+        "jira_security_level",
+    )
     @classmethod
-    def title_not_empty(cls, v: str) -> str:
-        if not v.strip():
-            raise ValueError("title must not be empty")
-        return v
+    def _strip_destination(cls, v: str) -> str:
+        return v.strip() if isinstance(v, str) else v
+
+
+class ChatIssueRequest(BaseModel):
+    """Request body for opening a tracker issue from a chat conversation.
+
+    No credentials and no ``test_name``: there is no failure to name, and the
+    credential is the caller's saved account token — never the request's.
+    ``confirmation_id`` is the id of a draft the user approved and
+    ``confirmation_code`` is the code its preview showed (see
+    ``POST /api/chat-issue/propose``); a missing, unknown or unconfirmed pair
+    files nothing.
+
+    ``repo`` is a bare ``owner/name`` GitHub slug, empty for the run's test
+    repo; ``job_id`` is the run that bounds which repos a non-admin may name.
+    """
+
+    target: Literal["github", "jira"]
+    title: IssueTitle
+    body: str
+    repo: str = ""
+    job_id: str = ""
+    confirmation_id: str = ""
+    confirmation_code: str = ""
+    jira_project_key: str = ""
+    jira_security_level: str = ""
+    jira_issue_type: IssueTypeName = "Bug"
+
+    @field_validator(
+        "jira_project_key",
+        "jira_security_level",
+        "confirmation_id",
+        "confirmation_code",
+        "job_id",
+        "repo",
+    )
+    @classmethod
+    def _strip_overrides(cls, v: str) -> str:
+        return v.strip() if isinstance(v, str) else v
 
 
 OverrideClassificationLiteral = Literal["CODE ISSUE", "PRODUCT BUG", "INFRASTRUCTURE"]

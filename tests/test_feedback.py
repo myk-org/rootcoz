@@ -1643,12 +1643,12 @@ class TestFeedbackEndpoint:
 
     def test_create_unreachable_github_stays_502(self, _init_db, temp_db_path, caplog):
         """502 remains reserved for a genuinely unreachable GitHub API."""
-        exc = httpx.RequestError("connection refused")
+        exc = httpx.ConnectError("connection refused")
         with capture_main_logs(caplog):
             resp = self._create_with_github_failure(temp_db_path, exc)
         assert resp.status_code == 502
         assert "unreachable" in resp.json()["detail"]
-        assert "RequestError" in caplog.text
+        assert "ConnectError" in caplog.text
 
 
 # ---------------------------------------------------------------------------

@@ -1424,6 +1424,84 @@ class RootCozClient:
             accept_statuses=(201,),
         )
 
+    def propose_chat_issue(
+        self,
+        target: str,
+        title: str,
+        body: str,
+        repo: str = "",
+        job_id: str = "",
+        jira_project_key: str = "",
+        jira_security_level: str = "",
+        jira_issue_type: str = "Bug",
+    ) -> dict[str, Any]:
+        """Draft an issue from chat text. POST /api/chat-issue/propose
+
+        Files nothing: the reply carries the ``confirmation_id`` and
+        ``confirmation_code`` that ``create_chat_issue`` needs, plus the exact
+        title and body it would file. Drafts are single-use and expire, so
+        propose again after any edit.
+
+        The destination (``repo``, ``job_id``, the Jira overrides) is part of
+        the draft, so ``create_chat_issue`` must be given the same one.
+        """
+        payload: dict[str, Any] = {"target": target, "title": title, "body": body}
+        if repo:
+            payload["repo"] = repo
+        if job_id:
+            payload["job_id"] = job_id
+        if jira_project_key:
+            payload["jira_project_key"] = jira_project_key
+        if jira_security_level:
+            payload["jira_security_level"] = jira_security_level
+        if jira_issue_type and jira_issue_type != "Bug":
+            payload["jira_issue_type"] = jira_issue_type
+        return self._request(
+            "POST", "/api/chat-issue/propose", json=payload, accept_statuses=(201,)
+        )
+
+    def create_chat_issue(
+        self,
+        target: str,
+        title: str,
+        body: str,
+        confirmation_id: str,
+        confirmation_code: str,
+        repo: str = "",
+        job_id: str = "",
+        jira_project_key: str = "",
+        jira_security_level: str = "",
+        jira_issue_type: str = "Bug",
+    ) -> dict[str, Any]:
+        """Create an issue from chat text. POST /api/chat-issue
+
+        No token parameter on purpose: the server files the issue with the
+        credentials saved in the caller's account, and a deployment token is
+        never a fallback. ``confirmation_id`` and ``confirmation_code`` must
+        come from ``propose_chat_issue`` for the same title, body and
+        destination — a code the user did not read in the preview files nothing.
+        """
+        payload: dict[str, Any] = {
+            "target": target,
+            "title": title,
+            "body": body,
+            "confirmation_id": confirmation_id,
+            "confirmation_code": confirmation_code,
+        }
+        if repo:
+            payload["repo"] = repo
+        if job_id:
+            payload["job_id"] = job_id
+        if jira_project_key:
+            payload["jira_project_key"] = jira_project_key
+        if jira_security_level:
+            payload["jira_security_level"] = jira_security_level
+        if jira_issue_type and jira_issue_type != "Bug":
+            payload["jira_issue_type"] = jira_issue_type
+        return self._request(
+            "POST", "/api/chat-issue", json=payload, accept_statuses=(201,)
+        )
+
     # -- User Tokens ----------------------------------------------------------
 
     def get_user_tokens(self) -> dict[str, Any]:

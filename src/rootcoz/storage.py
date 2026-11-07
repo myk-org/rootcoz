@@ -10859,6 +10859,45 @@ async def get_chat_messages(
         return await _chat_messages_on(db, job_id, limit, offset, username)
 
 
+async def get_chat_message_max_id(job_id: str, username: str = "") -> int:
+    """The id of the newest stored message in a chat, 0 when it has none.
+
+    One indexed aggregate: callers that need a watermark get it without
+    loading the transcript.
+    """
+    where, params = (
+        ("job_id = ? AND username = ?", (job_id, username))
+        if username
+        else ("job_id = ?", (job_id,))
+    )
+    async with _connect_db() as db:
+        row = await (
+            await db.execute(f"SELECT MAX(id) FROM chat_messages WHERE {where}", params)
+        ).fetchone()
+    return (row[0] or 0) if row else 0
+
+
+async def get_chat_user_messages_since(
+    job_id: str, *, after_id: int, limit: int, username: str
+) -> list[dict[str, Any]]:
+    """This user's newest *limit* user-role messages newer than *after_id*.
+
+    Newest first, so a caller looking for one reply reads at most *limit* rows
+    however long the conversation is. ``username`` is required: an empty one
+    would be every user's messages, which is never a consent check.
+    """
+    async with _connect_db() as db:
+        rows = await (
+            await db.execute(
+                "SELECT id, job_id, role, content, username, created_at "
+                "FROM chat_messages WHERE job_id = ? AND username = ? "
+                "AND role = 'user' AND id > ? ORDER BY id DESC LIMIT ?",
+                (job_id, username, after_id, limit),
+            )
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
 async def _latest_chat_session_on(
     db: aiosqlite.Connection, job_id: str, username: str
 ) -> dict[str, Any] | None:
