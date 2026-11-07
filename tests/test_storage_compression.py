@@ -498,20 +498,21 @@ async def test_a_refused_save_result_still_logs_error(_storage, storage_logs) ->
 # --- the backfill -----------------------------------------------------------
 
 
-async def test_backfill_is_byte_identical(_storage) -> None:
+async def test_backfill_is_byte_identical(_storage, storage_logs) -> None:
     """The frame decompresses to exactly the bytes the old build stored."""
     text = await _insert_legacy("job-bytes", _payload(failure_count=30))
     await storage.backfill_results_denorm()
 
     stats = await storage.backfill_result_json_compression()
     assert stats["rows"] == 1
+    assert "is no longer the database it started on" not in storage_logs.text
 
     row = await _stored(_storage, "job-bytes")
     assert row["kind"] == "blob"
     assert zstd.decompress(row["result_json"]) == text.encode()
 
 
-async def test_backfill_shrinks_the_column(_storage) -> None:
+async def test_backfill_shrinks_the_column(_storage, storage_logs) -> None:
     """The acceptance factor measured locally: the column is a fraction of itself."""
     for index in range(20):
         await _insert_legacy(f"job-compress-{index}", _payload(failure_count=40))
@@ -537,12 +538,15 @@ async def test_backfill_shrinks_the_column(_storage) -> None:
         )[0]
     assert after == stats["bytes_after"] < stats["bytes_before"] == before
     assert after <= before / 5  # measured ~9x on the dev DB
+    assert "is no longer the database it started on" not in storage_logs.text
 
     # Idempotent and resumable by construction: a second pass has nothing to do.
     assert (await storage.backfill_result_json_compression())["rows"] == 0
 
 
-async def test_compression_does_not_overwrite_a_concurrent_patch(_storage) -> None:
+async def test_compression_does_not_overwrite_a_concurrent_patch(
+    _storage, storage_logs
+) -> None:
     """The UPDATE is a compare-and-swap on the text it read, not just its type."""
     await _insert_legacy("job-race", _payload(failure_count=40))
     await storage.backfill_results_denorm()
@@ -562,12 +566,13 @@ async def test_compression_does_not_overwrite_a_concurrent_patch(_storage) -> No
         stats = await storage.backfill_result_json_compression()
 
     assert stats["rows"] == 0
+    assert "is no longer the database it started on" not in storage_logs.text
     row = await _stored(_storage, "job-race")
     assert row["kind"] == "text"
     assert json.loads(row["result_json"]) == newer
 
 
-async def test_backfill_does_not_block_the_event_loop(_storage) -> None:
+async def test_backfill_does_not_block_the_event_loop(_storage, storage_logs) -> None:
     """Encode runs in a thread, so a ticker keeps firing between batches (#402)."""
     for index in range(120):
         await _insert_legacy(f"job-loop-{index}", _payload(failure_count=60))
@@ -591,15 +596,139 @@ async def test_backfill_does_not_block_the_event_loop(_storage) -> None:
     await task
 
     assert stats["rows"] == 120
+    assert "is no longer the database it started on" not in storage_logs.text
     assert elapsed > 0.01, "the run must be long enough for the ticker to matter"
     # One tick per batch at minimum; a blocking encode would allow at most one.
     assert ticks > stats["rows"] // 10
 
 
+# --- a database that stops being ours mid-sweep (#435) ---------------------
+
+_STOPPED = "is no longer the database it started on"
+_EMPTY_STATS = {"rows": 0, "bytes_before": 0, "bytes_after": 0}
+
+
+def _foreign_database(path: Path) -> bytes:
+    """Bytes of a valid SQLite database that has no ``results`` table."""
+    conn = sqlite3.connect(path)
+    try:
+        conn.execute("CREATE TABLE other (id INTEGER)")
+        conn.commit()
+    finally:
+        conn.close()  # a clean close: no -journal/-wal sibling left behind
+    return path.read_bytes()
+
+
+@pytest.mark.parametrize("damage", ["unlink", "replace"])
+async def test_a_sweep_stops_when_its_database_is_damaged_between_batches(
+    _storage, storage_logs, tmp_path: Path, damage: str
+) -> None:
+    """The reported frame: a database that goes away mid-pass stops the pass.
+
+    ``no such table: results`` came from a batch connection that re-created the
+    file a teardown had just unlinked. Damaged between the read of batch two and
+    its write, the pass must stop, keep the batch it already committed, and say so
+    once -- and it must not write into a file that is not ours.
+    """
+    db_path = _storage
+    await _insert_legacy("job-stop-1", _payload(failure_count=20))
+    await _insert_legacy("job-stop-2", _payload(failure_count=20))
+    await storage.backfill_results_denorm()
+    foreign_bytes = _foreign_database(tmp_path / "foreign.db")
+
+    compress = storage._compress_result_rows
+    calls = 0
+
+    def damage_on_the_second_batch(rows: list, **kwargs: Any) -> list:
+        # Page one is already committed, page two already read: the slot a teardown
+        # lands in.
+        nonlocal calls
+        calls += 1
+        if calls == 2:
+            if damage == "unlink":
+                db_path.unlink()
+            else:
+                db_path.write_bytes(foreign_bytes)
+        return compress(rows, **kwargs)
+
+    with patch.object(storage, "_compress_result_rows", damage_on_the_second_batch):
+        stats = await storage.backfill_result_json_compression(batch_size=1)
+
+    assert calls == 2, "the pass must have reached the second batch"
+    assert stats["rows"] == 1, "the committed batch must be kept"
+    stopped = [r for r in storage_logs.records if _STOPPED in r.getMessage()]
+    assert len(stopped) == 1, [r.getMessage() for r in storage_logs.records]
+    assert str(db_path) in stopped[0].getMessage()
+    if damage == "unlink":
+        assert not db_path.exists(), "the sweep re-created the database that was gone"
+    else:
+        assert db_path.read_bytes() == foreign_bytes, (
+            "the sweep wrote to a foreign file"
+        )
+    # The done line is the INFO form: no file to report on, nothing raised out.
+    assert "no file report" in storage_logs.text
+    assert [r.getMessage() for r in storage_logs.records if r.exc_info] == []
+    assert [
+        r.getMessage() for r in storage_logs.records if r.levelno >= logging.ERROR
+    ] == []
+
+
+async def test_a_sweep_never_creates_a_database_that_is_gone(tmp_path: Path) -> None:
+    """Neither pass may manufacture the database it was told to sweep."""
+    gone = tmp_path / "gone.db"
+    corrupt = tmp_path / "corrupt.db"
+    garbage = b"this is not a sqlite database" * 8
+    corrupt.write_bytes(garbage)
+
+    for path in (gone, corrupt):
+        with patch.object(storage, "DB_PATH", path):
+            assert await storage.backfill_results_denorm() == 0
+            assert await storage.backfill_result_json_compression() == _EMPTY_STATS
+
+    assert not gone.exists(), "a sweep created the database it was missing"
+    assert corrupt.read_bytes() == garbage, "a sweep wrote into a corrupt file"
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["corrupt.db"], (
+        "a sweep left -wal/-shm siblings of a file it does not own"
+    )
+
+
+async def test_a_sweep_leaves_a_file_that_is_not_a_rootcoz_database_alone(
+    tmp_path: Path,
+) -> None:
+    """A database-shaped file without ``results`` is neither configured nor written."""
+    empty = tmp_path / "empty.db"
+    empty.write_bytes(b"")
+    rollback = tmp_path / "rollback.db"
+    conn = sqlite3.connect(rollback)
+    conn.execute("CREATE TABLE other (id INTEGER)")
+    conn.execute("INSERT INTO other VALUES (1)")
+    conn.commit()
+    conn.close()
+    wal = tmp_path / "wal.db"
+    conn = sqlite3.connect(wal)
+    conn.execute("PRAGMA journal_mode=WAL")
+    conn.execute("CREATE TABLE other (id INTEGER)")
+    conn.execute("INSERT INTO other VALUES (1)")
+    conn.commit()
+    conn.close()
+    # Bytes *and* sidecar set: the WAL pragma used to turn an empty file into 4096
+    # bytes, and the migration table appeared in the foreign ones.
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
+
+    for path in (empty, rollback, wal):
+        with patch.object(storage, "DB_PATH", path):
+            assert await storage.backfill_results_denorm() == 0
+            assert await storage.backfill_result_json_compression() == _EMPTY_STATS
+
+    assert {p.name: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+
 # --- the denormalized columns ----------------------------------------------
 
 
-async def test_denorm_backfill_repairs_a_late_old_build_row(_storage) -> None:
+async def test_denorm_backfill_repairs_a_late_old_build_row(
+    _storage, storage_logs
+) -> None:
     """A row an old build writes after the sweep is repaired, then compressed.
 
     The sweep is per-row version gated, not claimed once: otherwise every row a
@@ -631,6 +760,7 @@ async def test_denorm_backfill_repairs_a_late_old_build_row(_storage) -> None:
     row = await _stored(_storage, "job-late")
     assert row["kind"] == "blob"
     assert storage.parse_result_json(row["result_json"]) == payload
+    assert "is no longer the database it started on" not in storage_logs.text
 
 
 async def test_denorm_sweep_does_not_overwrite_a_concurrent_patch(_storage) -> None:

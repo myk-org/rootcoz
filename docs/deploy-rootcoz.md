@@ -383,7 +383,11 @@ migration step, no setting to turn it on.
   after the next start, so startup and `/health` are never delayed by them. The
   sweep commits one batch at a time, is safe to interrupt, and resumes where it
   stopped on the following boot; the log reports the column bytes and the
-  database file size before and after.
+  database file size before and after. A sweep whose database file has gone
+  away, or no longer has a `results` table, stops after the batches it already
+  committed and logs that once — the log still reports the column bytes it
+  compressed, but not the database file size after, because the file it started
+  on is no longer there.
 - The database **file** only shrinks after a rewrite plus `VACUUM`, which takes
   the write lock and needs free space roughly equal to the file size. That is an
   operator step, deliberately not automated on a live single-replica deployment.

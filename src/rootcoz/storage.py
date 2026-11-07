@@ -15,12 +15,13 @@ import uuid
 import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Sequence
 from compression import zstd
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Literal, NoReturn, get_args
+from urllib.parse import quote
 
 import aiosqlite
 
@@ -177,6 +178,18 @@ def signature_match(hashes: Any, alias: str = "") -> tuple[str, list[str]]:
     return fragment, values + values
 
 
+async def _configure_connection(db: aiosqlite.Connection) -> None:
+    """Set the busy_timeout, WAL mode and row factory a rootcoz connection needs."""
+    # busy_timeout first: the WAL switch needs exclusive access, and without
+    # it set the switch uses sqlite's default timeout and fails on a lock.
+    await db.execute("PRAGMA busy_timeout=5000")
+    # Fetch the row: an unread journal_mode cursor keeps a schema read lock,
+    # so DDL on this connection then fails with "database table is locked".
+    cursor = await db.execute("PRAGMA journal_mode=WAL")
+    await cursor.fetchone()
+    db.row_factory = aiosqlite.Row
+
+
 @asynccontextmanager
 async def _connect_db(
     db_path: Path | None = None,
@@ -191,15 +204,94 @@ async def _connect_db(
     """
     path = Path(db_path) if db_path is not None else current_db_path()
     async with aiosqlite.connect(path) as db:
-        # busy_timeout first: the WAL switch needs exclusive access, and without
-        # it set the switch uses sqlite's default timeout and fails on a lock.
-        await db.execute("PRAGMA busy_timeout=5000")
-        # Fetch the row: an unread journal_mode cursor keeps a schema read lock,
-        # so DDL on this connection then fails with "database table is locked".
-        cursor = await db.execute("PRAGMA journal_mode=WAL")
-        await cursor.fetchone()
-        db.row_factory = aiosqlite.Row
+        await _configure_connection(db)
         yield db
+
+
+def _db_uri(path: Path) -> str:
+    """A ``file:`` URI that fails instead of creating *path*.
+
+    ``mode=rw`` is the only mode this codebase opens a sweep database with, and
+    the reason the helper exists: ``aiosqlite.connect`` creates a missing file, so
+    a sweep that opened its database by path would mine -- and thereby re-create --
+    a database that was deleted under it. ``mode=ro`` was measured to buy nothing
+    here and cannot create a file either, so it is not carried as a parameter with
+    one possible value.
+    """
+    return f"file:{quote(path.as_posix())}?mode=rw"
+
+
+async def _table_exists(db: aiosqlite.Connection, name: str) -> bool:
+    """Whether this connection carries a table called *name*."""
+    cursor = await db.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?", (name,)
+    )
+    return await cursor.fetchone() is not None
+
+
+@dataclass
+class _SweepDb:
+    """The database one sweep pass resumes, re-verified before every connection.
+
+    A pass that reconnects per batch would otherwise mine a database that was
+    deleted (or replaced) under it and raise ``no such table: results``. One
+    connection answers both questions -- "is this file still our database?" and
+    "read/write it" -- so a file swapped between two operations cannot slip
+    between them. A sweep never resurrects a database it was not given, and
+    never configures one that is not a rootcoz database.
+    """
+
+    path: Path
+    name: str
+    gone: bool = False
+
+    @asynccontextmanager
+    async def open(self) -> AsyncIterator[aiosqlite.Connection | None]:
+        """This connection, or ``None`` once the pinned file is not our database."""
+        db = await self._connect()
+        if db is None:
+            self._stop()
+            yield None
+            return
+        try:
+            yield db
+        finally:
+            await db.close()
+
+    async def _connect(self) -> aiosqlite.Connection | None:
+        """A configured connection to our database, or ``None`` when it is not there."""
+        try:
+            db = await aiosqlite.connect(_db_uri(self.path), uri=True)
+        except sqlite3.OperationalError:  # gone: rw refuses to create the file again
+            return None
+        try:
+            has_results = await _table_exists(db, "results")
+        except (
+            sqlite3.OperationalError
+        ):  # corrupt: the connect is lazy, this read raises
+            await db.close()
+            return None
+        if not has_results:  # a foreign sqlite database: leave it as it is
+            await db.close()
+            return None
+        try:
+            await _configure_connection(db)
+        except BaseException:
+            # Loud: past this point the file is ours, so a failure is a real fault
+            # (a lock, a broken volume), not "the database went away".
+            await db.close()
+            raise
+        return db
+
+    def _stop(self) -> None:
+        """Announce the stop once; every later connection returns ``None`` too."""
+        if not self.gone:
+            self.gone = True
+            logger.info(
+                "%s stopped: %s is no longer the database it started on",
+                self.name,
+                self.path,
+            )
 
 
 # Primary (override) classifications — derived from the OverrideClassificationLiteral
@@ -911,7 +1003,7 @@ def _denorm_row_params(
 
 
 async def _derive_denorm_pages(
-    where: str, where_params: Sequence[Any], batch_size: int, db_path: Path
+    where: str, where_params: Sequence[Any], batch_size: int, sweep_db: _SweepDb
 ) -> int:
     """Derive one pending set, keyset-paged, one transaction per page.
 
@@ -921,7 +1013,9 @@ async def _derive_denorm_pages(
     rowid = 0
     done = 0
     while True:
-        async with _connect_db(db_path) as db:
+        async with sweep_db.open() as db:
+            if db is None:
+                return done
             cursor = await db.execute(
                 "SELECT rowid AS rid, job_id, result_json FROM results"
                 f" WHERE rowid > ? AND {where} ORDER BY rowid LIMIT ?",
@@ -972,7 +1066,10 @@ async def backfill_results_denorm(batch_size: int = 200) -> int:
     # One path for the whole pass: a DB_PATH rebind mid-sweep must not send the
     # next page to another database.
     db_path = current_db_path()
-    async with _connect_db(db_path) as db:
+    sweep_db = _SweepDb(db_path, "denorm backfill")
+    async with sweep_db.open() as db:
+        if db is None:
+            return 0
         cursor = await db.execute(
             "SELECT COUNT(*) FROM results WHERE"
             f" ({_DENORM_PENDING_BELOW}) OR ({_DENORM_PENDING_UNPROVEN})",
@@ -985,11 +1082,11 @@ async def backfill_results_denorm(batch_size: int = 200) -> int:
         "Migration: deriving denormalized columns for %d results row(s)", pending
     )
     done = await _derive_denorm_pages(
-        _DENORM_PENDING_UNPROVEN, (_RESULTS_DENORM_VERSION,), batch_size, db_path
+        _DENORM_PENDING_UNPROVEN, (_RESULTS_DENORM_VERSION,), batch_size, sweep_db
     )
     # Second: rows an older build inserted and never derived at all.
     done += await _derive_denorm_pages(
-        _DENORM_PENDING_BELOW, (_RESULTS_DENORM_VERSION,), batch_size, db_path
+        _DENORM_PENDING_BELOW, (_RESULTS_DENORM_VERSION,), batch_size, sweep_db
     )
     logger.info("Migration: derived denormalized columns for %d results row(s)", done)
     return done
@@ -1068,14 +1165,19 @@ async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, i
     # outlives whatever changed DB_PATH, and it must keep writing -- and
     # reporting -- the file it started on.
     db_path = current_db_path()
-    async with _connect_db(db_path) as db:
+    sweep_db = _SweepDb(db_path, "result_json compression")
+    on_disk_before = "unknown"
+    async with sweep_db.open() as db:
+        if db is None:
+            return stats
         if not await _migration_applied(db, _RESULTS_DENORM_KEY):
             logger.warning(
                 "result_json compression skipped: denormalized columns not derived"
             )
             return stats
         stats["bytes_before"] = await _eligible_result_bytes(db)
-        on_disk_before = await _db_storage_report(db, db_path)
+        with suppress(FileNotFoundError):
+            on_disk_before = await _db_storage_report(db, db_path)
     stats["bytes_after"] = stats["bytes_before"]
     logger.info(
         "result_json compression: starting (%d bytes of legacy results, database %s)",
@@ -1084,7 +1186,9 @@ async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, i
     )
     rowid = 0
     while True:
-        async with _connect_db(db_path) as db:
+        async with sweep_db.open() as db:
+            if db is None:
+                break
             cursor = await db.execute(
                 _RESULT_JSON_COMPRESSION_SELECT,
                 (rowid, _RESULTS_DENORM_VERSION, _RESULT_ZSTD_MIN_BYTES, batch_size),
@@ -1098,7 +1202,9 @@ async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, i
         params_page = await asyncio.to_thread(_compress_result_rows, rows)
         if not params_page:
             continue
-        async with _connect_db(db_path) as db:
+        async with sweep_db.open() as db:
+            if db is None:
+                break
             await db.execute("BEGIN IMMEDIATE")
             for params in params_page:
                 # Compare-and-swap on the payload, not just on its type: a
@@ -1117,17 +1223,29 @@ async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, i
             stats["rows"],
             rowid,
         )
-    async with _connect_db(db_path) as db:
-        on_disk_after = await _db_storage_report(db, db_path)
-    logger.info(
-        "result_json compression: done, %d row(s) compressed, %d -> %d bytes,"
-        " database %s -> %s",
-        stats["rows"],
-        stats["bytes_before"],
-        stats["bytes_after"],
-        on_disk_before,
-        on_disk_after,
-    )
+    on_disk_after: str | None = None
+    async with sweep_db.open() as db:
+        if db is not None:
+            with suppress(FileNotFoundError):
+                on_disk_after = await _db_storage_report(db, db_path)
+    if on_disk_after is None:
+        logger.info(
+            "result_json compression: stopped after %d row(s) compressed,"
+            " %d -> %d bytes (no file report)",
+            stats["rows"],
+            stats["bytes_before"],
+            stats["bytes_after"],
+        )
+    else:
+        logger.info(
+            "result_json compression: done, %d row(s) compressed, %d -> %d bytes,"
+            " database %s -> %s",
+            stats["rows"],
+            stats["bytes_before"],
+            stats["bytes_after"],
+            on_disk_before,
+            on_disk_after,
+        )
     return stats
 
 
