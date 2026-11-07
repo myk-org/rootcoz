@@ -844,6 +844,34 @@ class TestAnalyzeEndpoint:
             assert data["base_url"] == ""
             assert data["result_url"].startswith("/results/")
 
+    def test_a_refused_initial_write_starts_no_analysis(self, test_client) -> None:
+        """#419: nothing is started for a job whose initial state was not written.
+
+        The initial write is refused when the row holds a payload this build
+        cannot decode, and the enqueue must not spawn the analysis then: no write
+        of this build could record the status it starts with.
+        """
+        with (
+            patch(
+                "rootcoz.main.save_result",
+                side_effect=storage.UnsupportedResultEncoding("newer build"),
+            ),
+            patch("rootcoz.main._process_ci_source_analysis") as process,
+            pytest.raises(storage.UnsupportedResultEncoding),
+        ):
+            test_client.post(
+                "/analyze",
+                json={
+                    "type": "jenkins",
+                    "job_name": "test",
+                    "build_number": 123,
+                    "tests_repo_url": "https://github.com/example/repo",
+                    "ai_provider": "claude",
+                    "ai_model": "test-model",
+                },
+            )
+        process.assert_not_called()
+
     def test_analyze_invalid_build_number(self, test_client) -> None:
         """Test that invalid build number returns 422."""
         response = test_client.post(
@@ -1843,6 +1871,54 @@ class TestAbortEndpoint:
             assert stored["status"] == "aborted"
 
     @pytest.mark.asyncio
+    async def test_abort_lands_when_the_job_started_meanwhile(
+        self, test_client, temp_db_path
+    ):
+        """A waiting->running transition is still a legitimate abort.
+
+        The status the abort was decided from is no longer the row's, but the job
+        is still active, so refusing the abort and answering "Job finished as
+        running" would report a status the abort never wrote.
+        """
+        from rootcoz import main
+
+        original = main.update_status
+
+        async def _start_the_job_first(*args, **kwargs):
+            # The race the abort has to survive: the job starts after the abort
+            # read the status it decides from, before its write lands.
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "UPDATE results SET status = 'running' WHERE job_id = ?",
+                    ("job-started",),
+                )
+                await db.commit()
+            return await original(*args, **kwargs)
+
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            await storage.save_result(
+                job_id="job-started",
+                jenkins_url="http://jenkins",
+                status="waiting",
+                result={
+                    "job_name": "test",
+                    "build_number": 1,
+                    "request_params": {"submitted_by": "testuser"},
+                },
+            )
+            with patch.object(main, "update_status", _start_the_job_first):
+                resp = test_client.post(
+                    "/results/job-started/abort",
+                    cookies={"rootcoz_username": "testuser"},
+                )
+
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "aborted"
+            stored = await storage.get_result("job-started")
+            assert stored["status"] == "aborted"
+
+    @pytest.mark.asyncio
     async def test_abort_completed_job_is_noop(self, test_client, temp_db_path):
         """Aborting a completed job returns its current status."""
         with patch.object(storage, "DB_PATH", temp_db_path):
@@ -1901,6 +1977,146 @@ class TestAbortEndpoint:
             )
             assert resp.status_code == 403
 
+    @pytest.mark.asyncio
+    async def test_abort_with_undecodable_payload_still_aborts(
+        self, test_client, temp_db_path: Path, caplog
+    ) -> None:
+        """An abort whose payload this build cannot decode still ends the job.
+
+        The task is already cancelled, so a refused payload write must not leave
+        an 'active' row with nothing left to finish it: the status transition is
+        the abort, the payload rewrite is not. The newer build's bytes stay
+        untouched and the refused write logs once, at WARNING -- the abort
+        succeeded, so nothing about it is an error.
+        """
+        from rootcoz import main
+
+        class _FakeTask:
+            """A tracked background task: records the cancel, then ends."""
+
+            cancelled = False
+
+            def done(self) -> bool:
+                return self.cancelled
+
+            def cancel(self) -> None:
+                self.cancelled = True
+
+            def __await__(self):
+                async def _end() -> None:
+                    return None
+
+                return _end().__await__()
+
+        blob = b"\xff\xfe\x00a payload from a newer build"
+        task = _FakeTask()
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "INSERT INTO results (job_id, status, result_json)"
+                    " VALUES (?, 'running', ?)",
+                    ("job-newer-payload", blob),
+                )
+                await db.commit()
+            main._job_tasks["job-newer-payload"] = task
+            logging.getLogger("rootcoz.main").propagate = True
+            # simple_logger sets propagate=False on the storage logger too.
+            storage.logger.setLevel(logging.DEBUG)
+            storage.logger.addHandler(caplog.handler)
+            try:
+                with caplog.at_level(logging.WARNING, logger="rootcoz.main"):
+                    resp = test_client.post(
+                        "/results/job-newer-payload/abort",
+                        cookies={"rootcoz_username": "testuser"},
+                    )
+            finally:
+                storage.logger.removeHandler(caplog.handler)
+                logging.getLogger("rootcoz.main").propagate = False
+                main._job_tasks.pop("job-newer-payload", None)
+
+            # The caller gets the abort it asked for...
+            assert resp.status_code == 200
+            assert resp.json()["status"] == "aborted"
+            # ...no task is left to finish it...
+            assert task.cancelled
+            # ...and the row is terminal, not still active.
+            stored = await storage.get_result("job-newer-payload")
+            assert stored["status"] == "aborted"
+            async with storage._connect_db() as db:
+                row = await (
+                    await db.execute(
+                        "SELECT result_json FROM results WHERE job_id = ?",
+                        ("job-newer-payload",),
+                    )
+                ).fetchone()
+            assert row["result_json"] == blob, "the refused payload rewrite wrote"
+
+        # One message, once, and not at ERROR: the abort itself completed.
+        named = [
+            record
+            for record in caplog.records
+            if "job-newer-payload" in record.getMessage()
+        ]
+        assert not [r for r in named if r.levelno >= logging.ERROR], [
+            r.getMessage() for r in named if r.levelno >= logging.ERROR
+        ]
+        warnings = [r.getMessage() for r in named if r.levelname == "WARNING"]
+        assert len(warnings) == 1, warnings
+        assert "cannot decode" in warnings[0]
+        assert "nothing was written over it" in warnings[0]
+
+    @pytest.mark.asyncio
+    async def test_abort_cancels_the_job_task(self, test_client, temp_db_path: Path):
+        """A normal abort still cancels the tracked task and forgets it."""
+        from rootcoz import main
+
+        cancelled: list[bool] = []
+
+        class _FakeTask:
+            cancelled = False
+
+            def done(self) -> bool:
+                return self.cancelled
+
+            def cancel(self) -> None:
+                self.cancelled = True
+                cancelled.append(True)
+
+            def __await__(self):
+                async def _end() -> None:
+                    return None
+
+                return _end().__await__()
+
+        task = _FakeTask()
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            await storage.save_result(
+                job_id="job-abort-task",
+                jenkins_url="http://jenkins",
+                status="running",
+                result={
+                    "job_name": "test",
+                    "build_number": 1,
+                    "request_params": {"submitted_by": "testuser"},
+                },
+            )
+            main._job_tasks["job-abort-task"] = task
+            try:
+                resp = test_client.post(
+                    "/results/job-abort-task/abort",
+                    cookies={"rootcoz_username": "testuser"},
+                )
+                assert resp.status_code == 200
+                assert cancelled == [True], "the abort did not cancel the job's task"
+                assert "job-abort-task" not in main._job_tasks
+            finally:
+                main._job_tasks.pop("job-abort-task", None)
+
+            stored = await storage.get_result("job-abort-task")
+            assert stored["status"] == "aborted"
+
 
 class TestAppLifespan:
     """Tests for application lifespan events."""
@@ -1917,6 +2133,188 @@ class TestAppLifespan:
             with TestClient(app):
                 # After startup, DB should exist with results table
                 assert temp_db_path.exists()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_cancels_and_awaits_tracked_background_tasks(
+        self, mock_settings, temp_db_path: Path, monkeypatch
+    ) -> None:
+        """A tracked task still running at shutdown is cancelled, not leaked.
+
+        A task that outlives the app keeps reading the module-global DB_PATH and
+        races whatever the next app (or test) does with that file (#409). Driven
+        through the lifespan directly: TestClient ends its loop on exit, which
+        cancels everything anyway and would hide the leak.
+        """
+        from rootcoz import main
+
+        started = asyncio.Event()
+
+        async def _stuck() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        monkeypatch.setattr(main, "_compress_stored_results", _stuck)
+        tracked: list[asyncio.Task[Any]] = []
+        try:
+            with patch.object(storage, "DB_PATH", temp_db_path):
+                async with main.lifespan(main.app):
+                    await asyncio.wait_for(started.wait(), 5)
+                    tracked = [t for t in main._background_tasks if not t.done()]
+                    assert tracked
+                assert not main._background_tasks
+            assert all(t.cancelled() for t in tracked)
+        finally:
+            for task in list(main._background_tasks):
+                task.cancel()
+            await asyncio.gather(*main._background_tasks, return_exceptions=True)
+            main._background_tasks.clear()
+
+    @pytest.mark.asyncio
+    async def test_a_backfill_writes_the_database_it_started_on(
+        self, mock_settings, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A DB_PATH rebind mid-flight cannot redirect a running background task.
+
+        The shutdown drain only closes this window at shutdown: while the app is
+        up, a task that re-reads the module-global DB_PATH per connection follows
+        a rebind (a test's monkeypatch, a reload) into another file, and the drain
+        then awaits a write nobody asked about (#409). The sweep must finish the
+        database it started on and never touch the new one.
+        """
+        from rootcoz import main
+
+        started_on = tmp_path / "started-on.db"
+        moved_to = tmp_path / "moved-to.db"
+        for path in (started_on, moved_to):
+            with patch.object(storage, "DB_PATH", path):
+                await storage.init_db()
+        # A row the way a pre-compression build wrote it: inline TEXT, columns
+        # underived, so both passes of the sweep have work to do.
+        with patch.object(storage, "DB_PATH", started_on):
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "INSERT INTO results (job_id, status, result_json)"
+                    " VALUES ('job-legacy', 'completed', ?)",
+                    (json.dumps({"summary": "legacy", "details": "x" * 4000}),),
+                )
+                await db.commit()
+
+        real_sweep = main._compress_stored_results
+        started = asyncio.Event()
+        release = asyncio.Event()
+        finished = asyncio.Event()
+
+        async def _gated_sweep() -> None:
+            """Hold the sweep at its start so the global can move underneath it."""
+            started.set()
+            await release.wait()
+            try:
+                await real_sweep()
+            finally:
+                finished.set()
+
+        monkeypatch.setattr(main, "_compress_stored_results", _gated_sweep)
+        try:
+            with patch.object(storage, "DB_PATH", started_on):
+                async with main.lifespan(main.app):
+                    await asyncio.wait_for(started.wait(), 5)
+                    monkeypatch.setattr(storage, "DB_PATH", moved_to)
+                    release.set()
+                    await asyncio.wait_for(finished.wait(), 10)
+        finally:
+            release.set()
+            for task in list(main._background_tasks):
+                task.cancel()
+            await asyncio.gather(*main._background_tasks, return_exceptions=True)
+            main._background_tasks.clear()
+
+        with patch.object(storage, "DB_PATH", started_on):
+            async with storage._connect_db() as db:
+                row = await (
+                    await db.execute(
+                        "SELECT typeof(result_json) AS kind FROM results"
+                        " WHERE job_id = 'job-legacy'"
+                    )
+                ).fetchone()
+        assert row["kind"] == "blob", (
+            "the sweep followed DB_PATH away from the database it started on"
+        )
+        with patch.object(storage, "DB_PATH", moved_to):
+            async with storage._connect_db() as db:
+                written = (
+                    await (await db.execute("SELECT COUNT(*) FROM results")).fetchone()
+                )[0]
+        assert written == 0, "the sweep wrote into the database it was moved to"
+
+
+class TestBackgroundTaskDatabasePin:
+    """A background task writes the database it was spawned on (#409)."""
+
+    async def test_a_grandchild_keeps_the_pin_its_parent_was_spawned_with(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """A child spawned inside a pinned task stays on the parent's database.
+
+        ``_spawn_background`` pins the database into the context it spawns from. A
+        task that spawns its own child does that while already pinned, so the pin
+        must be kept rather than re-read from the module global: a ``DB_PATH``
+        rebind while the parent sleeps would otherwise move the grandchild into
+        another file (#409).
+        """
+        from rootcoz import main
+
+        started_on = tmp_path / "started-on.db"
+        moved_to = tmp_path / "moved-to.db"
+        for path in (started_on, moved_to):
+            with patch.object(storage, "DB_PATH", path):
+                await storage.init_db()
+
+        spawned = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _grandchild() -> None:
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "INSERT INTO results (job_id, status)"
+                    " VALUES ('grandchild', 'completed')"
+                )
+                await db.commit()
+
+        async def _parent() -> None:
+            """Pinned when spawned; spawns its own child after the rebind."""
+            spawned.set()
+            await release.wait()
+            await main._spawn_background(_grandchild())
+
+        try:
+            with patch.object(storage, "DB_PATH", started_on):
+                parent = main._spawn_background(_parent())
+                await asyncio.wait_for(spawned.wait(), 5)
+                monkeypatch.setattr(storage, "DB_PATH", moved_to)
+                release.set()
+                await asyncio.wait_for(parent, 10)
+        finally:
+            release.set()
+            for task in list(main._background_tasks):
+                task.cancel()
+            await asyncio.gather(*main._background_tasks, return_exceptions=True)
+            main._background_tasks.clear()
+
+        for path, expected in ((started_on, 1), (moved_to, 0)):
+            with patch.object(storage, "DB_PATH", path):
+                async with storage._connect_db() as db:
+                    found = (
+                        await (
+                            await db.execute(
+                                "SELECT COUNT(*) FROM results"
+                                " WHERE job_id = 'grandchild'"
+                            )
+                        ).fetchone()
+                    )[0]
+            assert found == expected, (
+                f"the grandchild wrote {path.name}, not the database its pinned "
+                "parent was spawned on"
+            )
 
 
 class TestOpenAPISchema:
@@ -8037,6 +8435,49 @@ class TestReAnalyzeFailure:
         )
         assert failure["duration"] == 12.5
         assert failure["status"] == "FAILED"
+
+    @pytest.mark.asyncio
+    async def test_re_analyze_of_a_failure_removed_before_the_patch_is_refused(
+        self, test_client
+    ) -> None:
+        """A failure the written payload no longer holds starts no re-analysis.
+
+        The failure is found in the stored result, then a concurrent rewrite takes
+        it out before this request's patch lands. The patch marks nothing, so the
+        endpoint must refuse instead of answering 202 for work it never recorded.
+        """
+        fa = FailureAnalysis(
+            test_name="tests.TestReAnalyze.test_removed",
+            error="ValueError",
+            analysis=AnalysisDetail(classification="CODE ISSUE"),
+        )
+        params = encrypt_sensitive_fields(
+            {"ai_provider": "claude", "ai_model": "opus", "submitted_by": "admin"}
+        )
+        params["submitted_by"] = "admin"
+        await storage.save_result(
+            "job-reanalyze-removed",
+            "",
+            "completed",
+            {
+                "summary": "1 failure",
+                "failures": [fa.model_dump(mode="json")],
+                "request_params": params,
+            },
+        )
+
+        with (
+            patch("rootcoz.main._find_failure_by_uuid_in_result", return_value=None),
+            patch(
+                "rootcoz.main._reanalyze_failure_background", new_callable=AsyncMock
+            ) as background,
+        ):
+            response = test_client.post(f"/api/failures/{fa.id}/re-analyze")
+
+        assert response.status_code == 404, response.text
+        background.assert_not_called()
+        stored = await storage.get_result("job-reanalyze-removed")
+        assert "reanalysis_status" not in stored["result"]["failures"][0]
 
     @pytest.mark.asyncio
     async def test_reanalyze_usage_isolated_by_attempt_and_child(
@@ -14267,6 +14708,118 @@ class TestGetJobResultFullEndpoint:
         assert data["summary"]["classifications"] == {}
 
     @pytest.mark.asyncio
+    async def test_compressed_row_serves_the_complete_payload(
+        self, test_client
+    ) -> None:
+        """A BLOB result_json reads exactly like an inline one over the API (#409)."""
+        analysis = {"classification": "CODE ISSUE", "pattern": "NEW", "analysis": "x"}
+        result_data = {
+            "status": "completed",
+            "summary": "2 failures",
+            "job_name": "zstd-job",
+            "build_number": 11,
+            "passed_count": 1,
+            "skipped_count": 0,
+            "failed_count": 2,
+            "request_params": {"submitted_by": "yuval", "build_id": "11"},
+            "token_usage": {"total": {"input": 3, "output": 4}},
+            "failures": [
+                {
+                    "id": f"zstd-failure-{index}",
+                    "test_name": f"test_zstd_{index}",
+                    "error": "boom " + "detail " * 200,
+                    "analysis": analysis,
+                }
+                for index in range(2)
+            ],
+            "child_job_analyses": [
+                {
+                    "job_name": "child-job",
+                    "build_number": 3,
+                    "failures": [
+                        {
+                            "id": "zstd-child-failure",
+                            "test_name": "test_child",
+                            "error": "child boom " + "detail " * 200,
+                            "analysis": analysis,
+                        }
+                    ],
+                    "failed_children": [],
+                }
+            ],
+        }
+        await storage.save_result(
+            "job-zstd-full", "http://jenkins", "completed", result_data
+        )
+        async with storage._connect_db() as db:
+            row = await (
+                await db.execute(
+                    "SELECT typeof(result_json) FROM results WHERE job_id = ?",
+                    ("job-zstd-full",),
+                )
+            ).fetchone()
+        assert row[0] == "blob", "the payload must be stored compressed for this test"
+
+        response = test_client.get("/api/results/job-zstd-full/full")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["job"]["job_name"] == "zstd-job"
+        assert data["job"]["build_number"] == 11
+        assert data["summary"]["total_failures"] == 3
+        assert [
+            (failure["test_name"], failure["classification"])
+            for failure in data["failures"]
+        ] == [
+            ("test_zstd_0", "CODE ISSUE"),
+            ("test_zstd_1", "CODE ISSUE"),
+            ("test_child", "CODE ISSUE"),
+        ]
+
+    @pytest.mark.asyncio
+    async def test_compressed_row_sparse_fields_projection_is_complete(
+        self, test_client
+    ) -> None:
+        """A ``fields=`` projection returns full-length values from a compressed row."""
+        long_analysis = "root cause: " + "detail " * 400
+        result_data = {
+            "status": "completed",
+            "summary": "one failure",
+            "job_name": "zstd-sparse",
+            "build_number": 5,
+            "failures": [
+                {
+                    "test_name": "test_sparse",
+                    "error": "boom",
+                    "analysis": {
+                        "classification": "PRODUCT BUG",
+                        "pattern": "NEW",
+                        "analysis": long_analysis,
+                    },
+                }
+            ],
+        }
+        await storage.save_result(
+            "job-zstd-sparse", "http://jenkins", "completed", result_data
+        )
+        async with storage._connect_db() as db:
+            row = await (
+                await db.execute(
+                    "SELECT typeof(result_json) FROM results WHERE job_id = ?",
+                    ("job-zstd-sparse",),
+                )
+            ).fetchone()
+        assert row[0] == "blob"
+
+        response = test_client.get(
+            "/results/job-zstd-sparse",
+            params={"fields": "result.failures.analysis,result.summary,status"},
+        )
+        assert response.status_code == 200
+        data = response.json()
+        assert data["result"]["summary"] == "one failure"
+        assert data["result"]["failures"][0]["analysis"]["analysis"] == long_analysis
+
+    @pytest.mark.asyncio
     async def test_cli_parity_with_endpoint_response(self, test_client) -> None:
         """Client and CLI JSON output preserve the exact endpoint payload.
 
@@ -14718,6 +15271,83 @@ class TestSubmitIntake:
             second = test_client.post(f"/results/{job_id}/analyze", json=analyze_body)
         assert first.status_code == 202, first.text
         assert second.status_code == 409
+
+    @pytest.mark.asyncio
+    async def test_re_analyze_verdicts_come_from_the_final_attempt(
+        self, test_client
+    ) -> None:
+        """Both flags are per attempt: ``patch_result_json`` re-runs the callback.
+
+        Attempt one finds the failure still running from an earlier run, attempt two
+        finds that run finished and records it running again. Answering 409 from the
+        first attempt's flag would leave the failure running with no worker behind
+        it.
+        """
+        from rootcoz import storage
+
+        fa = FailureAnalysis(
+            test_name="tests.TestRetry.test_one",
+            error="ValueError",
+            analysis=AnalysisDetail(classification="CODE ISSUE"),
+        )
+        await storage.save_result(
+            "job-reanalyze-retry",
+            "",
+            "completed",
+            {
+                "summary": "1 failure",
+                "failures": [fa.model_dump(mode="json")],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "ai_provider": "claude",
+                        "ai_model": "opus",
+                        "submitted_by": "admin",
+                    }
+                ),
+            },
+        )
+
+        real_patch = storage.patch_result_json
+        attempts: list[str] = []
+
+        async def retried(job_id: str, patch_fn: Any, **kwargs: Any) -> None:
+            if attempts:
+                # The background re-analysis that the 202 started patches on its own.
+                await real_patch(job_id, patch_fn, **kwargs)
+                return
+
+            def still_running(data: dict[str, Any]) -> None:
+                attempts.append("running")
+                data["failures"][0]["reanalysis_status"] = "running"
+                patch_fn(data)
+
+            await real_patch(job_id, still_running, **kwargs)
+
+            def finished(data: dict[str, Any]) -> None:
+                attempts.append("finished")
+                data["failures"][0].pop("reanalysis_status", None)
+                patch_fn(data)
+
+            await real_patch(job_id, finished, **kwargs)
+
+        with (
+            patch("rootcoz.main.patch_result_json", retried),
+            patch(
+                "rootcoz.main.analyze_failure_group",
+                new_callable=AsyncMock,
+                return_value=[fa],
+            ),
+            patch(
+                "rootcoz.main._create_ai_auth_header",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            patch("rootcoz.main.RepositoryManager"),
+        ):
+            response = test_client.post(f"/api/failures/{fa.id}/re-analyze")
+
+        assert attempts == ["running", "finished"]
+        assert response.status_code == 202, response.text
 
     @pytest.mark.parametrize("previous_status", ["completed", "failed"])
     def test_in_place_analyze_releases_claim_when_enqueue_fails(
