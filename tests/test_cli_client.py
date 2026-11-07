@@ -1277,14 +1277,16 @@ class TestRootCozClientReview:
         assert result["status"] == "ok"
 
     def test_enrich_comments(self):
+        payload = {"enrichments": {"comment-1": [{"kind": "pr", "state": "merged"}]}}
+
         def handler(request):
             assert request.method == "GET"
             assert "/results/job-1/enrich-comments" in str(request.url)
-            return httpx.Response(200, json={"enriched": 3})
+            return httpx.Response(200, json=payload)
 
         client = _make_client(handler)
         result = client.enrich_comments("job-1")
-        assert result["enriched"] == 3
+        assert result == payload
 
 
 class TestRootCozClientExcludeJobId:
