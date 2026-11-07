@@ -20,6 +20,7 @@ from reportportal_client import RPClient
 
 from rootcoz import get_child_logger
 from rootcoz.exporters.base import ExportContext, Exporter, ExporterResult
+from rootcoz.models import is_failed_analysis
 
 if TYPE_CHECKING:
     from rootcoz.models import FailureAnalysis
@@ -702,9 +703,10 @@ class ReportPortalClient(Exporter):
             ``launch_id``. ``defaulted`` lists items whose classification maps
             to no RP defect type; they are still pushed with the neutral
             ``TO_INVESTIGATE`` locator, and each entry names that
-            classification. ``unmatched`` is always empty: nothing is left out
-            for want of a classification, and an item that could not be pushed
-            at all is named in ``errors``.
+            classification. ``unmatched`` lists items carrying no analysis at
+            all (:func:`rootcoz.models.is_failed_analysis`): they are left out
+            untouched rather than reset to a defect type we did not pick, and
+            an item that could not be pushed at all is named in ``errors``.
         """
         if not matched_pairs:
             return {
@@ -744,8 +746,7 @@ class ReportPortalClient(Exporter):
             item_id = rp_item.get("id")
             item_name = rp_item.get("name", "")
             if item_id is None:
-                # No update target: the error names it. Nothing is ever left out
-                # for want of a classification, so `unmatched` stays empty.
+                # No update target: the error names it.
                 errors.append(f"RP item missing 'id' field ({item_name})")
                 continue
             if launch_id is None:
@@ -763,6 +764,13 @@ class ReportPortalClient(Exporter):
                 locators.get("TO_INVESTIGATE") or _DEFAULT_LOCATORS["TO_INVESTIGATE"]
             )
             if push_classifications and not locator:
+                if is_failed_analysis(failure):
+                    # No analysis at all — a provider-outage placeholder or a
+                    # narration-only answer. Pushing TO_INVESTIGATE here would
+                    # reset a defect type a human set on the RP item and comment
+                    # a link to an analysis that does not exist, so leave it be.
+                    unmatched.append(f"{item_name} (no analysis)")
+                    continue
                 defaulted.append(
                     f"{item_name} (classification: {ai_classification or 'none'})"
                 )

@@ -29,7 +29,6 @@ from rootcoz.engine.core import (
     build_other_groups_instruction,
     build_prompt_sections,
     build_signature_section,
-    log_scrubbed_answer,
     parse_json_response,
     run_single_ai_analysis,
     safe_update_progress,
@@ -549,13 +548,9 @@ async def analyze_failure_group_with_peers(
             "letting the peers analyze the failure",
             exc,
         )
-        # Swallowed here, so this DEBUG line is the only place the answer itself
-        # survives — scrubbed, because it is exactly the kind of text that
-        # quotes credentials.
-        log_scrubbed_answer(
-            exc.raw_text,
-            why="Peer analysis: main AI answer with no usable classification",
-        )
+        # The answer itself is not re-logged here: _call_ai_with_retry already
+        # wrote the whole scrubbed text before raising, and one record per answer
+        # is enough. Peer run continues without a primary analysis.
         incomplete_reason = str(exc)
         parsed_analysis = AnalysisDetail()
         error_signature = exc.error_signature

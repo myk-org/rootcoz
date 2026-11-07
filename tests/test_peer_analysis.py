@@ -3239,38 +3239,54 @@ class TestOrchestratorEmptyFallback:
             assert "FAILURE SUMMARY" in prompt
 
     @pytest.mark.asyncio
-    async def test_primary_narration_stays_inspectable_at_debug(
-        self, caplog: pytest.LogCaptureFixture
+    async def test_primary_narration_is_logged_once_during_a_peer_run(
+        self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        """The dropped narration is still reachable, scrubbed, at DEBUG.
+        """The raise path logs the answer; the peer catch must not log it again.
 
-        The peer path swallows the ``AnalysisIncompleteError`` to keep the debate
-        going, and the narration must not reach another provider — but "what did
-        the model actually say?" has to be answerable without raising the global
-        log level, so the whole scrubbed answer goes to DEBUG (#399).
+        ``_call_ai_with_retry`` already wrote the whole scrubbed answer before it
+        raised on an exhausted retry, so re-logging ``exc.raw_text`` in the peer
+        catch put the same narration in the log twice for every peer run (#399).
+        The answer stays inspectable at DEBUG — from the one place that logs it.
         """
         import logging
         from unittest.mock import AsyncMock
 
+        from rootcoz.engine import core as core_module
         from rootcoz.engine.core import AnalysisIncompleteError
         from rootcoz.engine.core import logger as core_logger
+        from rootcoz.feedback import scrub_sensitive_data
         from rootcoz.peer_analysis import analyze_failure_group_with_peers
 
         narration = "The deploy log said password=hunter2\nthen " + "z" * 3000
-        mock_orchestrator = AsyncMock(
-            side_effect=AnalysisIncompleteError(
+        # Every logged answer passes through this scrubber, whoever logs it, so a
+        # count here counts log lines — not logger names, which simple_logger
+        # makes order-dependent.
+        scrub_inputs: list[str] = []
+
+        def recording_scrub(text: str) -> str:
+            scrub_inputs.append(text)
+            return scrub_sensitive_data(text)
+
+        async def raise_after_the_retry_log(**_kwargs: object) -> None:
+            """Stand in for the retry loop's raise path: log the answer, then raise."""
+            core_module.log_scrubbed_answer(
+                narration, why="AI answer with no usable classification"
+            )
+            raise AnalysisIncompleteError(
                 "AI analysis incomplete: response has no usable classification",
                 error_signature="sig123",
                 raw_text=narration,
             )
-        )
+
+        mock_orchestrator = AsyncMock(side_effect=raise_after_the_retry_log)
         mock_peer_call = AsyncMock(
             return_value=AIResult(success=False, text="CLI error")
         )
 
+        monkeypatch.setattr(core_module, "scrub_sensitive_data", recording_scrub)
         original_level = core_logger.level
         core_logger.setLevel(logging.DEBUG)
-        core_logger.addHandler(caplog.handler)
         try:
             with (
                 patch(
@@ -3288,21 +3304,13 @@ class TestOrchestratorEmptyFallback:
                     max_rounds=1,
                 )
         finally:
-            core_logger.removeHandler(caplog.handler)
             core_logger.setLevel(original_level)
 
-        answers = [
-            r.getMessage()
-            for r in caplog.records
-            if r.levelno == logging.DEBUG
-            and "no usable classification (scrubbed)" in r.getMessage()
-        ]
-        assert answers, "the swallowed narration must still be inspectable at DEBUG"
-        for message in answers:
-            assert "hunter2" not in message
-            # Scrub before logging, and keep the whole answer, not a slice.
-            assert "[REDACTED]" in message
-            assert "z" * 3000 in message
+        logged = [text for text in scrub_inputs if "z" * 3000 in text]
+        assert logged == [narration], "one log line per answer, and the whole answer"
+        # Scrub before logging, always: the line the user reads carries no secret.
+        assert "hunter2" not in scrub_sensitive_data(logged[0])
+        assert "[REDACTED]" in scrub_sensitive_data(logged[0])
 
     @pytest.mark.asyncio
     async def test_unclassified_group_keeps_the_incomplete_reason(self) -> None:

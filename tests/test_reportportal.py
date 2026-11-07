@@ -469,6 +469,7 @@ class TestPushClassifications:
         failure.analysis.details = details
         failure.analysis.product_bug_report = None
         failure.analysis.code_fix = None
+        failure.analysis_error = ""
         failure.test_name = "test_example"
         return failure
 
@@ -636,6 +637,84 @@ class TestPushClassifications:
         assert result["unmatched"] == []
         payload = _extract_put_json(mock_session)
         assert payload["issue"]["issueType"] == "ti001"
+
+    def test_push_unanalysed_row_does_not_reset_a_defect_type(self):
+        """A row with no analysis at all must not overwrite what a human set.
+
+        ``TO INVESTIGATE`` is right for a classification nothing maps to, but a
+        provider-outage placeholder has no classification *at all*: pushing it
+        resets the RP item's defect type and adds a comment pointing at an AI
+        analysis that does not exist (#399).
+        """
+        client, mock_session = self._setup_push_client()
+
+        failure = self._make_failure(
+            "", "Analysis failed; check server logs for details"
+        )
+        failure.test_name = "test_placeholder"
+        matched = [
+            (
+                {
+                    "id": 401,
+                    "name": "test_placeholder",
+                    "launchId": 10,
+                    # The defect type a human already set on the RP item.
+                    "issue": {"issue_type": "pb001"},
+                },
+                failure,
+            )
+        ]
+
+        result = client.push_classifications(
+            matched, "http://rootcoz.example.com/results/abc-123"
+        )
+
+        assert result["pushed"] == 0
+        mock_session.put.assert_not_called()
+        assert result["defaulted"] == []
+        assert result["unmatched"] == ["test_placeholder (no analysis)"]
+
+    def test_unanalysed_rows_leave_the_batch_to_classified_ones(self):
+        """Only rows carrying *no* analysis are left out; the rest still go.
+
+        An empty classification nobody marked incomplete keeps today's neutral
+        fallback -- the fix is the distinction, not reverting the fallback.
+        """
+        client, mock_session = self._setup_push_client()
+
+        outage = self._make_failure(
+            "", "Analysis failed; check server logs for details"
+        )
+        outage.test_name = "test_outage"
+        narration = self._make_failure("", "Here is what I read in the log")
+        narration.analysis_error = (
+            "AI analysis incomplete: response has no usable classification"
+        )
+        narration.test_name = "test_narration"
+        mapped = self._make_failure("PRODUCT BUG", "A real bug")
+        mapped.test_name = "test_mapped"
+        unmarked = self._make_failure("")
+        unmarked.test_name = "test_unmarked"
+        matched = [
+            ({"id": 501, "name": "test_outage", "launchId": 10}, outage),
+            ({"id": 502, "name": "test_narration", "launchId": 10}, narration),
+            ({"id": 503, "name": "test_mapped", "launchId": 10}, mapped),
+            ({"id": 504, "name": "test_unmarked", "launchId": 10}, unmarked),
+        ]
+
+        result = client.push_classifications(
+            matched, "http://rootcoz.example.com/results/abc-123"
+        )
+
+        assert result["pushed"] == 2
+        assert result["unmatched"] == [
+            "test_outage (no analysis)",
+            "test_narration (no analysis)",
+        ]
+        assert result["defaulted"] == ["test_unmarked (classification: none)"]
+        issues = mock_session.put.call_args[1]["json"]["issues"]
+        assert [i["testItemId"] for i in issues] == [503, 504]
+        assert [i["issue"]["issueType"] for i in issues] == ["pb001", "ti001"]
 
     def test_push_unmapped_classification_keeps_whole_batch(self):
         """One unmapped classification does not shrink the batch sent to RP."""

@@ -9,9 +9,10 @@ function listDetail(entries: string[]): string {
 /**
  * User-facing copy for a push result that left tests out.
  *
- * An `unmatched` test was not pushed at all (no classification, or one the
- * backend has no defect type for). The entry carries the offending
- * classification, so it is listed apart from the headline instead of being
+ * An `unmatched` test was not pushed at all: it carries no analysis (a
+ * provider-outage placeholder or a narration-only answer), so pushing it would
+ * overwrite whatever defect type a human set on the Report Portal item. The
+ * entry names that, so it is listed apart from the headline instead of being
  * crammed into one sentence.
  */
 export function unmatchedFailure(
@@ -30,9 +31,11 @@ export function unmatchedFailure(
 /**
  * Copy for tests the backend pushed under the TO INVESTIGATE fallback because
  * their classification had no defect type to map to — either empty or one the
- * backend does not know. They were pushed, so this is information — never a
- * warning, and never counted as skipped. The detail line names the
- * classification (`none` when it is empty), so the sentence must hold for both.
+ * backend does not know. It never covers a test with no analysis at all: those
+ * are left untouched and surface as `unmatched` instead. They were pushed, so
+ * this is information — never a warning, and never counted as skipped. The
+ * detail line names the classification (`none` when it is empty), so the
+ * sentence must hold for both.
  */
 export function defaultedNotice(
   defaulted: string[],
