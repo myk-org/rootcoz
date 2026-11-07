@@ -233,11 +233,12 @@ async def _has_results_table(db: aiosqlite.Connection) -> bool:
     """Whether this connection carries our ``results`` table, not a namesake.
 
     A foreign database can define its own ``results``; the columns this sweep
-    queries are what make the file a rootcoz database. ``table_info`` on a
-    missing table returns no rows, so this also answers "is ``results`` there".
+    reads and writes are what make the file a rootcoz database. ``table_info``
+    on a missing table returns no rows, so this also answers "is ``results``".
     """
     cursor = await db.execute("PRAGMA table_info(results)")
-    return {"job_id", "result_json"} <= {row[1] for row in await cursor.fetchall()}
+    required = {"job_id", "result_json", "denorm_version", *_DENORM_COLUMNS}
+    return required <= {row[1] for row in await cursor.fetchall()}
 
 
 @dataclass
@@ -275,21 +276,25 @@ class _SweepDb:
         if self.gone:  # a stopped pass stays stopped; the second stage must not resume
             return None
         try:
-            stat = self.path.stat()
-        except FileNotFoundError:
-            return None
-        if self.identity is None:
-            self.identity = (stat.st_dev, stat.st_ino)
-        elif (stat.st_dev, stat.st_ino) != self.identity:
-            # Another database at our path: sweeping it would count its bytes as
-            # the ones this pass started with.
-            return None
-        try:
             db = await aiosqlite.connect(_db_uri(self.path), uri=True)
         except sqlite3.OperationalError:  # gone: rw refuses to create the file again
             return None
         try:
+            # Verified after the open, never before it: the connection holds the
+            # descriptor, so a path swapped during the await is the only way to be
+            # handed another file, and this stat still sees that swap.
+            stat = self.path.stat()
+            if self.identity is None:
+                self.identity = (stat.st_dev, stat.st_ino)
+            elif (stat.st_dev, stat.st_ino) != self.identity:
+                # Another database at our path: sweeping it would count its bytes
+                # as the ones this pass started with.
+                await db.close()
+                return None
             has_results = await _has_results_table(db)
+        except FileNotFoundError:  # deleted while it was being opened
+            await db.close()
+            return None
         except sqlite3.OperationalError:
             # A lock or an I/O fault, not a dead database: the caller logs it as
             # the failure it is instead of this pass calling itself stopped.

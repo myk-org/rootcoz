@@ -714,6 +714,46 @@ async def test_a_sweep_stops_when_its_path_becomes_another_rootcoz_database(
     )
 
 
+async def test_a_sweep_refuses_a_database_swapped_while_it_opens(
+    _storage, storage_logs, tmp_path: Path
+) -> None:
+    """The identity is read after the open, not before it.
+
+    A ``stat`` taken before the await cannot see a swap that lands during it, and
+    the pass would then read and commit to the replacement. What the connection
+    actually opened is the file that has to be verified.
+    """
+    db_path = _storage
+    await _insert_legacy("job-raced-1", _payload(failure_count=20))
+    await storage.backfill_results_denorm()
+    async with storage._connect_db() as db:  # a self-contained copy of a rootcoz db
+        await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    replacement = tmp_path / "replacement.db"
+    replacement_bytes = db_path.read_bytes()
+    replacement.write_bytes(replacement_bytes)
+
+    real_connect = storage.aiosqlite.connect
+    calls = 0
+
+    async def swap_before_the_write_open(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        if calls == 3:  # the batch's write open: lands inside the await
+            replacement.replace(db_path)
+        return await real_connect(*args, **kwargs)
+
+    with patch.object(storage.aiosqlite, "connect", new=swap_before_the_write_open):
+        stats = await storage.backfill_result_json_compression()
+
+    assert calls == 3, "the swap must have landed before the write open"
+    assert stats["rows"] == 0, "the pass committed a batch into the replacement"
+    stopped = [r for r in storage_logs.records if _STOPPED in r.getMessage()]
+    assert len(stopped) == 1, [r.getMessage() for r in storage_logs.records]
+    assert db_path.read_bytes() == replacement_bytes, (
+        "the sweep wrote into the database that replaced it"
+    )
+
+
 async def test_a_lock_error_on_the_check_is_not_a_vanished_database(_storage) -> None:
     """A transient lock or I/O fault fails the pass loudly, it does not stop it."""
     await _insert_legacy("job-locked", _payload(failure_count=20))
@@ -731,11 +771,15 @@ async def test_a_lock_error_on_the_check_is_not_a_vanished_database(_storage) ->
 
 
 async def test_a_foreign_results_table_is_not_our_database(tmp_path: Path) -> None:
-    """A foreign table named ``results`` lacks our columns: configure nothing."""
+    """Our column names are not our schema: a short ``results`` configures nothing.
+
+    The two columns the compression query names are not enough either -- the
+    denormalized ones are what makes this our table.
+    """
     foreign = tmp_path / "foreign-results.db"
     conn = sqlite3.connect(foreign)
-    conn.execute("CREATE TABLE results (id INTEGER)")
-    conn.execute("INSERT INTO results VALUES (1)")
+    conn.execute("CREATE TABLE results (job_id TEXT, result_json TEXT)")
+    conn.execute("INSERT INTO results VALUES ('job-foreign', '{}')")
     conn.commit()
     conn.close()
     before = {p.name: p.read_bytes() for p in tmp_path.iterdir()}
