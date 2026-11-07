@@ -128,6 +128,38 @@ class TestRootCozClientResults:
         result = client.list_result_fields()
         assert "status" in result["fields"]
 
+    def test_list_incomplete_analyses(self):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/results/incomplete"
+            assert request.url.params["limit"] == "25"
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "job_id": "job-1",
+                        "job_name": "example",
+                        "build_number": 7,
+                        "incomplete_count": 2,
+                        "test_names": ["t1", "t2"],
+                    }
+                ],
+            )
+
+        client = _make_client(handler)
+        result = client.list_incomplete_analyses(limit=25)
+        assert result[0]["job_id"] == "job-1"
+        assert result[0]["test_names"] == ["t1", "t2"]
+
+    def test_list_incomplete_analyses_default_limit_omits_param(self):
+        def handler(request):
+            assert request.url.path == "/api/results/incomplete"
+            assert "limit" not in request.url.params
+            return httpx.Response(200, json=[])
+
+        client = _make_client(handler)
+        assert client.list_incomplete_analyses() == []
+
     def test_get_result_not_found(self):
         client = _make_client(
             lambda request: httpx.Response(404, json={"detail": "Job not found"})

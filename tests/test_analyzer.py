@@ -1,6 +1,7 @@
 """Tests for analyzer module."""
 
 import asyncio
+import hashlib
 import inspect
 import json
 import logging
@@ -21,6 +22,7 @@ from rootcoz.config import (
 )
 from rootcoz.engine.core import (
     JSON_RESPONSE_SCHEMA,
+    AnalysisIncompleteError,
     _build_cross_failure_prompt,
     _parse_cross_failure_response,
     analyze_failure_group,
@@ -367,6 +369,297 @@ class TestRunSingleAiAnalysis:
         )
         mock_cli.assert_awaited_once()
         assert parsed.details == "first try"
+
+    @pytest.mark.asyncio
+    async def test_narration_only_answer_retries_then_raises_incomplete(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """An answer that is only narration is retried and then fails the group."""
+        narration = (
+            "Now let me read the test source code. Now let me examine the "
+            "must-gather artifacts. Let me examine the CDI controller logs."
+        )
+        mock_cli = AsyncMock(return_value=AIResult(success=True, text=narration))
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_cli)
+
+        failure = FailedTest(
+            test_name="test_foo", error_message="timeout", stack_trace="st"
+        )
+        with pytest.raises(AnalysisIncompleteError, match="no usable classification"):
+            await run_single_ai_analysis(
+                failures=[failure],
+                console_context="",
+                repo_path=tmp_path,
+                ai_provider="cursor",
+                ai_model="cursor:grok",
+                ai_call_timeout=None,
+                custom_prompt="",
+                artifacts_context="",
+                server_url="",
+                job_id="job-1",
+            )
+        assert mock_cli.await_count == 2
+
+    async def _narration_debug_excerpts(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        narration: str,
+        tmp_path: Path,
+    ) -> list[str]:
+        """Log a narration-only answer and return its DEBUG excerpt messages."""
+        from rootcoz.engine.core import logger as core_logger
+
+        mock_cli = AsyncMock(
+            side_effect=lambda *a, **kw: AIResult(success=True, text=narration)
+        )
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_cli)
+
+        original_level = core_logger.level
+        core_logger.setLevel(logging.DEBUG)
+        core_logger.addHandler(caplog.handler)
+        try:
+            with pytest.raises(AnalysisIncompleteError):
+                await run_single_ai_analysis(
+                    failures=[
+                        FailedTest(
+                            test_name="test_foo",
+                            error_message="timeout",
+                            stack_trace="st",
+                        )
+                    ],
+                    console_context="",
+                    repo_path=tmp_path,
+                    ai_provider="cursor",
+                    ai_model="cursor:grok",
+                    ai_call_timeout=None,
+                    custom_prompt="",
+                    artifacts_context="",
+                    server_url="",
+                    job_id="job-1",
+                )
+        finally:
+            core_logger.removeHandler(caplog.handler)
+            core_logger.setLevel(original_level)
+
+        return [
+            r.getMessage()
+            for r in caplog.records
+            if r.levelno == logging.DEBUG
+            and "no usable classification (scrubbed)" in r.getMessage()
+        ]
+
+    @pytest.mark.asyncio
+    async def test_narration_logged_as_fingerprint_not_raw_text(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        tmp_path: Path,
+    ) -> None:
+        """WARNING carries length + sha256 only; DEBUG keeps the WHOLE scrubbed answer.
+
+        Model narration can quote CI logs, artifacts or tokens, so it must never
+        land in a WARNING line — but the scrubbed answer at DEBUG is the only
+        record of what the model actually said, so it may not be cut either.
+        """
+        from rootcoz.engine.core import AI_LOG_DIGEST_CHARS
+
+        long_tail = 2500
+
+        narration = "QUOTED-CI-LOG " + "x" * long_tail
+        excerpts = await self._narration_debug_excerpts(
+            monkeypatch, caplog, narration, tmp_path
+        )
+
+        warnings = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING
+            and "no usable classification" in r.getMessage()
+        ]
+        assert warnings, "the narration-only answer must be reported"
+        digest = hashlib.sha256(narration.encode()).hexdigest()
+        for record in warnings:
+            message = record.getMessage()
+            assert "QUOTED-CI-LOG" not in message
+            # The fingerprint width is part of the log format, not a bare literal.
+            logged_digest = message.rsplit("text_sha256=", 1)[1]
+            assert logged_digest == digest[:AI_LOG_DIGEST_CHARS]
+            assert len(logged_digest) == AI_LOG_DIGEST_CHARS
+            assert str(len(narration)) in message
+
+        assert excerpts, "DEBUG keeps the answer for diagnosis"
+        for excerpt in excerpts:
+            # The whole answer, never a truncated slice of it.
+            assert excerpt.count("x") == long_tail
+            assert excerpt.endswith(narration)
+
+    @pytest.mark.parametrize(
+        ("narration", "secret"),
+        [
+            # A password assignment, which the assignment pattern covers.
+            ("Now let me read the deploy log: password=hunter2 it failed", "hunter2"),
+            # An env-style credential the assignment pattern misses.
+            (
+                (
+                    "Now let me read the deploy log: "
+                    "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMIunlikelyEXAMPLE it failed"
+                ),
+                "wJalrXUtnFEMI",
+            ),
+        ],
+    )
+    @pytest.mark.asyncio
+    async def test_narration_excerpt_is_scrubbed_before_logging(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        narration: str,
+        secret: str,
+        tmp_path: Path,
+    ) -> None:
+        """The DEBUG excerpt must not copy a credential the model quoted."""
+        excerpt_messages = await self._narration_debug_excerpts(
+            monkeypatch, caplog, narration, tmp_path
+        )
+        assert excerpt_messages, "the excerpt still reaches DEBUG"
+        for message in excerpt_messages:
+            assert secret[:5] not in message
+            assert "[REDACTED]" in message
+        # The rest of the excerpt stays readable for diagnosis.
+        assert "deploy log" in excerpt_messages[0]
+
+    @pytest.mark.asyncio
+    async def test_credential_deep_in_the_answer_is_still_scrubbed(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        tmp_path: Path,
+    ) -> None:
+        """A credential far down the answer must not survive the DEBUG line.
+
+        The whole answer is scrubbed before it is logged, so a secret late in a
+        long narration is redacted rather than shipped raw with the tail.
+        """
+        secret = (
+            "deadbeef" * 5
+        )  # 40 hex chars: the generic token pattern  # pragma: allowlist secret
+        narration = "y" * 5000 + " " + secret
+        excerpt_messages = await self._narration_debug_excerpts(
+            monkeypatch, caplog, narration, tmp_path
+        )
+        assert excerpt_messages, "the answer still reaches DEBUG"
+        for message in excerpt_messages:
+            assert secret[:5] not in message
+            assert "[REDACTED" in message
+            # The text before the credential is kept: scrubbing, not truncating.
+            assert "y" * 5000 in message
+
+    @pytest.mark.asyncio
+    async def test_excerpt_is_scrubbed_only_when_debug_is_enabled(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """Scrubbing the whole answer is DEBUG-only work, never paid at INFO.
+
+        The answer argument of the DEBUG line is evaluated eagerly, so an
+        unguarded call pushes the entire answer (78K tokens on the job that
+        opened this) through every redaction regex on the event loop for a line
+        nobody emits (#399).
+        """
+        from rootcoz.engine.core import logger as core_logger
+
+        narration = "Now let me read the log: " + "x" * 4000
+        scrubbed: list[str] = []
+
+        def counting_scrub(text: str) -> str:
+            scrubbed.append(text)
+            return text
+
+        monkeypatch.setattr("rootcoz.engine.core.scrub_sensitive_data", counting_scrub)
+        monkeypatch.setattr(
+            "rootcoz.engine.core.call_ai_once",
+            AsyncMock(
+                side_effect=lambda *a, **kw: AIResult(success=True, text=narration)
+            ),
+        )
+
+        async def drive() -> None:
+            with pytest.raises(AnalysisIncompleteError):
+                await run_single_ai_analysis(
+                    failures=[
+                        FailedTest(
+                            test_name="test_foo",
+                            error_message="timeout",
+                            stack_trace="st",
+                        )
+                    ],
+                    console_context="",
+                    repo_path=tmp_path,
+                    ai_provider="cursor",
+                    ai_model="cursor:grok",
+                    ai_call_timeout=None,
+                    custom_prompt="",
+                    artifacts_context="",
+                    server_url="",
+                    job_id="job-1",
+                )
+
+        original_level = core_logger.level
+        try:
+            core_logger.setLevel(logging.INFO)
+            await drive()
+            assert scrubbed == [], "the excerpt must not be scrubbed at INFO"
+
+            core_logger.setLevel(logging.DEBUG)
+            await drive()
+        finally:
+            core_logger.setLevel(original_level)
+
+        assert scrubbed, "DEBUG still scrubs the answer"
+        # The whole answer, not a truncated slice: scrub first, log after.
+        assert set(scrubbed) == {narration}
+
+    @pytest.mark.asyncio
+    async def test_narration_then_valid_answer_uses_second_response(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """A narration-only first answer is retried and the second one is used."""
+        good = json.dumps(
+            {
+                "classification": "INFRASTRUCTURE",
+                "affected_tests": ["test_foo"],
+                "details": "node went NotReady",
+            }
+        )
+        mock_cli = AsyncMock(
+            side_effect=[
+                AIResult(
+                    success=True,
+                    text="Now let me read the test source code.",
+                ),
+                AIResult(success=True, text=good),
+            ]
+        )
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_cli)
+
+        failure = FailedTest(
+            test_name="test_foo", error_message="timeout", stack_trace="st"
+        )
+        parsed, _sig = await run_single_ai_analysis(
+            failures=[failure],
+            console_context="",
+            repo_path=tmp_path,
+            ai_provider="cursor",
+            ai_model="cursor:grok",
+            ai_call_timeout=None,
+            custom_prompt="",
+            artifacts_context="",
+            server_url="",
+            job_id="job-1",
+        )
+        assert mock_cli.await_count == 2
+        assert parsed.classification == "INFRASTRUCTURE"
+        assert parsed.details == "node went NotReady"
 
     @pytest.mark.asyncio
     async def test_peer_analysis_uses_shared_helper(
@@ -2430,6 +2723,82 @@ class TestRecoverFromDetails:
         result = recover_from_details(AnalysisDetail(classification="", details=""))
         assert result.classification == ""
 
+    def test_warns_when_nothing_recoverable(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """A silent empty fallback is what hid #397; recovery must warn instead."""
+        from rootcoz.engine.core import logger as core_logger
+
+        # simple_logger sets propagate=False, so attach the handler directly.
+        original_level = core_logger.level
+        core_logger.setLevel(logging.WARNING)
+        core_logger.addHandler(caplog.handler)
+        try:
+            result = recover_from_details(
+                AnalysisDetail(
+                    classification="",
+                    details="Now let me read the test source code.",
+                )
+            )
+        finally:
+            core_logger.removeHandler(caplog.handler)
+            core_logger.setLevel(original_level)
+
+        assert result.classification == ""
+        assert any("classification" in record.message for record in caplog.records)
+
+
+class TestParseJsonResponseUsability:
+    """An answer without a taxonomy classification is not a stored analysis (#397)."""
+
+    NARRATION = (
+        "Now let me read the test source code. Now let me examine the must-gather "
+        "artifacts. Let me examine the CDI controller logs before concluding."
+    )
+
+    def test_narration_only_response_is_not_usable(self) -> None:
+        """Model narration with no final answer is rejected, not wrapped in details."""
+        assert parse_json_response(self.NARRATION) is None
+
+    def test_valid_json_answer_is_usable(self) -> None:
+        """A JSON answer with a taxonomy classification still parses."""
+        parsed = parse_json_response(
+            json.dumps({"classification": "PRODUCT BUG", "details": "real diagnosis"})
+        )
+        assert parsed is not None
+        assert parsed.classification == "PRODUCT BUG"
+        assert parsed.details == "real diagnosis"
+
+    def test_markdown_recovered_classification_is_usable(self) -> None:
+        """The ``**Classification: X**`` recovery path still yields an analysis."""
+        parsed = parse_json_response(
+            "**Classification: INFRASTRUCTURE**\n\nNode went NotReady mid-run."
+        )
+        assert parsed is not None
+        assert parsed.classification == "INFRASTRUCTURE"
+        assert "NotReady" in parsed.details
+        assert self.NARRATION not in parsed.details
+
+    def test_unknown_classification_is_not_usable(self) -> None:
+        """A classification outside the taxonomy is unusable, not stored as-is."""
+        assert (
+            parse_json_response(
+                json.dumps({"classification": "SOMETHING", "details": "x"})
+            )
+            is None
+        )
+
+    def test_quoted_classification_is_not_taken_as_the_answer(self) -> None:
+        """A structured answer that quotes one must not become the diagnosis.
+
+        Recovery is for prose that did not parse; a quoted log line is not the
+        model's answer, and storing it attributes a diagnosis it never gave.
+        """
+        quoted = json.dumps(
+            {"details": "The failing log line read **Classification: PRODUCT BUG**"}
+        )
+        assert parse_json_response(quoted) is None
+
 
 class TestRecoverFromDetailsCodeFields:
     """Tests that recover_from_details extracts original_code and suggested_code."""
@@ -2978,6 +3347,43 @@ async def test_orchestrated_mixed_groups_keep_success_and_mark_failure(
 
 
 @pytest.mark.asyncio
+async def test_orchestrated_narration_group_is_stored_as_incomplete(
+    tmp_path: Path,
+) -> None:
+    """A narration-only group becomes an explicit analysis-incomplete row (#397)."""
+    f1 = FailedTest(test_name="test_a", error_message="err_a")
+    groups = {"sig_1": [f1]}
+    narration = (
+        "Now let me read the test source code. Now let me examine the "
+        "must-gather artifacts. Let me examine the CDI controller logs."
+    )
+    mock_result = AIResult(success=True, text=narration)
+    mock_result.record_usage = AsyncMock()
+
+    with patch(
+        "rootcoz.engine.core.call_ai_once",
+        new_callable=AsyncMock,
+        return_value=mock_result,
+    ) as ai_call:
+        analyses, patterns = await run_orchestrated_analysis(
+            groups=groups,
+            console_context="console",
+            repo_path=tmp_path,
+            ai_provider="test",
+            ai_model="test-model",
+        )
+
+    assert ai_call.await_count == 2
+    assert len(analyses) == 1
+    analysis = analyses[0].analysis
+    assert analysis.classification == ""
+    assert narration not in analysis.details
+    assert analysis.details == "Analysis failed; check server logs for details"
+    assert analyses[0].analysis_error.startswith("AI analysis incomplete")
+    assert patterns == []
+
+
+@pytest.mark.asyncio
 async def test_run_orchestrated_analysis_copies_builtin_agents(tmp_path: Path) -> None:
     """run_orchestrated_analysis copies built-in agents to workspace."""
     f1 = FailedTest(test_name="test_a", error_message="err_a")
@@ -3061,6 +3467,54 @@ async def test_run_orchestrated_analysis_cross_failure_patterns(
     assert len(analyses) == 2
     assert len(patterns) == 1
     assert patterns[0].pattern == "Shared NFS outage"
+
+
+async def test_cross_failure_skips_unclassified_group(tmp_path: Path) -> None:
+    """A group with no classification has no diagnosis to correlate.
+
+    Only the peer path returns such a group (its primary answer and every peer
+    came back without a taxonomy), and sending it to cross-failure would feed
+    the AI an empty analysis and dilute the diagnosed groups (#399).
+    """
+    f1 = FailedTest(test_name="test_a", error_message="err_a")
+    f2 = FailedTest(test_name="test_b", error_message="err_b")
+    groups = {"sig_1": [f1], "sig_2": [f2]}
+
+    async def fake_analyze_group(failures: list[FailedTest], **_: object):
+        classified = failures[0].test_name == "test_a"
+        return [
+            FailureAnalysis(
+                test_name=f.test_name,
+                error=f.error_message,
+                error_signature="sig",
+                error_signature_v2="sig",
+                analysis=AnalysisDetail(
+                    classification="INFRASTRUCTURE" if classified else "",
+                    details="infra" if classified else "",
+                ),
+                analysis_error="" if classified else "no usable classification",
+            )
+            for f in failures
+        ]
+
+    with (
+        patch(
+            "rootcoz.engine.core.analyze_failure_group",
+            side_effect=fake_analyze_group,
+        ),
+        patch("rootcoz.engine.core.call_ai_once", new_callable=AsyncMock) as cross_ai,
+    ):
+        analyses, patterns = await run_orchestrated_analysis(
+            groups=groups,
+            console_context="console",
+            repo_path=tmp_path,
+            ai_provider="test",
+            ai_model="test-model",
+        )
+
+    assert len(analyses) == 2
+    assert patterns == []
+    cross_ai.assert_not_called()
 
 
 class TestRecoverableFailureRetry:

@@ -138,6 +138,7 @@ from rootcoz.engine.core import (
     copy_rootcoz_pi_resources,
     extract_json_dict,
     get_failure_signature,
+    incomplete_reason,
     resolve_additional_repos,
     run_orchestrated_analysis,
     safe_update_clone_progress,
@@ -237,6 +238,7 @@ from rootcoz.models import (
     UpdateFilterPresetRequest,
     _JenkinsParamsMixin,
     _validate_repo_slug,
+    is_failed_analysis,
 )
 from rootcoz.monitoring import (
     _get_app_version,
@@ -294,6 +296,7 @@ from rootcoz.storage import (
     ANALYSIS_STATE_SUBMITTED,
     DB_PATH,
     ENDED_STATUSES,
+    MAX_INCOMPLETE_LIST_LIMIT,
     UnsupportedResultEncoding,
     backfill_result_json_compression,
     backfill_results_denorm,
@@ -303,6 +306,7 @@ from rootcoz.storage import (
     get_effective_classification,
     get_history_classification,
     get_result,
+    incomplete_failures,
     init_db,
     list_distinct_job_names,
     list_results,
@@ -1351,11 +1355,29 @@ logger = get_logger(
 _job_id_filter = JobIdFilter()
 
 
+def _known_loggers() -> list[logging.Logger]:
+    """Every registered logger, plus the root — never a loggerDict PlaceHolder.
+
+    A bare ``logging.getLogger(placeholder_name)`` builds a real logger, and
+    simple_logger's logger class defaults to INFO. That newly built logger
+    then parents every child of that name (``rootcoz.engine`` capping
+    ``rootcoz.engine.core``), silently overriding the ``rootcoz`` parent
+    level that is the single level authority (#347).
+    """
+    return [
+        logging.root,
+        *(
+            obj
+            for obj in logging.Logger.manager.loggerDict.values()
+            if isinstance(obj, logging.Logger)
+        ),
+    ]
+
+
 def _install_job_id_filter() -> None:
     """Attach JobIdFilter to every handler on every known logger."""
-    for name in [None, *list(logging.Logger.manager.loggerDict)]:
-        _logger = logging.getLogger(name)
-        for handler in getattr(_logger, "handlers", []):
+    for _logger in _known_loggers():
+        for handler in _logger.handlers:
             if _job_id_filter not in handler.filters:
                 handler.addFilter(_job_id_filter)
 
@@ -5409,7 +5431,11 @@ async def _run_per_group_analysis(
                 type(result).__name__,
                 safe_exception_frames(result),
             )
-            all_analyses.extend(_failed_group_analyses(signature, failures))
+            all_analyses.extend(
+                _failed_group_analyses(
+                    signature, failures, analysis_error=incomplete_reason(result)
+                )
+            )
         elif result:
             all_analyses.extend(result)
         else:
@@ -5475,6 +5501,9 @@ async def _analyze_failures_or_exit(
                 summary=make_user_friendly_error(error_text),
                 ai_provider=ai_provider,
                 ai_model=ai_model,
+                # A narration-only answer still carries a placeholder row with
+                # its analysis_error, so the report says why it is unclassified.
+                failures=console_results,
             )
             fail_data = fail_result.model_dump(mode="json")
             fail_data["error"] = fail_result.summary
@@ -5604,7 +5633,11 @@ async def _analyze_failures_or_exit(
             all_analyses = [
                 analysis
                 for signature, failures in groups.items()
-                for analysis in _failed_group_analyses(signature, failures)
+                for analysis in _failed_group_analyses(
+                    signature,
+                    failures,
+                    analysis_error=incomplete_reason(fallback_exc),
+                )
             ]
 
     unique_errors = len(groups)
@@ -5612,7 +5645,7 @@ async def _analyze_failures_or_exit(
     # Placeholders keep failed tests visible but are not successful analyses.
     from rootcoz.sources.jenkins_source import child_has_successful_analysis
 
-    if not any(not _is_failed_analysis(a) for a in all_analyses) and not any(
+    if not any(not is_failed_analysis(a) for a in all_analyses) and not any(
         child_has_successful_analysis(c) for c in (child_job_analyses or [])
     ):
         error_msg = (
@@ -5656,14 +5689,6 @@ async def _analyze_failures_or_exit(
     return all_analyses, test_failures, unique_errors, cross_failure_patterns
 
 
-def _is_failed_analysis(failure: FailureAnalysis) -> bool:
-    """Identify the placeholder produced when a failure group cannot be analyzed."""
-    return (
-        failure.analysis.details == "Analysis failed; check server logs for details"
-        and not failure.analysis.classification
-    )
-
-
 def _count_failed_child_groups(children: list[ChildJobAnalysis]) -> int:
     """Count failed signatures within each child build, including nested builds."""
     total = 0
@@ -5671,7 +5696,7 @@ def _count_failed_child_groups(children: list[ChildJobAnalysis]) -> int:
         signatures = {
             storage.resolve_signature(failure)
             for failure in child.failures
-            if _is_failed_analysis(failure)
+            if is_failed_analysis(failure)
         }
         total += len(signatures)
         if child.all_groups_failed and not child.failures:
@@ -6193,7 +6218,7 @@ async def _process_ci_source_analysis(
             analysis_result_tuple
         )
 
-        failed_tests = [a for a in all_analyses if _is_failed_analysis(a)]
+        failed_tests = [a for a in all_analyses if is_failed_analysis(a)]
         failed_analyses = len({storage.resolve_signature(a) for a in failed_tests})
         analysis_status: Literal["completed", "failed"] = (
             "completed"
@@ -6214,7 +6239,10 @@ async def _process_ci_source_analysis(
             f"{len(all_analyses) - len(failed_tests)} analyzed successfully."
         )
         if failed_analyses:
-            summary += f" {failed_analyses} group(s) failed; check server logs."
+            summary += (
+                f" {failed_analyses} group(s) could not be analyzed: "
+                "re-analyze the job, or classify them manually."
+            )
         if child_job_analyses:
             summary = (
                 f"{summary} Additionally, {len(child_job_analyses)} failed child "
@@ -7022,11 +7050,20 @@ async def _apply_effective_classifications(
         if not test_name:
             return
         analysis = failure.get("analysis")
-        if not isinstance(analysis, dict):
-            return
-        key = (test_name, child_job_name, child_build_number)
-        effective = overrides.get(key)
+        effective = storage.effective_override(
+            overrides, str(test_name), child_job_name, child_build_number
+        )
         if not effective:
+            return
+        if not isinstance(analysis, dict):
+            # A legacy plain-text analysis carries no classification, so the
+            # override has nowhere to land. Materialise it here — otherwise the
+            # listing (which reads overrides directly) calls the failure
+            # complete while the report still shows it unclassified.
+            failure["analysis"] = {
+                "classification": effective,
+                "details": analysis if isinstance(analysis, str) else "",
+            }
             return
         current = analysis.get("classification", "")
         if effective == current:
@@ -7052,6 +7089,29 @@ async def _apply_effective_classifications(
 async def list_result_fields() -> dict[str, Any]:
     """Return the allowlist of field paths for sparse GET /results/{job_id}."""
     return {"fields": sorted(RESULT_FIELD_PATHS)}
+
+
+@app.get("/api/results/incomplete", operation_id="apiIncompleteAnalyses")
+async def api_incomplete_analyses(
+    limit: int = Query(
+        default=100,
+        ge=1,
+        description=(
+            "Max jobs to return; values above the cap are clamped to it, since "
+            "this listing reads result_json (see #392)."
+        ),
+    ),
+) -> dict[str, Any]:
+    """List jobs whose stored failures have no usable classification (viewer+).
+
+    Read-only: identifies analyses that were never classified (or whose AI
+    answer carried nothing classifiable) so they can be re-analyzed. The
+    response carries ``jobs`` plus ``truncated``/``scanned``, so a caller can
+    tell that the listing stopped before examining every row.
+    """
+    return await storage.list_incomplete_analyses(
+        limit=min(limit, MAX_INCOMPLETE_LIST_LIMIT)
+    )
 
 
 @app.get("/results/{job_id}", response_model=None, operation_id="getJobResult")
@@ -7104,6 +7164,12 @@ async def get_job_result(
             await _attach_token_usage(job_id, result["result"])
     _attach_result_links(result, _extract_base_url(), job_id)
     await _attach_origin_job_info(result)
+    # Count failures with no usable classification so the report can flag
+    # analyses that were never actually classified (computed after overrides).
+    if isinstance(result.get("result"), dict):
+        result["result"]["incomplete_count"] = len(
+            incomplete_failures(result["result"])
+        )
     # Attach tracked-in data per failure
     result["tracked_in"] = await storage.get_tracked_in_for_job(job_id)
     settings = get_settings()
@@ -7748,6 +7814,12 @@ async def _reanalyze_failure_background(
             # Remove running status and any previous error
             failure.pop("reanalysis_status", None)
             failure.pop("reanalysis_error", None)
+            # The reason tracks the new analysis: a pass that still has no
+            # classification carries its own explanation, a classified row none.
+            if new_data.get("analysis_error"):
+                failure["analysis_error"] = new_data["analysis_error"]
+            else:
+                failure.pop("analysis_error", None)
 
         await patch_result_json(job_id, _patch_success)
         logger.info(
@@ -7757,7 +7829,14 @@ async def _reanalyze_failure_background(
         )
 
     except Exception as exc:
-        error_msg = "Re-analysis failed unexpectedly. Check server logs for details."
+        # Only a narration-only answer (AnalysisIncompleteError) is our own
+        # diagnosis. Any other failure is a crash whose text may echo a
+        # credential, so it keeps the generic message.
+        model_reason = incomplete_reason(exc)
+        error_msg = (
+            model_reason
+            or "Re-analysis failed unexpectedly. Check server logs for details."
+        )
         logger.exception(
             "Failure %s re-analysis failed in job %s: %s",
             failure_uuid,
@@ -7771,6 +7850,16 @@ async def _reanalyze_failure_background(
             if failure:
                 failure["reanalysis_status"] = "failed"
                 failure["reanalysis_error"] = error_msg
+                # analysis_error explains a *missing* analysis, and only the
+                # error type may write it: the report reads its presence as "the
+                # model answered without a classification"
+                # (frontend countProviderFailures), so a crash must not land
+                # there. A classified row keeps the analysis it already had.
+                analysis = failure.get("analysis")
+                if model_reason and not (
+                    analysis.get("classification") if isinstance(analysis, dict) else ""
+                ):
+                    failure["analysis_error"] = model_reason
 
         try:
             await patch_result_json(job_id, _patch_error)
@@ -12279,7 +12368,10 @@ async def _execute_rp_push(
         pushed_by: Username of the user who triggered the push.
 
     Returns:
-        Dict with keys: ``pushed``, ``unmatched``, ``errors``, ``launch_id``.
+        Dict with keys: ``pushed``, ``unmatched``, ``defaulted``, ``errors``,
+        ``launch_id``. An unmappable classification -- including the empty one
+        of an item with no analysis at all -- is pushed as ``TO INVESTIGATE``
+        and named in ``defaulted``; ``unmatched`` is always empty since #397.
     """
     context = await _build_export_context(
         job_id=job_id,
@@ -16135,19 +16227,16 @@ def _install_sse_log_handler() -> None:
     handler = _SSELogHandler()
     handler.setLevel(logging.DEBUG)
     # Copy formatter from the first RotatingFileHandler we find
-    for name in [None, *list(logging.Logger.manager.loggerDict)]:
-        lg = logging.getLogger(name)
-        for h in getattr(lg, "handlers", []):
+    for lg in _known_loggers():
+        for h in lg.handlers:
             if isinstance(h, logging.handlers.RotatingFileHandler) and h.formatter:
                 handler.setFormatter(h.formatter)
                 break
         if handler.formatter:
             break
     # Attach to every logger
-    for name in [None, *list(logging.Logger.manager.loggerDict)]:
-        lg = logging.getLogger(name)
-        if hasattr(lg, "addHandler"):
-            lg.addHandler(handler)
+    for lg in _known_loggers():
+        lg.addHandler(handler)
     _sse_log_handler = handler
 
 

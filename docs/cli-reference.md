@@ -124,6 +124,7 @@ Related lifecycle commands:
 | `submitters` | `--json` | Submitter names shown on the dashboard, one per line (sorted, deduped case-insensitively). |
 | `show JOB_ID` | `--full`/`-f`, `--fields` | Summary by default, full JSON with `--full`, or a sparse projection with `--fields`. |
 | `fields` | — | Print the allowlist of field paths accepted by `--fields`. |
+| `incomplete` | `--limit` (100, min 1, server caps at 500) | Jobs with failures that have no usable classification: job, build, and the count. `--json` also carries `test_names`. |
 | `tests JOB_ID` | `--status`/`-s` (`passed`, `skipped`, `failed`, repeatable), `--child-job`, `--child-build`, `--offset` (0), `--limit` (50, max 200) | Paginated test entries with `total` and `has_more`. |
 | `full JOB_ID` | `--status`/`-s`, `--child-job`, `--child-build`, `--offset` (0), `--limit` (50, max 200) — all scope the `tests` section | Complete job data in one call: failures with review state and effective classifications, summary, tests page, comments, tracked-in links. |
 | `review-status JOB_ID` | — | Failure, reviewed, and comment counts. |
@@ -133,7 +134,7 @@ Related lifecycle commands:
 | `enrich-comments JOB_ID` | — | Refresh PR and ticket status on comments; a repeat read may be served from the server's per-job cache (see [API Reference](api-reference.html#comments-and-mentions)). Prints the comment and badge counts, then `Some lookups failed; these counts may be incomplete.` when the server reports a failed lookup, so an empty result is not read as nothing to enrich. Nothing extra is printed when no lookup failed, or against a server too old to send the flag. `--json` prints neither line: the payload's `failed` key is the signal there. |
 | `delete [JOB_ID ...]` | `--all`, `--confirm` | Delete jobs and related data. `--all` requires `--confirm`. |
 
-Sparse field paths include `result.summary`, `result.failed_count`, `result.failures.test_name`, `result.failures.classification`, and `result.failures.details`. Unknown paths are rejected with HTTP 400, so run `rootcoz results fields` first.
+Sparse field paths include `result.summary`, `result.failed_count`, `result.failures.test_name`, `result.failures.classification`, `result.failures.details`, and `result.incomplete_count`. Unknown paths are rejected with HTTP 400, so run `rootcoz results fields` first.
 
 > **Note:** Pass `--child-job` before `--child-build`. The CLI validates the pair and rejects a build number with no job name, because the client drops `child_build_number` when `--child-job` is absent — an unpaired `--child-build` would otherwise be applied unscoped and silently. `results set-tracked-in` is included in that validation.
 
@@ -311,8 +312,8 @@ See [Managing Users and Server Settings](manage-users-and-server-settings.html) 
   The path is not on the allowlist. Run `rootcoz results fields` and copy the path exactly.
 - `--child-build requires --child-job`.  
   Pass both flags together; there is no way to target a child build without naming its job.
-- A `push` reports every test as unmatched.  
-  The exporter could not match test names. Confirm the plugin is enabled with `rootcoz exporters`, and check the child scoping flags if the job is a pipeline parent.
+- A `push` reports every test under `defaulted`.  
+  None of the failures had a classification to map, so they were pushed as `TO INVESTIGATE`; an analysis with none at all is named as `none`. Re-analyze the jobs first. A test that never reached the launch is named under `errors` instead.
 
 ## Related Pages
 

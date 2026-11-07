@@ -22,6 +22,7 @@ from rootcoz.engine.chat import analysis_http_tools
 from rootcoz.engine.core import (
     JSON_RESPONSE_SCHEMA,
     TIMELINE_RULE,
+    AnalysisIncompleteError,
     _expand_group_to_analyses,
     build_failure_details_instruction,
     build_other_groups_instruction,
@@ -36,6 +37,7 @@ from rootcoz.engine.core import (
 )
 from rootcoz.models import (
     AiConfigEntry,
+    AnalysisDetail,
     FailedTest,
     FailureAnalysis,
     OverrideClassificationLiteral,
@@ -512,22 +514,44 @@ async def analyze_failure_group_with_peers(
         f"Peer analysis: calling main AI ({main_ai_provider}/{main_ai_model}) "
         f"for failure group ({len(failures)} tests)"
     )
-    parsed_analysis, error_signature = await run_single_ai_analysis(
-        failures=failures,
-        console_context=console_context,
-        repo_path=repo_path,
-        ai_provider=main_ai_provider,
-        ai_model=main_ai_model,
-        ai_call_timeout=ai_call_timeout,
-        custom_prompt=custom_prompt,
-        artifacts_context=artifacts_context,
-        server_url=server_url,
-        job_id=job_id,
-        additional_repos=additional_repos,
-        auth_header=auth_header,
-        all_groups=all_groups,
-        system_prompt=system_prompt,
-    )
+    # Why the primary answer carried no analysis, when it didn't. Kept off the
+    # analysis/details fields and onto the rows that end up unclassified.
+    incomplete_reason = ""
+    try:
+        parsed_analysis, error_signature = await run_single_ai_analysis(
+            failures=failures,
+            console_context=console_context,
+            repo_path=repo_path,
+            ai_provider=main_ai_provider,
+            ai_model=main_ai_model,
+            ai_call_timeout=ai_call_timeout,
+            custom_prompt=custom_prompt,
+            artifacts_context=artifacts_context,
+            server_url=server_url,
+            job_id=job_id,
+            additional_repos=additional_repos,
+            auth_header=auth_header,
+            all_groups=all_groups,
+            system_prompt=system_prompt,
+        )
+    except AnalysisIncompleteError as exc:
+        # The main model narrated instead of answering. That is not a reason to
+        # abort the debate: the peers can still classify the group, and
+        # _peer_consensus_fallback needs their votes. Run with no primary
+        # analysis. The narration itself is never forwarded: peers already get
+        # the console output, failure details and artifacts from files, and the
+        # narration can quote CI credentials that a peer provider must not see.
+        logger.warning(
+            "Peer analysis: main AI produced no usable analysis (%s); "
+            "letting the peers analyze the failure",
+            exc,
+        )
+        # The answer itself is not re-logged here: _call_ai_with_retry already
+        # wrote the whole scrubbed text before raising, and one record per answer
+        # is enough. Peer run continues without a primary analysis.
+        incomplete_reason = str(exc)
+        parsed_analysis = AnalysisDetail()
+        error_signature = exc.error_signature
 
     # Compute other_groups_file path for peer/revision prompts
     # (the file was already written by run_single_ai_analysis above)
@@ -977,6 +1001,13 @@ async def analyze_failure_group_with_peers(
 
                 if rev_result.success:
                     revised = parse_json_response(rev_result.text)
+                    if revised is None:
+                        logger.warning(
+                            f"Revision round {round_num} returned no usable "
+                            "classification; keeping prior analysis"
+                        )
+                        parsed_analysis = previous_analysis
+                        continue
                     normalized_revised = _coerce_supported_classification(
                         revised.classification
                     )
@@ -1096,6 +1127,12 @@ async def analyze_failure_group_with_peers(
     # Apply analysis to all failures in the group.
     # Shared with the non-peer path: all failures share the same v2 signature
     # (that's how they were grouped), and the anchor is per failure.
+    # A peer classification means the group has a diagnosis; without one the
+    # row keeps the reason it has none.
     return _expand_group_to_analyses(
-        error_signature, failures, parsed_analysis, peer_debate
+        error_signature,
+        failures,
+        parsed_analysis,
+        peer_debate,
+        analysis_error="" if parsed_analysis.classification else incomplete_reason,
     )

@@ -21,6 +21,7 @@ from pydantic import SecretStr
 from rootcoz import storage
 from rootcoz.config import Settings
 from rootcoz.encryption import encrypt_sensitive_fields
+from rootcoz.engine.core import AnalysisIncompleteError
 from rootcoz.models import (
     AiConfigEntry,
     AnalysisDetail,
@@ -10510,6 +10511,231 @@ class TestReAnalyzeFailure:
         )
         assert failure["duration"] == 12.5
         assert failure["status"] == "FAILED"
+
+    @pytest.mark.asyncio
+    async def test_successful_reanalysis_clears_stale_analysis_error(
+        self, test_client
+    ) -> None:
+        """A row that now has a classification must not keep its old reason."""
+        job_id = "job-reanalyze-clears-error"
+        stale = FailureAnalysis(
+            test_name="tests.TestReAnalyze.test_stale",
+            error="ValueError",
+            analysis=AnalysisDetail(),
+            analysis_error="AI analysis incomplete",
+        ).model_dump(mode="json")
+        await storage.save_result(
+            job_id,
+            "",
+            "completed",
+            {
+                "summary": "1 failure",
+                "failures": [stale],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "ai_provider": "claude",
+                        "ai_model": "opus",
+                        "submitted_by": "admin",
+                    }
+                ),
+            },
+        )
+
+        new_analysis = FailureAnalysis(
+            test_name=stale["test_name"],
+            error="ValueError",
+            analysis=AnalysisDetail(classification="CODE ISSUE"),
+        )
+        with (
+            patch(
+                "rootcoz.main.analyze_failure_group",
+                new_callable=AsyncMock,
+                return_value=[new_analysis],
+            ),
+            patch(
+                "rootcoz.main._create_ai_auth_header",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            patch("rootcoz.main.RepositoryManager"),
+        ):
+            response = test_client.post(f"/api/failures/{stale['id']}/re-analyze")
+            assert response.status_code == 202
+
+            import asyncio
+
+            for _ in range(50):
+                await asyncio.sleep(0.1)
+                stored = await storage.get_result(job_id)
+                failures = (stored or {}).get("result", {}).get("failures", [])
+                if (
+                    failures
+                    and failures[0].get("analysis", {}).get("classification")
+                    == "CODE ISSUE"
+                ):
+                    break
+
+        stored = await storage.get_result(job_id)
+        failure = stored["result"]["failures"][0]
+        assert failure["analysis"]["classification"] == "CODE ISSUE"
+        assert "analysis_error" not in failure
+
+    @pytest.mark.asyncio
+    async def test_reanalysis_that_stays_unclassified_keeps_its_new_reason(
+        self, test_client
+    ) -> None:
+        """A pass that still has no diagnosis must keep the reason it produced."""
+        job_id = "job-reanalyze-still-incomplete"
+        old = FailureAnalysis(
+            test_name="tests.TestReAnalyze.test_incomplete",
+            error="ValueError",
+            analysis=AnalysisDetail(),
+            analysis_error="old reason",
+        ).model_dump(mode="json")
+        await storage.save_result(
+            job_id,
+            "",
+            "completed",
+            {
+                "summary": "1 failure",
+                "failures": [old],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "ai_provider": "claude",
+                        "ai_model": "opus",
+                        "submitted_by": "admin",
+                    }
+                ),
+            },
+        )
+
+        new_analysis = FailureAnalysis(
+            test_name=old["test_name"],
+            error="ValueError",
+            analysis=AnalysisDetail(),
+            analysis_error="peers could not classify: new reason",
+        )
+        with (
+            patch(
+                "rootcoz.main.analyze_failure_group",
+                new_callable=AsyncMock,
+                return_value=[new_analysis],
+            ),
+            patch(
+                "rootcoz.main._create_ai_auth_header",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            patch("rootcoz.main.RepositoryManager"),
+        ):
+            response = test_client.post(f"/api/failures/{old['id']}/re-analyze")
+            assert response.status_code == 202
+
+            import asyncio
+
+            for _ in range(50):
+                await asyncio.sleep(0.1)
+                stored = await storage.get_result(job_id)
+                failures = (stored or {}).get("result", {}).get("failures", [])
+                if failures and failures[0].get("analysis_error") == (
+                    "peers could not classify: new reason"
+                ):
+                    break
+
+        stored = await storage.get_result(job_id)
+        failure = stored["result"]["failures"][0]
+        assert failure["analysis_error"] == "peers could not classify: new reason"
+        assert "reanalysis_status" not in failure
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("error", "expected_reanalysis_error", "expected_analysis_error"),
+        [
+            # A crash is not an answer, so it must not be spelled like one: the
+            # report reads `analysis_error` as "the model answered without a
+            # classification" (frontend `countProviderFailures`).
+            (
+                RuntimeError("simulated analysis crash"),
+                "Re-analysis failed unexpectedly. Check server logs for details.",
+                # No reason on the row: an empty `analysis_error` is "not the
+                # model", which is what the report's provider count reads.
+                "",
+            ),
+            # A narration-only answer still explains why there is no diagnosis.
+            (
+                AnalysisIncompleteError(
+                    "AI analysis incomplete: response has no usable classification"
+                ),
+                "AI analysis incomplete: response has no usable classification",
+                "AI analysis incomplete: response has no usable classification",
+            ),
+        ],
+    )
+    async def test_reanalysis_failure_kind_comes_from_the_error_type(
+        self,
+        test_client,
+        error: Exception,
+        expected_reanalysis_error: str,
+        expected_analysis_error: str,
+    ) -> None:
+        """Only a model-narration failure may write `analysis_error`.
+
+        A generic crash message there would make the report blame the model for a
+        server error, so the row keeps the crash in `reanalysis_error` and leaves
+        the type-driven reason alone (#399).
+        """
+        job_id = "job-reanalyze-failure-kind"
+        row = FailureAnalysis(
+            test_name="tests.TestReAnalyze.test_failure_kind",
+            error="ValueError",
+            analysis=AnalysisDetail(),
+        ).model_dump(mode="json")
+        await storage.save_result(
+            job_id,
+            "",
+            "completed",
+            {
+                "summary": "1 failure",
+                "failures": [row],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "ai_provider": "claude",
+                        "ai_model": "opus",
+                        "submitted_by": "admin",
+                    }
+                ),
+            },
+        )
+
+        with (
+            patch(
+                "rootcoz.main.analyze_failure_group",
+                new_callable=AsyncMock,
+                side_effect=error,
+            ),
+            patch(
+                "rootcoz.main._create_ai_auth_header",
+                new_callable=AsyncMock,
+                return_value="",
+            ),
+            patch("rootcoz.main.RepositoryManager"),
+        ):
+            response = test_client.post(f"/api/failures/{row['id']}/re-analyze")
+            assert response.status_code == 202
+
+            import asyncio
+
+            for _ in range(50):
+                await asyncio.sleep(0.1)
+                stored = await storage.get_result(job_id)
+                failures = (stored or {}).get("result", {}).get("failures", [])
+                if failures and failures[0].get("reanalysis_status") == "failed":
+                    break
+
+        failure = (await storage.get_result(job_id))["result"]["failures"][0]
+        assert failure["reanalysis_status"] == "failed"
+        assert failure["reanalysis_error"] == expected_reanalysis_error
+        assert failure.get("analysis_error") == expected_analysis_error
 
     @pytest.mark.asyncio
     async def test_re_analyze_of_a_failure_removed_before_the_patch_is_refused(

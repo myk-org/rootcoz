@@ -585,6 +585,15 @@ class FailureAnalysis(BaseModel):
         ),
     )
     analysis: AnalysisDetail = Field(description="Structured AI analysis output")
+    analysis_error: str = Field(
+        default="",
+        description=(
+            "Explanatory text for why this failure has no real analysis (e.g. "
+            "the AI returned no usable classification). It is not what marks a "
+            "row incomplete -- that is an empty effective classification, so a "
+            "reviewer override still completes the row."
+        ),
+    )
     error_signature: str = Field(
         default="",
         description=(
@@ -634,6 +643,22 @@ class FailureAnalysis(BaseModel):
         if isinstance(v, str):
             return {"details": v}
         return v
+
+
+def is_failed_analysis(failure: FailureAnalysis) -> bool:
+    """Identify a group whose analysis is missing, not merely unclassified.
+
+    Two shapes mean the same thing: the ``_failed_group_analyses`` placeholder
+    (a provider error) and a row carrying ``analysis_error`` (our own answer was
+    unclassified, e.g. a peer group no peer could classify). Without the second,
+    such a group looked like a completed analysis and the whole job was reported
+    as analysed.
+    """
+    if failure.analysis.classification:
+        return False
+    return bool(failure.analysis_error) or failure.analysis.details == (
+        "Analysis failed; check server logs for details"
+    )
 
 
 class ChildJobAnalysis(BaseModel):
@@ -1388,7 +1413,21 @@ class ReportPortalPushResult(BaseModel):
     pushed: int = Field(description="Number of items successfully updated")
     unmatched: list[str] = Field(
         default_factory=list,
-        description="RP item names that could not be matched to rootcoz failures or mapped to a defect type",
+        description=(
+            "Always empty since #397: an item whose classification maps to no "
+            "RP defect type is pushed under TO_INVESTIGATE and named in "
+            "'defaulted', never left out, and an item that could not be pushed "
+            "at all is reported through 'errors'. Kept so existing clients that "
+            "read it keep working."
+        ),
+    )
+    defaulted: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Items whose classification maps to no RP defect type, naming each "
+            "item and its classification. They WERE pushed, under the neutral "
+            "TO_INVESTIGATE defect type -- informational, not skipped."
+        ),
     )
     errors: list[str] = Field(
         default_factory=list,

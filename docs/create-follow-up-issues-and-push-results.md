@@ -118,7 +118,13 @@ rootcoz create-chat-issue --target github --job-id JOB_ID \
 
 7. Push reviewed classifications to Report Portal.
 
-   Click `Push to Report Portal` in the report header, confirm, and RootCoz matches the job to its Report Portal launch, updates the matching test items, and reports how many classifications were pushed, plus any unmatched items and errors.
+   Click `Push to Report Portal` in the report header, confirm, and RootCoz matches the job to its Report Portal launch, updates the matching test items, and reports how many classifications were pushed, plus any items pushed as `TO INVESTIGATE` and any errors.
+
+   A failure whose classification is empty or unknown is not dropped from the push: it has no defect type to map to, so it is pushed with the neutral `TO INVESTIGATE` defect type and, with `RP_PUSH_CLASSIFICATIONS` enabled, is listed under `defaulted` as `<item name> (classification: <value>)` — `<value>` is `none` when the classification is empty. The exception is a test the project history already classifies as `INFRASTRUCTURE` (a recorded `rootcoz classify` entry): that history classification takes precedence whatever the AI said, so the item is pushed with the `INFRASTRUCTURE` → `SYSTEM_ISSUE` (System Issue) defect type and is never listed under `defaulted`, because it does have a defect type to map to. With classification pushing disabled every item is sent as `TO INVESTIGATE`, so there is nothing to single out and `defaulted` stays empty.
+
+   `defaulted` is informational: those items were pushed, so they never count as skipped and never shrink the batch. That includes an item that carries no analysis at all — a provider outage left the placeholder `Analysis failed; check server logs for details`, or the model narrated an answer with no classification — because an empty classification falls back to `TO INVESTIGATE` exactly like an unmapped one, so the test still reaches the launch and the dialog says `N test(s) were pushed as TO INVESTIGATE because they have no mappable classification`. `unmatched` is always empty and kept only for clients that still read it; `errors` names anything that could not be pushed at all.
+
+   Those statements describe the current server's push response. A historical push result, or a response from an older server, may still carry `unmatched` entries worded as `<item name> (classification: <value>)` or `<item name> (no analysis)`; the dialog renders both honestly.
 
    You can also check what is available before pushing:
 
@@ -220,8 +226,8 @@ For raw endpoints, see [API Endpoint Reference](api-reference.html) for details.
 - The push returns `Operator access required.`  
   Exporter pushes need `operator` or `admin`. Reviewers can create and link issues, but not push.
 
-- The push reports unmatched items.  
-  RootCoz matched the launch but could not pair some failures with Report Portal test items. Check the reported item names against the launch, and confirm the job name and build number match the Report Portal launch.
+- The push reports items it could not classify.  
+  Those failures have no classification (or an unknown one) to map to a Report Portal defect type, so they were still pushed as `TO INVESTIGATE`; the entry names the classification it could not map, `none` when the analysis carried no classification at all. Re-analyze the job to classify them and push again. A failure that matches no item in the launch cannot be pushed at all, so it is named in the server log rather than in `errors`, which lists only items that failed to push: if a test you expected to reach the launch is missing altogether, confirm the job name and build number match the Report Portal launch and look for that log line.
 
 ## Related Pages
 
