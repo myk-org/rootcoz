@@ -209,6 +209,36 @@ thresholds. The cost is a scheduling floor of 32Gi memory + 16Gi ephemeral: the 
 allocatable. The repo's dev deployment requests `16Gi` instead (`1000m` CPU) — Burstable, the fallback
 for smaller nodes.
 
+### Probes
+
+Every probe timing field is a value under `probes:` — `startup`, `readiness` and `liveness`, each
+with `periodSeconds`, `timeoutSeconds`, `failureThreshold` and `successThreshold`, plus
+`initialDelaySeconds` on readiness and liveness. **Defaults live in `chart/values.yaml`, not here**;
+only the two numbers below are restated because CI asserts them.
+
+- **Readiness `timeoutSeconds: 5`.** `GET /health` answers in ~1 ms, so this timeout absorbs a
+  *stalled event loop*, not a slow response: one analysis can hold the loop for a few seconds, and at
+  the old 1 s a single stall counted a failure — three in a row (10 s period × 3) removed the pod
+  from the Service and tore down every SSE stream (`/api/stream`, `/api/results/*/stream`,
+  `/api/admin/logs/stream`) mid-analysis while the container kept running.
+- **Liveness budget `timeoutSeconds: 30` × `failureThreshold: 5` ≈ 2.5 min** of unresponsiveness
+  before SIGTERM (up to ~5 min if every attempt burns its timeout). **Do not widen it to hide a
+  stall** — it fired correctly on 2026-11-04.
+
+Every other timing field — startup `2/10/30`, readiness `5/10/3`, liveness `15/30/5`
+(`periodSeconds`/`timeoutSeconds`/`failureThreshold`) — is in `chart/values.yaml`, where
+`successThreshold: 1` is a constant, not a knob: Kubernetes accepts no other value, and the schema
+pins it.
+
+**Targets are not values.** Readiness and liveness are `GET /health` — a dict literal, no I/O.
+Never point them at `/api/health`: it runs the DB, Jenkins, sidecar and Report Portal checks behind a
+6 s internal timeout, so an upstream hiccup would become a restart storm. The startup probe is
+`exec curl /api/health`, waiting for the backend *and* the sidecar before the other two start; its
+comment in `chart/templates/deployment.yaml` says so.
+
+Changing a probe value changes the pod template, so it **rolls the pod** — see
+[Rollout on upgrade](#rollout-on-upgrade).
+
 ### `/tmp` and ephemeral storage
 
 Clones and code-graph indexes live under `/tmp`. Setting `resources.limits["ephemeral-storage"]`
@@ -401,7 +431,13 @@ quantity goes (`resources.limits.memory=[1]`), and a non-string value in `podAnn
 `podLabels` / `nodeSelector`, which are string→string maps. Further checks cover the pod-integrity
 rules: `--set resources.requests.memory=""` renders no `memory`
 request (empty means omit), and with the sidecar agent dir configured the init container's `requests`
-equal its `limits`, so a Guaranteed app container keeps Guaranteed QoS for the whole pod.
+equal its `limits`, so a Guaranteed app container keeps Guaranteed QoS for the whole pod. The probe
+values are asserted too: the default render must carry readiness `timeoutSeconds: 5` and the liveness
+`30` × `5` budget, every timing field is proved wired by rendering a distinct number per probe and
+comparing each block verbatim (a literal drifting back into the template fails), readiness and
+liveness must GET `/health` with no `api/health` between them, the startup probe must keep its
+exec `/api/health` wait, and the schema rejects `probes.readiness.timeoutSeconds=5s`, a typo'd
+`probes.readines.` key and `successThreshold: 2`.
 
 ## Limitations
 

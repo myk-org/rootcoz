@@ -197,6 +197,48 @@
         }
       }
     },
+    "probes": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Probe timing fields. The probe targets are deliberately not values: readiness and liveness must GET /health and the startup probe is the exec /api/health sidecar wait (#402 B4). startup has no initialDelaySeconds — absent renders nothing and the API defaults it to 0.",
+      "properties": {
+        "startup": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["periodSeconds", "timeoutSeconds", "failureThreshold", "successThreshold"],
+          "properties": {
+            "periodSeconds": { "type": "integer", "minimum": 1 },
+            "timeoutSeconds": { "type": "integer", "minimum": 1 },
+            "failureThreshold": { "type": "integer", "minimum": 1 },
+            "successThreshold": { "type": "integer", "enum": [1], "description": "Kubernetes requires 1 for startup, readiness and liveness probes." }
+          }
+        },
+        "readiness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["initialDelaySeconds", "periodSeconds", "timeoutSeconds", "failureThreshold", "successThreshold"],
+          "properties": {
+            "initialDelaySeconds": { "type": "integer", "minimum": 0 },
+            "periodSeconds": { "type": "integer", "minimum": 1 },
+            "timeoutSeconds": { "type": "integer", "minimum": 1 },
+            "failureThreshold": { "type": "integer", "minimum": 1 },
+            "successThreshold": { "type": "integer", "enum": [1], "description": "Kubernetes requires 1 for startup, readiness and liveness probes." }
+          }
+        },
+        "liveness": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["initialDelaySeconds", "periodSeconds", "timeoutSeconds", "failureThreshold", "successThreshold"],
+          "properties": {
+            "initialDelaySeconds": { "type": "integer", "minimum": 0 },
+            "periodSeconds": { "type": "integer", "minimum": 1 },
+            "timeoutSeconds": { "type": "integer", "minimum": 1 },
+            "failureThreshold": { "type": "integer", "minimum": 1 },
+            "successThreshold": { "type": "integer", "enum": [1], "description": "Kubernetes requires 1 for startup, readiness and liveness probes." }
+          }
+        }
+      }
+    },
     "env": {
       "type": "object",
       "properties": {
