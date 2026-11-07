@@ -1201,45 +1201,71 @@ async def test_no_sql_site_still_parses_result_json(_storage) -> None:
 # --- the write lock is never held across an encode (#433) -------------------
 
 
+@pytest.mark.parametrize("parked_writer", ["save_result", "update_status"])
 async def test_a_slow_encode_does_not_hold_the_write_lock(
-    _storage, monkeypatch
+    _storage, monkeypatch, parked_writer: str
 ) -> None:
-    """Two writers encode at the same time: neither waits out ``busy_timeout``.
+    """Other jobs' writes land while one job's payload is being encoded.
 
     The encode runs off the loop with no transaction open, so the write lock is
     taken only around the (fast) statement. Holding it across the encode makes
-    the second writer's ``BEGIN IMMEDIATE`` fail with ``database is locked`` on a
-    contended box -- the CI failure this shape exists to prevent.
+    the competing writes wait out ``busy_timeout`` and fail with ``database is
+    locked`` -- the CI failure this shape exists to prevent.
+
+    The parked writer is held inside its encode by events this test owns, so "the
+    writes went through while the encode was in progress" holds by construction,
+    not by the clock: that encode cannot finish before the test releases it, and
+    the release comes after every competing write has returned.
     """
     payload = _payload(failure_count=20)
     # Seed the rows the status writers update while the encoder is still fast.
     for job_id in ("job-lock-status-a", "job-lock-status-b"):
         await storage.save_result(job_id, "", "running", payload)
 
-    # A busy_timeout far shorter than the encode below, applied to every
-    # connection this test opens: a lock held across the encode has to time out.
-    real_connect_db = storage._connect_db
+    def write(job_id: str):
+        if job_id.startswith("job-lock-save"):
+            return storage.save_result(job_id, "", "completed", payload)
+        return storage.update_status(job_id, "completed", payload)
 
-    @contextlib.asynccontextmanager
-    async def short_busy_timeout() -> Any:
-        async with real_connect_db() as db:
-            await db.execute("PRAGMA busy_timeout=300")
-            yield db
+    job_ids = (
+        "job-lock-save-a",
+        "job-lock-save-b",
+        "job-lock-status-a",
+        "job-lock-status-b",
+    )
+    parked = (
+        "job-lock-save-a" if parked_writer == "save_result" else "job-lock-status-a"
+    )
+    rivals = [job_id for job_id in job_ids if job_id != parked]
 
-    monkeypatch.setattr(storage, "_connect_db", short_busy_timeout)
+    encoding = threading.Event()  # the parked writer has begun its encode
+    release = threading.Event()  # the test lets that encode finish
     real_compress = zstd.compress
 
-    def slow_compress(data: bytes, level: int = 0) -> bytes:
-        time.sleep(0.6)  # longer than busy_timeout: a held lock has to time out
+    def parked_first_compress(data: bytes, level: int = 0) -> bytes:
+        if not encoding.is_set():  # only the parked writer waits; rivals must not
+            encoding.set()
+            # Only a deadlock guard: the test releases this, it never times it.
+            assert release.wait(60), "the parked encode was never released"
         return real_compress(data, level)
 
-    monkeypatch.setattr(storage.zstd, "compress", slow_compress)
-    await asyncio.gather(
-        storage.save_result("job-lock-save-a", "", "completed", payload),
-        storage.save_result("job-lock-save-b", "", "completed", payload),
-        storage.update_status("job-lock-status-a", "completed", payload),
-        storage.update_status("job-lock-status-b", "completed", payload),
-    )
+    monkeypatch.setattr(storage.zstd, "compress", parked_first_compress)
+    encoder = asyncio.create_task(write(parked))
+    rival_tasks: list[asyncio.Task[None]] = []
+    try:
+        assert await asyncio.to_thread(encoding.wait, 60), "no encode to park"
+        # Written while that encode is still parked. A write lock held across the
+        # encode would raise here -- after the connection's ``busy_timeout``, so
+        # this fails on the bug instead of hanging on it.
+        rival_tasks = [asyncio.create_task(write(job_id)) for job_id in rivals]
+        await asyncio.gather(*rival_tasks)
+        assert not encoder.done(), "the encode has to still be in progress"
+    finally:
+        # Gather re-raises on the first failure and leaves its siblings running;
+        # drain them before the encode is released so no write outlives the test.
+        await asyncio.gather(*rival_tasks, return_exceptions=True)
+        release.set()
+        await encoder
 
     for job_id in ("job-lock-save-a", "job-lock-save-b"):
         assert (await _stored(_storage, job_id))["kind"] == "blob"
