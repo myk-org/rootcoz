@@ -101,3 +101,37 @@ class TestGetLogFile:
             assert get_log_file() is None
         finally:
             log_dir.chmod(0o755)
+
+
+class TestLogLevelAuthority:
+    def test_engine_core_debug_reaches_handler_with_debug_parent(self) -> None:
+        """The rootcoz parent is the level authority, so DEBUG must reach
+        rootcoz.engine.core's handler — no intermediate logger may cap it."""
+        import rootcoz.main  # noqa: F401  (import-time logger wiring)
+        from rootcoz.engine.core import logger as engine_logger
+
+        parent = logging.getLogger("rootcoz")
+        previous_level = parent.level
+        records: list[logging.LogRecord] = []
+
+        class _Capture(logging.Handler):
+            def emit(self, record: logging.LogRecord) -> None:
+                records.append(record)
+
+        capture = _Capture()
+        capture.setLevel(logging.DEBUG)
+        engine_logger.addHandler(capture)
+        parent.setLevel(logging.DEBUG)
+        try:
+            engine_logger.debug("engine debug probe")
+            levels = {
+                name: logging.getLogger(name).getEffectiveLevel()
+                for name in ("rootcoz", "rootcoz.engine", "rootcoz.engine.core")
+            }
+        finally:
+            parent.setLevel(previous_level)
+            engine_logger.removeHandler(capture)
+
+        assert any(record.levelno == logging.DEBUG for record in records), (
+            f"DEBUG record never reached a handler; effective levels={levels}"
+        )

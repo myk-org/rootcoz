@@ -3250,6 +3250,243 @@ class TestPeerConsensusFallback:
 
 class TestOrchestratorEmptyFallback:
     @pytest.mark.asyncio
+    async def test_peers_still_run_when_primary_narrates(self, tmp_path: Path) -> None:
+        """A narration-only main answer must not abort the debate (#397).
+
+        ``run_single_ai_analysis`` raises ``AnalysisIncompleteError``; the peers
+        must still classify the group, and the stored row must be classified.
+        """
+        from unittest.mock import AsyncMock
+
+        from rootcoz import storage
+        from rootcoz.engine.core import AnalysisIncompleteError
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
+
+        mock_orchestrator = AsyncMock(
+            side_effect=AnalysisIncompleteError(
+                "AI analysis incomplete: response has no usable classification",
+                error_signature="sig123",
+                raw_text="Now let me read the test source code.",
+            )
+        )
+
+        peer_response = _make_peer_json_response(
+            agrees=False,
+            classification="PRODUCT BUG",
+            reasoning="This is a product bug",
+        )
+        peer_call = AsyncMock(return_value=AIResult(success=True, text=peer_response))
+
+        with (
+            patch("rootcoz.peer_analysis.run_single_ai_analysis", mock_orchestrator),
+            _patch_peer_ai_calls(peer_call),
+        ):
+            results = await analyze_failure_group_with_peers(
+                failures=[_make_failure()],
+                console_context="console output",
+                repo_path=tmp_path,
+                main_ai_provider="claude",
+                main_ai_model="claude-sonnet-4-20250514",
+                peer_ai_configs=_peer_configs(),
+                max_rounds=1,
+            )
+
+        assert peer_call.await_count >= 1
+        assert len(results) == 1
+        analysis = results[0].analysis
+        assert analysis.classification == "PRODUCT BUG"
+        # The primary's narration is context for the peers, never the analysis.
+        assert "Now let me read the test source code" not in (analysis.details or "")
+        # Classified by the peers: the row must not be reported as incomplete.
+        assert results[0].analysis_error == ""
+        assert (
+            storage.incomplete_failures(
+                {"failures": [r.model_dump(mode="json") for r in results]}
+            )
+            == []
+        )
+
+    @pytest.mark.asyncio
+    async def test_peer_prompt_does_not_carry_primary_narration(
+        self, tmp_path: Path
+    ) -> None:
+        """The primary model's narration never reaches another provider.
+
+        Peers read the console output, failure details and artifacts from files,
+        so forwarding narration adds no data they cannot get themselves -- while
+        it can quote CI credentials that must not cross a provider boundary.
+        """
+        from unittest.mock import AsyncMock
+
+        from rootcoz.engine.core import AnalysisIncompleteError
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
+
+        prompts: list[str] = []
+
+        async def mock_peer_call(prompt, **_kwargs):
+            prompts.append(prompt)
+            return AIResult(success=False, text="CLI error")
+
+        mock_orchestrator = AsyncMock(
+            side_effect=AnalysisIncompleteError(
+                "AI analysis incomplete: response has no usable classification",
+                error_signature="sig123",
+                raw_text="The deploy log said password=hunter2 before it failed.",
+            )
+        )
+        with (
+            patch("rootcoz.peer_analysis.run_single_ai_analysis", mock_orchestrator),
+            _patch_peer_ai_calls(mock_peer_call),
+        ):
+            await analyze_failure_group_with_peers(
+                failures=[_make_failure()],
+                console_context="console output",
+                repo_path=tmp_path,
+                main_ai_provider="claude",
+                main_ai_model="claude-sonnet-4-20250514",
+                peer_ai_configs=_peer_configs(),
+                max_rounds=1,
+            )
+
+        assert prompts
+        for prompt in prompts:
+            assert "hunter2" not in prompt
+            assert "The deploy log said" not in prompt
+            assert "Primary model narration" not in prompt
+            # The peer still gets the failure-details file pointer.
+            assert "FAILURE SUMMARY" in prompt
+
+    @pytest.mark.asyncio
+    async def test_primary_narration_is_logged_once_during_a_peer_run(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The raise path logs the answer; the peer catch must not log it again.
+
+        ``_call_ai_with_retry`` already wrote the whole scrubbed answer before it
+        raised on an exhausted retry, so re-logging ``exc.raw_text`` in the peer
+        catch put the same narration in the log twice for every peer run (#399).
+        The answer stays inspectable at DEBUG — from the one place that logs it.
+        """
+        import logging
+        from unittest.mock import AsyncMock
+
+        from rootcoz.engine import core as core_module
+        from rootcoz.engine.core import AnalysisIncompleteError
+        from rootcoz.engine.core import logger as core_logger
+        from rootcoz.feedback import scrub_sensitive_data
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
+
+        narration = "The deploy log said password=hunter2\nthen " + "z" * 3000
+        # Every logged answer passes through this scrubber, whoever logs it, so a
+        # count here counts log lines — not logger names, which simple_logger
+        # makes order-dependent.
+        scrub_inputs: list[str] = []
+
+        def recording_scrub(text: str) -> str:
+            scrub_inputs.append(text)
+            return scrub_sensitive_data(text)
+
+        async def raise_after_the_retry_log(**_kwargs: object) -> None:
+            """Stand in for the retry loop's raise path: log the answer, then raise."""
+            core_module.log_scrubbed_answer(
+                narration, why="AI answer with no usable classification"
+            )
+            raise AnalysisIncompleteError(
+                "AI analysis incomplete: response has no usable classification",
+                error_signature="sig123",
+                raw_text=narration,
+            )
+
+        mock_orchestrator = AsyncMock(side_effect=raise_after_the_retry_log)
+        mock_peer_call = AsyncMock(
+            return_value=AIResult(success=False, text="CLI error")
+        )
+
+        monkeypatch.setattr(core_module, "scrub_sensitive_data", recording_scrub)
+        original_level = core_logger.level
+        core_logger.setLevel(logging.DEBUG)
+        try:
+            with (
+                patch(
+                    "rootcoz.peer_analysis.run_single_ai_analysis", mock_orchestrator
+                ),
+                _patch_peer_ai_calls(mock_peer_call),
+            ):
+                await analyze_failure_group_with_peers(
+                    failures=[_make_failure()],
+                    console_context="console output",
+                    repo_path=tmp_path,
+                    main_ai_provider="claude",
+                    main_ai_model="claude-sonnet-4-20250514",
+                    peer_ai_configs=_peer_configs(),
+                    max_rounds=1,
+                )
+        finally:
+            core_logger.setLevel(original_level)
+
+        logged = [text for text in scrub_inputs if "z" * 3000 in text]
+        assert logged == [narration], "one log line per answer, and the whole answer"
+        # Scrub before logging, always: the line the user reads carries no secret.
+        assert "hunter2" not in scrub_sensitive_data(logged[0])
+        assert "[REDACTED]" in scrub_sensitive_data(logged[0])
+
+    @pytest.mark.asyncio
+    async def test_unclassified_group_keeps_the_incomplete_reason(
+        self, tmp_path: Path
+    ) -> None:
+        """A narration-only primary with no usable peer vote explains itself.
+
+        The narration is never stored as the analysis, and the row carries the
+        reason it has no diagnosis (#397).
+        """
+        from unittest.mock import AsyncMock
+
+        from rootcoz.engine.core import AnalysisIncompleteError
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
+
+        reason = "AI analysis incomplete: response has no usable classification"
+        mock_orchestrator = AsyncMock(
+            side_effect=AnalysisIncompleteError(
+                reason,
+                error_signature="sig123",
+                raw_text="Now let me read the test source code.",
+            )
+        )
+
+        async def mock_peer_call(
+            prompt,
+            *,
+            cwd=None,
+            ai_provider="",
+            ai_model="",
+            ai_call_timeout=None,
+            session_id=None,
+            **_kwargs,
+        ):
+            return AIResult(success=False, text="CLI error")
+
+        with (
+            patch("rootcoz.peer_analysis.run_single_ai_analysis", mock_orchestrator),
+            _patch_peer_ai_calls(mock_peer_call),
+        ):
+            results = await analyze_failure_group_with_peers(
+                failures=[_make_failure()],
+                console_context="console output",
+                repo_path=tmp_path,
+                main_ai_provider="claude",
+                main_ai_model="claude-sonnet-4-20250514",
+                peer_ai_configs=_peer_configs(),
+                max_rounds=1,
+            )
+
+        assert len(results) == 1
+        assert results[0].analysis.classification == ""
+        assert results[0].analysis_error == reason
+        assert "Now let me read the test source code" not in (
+            results[0].analysis.details or ""
+        )
+
+    @pytest.mark.asyncio
     async def test_peer_consensus_adopted_when_orchestrator_empty(
         self, tmp_path: Path
     ) -> None:

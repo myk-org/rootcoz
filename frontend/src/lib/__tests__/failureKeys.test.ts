@@ -1,6 +1,42 @@
 import { describe, expect, it } from 'vitest'
-import { countUnreviewedFailures } from '@/lib/failureKeys'
-import type { ChildJobAnalysis, ReviewState } from '@/types'
+import {
+  PROVIDER_FAILURE_DETAILS,
+  countProviderFailures,
+  countUnclassifiedFailures,
+  countUnreviewedFailures,
+} from '@/lib/failureKeys'
+import type { ChildJobAnalysis, FailureAnalysis, ReviewState } from '@/types'
+
+/** One failure with the classification the server stored for it. */
+function makeFailure(
+  testName: string,
+  classification: string,
+  extra: Partial<FailureAnalysis> = {},
+): FailureAnalysis {
+  return {
+    id: `${testName}-id`,
+    test_name: testName,
+    error: 'boom',
+    analysis: { classification, pattern: '', affected_tests: [], details: '', artifacts_evidence: '' },
+    error_signature: 'sig',
+    ...extra,
+  }
+}
+
+/** One failure the provider placeholder was stored on, unclassified. */
+function makeProviderFailure(testName: string, analysisError?: string): FailureAnalysis {
+  return {
+    ...makeFailure(testName, ''),
+    analysis: {
+      classification: '',
+      pattern: '',
+      affected_tests: [],
+      details: PROVIDER_FAILURE_DETAILS,
+      artifacts_evidence: '',
+    },
+    ...(analysisError ? { analysis_error: analysisError } : {}),
+  }
+}
 
 function makeReview(reviewed: boolean): ReviewState {
   return { reviewed, username: 'user', updated_at: '2025-01-01T00:00:00Z' }
@@ -125,5 +161,115 @@ describe('countUnreviewedFailures', () => {
         childBuildNumber: 9,
       }),
     ).toBe(0)
+  })
+})
+
+describe('countUnclassifiedFailures', () => {
+  it('counts failures whose stored classification is empty', () => {
+    const failures = [makeFailure('test-a', ''), makeFailure('test-b', 'CODE ISSUE')]
+    expect(countUnclassifiedFailures(failures, [], {})).toBe(1)
+  })
+
+  it('treats a whitespace-only classification as empty, as the server does', () => {
+    // storage._effective_classification strips before deciding.
+    expect(countUnclassifiedFailures([makeFailure('test-a', '  ')], [], {})).toBe(1)
+  })
+
+  it('lets a live reviewer override clear a failure without a refetch', () => {
+    // The banner is derived from this count, so a classification the reviewer
+    // just saved must clear it immediately.
+    const failures = [makeFailure('test-a', '')]
+    expect(
+      countUnclassifiedFailures(failures, [], { 'test-a': 'PRODUCT BUG' }),
+    ).toBe(0)
+  })
+
+  it('counts child failures through their own review key', () => {
+    const child = { ...makeChild('child', 5), failures: [makeFailure('test-x', '')] }
+    expect(countUnclassifiedFailures([], [child], {})).toBe(1)
+    expect(
+      countUnclassifiedFailures([], [child], { 'child#5::test-x': 'CODE ISSUE' }),
+    ).toBe(0)
+    // A top-level override for the same test name never covers a child scope.
+    expect(countUnclassifiedFailures([], [child], { 'test-x': 'CODE ISSUE' })).toBe(1)
+  })
+
+  it('counts unclassified failures at every depth of the child tree', () => {
+    // Pins the shared `walkChildTree` traversal: a hand-rolled walk that stops
+    // after one level would drift from `countAllFailures` here.
+    const grandchild = {
+      ...makeChild('grandchild', 9),
+      failures: [makeFailure('test-g', ''), makeFailure('test-h', '  ')],
+    }
+    const child = {
+      ...makeChild('child', 5),
+      failures: [makeFailure('test-c', '')],
+      failed_children: [grandchild],
+    }
+    const failures = [makeFailure('test-p', ''), makeFailure('test-ok', 'CODE ISSUE')]
+
+    expect(countUnclassifiedFailures(failures, [child], {})).toBe(4)
+    // A reviewer override at any depth still clears exactly its own failure.
+    expect(
+      countUnclassifiedFailures(failures, [child], {
+        'grandchild#9::test-g': 'PRODUCT BUG',
+        'child#5::test-c': 'CODE ISSUE',
+      }),
+    ).toBe(2)
+  })
+
+  it('never counts an ingest-only job, whose analysis has not run yet', () => {
+    // Same empty classifications as a failed analysis, but the model was never
+    // asked — mirrors the server's `incomplete_failures` analysis-state gate.
+    const failures = [makeFailure('test-a', ''), makeFailure('test-b', '')]
+    expect(countUnclassifiedFailures(failures, [], {}, 'submitted')).toBe(0)
+    // ...and the same failures after an analysis that produced nothing do count.
+    expect(countUnclassifiedFailures(failures, [], {}, 'analyzed')).toBe(2)
+  })
+})
+
+describe('countProviderFailures', () => {
+  it('counts only failures carrying the provider placeholder', () => {
+    // Same traversal as `countUnclassifiedFailures`, narrower predicate.
+    const failures = [makeProviderFailure('test-a'), makeFailure('test-b', '')]
+    expect(countProviderFailures(failures, [], {})).toBe(1)
+    expect(countUnclassifiedFailures(failures, [], {})).toBe(2)
+  })
+
+  it('skips a placeholder row that explains itself in analysis_error', () => {
+    // A narration-only reply shares the placeholder but is not a provider
+    // outage, so the banner must not blame credentials for it.
+    const failures = [makeProviderFailure('test-a'), makeProviderFailure('test-b', 'no classification')]
+    expect(countProviderFailures(failures, [], {})).toBe(1)
+    expect(countUnclassifiedFailures(failures, [], {})).toBe(2)
+  })
+
+  it('lets a live reviewer override clear a provider placeholder', () => {
+    const failures = [makeProviderFailure('test-a')]
+    expect(countProviderFailures(failures, [], { 'test-a': 'PRODUCT BUG' })).toBe(0)
+  })
+
+  it('counts placeholders through their own review key in the child tree', () => {
+    const grandchild = {
+      ...makeChild('grandchild', 9),
+      failures: [makeProviderFailure('test-g')],
+    }
+    const child = {
+      ...makeChild('child', 5),
+      failures: [makeProviderFailure('test-c')],
+      failed_children: [grandchild],
+    }
+    expect(countProviderFailures([makeProviderFailure('test-p')], [child], {})).toBe(3)
+    // A child-scoped override clears exactly its own failure, at any depth.
+    expect(countProviderFailures([makeProviderFailure('test-p')], [child], {
+      'grandchild#9::test-g': 'CODE ISSUE',
+      'test-p': 'PRODUCT BUG',
+    })).toBe(1)
+  })
+
+  it('never counts an ingest-only job', () => {
+    const failures = [makeProviderFailure('test-a')]
+    expect(countProviderFailures(failures, [], {}, 'submitted')).toBe(0)
+    expect(countProviderFailures(failures, [], {}, 'analyzed')).toBe(1)
   })
 })

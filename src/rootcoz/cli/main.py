@@ -27,7 +27,7 @@ from rootcoz.cli.config import (
 )
 from rootcoz.cli.output import print_output
 from rootcoz.config import parse_additional_repos, parse_peer_configs
-from rootcoz.storage import VALID_ROLES
+from rootcoz.storage import MAX_INCOMPLETE_LIST_LIMIT, VALID_ROLES
 
 # -- App and sub-command groups -----------------------------------------------
 
@@ -1011,6 +1011,50 @@ def results_fields(
         fields_list = data.get("fields", [])
         for field in fields_list:
             typer.echo(field)
+
+
+@results_app.command("incomplete")
+def results_incomplete(
+    limit: int = typer.Option(
+        100, "--limit", min=1, help="Max jobs to list (the server caps it)."
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """List jobs with failures that have no usable classification."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.list_incomplete_analyses(limit=limit),
+        emit_output=False,
+    )
+    if _state.get("json", False):
+        return
+    jobs = data.get("jobs", []) if isinstance(data, dict) else data
+    print_output(
+        jobs,
+        columns=["job_id", "job_name", "build_number", "incomplete_count"],
+    )
+    if isinstance(data, dict) and data.get("truncated"):
+        scanned = data.get("scanned", 0)
+        if data.get("truncated_by") == "scan_ceiling":
+            typer.echo(
+                f"Listing truncated after {scanned} row(s); "
+                "the server's scan ceiling stopped the scan, so older jobs "
+                "were not examined.",
+                err=True,
+            )
+        elif limit > MAX_INCOMPLETE_LIST_LIMIT:
+            # The server clamps to the cap, so a larger --limit returns nothing.
+            typer.echo(
+                f"Listing truncated after {scanned} row(s); --limit {limit} "
+                f"exceeds the server's cap of {MAX_INCOMPLETE_LIST_LIMIT}, so "
+                "a larger value returns no more jobs.",
+                err=True,
+            )
+        else:
+            typer.echo(
+                f"Listing truncated after {scanned} row(s); raise --limit to see more.",
+                err=True,
+            )
 
 
 @results_app.command("submitters")
@@ -3185,10 +3229,13 @@ def push_rp_cmd(
         pushed = data.get("pushed", 0)
         errors = data.get("errors", [])
         unmatched = data.get("unmatched", [])
+        defaulted = data.get("defaulted", [])
         launch_id = data.get("launch_id")
         typer.echo(f"Pushed {pushed} classification(s) to Report Portal")
         if launch_id is not None:
             typer.echo(f"Launch ID: {launch_id}")
+        if defaulted:
+            typer.echo(f"Pushed as TO INVESTIGATE: {', '.join(defaulted)}")
         if unmatched:
             typer.echo(f"Unmatched: {', '.join(unmatched)}")
         if errors:
@@ -3229,6 +3276,11 @@ def push_cmd(
         message = data.get("message", "")
         if message:
             typer.echo(message)
+        # Same fallback the dedicated push-reportportal command reports: an item
+        # sent under TO INVESTIGATE was pushed, but its classification was lost.
+        defaulted = data.get("defaulted", [])
+        if defaulted:
+            typer.echo(f"Pushed as TO INVESTIGATE: {', '.join(defaulted)}")
         errors = data.get("errors", [])
         if errors:
             typer.echo(f"Errors: {len(errors)}")
