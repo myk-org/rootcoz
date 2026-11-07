@@ -49,11 +49,14 @@ _LOOP_LAG_WARN_MS = 5000.0
 # A probe that cannot finish must degrade its block, not hold the request open.
 _PROBE_TIMEOUT_SECONDS = 15.0
 
-# A deadline one probe gets instead of the constant above, by probe name. Empty
-# in production; a test shortens a single probe so "a probe that never returns
-# degrades only its block" is decided by that probe being blocked for good, not
-# by the healthy probes answering inside a tiny window.
-_PROBE_DEADLINES: dict[str, float] = {}
+# TEST ONLY, empty in production: a per-probe deadline override by probe name,
+# read by ``_guarded`` in place of the constant above. A test shortens one probe
+# so "a probe that never returns degrades only its block" is decided by that
+# probe being blocked for good, not by the healthy probes answering inside a
+# tiny window. It must stay empty outside tests; that a stray entry could
+# shorten a production deadline is what
+# test_no_probe_deadline_override_ships guards.
+_PROBE_DEADLINE_OVERRIDES: dict[str, float] = {}
 
 _FILESYSTEM_NOTE = (
     "Measured on the filesystem that holds the data directory, whatever "
@@ -674,7 +677,7 @@ async def _guarded(
     fallback: dict[str, Any],
 ) -> dict[str, Any]:
     """Run one probe; a crash in it must not fail the whole snapshot."""
-    deadline = _PROBE_DEADLINES.get(name, _PROBE_TIMEOUT_SECONDS)
+    deadline = _PROBE_DEADLINE_OVERRIDES.get(name, _PROBE_TIMEOUT_SECONDS)
     try:
         # shortcut: cancelling the wait does not kill a thread already inside
         # a filesystem walk, so the timeout frees the request, not the worker.
