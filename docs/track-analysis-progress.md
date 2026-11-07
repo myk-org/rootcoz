@@ -118,7 +118,7 @@ This prints just the three fields a status check needs, instead of the full resu
   Updates are shared between browser tabs over one connection, and the connection is led by a single tab. If a tab misses events, reload it; it re-subscribes and refetches on mount.
 
 - **A job shows `Analysis interrupted by server restart. Please re-submit.`**  
-  The background task did not survive the restart; the server marks the job failed as it shuts down. `GET /results/{job_id}` carries `failure_reason: "server_restart"` for exactly these — the same sentence with an empty `failure_reason` came from a crash instead. Submitting again, or re-analyzing from the report header, is still the only way to get the analysis.
+  The background task did not survive the restart; the server marks the job failed as it shuts down. `GET /results/{job_id}` carries `failure_reason: "server_restart"` for exactly these — the same sentence with an empty `failure_reason` came from a crash instead, or from a `waiting` job the next boot could not resume. Submitting again, or re-analyzing from the report header, is still the only way to get the analysis.
 
 - **`Abort` is greyed out.**  
   Only the submitter of that job and admins can abort it. The tooltip says the same thing.

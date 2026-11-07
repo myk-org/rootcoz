@@ -1490,6 +1490,32 @@ class TestMarkJobsFailedForRestart:
         assert row["status"] == "waiting"
         assert row["failure_reason"] == ""
 
+    async def test_an_in_place_analyze_clears_the_restart_marker(
+        self, setup_test_db: Path
+    ) -> None:
+        """The reused row must not keep a marker from the run it replaces.
+
+        ``POST /results/{job_id}/analyze`` claims this row in place, so a marker
+        written by the shutdown would survive into the new run and be reported
+        beside its ``completed`` status (#458).
+        """
+        from rootcoz.storage import ANALYSIS_STATE_SUBMITTED
+
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                "job-sub",
+                "",
+                "running",
+                {"analysis_state": ANALYSIS_STATE_SUBMITTED, "job_name": "raw"},
+            )
+            await storage.mark_jobs_failed_for_restart(["job-sub"])
+            claimed = await storage.claim_submitted_job_for_analyze("job-sub")
+            row = await storage.get_result("job-sub")
+
+        assert claimed is True
+        assert row["status"] == "pending"
+        assert row["failure_reason"] == ""
+
 
 @pytest.mark.asyncio
 async def test_list_distinct_job_names(setup_test_db: Path):

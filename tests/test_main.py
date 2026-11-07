@@ -2236,6 +2236,57 @@ class TestAppLifespan:
         assert stored["completed_at"] is None
 
     @pytest.mark.asyncio
+    async def test_shutdown_does_not_wait_for_a_task_that_ignores_cancellation(
+        self, mock_settings, temp_db_path: Path, monkeypatch
+    ) -> None:
+        """The budget bounds the drain even when a child keeps going.
+
+        The clone-thread wait deliberately keeps waiting through repeated
+        cancellation (#458), and ``asyncio.gather``'s future only completes once
+        every child has -- so the budget has to abandon it, and the mark has to
+        have landed before that.
+        """
+        from rootcoz import main
+
+        started = asyncio.Event()
+        stop = asyncio.Event()
+
+        async def _stubborn() -> None:
+            started.set()
+            while not stop.is_set():
+                try:
+                    await asyncio.sleep(0.05)
+                except asyncio.CancelledError:
+                    continue
+
+        async def _nothing() -> None:
+            return None
+
+        monkeypatch.setattr(main, "SHUTDOWN_DRAIN_SECONDS", 0.2)
+        shed = asyncio.create_task(_stubborn())
+        try:
+            with (
+                patch.object(main, "_compress_stored_results", _nothing),
+                patch.object(storage, "DB_PATH", temp_db_path),
+            ):
+                async with main.lifespan(main.app):
+                    await storage.save_result("job-stuck", "http://j/1", "running")
+                    main._register_job_task("job-stuck", shed)
+                    await asyncio.wait_for(started.wait(), 5)
+                stored = await storage.get_result("job-stuck")
+        finally:
+            stop.set()
+            for task in [shed, *main._background_tasks]:
+                task.cancel()
+            await asyncio.gather(
+                *[shed, *main._background_tasks], return_exceptions=True
+            )
+            main._background_tasks.clear()
+            main._job_tasks.clear()
+
+        assert stored["failure_reason"] == storage.SERVER_RESTART_FAILURE_REASON
+
+    @pytest.mark.asyncio
     async def test_a_backfill_writes_the_database_it_started_on(
         self, mock_settings, tmp_path: Path, monkeypatch
     ) -> None:
@@ -17885,3 +17936,16 @@ class TestAnalysisReaperIsOneCopy:
         # repo_manager:` copy would at best drift again, at worst skip the reaper.
         assert kwargs["repo_manager"] is manager.return_value
         assert kwargs["repo_path"] == tmp_path / "workspace"
+
+
+def test_the_entrypoint_outlives_the_app_shutdown() -> None:
+    """The restart mark is only written if the shell waits for uvicorn.
+
+    A TERM trap makes ``wait`` return 128+signum while uvicorn is still in the
+    lifespan shutdown, so a bare ``wait`` under errexit ended the script -- and
+    PID 1 with it -- before the mark committed (#458).
+    """
+    entrypoint = (Path(__file__).resolve().parents[1] / "entrypoint.sh").read_text()
+
+    assert 'wait "$APP_PID" || status=$?' in entrypoint
+    assert 'kill -0 "$APP_PID" 2>/dev/null || break' in entrypoint

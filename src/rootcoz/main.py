@@ -2319,16 +2319,18 @@ _PROCESS_STARTED_AT = _time.time()
 # Track analysis background tasks by job_id for abort support
 _job_tasks: dict[str, asyncio.Task[Any]] = {}
 
-#: How long the shutdown lets cancelled tasks unwind. Their ``finally`` blocks can
-#: delete a workspace tree for minutes (#402 A1), so the restart mark below is
-#: written *before* this wait: whatever is still running when it expires is
-#: abandoned by *this* process on its own terms (log line written, DB handle
-#: closed) instead of by the kubelet's SIGKILL mid-delete. The number is the
-#: residual budget, not a round guess: 60 s grace - 15 s uvicorn ceiling - 5 s to
-#: exit = 40, which is all the cleanup time the grace period can actually give.
-#: The 15 s lives only in entrypoint.sh (see the chart/tox assertions); app-side
-#: code does not repeat it, because a second copy under a "must match" comment is
-#: a number nothing checks.
+#: How long the shutdown may spend recording the restart mark and letting
+#: cancelled tasks unwind -- one budget for both, so the arithmetic below covers
+#: the whole shutdown. Task ``finally`` blocks can delete a workspace tree for
+#: minutes (#402 A1), so the mark is written *first*: whatever is still running
+#: when the budget expires is abandoned by *this* process on its own terms (log
+#: line written, DB handle closed) instead of by the kubelet's SIGKILL
+#: mid-delete. The number is the residual budget, not a round guess:
+#: 60 s grace - 15 s uvicorn ceiling - 5 s to exit = 40, which is all the
+#: cleanup time the grace period can actually give. The 15 s lives only in
+#: entrypoint.sh (see the chart/tox assertions); app-side code does not repeat
+#: it, because a second copy under a "must match" comment is a number nothing
+#: checks.
 SHUTDOWN_DRAIN_SECONDS = 40
 
 
@@ -2955,16 +2957,33 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         pending = list(_background_tasks)
         for task in pending:
             task.cancel()
-        # Before the drain, not after: this write is the only thing that keeps a
-        # SIGTERM from looking like a crash on the next boot, and the drain below
-        # can outlive the kubelet's grace period.
-        await storage.mark_jobs_failed_for_restart(in_flight)
-        # Nothing tracked may outlive the app: a surviving task keeps reading the
-        # module-global DB_PATH and races whatever runs next in this process.
-        if pending:
-            with contextlib.suppress(TimeoutError):
-                async with asyncio.timeout(SHUTDOWN_DRAIN_SECONDS):
-                    await asyncio.gather(*pending, return_exceptions=True)
+        # Marking and draining share ONE budget, because they are one shutdown:
+        # the chart asserts 60 s grace > 15 s uvicorn + SHUTDOWN_DRAIN_SECONDS,
+        # and a mark outside this timeout spends time that budget never counted.
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(SHUTDOWN_DRAIN_SECONDS):
+                # Before the drain, not after: this write is the only thing that
+                # keeps a SIGTERM from looking like a crash on the next boot, and
+                # the drain below can outlive the kubelet's grace period.
+                await storage.mark_jobs_failed_for_restart(in_flight)
+                # Nothing tracked may outlive the app: a surviving task keeps
+                # reading the module-global DB_PATH and races whatever runs next.
+                # asyncio.wait, never gather: gather's future resolves only once
+                # every child has, so a child that swallows cancellation (the
+                # clone-thread wait at #458) would hold the shutdown past the
+                # budget; wait() is cancelled here instead, and those tasks are
+                # abandoned below -- which is what having a budget means.
+                if pending:
+                    done, _ = await asyncio.wait(pending)
+                    for task in done:
+                        if not task.cancelled():
+                            task.exception()  # retrieved: there is no caller to raise to
+        abandoned = [task for task in pending if not task.done()]
+        if abandoned:
+            logger.warning(
+                f"Shutdown budget ({SHUTDOWN_DRAIN_SECONDS}s) expired: abandoning "
+                f"{len(abandoned)} in-flight task(s)"
+            )
         _background_tasks.clear()
         _job_tasks.clear()
         cleanup_task.cancel()

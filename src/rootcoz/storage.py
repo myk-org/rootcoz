@@ -3850,13 +3850,17 @@ async def claim_submitted_job_for_analyze(job_id: str) -> bool:
     """Atomically claim a completed submitted job for in-place analyze.
 
     Returns True only for the caller that flipped ``status`` to ``pending``.
+
+    The claim also clears ``failure_reason``: this row is about to be analyzed
+    again, and a restart marker left on it (#458) would still be reported beside
+    the *new* run's status -- a completed job carrying ``server_restart``.
     """
     placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
     async with _connect_db() as db:
         cursor = await db.execute(
             f"""
             UPDATE results
-            SET status = 'pending'
+            SET status = 'pending', failure_reason = ''
             WHERE job_id = ?
               AND COALESCE(analysis_state, 'analyzed') = ?
               AND status NOT IN ({placeholders})

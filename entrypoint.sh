@@ -141,7 +141,19 @@ if [ "$SIDECAR_RUNNING" = true ]; then
     trap 'kill -TERM $APP_PID 2>/dev/null || true' TERM
     trap 'kill -INT $APP_PID 2>/dev/null || true' INT
 
-    wait $APP_PID
+    # `wait` returns 128+signum the moment that TERM trap fires, while uvicorn is
+    # still shutting down -- and the lifespan shutdown that records an in-flight
+    # job as a server restart (#458) happens *during* that shutdown. A bare `wait`
+    # under errexit therefore exited this script, and as PID 1 it took the
+    # container (and uvicorn, mid-write) with it: SIGTERM looked like a crash on
+    # the next boot. Keep waiting until the pid is really gone, then report the
+    # app's own status.
+    status=0
+    while :; do
+        wait "$APP_PID" || status=$?
+        kill -0 "$APP_PID" 2>/dev/null || break
+    done
+    exit "$status"
 else
     if [ -n "$extra_args" ]; then
         exec "$@" $extra_args
