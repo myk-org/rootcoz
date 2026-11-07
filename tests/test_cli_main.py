@@ -770,7 +770,8 @@ class TestSetReviewedCommand:
 
 
 class TestEnrichCommentsCommand:
-    # Real shape: POST/GET /results/{job_id}/enrich-comments -> {"enrichments": {comment_id: [badges]}}
+    # Real shape: GET /results/{job_id}/enrich-comments ->
+    # {"enrichments": {comment_id: [badges]}, "failed": bool}
     _PAYLOAD: ClassVar[dict] = {
         "enrichments": {
             "comment-1": [{"kind": "pr", "state": "merged"}],
@@ -779,7 +780,8 @@ class TestEnrichCommentsCommand:
                 {"kind": "pr", "state": "open"},
                 {"kind": "ticket", "status": "In Progress"},
             ],
-        }
+        },
+        "failed": False,
     }
 
     def test_enrich_comments(self, mock_client):
@@ -793,12 +795,22 @@ class TestEnrichCommentsCommand:
         mock_client.enrich_comments.assert_called_once_with("job-1")
 
     def test_enrich_comments_empty(self, mock_client):
-        mock_client.enrich_comments.return_value = {"enrichments": {}}
+        mock_client.enrich_comments.return_value = {"enrichments": {}, "failed": False}
         result = runner.invoke(app, ["results", "enrich-comments", "job-1"])
         assert result.exit_code == 0
         assert result.output.split("\n")[:2] == [
             "Enriched 0 comment(s).",
             "Status badges: 0.",
+        ]
+
+    def test_enrich_comments_failed_lookup(self, mock_client):
+        mock_client.enrich_comments.return_value = {"enrichments": {}, "failed": True}
+        result = runner.invoke(app, ["results", "enrich-comments", "job-1"])
+        assert result.exit_code == 0
+        assert result.output.split("\n")[:3] == [
+            "Enriched 0 comment(s).",
+            "Status badges: 0.",
+            "Some lookups failed; these counts may be incomplete.",
         ]
 
     def test_enrich_comments_json(self, mock_client):

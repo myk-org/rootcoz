@@ -1391,6 +1391,9 @@ def enrich_comments_cmd(
         badges = sum(len(badge_list) for badge_list in enrichments.values())
         typer.echo(f"Enriched {comments} comment(s).")
         typer.echo(f"Status badges: {badges}.")
+        # An empty mapping is also what a failed lookup returns (#452).
+        if data.get("failed"):
+            typer.echo("Some lookups failed; these counts may be incomplete.")
 
 
 # -- Analyze ------------------------------------------------------------------

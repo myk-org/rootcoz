@@ -1277,7 +1277,10 @@ class TestRootCozClientReview:
         assert result["status"] == "ok"
 
     def test_enrich_comments(self):
-        payload = {"enrichments": {"comment-1": [{"kind": "pr", "state": "merged"}]}}
+        payload = {
+            "enrichments": {"comment-1": [{"kind": "pr", "state": "merged"}]},
+            "failed": False,
+        }
 
         def handler(request):
             assert request.method == "GET"
