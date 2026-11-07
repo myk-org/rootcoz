@@ -46,6 +46,10 @@ AUDIT_EXEMPT: dict[tuple[str, str], str] = {
     ("POST", "/api/chat/{job_id}/close"): "chat session lifecycle",
     ("DELETE", "/api/chat/{job_id}"): "chat session lifecycle",
     ("POST", "/api/chat/{job_id}"): "chat message activity, content never audited",
+    (
+        "POST",
+        "/api/chat-issue/propose",
+    ): "issue draft held in memory, files nothing",
     ("POST", "/api/admin/chat/init"): "chat session lifecycle",
     ("POST", "/api/admin/chat/abort"): "chat session lifecycle",
     ("POST", "/api/admin/chat/close"): "chat session lifecycle",

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react'
 import { api, extractApiDetail } from '@/lib/api'
-import { createIssueFailureMessage } from '@/lib/issueCreateError'
+import { createIssueFailureMessage, createOutcomeUnknown } from '@/lib/issueCreateError'
 import { IssueCreateError } from '@/components/shared/IssueCreateError'
 import { useSubmitGuard } from '@/lib/useSubmitGuard'
 import { reviewKey } from '@/lib/reviewKey'
@@ -96,6 +96,10 @@ export function BugCreationDialog({
   // A failed create returns to the preview with the generated issue intact, so the
   // same title/body/type can be retried without regenerating it.
   const [createError, setCreateError] = useState('')
+  // True when the failed attempt could not prove that nothing was filed: a 5xx,
+  // a timeout or a lost response may have created the issue, so retrying can
+  // duplicate it. Only a 4xx refusal is the server saying it filed nothing.
+  const [createMaybeFiled, setCreateMaybeFiled] = useState(false)
   const guardSubmit = useSubmitGuard()
   const [selectedRepo, setSelectedRepo] = useState(availableRepos?.[0]?.url ?? '')
   const [jiraProjectKey, setJiraProjectKey] = useState(defaultProjectKey || '')
@@ -221,6 +225,7 @@ export function BugCreationDialog({
   async function handleCreate() {
     await guardSubmit(async () => {
       setCreateError('')
+      setCreateMaybeFiled(false)
       setPhase('creating')
       // Snapshot the tracker links that already exist so a failure can be told
       // apart from "nothing was filed" before the retry button offers a resubmit.
@@ -247,6 +252,9 @@ export function BugCreationDialog({
           return
         }
         setCreateError(createIssueFailureMessage(err))
+        // What the server said decides: its own "was not filed" refusal is not
+        // an unknown outcome, so the dialog must not contradict it.
+        setCreateMaybeFiled(createOutcomeUnknown(err))
         setPhase('preview')
       }
     })
@@ -307,6 +315,7 @@ export function BugCreationDialog({
       setCreatedUrl('')
       setErrorMsg('')
       setCreateError('')
+      setCreateMaybeFiled(false)
       setSelectedRepo(availableRepos?.[0]?.url ?? '')
       setJiraProjectKey(defaultProjectKey || '')
       setConfirmedProjectKey(defaultProjectKey || '')
@@ -402,6 +411,13 @@ export function BugCreationDialog({
         {promptPhase === 'preview' && (
           <div className="space-y-4">
             {createError && <IssueCreateError message={createError} />}
+            {createError && createMaybeFiled && (
+              <p role="status" className="text-xs text-signal-amber">
+                The server could not confirm this attempt, so the issue may already
+                have been filed. Check {label} before you retry — submitting it again could
+                create a duplicate.
+              </p>
+            )}
             {target === 'github' && availableRepos && availableRepos.length > 1 && (
               <div className="space-y-2">
                 <label htmlFor="bug-repo" className="text-xs font-display uppercase tracking-widest text-text-tertiary">Repository</label>
