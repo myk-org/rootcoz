@@ -2244,7 +2244,9 @@ class TestAppLifespan:
         The clone-thread wait deliberately keeps waiting through repeated
         cancellation (#458), and ``asyncio.gather``'s future only completes once
         every child has -- so the budget has to abandon it, and the mark has to
-        have landed before that.
+        have landed before that. Abandoning is not enough on its own: returning
+        from the lifespan leaves the task for ``asyncio.run()``'s unbounded
+        cancel-and-gather, so the shutdown has to end the process instead.
         """
         from rootcoz import main
 
@@ -2262,7 +2264,9 @@ class TestAppLifespan:
         async def _nothing() -> None:
             return None
 
+        exited: list[int] = []
         monkeypatch.setattr(main, "SHUTDOWN_DRAIN_SECONDS", 0.2)
+        monkeypatch.setattr(main.os, "_exit", exited.append)
         shed = asyncio.create_task(_stubborn())
         try:
             with (
@@ -2285,6 +2289,7 @@ class TestAppLifespan:
             main._job_tasks.clear()
 
         assert stored["failure_reason"] == storage.SERVER_RESTART_FAILURE_REASON
+        assert exited == [0], "the shutdown must end the process, not return"
 
     @pytest.mark.asyncio
     async def test_a_backfill_writes_the_database_it_started_on(

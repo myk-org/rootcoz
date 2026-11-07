@@ -2984,6 +2984,13 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                 f"Shutdown budget ({SHUTDOWN_DRAIN_SECONDS}s) expired: abandoning "
                 f"{len(abandoned)} in-flight task(s)"
             )
+            # Returning would hand the pod back to the grace deadline: uvicorn's
+            # asyncio.run() cancels every task still on the loop and gathers it
+            # with no timeout (its executor join allows 300 s), so a child that
+            # suppresses cancellation holds the process open no matter what this
+            # lifespan did. The budget is a budget only if the process stops
+            # here -- mark committed, log line written.
+            os._exit(0)
         _background_tasks.clear()
         _job_tasks.clear()
         cleanup_task.cancel()
