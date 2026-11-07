@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 from typing import ClassVar, Self
 from unittest.mock import MagicMock, patch
 
@@ -2414,6 +2415,143 @@ class TestCreateIssueCommand:
         assert "github_token" not in kwargs
         assert kwargs["jira_token"] == _FAKE_JIRA_CLI_TOKEN
         assert kwargs["jira_email"] == "user@example.com"
+
+
+class TestCreateChatIssueCommand:
+    def test_create_chat_issue(self, mock_client):
+        mock_client.create_chat_issue.return_value = {
+            "url": "https://github.com/org/repo/issues/99",
+            "number": 99,
+            "key": "",
+            "title": "Bug fix",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "create-chat-issue",
+                "--target",
+                "github",
+                "--title",
+                "Bug fix",
+                "--body",
+                "Details...",
+                "--confirmation-id",
+                "draft-1",
+                "--confirmation-code",
+                "ABC234",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "#99" in result.output
+        assert "github.com/org/repo/issues/99" in result.output
+        mock_client.create_chat_issue.assert_called_once_with(
+            target="github",
+            title="Bug fix",
+            body="Details...",
+            confirmation_id="draft-1",
+            confirmation_code="ABC234",
+            repo="",
+            job_id="",
+            jira_project_key="",
+            jira_security_level="",
+            jira_issue_type="Bug",
+        )
+
+    def test_create_chat_issue_rejects_an_unknown_target(self, mock_client):
+        result = runner.invoke(
+            app,
+            [
+                "create-chat-issue",
+                "--target",
+                "invalid",
+                "--title",
+                "X",
+                "--body",
+                "Y",
+                "--confirmation-id",
+                "draft-1",
+                "--confirmation-code",
+                "ABC234",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "--target" in result.output
+        mock_client.create_chat_issue.assert_not_called()
+
+    def test_propose_chat_issue_prints_the_draft_to_approve(self, mock_client):
+        """The command files nothing: it prints the text and the next command."""
+        mock_client.propose_chat_issue.return_value = {
+            "confirmation_id": "draft-1",
+            "confirmation_code": "ABC234",
+            "title": "Bug fix",
+            "body": "Details...",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "propose-chat-issue",
+                "--target",
+                "github",
+                "--title",
+                "Bug fix",
+                "--body",
+                "Details...",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "draft-1" in result.output
+        assert "ABC234" in result.output
+        assert "Details..." in result.output
+        assert "create-chat-issue" in result.output
+        mock_client.create_chat_issue.assert_not_called()
+
+    def test_the_proposed_command_can_actually_run(self, mock_client):
+        """Every option `create-chat-issue` requires is in the command it prints."""
+        mock_client.propose_chat_issue.return_value = {
+            "confirmation_id": "draft-1",
+            "confirmation_code": "ABC234",
+            "title": "Bug fix",
+            "body": "Details...",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "propose-chat-issue",
+                "--target",
+                "github",
+                "--title",
+                "Bug fix",
+                "--body",
+                "Details...",
+                "--repo",
+                "org/tests",
+                "--job-id",
+                "job-1",
+            ],
+        )
+        assert result.exit_code == 0
+        command = result.output.split("file it with: ", 1)[1].strip()
+        for option in (
+            "--target github",
+            "--confirmation-id draft-1",
+            "--confirmation-code ABC234",
+            "--title " + shlex.quote("Bug fix"),
+            "--body " + shlex.quote("Details..."),
+            "--repo org/tests",
+            "--job-id job-1",
+        ):
+            assert option in command
+        # And it names the same destination the draft was proposed for.
+        assert mock_client.propose_chat_issue.call_args[1]["repo"] == "org/tests"
+        assert mock_client.propose_chat_issue.call_args[1]["job_id"] == "job-1"
+
+    def test_create_chat_issue_exposes_no_token_options(self, mock_client):
+        """A command that could take a token could file under a server token."""
+        result = runner.invoke(app, ["create-chat-issue", "--help"])
+        assert result.exit_code == 0
+        assert "--github-token" not in result.output
+        assert "--jira-token" not in result.output
+        assert "--jira-sa-token" not in result.output
 
 
 class TestOverrideClassificationCommand:
