@@ -1251,14 +1251,19 @@ async def test_a_slow_encode_does_not_hold_the_write_lock(
 
     monkeypatch.setattr(storage.zstd, "compress", parked_first_compress)
     encoder = asyncio.create_task(write(parked))
+    rival_tasks: list[asyncio.Task[None]] = []
     try:
         assert await asyncio.to_thread(encoding.wait, 60), "no encode to park"
         # Written while that encode is still parked. A write lock held across the
         # encode would raise here -- after the connection's ``busy_timeout``, so
         # this fails on the bug instead of hanging on it.
-        await asyncio.gather(*(write(job_id) for job_id in rivals))
+        rival_tasks = [asyncio.create_task(write(job_id)) for job_id in rivals]
+        await asyncio.gather(*rival_tasks)
         assert not encoder.done(), "the encode has to still be in progress"
     finally:
+        # Gather re-raises on the first failure and leaves its siblings running;
+        # drain them before the encode is released so no write outlives the test.
+        await asyncio.gather(*rival_tasks, return_exceptions=True)
         release.set()
         await encoder
 
