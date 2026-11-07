@@ -24,14 +24,8 @@ const usage: TokenUsageSummary = {
 
 type FailureWithUsage = FailureAnalysis & { token_usage?: TokenUsageSummary | null }
 
-function showCard(count: number, tokenUsage?: TokenUsageSummary | null, peerDebate?: PeerDebate) {
-  const tests: FailureWithUsage[] = Array.from({ length: count }, (_, i) => ({
-    id: `id-${i}`, test_name: `test-${i}`, error: 'boom', error_signature: 'shared',
-    analysis: { classification: 'CODE ISSUE', pattern: '', affected_tests: [], details: '', artifacts_evidence: '' },
-    token_usage: tokenUsage,
-    peer_debate: peerDebate,
-  }))
-  const group: GroupedFailure = { id: 'group-id-0', signature: 'shared', tests, count }
+function showGroup(tests: FailureWithUsage[]) {
+  const group: GroupedFailure = { id: 'group-id-0', signature: 'shared', tests, count: tests.length }
   render(
     <MemoryRouter>
       <TooltipProvider delayDuration={0}>
@@ -42,6 +36,17 @@ function showCard(count: number, tokenUsage?: TokenUsageSummary | null, peerDeba
     </MemoryRouter>,
   )
   fireEvent.click(screen.getByRole('button', { name: /test-0/i }))
+}
+
+function showCard(count: number, tokenUsage?: TokenUsageSummary | null, peerDebate?: PeerDebate, analysisError = '') {
+  showGroup(Array.from({ length: count }, (_, i) => ({
+    id: `id-${i}`, test_name: `test-${i}`, error: 'boom', error_signature: 'shared',
+    // A row with a reason has no classification: that is what makes it incomplete.
+    analysis: { classification: analysisError ? '' : 'CODE ISSUE', pattern: '', affected_tests: [], details: '', artifacts_evidence: '' },
+    token_usage: tokenUsage,
+    peer_debate: peerDebate,
+    ...(analysisError ? { analysis_error: analysisError } : {}),
+  })))
 }
 
 describe('FailureCard primary usage', () => {
@@ -93,6 +98,40 @@ describe('FailureCard primary usage', () => {
     expect(screen.queryByPlaceholderText('provider')).toBeNull()
     expect(screen.queryByPlaceholderText('model')).toBeNull()
     expect(screen.queryByText(/AI for issue generation/i)).toBeNull()
+  })
+})
+
+describe('FailureCard incomplete analysis', () => {
+  beforeEach(() => { sessionStorage.clear(); auth.role = 'reviewer' })
+
+  it('renders the reason the analysis is missing', () => {
+    // The backend stores the reason on the row; without this the card showed
+    // only "check server logs" and the reason was invisible to reviewers.
+    showCard(1, null, undefined, 'AI analysis incomplete: response has no usable classification')
+    expect(screen.getByTestId('analysis-incomplete-reason')).toHaveTextContent(
+      'no usable classification',
+    )
+  })
+
+  it('renders the reason of a grouped member that is still unclassified', () => {
+    // A single-failure re-analysis can leave one member unclassified while the
+    // representative is classified, and the card takes its analysis from the
+    // representative — the member's reason must still show.
+    showGroup([
+      { id: 'id-0', test_name: 'test-0', error: 'boom', error_signature: 'shared',
+        analysis: { classification: 'CODE ISSUE', pattern: '', affected_tests: [], details: '', artifacts_evidence: '' } },
+      { id: 'id-1', test_name: 'test-1', error: 'boom', error_signature: 'shared',
+        analysis: { classification: '', pattern: '', affected_tests: [], details: '', artifacts_evidence: '' },
+        analysis_error: 'AI analysis incomplete: no usable classification' },
+    ])
+    expect(screen.getByTestId('analysis-incomplete-reason')).toHaveTextContent(
+      'no usable classification',
+    )
+  })
+
+  it('renders nothing when the row has a real analysis', () => {
+    showCard(1)
+    expect(screen.queryByTestId('analysis-incomplete-reason')).toBeNull()
   })
 })
 

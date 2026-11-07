@@ -20,6 +20,8 @@ interface ConfirmDialogProps {
   loading?: boolean
   /** Error message shown in the dialog body (e.g. a failed request). */
   error?: string | null
+  /** Muted second line under the error — the offending items behind it. */
+  errorDetail?: string | null
 }
 
 export function ConfirmDialog({
@@ -33,6 +35,7 @@ export function ConfirmDialog({
   onConfirm,
   loading = false,
   error,
+  errorDetail,
 }: ConfirmDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -42,6 +45,7 @@ export function ConfirmDialog({
           <DialogDescription>{description}</DialogDescription>
         </DialogHeader>
         {error && <p role="alert" className="text-sm text-signal-red">{error}</p>}
+        {errorDetail && <p className="text-xs text-text-tertiary">{errorDetail}</p>}
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={loading}>
             {cancelLabel}

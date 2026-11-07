@@ -50,6 +50,7 @@ RESULT_FIELD_PATHS: frozenset[str] = frozenset(
         "result.skipped_count",
         "result.failed_count",
         "result.analysis_state",
+        "result.incomplete_count",
         "result.request_params",
         "result.display_name",
         # Per-failure projections (applied to each item in result.failures)

@@ -242,7 +242,10 @@ async def test_all_direct_groups_fail_preserves_child_report(
             else "Analysis failed; check server logs for details"
         )
     if child_success:
-        assert "1 group(s) failed" in result["summary"]
+        # The summary names what the user can do, not where to read logs.
+        assert "1 group(s) could not be analyzed" in result["summary"]
+        assert "re-analyze the job" in result["summary"]
+        assert "check server logs" not in result["summary"]
         assert "error" not in result
         review.assert_awaited_once()
     else:
@@ -420,7 +423,7 @@ async def test_pipeline_jira_and_saving_stages(
                     in row["result"]["error"]
                 )
             else:
-                assert "1 group(s) failed" in row["result"]["summary"]
+                assert "1 group(s) could not be analyzed" in row["result"]["summary"]
                 assert (
                     f"{2 if dedup else 1} analyzed successfully"
                     in row["result"]["summary"]

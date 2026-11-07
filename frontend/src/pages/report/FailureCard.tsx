@@ -247,6 +247,18 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
 
   const repKey = scopedReviewKey(rep.test_name)
   const classification = classifications[repKey] ?? analysis.classification
+  // Grouped failures share a card but not an outcome: a single-failure
+  // re-analysis can leave a member unclassified while the representative is
+  // classified, so every unclassified member's reason has to show (#397).
+  const incompleteReasons = [
+    ...new Set(
+      group.tests.flatMap((t) => {
+        const effective =
+          classifications[scopedReviewKey(t.test_name)] ?? t.analysis.classification
+        return t.analysis_error && !effective.trim() ? [t.analysis_error] : []
+      }),
+    ),
+  ]
   const pattern = analysis.pattern || ''
   const borderColor = classification === 'PRODUCT BUG' ? 'border-l-signal-orange' : 'border-l-signal-blue'
 
@@ -496,6 +508,21 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                 {displayError}
               </pre>
             </div>
+
+            {/* Why there is no analysis (#397): the backend stores the reason on
+                the row, so an unclassified card explains itself instead of
+                showing a bare "check server logs". Only while the row has no
+                effective classification — a reviewer override completes it. */}
+            {incompleteReasons.length > 0 && (
+              <div className="space-y-2">
+                <h4 className="text-xs font-display uppercase tracking-widest text-text-tertiary mb-2">Analysis Incomplete</h4>
+                {incompleteReasons.map((reason) => (
+                  <p key={reason} role="alert" data-testid="analysis-incomplete-reason" className="rounded-md bg-signal-orange/5 border border-signal-orange/20 p-3 text-sm text-text-secondary whitespace-pre-wrap">
+                    {reason}
+                  </p>
+                ))}
+              </div>
+            )}
 
             {/* Analysis */}
             {analysis.details && (

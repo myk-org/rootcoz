@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 from typing import ClassVar
 from unittest.mock import AsyncMock, patch
 
@@ -15,6 +16,7 @@ from rootcoz.attribution import AiProvenance, read_provenance
 from rootcoz.config import get_settings
 from rootcoz.encryption import get_hmac_secret
 from rootcoz.feedback import (
+    _PEM_WINDOW,
     _build_fallback_feedback,
     _derive_fallback_labels,
     _parse_json_response,
@@ -170,6 +172,349 @@ class TestScrubSensitiveData:
         text = "Failed request to https://api.example.com/v1/users"
         result = scrub_sensitive_data(text)
         assert "https://api.example.com/v1/users" in result
+
+    def test_redacts_authenticated_url_userinfo(self):
+        text = "git clone https://user:s3cr3t-token@git.example.com/org/repo.git"  # pragma: allowlist secret
+        result = scrub_sensitive_data(text)
+        assert "s3cr3t-token" not in result
+        assert "user:" not in result
+        # The scheme, host and path survive so the log still names the repo.
+        assert "https://[REDACTED]@git.example.com/org/repo.git" in result
+
+    def test_redacts_bare_userinfo_in_a_clone_url(self):
+        text = "fatal: could not read user:s3cr3t-token@git.example.com:org/repo.git"
+        result = scrub_sensitive_data(text)
+        assert "s3cr3t-token" not in result
+        assert "[REDACTED]@git.example.com:org/repo.git" in result
+
+    def test_redacts_a_secret_containing_whitespace(self):
+        """Only the first token of a value was dropped, so everything after the
+        first space -- the rest of a passphrase, or a whole PEM header -- was
+        left in the DEBUG log excerpt that ships in the issue (#399)."""
+        assert (
+            scrub_sensitive_data("GITHUB_TOKEN=abc def ghi")  # pragma: allowlist secret
+            == "GITHUB_TOKEN=[REDACTED]"
+        )
+        # Split so the private-key hook does not flag this fixture. A header
+        # with no footer in reach takes the fail-closed branch, so the body
+        # goes with it (see test_footerless_pem_redacts_its_body).
+        pem_header = "-----BEGIN RSA PRIVATE" + " KEY-----"
+        assert (
+            scrub_sensitive_data(f"PRIVATE_KEY={pem_header}\nMIIEowIBAAKCAQEA")
+            == "PRIVATE_KEY=[REDACTED]"
+        )
+        quoted = scrub_sensitive_data(
+            '{"client_secret": "pass phrase"}'  # pragma: allowlist secret
+        )
+        assert "phrase" not in quoted
+
+    def test_redacts_userinfo_whose_password_contains_a_slash(self):
+        """The authority was scanned with `[^\\s/]*`, so a base64 password
+        holding a `/` broke the match before its `@` and the *whole*
+        `user:a/b+c@host` survived into the DEBUG log excerpt. A `/` before the
+        `@` is credential text; only a `/` after it ends the authority (#399)."""
+        assert (
+            scrub_sensitive_data(
+                "push failed for https://user:a/b+c@registry.example.com/v2/app"
+            )
+            == "push failed for https://[REDACTED]@registry.example.com/v2/app"
+        )
+        assert (
+            scrub_sensitive_data("fatal: user:a/b+c@git.example.com:org/repo.git")
+            == "fatal: [REDACTED]@git.example.com:org/repo.git"
+        )
+
+    def test_redacts_a_pem_block_after_an_assignment(self):
+        """The value pattern stopped at the newline, so `PRIVATE_KEY=-----BEGIN…`
+        lost only its header line and the key body -- the actual secret --
+        stayed in the DEBUG log excerpt shipped in the issue (#399)."""
+        block = (
+            "-----BEGIN RSA PRIVATE" + " KEY-----\n"
+            "MIIEowIBAAKCAQEAsecretbody\n"
+            "-----END RSA PRIVATE" + " KEY-----"
+        )
+        assert (
+            scrub_sensitive_data(f"crash log\nPRIVATE_KEY={block}\nafter line")
+            == "crash log\nPRIVATE_KEY=[REDACTED]\nafter line"
+        )
+
+    def test_footerless_pem_redacts_its_body(self):
+        """The bounded block fell through to "redact the header line only" when
+        the footer never arrived, which kept the key body -- the secret -- in
+        full (3 000 bytes came back untouched). With no footer in reach the
+        bound must fail closed and eat the header plus its whole window (#399)."""
+        body = "MIIEowIBAAKCAQEA" * 188
+        result = scrub_sensitive_data(
+            "PRIVATE_KEY=-----BEGIN RSA PRIVATE" + " KEY-----\n" + body
+        )
+        assert result == "PRIVATE_KEY=[REDACTED]", result
+
+    def test_redacts_userinfo_longer_than_the_scan_window(self):
+        """The scan window is 2 048 chars so a crafted excerpt cannot force a
+        backtracking run, but the bound failed open: a 2 049-char userinfo
+        matched nothing and the secret came back in full -- for the scheme
+        pattern and for the bare `user:<secret>@host` form. Over the window the
+        bound must fail closed and redact the whole run (#399)."""
+        secret = "u" * 2049
+        for text in (
+            f"git clone https://{secret}@git.example.com/org/repo.git",
+            f"fatal: user:{secret}@git.example.com:org/repo.git",
+        ):
+            result = scrub_sensitive_data(text)
+            assert secret not in result
+            assert "[REDACTED]" in result, result
+
+    def test_redacts_a_bare_pem_block(self):
+        """A key pasted on its own -- no `KEY=`/`key:` in front, the shape of a
+        log excerpt, a `kubectl describe` dump or an issue body -- never
+        reached `_ASSIGNMENT_VALUE`, so header and body shipped verbatim. The
+        block goes header through footer, and the text after it survives
+        (#399)."""
+        block = (
+            "-----BEGIN RSA PRIVATE" + " KEY-----\n"
+            "MIIEowIBAAKCAQEAsecretbody\n"
+            "-----END RSA PRIVATE" + " KEY-----"
+        )
+        assert (
+            scrub_sensitive_data(f"kubectl describe secret db\n{block}\nafter line")
+            == "kubectl describe secret db\n[REDACTED]\nafter line"
+        )
+
+    def test_footerless_bare_pem_redacts_its_body(self):
+        """With no footer in reach the bare header must fail closed like the
+        assignment case: header plus its whole window goes, so no body byte
+        survives, and the window is what bounds it (#399)."""
+        header = "-----BEGIN RSA PRIVATE" + " KEY-----"
+        assert scrub_sensitive_data(header + "\n" + "MIIEowIBAAKCAQEA" * 188) == (
+            "[REDACTED]"
+        )
+        result = scrub_sensitive_data(header + "\n" + "A" * (2 * _PEM_WINDOW))
+        assert result.startswith("[REDACTED]")
+        # Header plus one window went, the rest of the run is left alone.
+        assert len(result) <= _PEM_WINDOW + len("[REDACTED]")
+
+    def test_bare_pgp_private_key_block_is_redacted(self):
+        """The bare header required the block to end in `PRIVATE KEY-----`, so a
+        PGP block (`… PRIVATE KEY BLOCK-----`) matched nothing at all and its
+        body came back byte-identical (#399)."""
+        block = (
+            "-----BEGIN PGP PRIVATE" + " KEY BLOCK-----\n"
+            "lQOYBFsecretsecretsecret\n"
+            "-----END PGP PRIVATE" + " KEY BLOCK-----"
+        )
+        assert (
+            scrub_sensitive_data(f"gpg secret key dump\n{block}\nafter line")
+            == "gpg secret key dump\n[REDACTED]\nafter line"
+        )
+
+    def test_footerless_bare_pgp_private_key_block_redacts_its_body(self):
+        """The PGP header must fail closed like the other flavours: with no
+        footer in reach the header plus its whole window goes (#399)."""
+        header = "-----BEGIN PGP PRIVATE" + " KEY BLOCK-----"
+        assert scrub_sensitive_data(header + "\n" + "lQOYBFsecret" * 188) == (
+            "[REDACTED]"
+        )
+        result = scrub_sensitive_data(header + "\n" + "A" * (2 * _PEM_WINDOW))
+        assert result.startswith("[REDACTED]")
+        assert len(result) <= _PEM_WINDOW + len("[REDACTED]")
+
+    def test_bare_private_key_header_with_trailing_tokens_is_redacted(self):
+        """The private header only allowed the PGP `BLOCK` after `PRIVATE KEY`,
+        so any further token (`PRIVATE KEY BLOCK EXTRA`, a vendor flavour)
+        matched the bare branch not at all and the body shipped byte-identical
+        (#399)."""
+        block = (
+            "-----BEGIN PRIVATE" + " KEY BLOCK EXTRA-----\n"
+            "MIIEowIBAAKCAQEAsecretbody\n"
+            "-----END PRIVATE" + " KEY BLOCK EXTRA-----"
+        )
+        assert (
+            scrub_sensitive_data(f"vendor key dump\n{block}\nafter line")
+            == "vendor key dump\n[REDACTED]\nafter line"
+        )
+
+    def test_footerless_bare_private_key_header_with_trailing_tokens_redacts_body(
+        self,
+    ):
+        """A trailing-token header must fail closed like every other flavour:
+        with no footer in reach no body byte survives (#399)."""
+        header = "-----BEGIN PRIVATE" + " KEY BLOCK EXTRA-----"
+        assert scrub_sensitive_data(header + "\n" + "MIIEowIBAAKCAQEA" * 188) == (
+            "[REDACTED]"
+        )
+        result = scrub_sensitive_data(header + "\n" + "A" * (2 * _PEM_WINDOW))
+        assert result.startswith("[REDACTED]")
+        assert len(result) <= _PEM_WINDOW + len("[REDACTED]")
+
+    def test_bare_public_pem_forms_are_left_intact(self):
+        """An open-ended token list after `PRIVATE KEY` must not reach a public
+        block: none of these carries a `PRIVATE KEY` token sequence, and a
+        certificate, a public key or a signature is not a secret (#399)."""
+        for name, body in (
+            ("CERTIFICATE", "MIIDdzCCAl+gAwIBAgIEpublicbody"),
+            ("PUBLIC KEY", "MIIBIjANBgkqhkipublicbody"),
+            ("PGP PUBLIC KEY BLOCK", "mQINBFpublicbody"),
+            ("PGP SIGNATURE", "iQEzBAABsignaturebody"),
+        ):
+            text = f"-----BEGIN {name}-----\n{body}\n-----END {name}-----"
+            assert scrub_sensitive_data(text) == text, name
+
+    def test_bare_public_pem_block_is_left_intact(self):
+        """The bare pattern took any `-----BEGIN…-----`, so a TLS-failure report
+        lost the certificate it is reporting about. Only a private key's body is
+        a secret, so a bare public block survives — while the assignment case,
+        where over-redacting is the safe side, still eats it (#399)."""
+        cert = (
+            "-----BEGIN CERTIFICATE-----\n"
+            "MIIDdzCCAl+gAwIBAgIEpublicbody\n"
+            "-----END CERTIFICATE-----"
+        )
+        public_key = (
+            "-----BEGIN PUBLIC KEY-----\n"
+            "MIIBIjANBgkqhkipublicbody\n"
+            "-----END PUBLIC KEY-----"
+        )
+        report = f"TLS handshake failed: x509: unknown authority\n{cert}"
+        assert scrub_sensitive_data(report) == report
+        assert scrub_sensitive_data(public_key) == public_key
+        # After an assignment the broad header stays: the value is the secret.
+        assert scrub_sensitive_data(f"PRIVATE_KEY={cert}") == "PRIVATE_KEY=[REDACTED]"
+
+    def test_footerless_bare_public_pem_is_left_intact(self):
+        """The fail-closed window must not widen the bare case back to every
+        header: with no footer in reach a bare public block is still untouched
+        (#399)."""
+        text = "-----BEGIN CERTIFICATE-----\n" + "Z" * (2 * _PEM_WINDOW)
+        assert scrub_sensitive_data(text) == text
+
+    def test_every_bare_private_key_header_is_redacted(self):
+        """Narrowing the bare header must not lose a private-key flavour: with
+        or without a leading token, and with or without encryption (#399)."""
+        for prefix in ("RSA ", "EC ", "DSA ", "OPENSSH ", "ENCRYPTED ", ""):
+            block = (
+                f"-----BEGIN {prefix}PRIVATE KEY-----\n"
+                "MIIEowIBAAKCAQEAsecretbody\n"
+                f"-----END {prefix}PRIVATE KEY-----"
+            )
+            assert scrub_sensitive_data(block) == "[REDACTED]", prefix
+
+    def test_bare_begin_word_is_not_a_pem_header(self):
+        """Only the `-----` markers make a header; the word alone is prose."""
+        text = "the log said BEGIN and then the test failed\nEND"
+        assert scrub_sensitive_data(text) == text
+
+    def test_pem_redaction_is_marker_and_length_bounded(self):
+        """Only a `-----BEGIN` value followed by its `-----END` is eaten: a bare
+        `BEGIN` word and an unterminated block must not swallow the log."""
+        assert (
+            scrub_sensitive_data("PRIVATE_KEY=BEGIN is not a header\nKEEP=kept")
+            == "PRIVATE_KEY=[REDACTED]\nKEEP=kept"
+        )
+        runaway = (
+            "PRIVATE_KEY=-----BEGIN RSA PRIVATE"
+            + " KEY-----\n"
+            + "A" * 20000
+            + "\n-----END RSA PRIVATE"
+            + " KEY-----\nTAIL"
+        )
+        result = scrub_sensitive_data(runaway)
+        assert "-----END RSA PRIVATE" + " KEY-----" in result
+        assert "TAIL" in result
+
+    def test_redacts_userinfo_whose_password_contains_an_at_sign(self):
+        """The userinfo match stopped at the *first* `@`, so a password holding
+        one leaked its suffix together with the host. The host is what follows
+        the last `@` of the authority (#399)."""
+        assert (
+            scrub_sensitive_data(
+                "push failed for https://user:p@ssw0rd@registry.example.com/v2/app"
+            )
+            == "push failed for https://[REDACTED]@registry.example.com/v2/app"
+        )
+        assert (
+            scrub_sensitive_data("fatal: user:p@ss@git.example.com:org/repo.git")
+            == "fatal: [REDACTED]@git.example.com:org/repo.git"
+        )
+
+    def test_scrubbing_is_linear_on_adversarial_userinfo(self):
+        """The userinfo pattern matched the right text but the wrong way: with
+        no `@` in reach the greedy nested quantifier re-scanned the rest of the
+        excerpt from every `:` the bare pattern anchors on, so `a:`*k cost
+        quadratic time in attacker-supplied text (0.23 s at 4 000 chars,
+        1.73 s at 16 000) (#397). The `\b`-anchored scheme and bare patterns had
+        the same shape: they held on at every word boundary of an `a.`/`a-` run
+        and re-scanned that run to its end, so the same excerpt cost 0.9 s at
+        16 000 chars and 4.5 s at 32 000 (#399). Both sizes must fit the same
+        generous bound and a 4x bigger input must not cost 16x, which only a
+        scan that enters each run once can do -- the point is to catch the
+        blowup, not to police microseconds."""
+
+        def elapsed(text: str) -> float:
+            best = float("inf")
+            for _ in range(3):
+                start = time.perf_counter()
+                scrub_sensitive_data(text)
+                best = min(best, time.perf_counter() - start)
+            return best
+
+        for unit in ("a:", "a.", "a-"):
+            small = elapsed((unit * 4000)[:8000])
+            large = elapsed((unit * 16000)[:32000])
+            assert large < 0.5, f"{unit!r} 32 000-char input took {large:.2f}s"
+            assert large < small * 8 + 0.05, (
+                f"{unit!r} scaled {large / max(small, 1e-9):.1f}x for 4x input "
+                f"({small:.3f}s at 8 000, {large:.3f}s at 32 000)"
+            )
+
+    def test_redacts_quoted_compound_keys(self):
+        """A quoted JSON/literal key must not hide a secret behind its `_`."""
+        for text in (
+            '{"client_secret": "credential-value"}',  # pragma: allowlist secret
+            "{'api_key': 'credential-value'}",  # pragma: allowlist secret
+            '{"access_token": "credential-value"}',  # pragma: allowlist secret
+            '{"aws_secret_access_key": "credential-value"}',  # pragma: allowlist secret
+        ):
+            result = scrub_sensitive_data(text)
+            assert "credential-value" not in result, result
+            assert "[REDACTED]" in result, result
+
+    def test_quoted_key_narrowing_spares_prose(self):
+        for text in (
+            "the client_secret and api_key fields are documented",
+            'see "client_secret" in the settings reference',
+        ):
+            assert scrub_sensitive_data(text) == text
+
+    def test_preserves_docker_digest_tag(self):
+        text = "docker pull registry.example.com/app:v4.18@sha256:" + "f" * 64
+        result = scrub_sensitive_data(text)
+        assert "app:v4.18@sha256:" in result
+
+    def test_preserves_mailto_address(self):
+        text = "contact mailto:user@example.com for access"
+        assert scrub_sensitive_data(text) == text
+
+    def test_preserves_unauthenticated_urls(self):
+        text = "git clone https://git.example.com/org/repo.git"
+        assert scrub_sensitive_data(text) == text
+
+    def test_preserves_harmless_settings(self):
+        for text in (
+            "MAX_TOKENS=2000",
+            "max_tokens=2000",
+            "TOKENIZERS_PARALLELISM=false",
+        ):
+            assert scrub_sensitive_data(text) == text
+        # The narrowing must not lose a real env-style credential.
+        assert (
+            scrub_sensitive_data(
+                "AWS_SECRET_ACCESS_KEY=wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"  # pragma: allowlist secret
+            )
+            == ("AWS_SECRET_ACCESS_KEY=[REDACTED]")
+        )
+        assert scrub_sensitive_data(
+            "GITHUB_TOKEN=ghp_abcdefghij1234567890"  # pragma: allowlist secret
+        ) == ("GITHUB_TOKEN=[REDACTED]")
 
     def test_preserves_test_names(self):
         text = "tests.auth.test_login.TestLogin.test_valid_credentials"

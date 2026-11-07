@@ -154,6 +154,10 @@ export interface FailureAnalysis {
   /** Fallback display text when the source reported no message (backend `display_error`). */
   stack_trace?: string
   analysis: AnalysisDetail
+  /** Why this failure has no real analysis (e.g. the AI answered without a
+   *  classification). Explanatory only: an empty effective classification is
+   *  what marks the row incomplete, so a reviewer override still completes it. */
+  analysis_error?: string
   /** Anchor signature (frozen pre-v2 rules), stable for the life of the row. */
   error_signature: string
   /** Current-rules signature; absent on failures stored before those rules. */
@@ -228,6 +232,9 @@ export interface AnalysisResult {
   analysis_state?: 'submitted' | 'analyzed'
   analyzed_by?: string
   analyzed_at?: string
+  /** Failures whose effective classification is empty (a reviewer override
+   *  counts, so an override clears the failure from this total). */
+  incomplete_count?: number
 }
 
 // -- Dashboard ------------------------------------------------------
@@ -258,6 +265,8 @@ export interface DashboardJob {
   skipped_count?: number
   failed_count?: number
   analysis_state?: 'submitted' | 'analyzed'
+  /** Failures with no usable classification. */
+  incomplete_count?: number
 }
 
 export interface TestEntry {
@@ -468,6 +477,10 @@ export interface ExporterInfo {
 
 export interface ReportPortalPushResult {
   pushed: number
+  /** Tests pushed under the TO INVESTIGATE fallback (they had no
+   *  classification to map) — pushed, not skipped. Older servers omit it. */
+  defaulted?: string[]
+  /** Tests that were not pushed at all. */
   unmatched: string[]
   errors: string[]
   launch_id: number | null

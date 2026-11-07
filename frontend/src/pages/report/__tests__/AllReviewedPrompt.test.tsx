@@ -660,7 +660,10 @@ describe('AllReviewedPrompt', () => {
     mockPost.mockResolvedValueOnce({
       pushed: 0,
       total: 2,
-      unmatched: ['test-a', 'test-b'],
+      unmatched: [
+        'test-a (classification: UNKNOWN)',
+        'test-b (classification: UNKNOWN)',
+      ],
       errors: [],
       launch_id: null,
     })
@@ -681,10 +684,50 @@ describe('AllReviewedPrompt', () => {
     await waitFor(() => {
       expect(screen.getByRole('alert')).toBeDefined()
     })
-    expect(screen.getByRole('alert').textContent).toContain(
-      '2 test(s) could not be matched to Report Portal items',
+    const alert = screen.getByRole('alert')
+    expect(alert.textContent).toContain(
+      '2 test(s) have no classification to map to a Report Portal defect type',
     )
+    // Nothing was pushed: there is no split to state, only the reason
+    expect(alert.textContent).not.toContain('Pushed 0')
+    // The old copy blamed Report Portal matching for an analysis problem
+    expect(alert.textContent).not.toContain('could not be matched')
+    // The offending entries (they name the classification) on a second line
+    expect(screen.getByText(/test-a \(classification: UNKNOWN\)/)).toBeDefined()
     expect(screen.getByText('All failures reviewed. Update Report Portal?')).toBeDefined()
+  })
+
+  it('shows the pushed/skipped split for a partial push', async () => {
+    mockPost.mockResolvedValueOnce({
+      pushed: 3,
+      total: 4,
+      unmatched: ['test-c (classification: UNKNOWN)'],
+      errors: [],
+      launch_id: 7,
+    })
+
+    renderPrompt({
+      additionalReviews: {
+        'test-a': makeReview(true),
+        'test-b': makeReview(true),
+      },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('All failures reviewed. Update Report Portal?')).toBeDefined()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toBeDefined()
+    })
+    const alert = screen.getByRole('alert')
+    expect(alert.textContent).toContain('Pushed 3 · skipped 1')
+    expect(alert.textContent).toContain(
+      '1 test(s) have no classification to map to a Report Portal defect type',
+    )
+    expect(alert.textContent).not.toContain('could not be matched')
   })
 
   it('retries only the failed scope/exporter combinations', async () => {
@@ -918,5 +961,115 @@ describe('AllReviewedPrompt', () => {
       expect(screen.queryByText('All failures reviewed. Update Report Portal?')).toBeNull()
     })
     expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('treats TO INVESTIGATE-defaulted tests as a successful push', async () => {
+    mockPost.mockResolvedValueOnce({
+      pushed: 3,
+      defaulted: ['test-a (classification: none)'],
+      unmatched: [],
+      errors: [],
+      launch_id: 9,
+    })
+
+    renderPrompt({
+      additionalReviews: {
+        'test-a': makeReview(true),
+        'test-b': makeReview(true),
+      },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('All failures reviewed. Update Report Portal?')).toBeDefined()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
+
+    // Pushed, so the dialog closes: no retry prompt, no error
+    await waitFor(() => {
+      expect(screen.queryByText('All failures reviewed. Update Report Portal?')).toBeNull()
+    })
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(mockPost).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not re-push a scope whose tests were only defaulted', async () => {
+    renderPrompt({
+      reportportalAvailable: true,
+      datadogAvailable: true,
+      additionalReviews: {
+        'test-a': makeReview(true),
+        'test-b': makeReview(true),
+      },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('All failures reviewed. Update Report Portal and Datadog?')).toBeDefined()
+    })
+
+    // Report Portal pushed everything (one entry defaulted), Datadog failed
+    mockPost.mockResolvedValueOnce({
+      pushed: 3,
+      defaulted: ['test-a (classification: none)'],
+      unmatched: [],
+      errors: [],
+      launch_id: 5,
+    })
+    mockPost.mockRejectedValueOnce(
+      new ApiError(502, 'Bad Gateway', { detail: 'Datadog unavailable' }),
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toBeDefined()
+    })
+    // Only the Datadog failure is reported — defaulting is not a failure
+    expect(screen.getByRole('alert').textContent).toContain('Datadog unavailable')
+    expect(screen.getByRole('alert').textContent).not.toContain('TO INVESTIGATE')
+
+    mockPost.mockResolvedValueOnce({
+      success: true,
+      message: 'ok',
+      pushed: 2,
+      total: 2,
+      errors: [],
+      skipped: 0,
+    })
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
+
+    await waitFor(() => {
+      expect(screen.queryByText('All failures reviewed. Update Report Portal and Datadog?')).toBeNull()
+    })
+    expect(mockPost.mock.calls.filter((c) => c[0] === '/results/job-1/push-reportportal')).toHaveLength(1)
+  })
+
+  it('counts only unmatched tests as skipped when some were defaulted', async () => {
+    mockPost.mockResolvedValueOnce({
+      pushed: 3,
+      defaulted: ['test-a (classification: none)'],
+      unmatched: ['test-c (classification: UNKNOWN)'],
+      errors: [],
+      launch_id: 7,
+    })
+
+    renderPrompt({
+      additionalReviews: {
+        'test-a': makeReview(true),
+        'test-b': makeReview(true),
+      },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('All failures reviewed. Update Report Portal?')).toBeDefined()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
+
+    await waitFor(() => {
+      expect(screen.getByRole('alert')).toBeDefined()
+    })
+    const alert = screen.getByRole('alert')
+    expect(alert.textContent).toContain('Pushed 3 · skipped 1')
+    expect(alert.textContent).not.toContain('skipped 2')
   })
 })

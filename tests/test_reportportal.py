@@ -595,6 +595,8 @@ class TestPushClassifications:
             history_classifications={"test_network": "INFRASTRUCTURE"},
         )
         assert result["pushed"] == 1
+        # It does have a defect type to map to, so it is never listed as defaulted.
+        assert result["defaulted"] == []
         # Verify the PUT used the System Issue locator due to history classification
         payload = _extract_put_json(mock_session)
         assert payload is not None
@@ -602,22 +604,8 @@ class TestPushClassifications:
         assert payload["issue"]["autoAnalyzed"] is False
         assert payload["issue"]["ignoreAnalyzer"] is True
 
-    def test_push_unmapped_classification_skipped(self):
-        client = ReportPortalClient(
-            url="http://rp.example.com", token="tok", project="proj"
-        )
-        client.get_defect_type_locators = MagicMock(
-            return_value={
-                "PRODUCT_BUG": "pb001",
-                "AUTOMATION_BUG": "ab001",
-                "SYSTEM_ISSUE": "si001",
-            }
-        )
-        mock_session = MagicMock()
-        mock_rp = MagicMock()
-        mock_rp.base_url_v1 = "http://rp.example.com/api/v1/proj"
-        client._rp_client = mock_rp
-        client._session = mock_session
+    def test_push_unmapped_classification_uses_to_investigate(self):
+        client, mock_session = self._setup_push_client()
 
         failure = self._make_failure("SOMETHING UNKNOWN", "text")
         matched = [({"id": 103, "name": "test_x"}, failure)]
@@ -625,8 +613,66 @@ class TestPushClassifications:
         result = client.push_classifications(
             matched, "http://rootcoz.example.com/results/abc-123"
         )
+        assert result["pushed"] == 1
+        # Pushed under the TO_INVESTIGATE fallback: named, but not skipped.
+        assert result["defaulted"] == ["test_x (classification: SOMETHING UNKNOWN)"]
+        assert result["unmatched"] == []
+        payload = _extract_put_json(mock_session)
+        assert payload["issue"]["issueType"] == "ti001"
+
+    def test_push_empty_classification_uses_to_investigate(self):
+        """Issue #397: an empty classification must not drop the test."""
+        client, mock_session = self._setup_push_client()
+
+        failure = self._make_failure("", "narration only, no classification")
+        matched = [({"id": 104, "name": "test_empty", "launchId": 10}, failure)]
+
+        result = client.push_classifications(
+            matched, "http://rootcoz.example.com/results/abc-123"
+        )
+        assert result["pushed"] == 1
+        assert result["errors"] == []
+        assert result["defaulted"] == ["test_empty (classification: none)"]
+        assert result["unmatched"] == []
+        payload = _extract_put_json(mock_session)
+        assert payload["issue"]["issueType"] == "ti001"
+
+    def test_push_unmapped_classification_keeps_whole_batch(self):
+        """One unmapped classification does not shrink the batch sent to RP."""
+        client, mock_session = self._setup_push_client()
+
+        mapped = self._make_failure("PRODUCT BUG", "Bug")
+        mapped.test_name = "test_mapped"
+        unmapped = self._make_failure("", "no classification")
+        unmapped.test_name = "test_unmapped"
+        matched = [
+            ({"id": 301, "name": "test_mapped", "launchId": 10}, mapped),
+            ({"id": 302, "name": "test_unmapped", "launchId": 10}, unmapped),
+        ]
+
+        result = client.push_classifications(
+            matched, "http://rootcoz.example.com/results/abc-123"
+        )
+        assert result["pushed"] == 2
+        assert result["defaulted"] == ["test_unmapped (classification: none)"]
+        assert result["unmatched"] == []
+        issues = mock_session.put.call_args[1]["json"]["issues"]
+        assert [i["issue"]["issueType"] for i in issues] == ["pb001", "ti001"]
+
+    def test_failed_batch_does_not_claim_defaulted_tests_were_pushed(self):
+        """A rejected batch pushed nothing, so nothing may be reported as pushed."""
+        client, mock_session = self._setup_push_client()
+        mock_session.put.side_effect = _requests.RequestException("RP API error")
+
+        failure = self._make_failure("", "no classification")
+        matched = [({"id": 303, "name": "test_defaulted"}, failure)]
+
+        result = client.push_classifications(
+            matched, "http://rootcoz.example.com/results/abc-123"
+        )
         assert result["pushed"] == 0
-        assert len(result["unmatched"]) == 1
+        assert result["errors"]
+        assert result["defaulted"] == []
 
     def test_push_with_jira_matches_as_external_issues(self):
         client = ReportPortalClient(
@@ -689,6 +735,10 @@ class TestPushClassifications:
         assert result["pushed"] == 0
         assert len(result["errors"]) == 1
         assert "missing 'id'" in result["errors"][0]
+        # The error names the item; `unmatched` is reserved for classifications
+        # RP has no defect type for, and nothing was defaulted either.
+        assert result["unmatched"] == []
+        assert result["defaulted"] == []
         mock_session.put.assert_not_called()
 
     def test_push_error_handling(self):
@@ -901,7 +951,7 @@ class TestPushContentToggles(TestPushClassifications):
         assert payload["issue"]["issueType"] == "ti001"
 
     def test_classifications_disabled_skips_unmatched(self):
-        """When classifications disabled, unknown classifications don't go to unmatched."""
+        """With classifications off, an unknown one is neither defaulted nor unmatched."""
         client, mock_session = self._setup_push_client()
         failure = self._make_failure("SOMETHING UNKNOWN")
         matched = [({"id": 202, "name": "test_unknown", "launchId": 10}, failure)]
@@ -913,6 +963,7 @@ class TestPushContentToggles(TestPushClassifications):
         )
         assert result["pushed"] == 1
         assert result["unmatched"] == []
+        assert result["defaulted"] == []
         payload = _extract_put_json(mock_session)
         assert payload["issue"]["issueType"] == "ti001"
 

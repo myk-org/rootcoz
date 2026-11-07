@@ -21,7 +21,7 @@ import { CrossFailurePatterns } from './report/CrossFailurePatterns'
 import { TestListSection } from './report/TestListSection'
 import { AllReviewedPrompt } from './report/AllReviewedPrompt'
 import { collectChildExpandKeys, expandKey } from '@/lib/childJobHash'
-import { collectAllTestKeys, countAllFailures, reviewedKeyCount } from '@/lib/failureKeys'
+import { collectAllTestKeys, countAllFailures, countProviderFailures, countUnclassifiedFailures, reviewedKeyCount } from '@/lib/failureKeys'
 import { Badge } from '@/components/ui/badge'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { Skeleton } from '@/components/ui/skeleton'
@@ -373,9 +373,32 @@ function ReportContent() {
     () => (result ? countAllFailures(result.failures ?? [], result.child_job_analyses ?? []) : 0),
     [result],
   )
+  // Live count, not `result.incomplete_count`: a reviewer override classifies a
+  // failure without a refetch, and the banner must clear with the card. A
+  // `submitted` job's empty classifications mean analysis has not run yet.
+  const incompleteCount = useMemo(
+    () => (result
+      ? countUnclassifiedFailures(result.failures ?? [], result.child_job_analyses ?? [], state.classifications, result.analysis_state)
+      : 0),
+    [result, state.classifications],
+  )
   const allTestKeys = useMemo(
     () => (result ? collectAllTestKeys(result.failures ?? [], result.child_job_analyses ?? []) : []),
     [result],
+  )
+  // Same overrides and state gate as `incompleteCount`: a reviewer override
+  // classifies a provider placeholder, so the banner must stop blaming the
+  // provider for it.
+  const providerFailureCount = useMemo(
+    () => (result
+      ? countProviderFailures(
+        result.failures ?? [],
+        result.child_job_analyses ?? [],
+        state.classifications,
+        result.analysis_state,
+      )
+      : 0),
+    [result, state.classifications],
   )
   const repoUrls = useMemo<RepoUrl[]>(
     () => buildRepoUrls(result?.request_params),
@@ -620,10 +643,43 @@ function ReportContent() {
         <div role="alert" className="rounded-lg border-l-4 border-l-signal-amber bg-signal-amber/5 p-4 animate-slide-up">
           <h2 className="text-sm font-medium text-signal-amber">Partial analysis</h2>
           <p className="mt-1 text-xs text-text-secondary">
-            {result.failed_analysis_groups} group(s) failed; check server logs. Successful analyses remain available below.
+            {result.failed_analysis_groups} group(s) could not be analyzed. Re-analyze the job, or classify the failures manually. Successful analyses remain available below.
           </p>
         </div>
       ) : null}
+
+      {/* ---- Unclassified failures banner ---- */}
+      {incompleteCount > 0 && (
+        <div
+          role="status"
+          data-testid="incomplete-analysis-banner"
+          className="rounded-lg border border-border-muted bg-background-offset p-4 animate-slide-up"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2">
+            <p className="text-xs text-text-tertiary">
+              {incompleteCount} failure(s) have no usable analysis —{' '}
+              {providerFailureCount === 0
+                ? 'the model returned nothing that could be classified.'
+                : providerFailureCount >= incompleteCount
+                  ? 'the AI provider call failed, so no analysis was produced.'
+                  : `${providerFailureCount} of them had a failed AI provider call, and the rest returned nothing classifiable.`}{' '}
+              Re-analyze to classify them.
+            </p>
+            {isOperator && result.request_params && (
+              <Button
+                variant="ghost"
+                size="sm"
+                className="gap-1.5 text-xs"
+                onClick={() => dispatch({ type: 'SET_RE_ANALYZE_OPEN', payload: true })}
+                disabled={result.status === 'running' || result.status === 'pending' || result.status === 'waiting'}
+              >
+                <RotateCw className="h-3.5 w-3.5" />
+                {submitted ? 'Analyze' : 'Re-Analyze'}
+              </Button>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* ---- Zero-failure banner ---- */}
       {totalFailures === 0 && result.status === 'completed' && !submitted && !result.failed_analysis_groups && (

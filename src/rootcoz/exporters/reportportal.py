@@ -263,6 +263,7 @@ class ReportPortalClient(Exporter):
         details: dict[str, Any] = {
             "pushed": 0,
             "unmatched": [],
+            "defaulted": [],
             "errors": [message],
             "launch_id": launch_id,
         }
@@ -697,12 +698,19 @@ class ReportPortalClient(Exporter):
                 line is appended to the RP comment.
 
         Returns:
-            Dict with keys: ``pushed``, ``unmatched``, ``errors``, ``launch_id``.
+            Dict with keys: ``pushed``, ``unmatched``, ``defaulted``, ``errors``,
+            ``launch_id``. ``defaulted`` lists items whose classification maps
+            to no RP defect type; they are still pushed with the neutral
+            ``TO_INVESTIGATE`` locator, and each entry names that
+            classification. ``unmatched`` is always empty: nothing is left out
+            for want of a classification, and an item that could not be pushed
+            at all is named in ``errors``.
         """
         if not matched_pairs:
             return {
                 "pushed": 0,
                 "unmatched": [],
+                "defaulted": [],
                 "errors": [],
                 "launch_id": None,
             }
@@ -723,6 +731,7 @@ class ReportPortalClient(Exporter):
         history = history_classifications or {}
         reviewed_by = reviewed_by or {}
         unmatched: list[str] = []
+        defaulted: list[str] = []
         errors: list[str] = []
         launch_id: int | None = None
 
@@ -735,6 +744,8 @@ class ReportPortalClient(Exporter):
             item_id = rp_item.get("id")
             item_name = rp_item.get("name", "")
             if item_id is None:
+                # No update target: the error names it. Nothing is ever left out
+                # for want of a classification, so `unmatched` stays empty.
                 errors.append(f"RP item missing 'id' field ({item_name})")
                 continue
             if launch_id is None:
@@ -745,17 +756,17 @@ class ReportPortalClient(Exporter):
             hist_cls = history.get(failure.test_name)
             locator = self._map_classification(ai_classification, hist_cls, locators)
 
-            if push_classifications:
-                if not locator:
-                    unmatched.append(item_name)
-                    continue
-                issue_type = locator
-            else:
-                # RP API requires issueType; use TO_INVESTIGATE as neutral default
-                issue_type = (
-                    locators.get("TO_INVESTIGATE")
-                    or _DEFAULT_LOCATORS["TO_INVESTIGATE"]
+            # RP API requires issueType; TO_INVESTIGATE is the neutral default
+            # for push_classifications=False and for an unmappable classification
+            # (such a test must still reach the launch, not be dropped).
+            to_investigate = (
+                locators.get("TO_INVESTIGATE") or _DEFAULT_LOCATORS["TO_INVESTIGATE"]
+            )
+            if push_classifications and not locator:
+                defaulted.append(
+                    f"{item_name} (classification: {ai_classification or 'none'})"
                 )
+            issue_type = (locator if push_classifications else None) or to_investigate
 
             # Build issue update payload (RP API uses camelCase)
             issue_payload: dict[str, Any] = {
@@ -878,6 +889,9 @@ class ReportPortalClient(Exporter):
         return {
             "pushed": pushed,
             "unmatched": unmatched,
+            # A failed batch pushed nothing, so claiming these reached RP under
+            # TO_INVESTIGATE would be false; the failure is in `errors`.
+            "defaulted": defaulted if pushed else [],
             "errors": errors,
             "launch_id": launch_id,
         }

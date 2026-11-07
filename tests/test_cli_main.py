@@ -249,6 +249,86 @@ class TestResultsCommands:
         assert "result.summary" in result.output
         mock_client.list_result_fields.assert_called_once()
 
+    def test_results_incomplete(self, mock_client):
+        mock_client.list_incomplete_analyses.return_value = [
+            {
+                "job_id": "abc-123",
+                "job_name": "example",
+                "build_number": 7,
+                "incomplete_count": 2,
+                "test_names": ["t1", "t2"],
+            }
+        ]
+        result = runner.invoke(app, ["results", "incomplete", "--limit", "10"])
+        assert result.exit_code == 0
+        assert "abc-123" in result.output
+        assert "example" in result.output
+        assert "2" in result.output
+        mock_client.list_incomplete_analyses.assert_called_once_with(limit=10)
+
+    def test_results_incomplete_scan_ceiling_does_not_advise_raising_limit(
+        self, mock_client
+    ):
+        """The ceiling, not ``limit``, stopped the scan: raising it cannot help."""
+        mock_client.list_incomplete_analyses.return_value = {
+            "jobs": [],
+            "truncated": True,
+            "truncated_by": "scan_ceiling",
+            "scanned": 5000,
+        }
+        result = runner.invoke(app, ["results", "incomplete", "--limit", "500"])
+        assert result.exit_code == 0
+        assert "5000" in result.output
+        assert "ceiling" in result.output
+        assert "--limit" not in result.output
+
+    def test_results_incomplete_limit_truncation_advises_raising_limit(
+        self, mock_client
+    ):
+        mock_client.list_incomplete_analyses.return_value = {
+            "jobs": [],
+            "truncated": True,
+            "truncated_by": "limit",
+            "scanned": 42,
+        }
+        result = runner.invoke(app, ["results", "incomplete", "--limit", "10"])
+        assert result.exit_code == 0
+        assert "42" in result.output
+        assert "raise --limit" in result.output
+
+    def test_results_incomplete_above_the_cap_does_not_advise_raising_limit(
+        self, mock_client
+    ):
+        """The server clamps the limit, so a bigger value cannot return more."""
+        mock_client.list_incomplete_analyses.return_value = {
+            "jobs": [],
+            "truncated": True,
+            "truncated_by": "limit",
+            "scanned": 500,
+        }
+        result = runner.invoke(app, ["results", "incomplete", "--limit", "5000"])
+        assert result.exit_code == 0
+        assert "raise --limit" not in result.output
+        assert "cap of 500" in result.output
+
+    def test_results_incomplete_json_includes_test_names(self, mock_client):
+        mock_client.list_incomplete_analyses.return_value = [
+            {
+                "job_id": "abc-123",
+                "job_name": "example",
+                "build_number": 7,
+                "incomplete_count": 2,
+                "test_names": ["t1", "t2"],
+            }
+        ]
+        result = runner.invoke(app, ["--json", "results", "incomplete"])
+        assert result.exit_code == 0
+        rows = json.loads(result.output)
+        assert rows[0]["job_id"] == "abc-123"
+        assert rows[0]["incomplete_count"] == 2
+        assert rows[0]["test_names"] == ["t1", "t2"]
+        mock_client.list_incomplete_analyses.assert_called_once_with(limit=100)
+
     def test_results_delete(self, mock_client):
         mock_client.delete_job.return_value = {"status": "deleted", "job_id": "abc-123"}
         result = runner.invoke(app, ["results", "delete", "abc-123"])
@@ -4278,6 +4358,21 @@ class TestPushRpCommand:
         result = runner.invoke(app, ["push-rp", "job-123"])
         assert result.exit_code != 0
         assert "400" in result.output or "disabled" in result.output.lower()
+
+    def test_push_rp_reports_to_investigate_fallbacks(self, mock_client):
+        """A pushed-under-TO_INVESTIGATE item must not read as a clean push."""
+        mock_client.push_reportportal.return_value = {
+            "pushed": 2,
+            "unmatched": [],
+            "defaulted": ["test_a (classification: none)"],
+            "errors": [],
+            "launch_id": 42,
+        }
+        result = runner.invoke(app, ["push-rp", "job-123"])
+        assert result.exit_code == 0
+        assert (
+            "Pushed as TO INVESTIGATE: test_a (classification: none)" in result.output
+        )
 
     def test_push_rp_with_errors(self, mock_client):
         mock_client.push_reportportal.return_value = {
