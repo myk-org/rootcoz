@@ -17823,3 +17823,315 @@ class TestAnalysisReaperIsOneCopy:
         # repo_manager:` copy would at best drift again, at worst skip the reaper.
         assert kwargs["repo_manager"] is manager.return_value
         assert kwargs["repo_path"] == tmp_path / "workspace"
+
+
+# -- A refused analysis keeps its sentence (#423) --------------------------
+#
+# The analysis path never raises to its caller (the AIResult contract), so a
+# refusal has to survive as text: through the retry decision, into the
+# placeholder row and out as the job's stored error. These tests drive the same
+# functions ``/analyze`` ends in, with the sidecar client refusing.
+
+_LIMITS_LITERAL = (
+    "Model metadata missing reliable input/output token limits for unknown model. "
+    "Declare the model in the agent-dir models.json with contextWindow and maxTokens "
+    "to use it with a session API key."
+)
+_LIMITS_SENTENCE = f"AI session refused: {_LIMITS_LITERAL}"
+_LIBRARY_LIMITS = f"Sidecar session creation failed (HTTP 400): {_LIMITS_LITERAL}"
+_HTTPX_KEYLESS = (
+    "Client error '400 Bad Request' for url 'http://127.0.0.1:9100/sessions'\n"
+    "For more information check: https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+)
+
+
+def _ai_result(*, success: bool, text: str) -> Any:
+    """An AIResult whose usage recording is a no-op (no tracker in a unit test)."""
+    from pi_sidecar_client import AIResult
+
+    result = AIResult(success=success, text=text, error=None if success else text)
+    result.record_usage = AsyncMock()
+    return result
+
+
+def _refusal(monkeypatch, text: str, *, redact_key=None):
+    """Make the engine's AI call reach the real refusal mapping.
+
+    conftest denies the engine's AI call outright, so this installs the one
+    production layer that turns a sidecar body into a sentence —
+    ``_call_with_safe_error`` — over a fake library call that answers ``text``.
+    """
+    from rootcoz import ai_client
+
+    refused = AsyncMock(
+        side_effect=lambda *a, **k: _ai_result(success=False, text=text)
+    )
+    monkeypatch.setattr(ai_client, "_call_ai", refused)
+
+    async def mapped(prompt, **kwargs):
+        return await ai_client._call_with_safe_error(
+            ai_client._call_ai, prompt, redact_key=redact_key, **kwargs
+        )
+
+    monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mapped)
+    return refused
+
+
+def _one_group():
+    from rootcoz.models import FailedTest
+
+    failures = [
+        FailedTest(test_name="test_a", error_message="boom", stack_trace="trace")
+    ]
+    return {"sig-1": failures}, failures
+
+
+async def _orchestrated(tmp_path):
+    from rootcoz.engine.core import run_orchestrated_analysis
+
+    groups, _ = _one_group()
+    return await run_orchestrated_analysis(
+        groups=groups,
+        console_context="console output",
+        repo_path=tmp_path,
+        ai_provider="claude",
+        ai_model="opus",
+    )
+
+
+async def _stored_error(monkeypatch, tmp_path, job_id: str = "refusal-job"):
+    """Run the finalisation ``/analyze`` ends in and return the stored row."""
+    from rootcoz import main as rootcoz_main
+
+    groups, failures = _one_group()
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / f"{job_id}.db")
+    await storage.init_db()
+    await storage.save_result(
+        job_id, "", "queued", {"status": "queued", "result": {}, "request_params": {}}
+    )
+    await rootcoz_main._analyze_failures_or_exit(
+        job_id=job_id,
+        test_failures=failures,
+        console_context="console output",
+        artifacts_context="",
+        metadata_job_name="job",
+        display_name="job",
+        repo_path=tmp_path,
+        ai_provider="claude",
+        ai_model="opus",
+        merged=Settings(),
+        custom_prompt="",
+        server_url="",
+        peer_ai_configs=None,
+        cloned_repos={},
+        auth_header="",
+        groups=groups,
+        source_result=None,
+    )
+    return await storage.get_result(job_id)
+
+
+class TestAnalyzeRefusalReachesTheStoredError:
+    """The refusal is a sentence the job records, on both credential sources."""
+
+    async def test_keyless_analysis_maps_the_library_4xx(self, tmp_path, monkeypatch):
+        """A keyless refusal maps to the generic sentence and is not retried.
+
+        The text is the genuine two-line httpx message, so the old
+        ``$``-anchored ``/sessions'?$`` matcher returned ``False`` here.
+        """
+        from rootcoz import ai_client
+
+        refused = _refusal(monkeypatch, _HTTPX_KEYLESS)
+        analyses, _ = await _orchestrated(tmp_path)
+        assert refused.await_count == 1
+        expected = ai_client._session_refusal(400, _HTTPX_KEYLESS, "claude", "opus")
+        assert analyses[0].analysis.details == expected
+        assert "(sidecar HTTP 400)" in analyses[0].analysis.details
+        assert "models.json" not in analyses[0].analysis.details
+        assert analyses[0].analysis.placeholder is True
+
+    async def test_server_credential_analysis_keeps_the_refusal_sentence(
+        self, tmp_path, monkeypatch
+    ):
+        """A stored server key keeps the sidecar's own limits sentence."""
+        refused = _refusal(monkeypatch, _LIBRARY_LIMITS)
+        stored = await _stored_error(monkeypatch, tmp_path, "refusal-server")
+        assert refused.await_count == 1
+        assert stored["result"]["error"] == _LIMITS_SENTENCE
+        assert stored["result"]["status"] == "failed"
+        assert (
+            stored["result"]["failures"][0]["analysis"]["details"] == _LIMITS_SENTENCE
+        )
+        assert stored["result"]["failures"][0]["analysis"]["placeholder"] is True
+
+    async def test_user_keyed_analysis_keeps_the_refusal_sentence(
+        self, tmp_path, monkeypatch
+    ):
+        """The user-credential path carries the same sentence."""
+        from rootcoz import ai_client
+
+        async def refuse_client(*_args, **_kwargs):
+            # What _call_user_session returns for a caught SessionCreationRefused.
+            return ai_client.AIResult(
+                success=False, text=_LIMITS_SENTENCE, error=_LIMITS_SENTENCE
+            )
+
+        async def mapped(prompt, **kwargs):
+            return await ai_client._call_with_safe_error(
+                refuse_client, prompt, redact_key="user-key", **kwargs
+            )
+
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mapped)
+        stored = await _stored_error(monkeypatch, tmp_path, "refusal-user")
+        assert stored["result"]["error"] == _LIMITS_SENTENCE
+        assert (
+            stored["result"]["failures"][0]["analysis"]["details"] == _LIMITS_SENTENCE
+        )
+
+    async def test_refusal_reaches_the_group_placeholder(self, tmp_path, monkeypatch):
+        """One refused group carries the sentence; its sibling keeps the generic."""
+        from rootcoz import ai_client
+        from rootcoz.engine.core import run_orchestrated_analysis
+        from rootcoz.models import FailedTest
+
+        _refusal(monkeypatch, _LIBRARY_LIMITS)
+        calls = {"n": 0}
+
+        async def mapped(prompt, **kwargs):
+            # One concurrency slot below, so the first call is the first group.
+            calls["n"] += 1
+            if calls["n"] == 1:
+                return await ai_client._call_with_safe_error(
+                    ai_client._call_ai, prompt, redact_key=None, **kwargs
+                )
+            return _ai_result(
+                success=True,
+                text=json.dumps(
+                    {
+                        "classification": "CODE ISSUE",
+                        "pattern": "NEW",
+                        "affected_tests": ["test_b"],
+                        "details": "real answer",
+                    }
+                ),
+            )
+
+        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mapped)
+        groups = {
+            "sig-a": [FailedTest(test_name="test_a", error_message="boom")],
+            "sig-b": [FailedTest(test_name="test_b", error_message="bang")],
+        }
+        analyses, _ = await run_orchestrated_analysis(
+            groups=groups,
+            console_context="console",
+            repo_path=tmp_path,
+            ai_provider="claude",
+            ai_model="opus",
+            max_concurrent_ai_calls=1,
+        )
+        refused = next(a for a in analyses if a.test_name == "test_a")
+        answered = next(a for a in analyses if a.test_name == "test_b")
+        assert refused.analysis.details == _LIMITS_SENTENCE
+        assert refused.analysis.placeholder is True
+        assert answered.analysis.details == "real answer"
+        assert answered.analysis.placeholder is False
+
+    async def test_fully_refused_job_is_still_failed(self, tmp_path, monkeypatch):
+        """Every group refused is a failed job, not a completed one.
+
+        ``is_failed_analysis`` reads the typed flag, so a refusal placeholder is
+        never mistaken for an analysis; the classified-marker case pins the early
+        return that keeps a real analysis out of that set.
+        """
+        from rootcoz.models import (
+            AnalysisDetail,
+            FailureAnalysis,
+            is_failed_analysis,
+        )
+
+        _refusal(monkeypatch, _LIBRARY_LIMITS)
+        stored = await _stored_error(monkeypatch, tmp_path, "refusal-all")
+        assert stored["result"]["status"] == "failed"
+        assert stored["result"]["error"] == _LIMITS_SENTENCE
+        assert stored["result"]["failed_analysis_groups"] >= 1
+        assert stored["result"]["failures"][0]["analysis"]["placeholder"] is True
+
+        classified = FailureAnalysis(
+            test_name="t",
+            error="boom",
+            analysis=AnalysisDetail(
+                classification="CODE ISSUE", details=_LIMITS_SENTENCE
+            ),
+        )
+        assert not is_failed_analysis(classified)
+        assert classified.analysis.placeholder is False
+
+    async def test_child_build_refusal_is_not_generic(self, tmp_path, monkeypatch):
+        """All three child placeholders carry the sentence, not "check server logs"."""
+        from rootcoz.models import FailedTest
+        from rootcoz.sources import jenkins_source
+        from rootcoz.sources.base import run_console_only_analysis
+
+        failure = FailedTest(test_name="test_a", error_message="boom")
+
+        async def refuse(*_args, **_kwargs):
+            raise RuntimeError(_LIMITS_SENTENCE)
+
+        # The jenkins module holds its own reference to the analyzer.
+        monkeypatch.setattr(jenkins_source, "analyze_failure_group", refuse)
+        monkeypatch.setattr("rootcoz.engine.core.analyze_failure_group", refuse)
+        analyses, _unique, _failed = await jenkins_source._analyze_grouped_failures(
+            [failure],
+            console_context="console",
+            repo_path=tmp_path,
+            artifacts_context="",
+        )
+        assert analyses[0].analysis.details == _LIMITS_SENTENCE
+        assert analyses[0].analysis.placeholder is True
+
+        bundles = jenkins_source._normalize_child_results(
+            [("child", 1)], [RuntimeError(_LIMITS_SENTENCE)]
+        )
+        assert bundles[0].analysis.note == _LIMITS_SENTENCE
+
+        success, rows, error_text = await run_console_only_analysis(
+            test_name="child#1",
+            console_context="console",
+            artifacts_context="",
+            repo_path=tmp_path,
+            ai_provider="claude",
+            ai_model="opus",
+            ai_call_timeout=None,
+            custom_prompt="",
+            server_url="",
+            job_id="job",
+            additional_repos=None,
+            auth_header="",
+        )
+        assert success is False
+        assert error_text == _LIMITS_SENTENCE
+        assert rows[0].analysis.details == _LIMITS_SENTENCE
+
+    async def test_refusal_is_identical_when_stored_and_returned(
+        self, tmp_path, monkeypatch
+    ):
+        """One 401 cause: the stored error, the group detail and the chat 422 agree."""
+        from rootcoz import ai_client
+
+        body = "upstream rejected the key"
+        _refusal(monkeypatch, f"Sidecar session creation failed (HTTP 401): {body}")
+        stored = await _stored_error(monkeypatch, tmp_path, "refusal-401")
+        sentence = stored["result"]["error"]
+        assert sentence == stored["result"]["failures"][0]["analysis"]["details"]
+        assert sentence == ai_client._session_refusal(401, body, "claude", "opus")
+        assert (
+            ai_client.format_chat_ai_user_error(
+                f"Sidecar session creation failed (HTTP 401): {body}",
+                ai_provider="claude",
+                ai_model="opus",
+            )
+            == sentence
+        )
+        for word in ("your", "re-enter", "rotate", "the server's"):
+            assert word not in sentence

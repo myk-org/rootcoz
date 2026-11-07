@@ -16,6 +16,7 @@ from pi_sidecar_client import get_sidecar_client
 from rootcoz import get_child_logger
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
+    SessionCreationRefused,
     call_ai,
     create_session_safely,
     resolve_catalog_pair,
@@ -1683,6 +1684,10 @@ async def _create_chat_session(
         session_id = await create_session_safely(client, **create_kwargs)
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id
+    except SessionCreationRefused:
+        # Ahead of the broad tuple below (it holds RuntimeError): a refused
+        # session must reach the route's 422, never be swallowed into None.
+        raise
     except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
         logger.warning(
             "%s: failed to create session (%s)\n%s",

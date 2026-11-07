@@ -58,7 +58,7 @@ export function AnalysisModelNotice({ provider, forceServer }: { provider: strin
   return <UnverifiedModelsWarning show={allowsUnverified(providerStatus, provider, forceServer)} />
 }
 
-export function AnalysisModelSelect({ provider, value, onChange, onCommit, forceServer, label = 'AI Model', hideNotice = false }: {
+export function AnalysisModelSelect({ provider, value, onChange, onCommit, forceServer, label = 'AI Model', hideNotice = false, disableUnsessionable = true }: {
   provider: string
   value: string
   onChange: (value: string) => void
@@ -68,6 +68,9 @@ export function AnalysisModelSelect({ provider, value, onChange, onCommit, force
   label?: string
   /** Row layouts render the notice themselves, below the whole provider+model row. */
   hideNotice?: boolean
+  /** Every session-starting picker uses this select, so it is on by default:
+   *  a model the sidecar would refuse is not offered as if it could start. */
+  disableUnsessionable?: boolean
 }) {
   const { providers, providerStatus } = useProviderCatalog()
   const { canUseServerProviders, canUseFreeProviders } = useAuth()
@@ -76,7 +79,7 @@ export function AnalysisModelSelect({ provider, value, onChange, onCommit, force
   // fragment would let the caller lay the notice out as its own flex/grid item,
   // which is what pushed it beside the picker and into the next grid cell.
   return <div className="space-y-1">
-    <ModelCombobox value={value} onChange={onChange} onCommit={onCommit} options={visibleModels(providers, provider, forceServer, providerStatus, canUseServerProviders, canUseFreeProviders)} ariaLabel={label} forceServer={forceServer} canUseServer={canUseServerProviders} canUseFree={canUseFreeProviders} placeholder={unverified ? 'Enter model ID' : 'Default model'} />
+    <ModelCombobox value={value} onChange={onChange} onCommit={onCommit} options={visibleModels(providers, provider, forceServer, providerStatus, canUseServerProviders, canUseFreeProviders)} ariaLabel={label} forceServer={forceServer} canUseServer={canUseServerProviders} canUseFree={canUseFreeProviders} disableUnsessionable={disableUnsessionable} placeholder={unverified ? 'Enter model ID' : 'Default model'} />
     {!hideNotice && <UnverifiedModelsWarning show={unverified} />}
   </div>
 }

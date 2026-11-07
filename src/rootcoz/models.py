@@ -479,6 +479,9 @@ class CodeFix(BaseModel):
         return result
 
 
+ANALYSIS_PLACEHOLDER = "Analysis failed; check server logs for details"
+
+
 class AnalysisDetail(BaseModel):
     """Structured AI analysis broken into sections."""
 
@@ -506,6 +509,13 @@ class AnalysisDetail(BaseModel):
     product_bug_report: ProductBugReport | bool | None = Field(
         default=False, description="Bug report (if PRODUCT BUG)"
     )
+    placeholder: bool = Field(
+        default=False,
+        description=(
+            "True only on the sentinel rootcoz writes when a failure group could not be "
+            "analyzed; never set from AI output"
+        ),
+    )
 
     @model_validator(mode="after")
     def check_mutual_exclusivity(self) -> AnalysisDetail:
@@ -522,6 +532,8 @@ class AnalysisDetail(BaseModel):
             d.pop("code_fix", None)
         if not d.get("product_bug_report"):
             d.pop("product_bug_report", None)
+        if not d.get("placeholder"):
+            d.pop("placeholder", None)
         return d
 
 
@@ -649,16 +661,17 @@ def is_failed_analysis(failure: FailureAnalysis) -> bool:
     """Identify a group whose analysis is missing, not merely unclassified.
 
     Two shapes mean the same thing: the ``_failed_group_analyses`` placeholder
-    (a provider error) and a row carrying ``analysis_error`` (our own answer was
-    unclassified, e.g. a peer group no peer could classify). Without the second,
-    such a group looked like a completed analysis and the whole job was reported
-    as analysed.
+    (a provider error, flagged by ``AnalysisDetail.placeholder``) and a row
+    carrying ``analysis_error`` (our own answer was unclassified, e.g. a peer
+    group no peer could classify). Without the second, such a group looked like a
+    completed analysis and the whole job was reported as analysed.
+
+    Neither disjunct reads ``details``: the producing site says it with the typed
+    ``placeholder`` flag instead, so a sentence in ``details`` never decides this.
     """
     if failure.analysis.classification:
         return False
-    return bool(failure.analysis_error) or failure.analysis.details == (
-        "Analysis failed; check server logs for details"
-    )
+    return bool(failure.analysis_error) or failure.analysis.placeholder
 
 
 class ChildJobAnalysis(BaseModel):

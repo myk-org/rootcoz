@@ -1,5 +1,7 @@
 """Explicit chat Start selects a user-owned credential source, not job defaults."""
 
+import logging
+import traceback
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -364,3 +366,154 @@ async def test_new_session_replaces_stale_welcome_but_keeps_replies(
     messages = await storage.get_chat_messages(job_id, username="alice")
     assert sum(1 for m in messages if (m["content"] or "").startswith("👋")) == 1
     assert any((m["content"] or "") == "hello" for m in messages)
+
+
+# -- A refused session is a 422, never a 500 (#423) -----------------------
+#
+# The sidecar needs declared token limits to create a keyed session; a
+# listed-but-undeclared model carries none, so POST /sessions answers 400. All
+# three create branches must map it, on both chat routes. The sidecar stand-in
+# and the Start rig live in conftest (``refusing_sidecar``,
+# ``install_start_rig``).
+
+
+def _start_request(admin: bool):
+    return SimpleNamespace(
+        state=SimpleNamespace(username="alice", is_admin=True, role="admin")
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_init_maps_sidecar_refusal_to_422(
+    refusing_sidecar, install_start_rig, refusal_secret_key
+):
+    """A stored server key refused with the limits text answers a followable 422.
+
+    Today the ``httpx.HTTPStatusError`` escapes as a 500, so this is red before
+    the change on every assertion below.
+    """
+    client = refusing_sidecar(
+        400, json_body={"error": ai_client._SIDECAR_LIMITS_REFUSAL}
+    )
+    await install_start_rig(
+        credential_source="server", client=client, job_id="refusal-job", admin=False
+    )
+    with pytest.raises(HTTPException) as exc:
+        await main.init_chat(
+            "refusal-job",
+            _start_request(admin=False),
+            ChatInitRequest(ai_provider="openai", ai_model="undeclared"),
+        )
+    assert exc.value.status_code == 422
+    assert exc.value.detail == (
+        f"{ai_client.SESSION_REFUSAL_MARKER}: {ai_client._SIDECAR_LIMITS_REFUSAL}"
+    )
+    assert "models.json" in exc.value.detail
+    assert refusal_secret_key not in repr(exc.value)
+    assert refusal_secret_key not in "".join(traceback.format_exception(exc.value))
+
+
+@pytest.mark.asyncio
+async def test_refusal_exception_carries_no_body_and_no_context(
+    caplog, refusing_sidecar, install_start_rig, refusal_secret_key
+):
+    """The sentence is built inside its except and raised outside it.
+
+    A raw non-JSON body carrying a key yields rootcoz's own sentence, the key
+    reaches no log record, and ``__context__`` holds no ``HTTPStatusError``.
+    """
+    caplog.set_level(logging.DEBUG)
+    client = refusing_sidecar(
+        400, raw_text=f"upstream said no for {refusal_secret_key}"
+    )
+    await install_start_rig(
+        credential_source="server", client=client, job_id="refusal-body", admin=False
+    )
+    with pytest.raises(ai_client.SessionCreationRefused) as exc:
+        await ai_client.create_session_safely(
+            client,
+            provider="openai",
+            model="undeclared",
+            system_prompt="hi",
+            server_api_key=refusal_secret_key,
+        )
+    sentence = str(exc.value)
+    assert sentence.startswith(f"{ai_client.SESSION_REFUSAL_MARKER}: ")
+    assert "could not be created for openai/undeclared" in sentence
+    assert "upstream said no" not in sentence
+    assert exc.value.__context__ is None
+    assert refusal_secret_key not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("credential_source", "stored_server_key", "job_id"),
+    [
+        ("server", None, "refusal-unkeyed"),
+        ("user", None, "refusal-user"),
+    ],
+)
+async def test_chat_init_maps_unkeyed_and_user_keyed_refusals_to_422(
+    monkeypatch,
+    refusing_sidecar,
+    install_start_rig,
+    credential_source,
+    stored_server_key,
+    job_id,
+):
+    """The unkeyed library call and the user-keyed create map their 4xx too.
+
+    Both branches re-raise ``httpx.HTTPError`` today, which the route turns into
+    a 500 — the branches test 8's stored-server-key path does not reach.
+    """
+    client = refusing_sidecar(
+        400, json_body={"error": ai_client._SIDECAR_LIMITS_REFUSAL}
+    )
+    await install_start_rig(
+        credential_source=credential_source,
+        client=client,
+        job_id=job_id,
+        admin=False,
+    )
+    if stored_server_key is None and credential_source == "server":
+        # No stored server key: create_session_safely takes the library path,
+        # which re-raises the raw httpx error.
+        monkeypatch.setattr(
+            ai_client, "server_provider_key", AsyncMock(return_value=None)
+        )
+    with pytest.raises(HTTPException) as exc:
+        await main.init_chat(
+            job_id,
+            _start_request(admin=False),
+            ChatInitRequest(ai_provider="openai", ai_model="undeclared"),
+        )
+    assert exc.value.status_code == 422
+    assert exc.value.detail == (
+        f"{ai_client.SESSION_REFUSAL_MARKER}: {ai_client._SIDECAR_LIMITS_REFUSAL}"
+    )
+
+
+@pytest.mark.asyncio
+async def test_admin_chat_init_maps_refusal_to_422(refusing_sidecar, install_start_rig):
+    """The admin-chat route reaches the same mapping instead of a ready session.
+
+    Today ``_create_chat_session`` swallows the refusal into ``None`` and the
+    route answers ``200 {"ready": true, "session_id": ""}``.
+    """
+    client = refusing_sidecar(
+        400, json_body={"error": ai_client._SIDECAR_LIMITS_REFUSAL}
+    )
+    await install_start_rig(
+        credential_source="server",
+        client=client,
+        job_id=main.ADMIN_CHAT_JOB_ID,
+        admin=True,
+    )
+    with pytest.raises(HTTPException) as exc:
+        await main.init_admin_chat(
+            _start_request(admin=True),
+            ChatInitRequest(ai_provider="openai", ai_model="undeclared"),
+        )
+    assert exc.value.status_code == 422
+    assert exc.value.detail.startswith(ai_client.SESSION_REFUSAL_MARKER)
+    assert "session_id" not in repr(exc.value)

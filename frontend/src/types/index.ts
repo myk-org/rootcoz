@@ -403,6 +403,12 @@ export interface AiModel {
   /** Admin-declared free pair — usable via server credentials with the
    *  free-providers grant even without the full server grant. */
   free?: boolean
+  /** False when the sidecar refuses to open a session for this id (a listed
+   *  but undeclared model carries no token limits). Absent for unflagged
+   *  providers, where nothing is claimed either way. */
+  session_supported?: boolean
+  /** Why a session cannot start; only ever set with `session_supported: false`. */
+  session_unsupported_reason?: string
 }
 
 /** Response shape from GET /api/ai-models (no provider filter) */

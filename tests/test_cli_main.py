@@ -1990,6 +1990,59 @@ class TestAiModelsCommand:
         assert "Enter a model ID manually" in result.output
         assert "unverified" in result.output
 
+    def test_ai_models_table_shows_session_support(self, mock_client):
+        """The documented way to pick an id must not recommend an unusable one.
+
+        The three rendered cells are what matters: a dict-only assertion would
+        still pass if the column rendered nothing. ``--json`` bypasses the mapped
+        rows, so the reason is pinned there.
+        """
+        mock_client.list_ai_models.return_value = {
+            "providers": {
+                "EnMaaS": [
+                    {
+                        "id": "gemini-3.1-pro-preview",
+                        "name": "Gemini",
+                        "session_supported": False,
+                        "session_unsupported_reason": (
+                            "AI session refused: this model is listed by the provider"
+                            " but is not declared in that provider's models[] and the"
+                            " listing reports no token limits. Declare it in the"
+                            " agent-dir models.json models[] — limits are optional"
+                            " there, pi's defaults apply — or pick a model that is"
+                            " declared or lists both limits."
+                        ),
+                    },
+                    {
+                        "id": "rits/zai-org/glm-5-3",
+                        "name": "GLM",
+                        "session_supported": True,
+                    },
+                ],
+                "openai": [{"id": "gpt-5.6-luna", "name": "Luna"}],
+            }
+        }
+        result = runner.invoke(app, ["ai-models"])
+        assert result.exit_code == 0
+        rows = {
+            line.split()[0]: line
+            for line in result.output.splitlines()
+            if line.startswith(
+                ("gemini-3.1-pro-preview", "rits/zai-org/glm-5-3", "gpt-5.6-luna")
+            )
+        }
+        assert "SESSION" in result.output
+        assert " no" in rows["gemini-3.1-pro-preview"]
+        assert " yes" in rows["rits/zai-org/glm-5-3"]
+        assert " unknown" in rows["gpt-5.6-luna"]
+
+        json_result = runner.invoke(app, ["ai-models", "--json"])
+        assert json_result.exit_code == 0
+        payload = json.loads(json_result.output)
+        reason = payload["providers"]["EnMaaS"][0]["session_unsupported_reason"]
+        assert reason.startswith("AI session refused: ")
+        assert "models.json" in reason
+
     def test_ai_models_empty_all(self, mock_client):
         mock_client.list_ai_models.return_value = {"providers": {}}
         result = runner.invoke(app, ["ai-models"])

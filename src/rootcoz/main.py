@@ -69,6 +69,8 @@ from rootcoz import server_status, storage
 from rootcoz import transcripts as sidecar_transcripts
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
+    SESSION_REFUSAL_MARKER,
+    SessionCreationRefused,
     _cached_catalog_provider_ids,
     _get_model_catalog,
     _setup_usage_recorder,
@@ -5433,7 +5435,10 @@ async def _run_per_group_analysis(
             )
             all_analyses.extend(
                 _failed_group_analyses(
-                    signature, failures, analysis_error=incomplete_reason(result)
+                    signature,
+                    failures,
+                    analysis_error=incomplete_reason(result),
+                    error_text=str(result),
                 )
             )
         elif result:
@@ -5637,6 +5642,7 @@ async def _analyze_failures_or_exit(
                     signature,
                     failures,
                     analysis_error=incomplete_reason(fallback_exc),
+                    error_text=str(fallback_exc),
                 )
             ]
 
@@ -5652,6 +5658,15 @@ async def _analyze_failures_or_exit(
             f"All failure group(s) failed during analysis "
             f"({len(test_failures)} test failures, {unique_errors} unique errors)"
         )
+        # A refusal is what the job records: the aggregate line names no cause,
+        # and this is the one path that reaches a fully-failed job's summary.
+        for analysis in all_analyses:
+            details = (analysis.analysis.details or "").lstrip()
+            if analysis.analysis.placeholder and details.startswith(
+                SESSION_REFUSAL_MARKER
+            ):
+                error_msg = details
+                break
         logger.error(f"Analysis fully failed for job_id={job_id}: {error_msg}")
         fail_result = FailureAnalysisResult(
             job_id=job_id,
@@ -22490,6 +22505,10 @@ async def init_chat(
             _hold_chat_lock(f"{job_id}:{username}"),
         ):
             result = await _init_chat_under_barrier(job_id, username, body)
+    except SessionCreationRefused as exc:
+        # A refused session is the caller's to fix: a 4xx with the reason and
+        # the fix, never a 500.
+        raise HTTPException(status_code=422, detail=str(exc)) from None
     finally:
         clear_chat_prep_phase(job_id, username)
     if result["session_id"]:
@@ -23184,7 +23203,10 @@ async def _process_chat_message(
                             "Chat AI call failed for job %s: %s", job_id, response_text
                         )
                         user_error = format_chat_ai_user_error(
-                            response_text, is_admin=is_admin, ai_provider=ai_provider
+                            response_text,
+                            is_admin=is_admin,
+                            ai_provider=ai_provider,
+                            ai_model=ai_model,
                         )
                         await _fail_chat_assistant_placeholder(
                             assistant_msg_id,
@@ -23640,6 +23662,8 @@ async def init_admin_chat(
                     # admin chats with the real reason, not a placeholder.
                     tracker_unavailable=tracker_unavailable,
                 )
+            except SessionCreationRefused as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from None
             finally:
                 chat_session_source.reset(source_token)
                 ai_username.reset(token)
@@ -23972,7 +23996,10 @@ async def _process_admin_chat_message(
             if not success:
                 logger.error("Admin chat AI call failed: %s", response_text)
                 user_error = format_chat_ai_user_error(
-                    response_text, is_admin=True, ai_provider=ai_provider
+                    response_text,
+                    is_admin=True,
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
                 )
                 await storage.update_chat_message_content(
                     assistant_msg_id, f"Error: {user_error}"

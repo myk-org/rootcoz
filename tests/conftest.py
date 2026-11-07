@@ -6,6 +6,7 @@ import tempfile
 from collections.abc import Awaitable, Callable, Generator
 from contextlib import contextmanager
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # pi_sidecar_client reads PI_SIDECAR_LOG_LEVEL at import time and passes the
@@ -500,3 +501,114 @@ def _mock_sidecar_calls():
     ):
         yield mock_client
     ai_client.update_model_catalog(None)
+
+
+# ---------------------------------------------------------------------------
+# Refused-session rigs (#423)
+#
+# A sidecar refuses to create a keyed session for a listed-but-undeclared model
+# (it needs declared token limits), answering 400. Both chat routes must map
+# that to a 422 instead of a 500, so the rig below drives a real Start down to
+# ``create_session_safely`` with a sidecar stand-in that refuses.
+# ---------------------------------------------------------------------------
+
+REFUSAL_SECRET_KEY = "sk-live-never-echo-this"  # pragma: allowlist secret
+
+
+@pytest.fixture
+def refusal_secret_key() -> str:
+    """The fake key the refusal rig stores, so a leak assertion cannot drift."""
+    return REFUSAL_SECRET_KEY
+
+
+@pytest.fixture
+def refusing_sidecar():
+    """Build a sidecar stand-in whose every session create answers one status."""
+
+    def _build(status_code: int, *, json_body=None, raw_text: str = "") -> object:
+        request = httpx.Request("POST", "http://sidecar.test/sessions")
+        response = (
+            httpx.Response(status_code, json=json_body, request=request)
+            if json_body is not None
+            else httpx.Response(status_code, text=raw_text, request=request)
+        )
+
+        class _Http:
+            async def post(self, url, json=None):
+                return response
+
+        async def create_session(**kwargs):
+            # The real client re-raises httpx.HTTPError untouched when no
+            # api_key is supplied — the unkeyed create_session_safely branch.
+            response.raise_for_status()
+            return {"session_id": "never"}
+
+        return SimpleNamespace(
+            _client=_Http(), delete_session=AsyncMock(), create_session=create_session
+        )
+
+    return _build
+
+
+@pytest.fixture
+def install_start_rig(monkeypatch, tmp_path):
+    """Wire a chat Start down to ``create_session_safely`` with a fake sidecar."""
+    from rootcoz import ai_client, main, storage
+    from rootcoz.config import Settings
+
+    async def _install(*, credential_source, client, job_id, admin):
+        from rootcoz.engine import chat
+        from rootcoz.sources import chat_workspace
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / f"{job_id}-refusal.db")
+        await storage.init_db()
+        await storage.create_admin_user("alice")
+        if not admin:
+            await storage.save_result(
+                job_id, "", "completed", {"status": "completed", "result": {}}
+            )
+        monkeypatch.setattr(main, "get_settings", lambda: Settings(ai_call_timeout=30))
+        monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *a, **k: tmp_path)
+        monkeypatch.setattr(chat, "clone_chat_repos", AsyncMock(return_value=False))
+        monkeypatch.setattr(
+            chat_workspace, "setup_ci_build_workspace", AsyncMock(return_value=False)
+        )
+        monkeypatch.setattr(
+            main,
+            "_resolve_chat_credentials",
+            AsyncMock(return_value=("", "", None, "", "")),
+        )
+        monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
+        monkeypatch.setattr(chat, "get_sidecar_client", lambda: client)
+        monkeypatch.setattr(
+            chat,
+            "resolve_catalog_pair",
+            AsyncMock(return_value=("openai", "undeclared")),
+        )
+
+        async def validate(provider, model):
+            ai_client._selected_credential_source.set(credential_source)
+            return provider, model
+
+        monkeypatch.setattr(main, "_validate_catalog_pair", validate)
+        monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+        if credential_source == "user":
+            await storage.update_user_ai_credential(
+                "alice", "openai", REFUSAL_SECRET_KEY
+            )
+            monkeypatch.setattr(
+                ai_client, "server_provider_key", AsyncMock(return_value=None)
+            )
+            monkeypatch.setattr(
+                ai_client,
+                "supported_key_providers",
+                AsyncMock(return_value=["openai"]),
+            )
+        else:
+            monkeypatch.setattr(
+                ai_client,
+                "server_provider_key",
+                AsyncMock(return_value=REFUSAL_SECRET_KEY),
+            )
+
+    return _install

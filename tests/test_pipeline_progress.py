@@ -32,8 +32,9 @@ async def test_direct_and_child_failures_persist_scoped_group_count(
         test_name="bad",
         error="boom",
         error_signature="same",
+        # The typed flag the producer sets; the sentence in details is not read.
         analysis=AnalysisDetail(
-            details="Analysis failed; check server logs for details"
+            details="Analysis failed; check server logs for details", placeholder=True
         ),
     )
     good = FailureAnalysis(
@@ -139,7 +140,8 @@ async def test_all_direct_groups_fail_preserves_child_report(
                     analysis=AnalysisDetail(
                         details="diagnosed"
                         if child_success
-                        else "Analysis failed; check server logs for details"
+                        else "Analysis failed; check server logs for details",
+                        placeholder=not child_success,
                     ),
                 )
             ],
@@ -305,7 +307,7 @@ async def test_pipeline_jira_and_saving_stages(
         test_name="bad",
         error="err",
         analysis=AnalysisDetail(
-            details="Analysis failed; check server logs for details"
+            details="Analysis failed; check server logs for details", placeholder=True
         ),
     )
 

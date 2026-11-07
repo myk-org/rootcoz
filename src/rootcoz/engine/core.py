@@ -26,7 +26,9 @@ from simple_logger.logger import get_logger
 from rootcoz.ai_client import (
     ANALYSIS_BUILTIN_TOOLS,
     RESOURCE_REPO_BROWSE_HINT,
+    SESSION_REFUSAL_MARKER,
     AIResult,
+    _is_refusal_text,
     call_ai_once,
 )
 from rootcoz.config import Settings, get_settings, parse_additional_repos
@@ -35,6 +37,7 @@ from rootcoz.engine.session_tools import build_session_tools
 from rootcoz.feedback import scrub_sensitive_data
 from rootcoz.logging_context import get_log_file
 from rootcoz.models import (
+    ANALYSIS_PLACEHOLDER,
     AdditionalRepo,
     AiConfigEntry,
     AnalysisDetail,
@@ -1816,6 +1819,9 @@ _NON_RETRYABLE_AI_ERRORS = (
     "not logged in",
     "invalid api key",
     "invalid_api_key",
+    # A session refusal is a second doomed POST /sessions, not a transient
+    # blip: the retry decision lowercases the detail before matching.
+    SESSION_REFUSAL_MARKER.casefold(),
 )
 
 
@@ -2202,6 +2208,10 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
         )
 
     if not result.success:
+        # A refusal keeps its sentence all the way to the stored error: it names
+        # the cause and the fix, unlike the generic provider-failure line.
+        if _is_refusal_text(result.text or ""):
+            raise RuntimeError(result.text)
         raise RuntimeError("AI call failed. Check provider credentials and try again.")
     if _is_empty_ai_text(result):
         raise RuntimeError("AI returned empty response after retry.")
@@ -2701,13 +2711,29 @@ def _parse_cross_failure_response(
 
 
 def _failed_group_analyses(
-    signature: str, failures: list[FailedTest], analysis_error: str = ""
+    signature: str,
+    failures: list[FailedTest],
+    analysis_error: str = "",
+    error_text: str | None = None,
 ) -> list[FailureAnalysis]:
     """Keep failed tests visible without exposing the provider error as analysis.
 
     ``analysis_error`` marks a group whose answer carried no usable analysis
     (e.g. narration only) so the row is reviewable and re-analysable.
+
+    The only builder of a placeholder, and therefore the only writer of the
+    typed ``placeholder`` flag ``models.is_failed_analysis`` reads (never the
+    ``details`` text). ``error_text`` is stored only when it is one of our own
+    refusal sentences: a raw provider/library text can carry a whole response
+    body and this is a persisted report.
     """
+    details = ANALYSIS_PLACEHOLDER
+    if (
+        error_text
+        and _is_refusal_text(error_text)
+        and error_text.lstrip().startswith(SESSION_REFUSAL_MARKER)
+    ):
+        details = error_text.strip()
     return [
         FailureAnalysis(
             test_name=f.test_name,
@@ -2716,9 +2742,7 @@ def _failed_group_analyses(
             error_signature=get_legacy_signature(f),
             error_signature_v2=signature,
             analysis_error=analysis_error,
-            analysis=AnalysisDetail(
-                details="Analysis failed; check server logs for details"
-            ),
+            analysis=AnalysisDetail(details=details, placeholder=True),
         )
         for f in failures
     ]
@@ -2914,7 +2938,10 @@ async def run_orchestrated_analysis(
             # and must never be persisted into the result.
             all_analyses.extend(
                 _failed_group_analyses(
-                    sig, failures, analysis_error=incomplete_reason(result)
+                    sig,
+                    failures,
+                    analysis_error=incomplete_reason(result),
+                    error_text=str(result),
                 )
             )
             continue
