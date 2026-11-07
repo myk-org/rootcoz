@@ -139,6 +139,87 @@ class TestWildcardOverrideScope:
         )
 
 
+class TestReportWildcardOverride:
+    """The report path resolved overrides on the exact ``(test, child, build)``
+    tuple only, so a build-0 child override cleared the listing count while the
+    report row kept ``classification: ""`` -- two answers to one question
+    (#399). Both paths now share :func:`storage.effective_override`."""
+
+    def test_the_helper_holds_the_exact_then_wildcard_rule(self) -> None:
+        assert (
+            storage.effective_override(
+                {("t1", "child", 0): "CODE ISSUE"}, "t1", "child", 5
+            )
+            == "CODE ISSUE"
+        )
+        assert storage.effective_override(None, "t1", "child", 5) == ""
+        assert storage.effective_override({}, "t1", "child", 0) == ""
+        # No wildcard lookup when the failure itself is build 0.
+        assert (
+            storage.effective_override(
+                {("t1", "child", 5): "PRODUCT BUG"}, "t1", "child", 0
+            )
+            == ""
+        )
+
+    async def _seed_report(
+        self, temp_db_path: Path, rows: list[tuple[str, int]]
+    ) -> None:
+        """Save a report whose child build 5 failure is unclassified, plus
+        the given ``(classification, child_build_number)`` override rows.
+
+        Inserted directly: ``override_classification`` fans a wildcard out to
+        the builds it finds in ``failure_history``, so it cannot reproduce the
+        legacy build-0 row this guards.
+        """
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.save_result(
+                job_id="job-1",
+                build_url="https://ci.example.com/job/example-job/7/",
+                status="completed",
+                result=_result_payload(
+                    [],
+                    child_job_analyses=[
+                        {
+                            "job_name": "child",
+                            "build_number": 5,
+                            "failures": [_failure("t1")],
+                        }
+                    ],
+                ),
+            )
+        async with aiosqlite.connect(temp_db_path) as db:
+            await db.executemany(
+                "INSERT INTO test_classifications "
+                "(job_id, test_name, job_name, classification, visible, "
+                "child_build_number) VALUES ('job-1', 't1', 'child', ?, 1, ?)",
+                rows,
+            )
+            await db.commit()
+
+    async def test_a_build_zero_child_override_reaches_the_report_row(
+        self, client: TestClient, temp_db_path: Path
+    ) -> None:
+        await self._seed_report(temp_db_path, [("CODE ISSUE", 0)])
+
+        result = client.get("/results/job-1", headers=_ADMIN_HEADERS).json()["result"]
+        assert (
+            result["child_job_analyses"][0]["failures"][0]["analysis"]["classification"]
+            == "CODE ISSUE"
+        )
+        assert result["incomplete_count"] == 0
+
+    async def test_an_exact_build_override_still_wins_in_the_report(
+        self, client: TestClient, temp_db_path: Path
+    ) -> None:
+        await self._seed_report(temp_db_path, [("CODE ISSUE", 0), ("PRODUCT BUG", 5)])
+
+        row = client.get("/results/job-1", headers=_ADMIN_HEADERS).json()["result"][
+            "child_job_analyses"
+        ][0]["failures"][0]
+        assert row["analysis"]["classification"] == "PRODUCT BUG"
+
+
 class TestResultPayloadExposesCount:
     async def test_result_response_counts_incomplete_failures(
         self, client: TestClient, temp_db_path: Path

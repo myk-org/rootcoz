@@ -4633,6 +4633,29 @@ def count_all_failures(result_data: dict[str, Any]) -> int:
     return sum(1 for _ in _iter_all_failures(result_data))
 
 
+def effective_override(
+    overrides: Mapping[tuple[str, str, int], str] | None,
+    test_name: str,
+    child_job_name: str,
+    child_build_number: int,
+) -> str:
+    """Return the reviewer override that applies to a failure, or ``""``.
+
+    The exact ``(test, child, build)`` key wins. A build-0 key means "any
+    build" of that child, the way the SQL scoping reads it
+    (``child_build_number = 0 OR child_build_number = <build>``), so it also
+    clears a failure stored under a concrete build when no row was fanned out
+    to it. Both the listing count and the report resolve overrides through
+    here, so the two answers cannot disagree.
+    """
+    if not overrides:
+        return ""
+    override = overrides.get((test_name, child_job_name, child_build_number))
+    if not override and child_build_number:
+        override = overrides.get((test_name, child_job_name, 0))
+    return str(override).strip() if override else ""
+
+
 def _effective_classification(
     failure: dict[str, Any],
     child_job_name: str,
@@ -4644,16 +4667,14 @@ def _effective_classification(
     Legacy results stored the analysis as plain text, which carries no
     classification at all.
     """
-    if overrides:
-        key = (str(failure.get("test_name") or ""), child_job_name, child_build_number)
-        override = overrides.get(key)
-        if not override and child_build_number:
-            # A build-0 override means "any build" of that child, the way the
-            # SQL scoping reads it -- so it clears a failure stored under a
-            # concrete build even when no row was fanned out to it.
-            override = overrides.get((key[0], child_job_name, 0))
-        if override:
-            return str(override).strip()
+    override = effective_override(
+        overrides,
+        str(failure.get("test_name") or ""),
+        child_job_name,
+        child_build_number,
+    )
+    if override:
+        return override
     analysis = failure.get("analysis")
     stored = analysis.get("classification") if isinstance(analysis, dict) else ""
     return str(stored or "").strip()

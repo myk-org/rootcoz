@@ -6909,8 +6909,9 @@ async def _apply_effective_classifications(
         if not test_name:
             return
         analysis = failure.get("analysis")
-        key = (test_name, child_job_name, child_build_number)
-        effective = overrides.get(key)
+        effective = storage.effective_override(
+            overrides, str(test_name), child_job_name, child_build_number
+        )
         if not effective:
             return
         if not isinstance(analysis, dict):
