@@ -5426,7 +5426,7 @@ async def _analyze_failures_or_exit(
     artifacts_context: str,
     metadata_job_name: str,
     display_name: str,
-    repo_path: Path | None,
+    repo_path: Path,
     ai_provider: str,
     ai_model: str,
     merged: Settings,
