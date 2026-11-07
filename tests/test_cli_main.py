@@ -850,19 +850,54 @@ class TestSetReviewedCommand:
 
 
 class TestEnrichCommentsCommand:
+    # Real shape: GET /results/{job_id}/enrich-comments ->
+    # {"enrichments": {comment_id: [badges]}, "failed": bool}
+    _PAYLOAD: ClassVar[dict] = {
+        "enrichments": {
+            "comment-1": [{"kind": "pr", "state": "merged"}],
+            "comment-2": [{"kind": "ticket", "status": "Done"}],
+            "comment-3": [
+                {"kind": "pr", "state": "open"},
+                {"kind": "ticket", "status": "In Progress"},
+            ],
+        },
+        "failed": False,
+    }
+
     def test_enrich_comments(self, mock_client):
-        mock_client.enrich_comments.return_value = {"enriched": 3}
+        mock_client.enrich_comments.return_value = self._PAYLOAD
         result = runner.invoke(app, ["results", "enrich-comments", "job-1"])
         assert result.exit_code == 0
-        assert "3" in result.output
+        assert result.output.split("\n")[:2] == [
+            "Enriched 3 comment(s).",
+            "Status badges: 4.",
+        ]
         mock_client.enrich_comments.assert_called_once_with("job-1")
 
+    def test_enrich_comments_empty(self, mock_client):
+        mock_client.enrich_comments.return_value = {"enrichments": {}, "failed": False}
+        result = runner.invoke(app, ["results", "enrich-comments", "job-1"])
+        assert result.exit_code == 0
+        assert result.output.split("\n")[:2] == [
+            "Enriched 0 comment(s).",
+            "Status badges: 0.",
+        ]
+
+    def test_enrich_comments_failed_lookup(self, mock_client):
+        mock_client.enrich_comments.return_value = {"enrichments": {}, "failed": True}
+        result = runner.invoke(app, ["results", "enrich-comments", "job-1"])
+        assert result.exit_code == 0
+        assert result.output.split("\n")[:3] == [
+            "Enriched 0 comment(s).",
+            "Status badges: 0.",
+            "Some lookups failed; these counts may be incomplete.",
+        ]
+
     def test_enrich_comments_json(self, mock_client):
-        mock_client.enrich_comments.return_value = {"enriched": 3}
+        mock_client.enrich_comments.return_value = self._PAYLOAD
         result = runner.invoke(app, ["--json", "results", "enrich-comments", "job-1"])
         assert result.exit_code == 0
-        parsed = json.loads(result.output)
-        assert parsed["enriched"] == 3
+        assert json.loads(result.output) == self._PAYLOAD
 
 
 class TestDashboardSubmittersCommand:

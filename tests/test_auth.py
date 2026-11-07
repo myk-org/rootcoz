@@ -1680,7 +1680,7 @@ class TestRBACRoles:
         assert resp.status_code == 200
         # Real success shape: comment_id -> list of {type, key, status}.
         # The job has no comments, so the mapping is empty -- not a 404/403.
-        assert resp.json() == {"enrichments": {}}
+        assert resp.json() == {"enrichments": {}, "failed": False}
 
     def test_viewer_cannot_token_usage_stream(self, client):
         """The token-usage SSE stream is admin-only."""
