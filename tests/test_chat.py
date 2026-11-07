@@ -1294,6 +1294,64 @@ class TestChatIssueTools:
         assert "issue creation is disabled on this server" in prompt
         assert "every tracker this chat can file in is in your tool list" not in prompt
 
+    def test_a_caller_with_no_github_token_is_told_the_real_fix(self):
+        """Pin the no-credential answer, because the model ignored it in e2e.
+
+        A chat whose tool list held no ``propose_tracker_issue`` /
+        ``create_github_issue`` still answered "I'll draft it" on one attempt and
+        blamed a "session-level tooling gap rather than account config" on the
+        next — never the token, twice. Model prose cannot be asserted, so the
+        product half is pinned here: the exact instruction the server sends and
+        the tools it withholds. The model half stays a manual e2e signal; see
+        issue #446 for the detail.
+        """
+        from rootcoz.main import _chat_tracker_state
+
+        settings = TestChatTrackerTargets._settings()
+
+        def told_and_offered(tokens: dict[str, str]) -> tuple[str, list[str]]:
+            """The prompt and tool names this caller's chat session is built with."""
+            targets, unavailable = _chat_tracker_state(
+                settings,
+                tokens,
+                github_repo_available=bool(settings.tests_repo_url),
+            )
+            tools = build_chat_custom_tools(
+                server_url="http://localhost:8000",
+                auth_token="tok",
+                job_id="j1",
+                tracker_targets=targets,
+            )
+            return (
+                build_system_prompt(
+                    job_name="job",
+                    build_number=1,
+                    job_id="j1",
+                    custom_tools=tools,
+                    issue_repos=("org/repo",),
+                    tracker_unavailable=unavailable,
+                ),
+                [tool["name"] for tool in tools],
+            )
+
+        # No saved token: the sentence naming the account and the fix, and no
+        # tool that could file the issue.
+        prompt, names = told_and_offered({})
+        assert (
+            "GitHub: this account has no GitHub token saved. Tell the user the "
+            "fix: Profile Settings → add the GitHub token." in prompt
+        )
+        assert "propose_tracker_issue" not in names
+        assert "create_github_issue" not in names
+
+        # A saved token: the tools appear and the no-token sentence is gone, so
+        # the assertions above cannot pass by naming a tool that is never built.
+        tokens = {"github_token": "ghp_user"}  # pragma: allowlist secret
+        prompt, names = told_and_offered(tokens)
+        assert "propose_tracker_issue" in names
+        assert "create_github_issue" in names
+        assert "this account has no GitHub token saved" not in prompt
+
 
 class TestBuildSystemPrompt:
     """Tests for build_system_prompt with custom_tools."""
