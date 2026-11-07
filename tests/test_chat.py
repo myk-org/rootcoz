@@ -4003,23 +4003,41 @@ class TestChatIssueRepoAllowList:
         assert "org/repo" not in detail
         mock_create.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "bad",
+        [
+            "https://github.com/org/tests",
+            "tests",
+            "owner/..",
+            "owner/.",
+            "../..",
+            "üñî/çødé",
+            "--/--",
+        ],
+    )
     async def test_a_malformed_repo_is_refused_as_a_url_or_a_bare_name(
-        self, test_client, github_issue_config
+        self, test_client, github_issue_config, bad: str
     ):
-        """Not a 422: the detail is the string the model relays to the user."""
-        headers = await self._reviewer("slug")
-        for bad in ("https://github.com/org/tests", "tests"):
-            response = test_client.post(
-                "/api/chat-issue/propose",
-                json={"target": "github", "title": "t", "body": "b", "repo": bad},
-                headers=headers,
-            )
-            assert response.status_code == 400, response.text
-            assert "'owner/name'" in response.json()["detail"]
+        """Not a 422: the detail is the string the model relays to the user.
 
+        A slug is what GitHub accepts — ``[A-Za-z0-9._-]`` with neither a dot
+        component nor a leading ``-`` — so a dot path (``owner/..``) and a
+        non-ASCII owner are refused here rather than sent on to the tracker.
+        """
+        headers = await self._reviewer("slug")
+        response = test_client.post(
+            "/api/chat-issue/propose",
+            json={"target": "github", "title": "t", "body": "b", "repo": bad},
+            headers=headers,
+        )
+        assert response.status_code == 400, response.text
+        assert "'owner/name'" in response.json()["detail"]
+
+    @pytest.mark.parametrize("repo", ["any/where", "my-org/rootcoz.ci-tools"])
     async def test_an_admin_may_name_any_repo(
-        self, test_client, temp_db_path: Path, github_issue_config
+        self, test_client, temp_db_path: Path, github_issue_config, repo: str
     ):
+        """Every GitHub-shaped slug is accepted: dots and dashes included."""
         admin, api_key = await storage.create_admin_user("repo-admin")
         await storage.save_user_tokens(
             admin,
@@ -4028,12 +4046,12 @@ class TestChatIssueRepoAllowList:
         headers = {"Authorization": f"Bearer {api_key}"}
         with patch("rootcoz.main.create_github_issue") as mock_create:
             mock_create.return_value = {
-                "url": "https://github.com/any/where/issues/4",
+                "url": f"https://github.com/{repo}/issues/4",
                 "number": 4,
             }
-            response = await self._file(test_client, headers, repo="any/where")
+            response = await self._file(test_client, headers, repo=repo)
         assert response.status_code == 201, response.text
-        assert self._filed_repo(mock_create) == "https://github.com/any/where"
+        assert self._filed_repo(mock_create) == f"https://github.com/{repo}"
 
     async def test_a_non_admin_without_a_run_is_refused(
         self, test_client, github_issue_config

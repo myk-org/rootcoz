@@ -3081,13 +3081,19 @@ _AUDITED_ISSUE_PATHS = frozenset({"/api/chat-issue", "/api/chat-issue/propose"})
 
 
 async def _audit_refused_issue_call(
-    request: Request, username: str, reason: str
+    request: Request,
+    username: str,
+    reason: str,
+    details: dict[str, Any] | None = None,
 ) -> None:
-    """One ``issue.create`` row for an issue attempt the auth layer refused.
+    """One ``issue.create`` row for an issue attempt refused before its handler.
 
-    The handler never ran, so this is the only place the attempt can be
-    recorded. ``reason`` and ``step`` are fixed codes — never the request body,
-    which is where a pasted credential would be.
+    Two layers can refuse one: the auth layer, and request-model validation
+    (``422``), which raises before the handler body runs. Neither is seen by
+    the handler, so this is the only place such an attempt can be recorded.
+    ``reason``, ``step`` and whatever ``details`` adds — the failing field
+    names, for a ``422`` — are fixed codes and schema names, never the request
+    body, which is where a pasted credential would be.
 
     ``username`` is empty for a request the auth layer could not authenticate:
     the only name such a request carries is the caller-supplied
@@ -3108,7 +3114,12 @@ async def _audit_refused_issue_call(
         target_type="chat",
         target_id=username or None,
         outcome="denied",
-        details={"reason": reason, "result": "refused", "step": step},
+        details={
+            "reason": reason,
+            "result": "refused",
+            "step": step,
+            **(details or {}),
+        },
         request=request,
     )
 
@@ -3590,11 +3601,35 @@ def _mask_pydantic_error(error: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _invalid_field_names(exc: RequestValidationError) -> list[str]:
+    """The request-model fields a call failed to satisfy, as names only.
+
+    ``loc``'s last element is a schema field name, never a value, and anything
+    that is not an identifier falls back to ``body`` so no caller text can
+    reach the audit row.
+    """
+    names = set()
+    for error in exc.errors():
+        loc = error.get("loc") or ()
+        name = loc[-1] if loc else ""
+        names.add(name if isinstance(name, str) and name.isidentifier() else "body")
+    return sorted(names)
+
+
 @app.exception_handler(RequestValidationError)
 async def _validation_error_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
     """Log 422 validation error details and return standard response."""
+    # A chat-issue call rejected here never reaches its handler, so this is the
+    # only place its attempt can reach the trail (#407). Scoped to those paths:
+    # every other 422 in the product is unchanged.
+    await _audit_refused_issue_call(
+        request,
+        getattr(request.state, "username", ""),
+        "invalid_request",
+        {"fields": _invalid_field_names(exc)},
+    )
     if request.url.path in _BODY_LOGGING_SKIP_PATHS or request.url.path.startswith(
         "/api/chat/"
     ):

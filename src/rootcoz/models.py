@@ -1132,8 +1132,18 @@ class CreateIssueRequest(_ChildJobFieldsValidator, _TrackerCredentialsMixin):
     )
 
 
-#: ``owner/name`` shape of a GitHub repository slug (never a URL).
-_REPO_SLUG_RE = re.compile(r"[\w.-]+/[\w.-]+")
+#: ``owner/name`` shape of a GitHub repository slug (never a URL). GitHub allows
+#: ``[A-Za-z0-9._-]`` in each half, an owner starts with a letter or digit, and
+#: neither half may be a dot path (``.`` or ``..``, which a checkout would treat
+#: as a directory) nor start with ``-``; an owner is at most 39 characters while
+#: a repository name is at most 100.
+_REPO_SLUG_RE = re.compile(
+    # Owner: GitHub caps it at 39 characters, and it starts with a letter or digit.
+    r"[A-Za-z0-9][A-Za-z0-9._-]{0,38}/"
+    # Name: at most 100, no leading '-', and not a dot path ('.' / '..'), which a
+    # checkout reads as a directory rather than a repository.
+    r"(?!-)(?!\.{1,2}\Z)[A-Za-z0-9._-]{1,100}"
+)
 
 _REPO_SLUG_ERROR = (
     "repo must be a bare 'owner/name' GitHub repository (for example "

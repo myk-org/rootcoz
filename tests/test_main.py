@@ -5438,6 +5438,61 @@ class TestChatIssueEndpoint:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
+        ("path", "step", "payload", "fields"),
+        [
+            (
+                "/api/chat-issue/propose",
+                "propose",
+                {"target": "github", "title": "t"},
+                ["body"],
+            ),
+            (
+                "/api/chat-issue/propose",
+                "propose",
+                {"target": "slack", "title": "t", "body": "b"},
+                ["target"],
+            ),
+            ("/api/chat-issue", "create", {"target": "github", "title": "t"}, ["body"]),
+        ],
+    )
+    async def test_a_request_rejected_by_validation_leaves_an_audit_row(
+        self,
+        test_client,
+        path: str,
+        step: str,
+        payload: dict[str, str],
+        fields: list[str],
+    ):
+        """A 422 never reaches the handler, so its attempt is audited here.
+
+        Without this row an admin could not learn a refused attempt happened:
+        the handler is the only other place that writes one. The details name
+        the endpoint's step and the failing fields — never a body or a value.
+        """
+        pasted = "ghp_pasted_by_the_user_0123456789"  # pragma: allowlist secret
+        headers = await self._user(f"chat-422-{step}")
+        response = test_client.post(
+            path, json={**payload, "jira_security_level": pasted}, headers=headers
+        )
+        assert response.status_code == 422, response.text
+
+        audit = await self._chat_audit()
+        assert audit["total"] == 1, audit
+        event = audit["events"][0]
+        assert event["actor"] == f"chat-422-{step}"
+        assert event["outcome"] == "denied"
+        assert event["target_id"] == f"chat-422-{step}"
+        assert event["details"] == {
+            "reason": "invalid_request",
+            "result": "refused",
+            "step": step,
+            "fields": fields,
+        }
+        assert pasted not in json.dumps(audit)
+        assert "missing" not in json.dumps(audit)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
         ("target", "request_field", "detail_key"),
         [("github", "repo", "repo"), ("jira", "jira_project_key", "jira_project")],
     )
