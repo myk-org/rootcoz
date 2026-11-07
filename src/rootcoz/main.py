@@ -181,6 +181,7 @@ from rootcoz.jira import (
 from rootcoz.logging_context import JobIdFilter, get_log_file, job_id_var
 from rootcoz.metadata_rules import match_job_metadata
 from rootcoz.models import (
+    _REPO_SLUG_RE,
     _SYSTEM_TAGS,
     AddCommentRequest,
     AdditionalRepo,
@@ -1417,7 +1418,10 @@ _AUDIT_DIGEST_DETAIL_KEYS: frozenset[str] = frozenset({"sql_hash"})
 # repository, site or project). Those are identifiers, and a repository named
 # ``OpenShiftVirtualization2024`` is credential-shaped to the bare-run heuristic
 # below — which would leave the row's own destination unreadable. A known
-# credential prefix is still scrubbed.
+# credential prefix is still scrubbed. The exemption covers a destination this
+# process RESOLVED or validated, never text a caller typed: a value that is
+# merely stored under one of these names still has to be shaped like one (see
+# :func:`_refused_issue_details`).
 _AUDIT_DESTINATION_DETAIL_KEYS: frozenset[str] = frozenset(
     {"url", "repo", "site", "jira_project"}
 )
@@ -10886,24 +10890,46 @@ def _audit_url_host(url: str) -> str:
         return ""
 
 
+#: Shape a caller-typed value must have before a refusal row may store it as a
+#: destination: a bare ``owner/name`` GitHub slug, and a Jira project key or id
+#: (16 characters at most, short of the 24-character run the audit heuristic
+#: scrubs). Anything else is only text the caller typed, and the destination
+#: exemption — meant for a name this process resolved — must not cover it: a
+#: bare 40-hex token is neither shape, so it is dropped, never stored verbatim.
+_JIRA_PROJECT_KEY_RE = re.compile(r"\A(?:[A-Za-z][A-Za-z0-9_]{0,15}|[0-9]{1,10})\Z")
+
+
 def _refused_issue_details(
     body: ChatIssueRequest | ChatIssueProposeRequest, tracker: str, step: str
 ) -> dict[str, Any]:
     """Audit details for a refused chat issue attempt: what and where, never the text.
 
     The job and the destination the caller asked for, so a refusal row names its
-    subject; the draft's title and body are deliberately absent, and a pasted
-    credential in ``repo`` is scrubbed by :func:`record_audit`.
+    subject; the draft's title and body are deliberately absent. ``repo`` and
+    ``jira_project`` are exempt from the bare-run heuristic because they name a
+    destination — an exemption the caller's own text must not enjoy, so a value
+    is stored only when it is shaped like that destination and dropped
+    otherwise. Raw input is what reaches here, and a pasted credential is not a
+    repo slug.
     """
     return {
         "tracker": tracker,
         "result": "refused",
         "step": step,
         "job_id": body.job_id,
-        "repo": body.repo if tracker == "github" else "",
+        "repo": (
+            body.repo
+            if tracker == "github" and _REPO_SLUG_RE.fullmatch(body.repo)
+            else ""
+        ),
         # Not ``jira_project_key``: a detail named ``*_key`` is dropped as
         # credential-shaped by ``_redact_details``, and a project key is not one.
-        "jira_project": body.jira_project_key if tracker == "jira" else "",
+        "jira_project": (
+            body.jira_project_key
+            if tracker == "jira"
+            and _JIRA_PROJECT_KEY_RE.fullmatch(body.jira_project_key)
+            else ""
+        ),
     }
 
 

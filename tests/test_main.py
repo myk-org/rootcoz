@@ -37,6 +37,9 @@ FAKE_GITHUB_TOKEN = "not-a-real-token"
 # log or detail that echoes either one can be asserted against.
 _REPORT_GITHUB_TOKEN = "ghp_report_token_0123456789"  # pragma: allowlist secret
 _REPORT_BODY = "REPORT-BODY-MUST-NOT-BE-LOGGED"
+# A bare 40-hex run: no credential prefix, so only the length/shape rule of the
+# audit heuristic can recognise it as a token.
+_PASTED_HEX = "9f8e7d6c5b4a39281706f5e4d3c2b1a0ffee0011"  # pragma: allowlist secret
 
 
 def _patch_preflight():
@@ -5034,6 +5037,52 @@ class TestChatIssueEndpoint:
             "step": "create",
         }
         assert pasted not in json.dumps(audit)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("target", "request_field", "detail_key"),
+        [("github", "repo", "repo"), ("jira", "jira_project_key", "jira_project")],
+    )
+    async def test_a_refusal_drops_a_destination_that_is_not_shaped_like_one(
+        self,
+        test_client,
+        target: str,
+        request_field: str,
+        detail_key: str,
+    ):
+        """A refusal row stores a destination, never text the caller typed.
+
+        ``repo``/``jira_project`` are exempt from the bare-run heuristic because
+        they name a destination — an exemption that must not apply to raw input,
+        or a pasted 40-hex token is stored verbatim on the refusal row.
+        """
+        headers = await self._user(f"chat-audit-unshaped-{target}")
+        refused = test_client.post(
+            "/api/chat-issue/propose",
+            json={**self._CHAT, "target": target, request_field: _PASTED_HEX},
+            headers=headers,
+        )
+        assert refused.status_code == 400, refused.text
+
+        audit = await self._chat_audit()
+        assert audit["total"] == 1, audit
+        assert audit["events"][0]["details"][detail_key] == ""
+        assert _PASTED_HEX not in json.dumps(audit)
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_keeps_a_repo_that_is_shaped_like_one(self, test_client):
+        """The gate drops pasted tokens, not the subject the row exists to name."""
+        headers = await self._user("chat-audit-slug-refusal")
+        refused = test_client.post(
+            "/api/chat-issue/propose",
+            json={**self._CHAT, "target": "github", "repo": "org/elsewhere"},
+            headers=headers,
+        )
+        assert refused.status_code == 400, refused.text
+
+        audit = await self._chat_audit()
+        assert audit["total"] == 1, audit
+        assert audit["events"][0]["details"]["repo"] == "org/elsewhere"
 
     @pytest.mark.asyncio
     async def test_an_unauthenticated_refusal_names_no_caller_identity(
