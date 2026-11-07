@@ -1,21 +1,26 @@
 """SQLite storage for analysis results."""
 
 import asyncio
+import copy
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import secrets
 import sqlite3
 import time
 import uuid
+import weakref
 from collections.abc import AsyncIterator, Awaitable, Callable, Collection, Sequence
+from compression import zstd
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, get_args
+from typing import Any, Literal, NoReturn, get_args
 
 import aiosqlite
 
@@ -40,6 +45,30 @@ logger = get_child_logger(__name__)
 
 
 DB_PATH = Path(os.getenv("DB_PATH", "/data/results.db"))
+
+# A task that outlives whatever spawned it must keep writing the database it was
+# started against. DB_PATH is a module global, so a rebind mid-flight -- a test's
+# monkeypatch, a reload -- would otherwise move every later connection of a
+# running backfill to another file, and the shutdown drain would wait on a write
+# into a database nobody asked about (#409).
+_PINNED_DB_PATH: ContextVar[Path | None] = ContextVar("rootcoz_db_path", default=None)
+
+
+def pin_db_path(path: Path | None = None) -> None:
+    """Freeze this context (and everything it spawns) on *path*.
+
+    With no *path* the pin this context inherited is kept -- the live ``DB_PATH``
+    only when it is not pinned yet. Call it where a background task is created:
+    the task carries the path it starts on, and a task spawned from inside it
+    keeps that path instead of following the global into another file.
+    """
+    _PINNED_DB_PATH.set(Path(path) if path is not None else current_db_path())
+
+
+def current_db_path() -> Path:
+    """The database this context writes to: the pinned path, else ``DB_PATH``."""
+    return _PINNED_DB_PATH.get() or DB_PATH
+
 
 ANALYSIS_STATE_SUBMITTED: Literal["submitted"] = "submitted"
 ANALYSIS_STATE_ANALYZED: Literal["analyzed"] = "analyzed"
@@ -149,11 +178,26 @@ def signature_match(hashes: Any, alias: str = "") -> tuple[str, list[str]]:
 
 
 @asynccontextmanager
-async def _connect_db() -> AsyncIterator[aiosqlite.Connection]:
-    """Open a database connection with WAL mode and busy_timeout."""
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute("PRAGMA journal_mode=WAL")
+async def _connect_db(
+    db_path: Path | None = None,
+) -> AsyncIterator[aiosqlite.Connection]:
+    """Open a database connection with WAL mode and busy_timeout.
+
+    Args:
+        db_path: File to open; this context's pinned path (else ``DB_PATH``) by
+            default. A caller opening several connections resolves
+            ``current_db_path()`` once and passes it, so one pass cannot be
+            split across two files.
+    """
+    path = Path(db_path) if db_path is not None else current_db_path()
+    async with aiosqlite.connect(path) as db:
+        # busy_timeout first: the WAL switch needs exclusive access, and without
+        # it set the switch uses sqlite's default timeout and fails on a lock.
         await db.execute("PRAGMA busy_timeout=5000")
+        # Fetch the row: an unread journal_mode cursor keeps a schema read lock,
+        # so DDL on this connection then fails with "database table is locked".
+        cursor = await db.execute("PRAGMA journal_mode=WAL")
+        await cursor.fetchone()
         db.row_factory = aiosqlite.Row
         yield db
 
@@ -282,20 +326,188 @@ def _hash_session_token(token: str) -> str:
     return hashlib.sha256(token.encode()).hexdigest()
 
 
+# --- result_json storage format ---------------------------------------------
+#
+# The payload is the whole column's size (its bulk is the per-child analysis
+# text), and it is always read back whole, so it is stored compressed:
+#
+#   TEXT   inline JSON — every row written before compression, and any payload
+#          the codec cannot shrink
+#   BLOB   zstd frame — every new row >= 1 KB that shrinks
+#
+# There is no marker column and no header byte: SQLite hands back ``str`` or
+# ``bytes`` and ``typeof(result_json)`` says which in SQL. Every reader goes
+# through :func:`parse_result_json`, so nothing else understands the two shapes.
+# ``compression.zstd`` is stdlib from Python 3.14 on (PEP 784) — no dependency.
+# The payload stays inline, with the per-group text repeated in every failure:
+# normalising it into ``failure_groups`` measured ~0.1 % on top of zstd and was
+# rejected on #409, not overlooked.
+_RESULT_ZSTD_MIN_BYTES = 1024  # below this a frame is never smaller
+_RESULT_ZSTD_LEVEL = 3  # 9.1x at 0.21 ms/row; level 9 buys 8% for 3x the CPU
+
+# Every ``result_json`` write for a job holds that job's lock from the read to the
+# commit, so no write of this process can move the row between the two. The lock is
+# per job: a slow encode delays only that job's writers, and the SQLite write lock is
+# still taken after the encode.
+#
+# The lock is process-local, so it orders this process's writers and nobody else's:
+# two uvicorn workers writing the same job do not see each other's lock, and their
+# read/merge/encode happens before SQLite's write lock. That is why every write also
+# proves inside its transaction that the row still is the one it encoded -- see
+# :func:`_write_result` and :func:`_begin_guarded_write`. This is not the
+# compare-on-every-read design: the lock keeps this process's ordering, the guard
+# covers the other process.
+_job_write_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
+
+
+def _job_write_lock(job_id: str) -> asyncio.Lock:
+    """Return the lock that serialises every ``result_json`` write for *job_id*.
+
+    Weakly held, so a finished job's lock is collected as soon as no task holds or
+    waits for it: the registry cannot grow with the number of jobs.
+    """
+    lock = _job_write_locks.get(job_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _job_write_locks[job_id] = lock
+    return lock
+
+
+#: What a write's read and encode were based on: ``(result_json, status)``.
+_WriteState = tuple[bytes | str | None, str | None]
+
+#: What one write attempt did. ``"stale"`` means the row moved under the encode, so
+#: the attempt is redone on a fresh read instead of landing.
+_WriteOutcome = Literal["landed", "stale", "refused"]
+
+#: Attempts per write before a rival's write stands. Bounded on purpose: a row that
+#: another process keeps moving is left to that process -- a lost race, not a loop.
+_RESULT_WRITE_ATTEMPTS = 3
+
+
+async def _read_write_state(db: aiosqlite.Connection, job_id: str) -> _WriteState:
+    """Return the ``(result_json, status)`` a write on *job_id* is based on."""
+    row = await (
+        await db.execute(
+            "SELECT result_json, status FROM results WHERE job_id = ?", (job_id,)
+        )
+    ).fetchone()
+    return (None, None) if row is None else (row[0], row[1])
+
+
+async def _begin_guarded_write(
+    db: aiosqlite.Connection, job_id: str, expect: _WriteState
+) -> bool:
+    """Open the write transaction, refusing it when the row moved since *expect*.
+
+    ``BEGIN IMMEDIATE`` holds SQLite's write lock, so this compare and the write
+    that follows are one step for every other process as well: a payload encoded
+    from *expect* can never land on a row another process already changed. Compare
+    the payload and the status, because a decision encoded from either (a
+    ``skip_terminal`` check, a merged status) is void once either moved.
+    """
+    await db.execute("BEGIN IMMEDIATE")
+    if await _read_write_state(db, job_id) == expect:
+        return True
+    await db.execute("ROLLBACK")
+    return False
+
+
+async def _write_result(
+    job_id: str,
+    writer: str,
+    attempt: Callable[[], Awaitable[_WriteOutcome]],
+) -> bool:
+    """Run *attempt* under the job's write lock until it lands on the row it read.
+
+    A ``"stale"`` attempt re-reads, re-merges and re-encodes inside the same lock,
+    so the retry is decided from the row the other process left behind rather than
+    from the read that no longer applies.
+
+    Returns:
+        True when the write landed, False when it was refused or the race was lost
+        (bounded retries, then the rival's write stands -- stated outcome).
+    """
+    async with _job_write_lock(job_id):
+        tries_left = _RESULT_WRITE_ATTEMPTS
+        while True:
+            outcome = await attempt()
+            if outcome == "landed":
+                return True
+            tries_left -= 1
+            if outcome == "refused" or tries_left <= 0:
+                if outcome == "stale":
+                    logger.warning(
+                        f"job_id={job_id}: {writer} lost the write race after "
+                        f"{_RESULT_WRITE_ATTEMPTS} attempts -- another process wrote "
+                        "the row every time, so its payload is kept and this write "
+                        "was dropped"
+                    )
+                return False
+            logger.warning(
+                f"job_id={job_id}: {writer} found the row changed by another process "
+                "since it read it (payload or status), re-reading and retrying"
+            )
+
+
+def _encode_result_text(raw: str) -> bytes | str:
+    """Return *raw* as a zstd frame when that is smaller, else *raw* unchanged."""
+    data = raw.encode()
+    if len(data) < _RESULT_ZSTD_MIN_BYTES:
+        return raw
+    frame = zstd.compress(data, _RESULT_ZSTD_LEVEL)
+    # min(frame, raw): a row can never grow. The size gate is only a CPU shortcut.
+    return frame if len(frame) < len(data) else raw
+
+
+def _dump_result_json(result: dict[str, Any] | None) -> bytes | str | None:
+    """Serialise *result* for the ``result_json`` column (compressed when smaller)."""
+    return None if result is None else _encode_result_text(json.dumps(result))
+
+
 _ZSTD_FRAME_MAGIC = b"\x28\xb5\x2f\xfd"
 
-# What an operator can actually do about a row this build cannot decode.
+# What an operator can actually do about a row this build has no codec for.
 _RESULT_ENCODING_REMEDY = (
     "Run a rootcoz build that has the result_json codec to read it, "
     "or restore a pre-compression copy of the database."
 )
 
+# A frame this build's codec refuses cannot be decoded by upgrading: the bytes
+# are damaged, so only a good copy (or a later write) brings the row back.
+_DAMAGED_RESULT_REMEDY = (
+    "Nothing in this build can repair it: restore a pre-compression copy of the "
+    "database, or let the job's next write replace the unreadable payload."
+)
 
-class UnsupportedResultEncoding(Exception):
-    """Stored ``result_json`` uses an encoding this build cannot decode.
 
-    Not corruption: the payload is intact, it was written by a newer build
-    (result_json compression) and this build simply predates the codec.
+class UnreadableResultJson(Exception):
+    """Stored ``result_json`` content this build cannot decode.
+
+    Never fatal on a read path: readers use ``parse_result_json_lenient`` or
+    catch this and report the row. Two causes, kept apart because the operator
+    action differs: :class:`UnsupportedResultEncoding` (no codec here) and
+    :class:`DamagedResultEncoding` (our codec refused the bytes).
+    """
+
+
+class UnsupportedResultEncoding(UnreadableResultJson):
+    """Stored ``result_json`` uses an encoding this build has no codec for.
+
+    Not corruption: the payload is intact, a newer build (another result_json
+    codec) wrote it and this build simply predates that codec. Upgrading fixes
+    it, which is why it is not :class:`DamagedResultEncoding`.
+    """
+
+
+class DamagedResultEncoding(UnreadableResultJson):
+    """Stored ``result_json`` is a frame this build's codec will not inflate.
+
+    The bytes carry this build's zstd frame magic, so the codec is present and
+    a valid frame would decompress: refusing them means the stored bytes are
+    truncated or corrupt. Damage, not a missing encoding.
     """
 
 
@@ -310,33 +522,46 @@ def undecodable_result_count() -> int:
     return len(_undecodable_result_ids)
 
 
-def _note_undecodable_result(job_id: str) -> None:
-    """Warn once for a skipped row, naming it, and count it for health."""
+def _note_unreadable_result(job_id: str, exc: UnreadableResultJson) -> bool:
+    """Warn once for a skipped row, naming it, and count it for health.
+
+    The one place that tells the two causes apart: a frame this build's own codec
+    refused (truncated or corrupt) is not a payload that is still intact.
+
+    Returns:
+        ``True`` when *exc* is damage, so a scan reporting the causes apart does
+        not repeat the classification its callers must otherwise duplicate.
+    """
     _undecodable_result_ids.add(job_id)
+    if isinstance(exc, DamagedResultEncoding):
+        logger.warning(
+            f"Startup skipped job_id={job_id}: result_json is a damaged "
+            "(truncated or corrupt) compressed frame, which this build cannot "
+            "inflate. The stored payload was not modified."
+        )
+        return True
     logger.warning(
         f"Startup skipped job_id={job_id}: result_json uses an encoding this "
         "build cannot decode (a compressed frame or a newer encoding). The row "
         "is intact and was not modified."
     )
+    return False
 
 
 def _unsupported_result_encoding(raw: str | bytes) -> str | None:
-    """Describe why *raw* cannot be decoded here, or return None if it can.
+    """Describe why *raw* needs a codec this build lacks, or None if it does not.
 
     A ``result_json`` comes back as bytes holding a zstd frame when the row was
-    written by a build with result_json compression. Without this check the
-    frame reaches ``json.loads``, which raises a bare ``UnicodeDecodeError``
-    that says nothing about the cause. Single source of that message.
+    written by a build with result_json compression. Without this check non-frame
+    bytes reach ``json.loads``, which raises a bare ``UnicodeDecodeError`` that
+    says nothing about the cause. Single source of that message.
+
+    Only ever asked after ``zstd.decompress`` refused *raw* and *raw* is not a
+    frame of ours: our own magic that will not inflate is damage, which
+    :func:`parse_result_json` reports as ``DamagedResultEncoding`` instead.
     """
     if not isinstance(raw, bytes):
         return None
-    if raw.startswith(_ZSTD_FRAME_MAGIC):
-        return (
-            "result_json is a zstd frame "
-            f"({_ZSTD_FRAME_MAGIC.hex(' ')}): the row was written by a build with "
-            "result_json compression, which this build cannot decode. "
-            f"The row is intact. {_RESULT_ENCODING_REMEDY}"
-        )
     try:
         raw.decode("utf-8")
     except UnicodeDecodeError:
@@ -349,32 +574,59 @@ def _unsupported_result_encoding(raw: str | bytes) -> str | None:
 
 
 def parse_result_json(
-    raw: str | bytes | None, *, job_id: str = ""
+    raw: bytes | bytearray | str | None, *, job_id: str = ""
 ) -> dict[str, Any] | None:
     """Decode and validate a ``result_json`` blob.
 
     Args:
-        raw: The raw JSON string (or stored bytes) from the database, or None.
+        raw: The raw column value — JSON text, or a zstd frame written by
+            :func:`_encode_result_text` — or None.
         job_id: Optional job_id for log messages.
 
     Returns:
         Parsed dict when valid, None when *raw* is empty/malformed.
 
     Raises:
-        UnsupportedResultEncoding: *raw* is framed by an encoding this build
-            cannot decode. Callers that must not die on it (startup scans) use
-            ``parse_result_json_lenient``.
+        DamagedResultEncoding: *raw* is a zstd frame this build's codec refuses
+            (truncated or corrupt).
+        UnsupportedResultEncoding: *raw* is encoded with something this build
+            has no codec for. Callers that must not die on either (startup
+            scans) use ``parse_result_json_lenient``, or catch
+            ``UnreadableResultJson``.
     """
     if not raw:
         return None
-    unsupported = _unsupported_result_encoding(raw)
-    if unsupported is not None:
-        raise UnsupportedResultEncoding(f"job_id={job_id or '?'}: {unsupported}")
+    stored = raw
+    if isinstance(raw, (bytes, bytearray)):
+        try:
+            raw = zstd.decompress(raw)
+        except zstd.ZstdError as exc:
+            blob = bytes(raw)
+            if blob.startswith(_ZSTD_FRAME_MAGIC):
+                # Our magic, our codec: a valid zstd frame always decompresses,
+                # so a refusal is damage -- not an encoding to go and install.
+                raise DamagedResultEncoding(
+                    f"job_id={job_id or '?'}: result_json is a zstd frame "
+                    f"({_ZSTD_FRAME_MAGIC.hex(' ')}): the row was written by a "
+                    "build with result_json compression, but the frame is "
+                    f"truncated or corrupt ({exc}). {_DAMAGED_RESULT_REMEDY}"
+                ) from None
+            # Not a frame of ours: bytes from a codec this build lacks, or plain
+            # JSON text stored as bytes.
+            unsupported = _unsupported_result_encoding(blob)
+            if unsupported is not None:
+                raise UnsupportedResultEncoding(
+                    f"job_id={job_id or '?'}: {unsupported}"
+                ) from None
+            raw = blob.decode("utf-8")  # plain JSON bytes, no frame
     try:
         data = json.loads(raw)
-    except json.JSONDecodeError, TypeError:
-        logger.warning(
-            f"parse_result_json: malformed JSON for job_id={job_id}, skipping"
+    except UnicodeDecodeError, json.JSONDecodeError, TypeError:
+        # Malformed JSON degrades: every read path sees None instead of an
+        # exception, and no writer overwrites the row.
+        logger.error(
+            f"parse_result_json: unreadable result_json for job_id={job_id} "
+            f"(stored {type(stored).__name__}, {len(stored)} chars/bytes), skipping"
         )
         return None
     if not isinstance(data, dict):
@@ -386,18 +638,18 @@ def parse_result_json(
 
 
 def parse_result_json_lenient(
-    raw: str | bytes | None, *, job_id: str = ""
+    raw: bytes | bytearray | str | None, *, job_id: str = ""
 ) -> dict[str, Any] | None:
     """``parse_result_json`` for scans where one row must not abort startup.
 
     Only an undecodable *payload* degrades to None. Programming errors inside
     parsing still raise. Callers that must know a row was skipped (the
     failure-history backfill, the waiting-job rollback, the migrations) call
-    ``parse_result_json`` and handle ``UnsupportedResultEncoding`` themselves.
+    ``parse_result_json`` and handle ``UnreadableResultJson`` themselves.
     """
     try:
         return parse_result_json(raw, job_id=job_id)
-    except UnsupportedResultEncoding as exc:
+    except UnreadableResultJson as exc:
         logger.debug(f"Startup scan skipped a stored result: {exc}")
         return None
 
@@ -512,6 +764,371 @@ async def _claim_migration(db: aiosqlite.Connection, key: str) -> bool:
     cursor = await db.execute("SELECT changes()")
     row = await cursor.fetchone()
     return row is not None and row[0] == 1
+
+
+# One UPDATE per derived row, shared by the background sweep, keyed by name so
+# the statement can also compare: a row whose columns already match its payload
+# is left alone, so the rows a frame cannot shrink cost no write per boot.
+#
+# The payload is the compare-and-swap key, not the rowid: the columns were
+# derived from the text this sweep read, across an ``asyncio.to_thread`` window.
+# A concurrent ``patch_result_json`` rewrites the payload *and* its columns in
+# one transaction, so it must win here — a rowid-only update would replace its
+# ``failure_ids`` with the stale list and stamp it current, and no later pass
+# would find the new failure by identifier again. Losing the CAS leaves the row
+# below the swept version, so the next pass derives it from the newer payload.
+# The ``typeof`` guard keeps that from applying to a row a concurrent
+# compression pass just turned into a frame.
+#
+# A column is only written when the payload speaks about it, and `key presence`
+# is that test — the same one the writer uses. A partial ``update_status``
+# payload omits keys by design (it keeps ``build_id``, ``summary`` and
+# ``failure_ids`` in the columns while its payload has none), so an absent key
+# means "this payload does not know" and overwriting would strip the identity the
+# writer deliberately preserved and make those failures unfindable by identifier.
+# An empty value under a *present* key is the opposite: a clear, which the writer
+# applied and which the sweep must apply too — keeping it ("``:v <> ''``") would
+# leave a cleared submitter in the picker forever once the row is compressed and
+# no version-gated pass can revisit it. ``failure_ids`` is only a superset
+# prefilter (``find_failure_by_uuid`` still verifies against the payload), so a
+# stale entry costs a re-read, never a wrong answer. An omitted key still leaves
+# "columns disagree with the payload", so each pass re-writes such a row once with
+# the same values: one no-op UPDATE per boot, never a lost or a stuck column.
+_RESULTS_DENORM_UPDATE_SQL = (
+    "UPDATE results SET"
+    " result_json = COALESCE(:frame, result_json),"
+    " job_name = CASE WHEN :job_name_present"
+    " THEN :job_name ELSE job_name END,"
+    " build_number = CASE WHEN :build_number_present"
+    " THEN :build_number ELSE build_number END,"
+    " build_id = CASE WHEN :build_id_present"
+    " THEN :build_id ELSE build_id END,"
+    " submitted_by = CASE WHEN :submitted_by_present"
+    " THEN :submitted_by ELSE submitted_by END,"
+    " summary = CASE WHEN :summary_present"
+    " THEN :summary ELSE summary END,"
+    " display_name = CASE WHEN :display_name_present"
+    " THEN :display_name ELSE display_name END,"
+    " failure_ids = CASE WHEN :failure_ids_present"
+    " THEN :failure_ids ELSE failure_ids END,"
+    " denorm_version = :denorm_version"
+    " WHERE rowid = :rid AND typeof(result_json) = 'text'"
+    " AND result_json = :payload"
+    " AND (:frame IS NOT NULL"
+    " OR denorm_version IS NOT :denorm_version"
+    " OR (job_name, build_number, build_id, submitted_by, summary, display_name,"
+    " failure_ids) IS NOT (:job_name, :build_number, :build_id, :submitted_by,"
+    " :summary, :display_name, :failure_ids))"
+)
+
+# The sweep's two pending sets, both limited to inline TEXT payloads. The
+# unproven set runs first, so a row it re-derives is not picked up again by the
+# version-gated set in the same pass.
+#
+# ``_DENORM_PENDING_BELOW`` is the ordinary work: a row an older build inserted,
+# derived for the first time. It is resumable by rowid, so the expensive first
+# pass over a legacy database keeps its progress across a restart.
+#
+# ``_DENORM_PENDING_UNPROVEN`` is the mixed-version window. A pre-compression
+# build updating a row leaves ``denorm_version`` at its current value and only
+# refreshes the identity columns it knows, so that row can sit at the current
+# version while its newer payload disagrees with ``submitted_by``, ``summary``,
+# ``display_name`` and ``failure_ids`` — and a version-only gate would never
+# revisit it, leaving the stale columns (and unfindable failures) behind
+# forever. Such a build cannot touch a compressed row: its ``parse_result_json``
+# cannot decode a frame. So the row the sweep can still doubt is exactly the
+# TEXT one, and the version integer alone cannot be trusted for it. That is the
+# invariant this sweep and the writers agree on:
+#
+#   BLOB at the current version => the columns were derived from that payload
+#   (only this build writes a frame, and it frames a payload it just derived).
+#   TEXT => unproven, derive again before anything compresses it.
+#
+# Cost: everything that is still TEXT after a pass — payloads below the 1 KB
+# compression gate, and payloads a frame would not shrink — is parsed once per
+# boot, and only rows whose columns disagree with that payload are written. That
+# is the residue the compression sweep already re-reads on every boot, and it is
+# the cheapest check that catches a payload rewritten behind the version's back
+# without a full column-vs-payload compare in SQL (impossible: ``json_extract``
+# cannot read a frame).
+_DENORM_PENDING_BELOW = (
+    "typeof(result_json) = 'text' AND COALESCE(denorm_version, 0) < ?"
+)
+_DENORM_PENDING_UNPROVEN = (
+    "typeof(result_json) = 'text' AND COALESCE(denorm_version, 0) >= ?"
+)
+
+# Claim key for "this build knows the denormalized columns". Marked in init_db,
+# which stays schema-only: the columns themselves are derived by
+# backfill_results_denorm in the background, after /health can answer.
+_RESULTS_DENORM_KEY = "backfill_results_denorm_v2"
+
+# One-shot: the plain-column index replaced an expression index of the same
+# name, and CREATE INDEX IF NOT EXISTS would keep the old one silently. Dropped
+# once, not every boot — a rebuild reads every row's payload.
+_SUBMITTED_BY_INDEX_KEY = "results_submitted_by_index_plain_v1"
+
+
+def _denorm_row_params(
+    rows: Sequence[aiosqlite.Row], *, compress: bool = False
+) -> list[dict[str, Any]]:
+    """``UPDATE`` parameters for one page, parsed off the event loop.
+
+    Keyed by name: the UPDATE reuses each derived value to tell whether the row
+    already matches its payload.
+
+    *compress* also frames the payload in the same parameters, so the frame and
+    the columns derived from that exact payload are written by one statement. That
+    is what lets a compressed row at the current version mean "these columns came
+    from this payload": a pre-compression build can still rewrite a TEXT row after
+    the sweep passed it, and framing that text without re-deriving would leave its
+    filters stale in a row no later sweep visits.
+    """
+    params: list[dict[str, Any]] = []
+    for row in rows:
+        try:
+            payload = parse_result_json(row["result_json"], job_id=row["job_id"])
+        except UnreadableResultJson as exc:
+            # A payload this build cannot decode must not abort the pass, and its
+            # columns must not be derived from it: the row stays pending.
+            _note_unreadable_result(row["job_id"], exc)
+            continue
+        values = dict(zip(_DENORM_COLUMNS, _extract_denormalized_fields(payload)))
+        present = _denorm_presence(payload)
+        frame = _encode_result_text(row["result_json"]) if compress else None
+        params.append(
+            {
+                **values,
+                **{f"{column}_present": present[column] for column in values},
+                # A payload that would not shrink stays TEXT: ``None`` keeps it.
+                "frame": frame if isinstance(frame, bytes) else None,
+                "denorm_version": _RESULTS_DENORM_VERSION,
+                "rid": row["rid"],
+                "payload": row["result_json"],
+            }
+        )
+    return params
+
+
+async def _derive_denorm_pages(
+    where: str, where_params: Sequence[Any], batch_size: int, db_path: Path
+) -> int:
+    """Derive one pending set, keyset-paged, one transaction per page.
+
+    Returns:
+        Rows whose columns this pass actually rewrote.
+    """
+    rowid = 0
+    done = 0
+    while True:
+        async with _connect_db(db_path) as db:
+            cursor = await db.execute(
+                "SELECT rowid AS rid, job_id, result_json FROM results"
+                f" WHERE rowid > ? AND {where} ORDER BY rowid LIMIT ?",
+                (rowid, *where_params, batch_size),
+            )
+            rows = await cursor.fetchall()
+            if not rows:
+                return done
+            rowid = rows[-1]["rid"]
+            # Parsing a multi-MB payload must not stall /health (#402).
+            for params in await asyncio.to_thread(_denorm_row_params, rows):
+                cursor = await db.execute(_RESULTS_DENORM_UPDATE_SQL, params)
+                done += cursor.rowcount
+            await db.commit()
+            logger.debug(
+                "Migration: %d result(s) derived so far, cursor rowid=%d",
+                done,
+                rowid,
+            )
+
+
+async def backfill_results_denorm(batch_size: int = 200) -> int:
+    """Derive every denormalized ``results`` column from the stored payload.
+
+    Gated per row, not claimed once: a build that does not know a column keeps
+    writing rows without it during a mixed-version window, and only a re-runnable
+    sweep makes that converge. Two sets are pending — a row below the current
+    version, and a row still holding inline TEXT at the current version, which is
+    the only shape an older build can still rewrite behind the version's back (see
+    ``_DENORM_PENDING_BELOW``/``_DENORM_PENDING_UNPROVEN``). A compressed row at
+    the current version is final: it was derived from that exact payload, and an
+    older build cannot decode a frame to disagree with it.
+
+    Runs in the background, never inside ``init_db``: it parses every legacy
+    payload, which on a large database outlives the startup probe and would
+    crash-loop the pod with the transaction rolled back on every boot. One page
+    per transaction, so an interrupted pass keeps the progress of the version-
+    gated set and resumes where it stopped.
+
+    Args:
+        batch_size: Rows per keyset page, and per transaction.
+
+    Returns:
+        Rows whose columns this pass rewrote.
+    """
+    if batch_size <= 0:
+        raise ValueError("batch_size must be > 0")
+    # One path for the whole pass: a DB_PATH rebind mid-sweep must not send the
+    # next page to another database.
+    db_path = current_db_path()
+    async with _connect_db(db_path) as db:
+        cursor = await db.execute(
+            "SELECT COUNT(*) FROM results WHERE"
+            f" ({_DENORM_PENDING_BELOW}) OR ({_DENORM_PENDING_UNPROVEN})",
+            (_RESULTS_DENORM_VERSION, _RESULTS_DENORM_VERSION),
+        )
+        pending = (await cursor.fetchone())[0]
+    if not pending:
+        return 0
+    logger.info(
+        "Migration: deriving denormalized columns for %d results row(s)", pending
+    )
+    done = await _derive_denorm_pages(
+        _DENORM_PENDING_UNPROVEN, (_RESULTS_DENORM_VERSION,), batch_size, db_path
+    )
+    # Second: rows an older build inserted and never derived at all.
+    done += await _derive_denorm_pages(
+        _DENORM_PENDING_BELOW, (_RESULTS_DENORM_VERSION,), batch_size, db_path
+    )
+    logger.info("Migration: derived denormalized columns for %d results row(s)", done)
+    return done
+
+
+# The rows the writer would have compressed: still inline JSON, denormalized
+# columns already derived, big enough for a frame to win. Also the size scope
+# of the before/after report, so the sweep never reads the whole column twice.
+_RESULT_JSON_COMPRESSION_WHERE = (
+    "typeof(result_json) = 'text'"
+    " AND COALESCE(denorm_version, 0) >= ?"
+    " AND length(CAST(result_json AS BLOB)) >= ?"
+)
+_RESULT_JSON_COMPRESSION_SELECT = (
+    "SELECT rowid AS rid, job_id, result_json FROM results"
+    f" WHERE rowid > ? AND {_RESULT_JSON_COMPRESSION_WHERE}"
+    " ORDER BY rowid LIMIT ?"
+)
+
+
+async def _eligible_result_bytes(db: aiosqlite.Connection) -> int:
+    """Stored size of the rows this sweep would compress."""
+    cursor = await db.execute(
+        "SELECT COALESCE(SUM(length(CAST(result_json AS BLOB))), 0) FROM results"
+        f" WHERE {_RESULT_JSON_COMPRESSION_WHERE}",
+        (_RESULTS_DENORM_VERSION, _RESULT_ZSTD_MIN_BYTES),
+    )
+    return (await cursor.fetchone())[0]
+
+
+async def _db_storage_report(db: aiosqlite.Connection, db_path: Path) -> str:
+    """File size plus free pages — the space a VACUUM could return."""
+    cursor = await db.execute("PRAGMA freelist_count")
+    free_pages = (await cursor.fetchone())[0]
+    cursor = await db.execute("PRAGMA page_size")
+    page_size = (await cursor.fetchone())[0]
+    return (
+        f"{db_path.stat().st_size} bytes on disk, {free_pages * page_size} bytes free"
+    )
+
+
+def _compress_result_rows(
+    rows: Sequence[aiosqlite.Row],
+) -> list[dict[str, Any]]:
+    """Derive one batch's columns and frame the payload they were derived from.
+
+    Returns the ``_RESULTS_DENORM_UPDATE_SQL`` parameters for the batch: ``frame``
+    is ``None`` for a row a frame would grow, so that row stays TEXT and is retried
+    on the next boot while its columns are still derived.
+    """
+    return _denorm_row_params(rows, compress=True)
+
+
+async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, int]:
+    """Compress legacy TEXT ``result_json`` rows in resumable batches.
+
+    Keyset pagination, so it always terminates and a killed run resumes where it
+    stopped. It stores the frame of the bytes already in the row (no re-dump), so
+    decoding returns the payload byte for byte, and it derives the denormalized
+    columns from that same payload in the same statement -- a row an older build
+    rewrote after the denorm sweep passed it is repaired here instead of being
+    framed with stale columns in a row no later sweep would visit. A row a frame
+    would grow stays TEXT and is retried on the next boot; a row whose denormalized
+    columns are not derived yet is skipped until they are.
+
+    Args:
+        batch_size: Rows per batch.
+
+    Returns:
+        ``rows`` compressed and the migrated rows' ``bytes_before``/``bytes_after``.
+    """
+    if batch_size <= 0:
+        raise ValueError("batch_size must be > 0")
+    stats = {"rows": 0, "bytes_before": 0, "bytes_after": 0}
+    # Resolved once, before the first await and every page after it: the sweep
+    # outlives whatever changed DB_PATH, and it must keep writing -- and
+    # reporting -- the file it started on.
+    db_path = current_db_path()
+    async with _connect_db(db_path) as db:
+        if not await _migration_applied(db, _RESULTS_DENORM_KEY):
+            logger.warning(
+                "result_json compression skipped: denormalized columns not derived"
+            )
+            return stats
+        stats["bytes_before"] = await _eligible_result_bytes(db)
+        on_disk_before = await _db_storage_report(db, db_path)
+    stats["bytes_after"] = stats["bytes_before"]
+    logger.info(
+        "result_json compression: starting (%d bytes of legacy results, database %s)",
+        stats["bytes_before"],
+        on_disk_before,
+    )
+    rowid = 0
+    while True:
+        async with _connect_db(db_path) as db:
+            cursor = await db.execute(
+                _RESULT_JSON_COMPRESSION_SELECT,
+                (rowid, _RESULTS_DENORM_VERSION, _RESULT_ZSTD_MIN_BYTES, batch_size),
+            )
+            rows = await cursor.fetchall()
+        if not rows:
+            break
+        rowid = rows[-1]["rid"]
+        # Derive and encode off the event loop (#402): /health must answer between
+        # batches.
+        params_page = await asyncio.to_thread(_compress_result_rows, rows)
+        if not params_page:
+            continue
+        async with _connect_db(db_path) as db:
+            await db.execute("BEGIN IMMEDIATE")
+            for params in params_page:
+                # Compare-and-swap on the payload, not just on its type: a
+                # concurrent patch -- or a write from a pre-compression replica --
+                # must win over a frame built from the older text, and the columns
+                # this statement writes are the ones derived from that text.
+                cursor = await db.execute(_RESULTS_DENORM_UPDATE_SQL, params)
+                if cursor.rowcount and params["frame"] is not None:
+                    stats["rows"] += 1
+                    stats["bytes_after"] += len(params["frame"]) - len(
+                        params["payload"].encode()
+                    )
+            await db.commit()
+        logger.debug(
+            "result_json compression: %d row(s) so far, cursor rowid=%d",
+            stats["rows"],
+            rowid,
+        )
+    async with _connect_db(db_path) as db:
+        on_disk_after = await _db_storage_report(db, db_path)
+    logger.info(
+        "result_json compression: done, %d row(s) compressed, %d -> %d bytes,"
+        " database %s -> %s",
+        stats["rows"],
+        stats["bytes_before"],
+        stats["bytes_after"],
+        on_disk_before,
+        on_disk_after,
+    )
+    return stats
 
 
 _ROLE_PRIORITY = {"viewer": 0, "reviewer": 1, "operator": 2, "admin": 3}
@@ -680,7 +1297,10 @@ candidates AS (
         SELECT
             job_id,
             CASE
-                WHEN json_valid(result_json) THEN result_json
+                -- typeof guard: a compressed frame is not JSON, and this runs
+                -- before the background compression on every boot.
+                WHEN json_valid(result_json) AND typeof(result_json) = 'text'
+                THEN result_json
                 ELSE NULL
             END AS safe_rj
         FROM results
@@ -1013,39 +1633,29 @@ async def init_db() -> None:
             "analysis_state",
             "TEXT NOT NULL DEFAULT 'analyzed'",
         )
+        # Columns the SQL filters read now that result_json may be a zstd frame:
+        # a compressed payload cannot be json_extract'ed (#409).
+        await _migrate_add_column(
+            db, "results", "submitted_by", "TEXT NOT NULL DEFAULT ''"
+        )
+        await _migrate_add_column(db, "results", "summary", "TEXT NOT NULL DEFAULT ''")
+        await _migrate_add_column(
+            db, "results", "display_name", "TEXT NOT NULL DEFAULT ''"
+        )
+        await _migrate_add_column(
+            db, "results", "failure_ids", "TEXT NOT NULL DEFAULT ''"
+        )
+        await _migrate_add_column(
+            db, "results", "denorm_version", "INTEGER NOT NULL DEFAULT 0"
+        )
 
-        # Backfill job_name/build_number/build_id from result_json.
-        # Uses atomic claim so only one concurrent init_db() runs the scan.
-        _results_denorm_key = "backfill_results_denorm_v1"
-        if await _claim_migration(db, _results_denorm_key):
-            cursor = await db.execute("""
-                UPDATE results
-                SET job_name = COALESCE(json_extract(result_json, '$.job_name'), ''),
-                    build_number = CASE
-                        WHEN json_type(result_json, '$.build_number') = 'integer'
-                             AND json_extract(result_json, '$.build_number') >= 0
-                             AND json_extract(result_json, '$.build_number') <= 9223372036854775807
-                        THEN json_extract(result_json, '$.build_number')
-                        WHEN json_type(result_json, '$.build_number') = 'text'
-                             AND json_extract(result_json, '$.build_number') NOT GLOB '*[^0-9]*'
-                             AND json_extract(result_json, '$.build_number') != ''
-                             AND (
-                                 ltrim(json_extract(result_json, '$.build_number'), '0') = ''
-                                 OR length(ltrim(json_extract(result_json, '$.build_number'), '0')) < 19
-                                 OR (length(ltrim(json_extract(result_json, '$.build_number'), '0')) = 19
-                                     AND ltrim(json_extract(result_json, '$.build_number'), '0') <= '9223372036854775807')
-                             )
-                        THEN CAST(json_extract(result_json, '$.build_number') AS INTEGER)
-                        ELSE 0
-                    END,
-                    build_id = COALESCE(CAST(json_extract(result_json, '$.build_id') AS TEXT), '')
-                WHERE result_json IS NOT NULL AND json_valid(result_json) AND job_name = ''
-            """)
-            if cursor.rowcount:
-                logger.info(
-                    "Migration: backfilled job_name/build_number/build_id on %d results row(s)",
-                    cursor.rowcount,
-                )
+        # Schema only, never a row rewrite: init_db must stay fast enough for the
+        # startup probe. The columns are derived by backfill_results_denorm in the
+        # background (it also covers a row an old build writes during a
+        # mixed-version window). This key only tells the compression sweep that
+        # this build knows them.
+        await _ensure_migrations_table(db)
+        await _mark_migration_applied(db, _RESULTS_DENORM_KEY)
 
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_results_status_created "
@@ -1060,7 +1670,12 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_results_created_at "
             "ON results (created_at DESC)"
         )
-        # Submitter enumeration goes through this expression index, never per-row JSON.
+        # Submitter enumeration goes through the plain-column index, never per-row JSON.
+        # The plain column replaced an expression index of the same name, and
+        # CREATE INDEX IF NOT EXISTS would keep the old one silently: drop it once,
+        # not every boot, which would rebuild the index (and read every row) forever.
+        if await _claim_migration(db, _SUBMITTED_BY_INDEX_KEY):
+            await db.execute("DROP INDEX IF EXISTS idx_results_submitted_by")
         await db.execute(_SUBMITTED_BY_INDEX_SQL)
 
         # failure_history: denormalized table for fast history queries
@@ -1921,10 +2536,11 @@ async def _migrate_restore_ai_classifications() -> None:
             continue
         try:
             result_data = parse_result_json(row["result_json"], job_id=job_id)
-        except UnsupportedResultEncoding:
+        except UnreadableResultJson as exc:
             # This job's classifications stay wrong. Count it for health and
-            # leave the migration unapplied so a build with the codec retries.
-            _note_undecodable_result(job_id)
+            # leave the migration unapplied so a build that can read it retries
+            # (a damaged row never becomes readable and keeps it deferred).
+            _note_unreadable_result(job_id, exc)
             deferred.append(job_id)
             continue
         if not result_data:
@@ -2025,12 +2641,12 @@ async def _migrate_backfill_pattern_axis() -> None:
             continue
         try:
             result_data = parse_result_json(row[0], job_id=job_id)
-        except UnsupportedResultEncoding:
+        except UnreadableResultJson as exc:
             # Cannot restore this row's root cause here, so its classification
             # keeps a pattern label. Do not record the migration as done --
             # every step below is idempotent and only touches affected jobs, so
-            # a build with the codec re-runs it and finishes the job.
-            _note_undecodable_result(job_id)
+            # a build that can read it re-runs it and finishes the job.
+            _note_unreadable_result(job_id, exc)
             deferred.append(job_id)
             continue
         if not result_data:
@@ -2413,18 +3029,104 @@ async def get_historical_comments(
         return result
 
 
-def _extract_denormalized_fields(result: dict[str, Any] | None) -> tuple[str, int, str]:
-    """Extract job_name, build_number, build_id from a result dict.
+# Bumped whenever the denormalized columns change shape: a row written by a
+# build that does not know a column keeps its default, and backfill_results_denorm
+# re-derives every row still below this version. That makes the backfill
+# idempotent and re-runnable instead of a one-shot claim, so a mixed-version
+# window (an old build inserting rows after the sweep) converges on the next boot.
+_RESULTS_DENORM_VERSION = 2
+
+
+def _collect_failure_ids(result: dict[str, Any]) -> list[str]:
+    """Every failure and child-analysis UUID in a result, in payload order."""
+    ids: list[str] = []
+
+    def walk_failures(failures: Any) -> None:
+        for failure in failures if isinstance(failures, list) else []:
+            if not isinstance(failure, dict):
+                continue
+            failure_id = failure.get("id")
+            if isinstance(failure_id, str) and failure_id:
+                ids.append(failure_id)
+
+    def walk_children(children: Any) -> None:
+        for child in children if isinstance(children, list) else []:
+            if not isinstance(child, dict):
+                continue
+            child_id = child.get("id")
+            if isinstance(child_id, str) and child_id:
+                ids.append(child_id)
+            walk_failures(child.get("failures"))
+            walk_children(child.get("failed_children"))
+
+    walk_failures(result.get("failures"))
+    walk_children(result.get("child_job_analyses"))
+    return ids
+
+
+# One entry per value ``_extract_denormalized_fields`` returns, same order.
+_DENORM_COLUMNS = (
+    "job_name",
+    "build_number",
+    "build_id",
+    "submitted_by",
+    "summary",
+    "display_name",
+    "failure_ids",
+)
+
+
+def _denorm_presence(result: dict[str, Any] | None) -> dict[str, bool]:
+    """Whether the payload speaks about each denormalized column.
+
+    Key presence, not the value: an empty value under a present key is a clear
+    the writer applied, a missing key is "this payload does not know". Both the
+    writer and the sweep decide on this one answer.
+    """
+    payload = result or {}
+    request_params = payload.get("request_params")
+    return {
+        "job_name": "job_name" in payload,
+        "build_number": "build_number" in payload,
+        "build_id": "build_id" in payload,
+        "submitted_by": isinstance(request_params, dict)
+        and "submitted_by" in request_params,
+        "summary": "summary" in payload,
+        "display_name": "display_name" in payload,
+        "failure_ids": "failures" in payload or "child_job_analyses" in payload,
+    }
+
+
+def _extract_denormalized_fields(
+    result: dict[str, Any] | None,
+) -> tuple[str, int, str, str, str, str, str]:
+    """Extract the denormalized columns from a result dict.
+
+    ``submitted_by`` is the one ``request_params`` scalar lifted out: the
+    dashboard picker and filter cannot read a compressed payload in SQL.
 
     Returns:
-        Tuple of (job_name, build_number, build_id).
+        Tuple of (job_name, build_number, build_id, submitted_by, summary,
+        display_name, failure_ids).
     """
     if result is None:
-        return ("", 0, "")
+        return ("", 0, "", "", "", "", "")
     job_name = str(result.get("job_name") or "")
     build_number = _coerce_sqlite_build_number(result.get("build_number"))
     build_id = str(result.get("build_id") or "")
-    return (job_name, build_number, build_id)
+    request_params = result.get("request_params")
+    submitted_by = ""
+    if isinstance(request_params, dict):
+        submitted_by = str(request_params.get("submitted_by") or "").strip()
+    return (
+        job_name,
+        build_number,
+        build_id,
+        submitted_by,
+        str(result.get("summary") or ""),
+        str(result.get("display_name") or ""),
+        " ".join(dict.fromkeys(_collect_failure_ids(result))),
+    )
 
 
 def _coerce_analysis_state(value: Any) -> str:
@@ -2454,43 +3156,29 @@ def _append_denormalized_set_parts(
 ) -> None:
     """Append denormalized column SET fragments for keys present in *result*.
 
-    Only includes ``job_name``, ``build_number``, or ``build_id`` when the
-    corresponding key exists in *result* — partial payloads must not clobber
-    existing column values.
+    Only includes a denormalized column when *result* carries what it is
+    derived from — partial payloads must not clobber existing column values.
     """
-    job_name, build_number, build_id = _extract_denormalized_fields(result)
-    if "job_name" in result:
-        set_parts.append("job_name = ?")
-        params.append(job_name)
-    if "build_number" in result:
-        set_parts.append("build_number = ?")
-        params.append(build_number)
-    if "build_id" in result:
-        set_parts.append("build_id = ?")
-        params.append(build_id)
+    present = _denorm_presence(result)
+    for column, value in zip(_DENORM_COLUMNS, _extract_denormalized_fields(result)):
+        if present[column]:
+            set_parts.append(f"{column} = ?")
+            params.append(value)
     if "analysis_state" in result:
         set_parts.append("analysis_state = ?")
         params.append(_coerce_analysis_state(result.get("analysis_state")))
 
 
-def _build_status_update_clause(
-    status: str,
-    result_json: str | None = None,
-    result: dict[str, Any] | None = None,
-) -> tuple[list[str], list[Any]]:
-    """Build the SET clause parts and params for a status update.
+def _build_status_update_clause(status: str) -> tuple[list[str], list[Any]]:
+    """Build the SET clause parts and params for the status half of a write.
 
     Returns the set-clause fragments and the corresponding parameter list.
-    The caller must append the trailing ``job_id`` parameter.
+    The caller must append the trailing ``job_id`` parameter, and may guard the
+    statement with the status its transition was decided from -- see
+    :func:`_write_status`.
 
     Args:
         status: New status value.
-        result_json: Serialized result JSON. When not None, ``result_json``
-            is included in the update.
-        result: Optional result dict used to denormalize job_name/build_number/build_id.
-            When provided, denormalized columns are updated only for keys
-            present in *result* — omitted identity keys leave existing column
-            values unchanged (key-presence semantics).
 
     Returns:
         Tuple of (set_parts, params).
@@ -2498,19 +3186,45 @@ def _build_status_update_clause(
     set_parts = ["status = ?"]
     params: list[Any] = [status]
 
-    if result_json is not None:
-        set_parts.append("result_json = ?")
-        params.append(result_json)
-
-    if result is not None:
-        _append_denormalized_set_parts(result, set_parts, params)
-
     if status == "running":
         set_parts.append(
             "analysis_started_at = COALESCE(analysis_started_at, CURRENT_TIMESTAMP)"
         )
     if status == "completed":
         set_parts.append("completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)")
+
+    return set_parts, params
+
+
+def _build_payload_update_clause(
+    result_json: bytes | str | None,
+    result: dict[str, Any] | None,
+) -> tuple[list[str], list[Any]]:
+    """Build the SET clause parts and params for the payload half of a write.
+
+    Args:
+        result_json: Serialized result JSON. When not None, ``result_json``
+            is included in the update.
+        result: Optional result dict used to denormalize the derived columns.
+            When provided, denormalized columns are updated only for keys
+            present in *result* — omitted identity keys leave existing column
+            values unchanged (key-presence semantics).
+
+    Returns:
+        Tuple of (set_parts, params), empty when there is no payload to write.
+    """
+    set_parts: list[str] = []
+    params: list[Any] = []
+
+    if result_json is not None:
+        set_parts.append("result_json = ?")
+        params.append(result_json)
+
+    if result is not None:
+        _append_denormalized_set_parts(result, set_parts, params)
+        # This payload IS the stored one, so every column is now derived from it.
+        set_parts.append("denorm_version = ?")
+        params.append(_RESULTS_DENORM_VERSION)
 
     return set_parts, params
 
@@ -2566,15 +3280,95 @@ async def _row_exists(db: aiosqlite.Connection, job_id: str) -> bool:
     return await cursor.fetchone() is not None
 
 
-async def _read_stored_result(
-    db: aiosqlite.Connection, job_id: str
-) -> dict[str, Any] | None:
-    """Return the result currently stored for *job_id* (``None`` if absent)."""
-    cursor = await db.execute(
-        "SELECT result_json FROM results WHERE job_id = ?", (job_id,)
+def _parse_stored_result(job_id: str, expect: _WriteState) -> dict[str, Any] | None:
+    """Return the payload *expect* reports, or None when the row holds none.
+
+    Read while holding the job's write lock, so it is the payload the write lands
+    on; the state is what :func:`_begin_guarded_write` proves again inside the
+    transaction for the other processes (see :func:`_write_result`).
+
+    A damaged frame reads as "no previous payload", so a damaged row can never
+    block its own job's updates: the write that follows repairs it. The one
+    warning names the job, so the damage is still reportable after the payload is
+    gone.
+
+    Raises:
+        UnsupportedResultEncoding: the row holds an intact payload written by a
+            build with a result_json codec this one lacks. That is not damage to
+            repair but data to leave alone -- see :func:`_refuse_write`.
+    """
+    raw = expect[0]
+    if not raw:
+        return None
+    try:
+        return parse_result_json(raw, job_id=job_id)
+    except DamagedResultEncoding as exc:
+        logger.warning(
+            f"job_id={job_id}: previous result_json is damaged "
+            f"({type(exc).__name__}) and is replaced by this write"
+        )
+        return None
+
+
+def _refuse_write(
+    job_id: str,
+    exc: UnsupportedResultEncoding,
+    *,
+    log_level: int = logging.ERROR,
+) -> NoReturn:
+    """Report a write whose stored payload this build cannot decode, and refuse it.
+
+    An ``UnsupportedResultEncoding`` row is an intact report from a build with a
+    newer result_json codec: writing over it would destroy data that build can
+    still recover, so the writer leaves the row exactly as it found it. The
+    refusal is raised rather than returned, because a caller that returned
+    normally would report a status or result it never persisted.
+
+    *log_level* defaults to ERROR: a refused write failed the operation that
+    asked for it. A caller whose operation still succeeds without the payload
+    (an abort: the status transition is the whole action) passes WARNING, so the
+    log line matches the outcome instead of contradicting it.
+
+    Raises:
+        UnsupportedResultEncoding: always -- the write did not happen.
+    """
+    logger.log(
+        log_level,
+        f"job_id={job_id}: stored result_json uses an encoding this build cannot "
+        f"decode ({type(exc).__name__}), so the write was refused and nothing was "
+        "written over it -- a build with the result_json codec still has the "
+        "payload.",
     )
-    row = await cursor.fetchone()
-    return parse_result_json(row[0], job_id=job_id) if row and row[0] else None
+    raise exc
+
+
+def _payload_for_attempt(
+    result: dict[str, Any] | None,
+) -> dict[str, Any] | None:
+    """A private copy of the caller's payload for one write attempt.
+
+    An attempt merges stored fields into the dict it encodes, and
+    :func:`_write_result` re-runs it after a ``"stale"`` outcome: without a copy,
+    a key merged on one attempt would survive into the next even when the newer
+    stored payload no longer has it. The caller's dict is only ever refreshed from
+    a payload that landed (see :func:`_adopt_written_payload`).
+    """
+    return None if result is None else copy.deepcopy(result)
+
+
+def _adopt_written_payload(
+    result: dict[str, Any] | None, written: dict[str, Any] | None
+) -> None:
+    """Leave the caller holding what the landed write stored.
+
+    The attempts work on copies (see :func:`_payload_for_attempt`), so the caller's
+    dict is refreshed from the payload that landed -- it still carries the merged
+    progress fields and the token usage the write attached to it, as it did when
+    the attempt encoded the caller's dict in place.
+    """
+    if result is not None and written is not None:
+        result.clear()
+        result.update(written)
 
 
 async def save_result(
@@ -2593,49 +3387,161 @@ async def save_result(
         status: Current status of the analysis.
         result: Optional result data to store.
         jenkins_url: Deprecated alias for ``build_url``.
+
+    The read, the merge, the encode and the write all hold the job's write lock
+    (see :func:`_job_write_lock`), and the write only lands on the row it was
+    encoded from (see :func:`_write_result`), so neither a patch here nor a write
+    from another process can be replaced by a payload encoded from an older one.
+    Nothing is written when the row already holds a payload this build cannot
+    decode (a rollback): see :func:`_refuse_write`.
+
+    Raises:
+        UnsupportedResultEncoding: the save was refused for that reason, so
+            nothing was written and the caller must not treat it as saved.
     """
     if jenkins_url is not None:
         build_url = jenkins_url
     logger.debug(f"Saving result for job_id: {job_id} (status: {status})")
-    result_json = json.dumps(result) if result is not None else None
-    async with _connect_db() as db:
-        await db.execute("BEGIN IMMEDIATE")
-        if result is not None:
-            # Merge the stored forward links inside this same transaction so a
-            # link appended after the caller read the job cannot be dropped.
-            previous = await _read_stored_result(db, job_id)
-            if previous:
-                _preserve_reanalysis_forward_links(previous, result)
-            await _sync_result_token_usage(db, job_id, result)
-            result_json = json.dumps(result)
-        # Insert the row if it doesn't exist yet (preserves created_at / analysis_started_at).
-        job_name, build_number, build_id_val = _extract_denormalized_fields(result)
-        insert_state = _coerce_analysis_state((result or {}).get("analysis_state"))
-        await db.execute(
-            """
-            INSERT OR IGNORE INTO results (job_id, build_url, status, result_json,
-                                           job_name, build_number, build_id, analysis_state)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                job_id,
-                build_url,
-                status,
-                result_json,
-                job_name,
-                build_number,
-                build_id_val,
-                insert_state,
-            ),
+
+    written: dict[str, Any] | None = None
+
+    async def attempt() -> _WriteOutcome:
+        nonlocal written
+        result_json: bytes | str | None = None
+        payload = _payload_for_attempt(result)
+        async with _connect_db() as db:
+            expect = await _read_write_state(db, job_id)
+            if payload is not None:
+                try:
+                    previous = _parse_stored_result(job_id, expect)
+                    if previous:
+                        _preserve_reanalysis_forward_links(previous, payload)
+                    await _sync_result_token_usage(db, job_id, payload)
+                except UnsupportedResultEncoding as exc:
+                    # No transaction is open, so nothing to roll back.
+                    _refuse_write(job_id, exc)
+                result_json = await asyncio.to_thread(_dump_result_json, payload)
+        async with _connect_db() as db:
+            if not await _begin_guarded_write(db, job_id, expect):
+                return "stale"
+            await _write_saved_result(
+                db, job_id, build_url, status, payload, result_json
+            )
+            await db.commit()
+        written = payload
+        return "landed"
+
+    await _write_result(job_id, "save_result", attempt)
+    _adopt_written_payload(result, written)
+
+
+async def _write_saved_result(
+    db: aiosqlite.Connection,
+    job_id: str,
+    build_url: str,
+    status: str,
+    result: dict[str, Any] | None,
+    result_json: bytes | str | None,
+) -> None:
+    """Insert and update the row for :func:`save_result` inside its transaction."""
+    # Insert the row if it doesn't exist yet (preserves created_at / analysis_started_at).
+    (
+        job_name,
+        build_number,
+        build_id_val,
+        submitted_by,
+        summary,
+        display_name,
+        failure_ids,
+    ) = _extract_denormalized_fields(result)
+    insert_state = _coerce_analysis_state((result or {}).get("analysis_state"))
+    await db.execute(
+        """
+        INSERT OR IGNORE INTO results (job_id, build_url, status, result_json,
+                                       job_name, build_number, build_id,
+                                       analysis_state, submitted_by, summary,
+                                       display_name, failure_ids, denorm_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            job_id,
+            build_url,
+            status,
+            result_json,
+            job_name,
+            build_number,
+            build_id_val,
+            insert_state,
+            submitted_by,
+            summary,
+            display_name,
+            failure_ids,
+            _RESULTS_DENORM_VERSION,
+        ),
+    )
+    # The transition first, so the payload never lands without the status it
+    # describes; both statements are in this transaction either way.
+    await _write_status(db, job_id, status, writer="save_result")
+    payload_parts, payload_params = _build_payload_update_clause(result_json, result)
+    payload_parts.insert(0, "build_url = COALESCE(NULLIF(?, ''), build_url)")
+    payload_params.insert(0, build_url)
+    payload_params.append(job_id)
+    sql = f"UPDATE results SET {', '.join(payload_parts)} WHERE job_id = ?"
+    await db.execute(sql, payload_params)
+
+
+async def _write_status(
+    db: aiosqlite.Connection,
+    job_id: str,
+    status: str,
+    *,
+    writer: str,
+    expect_status: str | Sequence[str] | None = None,
+) -> bool:
+    """Write the status half of a result write inside its transaction.
+
+    *expect_status* is the status -- or the set of statuses -- the caller's
+    decision was made from, passed by a transition that only makes sense against
+    exactly that state: an abort must not end a job that completed while the abort
+    was being decided. The caller passes what it read itself -- re-reading the
+    status here and guarding against that read would guard against the state the
+    write replaces instead of the state the decision needed, which is how a
+    retried write once turned a completed job ``aborted``. An abort names
+    ``ACTIVE_STATUSES``: any of them is a job it may legitimately end, so a job
+    that merely started (``waiting`` -> ``running``) does not void the abort.
+
+    A missed expectation is never retried: the value to write was decided from a
+    state that is gone, so writing it anyway would revert a newer one.
+
+    Returns:
+        Whether the transition landed.
+    """
+    set_parts, params = _build_status_update_clause(status)
+    params.append(job_id)
+    sql = f"UPDATE results SET {', '.join(set_parts)} WHERE job_id = ?"
+    expected: tuple[str, ...] = ()
+    if expect_status is not None:
+        expected = (
+            (expect_status,) if isinstance(expect_status, str) else tuple(expect_status)
         )
-        # Update the row (handles both fresh inserts and existing rows).
-        set_parts, params = _build_status_update_clause(status, result_json, result)
-        set_parts.insert(0, "build_url = COALESCE(NULLIF(?, ''), build_url)")
-        params.insert(0, build_url)
-        params.append(job_id)
-        sql = f"UPDATE results SET {', '.join(set_parts)} WHERE job_id = ?"
-        await db.execute(sql, params)
-        await db.commit()
+        sql += f" AND status IN ({', '.join('?' * len(expected))})"
+        params.extend(expected)
+    cursor = await db.execute(sql, params)
+    if cursor.rowcount == 1:
+        return True
+    if expect_status is None:
+        logger.warning(f"{writer}: no row found for job_id={job_id}")
+        return False
+    row = await (
+        await db.execute("SELECT status FROM results WHERE job_id = ?", (job_id,))
+    ).fetchone()
+    wanted = "/".join(expected)
+    logger.warning(
+        f"job_id={job_id}: {writer} to '{status}' was decided from status "
+        f"'{wanted}' but the row is now '{row[0] if row else '?'}', so "
+        "the newer status is kept and this write was refused rather than reverting it"
+    )
+    return False
 
 
 def _preserve_reanalysis_forward_links(
@@ -2648,8 +3554,8 @@ def _preserve_reanalysis_forward_links(
     copy a finishing job read earlier must not replace the newer stored list —
     that would resurrect a deleted link or drop a re-analysis enqueued
     mid-flight.  The stored list is always the newer one, and both
-    ``save_result`` and ``update_status`` merge it inside their own write
-    transaction.
+    ``save_result`` and ``update_status`` merge it while holding the job's write
+    lock, so nothing can append to it in between.
     """
     stored_params = previous.get("request_params")
     params = result.get("request_params")
@@ -2664,7 +3570,10 @@ async def update_status(
     job_id: str,
     status: str,
     result: dict[str, Any] | None = None,
-) -> None:
+    *,
+    refusal_log_level: int = logging.ERROR,
+    expect_status: str | Sequence[str] | None = None,
+) -> bool:
     """Update the status of an existing analysis result.
 
     Unlike save_result, this uses UPDATE to preserve the original created_at timestamp.
@@ -2679,80 +3588,193 @@ async def update_status(
         job_id: Unique identifier for the analysis job.
         status: New status for the analysis.
         result: Optional result data to store. When None, result_json is not modified.
+        refusal_log_level: Log level for a refused payload write; ERROR unless the
+            caller's operation survives the refusal (see :func:`_refuse_write`).
+        expect_status: The status, or set of statuses, the caller's decision was
+            made from, for a transition that only makes sense against that state
+            (see :func:`_write_status`). It is refused rather than reverted over a
+            newer one, and never re-read here.
+
+    As in :func:`save_result`, the read, the merge, the encode and the write all
+    hold the job's write lock, the write only lands on the row it was encoded from,
+    and a stored payload a newer build can decode but this one cannot is left
+    untouched instead of being replaced.
+
+    Returns:
+        True when the row was written, False when *expect_status* no longer held
+        (see :func:`_write_status`).
+
+    Raises:
+        UnsupportedResultEncoding: the update was refused for that reason, so
+            nothing was written -- not the status either.
     """
     logger.debug(f"Updating status for job_id: {job_id} (status: {status})")
-    async with _connect_db() as db:
-        await db.execute("BEGIN IMMEDIATE")
-        if result is not None:
-            previous = await _read_stored_result(db, job_id)
-            if previous:
-                for key in ("progress_phase", "progress_log", "cloning_repos"):
-                    if key in previous:
-                        result[key] = previous[key]
-                _preserve_reanalysis_forward_links(previous, result)
-            if status in ("failed", "aborted", "completed"):
-                active_repos = result.get("cloning_repos") or []
-                if active_repos:
-                    log = result.setdefault("progress_log", [])
-                    state = "failed" if status == "failed" else "cancelled"
-                    active_operations: dict[str, dict[str, Any]] = {}
-                    legacy_starts: dict[str, dict[str, Any]] = {}
-                    for entry in log:
-                        repo = entry.get("repo")
-                        if repo not in active_repos:
-                            continue
-                        identity = entry.get("operation_id")
-                        active = active_operations if identity else legacy_starts
-                        key = identity or repo
-                        if entry.get("state") == "cloning":
-                            active[key] = entry
-                        else:
-                            active.pop(key, None)
-                    starts = list(active_operations.values()) + list(
-                        legacy_starts.values()
-                    )
-                    starts.extend(
-                        {"repo": repo}
-                        for repo in active_repos
-                        if repo not in legacy_starts
-                        and not any(
-                            entry["repo"] == repo
-                            for entry in active_operations.values()
-                        )
-                    )
-                    for started in starts:
-                        transition: dict[str, Any] = {
-                            "phase": "cloning",
-                            "repo": started["repo"],
-                            "state": state,
-                            "repos": [],
-                            "timestamp": time.time(),
-                        }
-                        transition.update(
-                            (key, started[key])
-                            for key in ("operation_id", "url", "ref")
-                            if key in started
-                        )
-                        log.append(transition)
-                    logger.info(
-                        "Ended %d active clone operations for job_id=%s status=%s",
-                        len(starts),
-                        job_id,
-                        status,
-                    )
-                result["cloning_repos"] = []
-                if status != "completed":
-                    result["progress_phase"] = status
-            await _sync_result_token_usage(db, job_id, result)
-        result_json = json.dumps(result) if result is not None else None
-        set_parts, params = _build_status_update_clause(status, result_json, result)
-        params.append(job_id)
-        sql = f"UPDATE results SET {', '.join(set_parts)} WHERE job_id = ?"
-        cursor = await db.execute(sql, params)
 
-        if cursor.rowcount == 0:
-            logger.warning(f"update_status: no row found for job_id={job_id}")
-        await db.commit()
+    written: dict[str, Any] | None = None
+
+    async def attempt() -> _WriteOutcome:
+        nonlocal written
+        result_json: bytes | str | None = None
+        payload = _payload_for_attempt(result)
+        async with _connect_db() as db:
+            expect = await _read_write_state(db, job_id)
+            if payload is not None:
+                try:
+                    previous = _parse_stored_result(job_id, expect)
+                    if previous:
+                        for key in ("progress_phase", "progress_log", "cloning_repos"):
+                            if key in previous:
+                                payload[key] = previous[key]
+                        _preserve_reanalysis_forward_links(previous, payload)
+                    _end_active_clone_operations(job_id, status, payload)
+                    await _sync_result_token_usage(db, job_id, payload)
+                except UnsupportedResultEncoding as exc:
+                    # No transaction is open, so nothing to roll back.
+                    _refuse_write(job_id, exc, log_level=refusal_log_level)
+                result_json = await asyncio.to_thread(_dump_result_json, payload)
+        async with _connect_db() as db:
+            if not await _begin_guarded_write(db, job_id, expect):
+                return "stale"
+            if not await _write_status(
+                db,
+                job_id,
+                status,
+                writer="update_status",
+                expect_status=expect_status,
+            ):
+                await db.execute("ROLLBACK")
+                return "refused"
+            payload_parts, payload_params = _build_payload_update_clause(
+                result_json, payload
+            )
+            if payload_parts:
+                payload_params.append(job_id)
+                await db.execute(
+                    f"UPDATE results SET {', '.join(payload_parts)} WHERE job_id = ?",
+                    payload_params,
+                )
+            await db.commit()
+        written = payload
+        return "landed"
+
+    landed = await _write_result(job_id, "update_status", attempt)
+    _adopt_written_payload(result, written)
+    return landed
+
+
+def _end_active_clone_operations(
+    job_id: str, status: str, result: dict[str, Any]
+) -> None:
+    """End the clone operations a terminal *status* leaves behind in *result*.
+
+    A job that finishes mid-clone would otherwise keep showing repos as cloning,
+    so each started operation gets the transition that ends it and
+    ``cloning_repos`` is cleared.
+    """
+    if status not in ("failed", "aborted", "completed"):
+        return
+    active_repos = result.get("cloning_repos") or []
+    if active_repos:
+        log = result.setdefault("progress_log", [])
+        state = "failed" if status == "failed" else "cancelled"
+        active_operations: dict[str, dict[str, Any]] = {}
+        legacy_starts: dict[str, dict[str, Any]] = {}
+        for entry in log:
+            repo = entry.get("repo")
+            if repo not in active_repos:
+                continue
+            identity = entry.get("operation_id")
+            active = active_operations if identity else legacy_starts
+            key = identity or repo
+            if entry.get("state") == "cloning":
+                active[key] = entry
+            else:
+                active.pop(key, None)
+        starts = list(active_operations.values()) + list(legacy_starts.values())
+        starts.extend(
+            {"repo": repo}
+            for repo in active_repos
+            if repo not in legacy_starts
+            and not any(entry["repo"] == repo for entry in active_operations.values())
+        )
+        for started in starts:
+            transition: dict[str, Any] = {
+                "phase": "cloning",
+                "repo": started["repo"],
+                "state": state,
+                "repos": [],
+                "timestamp": time.time(),
+            }
+            transition.update(
+                (key, started[key])
+                for key in ("operation_id", "url", "ref")
+                if key in started
+            )
+            log.append(transition)
+        logger.info(
+            "Ended %d active clone operations for job_id=%s status=%s",
+            len(starts),
+            job_id,
+            status,
+        )
+    result["cloning_repos"] = []
+    if status != "completed":
+        result["progress_phase"] = status
+
+
+async def fail_job_without_result_write(job_id: str, reason: str) -> None:
+    """Mark *job_id* failed when a write to its ``result_json`` was refused.
+
+    Only the status columns are written: the stored payload belongs to a build
+    this one cannot decode, so it is left exactly as found. Exists so a refused
+    write ends the job with the reason visible instead of leaving it in the
+    status it was refused from.
+
+    A job that already reached a terminal status keeps it: this fallback is a
+    consequence of a refused write, not a decision about the job, so it must not
+    end one an abort or a completion already ended (see :func:`_write_status`).
+    """
+
+    async def attempt() -> _WriteOutcome:
+        async with _connect_db() as db:
+            expect = await _read_write_state(db, job_id)
+        if expect[1] is None:
+            logger.warning(
+                f"job_id={job_id}: no row to mark failed without writing result_json"
+            )
+            return "refused"
+        if expect[1] in ENDED_STATUSES:
+            logger.warning(
+                f"job_id={job_id}: the job already ended as '{expect[1]}', so the "
+                "refused result_json write did not mark it failed -- the newer "
+                "status and its error are kept"
+            )
+            return "refused"
+        async with _connect_db() as db:
+            if not await _begin_guarded_write(db, job_id, expect):
+                return "stale"
+            landed = await _write_status(
+                db,
+                job_id,
+                "failed",
+                writer="fail_job_without_result_write",
+                expect_status=expect[1],
+            )
+            if not landed:
+                await db.execute("ROLLBACK")
+                return "refused"
+            await db.execute(
+                "UPDATE results SET error = ?, completed_at = ? WHERE job_id = ?",
+                (reason, datetime.now(UTC).isoformat(), job_id),
+            )
+            await db.commit()
+        return "landed"
+
+    if await _write_result(job_id, "fail_job_without_result_write", attempt):
+        logger.info(
+            f"job_id={job_id}: marked failed without writing result_json (only the "
+            "status columns changed)"
+        )
 
 
 async def claim_submitted_job_for_analyze(job_id: str) -> bool:
@@ -2988,79 +4010,105 @@ async def patch_result_json(
 ) -> None:
     """Atomically read-modify-write the ``result_json`` blob for *job_id*.
 
-        The *patch_fn* is called with the parsed ``result`` dict and is expected
-    to mutate it in place.  The read and write happen inside a single
-        ``BEGIN IMMEDIATE`` transaction so concurrent patches are serialized
-        by SQLite's write lock.
+    The *patch_fn* is called with the parsed ``result`` dict and is expected to
+    mutate it in place. The read, the patch and the encode hold the job's write
+    lock (see :func:`_job_write_lock`), so a patch always lands on the payload it
+    was applied to: nothing else in this process can write that row in between, and
+    another process's write is caught by the guard the write lands under (see
+    :func:`_write_result`) -- the patch is then redone on the payload it finds.
 
-                After *patch_fn* returns, denormalized identity columns (``job_name``,
-                ``build_number``, ``build_id``) are synced from the patched dict using
-                key-presence semantics: only keys present in the result update their
-                columns — missing keys leave existing column values unchanged.
+    After *patch_fn* returns, denormalized identity columns (``job_name``,
+    ``build_number``, ``build_id``) are synced from the patched dict using
+    key-presence semantics: only keys present in the result update their columns
+    — missing keys leave existing column values unchanged.
 
     If the row does not exist or ``result_json`` is empty, this is a no-op.
-        ``skip_terminal`` prevents patches to terminal jobs; ``allow_completed``
-        permits completed jobs when a reanalysis updates clone progress. Identified
-        re-analysis updates require a running failure regardless of parent status.
-        ``require_job_id`` makes the patch conditional: when set and that job row no
-        longer exists, the patch is skipped, so a link can never be created for an
-        already-deleted result.
+    ``skip_terminal`` prevents patches to terminal jobs; ``allow_completed``
+    permits completed jobs when a reanalysis updates clone progress. Identified
+    re-analysis updates require a running failure regardless of parent status.
+    ``require_job_id`` makes the patch conditional: when set and that job row no
+    longer exists, the patch is skipped, so a link can never be created for an
+    already-deleted result.
+
+    A damaged frame is replaced by the patched result; a payload a newer build can
+    decode but this one cannot is left untouched and the patch is refused.
+
+    Raises:
+        UnsupportedResultEncoding: the patch was refused for that reason, so the
+            stored payload is unchanged.
     """
-    async with _connect_db() as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            if require_job_id and not await _row_exists(db, require_job_id):
-                await db.execute("ROLLBACK")
-                return
+
+    async def attempt() -> _WriteOutcome:
+        async with _connect_db() as db:
             cursor = await db.execute(
                 "SELECT result_json, status FROM results WHERE job_id = ?", (job_id,)
             )
             row = await cursor.fetchone()
-            if (
-                not row
-                or not row[0]
-                or (
-                    skip_terminal
-                    and (
-                        (
-                            row[1] in ("failed", "aborted")
-                            and not active_reanalysis_failure_id
-                        )
-                        or (row[1] == "completed" and not allow_completed)
+        if (
+            not row
+            or not row[0]
+            or (
+                skip_terminal
+                and (
+                    (
+                        row[1] in ("failed", "aborted")
+                        and not active_reanalysis_failure_id
                     )
+                    or (row[1] == "completed" and not allow_completed)
                 )
-            ):
-                await db.execute("ROLLBACK")
-                return
+            )
+        ):
+            return "refused"
+        try:
             result_data = parse_result_json(row[0], job_id=job_id)
-            if result_data is None:
-                await db.execute("ROLLBACK")
-                return
-            if active_reanalysis_failure_id:
-                failure = _find_failure_by_uuid_in_failures(
-                    result_data.get("failures", []), active_reanalysis_failure_id
+        except DamagedResultEncoding as exc:
+            # A patch is applied to the stored payload; with a damaged frame
+            # there is none readable, so the patch starts from an empty
+            # result instead of failing. Warned once, naming the job.
+            logger.warning(
+                f"job_id={job_id}: previous result_json is damaged "
+                f"({type(exc).__name__}) and is replaced by this patch"
+            )
+            result_data = {}
+        except UnsupportedResultEncoding as exc:
+            # No transaction is open: the refusal is the whole outcome.
+            _refuse_write(job_id, exc)
+        if result_data is None:
+            return "refused"
+        if active_reanalysis_failure_id:
+            failure = _find_failure_by_uuid_in_failures(
+                result_data.get("failures", []), active_reanalysis_failure_id
+            )
+            if failure is None:
+                failure, _, _ = _find_failure_by_uuid_in_children(
+                    result_data.get("child_job_analyses", []),
+                    active_reanalysis_failure_id,
                 )
-                if failure is None:
-                    failure, _, _ = _find_failure_by_uuid_in_children(
-                        result_data.get("child_job_analyses", []),
-                        active_reanalysis_failure_id,
-                    )
-                if not failure or failure.get("reanalysis_status") != "running":
-                    await db.execute("ROLLBACK")
-                    return
-            patch_fn(result_data)
-            set_parts = ["result_json = ?"]
-            params: list[Any] = [json.dumps(result_data)]
-            _append_denormalized_set_parts(result_data, set_parts, params)
-            params.append(job_id)
+            if not failure or failure.get("reanalysis_status") != "running":
+                return "refused"
+        patch_fn(result_data)
+        set_parts = ["result_json = ?"]
+        # Encoded before the transaction, so the SQLite write lock never spans it.
+        # Unlike save_result/update_status this encode stays on the loop: a patch
+        # runs from request handlers that already hold the payload, and a thread
+        # hop here would appear in every caller that stubs ``asyncio.to_thread``.
+        params: list[Any] = [_dump_result_json(result_data)]
+        _append_denormalized_set_parts(result_data, set_parts, params)
+        params.append(job_id)
+        async with _connect_db() as db:
+            if not await _begin_guarded_write(db, job_id, (row[0], row[1])):
+                return "stale"
+            if require_job_id and not await _row_exists(db, require_job_id):
+                await db.execute("ROLLBACK")
+                return "refused"
             await db.execute(
                 f"UPDATE results SET {', '.join(set_parts)} WHERE job_id = ?",
                 params,
             )
             await db.commit()
-        except Exception:
-            await db.execute("ROLLBACK")
-            raise
+        return "landed"
+
+    await _write_result(job_id, "patch_result_json", attempt)
 
 
 def _backfill_child_uuids(child: dict[str, Any]) -> bool:
@@ -3089,8 +4137,8 @@ def _backfill_child_uuids(child: dict[str, Any]) -> bool:
     return changed
 
 
-async def _backfill_failure_uuids(job_id: str, result_data: dict[str, Any]) -> bool:
-    """Assign stable UUIDs to failures and child analyses that lack them.
+def _assign_missing_uuids(result_data: dict[str, Any]) -> bool:
+    """Assign a UUID to every failure and child analysis that lacks one.
 
     Legacy ``result_json`` rows pre-date the ``id`` field on
     :class:`~rootcoz.models.FailureAnalysis` and
@@ -3098,15 +4146,11 @@ async def _backfill_failure_uuids(job_id: str, result_data: dict[str, Any]) -> b
     Pydantic's ``default_factory`` generates a *transient* UUID that is never
     persisted — so the ID changes on every read.
 
-    This helper detects missing ``id`` fields, assigns UUIDs, and persists them
-    back so subsequent reads return stable identifiers.
-
     Args:
-        job_id: The analysis job identifier (used for the DB update).
         result_data: Parsed result dict (mutated in place).
 
     Returns:
-        ``True`` if any UUIDs were added (and the DB was updated).
+        ``True`` if any UUIDs were added.
     """
     changed = False
     for f in result_data.get("failures", []):
@@ -3120,15 +4164,70 @@ async def _backfill_failure_uuids(job_id: str, result_data: dict[str, Any]) -> b
             continue
         if _backfill_child_uuids(child):
             changed = True
-    if changed:
+    return changed
+
+
+async def _backfill_failure_uuids(
+    job_id: str, result_data: dict[str, Any]
+) -> dict[str, Any]:
+    """Persist stable UUIDs for a legacy payload and return the payload now stored.
+
+    A read is what notices the missing ids, but it must not write back the payload
+    it read: a writer may have patched the row since, and committing the older
+    payload would erase that patch. So the fix is a write of its own -- it holds
+    the job's write lock, adds the ids to the payload the row holds *now* (see
+    :func:`_write_result`), and the read returns what that write stored, so the
+    ids it reports are the persisted ones.
+
+    A stored payload this build cannot decode is left alone: the read path never
+    replaces a payload, it only hands out stable ids.
+
+    Args:
+        job_id: The analysis job identifier.
+        result_data: The parsed payload this read is about to return (mutated in
+            place; only returned when the row holds no readable payload).
+
+    Returns:
+        The payload as stored after the backfill, or -- when the write did not land
+        -- the payload the row holds, so the ids reported are always the stored
+        ones. *result_data* is returned only when the row holds no readable payload.
+    """
+    if not _assign_missing_uuids(result_data):
+        return result_data
+    stored: dict[str, Any] = {}
+
+    async def attempt() -> _WriteOutcome:
+        nonlocal stored
         async with _connect_db() as db:
+            expect = await _read_write_state(db, job_id)
+        payload = _parse_stored_result(job_id, expect)
+        if not payload or not _assign_missing_uuids(payload):
+            return "refused"
+        set_parts = ["result_json = ?"]
+        params: list[Any] = [await asyncio.to_thread(_dump_result_json, payload)]
+        # The payload itself changed, so its derived columns move with it.
+        _append_denormalized_set_parts(payload, set_parts, params)
+        params.append(job_id)
+        async with _connect_db() as db:
+            if not await _begin_guarded_write(db, job_id, expect):
+                return "stale"
             await db.execute(
-                "UPDATE results SET result_json = ? WHERE job_id = ?",
-                (json.dumps(result_data), job_id),
+                f"UPDATE results SET {', '.join(set_parts)} WHERE job_id = ?",
+                params,
             )
             await db.commit()
-        logger.info(f"Backfilled missing failure UUIDs for job_id={job_id}")
-    return changed
+        stored = payload
+        return "landed"
+
+    if not await _write_result(job_id, "failure id backfill", attempt):
+        # Another writer got the ids in first, so the row holds its payload, not
+        # this read's: report the stored ids, or the read hands out ids nothing
+        # contains and the failure lookup cannot find them.
+        async with _connect_db() as db:
+            expect = await _read_write_state(db, job_id)
+        return parse_result_json_lenient(expect[0], job_id=job_id) or result_data
+    logger.info(f"Backfilled missing failure UUIDs for job_id={job_id}")
+    return stored
 
 
 def _analysis_identity_key(item: dict[str, Any], *fields: str) -> tuple[Any, ...]:
@@ -3219,7 +4318,7 @@ async def get_result(
             # result instead of failing the whole read.
             parsed = parse_result_json_lenient(row["result_json"], job_id=job_id)
             if parsed:
-                await _backfill_failure_uuids(job_id, parsed)
+                parsed = await _backfill_failure_uuids(job_id, parsed)
                 if summary := await _token_usage_snapshot(db, job_id):
                     parsed["token_usage"] = summary
                 await _attach_failure_usage(db, job_id, parsed)
@@ -3260,26 +4359,22 @@ async def add_graft_estimated_tokens_saved(job_id: str, tokens: int) -> None:
         await db.commit()
 
 
-# Single source of the submitted_by JSON path. The json_valid guard lives inside the
-# constant so every use (filter, enumeration, ownership lookup) is safe on bad rows,
-# and it stays table-alias free so the enumeration matches the expression index below.
-_SUBMITTED_BY_RAW_SQL = (
-    "CASE WHEN json_valid(result_json) "
-    "THEN trim(json_extract(result_json, '$.request_params.submitted_by')) END"
-)
+# Single source of submitted_by. It is a denormalized column, because a compressed
+# result_json cannot be json_extract'ed in SQL (#409) — every use (filter,
+# enumeration, ownership lookup) reads it, and it stays table-alias free so the
+# enumeration matches the index below. Empty reads as NULL, never as a name.
+_SUBMITTED_BY_RAW_SQL = "NULLIF(submitted_by, '')"
 # Folding happens only in SQL: SQLite lower() is ASCII-only, so a Python lower()
 # would make a non-ASCII name unmatchable against its own rows.
 _SUBMITTED_BY_SQL = f"lower({_SUBMITTED_BY_RAW_SQL})"
-# The picker lists every stored name, and this index lets it do so without decoding
-# result JSON per row: DISTINCT reads the index alone. Only the enumeration uses it —
+# The picker lists every stored name, and this index lets it do so without touching
+# result_json per row: DISTINCT reads the index alone. Only the enumeration uses it —
 # a LIKE '%name%' filter cannot (no index can narrow an unanchored substring match).
 _SUBMITTED_BY_INDEX_SQL = (
-    "CREATE INDEX IF NOT EXISTS idx_results_submitted_by "
-    f"ON results ({_SUBMITTED_BY_RAW_SQL})"
+    "CREATE INDEX IF NOT EXISTS idx_results_submitted_by ON results (submitted_by)"
 )
 _SUBMITTER_LIST_SQL = (
-    f"SELECT DISTINCT {_SUBMITTED_BY_RAW_SQL} AS name FROM results "
-    f"WHERE {_SUBMITTED_BY_RAW_SQL} IS NOT NULL"
+    "SELECT DISTINCT submitted_by AS name FROM results WHERE submitted_by != ''"
 )
 
 
@@ -3307,7 +4402,15 @@ def _submitted_by_predicate(values: set[str]) -> tuple[str, list[str]]:
 
 
 async def get_job_submitters(job_ids: list[str]) -> dict[str, str]:
-    """Return {job_id: submitted_by} for multiple jobs in one query."""
+    """Return {job_id: submitted_by} for multiple jobs in one query.
+
+    A row whose column is still empty because ``backfill_results_denorm`` has not
+    reached it yet (a row a pre-compression build inserted) is read from its
+    payload instead: ownership checks run against these ids, so an operator would
+    otherwise be refused the delete of their own legacy job for as long as the
+    background sweep takes. Bounded by *job_ids*, so this never parses more rows
+    than the caller named.
+    """
     if not job_ids:
         return {}
     placeholders = ", ".join("?" for _ in job_ids)
@@ -3318,7 +4421,33 @@ async def get_job_submitters(job_ids: list[str]) -> dict[str, str]:
             job_ids,
         )
         rows = await cursor.fetchall()
-    return {row["job_id"]: row["submitter"] or "" for row in rows}
+        submitters = {row["job_id"]: row["submitter"] or "" for row in rows}
+        pending = [job_id for job_id, name in submitters.items() if not name]
+        if not pending:
+            return submitters
+        placeholders = ", ".join("?" for _ in pending)
+        cursor = await db.execute(
+            "SELECT job_id, result_json FROM results"
+            f" WHERE job_id IN ({placeholders}) AND COALESCE(denorm_version, 0) < ?",
+            (*pending, _RESULTS_DENORM_VERSION),
+        )
+        for row in await cursor.fetchall():
+            submitters[row["job_id"]] = _derived_columns(row)["submitted_by"]
+    return submitters
+
+
+def _derived_columns(row: aiosqlite.Row) -> dict[str, Any]:
+    """Derive the denormalized columns from a row's own inline payload.
+
+    The upgrade window's reader: a row an older build wrote (or rewrote) still has
+    ``''`` in those columns until ``backfill_results_denorm`` reaches it, so the
+    payload is the only truthful answer. Lenient, so a damaged payload reads as
+    empty columns instead of failing the caller.
+    """
+    payload = parse_result_json_lenient(row["result_json"], job_id=row["job_id"])
+    return dict(
+        zip(_DENORM_COLUMNS, _extract_denormalized_fields(payload), strict=True)
+    )
 
 
 def _find_failure_by_uuid_in_failures(
@@ -3359,13 +4488,23 @@ def _find_failure_by_uuid_in_children(
     return None, "", 0
 
 
+# Failure-UUID prefilter. ``failure_ids`` is the derived column, and the second
+# branch is the upgrade window: a row the background denorm sweep has not reached
+# still holds its payload inline with ``''`` in that column, so the UUID is looked
+# for in that text instead. Only TEXT is searched there -- a frame is never read by
+# SQL, the same rule as ``_FH_BUILD_ID_CANDIDATES_CTE``.
+_FIND_FAILURE_BY_UUID_SQL = "SELECT job_id, result_json FROM results WHERE INSTR(failure_ids, :uuid) > 0 OR (COALESCE(denorm_version, 0) < :denorm_version AND typeof(result_json) = 'text' AND INSTR(result_json, :uuid) > 0)"
+
+
 async def find_failure_by_uuid(
     failure_uuid: str,
 ) -> dict[str, Any] | None:
     """Search all stored results for a failure with the given UUID.
 
-    Uses SQLite ``INSTR`` to pre-filter rows that *might* contain the UUID,
-    then verifies in Python.
+    Uses SQLite ``INSTR`` on the derived ``failure_ids`` column -- and, for a row
+    the denorm sweep has not reached yet, on its inline payload text -- to
+    pre-filter rows that *might* contain the UUID (a compressed payload cannot be
+    scanned), then verifies in Python.
 
     Returns:
         Dict with ``job_id``, ``failure``, ``child_job_name``,
@@ -3373,9 +4512,8 @@ async def find_failure_by_uuid(
     """
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT job_id, result_json FROM results "
-            "WHERE result_json IS NOT NULL AND INSTR(result_json, ?) > 0",
-            (failure_uuid,),
+            _FIND_FAILURE_BY_UUID_SQL,
+            {"uuid": failure_uuid, "denorm_version": _RESULTS_DENORM_VERSION},
         )
         async for row in cursor:
             result_data = parse_result_json_lenient(
@@ -4064,18 +5202,17 @@ async def backfill_failure_history() -> None:
 
     logger.info(f"Backfilling failure_history from {len(rows)} missing results")
     backfilled = 0
-    compressed: list[str] = []
+    damaged: list[str] = []
     undecodable: list[str] = []
     malformed: list[str] = []
     for job_id, result_json_str, created_at in rows:
         try:
             result_data = parse_result_json(result_json_str, job_id=job_id)
-        except UnsupportedResultEncoding:
-            # Not corruption, and not a reason to have no service: this build
-            # predates the codec that wrote the row. Row is left untouched.
-            _note_undecodable_result(job_id)
-            if result_json_str.startswith(_ZSTD_FRAME_MAGIC):
-                compressed.append(job_id)
+        except UnreadableResultJson as exc:
+            # Not a reason to have no service: one row is unreadable here, the
+            # row itself is left untouched.
+            if _note_unreadable_result(job_id, exc):
+                damaged.append(job_id)
             else:
                 undecodable.append(job_id)
             continue
@@ -4093,7 +5230,7 @@ async def backfill_failure_history() -> None:
         )
         backfilled += 1
 
-    _warn_unreadable_results(compressed, undecodable, malformed)
+    _warn_unreadable_results(damaged, undecodable, malformed)
     logger.info(f"Backfill complete: processed {backfilled}/{len(rows)} results")
 
 
@@ -4105,26 +5242,28 @@ def _sample_job_ids(job_ids: list[str], limit: int = 5) -> str:
 
 
 def _warn_unreadable_results(
-    compressed: list[str], undecodable: list[str], malformed: list[str]
+    damaged: list[str], undecodable: list[str], malformed: list[str]
 ) -> None:
     """One aggregated warning per reason for rows the backfill had to skip.
 
-    *compressed* holds the rows whose payload is a zstd frame — the diagnosis
-    is certain there. *undecodable* holds the rest, where the only fact known
-    is that this build cannot decode the bytes.
+    *damaged* holds rows stored as a zstd frame this build's own codec refused:
+    the diagnosis is certain there (truncated or corrupt). *undecodable* holds
+    the rest, where the only fact known is that this build has no codec for the
+    bytes.
     """
-    if compressed:
+    if damaged:
         logger.warning(
-            f"Backfill skipped {len(compressed)} result(s) whose result_json was "
-            "written by a build with result_json compression, which this build "
-            f"cannot decode. Those rows are intact and untouched. "
-            f"{_RESULT_ENCODING_REMEDY} Job ids: {_sample_job_ids(compressed)}"
+            f"Backfill skipped {len(damaged)} result(s) whose result_json was "
+            "written by a build with result_json compression, but is truncated or "
+            "corrupt, so this build cannot inflate its frame. Those rows were "
+            f"left untouched. {_DAMAGED_RESULT_REMEDY} "
+            f"Job ids: {_sample_job_ids(damaged)}"
         )
     if undecodable:
         logger.warning(
             f"Backfill skipped {len(undecodable)} result(s) whose result_json "
-            "uses an encoding this build cannot decode -- a compressed frame or a "
-            f"newer encoding. Those rows are intact and untouched. "
+            "uses an encoding this build cannot decode -- a newer codec than this "
+            f"build has. Those rows are intact and untouched. "
             f"{_RESULT_ENCODING_REMEDY} Job ids: {_sample_job_ids(undecodable)}"
         )
     if malformed:
@@ -4723,6 +5862,7 @@ async def get_job_stats(job_name: str, exclude_job_id: str = "") -> dict[str, An
 
 
 ACTIVE_STATUSES = ("running", "pending", "waiting")
+ENDED_STATUSES = ("completed", "failed", "aborted")
 
 # Statuses whose background task is irrecoverably lost after a restart.
 # These are a subset of ACTIVE_STATUSES — "waiting" is excluded because
@@ -4938,8 +6078,8 @@ async def list_results_for_dashboard_filtered(
                 "(r.status = 'failed' AND ("
                 "lower(r.error) LIKE '%timed out%' OR "
                 "lower(r.error) LIKE '%timeout%' OR "
-                "lower(json_extract(r.result_json, '$.summary')) LIKE '%timed out%' OR "
-                "lower(json_extract(r.result_json, '$.summary')) LIKE '%timeout%'"
+                "lower(r.summary) LIKE '%timed out%' OR "
+                "lower(r.summary) LIKE '%timeout%'"
                 "))"
             )
         conditions.append(f"({' OR '.join(status_parts)})")
@@ -5912,7 +7052,8 @@ async def mark_stale_results_failed() -> tuple[
     so they are marked as failed with an error message and completion timestamp.
 
     Waiting jobs were polling Jenkins and can be safely resumed by re-creating
-    their background task.
+    their background task -- unless their payload is damaged, which no build can
+    inflate, so those are failed with the damage as their error.
 
     Returns:
         Tuple of (waiting_jobs, recovered_jobs).
@@ -5960,11 +7101,26 @@ async def mark_stale_results_failed() -> tuple[
                     result_data = parse_result_json(
                         row["result_json"], job_id=row["job_id"]
                     )
-                except UnsupportedResultEncoding:
+                except DamagedResultEncoding as exc:
+                    # Damage is terminal: no build's codec will inflate these
+                    # bytes, so this job can never be resumed. Fail it with the
+                    # damage as its error instead of leaving it 'waiting'.
+                    _note_unreadable_result(row["job_id"], exc)
+                    logger.warning(
+                        f"Marking waiting job {row['job_id']} as failed: its "
+                        "result_json is damaged, so no build can resume it"
+                    )
+                    await db.execute(
+                        "UPDATE results SET status = 'failed', "
+                        "error = ?, completed_at = ? WHERE job_id = ?",
+                        (str(exc), now, row["job_id"]),
+                    )
+                    continue
+                except UnsupportedResultEncoding as exc:
                     # Nothing proves this job is unrecoverable: leave the row
-                    # alone (still 'waiting', payload intact) so a build with
-                    # the codec resumes it after rolling forward.
-                    _note_undecodable_result(row["job_id"])
+                    # alone (still 'waiting', payload intact) so a build that
+                    # can read it resumes it after rolling forward.
+                    _note_unreadable_result(row["job_id"], exc)
                     continue
                 stored_params = (
                     result_data.get("request_params") if result_data else None
@@ -10718,6 +11874,13 @@ def _is_job_uuid(ref: str) -> bool:
     return True
 
 
+# The audit list's upgrade-window fallback: an underived legacy row holds ``''``
+# in ``display_name``/``job_name``, so a reference to its name has to be searched
+# in the payload text. TEXT only -- a frame is never read by SQL, the same rule as
+# ``_FIND_FAILURE_BY_UUID_SQL``.
+_AUDIT_LEGACY_NAME_MATCH_SQL = "INSTR(result_json, ?) > 0"
+
+
 async def _audit_target_jobs(
     db: aiosqlite.Connection, refs: Sequence[str]
 ) -> dict[str, tuple[str, str | None]]:
@@ -10726,40 +11889,68 @@ async def _audit_target_jobs(
     A reference is a job id or any of the job's names, so the query matches all
     of them and the result is keyed by every shape: either resolves without a
     second round trip. The label prefers ``display_name`` — the name a human
-    reads — then ``job_name``, then ``origin_job_name``. The newest row wins
-    when a job name was analyzed more than once.
+    reads — then ``job_name``. The newest row wins when a job name was analyzed
+    more than once.
 
-    Read at list time, never stored: neither value is a column and neither
-    enters ``entry_hash``. A missing job simply has no entry, so the caller
-    reports ``None`` rather than an error or an empty string.
+    Reads at list time, never stored, and read from the denormalized columns so
+    a compressed payload is never decoded for it. A legacy row whose columns are
+    still empty (a row a pre-compression build inserted or rewrote before the
+    sweep reached it) is read from its inline payload instead — the same
+    upgrade-window fallback ``_FIND_FAILURE_BY_UUID_SQL`` and
+    :func:`get_job_submitters` use. ``origin_job_name`` is not a name form here:
+    it is computed per response (``main._attach_origin_job_info``) and never
+    stored, so matching it could only ever match nothing.
     """
     if not refs:
         return {}
     marks = ", ".join("?" * len(refs))
     # Every name is optional and none is unique, so the label is the first one
     # that is set while the match is any of them.
-    names = ("display_name", "job_name", "origin_job_name")
-    name_expr = {
-        name: f"NULLIF(json_extract(result_json, '$.{name}'), '')" for name in names
-    }
+    names = ("display_name", "job_name")
+    name_expr = {name: f"NULLIF({name}, '')" for name in names}
     label_expr = "COALESCE(" + ", ".join(name_expr[name] for name in names) + ")"
+    # The upgrade window: a legacy row holds ``''`` in both columns until the
+    # denorm sweep reaches it, so a reference to its name has to match the payload
+    # text. Bound that to the rows the sweep has not derived yet and to inline TEXT
+    # -- a frame is never read by SQL, the same rule as the failure-UUID prefilter
+    # -- and fetch the payload only for those, never for a compressed row.
+    pending = (
+        f"COALESCE(denorm_version, 0) < {_RESULTS_DENORM_VERSION}"
+        " AND typeof(result_json) = 'text'"
+    )
     cursor = await db.execute(
         f"SELECT job_id, {label_expr} AS label,"
-        f" {', '.join(name_expr[name] + ' AS ' + name for name in names)}"
-        " FROM results WHERE result_json IS NOT NULL AND json_valid(result_json)"
-        f" AND (job_id IN ({marks})"
-        f" OR {' OR '.join(name_expr[name] + f' IN ({marks})' for name in names)})"
+        f" {', '.join(name_expr[name] + ' AS ' + name for name in names)},"
+        f" CASE WHEN {pending} THEN result_json END AS result_json"
+        " FROM results"
+        f" WHERE (job_id IN ({marks})"
+        f" OR {' OR '.join(name_expr[name] + f' IN ({marks})' for name in names)}"
+        f" OR ({pending}"
+        f" AND ({' OR '.join(_AUDIT_LEGACY_NAME_MATCH_SQL for _ in refs)})))"
         " ORDER BY created_at, rowid",
-        [*refs] * (len(names) + 1),
+        [*refs] * (len(names) + 2),
     )
     rows = await cursor.fetchall()
-    # Name keys first, so an id that is also some row's name stays the id.
     resolved: dict[str, tuple[str, str | None]] = {}
+    labelled: list[tuple[str, str | None, list[str]]] = []
     for row in rows:  # oldest first, so the newest row's label wins
-        for name in names:
-            if row[name]:
-                resolved[str(row[name])] = (row["job_id"], row["label"])
-    resolved.update({row["job_id"]: (row["job_id"], row["label"]) for row in rows})
+        row_names = [row[name] for name in names]
+        if row["result_json"]:
+            # An underived row's names are only in its payload: its columns are
+            # still empty, so they cannot be matched or shown from the row alone.
+            derived = _derived_columns(row)
+            row_names = [
+                have or derived[name]
+                for have, name in zip(row_names, names, strict=True)
+            ]
+        label = next((name for name in row_names if name), None)
+        labelled.append((row["job_id"], label, row_names))
+    # Name keys first, so an id that is also some row's name stays the id.
+    for job_id, label, row_names in labelled:
+        for name in row_names:
+            if name:
+                resolved[str(name)] = (job_id, label)
+    resolved.update({job_id: (job_id, label) for job_id, label, _ in labelled})
     return resolved
 
 

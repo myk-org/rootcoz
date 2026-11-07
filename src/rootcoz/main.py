@@ -1,5 +1,6 @@
 import asyncio
 import contextlib
+import contextvars
 import copy
 import csv
 import hashlib
@@ -30,6 +31,7 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
+from compression import zstd
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from datetime import UTC, datetime, timedelta
 from functools import partial
@@ -291,8 +293,13 @@ from rootcoz.storage import (
     ANALYSIS_STATE_ANALYZED,
     ANALYSIS_STATE_SUBMITTED,
     DB_PATH,
+    ENDED_STATUSES,
+    UnsupportedResultEncoding,
+    backfill_result_json_compression,
+    backfill_results_denorm,
     claim_submitted_job_for_analyze,
     copy_stable_analysis_ids,
+    fail_job_without_result_write,
     get_effective_classification,
     get_history_classification,
     get_result,
@@ -301,6 +308,7 @@ from rootcoz.storage import (
     list_results,
     list_results_for_dashboard,
     list_results_for_dashboard_filtered,
+    parse_result_json_lenient,
     patch_result_json,
     populate_failure_history,
     release_submitted_job_analyze_claim,
@@ -2307,6 +2315,22 @@ def _register_job_task(job_id: str, task: asyncio.Task[Any]) -> None:
     _job_tasks[job_id] = task
 
 
+def _spawn_background(coro: Coroutine[Any, Any, Any]) -> asyncio.Task[Any]:
+    """Track *coro* as a background task pinned to the database it starts on.
+
+    A background task outlives the request or the startup pass that spawned it,
+    so it must not follow a later ``DB_PATH`` rebind into another file: the
+    shutdown drain would then be waiting on a write into a database that is not
+    the one the app serves (#409).
+    """
+    context = contextvars.copy_context()
+    context.run(storage.pin_db_path)
+    task = asyncio.create_task(coro, context=context)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
+
+
 async def _preserve_request_params(job_id: str, result_data: dict[str, Any]) -> None:
     """Copy persisted enqueue-time fields from the stored result into result_data.
 
@@ -2490,7 +2514,7 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> None:
             or ""
         )
 
-        task = asyncio.create_task(
+        task = _spawn_background(
             _process_ci_source_analysis(
                 job_id=job["job_id"],
                 body=body,
@@ -2545,6 +2569,25 @@ async def _backfill_job_metadata(rules: list[dict[str, Any]]) -> None:
             logger.info("Backfilled metadata for %d job(s)", assigned)
     except Exception:
         logger.debug("Failed to backfill job metadata", exc_info=True)
+
+
+async def _compress_stored_results() -> None:
+    """Derive the denormalized columns, then compress legacy result_json rows.
+
+    Background and best-effort (#409): both passes parse or rewrite every legacy
+    payload, so neither may run inside ``init_db`` — on a large database they
+    outlive the startup probe and the rollout crash-loops. Sequential in one
+    task: the compression predicate skips a row whose columns are not derived.
+    """
+    try:
+        await backfill_results_denorm()
+    except Exception:
+        logger.exception("Failed to derive denormalized result columns")
+        return
+    try:
+        await backfill_result_json_compression()
+    except Exception:
+        logger.exception("Failed to compress stored result_json rows")
 
 
 async def _reclaim_abandoned_workspaces() -> int:
@@ -2827,7 +2870,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         raise RuntimeError("Startup configuration validation failed")
 
     try:
-        cleanup_task = asyncio.create_task(_periodic_session_cleanup())
+        cleanup_task = _spawn_background(_periodic_session_cleanup())
         # Created before any job is resumed: an abandoned workspace from the
         # previous process is reaped while nothing can be building it. Ownership
         # there is mtime versus process start, which holds only for one process
@@ -2836,25 +2879,24 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             "[startup] Workspace reclaim assumes a single server process "
             "(single-replica deployment)"
         )
-        reclaim_task = asyncio.create_task(_reclaim_abandoned_workspaces())
-        _background_tasks.add(reclaim_task)
-        reclaim_task.add_done_callback(_background_tasks.discard)
+        _spawn_background(_reclaim_abandoned_workspaces())
         # One sampler for the event-loop lag the admin status page reports.
         server_status.start_loop_lag_watchdog()
 
         # Pre-populate cursor models in background (don't block startup)
-        task = asyncio.create_task(_safe_preload_cursor_models())
-        _background_tasks.add(task)
-        task.add_done_callback(_background_tasks.discard)
+        _spawn_background(_safe_preload_cursor_models())
 
         # Retroactively assign metadata to jobs that don't have it yet
         settings = get_settings()
         if settings.admin_wait_approve_msg:
             logger.info("[startup] ADMIN_WAIT_APPROVE_MSG configured")
         if settings.metadata_rules:
-            task = asyncio.create_task(_backfill_job_metadata(settings.metadata_rules))
-            _background_tasks.add(task)
-            task.add_done_callback(_background_tasks.discard)
+            _spawn_background(_backfill_job_metadata(settings.metadata_rules))
+
+        # Compress legacy result_json rows written before they were stored
+        # compressed (#409). Background, chunked and off the event loop: a
+        # multi-GB sweep must not delay startup or /health.
+        _spawn_background(_compress_stored_results())
 
         waiting_jobs, recovered_jobs = await storage.mark_stale_results_failed()
         for rj in recovered_jobs:
@@ -2868,13 +2910,19 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         if waiting_jobs:
             # Schedule resumption as a background task so it runs after the
             # app is fully started and ready to serve internal API requests.
-            task = asyncio.create_task(_deferred_resume_waiting_jobs(waiting_jobs))
-            _background_tasks.add(task)
-            task.add_done_callback(_background_tasks.discard)
+            _spawn_background(_deferred_resume_waiting_jobs(waiting_jobs))
 
         yield
     finally:
         server_status.stop_loop_lag_watchdog()
+        # Nothing tracked may outlive the app: a surviving task keeps reading the
+        # module-global DB_PATH and races whatever runs next in this process.
+        pending = list(_background_tasks)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        _background_tasks.clear()
         cleanup_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await cleanup_task
@@ -2913,7 +2961,7 @@ class ErrorTrackingMiddleware(BaseHTTPMiddleware):
             server_errors = snap.get("error_counts", {}).get("5xx", 0)
             server_error_rate = server_errors / total_requests if total_requests else 0
             if server_error_rate > 0.5 and total_requests >= 10:
-                task = asyncio.create_task(
+                _spawn_background(
                     dispatch_alert(
                         "high_error_rate",
                         f"\u26a0\ufe0f rootcoz high 5xx error rate: {server_error_rate:.0%} "
@@ -2921,8 +2969,6 @@ class ErrorTrackingMiddleware(BaseHTTPMiddleware):
                         f"in {snap['window_seconds']}s window)",
                     )
                 )
-                _background_tasks.add(task)
-                task.add_done_callback(_background_tasks.discard)
         except Exception:  # alert scheduling must never break request handling
             logger.debug("Failed to schedule high-error-rate alert", exc_info=True)
 
@@ -3380,9 +3426,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # Track user activity only for authenticated identities
         if has_valid_session and username:
-            task = asyncio.create_task(_safe_track_user(username))
-            _background_tasks.add(task)
-            task.add_done_callback(_background_tasks.discard)
+            _spawn_background(_safe_track_user(username))
 
         # Admin-only path enforcement
         if path.startswith("/api/admin/") and not authenticated_admin:
@@ -5097,7 +5141,7 @@ async def _enqueue_ci_source_analysis(
     notify_dashboard_changed()
 
     # Spawn background task
-    task = asyncio.create_task(
+    task = _spawn_background(
         _process_ci_source_analysis(
             job_id=job_id,
             body=body,
@@ -6270,6 +6314,18 @@ async def _process_ci_source_analysis(
         logger.info(f"Analysis task cancelled for job_id={job_id}")
         return
 
+    except UnsupportedResultEncoding as exc:
+        # The stored payload is a newer build's, so this build can never store
+        # this job's status or result. Fail it visibly, payload untouched,
+        # instead of reporting an update that never happened.
+        logger.error(f"Analysis for job_id={job_id} was not stored: {exc}")
+        await fail_job_without_result_write(job_id, str(exc))
+        notify_active_count_changed()
+        notify_dashboard_changed()
+        notify_job_status_changed(job_id)
+        notify_token_usage_changed()
+        return
+
     except Exception as e:
         logger.exception(f"Analysis failed for job {job_id}")
         user_error = make_user_friendly_error(e)
@@ -6290,7 +6346,12 @@ async def _process_ci_source_analysis(
         # Attach token usage even on failure
         await _attach_token_usage(job_id, fail_data)
 
-        await update_status(job_id, "failed", fail_data)
+        try:
+            await update_status(job_id, "failed", fail_data)
+        except UnsupportedResultEncoding as exc:
+            # The failure result was refused as well: still end the job, visibly.
+            logger.error(f"Failure result for job_id={job_id} was not stored: {exc}")
+            await fail_job_without_result_write(job_id, str(exc))
         notify_active_count_changed()
         notify_dashboard_changed()
         notify_job_status_changed(job_id)
@@ -7838,11 +7899,22 @@ async def re_analyze_failure(
 
         # Immediately patch the failure as "running"
         already_running = False
+        marked = False
 
         def _patch_running(result_data: dict[str, Any]) -> None:
-            nonlocal already_running
+            nonlocal already_running, marked
+            # Both verdicts come from the payload this attempt writes, so they are
+            # reset per attempt: ``patch_result_json`` re-runs this callback on a
+            # fresh payload after a lost race, and a flag left over from an earlier
+            # attempt would answer for a payload it no longer describes (409 with
+            # no worker, or 202 for work that was never recorded).
+            already_running = False
+            marked = False
+            # A failure the stored result no longer holds is not marked, and
+            # answering 202 for it would start work whose state was never recorded.
             failure = _find_failure_by_uuid_in_result(result_data, failure_uuid)
             if failure:
+                marked = True
                 if failure.get("reanalysis_status") == "running":
                     already_running = True
                     return
@@ -7854,7 +7926,17 @@ async def re_analyze_failure(
 
         await patch_result_json(parent_job_id, _patch_running)
 
+        if not marked:
+            # The failure this request found was removed from the result before
+            # the patch landed (a concurrent rewrite), so there is nothing left to
+            # re-analyze.
+            raise HTTPException(
+                status_code=404,
+                detail=f"Failure {failure_uuid} no longer exists in {parent_job_id}",
+            )
+
         if already_running:
+            # Nothing was written for this attempt, so refusing here costs no work.
             raise HTTPException(
                 status_code=409,
                 detail=f"Failure {failure_uuid} is already being re-analyzed",
@@ -7880,7 +7962,7 @@ async def re_analyze_failure(
     notify_job_status_changed(parent_job_id)
 
     # Start background task
-    task = asyncio.create_task(
+    task = _spawn_background(
         _reanalyze_failure_background(
             job_id=parent_job_id,
             failure_uuid=failure_uuid,
@@ -8275,7 +8357,7 @@ async def add_comment(
     if settings.web_push_enabled and username and mentioned:
         vapid_cfg = get_vapid_config()
         if vapid_cfg and "private_key" in vapid_cfg and "claim_email" in vapid_cfg:
-            task = asyncio.create_task(
+            _spawn_background(
                 send_mention_notifications(
                     mentioned_usernames=mentioned,
                     comment_author=username,
@@ -8286,8 +8368,6 @@ async def add_comment(
                     public_base_url=settings.public_base_url,
                 )
             )
-            _background_tasks.add(task)
-            task.add_done_callback(_background_tasks.discard)
 
     # Notify mentioned users for SSE badge updates
     for mentioned_user in mentioned:
@@ -12761,7 +12841,7 @@ async def abort_analysis(
         )
 
     status = result.get("status", "")
-    if status in ("completed", "failed", "aborted"):
+    if status in ENDED_STATUSES:
         return {"status": status, "message": f"Job already {status}"}
 
     # Cancel the background task if it exists
@@ -12803,14 +12883,58 @@ async def abort_analysis(
 
     # Re-check status — task may have completed between cancel and here
     current = await storage.get_result(job_id)
-    if current and current.get("status") in ("completed", "failed"):
+    if current and current["status"] in ENDED_STATUSES:
         logger.info(f"Job {job_id} completed/failed during abort — not overwriting")
         return {
             "status": current["status"],
             "message": f"Job finished as {current['status']} during abort",
         }
 
-    await update_status(job_id, "aborted", abort_data)
+    # The abort is valid against any active status, so a job that merely started
+    # (``waiting`` -> ``running``) does not refuse it; a terminal one does, and its
+    # own status is reported instead of a status the abort did not write.
+    try:
+        aborted = await update_status(
+            job_id,
+            "aborted",
+            abort_data,
+            refusal_log_level=logging.WARNING,
+            expect_status=ACTIVE_STATUSES,
+        )
+    except UnsupportedResultEncoding:
+        # The abort is the status transition, and the job's task is already gone,
+        # so the row must not stay 'active'. Only the payload rewrite was refused:
+        # that stored report belongs to a build with a newer codec, so it stays
+        # byte-identical and the job is ended with a status-only update. The
+        # refusal was already logged (once, at WARNING) by the write itself.
+        aborted = await update_status(job_id, "aborted", expect_status=ACTIVE_STATUSES)
+    if not aborted:
+        # A status newer than the one this abort was decided from landed first;
+        # reporting the job as aborted would contradict the row.
+        current = await storage.get_result(job_id)
+        current_status = current["status"] if current else None
+        if current_status in ENDED_STATUSES:
+            logger.info(
+                f"Job {job_id} reached {current_status} during abort — not overwriting"
+            )
+            return {
+                "status": current_status,
+                "message": f"Job finished as {current_status} during abort",
+            }
+        # Still active: the abort lost the race to other writes, not to an ended
+        # job, so say that instead of claiming a status that was never written.
+        logger.warning(
+            f"Job {job_id} is still {current_status or 'gone'} after the abort "
+            "attempts, so the abort was not applied"
+        )
+        return {
+            "status": current_status or "gone",
+            "message": (
+                f"Job is {current_status} and the abort was not applied; retry"
+                if current_status
+                else "Job no longer exists and the abort was not applied"
+            ),
+        }
     notify_active_count_changed()
     notify_dashboard_changed()
     notify_job_status_changed(job_id)
@@ -23119,6 +23243,54 @@ async def admin_db_schema(request: Request) -> dict[str, Any]:
         conn.close()
 
 
+# A preview decodes at most this much of a frame: the query is read-only but it
+# takes arbitrary SQL, so one crafted blob can expand to gigabytes.
+_ADMIN_PREVIEW_MAX_BYTES = 1 << 20
+
+
+def _admin_row_value(value: Any) -> Any:
+    """Render one queried row value for the admin query response (#409).
+
+    A compressed ``result_json`` comes back as ``bytes``, which the JSON encoder
+    cannot serialise: show the payload the frame holds, and say so when it is
+    unreadable instead of failing the whole query.
+    """
+    if not isinstance(value, (bytes, bytearray)):
+        return value
+    # ``ZstdDecompressor.decompress`` stops at the end of the first frame and keeps
+    # the rest in ``unused_data``, so one call's ``eof`` only vouches for frame one —
+    # while ``zstd.decompress`` below inflates every frame. Walk them all and bound
+    # the total, or a tiny first frame would carry a gigabyte frame past the cap.
+    remaining = bytes(value)
+    total = 0
+    try:
+        while remaining:
+            decompressor = zstd.ZstdDecompressor()
+            total += len(
+                decompressor.decompress(
+                    remaining, max_length=_ADMIN_PREVIEW_MAX_BYTES + 1 - total
+                )
+            )
+            if total > _ADMIN_PREVIEW_MAX_BYTES:
+                return (
+                    f"<{len(value)}-byte frame, decoded payload over"
+                    f" {_ADMIN_PREVIEW_MAX_BYTES} bytes: not shown>"
+                )
+            if not decompressor.eof:
+                # Not the cap: a truncated frame stops short of its own end
+                # without raising, and calling that "oversized" would hide the
+                # damage this console exists to look into.
+                return f"<{len(value)} undecodable frame>"
+            remaining = decompressor.unused_data
+    except zstd.ZstdError:
+        return f"<{len(value)} undecodable frame>"
+    # Now known to fit the cap, so the shared parser stays bounded here. The
+    # lenient wrapper keeps this read-only preview from failing the query, whatever
+    # a stored payload turns out to be.
+    decoded = parse_result_json_lenient(value)
+    return decoded if decoded is not None else f"<{len(value)} undecodable frame>"
+
+
 @app.post("/api/admin/db/query", operation_id="adminDbQuery")
 async def admin_db_query(request: Request) -> dict[str, Any]:
     """Execute a read-only SQL query. Admin only."""
@@ -23168,7 +23340,10 @@ async def admin_db_query(request: Request) -> dict[str, Any]:
         cursor = conn.execute(sql)
         rows = cursor.fetchall()
         columns = [desc[0] for desc in cursor.description] if cursor.description else []
-        results = [dict(row) for row in rows]
+        results = [
+            {key: _admin_row_value(value) for key, value in dict(row).items()}
+            for row in rows
+        ]
         await record_audit(
             action="admin.db_query",
             actor=username,

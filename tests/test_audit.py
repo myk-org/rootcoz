@@ -16,6 +16,7 @@ import io
 import json
 import logging
 import sqlite3
+from compression import zstd
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -3396,6 +3397,52 @@ def test_admin_db_query_masks_credential_columns(
     assert secret not in json.dumps(details)
 
 
+def test_admin_db_query_preview_bounds_a_crafted_frame() -> None:
+    """Read-only SQL can craft a tiny frame that expands to gigabytes (#419).
+
+    The preview decodes at most ``_ADMIN_PREVIEW_MAX_BYTES``, so a bomb costs the
+    cap, not its advertised size — and a real payload still decodes.
+    """
+    bomb = zstd.compress(b"0" * (4 << 20))
+    assert len(bomb) < 1024, "cheap to send, expensive to decode"
+    assert "not shown" in main._admin_row_value(bomb)
+    assert main._admin_row_value(zstd.compress(b'{"job_name": "j"}')) == {
+        "job_name": "j"
+    }
+    assert main._admin_row_value(b"not a frame") == "<11 undecodable frame>"
+    # A frame our own codec refuses is a marker, never an exception: the preview is
+    # a read path, so a damaged stored row must not fail the admin query.
+    damaged = b"\x28\xb5\x2f\xfd" + b"\x00\x01\x02\x03rest-of-frame"
+    assert main._admin_row_value(damaged) == f"<{len(damaged)} undecodable frame>"
+
+
+def test_admin_db_query_preview_labels_a_truncated_frame_as_damaged() -> None:
+    """A truncated frame is damaged, not oversized.
+
+    Both end with ``eof`` False, so the size cap cannot be the branch that names
+    it: a damaged stored row is exactly what the console is used to look into.
+    """
+    frame = zstd.compress(json.dumps({"job_name": "j"}).encode())
+    damaged = frame[: len(frame) // 2]
+    assert main._admin_row_value(damaged) == f"<{len(damaged)} undecodable frame>"
+
+
+def test_admin_db_query_preview_bounds_concatenated_frames() -> None:
+    """A tiny first frame must not carry a huge second one past the cap (#419).
+
+    ``ZstdDecompressor.eof`` only vouches for the frame it stopped at, while the
+    preview decodes every frame: the cap has to bound the total decoded size, or a
+    crafted ``x'...'`` literal passes the check on frame one and then inflates the
+    rest on the request path.
+    """
+    bomb = zstd.compress(b"0" * (4 << 20))
+    tiny = zstd.compress(b"")
+    assert "not shown" in main._admin_row_value(tiny + bomb)
+    # Two frames whose total fits still decode, so the cap is not a frame count.
+    small = zstd.compress(b'{"job_name": "j"}')
+    assert main._admin_row_value(small) == {"job_name": "j"}
+
+
 def test_admin_db_query_rejection_is_audited_as_denied(
     app_client, temp_db_path: Path
 ) -> None:
@@ -4593,7 +4640,7 @@ def test_audit_list_label_prefers_display_name(audit_db: Path) -> None:
             },
         )
     )
-    refs = (JOB_ID, "Human Name", "machine-name", "origin-name")
+    refs = (JOB_ID, "Human Name", "machine-name")
     for ref in refs:
         asyncio.run(
             storage.insert_audit_event(
@@ -4608,6 +4655,34 @@ def test_audit_list_label_prefers_display_name(audit_db: Path) -> None:
     assert [(event["target_job_id"], event["target_label"]) for event in events] == [
         (JOB_ID, "Human Name")
     ] * len(refs)
+
+
+def test_audit_list_does_not_resolve_origin_job_name(audit_db: Path) -> None:
+    """``origin_job_name`` is response-only, so it is not a name a job is stored by.
+
+    It is computed per response by ``main._attach_origin_job_info`` and never
+    stored, so matching it in SQL could only ever match nothing — the ref stays
+    its own label with no job link instead of a lucky half-match.
+    """
+    asyncio.run(
+        storage.save_result(
+            JOB_ID,
+            status="completed",
+            result={"display_name": "Human Name", "job_name": "machine-name"},
+        )
+    )
+    asyncio.run(
+        storage.insert_audit_event(
+            action="job.metadata_set",
+            actor="alice",
+            target_type="job",
+            target_id="origin-name",
+        )
+    )
+    events = asyncio.run(storage.list_audit_events())["events"]
+    assert [(event["target_job_id"], event["target_label"]) for event in events] == [
+        (None, "origin-name")
+    ]
 
 
 @pytest.mark.parametrize("target_type", _NO_PRESENCE_TARGETS)
