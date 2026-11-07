@@ -133,9 +133,21 @@ _SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # compound name hides from those patterns) redacted. Harmless settings such
     # as `MAX_TOKENS=2000` keep their value: the keyword must be a whole word at
     # that point, so the plural `TOKENS` is not a credential name.
+    #
+    # The keyword sits in a lookahead, not in the consumed name: inline, the
+    # name's unbounded `[A-Za-z0-9_]*` prefix and its unbounded `_…` suffix
+    # made the two scan the same tail once per keyword occurrence, which is the
+    # square of the run length -- `token_token_token…` (no `:`/`=`) burned 25 s
+    # on a 50 000-char body, and the scrubber runs synchronously in async issue
+    # and feedback handlers (#399). The lookahead stops at the first keyword it
+    # accepts (never scanning the tail), and the name it guards is one run of
+    # word characters, so each run is walked once and a scan stays linear. A
+    # `(?<![A-Za-z0-9_])` anchor replaces `\b` for the same reason as the two URL
+    # patterns below; it is equivalent because `_` is a word character, so both
+    # only match at the start of a word run.
     (
         re.compile(
-            r"\b([A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY)(?![A-Za-z0-9])(?:_[A-Za-z0-9_]*)?[\"']?\s*[:=]\s*[\"']?)"
+            r"(?<![A-Za-z0-9_])(?=[A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY)(?![A-Za-z0-9]))([A-Za-z0-9_]*[\"']?\s*[:=]\s*[\"']?)"
             + _ASSIGNMENT_VALUE,
             re.IGNORECASE,
         ),

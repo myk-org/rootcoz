@@ -444,10 +444,13 @@ class TestScrubSensitiveData:
         1.73 s at 16 000) (#397). The `\b`-anchored scheme and bare patterns had
         the same shape: they held on at every word boundary of an `a.`/`a-` run
         and re-scanned that run to its end, so the same excerpt cost 0.9 s at
-        16 000 chars and 4.5 s at 32 000 (#399). Both sizes must fit the same
-        generous bound and a 4x bigger input must not cost 16x, which only a
-        scan that enters each run once can do -- the point is to catch the
-        blowup, not to police microseconds."""
+        16 000 chars and 4.5 s at 32 000 (#399). The secret-name pattern had the
+        same shape until its keyword moved into a lookahead: its unbounded name
+        prefix and suffix both scanned the tail of a `token_token_…` run, which
+        cost 25 s at 50 000 chars (#399). All sizes must fit the same generous
+        bound and a 4x bigger input must not cost 16x, which only a scan that
+        enters each run once can do -- the point is to catch the blowup, not to
+        police microseconds."""
 
         def elapsed(text: str) -> float:
             best = float("inf")
@@ -457,7 +460,7 @@ class TestScrubSensitiveData:
                 best = min(best, time.perf_counter() - start)
             return best
 
-        for unit in ("a:", "a.", "a-"):
+        for unit in ("a:", "a.", "a-", "token_"):
             small = elapsed((unit * 4000)[:8000])
             large = elapsed((unit * 16000)[:32000])
             assert large < 0.5, f"{unit!r} 32 000-char input took {large:.2f}s"

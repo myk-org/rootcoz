@@ -3469,6 +3469,54 @@ async def test_run_orchestrated_analysis_cross_failure_patterns(
     assert patterns[0].pattern == "Shared NFS outage"
 
 
+async def test_cross_failure_skips_unclassified_group(tmp_path: Path) -> None:
+    """A group with no classification has no diagnosis to correlate.
+
+    Only the peer path returns such a group (its primary answer and every peer
+    came back without a taxonomy), and sending it to cross-failure would feed
+    the AI an empty analysis and dilute the diagnosed groups (#399).
+    """
+    f1 = FailedTest(test_name="test_a", error_message="err_a")
+    f2 = FailedTest(test_name="test_b", error_message="err_b")
+    groups = {"sig_1": [f1], "sig_2": [f2]}
+
+    async def fake_analyze_group(failures: list[FailedTest], **_: object):
+        classified = failures[0].test_name == "test_a"
+        return [
+            FailureAnalysis(
+                test_name=f.test_name,
+                error=f.error_message,
+                error_signature="sig",
+                error_signature_v2="sig",
+                analysis=AnalysisDetail(
+                    classification="INFRASTRUCTURE" if classified else "",
+                    details="infra" if classified else "",
+                ),
+                analysis_error="" if classified else "no usable classification",
+            )
+            for f in failures
+        ]
+
+    with (
+        patch(
+            "rootcoz.engine.core.analyze_failure_group",
+            side_effect=fake_analyze_group,
+        ),
+        patch("rootcoz.engine.core.call_ai_once", new_callable=AsyncMock) as cross_ai,
+    ):
+        analyses, patterns = await run_orchestrated_analysis(
+            groups=groups,
+            console_context="console",
+            repo_path=tmp_path,
+            ai_provider="test",
+            ai_model="test-model",
+        )
+
+    assert len(analyses) == 2
+    assert patterns == []
+    cross_ai.assert_not_called()
+
+
 class TestRecoverableFailureRetry:
     """A truncated provider stream must not discard a completed analysis.
 

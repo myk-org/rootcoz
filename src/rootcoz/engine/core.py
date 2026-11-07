@@ -2919,11 +2919,20 @@ async def run_orchestrated_analysis(
             )
             continue
         all_analyses.extend(result)
-        if result:
-            group_results.append((sig, result[0].analysis))
-        else:
+        if not result:
             logger.warning("Analysis group %s returned no analyses", sig)
             all_analyses.extend(_failed_group_analyses(sig, failures))
+        elif not result[0].analysis.classification:
+            # Only the peer path returns rows with no classification (the
+            # single-AI path raises and lands in the branch above). Such a
+            # group has no diagnosis to correlate, so feeding it to
+            # cross-failure only dilutes the other groups' patterns (#399).
+            logger.info(
+                "Analysis group %s has no classification; excluded from cross-failure",
+                sig,
+            )
+        else:
+            group_results.append((sig, result[0].analysis))
 
     if not group_results:
         logger.warning("No successful direct analysis groups for job=%s", job_id)

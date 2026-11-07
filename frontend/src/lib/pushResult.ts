@@ -9,11 +9,11 @@ function listDetail(entries: string[]): string {
 /**
  * User-facing copy for a push result that left tests out.
  *
- * An `unmatched` test was not pushed at all: it carries no analysis (a
- * provider-outage placeholder or a narration-only answer), so pushing it would
- * overwrite whatever defect type a human set on the Report Portal item. The
- * entry names that, so it is listed apart from the headline instead of being
- * crammed into one sentence.
+ * Defensive path: the backend now pushes every unmappable test — including one
+ * with no analysis at all — as TO INVESTIGATE and reports it in `defaulted`, so
+ * a current payload always carries `unmatched: []`. Only an older backend can
+ * still leave a test unpushed, and the entry says why, so it is listed apart
+ * from the headline instead of being crammed into one sentence.
  */
 export function unmatchedFailure(
   pushed: number,
@@ -31,11 +31,11 @@ export function unmatchedFailure(
 /**
  * Copy for tests the backend pushed under the TO INVESTIGATE fallback because
  * their classification had no defect type to map to — either empty or one the
- * backend does not know. It never covers a test with no analysis at all: those
- * are left untouched and surface as `unmatched` instead. They were pushed, so
- * this is information — never a warning, and never counted as skipped. The
- * detail line names the classification (`none` when it is empty), so the
- * sentence must hold for both.
+ * backend does not know. It covers every such test, a test with no analysis at
+ * all included: those are pushed under the same fallback, which is why
+ * `unmatched` stays empty. They were pushed, so this is information — never a
+ * warning, and never counted as skipped. The detail line names the
+ * classification (`none` when it is empty), so the sentence must hold for both.
  */
 export function defaultedNotice(
   defaulted: string[],
