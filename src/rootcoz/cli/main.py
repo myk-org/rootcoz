@@ -3276,6 +3276,11 @@ def push_cmd(
         message = data.get("message", "")
         if message:
             typer.echo(message)
+        # Same fallback the dedicated push-reportportal command reports: an item
+        # sent under TO INVESTIGATE was pushed, but its classification was lost.
+        defaulted = data.get("defaulted", [])
+        if defaulted:
+            typer.echo(f"Pushed as TO INVESTIGATE: {', '.join(defaulted)}")
         errors = data.get("errors", [])
         if errors:
             typer.echo(f"Errors: {len(errors)}")

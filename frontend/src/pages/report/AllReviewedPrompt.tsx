@@ -6,7 +6,7 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { useAuth } from '@/lib/auth'
 import { useReportState } from '@/pages/report/reportState'
 import { pushRejectionDetail } from '@/lib/pushGate'
-import { unmatchedFailure } from '@/lib/pushResult'
+import { defaultedNotice, unmatchedFailure } from '@/lib/pushResult'
 
 interface AllReviewedPromptProps {
   jobId: string
@@ -19,6 +19,7 @@ interface PushResponse {
   errors?: string[]
   pushed?: number
   unmatched?: string[]
+  defaulted?: string[]
 }
 
 /**
@@ -26,7 +27,8 @@ interface PushResponse {
  * the push succeeded. Covers the generic exporter response
  * (`success`/`message`) and the Report Portal response (`errors`,
  * `unmatched` — a test that was not pushed). `defaulted` is not a failure:
- * those tests were pushed under the TO INVESTIGATE fallback.
+ * those tests were pushed under the TO INVESTIGATE fallback, so it is carried
+ * separately by `defaultedItems` and reported as a notice, never an error.
  */
 function pushFailureDetail(
   res: unknown,
@@ -41,6 +43,14 @@ function pushFailureDetail(
   return null
 }
 
+/** Tests a response pushed under TO INVESTIGATE — empty when none. */
+function pushDefaultedItems(res: unknown): string[] {
+  if (!res || typeof res !== 'object') return []
+  const r = res as PushResponse
+  if (r.success === false) return []
+  return r.defaulted ?? []
+}
+
 export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
   const { result, reviews, reportportalAvailable, datadogAvailable } = useReportState()
   const { isOperator } = useAuth()
@@ -50,6 +60,12 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
   // Muted second line under the error — the unmatched entries, which name the
   // classification the backend could not map
   const [pushErrorDetail, setPushErrorDetail] = useState<string | null>(null)
+  // The push went through, but tests landed under TO INVESTIGATE — the dialog
+  // stays open to say so instead of closing as if everything was classified
+  const [pushNotice, setPushNotice] = useState<{
+    message: string
+    detail: string
+  } | null>(null)
   // Push combinations (`exporter + scope query`) that already succeeded in
   // the current dialog session — a retry must only re-push the failed ones,
   // because Datadog events are created per POST.
@@ -119,6 +135,7 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
     setPushing(false)
     setPushError(null)
     setPushErrorDetail(null)
+    setPushNotice(null)
     succeededRef.current = new Set()
     pushRunRef.current++
   }, [jobId])
@@ -129,6 +146,7 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
     if (!open) {
       setPushError(null)
       setPushErrorDetail(null)
+      setPushNotice(null)
     }
   }
 
@@ -137,6 +155,7 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
     setPushing(true)
     setPushError(null)
     setPushErrorDetail(null)
+    setPushNotice(null)
     try {
       // One push per scope (parent + each child job with failures) per
       // available exporter — child scopes carry child_job_name +
@@ -167,6 +186,7 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
       if (runId !== pushRunRef.current) return
       const failures: string[] = []
       const details: string[] = []
+      const defaulted: string[] = []
       settled.forEach((outcome, i) => {
         const { key, label } = pushes[i]
         if (outcome.status === 'rejected') {
@@ -178,6 +198,7 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
             if (detail.detail) details.push(detail.detail)
           } else {
             succeededRef.current.add(key)
+            defaulted.push(...pushDefaultedItems(outcome.value))
           }
         }
       })
@@ -185,6 +206,9 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
         // Keep the dialog open so the user sees what failed
         setPushError(failures.join('; '))
         setPushErrorDetail(details.length > 0 ? details.join('; ') : null)
+      } else if (defaulted.length > 0) {
+        // Pushed, but under the TO INVESTIGATE fallback — say which tests
+        setPushNotice(defaultedNotice(defaulted))
       } else {
         setDialogOpen(false)
       }
@@ -215,6 +239,8 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
       loading={pushing}
       error={pushError}
       errorDetail={pushErrorDetail}
+      notice={pushNotice?.message}
+      noticeDetail={pushNotice?.detail}
     />
   )
 }

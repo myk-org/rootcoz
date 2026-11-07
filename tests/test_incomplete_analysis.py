@@ -429,6 +429,47 @@ class TestBulkOverridesChunking:
             assert await storage.get_effective_classifications_bulk(job_ids) == {}
 
 
+class TestDashboardOverrideLookup:
+    """Overrides are read only for jobs that still have an unclassified failure.
+
+    An override can clear an unclassified failure but never create one, so every
+    other job on the page has nothing for its override rows to change — and an
+    unlimited dashboard page carries every job.
+    """
+
+    async def test_only_unclassified_jobs_are_queried(self, temp_db_path: Path) -> None:
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            await storage.save_result(
+                job_id="job-bad",
+                build_url="",
+                status="completed",
+                result=_result_payload([_failure("t1")]),
+            )
+            await storage.save_result(
+                job_id="job-good",
+                build_url="",
+                status="completed",
+                result=_result_payload([_failure("t2", classification="CODE ISSUE")]),
+            )
+            seen: list[list[str]] = []
+            real_lookup = storage.get_effective_classifications_bulk
+
+            async def _recording_lookup(job_ids: list[str]):
+                seen.append(list(job_ids))
+                return await real_lookup(job_ids)
+
+            with patch.object(
+                storage, "get_effective_classifications_bulk", _recording_lookup
+            ):
+                rows = await storage.list_results_for_dashboard(limit=10)
+                filtered = await storage.list_results_for_dashboard_filtered(limit=10)
+
+        assert {row["job_id"] for row in rows} == {"job-bad", "job-good"}
+        assert {row["job_id"] for row in filtered["jobs"]} == {"job-bad", "job-good"}
+        assert [sorted(ids) for ids in seen] == [["job-bad"], ["job-bad"]]
+
+
 class TestIncompleteListingEndpoint:
     async def _seed(self, temp_db_path: Path, job_id: str, *failures: dict[str, Any]):
         with patch.object(storage, "DB_PATH", temp_db_path):

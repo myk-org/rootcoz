@@ -985,11 +985,86 @@ describe('AllReviewedPrompt', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
 
-    // Pushed, so the dialog closes: no retry prompt, no error
+    // Pushed, so no retry prompt and no error — but the operator is told which
+    // tests landed under the fallback instead of the dialog closing silently
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          '1 test(s) were pushed as TO INVESTIGATE because they have no mappable classification',
+        ),
+      ).toBeDefined()
+    })
+    expect(screen.getByText('test-a (classification: none)')).toBeDefined()
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(mockPost).toHaveBeenCalledTimes(1)
+  })
+
+  it('names every defaulted test across scopes in one notice', async () => {
+    mockPost.mockResolvedValueOnce({
+      pushed: 3,
+      defaulted: ['test-a (classification: none)', 'test-b (classification: UNKNOWN)'],
+      unmatched: [],
+      errors: [],
+      launch_id: 9,
+    })
+
+    renderPrompt({
+      additionalReviews: {
+        'test-a': makeReview(true),
+        'test-b': makeReview(true),
+      },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('All failures reviewed. Update Report Portal?')).toBeDefined()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
+
+    await waitFor(() => {
+      expect(
+        screen.getByText(
+          '2 test(s) were pushed as TO INVESTIGATE because they have no mappable classification',
+        ),
+      ).toBeDefined()
+    })
+    expect(
+      screen.getByText('test-a (classification: none), test-b (classification: UNKNOWN)'),
+    ).toBeDefined()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('drops the defaulted notice after a retry pushes nothing new', async () => {
+    mockPost.mockResolvedValueOnce({
+      pushed: 2,
+      defaulted: ['test-a (classification: none)'],
+      unmatched: [],
+      errors: [],
+      launch_id: 9,
+    })
+
+    renderPrompt({
+      additionalReviews: {
+        'test-a': makeReview(true),
+        'test-b': makeReview(true),
+      },
+    })
+
+    await waitFor(() => {
+      expect(screen.getByText('All failures reviewed. Update Report Portal?')).toBeDefined()
+    })
+
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
+    await waitFor(() => {
+      expect(screen.getByText('test-a (classification: none)')).toBeDefined()
+    })
+
+    // Every scope already pushed, so the second Yes has nothing to send and the
+    // dialog closes rather than repeating the notice.
+    fireEvent.click(screen.getByRole('button', { name: 'Yes' }))
     await waitFor(() => {
       expect(screen.queryByText('All failures reviewed. Update Report Portal?')).toBeNull()
     })
-    expect(screen.queryByRole('alert')).toBeNull()
     expect(mockPost).toHaveBeenCalledTimes(1)
   })
 

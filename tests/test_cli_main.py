@@ -4491,6 +4491,20 @@ class TestPushCommand:
         parsed = json.loads(result.output)
         assert parsed["pushed"] == 3
 
+    def test_push_reports_to_investigate_fallbacks(self, mock_client):
+        """The generic push names the fallbacks, like push-reportportal does."""
+        mock_client.push_to_exporter.return_value = {
+            "pushed": 2,
+            "errors": [],
+            "defaulted": ["test_a (classification: none)"],
+            "message": "Pushed 2 item(s)",
+        }
+        result = runner.invoke(app, ["push", "job-123", "--plugin", "reportportal"])
+        assert result.exit_code == 0
+        assert (
+            "Pushed as TO INVESTIGATE: test_a (classification: none)" in result.output
+        )
+
     def test_push_with_errors(self, mock_client):
         mock_client.push_to_exporter.return_value = {
             "pushed": 1,

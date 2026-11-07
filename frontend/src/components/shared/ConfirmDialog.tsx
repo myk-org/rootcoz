@@ -22,6 +22,10 @@ interface ConfirmDialogProps {
   error?: string | null
   /** Muted second line under the error — the offending items behind it. */
   errorDetail?: string | null
+  /** Informational line for a request that succeeded with a caveat. */
+  notice?: string | null
+  /** Muted second line under the notice — the items it names. */
+  noticeDetail?: string | null
 }
 
 export function ConfirmDialog({
@@ -36,6 +40,8 @@ export function ConfirmDialog({
   loading = false,
   error,
   errorDetail,
+  notice,
+  noticeDetail,
 }: ConfirmDialogProps) {
   return (
     <Dialog open={open} onOpenChange={onOpenChange}>
@@ -46,6 +52,8 @@ export function ConfirmDialog({
         </DialogHeader>
         {error && <p role="alert" className="text-sm text-signal-red">{error}</p>}
         {errorDetail && <p className="text-xs text-text-tertiary">{errorDetail}</p>}
+        {notice && <p className="text-sm text-text-secondary">{notice}</p>}
+        {noticeDetail && <p className="text-xs text-text-tertiary">{noticeDetail}</p>}
         <DialogFooter>
           <Button variant="ghost" onClick={() => onOpenChange(false)} disabled={loading}>
             {cancelLabel}

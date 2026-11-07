@@ -6027,12 +6027,14 @@ async def list_distinct_job_names() -> set[str]:
 def _parse_dashboard_row(
     row: aiosqlite.Row,
     overrides: Mapping[tuple[str, str, int], str] | None = None,
+    result_data: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Parse a single dashboard result row into a dict with summary data.
 
     ``overrides`` is the row's job overrides, fetched for the whole page in one
     query by the listing (see :func:`get_effective_classifications_bulk`) so a
-    page of unclassified jobs does not add a query per job.
+    page of unclassified jobs does not add a query per job. ``result_data`` lets
+    the listing hand over the payload it already parsed to pick those jobs.
     """
     row_data = dict(row)
     entry: dict[str, Any] = {
@@ -6047,7 +6049,10 @@ def _parse_dashboard_row(
         "comment_count": row_data["comment_count"],
         "analysis_state": row_data.get("analysis_state") or ANALYSIS_STATE_ANALYZED,
     }
-    result_data = parse_result_json_lenient(row["result_json"], job_id=row["job_id"])
+    if result_data is None:
+        result_data = parse_result_json_lenient(
+            row["result_json"], job_id=row["job_id"]
+        )
     if result_data:
         entry["job_name"] = result_data.get("job_name", "")
         if "build_number" in result_data:
@@ -6100,6 +6105,33 @@ _DASHBOARD_BASE_SQL = """
 """
 
 
+async def _parse_dashboard_rows(
+    rows: Sequence[aiosqlite.Row],
+) -> list[dict[str, Any]]:
+    """Parse a dashboard page, reading overrides only where they can matter.
+
+    An override can only *clear* an unclassified failure, never create one, so a
+    job whose stored result has none has nothing for its override rows to
+    change — and ``limit=0`` returns every job. The payload is parsed once here
+    and handed to :func:`_parse_dashboard_row`.
+    """
+    parsed = [
+        (row, parse_result_json_lenient(row["result_json"], job_id=row["job_id"]))
+        for row in rows
+    ]
+    unclassified = [
+        row["job_id"]
+        for row, result_data in parsed
+        if result_data
+        and incomplete_failures(result_data, analysis_state=row["analysis_state"])
+    ]
+    overrides = await get_effective_classifications_bulk(unclassified)
+    return [
+        _parse_dashboard_row(row, overrides.get(row["job_id"]), result_data)
+        for row, result_data in parsed
+    ]
+
+
 async def list_results_for_dashboard(
     limit: int = DEFAULT_DASHBOARD_LIMIT,
     offset: int = 0,
@@ -6134,10 +6166,7 @@ async def list_results_for_dashboard(
             params.append(offset)
         cursor = await db.execute(sql, params)
         rows = await cursor.fetchall()
-    overrides = await get_effective_classifications_bulk(
-        [row["job_id"] for row in rows]
-    )
-    return [_parse_dashboard_row(row, overrides.get(row["job_id"])) for row in rows]
+    return await _parse_dashboard_rows(rows)
 
 
 #: Rows fetched per round-trip while scanning for incomplete analyses. The
@@ -6414,15 +6443,7 @@ async def list_results_for_dashboard_filtered(
         cursor = await db.execute(sql, fetch_params)
         rows = await cursor.fetchall()
 
-    overrides = await get_effective_classifications_bulk(
-        [row["job_id"] for row in rows]
-    )
-    return {
-        "jobs": [
-            _parse_dashboard_row(row, overrides.get(row["job_id"])) for row in rows
-        ],
-        "total": total,
-    }
+    return {"jobs": await _parse_dashboard_rows(rows), "total": total}
 
 
 # The dashboard endpoint caps one submitted_by value at this many characters. The
@@ -7306,7 +7327,7 @@ async def get_effective_classifications_bulk(
     """Return effective classification overrides for many jobs, chunked.
 
     The dashboard reads ``incomplete_count`` for every row it returns, so the
-    overrides are fetched for the whole page instead of per job.
+    overrides are fetched for the whole page in one lookup instead of per job.
 
     Args:
         job_ids: Job identifiers to fetch overrides for.
