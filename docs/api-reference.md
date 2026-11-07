@@ -167,7 +167,7 @@ Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pat
 | GET | `/results/{job_id}/comments` | viewer | Full thread for one job |
 | POST | `/results/{job_id}/comments` | reviewer | `test_name`, `comment`; returns `201` |
 | DELETE | `/results/{job_id}/comments/{comment_id}` | reviewer | Comment author or admin |
-| GET | `/results/{job_id}/enrich-comments` | viewer | GitHub PR and Jira ticket status, re-read from GitHub and Jira on a cache miss. Read, not audited: the report page calls it on every load and the result is cached per job for 60 s, so a repeat read can return a minute-old status. Only refused and failed attempts are recorded |
+| GET | `/results/{job_id}/enrich-comments` | viewer | GitHub PR and Jira ticket status, re-read from GitHub and Jira on a cache miss. Read, not audited: the report page calls it on every load and the result is cached per job for 60 s, so a repeat read can return a minute-old status. Only refused and failed attempts are recorded. Returns `{"enrichments": {comment_id: [badges]}, "failed": bool}`: `failed` is `true` when any lookup errored or answered nothing, so an empty `enrichments` mapping is never mistaken for "nothing to enrich". The field is additive — a client that ignores it behaves as before, and a failure is never cached |
 | POST | `/api/analyze-comment-intent` | reviewer | Classifies an incoming comment as a question or an action |
 | GET | `/api/users/mentions` | viewer | Mentions for the current user |
 | GET | `/api/users/mentions/unread-count` | viewer | Navbar badge count |
