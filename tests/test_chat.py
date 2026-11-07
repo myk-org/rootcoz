@@ -1297,13 +1297,13 @@ class TestChatIssueTools:
     def test_a_caller_with_no_github_token_is_told_the_real_fix(self):
         """Pin the no-credential answer, because the model ignored it in e2e.
 
-        #446: at PR #416 head ``1b0c94b7`` a chat whose tool list held no
-        ``propose_tracker_issue`` / ``create_github_issue`` still answered "I'll
-        draft it" on one attempt and blamed a "session-level tooling gap rather
-        than account config" on the next — never the token. Model prose cannot be
-        asserted, so the product half is pinned here: the exact instruction the
-        server sends and the tools it withholds. The model half stays a manual
-        e2e signal tracked in #446.
+        A chat whose tool list held no ``propose_tracker_issue`` /
+        ``create_github_issue`` still answered "I'll draft it" on one attempt and
+        blamed a "session-level tooling gap rather than account config" on the
+        next — never the token, twice. Model prose cannot be asserted, so the
+        product half is pinned here: the exact instruction the server sends and
+        the tools it withholds. The model half stays a manual e2e signal; see
+        issue #446 for the detail.
         """
         from rootcoz.main import _chat_tracker_state
 
