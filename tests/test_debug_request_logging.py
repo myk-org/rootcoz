@@ -306,6 +306,28 @@ def test_skip_path_body_not_logged(test_client, caplog):
         _restore_logger(main_logger, orig_level, caplog)
 
 
+def test_chat_issue_body_is_never_logged(test_client, caplog):
+    """Chat text can hold a pasted credential: no field name marks it secret."""
+    main_logger, orig_level = _capture_debug_logs(caplog)
+    try:
+        with caplog.at_level(logging.DEBUG):
+            test_client.post(
+                "/api/chat-issue",
+                json={
+                    "target": "github",
+                    "title": "token ghp_secret",
+                    "body": "token ghp_secret",
+                },
+            )
+
+        body_log = _get_debug_messages(
+            caplog, containing="Incoming POST /api/chat-issue body:"
+        )
+        assert not body_log, "chat text is in skip-paths; body should NOT be logged"
+    finally:
+        _restore_logger(main_logger, orig_level, caplog)
+
+
 def test_validation_error_logged_at_error(test_client, caplog):
     """422 validation errors are logged at WARNING with masked body.
 

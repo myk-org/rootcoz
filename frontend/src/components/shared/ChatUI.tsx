@@ -16,7 +16,7 @@ import { Textarea } from '@/components/ui/textarea'
 import { LinkedText } from '@/components/shared/LinkedText'
 import { ChatMarkdown } from '@/components/shared/ChatMarkdown'
 import type { RepoUrl } from '@/lib/autoLink'
-import { Send, Loader2, Bot, User, Copy, Check } from 'lucide-react'
+import { Send, Loader2, Bot, User, Copy, Check, Info } from 'lucide-react'
 
 const EMPTY_REPO_URLS: RepoUrl[] = []
 
@@ -41,7 +41,8 @@ const PREP_STEPS = [
 export interface ChatMessage {
   id: number
   job_id: string
-  role: 'user' | 'assistant'
+  /** `system` rows are written by the server (an issue preview), never by a model. */
+  role: 'user' | 'assistant' | 'system'
   content: string
   username: string
   ai_provider: string
@@ -514,7 +515,7 @@ export function ChatUI({
   const copyAllMessages = useCallback(async () => {
     const text = messages
       .filter(m => m.content && m.status !== 'pending')
-      .map(m => `${m.role === 'user' ? `**${m.username || 'User'}:**` : '**Assistant:**'}\n${m.content}`)
+      .map(m => `${m.role === 'user' ? `**${m.username || 'User'}:**` : m.role === 'system' ? '**Server notice:**' : '**Assistant:**'}\n${m.content}`)
       .join('\n\n---\n\n')
     try {
       await navigator.clipboard.writeText(text)
@@ -696,6 +697,24 @@ export function ChatUI({
               canStop={canStop}
               onStop={handleAbort}
             />
+          ) : msg.role === 'system' ? (
+            // Server-written notice (an issue preview the user is asked to
+            // confirm): rendered verbatim, not as the assistant's words.
+            <div
+              key={msg.id}
+              className="rounded-lg border border-border-default bg-surface-elevated px-4 py-3 text-sm text-text-secondary"
+            >
+              <div className="flex items-center gap-2 text-[10px] uppercase tracking-widest text-text-tertiary">
+                <Info className="h-3 w-3" />
+                Server notice
+              </div>
+              <div className="mt-2 whitespace-pre-wrap break-words">
+                <LinkedText text={msg.content} repoUrls={EMPTY_REPO_URLS} />
+              </div>
+              <div className="mt-2 text-[10px] text-text-tertiary">
+                {new Date(msg.created_at).toLocaleString()}
+              </div>
+            </div>
           ) : (
             <div
               key={msg.id}

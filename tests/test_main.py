@@ -5,7 +5,7 @@ import json
 import logging
 import os
 import socket
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
@@ -37,6 +37,9 @@ FAKE_GITHUB_TOKEN = "not-a-real-token"
 # log or detail that echoes either one can be asserted against.
 _REPORT_GITHUB_TOKEN = "ghp_report_token_0123456789"  # pragma: allowlist secret
 _REPORT_BODY = "REPORT-BODY-MUST-NOT-BE-LOGGED"
+# A bare 40-hex run: no credential prefix, so only the length/shape rule of the
+# audit heuristic can recognise it as a token.
+_PASTED_HEX = "9f8e7d6c5b4a39281706f5e4d3c2b1a0ffee0011"  # pragma: allowlist secret
 
 
 def _patch_preflight():
@@ -4834,6 +4837,31 @@ class TestCreateGithubIssueApiErrors:
         assert response.json()["detail"] == "GitHub API error: 422"
 
     @pytest.mark.asyncio
+    async def test_github_read_timeout_warns_the_issue_may_already_be_filed(
+        self, test_client, caplog
+    ):
+        """A timeout may have filed the issue: check before a duplicate retry."""
+        import httpx
+
+        exc = httpx.ReadTimeout(
+            "GitHub did not respond",
+            request=httpx.Request("POST", "https://api.github.com"),
+        )
+        with capture_main_logs(caplog):
+            response = await self._post_with_github_failure(
+                test_client, "job-gh-timeout", exc
+            )
+
+        assert response.status_code == 502
+        detail = response.json()["detail"]
+        assert "the request may have been sent" in detail
+        assert "may already be filed" in detail
+        assert "could create a duplicate" in detail
+        assert "bug report" in detail
+        assert _REPORT_GITHUB_TOKEN not in caplog.text
+        assert _REPORT_BODY not in caplog.text
+
+    @pytest.mark.asyncio
     async def test_github_api_request_error_returns_502(self, test_client):
         """RequestError (network unreachable) from GitHub should surface as 502."""
         import httpx
@@ -4853,7 +4881,7 @@ class TestCreateGithubIssueApiErrors:
             "job-gh-net-err", "http://jenkins", "completed", result_data
         )
         with patch("rootcoz.main.create_github_issue") as mock_create:
-            mock_create.side_effect = httpx.RequestError(
+            mock_create.side_effect = httpx.ConnectError(
                 "Connection refused",
                 request=httpx.Request("POST", "https://api.github.com"),
             )
@@ -4877,6 +4905,8 @@ class TestCreateJiraBugApiErrors:
     @pytest.mark.asyncio
     async def test_jira_5xx_is_a_retryable_outage(self, test_client, caplog):
         """A Jira 5xx says 'unavailable, retry' instead of a bare status."""
+        import httpx
+
         result_data = {
             "status": "completed",
             "summary": "",
@@ -4982,7 +5012,7 @@ class TestCreateJiraBugApiErrors:
             "job-jira-net-err", "http://jenkins", "completed", result_data
         )
         with patch("rootcoz.main.create_jira_bug") as mock_create:
-            mock_create.side_effect = httpx.RequestError(
+            mock_create.side_effect = httpx.ConnectError(
                 "Connection refused",
                 request=httpx.Request("POST", "https://jira.example.com"),
             )
@@ -5007,6 +5037,8 @@ class TestCreateJiraBugApiErrors:
         the detail must point at the credential and the log must keep the
         upstream status and Jira's message while leaking neither token nor body.
         """
+        import httpx
+
         result_data = {
             "status": "completed",
             "summary": "",
@@ -5064,6 +5096,8 @@ class TestCreateJiraBugApiErrors:
         self, test_client, caplog, status: int
     ):
         """A Jira 401/403 keeps the credential detail it always had."""
+        import httpx
+
         result_data = {
             "status": "completed",
             "summary": "",
@@ -5105,6 +5139,1957 @@ class TestCreateJiraBugApiErrors:
         assert f"status={status}" in caplog.text
         assert "secret_jira_token" not in caplog.text
         assert _REPORT_BODY not in caplog.text
+
+
+class TestChatIssueEndpoint:
+    """POST /api/chat-issue — a tracker write driven from a chat conversation.
+
+    Every credential here must come from the caller's account row: no
+    deployment token on any path, no bootstrap-``admin`` exception.
+    """
+
+    _CHAT: ClassVar[dict[str, str]] = {
+        "title": "test_login fails with DNS timeout",
+        "body": "The login test timed out resolving the auth service.",
+    }
+
+    #: The admin chat's conversation id — what its issue tools hardcode.
+    _ADMIN_CHAT: ClassVar[str] = "__admin_chat__"
+
+    # -- helpers -------------------------------------------------------------
+
+    @staticmethod
+    async def _user(name: str, **tokens: str) -> dict[str, str]:
+        """A registered user whose account row holds *tokens*."""
+        _, api_key = await storage.create_user(name)
+        if tokens:
+            await storage.save_user_tokens(name, **tokens)
+        return {"Authorization": f"Bearer {api_key}"}
+
+    @staticmethod
+    async def _admin(name: str, **tokens: str) -> dict[str, str]:
+        """An admin caller: the one GitHub path that needs no run to file in."""
+        username, api_key = await storage.create_admin_user(name)
+        if tokens:
+            await storage.save_user_tokens(username, **tokens)
+        return {"Authorization": f"Bearer {api_key}"}
+
+    @staticmethod
+    async def _chat_audit() -> dict[str, Any]:
+        return await storage.list_audit_events(
+            action="issue.create", target_type="chat"
+        )
+
+    @staticmethod
+    async def _run(job_id: str, **params: str) -> str:
+        """A stored run — a non-admin GitHub write must name the run it belongs to.
+
+        Its ``request_params`` are what bound the repositories chat may file in.
+        """
+        await storage.save_result(
+            job_id,
+            "",
+            "completed",
+            {
+                "request_params": {
+                    "job_name": job_id,
+                    "build_number": 1,
+                    **params,
+                }
+            },
+        )
+        return job_id
+
+    @classmethod
+    async def _propose_only(
+        cls,
+        test_client,
+        target: str,
+        headers: dict[str, str] | None = None,
+        job_id: str = "",
+        conversation: str | None = None,
+        **text: str,
+    ) -> dict[str, str]:
+        """Draft as the chat tool does, and return nothing the user confirmed.
+
+        The proposal carries the conversation the chat tool hardcodes (the run
+        for a job chat, the admin chat otherwise; ``conversation=""`` is a
+        direct, non-chat caller such as the CLI), and this stores NO user reply
+        — the caller decides whether to send one with :meth:`_user_reply`.
+        """
+        if conversation is None:
+            conversation = job_id or "__admin_chat__"
+        proposal_body = {
+            **cls._CHAT,
+            "target": target,
+            **text,
+            **({"job_id": job_id} if job_id else {}),
+            **({"conversation": conversation} if conversation else {}),
+        }
+        # A chat with no run of its own files in the deployment's repo, so the
+        # proposal resolves that repo — as a real admin deployment has it.
+        github_repo = nullcontext()
+        if not job_id and target == "github":
+            github_repo = _with_github_issue_config()
+        with github_repo:
+            proposal = test_client.post(
+                "/api/chat-issue/propose",
+                json=proposal_body,
+                headers=headers or {},
+            )
+        assert proposal.status_code == 201, proposal.text
+        draft = proposal.json()
+        return {
+            "confirmation_id": draft["confirmation_id"],
+            "confirmation_code": draft["confirmation_code"],
+            "title": draft["title"],
+            "body": draft["body"],
+            "target": target,
+        }
+
+    @staticmethod
+    async def _user_reply(
+        headers: dict[str, str] | None,
+        code: str,
+        *,
+        conversation: str = "__admin_chat__",
+        username: str | None = None,
+        role: str = "user",
+    ) -> None:
+        """Store a chat message carrying *code* — the user's confirmation."""
+        if username is None:
+            token = (headers or {}).get("Authorization", "")
+            user = await storage.get_user_by_key(token.removeprefix("Bearer "))
+            username = (user or {}).get("username", "")
+        await storage.add_chat_message(
+            conversation,
+            role=role,
+            content=f"Yes, file it: {code}",
+            username=username or "",
+        )
+
+    @classmethod
+    async def _propose(
+        cls,
+        test_client,
+        target: str,
+        headers: dict[str, str] | None = None,
+        job_id: str = "",
+        conversation: str | None = None,
+        **text: str,
+    ) -> dict[str, str]:
+        """Draft the issue and send the user's reply, as a real chat would.
+
+        ``/api/chat-issue`` files only a proposed draft whose code the USER
+        replied with, so every create call here starts from these fields. Care
+        is taken to keep the reply in the draft's own conversation: a code from
+        another conversation is not a confirmation.
+        """
+        draft = await cls._propose_only(
+            test_client,
+            target,
+            headers,
+            job_id=job_id,
+            conversation=conversation,
+            **text,
+        )
+        await cls._user_reply(
+            headers,
+            draft["confirmation_code"],
+            conversation=(
+                conversation
+                if conversation is not None
+                else (job_id or "__admin_chat__")
+            ),
+        )
+        return draft
+
+    # -- GitHub --------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_github_uses_the_callers_row_token(self, test_client):
+        """The token on the outbound call is the caller's, and the attempt is audited."""
+        headers = await self._user("chat-gh", github_token="ghp_row_token")
+        job_id = await self._run(
+            "chat-gh-run", tests_repo_url="https://github.com/org/repo"
+        )
+        draft = await self._propose(test_client, "github", headers, job_id=job_id)
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/7",
+                "number": 7,
+            }
+            with _with_github_issue_config():
+                response = test_client.post(
+                    "/api/chat-issue",
+                    json={**draft, "job_id": job_id},
+                    headers=headers,
+                )
+        assert response.status_code == 201, response.text
+        assert response.json()["number"] == 7
+        assert mock_create.call_args[1]["github_token"] == "ghp_row_token"
+        audit = await self._chat_audit()
+        assert audit["total"] == 1
+        event = audit["events"][0]
+        assert event["details"]["result"] == "success"
+        assert event["details"]["tracker"] == "github"
+        assert event["target_id"] is None
+        assert event["outcome"] == "success"
+        # The row names the issue it filed: a reader reaches it from the row
+        # alone, and the clickable URL is derivable from repo + number.
+        assert event["details"]["repo"] == "org/repo"
+        assert event["details"]["number"] == 7
+        assert event["details"]["url"] == "https://github.com/org/repo/issues/7"
+        assert event["details"]["url"] == (
+            f"https://github.com/{event['details']['repo']}"
+            f"/issues/{event['details']['number']}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_github_without_a_row_token_refuses_and_audits(self, test_client):
+        """No account token → the followable 400, nothing sent, one refusal row."""
+        headers = await self._user("chat-gh-none")
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post(
+                "/api/chat-issue",
+                json={**self._CHAT, "target": "github"},
+                headers=headers,
+            )
+        assert response.status_code == 400
+        assert response.json()["detail"] == (
+            "GitHub token is required. Set up your token in Profile Settings."
+        )
+        mock_create.assert_not_called()
+        audit = await self._chat_audit()
+        assert audit["total"] == 1
+        assert audit["events"][0]["details"]["result"] == "refused"
+        assert audit["events"][0]["details"]["reason"] == "invalid_request"
+
+    @pytest.mark.asyncio
+    async def test_every_refused_attempt_is_audited_not_just_the_create(
+        self, test_client
+    ):
+        """Row G2: a refusal leaves one row saying why, naming the subject — and
+        never carrying a credential.
+
+        Only ``POST /api/chat-issue`` wrote a row at #407: a refused proposal and
+        a call the auth layer refuses (a disabled account) left nothing.
+        """
+        pasted = "ghp_pasted_by_the_user_0123456789"  # pragma: allowlist secret
+        headers = await self._user("chat-audit-notoken")
+        job_id = await self._run(
+            "chat-audit-notoken-run", tests_repo_url="https://github.com/org/repo"
+        )
+        # 1. A proposal refused for the caller's missing credential.
+        proposal = test_client.post(
+            "/api/chat-issue/propose",
+            json={
+                "title": "t",
+                "body": f"the token is {pasted}",
+                "target": "github",
+                "repo": "org/elsewhere",
+                "job_id": job_id,
+                "conversation": job_id,
+            },
+            headers=headers,
+        )
+        assert proposal.status_code == 400, proposal.text
+
+        # 2. A create refused by the auth layer before the handler runs.
+        disabled = await self._user("chat-audit-disabled")
+        await storage.set_user_disabled("chat-audit-disabled", True)
+        refused = test_client.post(
+            "/api/chat-issue",
+            json={**self._CHAT, "target": "github"},
+            headers=disabled,
+        )
+        assert refused.status_code == 401, refused.text
+
+        audit = await self._chat_audit()
+        assert audit["total"] == 2, audit
+        by_step = {event["details"]["step"]: event for event in audit["events"]}
+
+        refused_proposal = by_step["propose"]
+        assert refused_proposal["outcome"] == "failure"
+        assert refused_proposal["actor"] == "chat-audit-notoken"
+        # The reason code and the destination asked for, never the draft text.
+        assert refused_proposal["details"] == {
+            "reason": "invalid_request",
+            "result": "refused",
+            "step": "propose",
+            "tracker": "github",
+            "job_id": job_id,
+            "repo": "org/elsewhere",
+            "jira_project": "",
+        }
+
+        auth_refusal = by_step["create"]
+        assert auth_refusal["outcome"] == "denied"
+        assert auth_refusal["actor"] == "chat-audit-disabled"
+        assert auth_refusal["details"] == {
+            "reason": "account_disabled",
+            "result": "refused",
+            "step": "create",
+        }
+        assert pasted not in json.dumps(audit)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("path", "step", "payload", "fields"),
+        [
+            (
+                "/api/chat-issue/propose",
+                "propose",
+                {"target": "github", "title": "t"},
+                ["body"],
+            ),
+            (
+                "/api/chat-issue/propose",
+                "propose",
+                {"target": "slack", "title": "t", "body": "b"},
+                ["target"],
+            ),
+            ("/api/chat-issue", "create", {"target": "github", "title": "t"}, ["body"]),
+        ],
+    )
+    async def test_a_request_rejected_by_validation_leaves_an_audit_row(
+        self,
+        test_client,
+        path: str,
+        step: str,
+        payload: dict[str, str],
+        fields: list[str],
+    ):
+        """A 422 never reaches the handler, so its attempt is audited here.
+
+        Without this row an admin could not learn a refused attempt happened:
+        the handler is the only other place that writes one. The details name
+        the endpoint's step and the failing fields — never a body or a value.
+        """
+        pasted = "ghp_pasted_by_the_user_0123456789"  # pragma: allowlist secret
+        headers = await self._user(f"chat-422-{step}")
+        response = test_client.post(
+            path, json={**payload, "jira_security_level": pasted}, headers=headers
+        )
+        assert response.status_code == 422, response.text
+
+        audit = await self._chat_audit()
+        assert audit["total"] == 1, audit
+        event = audit["events"][0]
+        assert event["actor"] == f"chat-422-{step}"
+        assert event["outcome"] == "denied"
+        assert event["target_id"] == f"chat-422-{step}"
+        assert event["details"] == {
+            "reason": "invalid_request",
+            "result": "refused",
+            "step": step,
+            "fields": fields,
+        }
+        assert pasted not in json.dumps(audit)
+        assert "missing" not in json.dumps(audit)
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("target", "request_field", "detail_key"),
+        [("github", "repo", "repo"), ("jira", "jira_project_key", "jira_project")],
+    )
+    async def test_a_refusal_drops_a_destination_that_is_not_shaped_like_one(
+        self,
+        test_client,
+        target: str,
+        request_field: str,
+        detail_key: str,
+    ):
+        """A refusal row stores a destination, never text the caller typed.
+
+        ``repo``/``jira_project`` are exempt from the bare-run heuristic because
+        they name a destination — an exemption that must not apply to raw input,
+        or a pasted 40-hex token is stored verbatim on the refusal row.
+        """
+        headers = await self._user(f"chat-audit-unshaped-{target}")
+        refused = test_client.post(
+            "/api/chat-issue/propose",
+            json={**self._CHAT, "target": target, request_field: _PASTED_HEX},
+            headers=headers,
+        )
+        assert refused.status_code == 400, refused.text
+
+        audit = await self._chat_audit()
+        assert audit["total"] == 1, audit
+        assert audit["events"][0]["details"][detail_key] == ""
+        assert _PASTED_HEX not in json.dumps(audit)
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_keeps_a_repo_that_is_shaped_like_one(self, test_client):
+        """The gate drops pasted tokens, not the subject the row exists to name."""
+        headers = await self._user("chat-audit-slug-refusal")
+        refused = test_client.post(
+            "/api/chat-issue/propose",
+            json={**self._CHAT, "target": "github", "repo": "org/elsewhere"},
+            headers=headers,
+        )
+        assert refused.status_code == 400, refused.text
+
+        audit = await self._chat_audit()
+        assert audit["total"] == 1, audit
+        assert audit["events"][0]["details"]["repo"] == "org/elsewhere"
+
+    @pytest.mark.asyncio
+    async def test_an_unauthenticated_refusal_names_no_caller_identity(
+        self, test_client
+    ):
+        """The auth layer's refusal row must not launder a forged cookie.
+
+        Line 3227 is reached only when no session/bearer/proxy identity was
+        authenticated, so the ``rootcoz_username`` cookie is caller-chosen:
+        attributing the row to it let ``Cookie: rootcoz_username=victim`` write
+        a denied ``issue.create`` row naming that victim.
+        """
+        forged = "chat-audit-victim"
+        response = test_client.post(
+            "/api/chat-issue",
+            json={**self._CHAT, "target": "github"},
+            headers={"Authorization": ""},
+            cookies={"rootcoz_username": forged},
+        )
+        assert response.status_code == 401, response.text
+
+        audit = await self._chat_audit()
+        assert audit["total"] == 1, audit
+        event = audit["events"][0]
+        assert event["outcome"] == "denied"
+        assert event["actor"] == "anonymous"
+        assert event["target_id"] is None
+        assert event["details"] == {
+            "reason": "unauthenticated",
+            "result": "refused",
+            "step": "create",
+        }
+        # Not in the actor, the target, the log line or the details.
+        assert forged not in json.dumps(audit)
+
+    @pytest.mark.asyncio
+    async def test_bootstrap_admin_is_pointed_at_a_path_it_can_take(self, test_client):
+        """The bootstrap admin has no users row, so Profile Settings is a dead end."""
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post(
+                "/api/chat-issue",
+                json={**self._CHAT, "target": "github"},
+            )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert "GitHub token is required" in detail
+        assert "no profile to store one" in detail
+        assert "Sign in with your own account" in detail
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_github_never_falls_back_to_the_server_token(self, test_client):
+        """A deployment GITHUB_TOKEN is configuration, never identity."""
+        headers = await self._user("chat-gh-srvtok")
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post(
+                "/api/chat-issue",
+                json={**self._CHAT, "target": "github"},
+                headers=headers,
+            )
+        assert response.status_code == 400
+        assert "token is required" in response.json()["detail"].lower()
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_github_disabled_returns_403(self, test_client):
+        headers = await self._user("chat-gh-disabled", github_token="ghp_row_token")
+        from rootcoz.config import get_settings
+
+        with patch.dict(
+            os.environ,
+            {
+                "ENABLE_GITHUB_ISSUES": "false",
+                "TESTS_REPO_URL": "https://github.com/test-org/test-repo",
+            },
+        ):
+            get_settings.cache_clear()
+            try:
+                response = test_client.post(
+                    "/api/chat-issue",
+                    json={**self._CHAT, "target": "github"},
+                    headers=headers,
+                )
+            finally:
+                get_settings.cache_clear()
+        assert response.status_code == 403
+        assert "disabled" in response.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    async def test_disabled_tracker_reads_as_disabled_without_a_token(
+        self, test_client
+    ):
+        """A disabled tracker answers 403, not a token error the user cannot fix."""
+        from rootcoz.config import get_settings
+
+        headers = await self._user("chat-gh-disabled-notoken")
+        with patch.dict(
+            os.environ,
+            {
+                "ENABLE_GITHUB_ISSUES": "false",
+                "TESTS_REPO_URL": "https://github.com/test-org/test-repo",
+            },
+        ):
+            get_settings.cache_clear()
+            try:
+                response = test_client.post(
+                    "/api/chat-issue",
+                    json={**self._CHAT, "target": "github"},
+                    headers=headers,
+                )
+            finally:
+                get_settings.cache_clear()
+        assert response.status_code == 403
+        assert "disabled" in response.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    async def test_github_without_a_repo_url_returns_400(self, test_client):
+        """Nowhere to file is refused at the proposal: there is no destination
+        to show the user — and no default can change between the two steps."""
+        headers = await self._user("chat-gh-norepo", github_token="ghp_row_token")
+        job_id = await self._run("chat-gh-norepo-run")
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            proposal = test_client.post(
+                "/api/chat-issue/propose",
+                json={
+                    **self._CHAT,
+                    "target": "github",
+                    "job_id": job_id,
+                    "conversation": job_id,
+                },
+                headers=headers,
+            )
+        assert proposal.status_code == 400, proposal.text
+        assert "this run has no GitHub test repository" in proposal.json()["detail"]
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_github_404_names_the_repo_the_chat_files_into(self, test_client):
+        """#398's mapping wins, but it names the repository that actually failed.
+
+        GitHub answers 404 instead of 403 for an invisible repository, so the
+        chat path must send the user to their token — and to the repository the
+        request used, not to a deployment setting that had nothing to do with
+        it.
+        """
+        import httpx
+
+        headers = await self._user("chat-gh-404", github_token="ghp_row_token")
+        job_id = await self._run(
+            "chat-gh-404-run", tests_repo_url="https://github.com/org/run-repo"
+        )
+        draft = await self._propose(test_client, "github", headers, job_id=job_id)
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.side_effect = httpx.HTTPStatusError(
+                "Not Found",
+                request=httpx.Request("POST", "https://api.github.com"),
+                response=httpx.Response(404),
+            )
+            with _with_github_issue_config():
+                response = test_client.post(
+                    "/api/chat-issue",
+                    json={**draft, "job_id": job_id},
+                    headers=headers,
+                )
+        assert response.status_code == 403
+        detail = response.json()["detail"]
+        assert detail == (
+            "GitHub cannot see the repository org/run-repo, so your issue was "
+            "not filed. Check that the repository exists and that your token "
+            "can access it in Profile Settings."
+        )
+        # The deployment setting was not the repository this request used.
+        assert "TESTS_REPO_URL" not in detail
+
+    @pytest.mark.asyncio
+    async def test_github_404_names_tests_repo_url_when_it_is_the_repo(
+        self, test_client
+    ):
+        """A chat with no run files in the deployment's repo — so name the setting."""
+        import httpx
+
+        headers = await self._admin("chat-gh-404-default", github_token="ghp_row_token")
+        draft = await self._propose(test_client, "github", headers)
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.side_effect = httpx.HTTPStatusError(
+                "Not Found",
+                request=httpx.Request("POST", "https://api.github.com"),
+                response=httpx.Response(404),
+            )
+            with _with_github_issue_config():
+                response = test_client.post(
+                    "/api/chat-issue", json=draft, headers=headers
+                )
+        assert response.status_code == 403
+        assert response.json()["detail"] == (
+            "GitHub cannot see the repository in TESTS_REPO_URL, so your issue "
+            "was not filed. Check that the repository exists and that your "
+            "token can access it in Profile Settings."
+        )
+
+    # -- Jira -----------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_jira_uses_the_callers_row_credentials(self, test_client):
+        headers = await self._user(
+            "chat-jira", jira_token="user_jira_token", jira_email="user@example.com"
+        )
+        with patch("rootcoz.main.create_jira_bug") as mock_create:
+            mock_create.return_value = {
+                "key": "PROJ-7",
+                "url": "https://jira.example.com/browse/PROJ-7",
+            }
+            with _enable_feature("jira_enabled"):
+                draft = await self._propose(test_client, "jira", headers)
+                response = test_client.post(
+                    "/api/chat-issue",
+                    json=draft,
+                    headers=headers,
+                )
+        assert response.status_code == 201, response.text
+        assert response.json()["key"] == "PROJ-7"
+        # ``key``, not ``issue_key``: a ``*_key`` detail is dropped as a secret.
+        # ``jira_project`` and ``site`` say what the link belongs to, also a
+        # non-``*_key`` name for the same reason.
+        assert (await self._chat_audit())["events"][0]["details"] == {
+            "tracker": "jira",
+            "result": "success",
+            "job_id": "",
+            "key": "PROJ-7",
+            "url": "https://jira.example.com/browse/PROJ-7",
+            "jira_project": "TEST",
+            "site": "jira.example.com",
+        }
+        call_settings = mock_create.call_args[1]["settings"]
+        assert call_settings.jira_api_token.get_secret_value() == "user_jira_token"
+        assert call_settings.jira_auth_mode == "basic"
+
+    @pytest.mark.asyncio
+    async def test_jira_never_falls_back_to_the_server_token(self, test_client):
+        """The deployment holds a working Jira credential; the caller does not.
+
+        Without this, a weakened gate would file the ticket under the server's
+        identity and every other test would still pass.
+        """
+        headers = await self._user("chat-jira-srvtok")
+        with (
+            patch("rootcoz.main.create_jira_bug") as mock_create,
+            _enable_feature("jira_enabled"),
+        ):
+            response = test_client.post(
+                "/api/chat-issue",
+                json={**self._CHAT, "target": "jira"},
+                headers=headers,
+            )
+        assert response.status_code == 400
+        assert response.json()["detail"] == (
+            "Jira token is required. Set up your token in Profile Settings."
+        )
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_jira_disabled_returns_403(self, test_client):
+        headers = await self._user("chat-jira-off", jira_token="user_jira_token")
+        from rootcoz.config import get_settings
+
+        with patch.dict(os.environ, {"ENABLE_JIRA_ISSUES": "false"}):
+            get_settings.cache_clear()
+            try:
+                response = test_client.post(
+                    "/api/chat-issue",
+                    json={**self._CHAT, "target": "jira"},
+                    headers=headers,
+                )
+            finally:
+                get_settings.cache_clear()
+        assert response.status_code == 403
+        assert "disabled" in response.json()["detail"].lower()
+
+    @pytest.mark.asyncio
+    async def test_jira_legacy_service_account_secret_is_refused(self, test_client):
+        """A legacy SA secret is rejected, never silently dropped.
+
+        The refusal comes at the proposal, not at the create: the tool list no
+        longer offers a Jira issue for a credential the create call would
+        refuse, so the model is told before it drafts anything.
+        """
+        headers = await self._user(
+            "chat-jira-legacy", jira_sa_token="legacy-secret-token"
+        )
+        with (
+            patch("rootcoz.main.create_jira_bug") as mock_create,
+            _enable_feature("jira_enabled"),
+        ):
+            proposal = test_client.post(
+                "/api/chat-issue/propose",
+                json={**self._CHAT, "target": "jira"},
+                headers=headers,
+            )
+        assert proposal.status_code == 400, proposal.text
+        assert "not a recognized" in proposal.json()["detail"]
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_jira_mint_error_is_a_controlled_400(self, test_client):
+        """A credential that cannot mint is a configuration error, not a 500."""
+        from rootcoz.jira import JiraOAuthMintError
+        from rootcoz.main import app, get_settings
+
+        headers = await self._user("chat-jira-mint", jira_sa_token="ATOAsecret")
+        # oauth method: the user's ATOA secret replaces the deployment's, and the
+        # client/cloud ids stay the server's.
+        app.dependency_overrides[get_settings] = lambda: _build_wait_settings(
+            jira_auth_mode="oauth",
+            jira_project_key="PROJ",
+            atlassian_oauth_client_id="client-id",
+            atlassian_oauth_cloud_id="cloud-id",
+        )
+        try:
+            with patch("rootcoz.main.create_jira_bug") as mock_create:
+                mock_create.side_effect = JiraOAuthMintError("cannot mint access token")
+                draft = await self._propose(test_client, "jira", headers)
+                response = test_client.post(
+                    "/api/chat-issue",
+                    json=draft,
+                    headers=headers,
+                )
+        finally:
+            app.dependency_overrides.pop(get_settings, None)
+        assert response.status_code == 400
+        assert response.json()["detail"] == "cannot mint access token"
+
+    # -- access ---------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_viewer_cannot_create_a_chat_issue(self, test_client):
+        _, api_key = await storage.create_user("chat-viewer", role="viewer")
+        response = test_client.post(
+            "/api/chat-issue",
+            json={**self._CHAT, "target": "github"},
+            headers={"Authorization": f"Bearer {api_key}"},
+        )
+        assert response.status_code == 403
+        assert "Reviewer access required" in response.json()["detail"]
+        # A denied attempt is an attempt: the chat trail has the row.
+        audit = await self._chat_audit()
+        assert audit["total"] == 1
+        assert audit["events"][0]["outcome"] == "denied"
+        assert audit["events"][0]["actor"] == "chat-viewer"
+
+    # -- scrubbing ------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_chat_text_is_scrubbed_before_it_leaves(self, test_client):
+        """A pasted token never reaches the tracker — not even as a hex SHA.
+
+        A 40-hex commit SHA is also a legacy GitHub token shape, so the shared
+        scrubber redacts it; the chat model sends what the scrubber returns, so
+        the refusal names the marker and the user can retype the SHA by hand.
+        """
+        sha = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
+        headers = await self._user("chat-scrub", github_token="ghp_row_token")
+        job_id = await self._run(
+            "chat-scrub-run", tests_repo_url="https://github.com/org/repo"
+        )
+        title = "auth broke with ghp_abcdefghijklmnopqrstuvwxyz0123"
+        issue_body = f"Commit {sha} broke login."
+        draft = await self._propose(
+            test_client, "github", headers, job_id=job_id, title=title, body=issue_body
+        )
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/8",
+                "number": 8,
+            }
+            with _with_github_issue_config():
+                response = test_client.post(
+                    "/api/chat-issue",
+                    json={
+                        **draft,
+                        "title": title,
+                        "body": issue_body,
+                        "job_id": job_id,
+                    },
+                    headers=headers,
+                )
+        assert response.status_code == 201, response.text
+        kwargs = mock_create.call_args[1]
+        assert "ghp_" not in kwargs["title"]
+        assert "[REDACTED_GITHUB_TOKEN]" in kwargs["title"]
+        assert sha not in kwargs["body"]
+        assert "[REDACTED_HEX_TOKEN]" in kwargs["body"]
+
+    # -- consent gate ---------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_a_create_without_a_draft_files_nothing(self, test_client):
+        """The model's own claim that the user asked is not consent."""
+        headers = await self._admin("chat-nodraft", github_token="ghp_row_token")
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            missing = test_client.post(
+                "/api/chat-issue",
+                json={**self._CHAT, "target": "github"},
+                headers=headers,
+            )
+            unknown = test_client.post(
+                "/api/chat-issue",
+                json={
+                    **self._CHAT,
+                    "target": "github",
+                    "confirmation_id": "never-issued",
+                },
+                headers=headers,
+            )
+        for response in (missing, unknown):
+            assert response.status_code == 400, response.text
+            assert "confirmation id" in response.json()["detail"]
+        mock_create.assert_not_called()
+        audit = await self._chat_audit()
+        assert audit["total"] == 2
+        assert all(e["details"]["result"] == "refused" for e in audit["events"])
+
+    @pytest.mark.asyncio
+    async def test_a_draft_is_single_use_and_expires(self, test_client):
+        """A confirmation id authorises one create call, within its window."""
+        from rootcoz import main as main_mod
+
+        headers = await self._admin("chat-reuse", github_token="ghp_row_token")
+        draft = await self._propose(test_client, "github", headers)
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/9",
+                "number": 9,
+            }
+            with _with_github_issue_config():
+                first = test_client.post("/api/chat-issue", json=draft, headers=headers)
+                reused = test_client.post(
+                    "/api/chat-issue", json=draft, headers=headers
+                )
+        assert first.status_code == 201, first.text
+        assert reused.status_code == 400
+        assert "already used" in reused.json()["detail"]
+        assert mock_create.call_count == 1
+        # An expired draft of a fresh create is refused the same way.
+        expired = await self._propose(test_client, "github", headers)
+        main_mod._chat_issue_drafts[expired["confirmation_id"]]["expires_at"] = 0
+        with _with_github_issue_config():
+            stale = test_client.post("/api/chat-issue", json=expired, headers=headers)
+        assert stale.status_code == 400
+        assert "expired" in stale.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_another_accounts_draft_files_nothing(self, test_client):
+        headers = await self._admin("chat-mine", github_token="ghp_row_token")
+        other = await self._admin("chat-theirs", github_token="ghp_row_token")
+        draft = await self._propose(test_client, "github", other)
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post("/api/chat-issue", json=draft, headers=headers)
+        assert response.status_code == 400
+        assert "belongs to another account" in response.json()["detail"]
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_admin_needs_a_draft_too(self, test_client):
+        """No rank is exempt: the draft is about consent, not permissions."""
+        headers = await self._admin("chat-admin-nodraft", github_token="ghp_row_token")
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post(
+                "/api/chat-issue",
+                json={**self._CHAT, "target": "github"},
+                headers=headers,
+            )
+        assert response.status_code == 400
+        assert "confirmation id" in response.json()["detail"]
+        mock_create.assert_not_called()
+
+    # -- the user's confirmation (the code in their own reply) ----------------
+
+    @pytest.mark.asyncio
+    async def test_the_preview_names_the_tracker_destination_and_code(
+        self, test_client
+    ):
+        """The user approves a destination, not just text: an omitted repo is
+        shown as the repo it resolves to, and the preview carries the code."""
+        headers = await self._admin("chat-preview", github_token="ghp_row_token")
+        with _with_github_issue_config():
+            proposal = test_client.post(
+                "/api/chat-issue/propose",
+                json={
+                    **self._CHAT,
+                    "target": "github",
+                    "conversation": self._ADMIN_CHAT,
+                },
+                headers=headers,
+            )
+        assert proposal.status_code == 201, proposal.text
+        preview = proposal.json()["preview"]
+        code = proposal.json()["confirmation_code"]
+        assert len(code) == 6
+        assert "Tracker: GitHub" in preview
+        # The default repo is named, not left as an empty field to approve.
+        assert "Destination: GitHub repository org/repo" in preview
+        assert self._CHAT["title"] in preview
+        assert self._CHAT["body"] in preview
+        assert f"Confirmation code: {code}" in preview
+        assert proposal.json()["destination"]["repo"] == "org/repo"
+
+    def test_a_non_github_tests_repo_is_not_a_github_destination(self):
+        """A chat with no run of its own gates GitHub on a repo it can file in.
+
+        ``TESTS_REPO_URL`` pointing at another host is not a GitHub destination,
+        so the tool must not be offered for it — the create call parses the URL
+        and would refuse every issue.
+        """
+        from rootcoz.main import _settings_github_repo_available
+
+        assert (
+            _settings_github_repo_available(
+                SimpleNamespace(tests_repo_url="https://gitlab.com/org/repo")
+            )
+            is False
+        )
+        assert (
+            _settings_github_repo_available(
+                SimpleNamespace(tests_repo_url="https://github.com/org/repo")
+            )
+            is True
+        )
+        # No setting at all (the deployment this gate exists for).
+        assert _settings_github_repo_available(SimpleNamespace()) is False
+
+    @pytest.mark.asyncio
+    async def test_the_consent_request_is_posted_by_the_server(self, test_client):
+        """The user approves the server's own message, not the model's summary.
+
+        The preview handed to the model is narration: a model steered by job or
+        database content can misstate the destination (or say "reply with the
+        code to cancel") and still hold a code that authorises the stored draft.
+        So the same words are written into the chat by this server, as a role
+        the model cannot author, and the draft's watermark is that row's id —
+        only a reply NEWER than it confirms.
+        """
+        from rootcoz import main as main_mod
+
+        headers = await self._admin("chat-consent-msg", github_token="ghp_row_token")
+        with _with_github_issue_config():
+            proposal = test_client.post(
+                "/api/chat-issue/propose",
+                json={
+                    **self._CHAT,
+                    "target": "github",
+                    "conversation": self._ADMIN_CHAT,
+                },
+                headers=headers,
+            )
+        assert proposal.status_code == 201, proposal.text
+        draft = proposal.json()
+        messages = await storage.get_chat_messages(
+            self._ADMIN_CHAT, username="chat-consent-msg"
+        )
+        notices = [message for message in messages if message["role"] == "system"]
+        assert len(notices) == 1, messages
+        shown = notices[0]["content"]
+        # What the user is asked to approve, verbatim and server-written.
+        assert "Tracker: GitHub" in shown
+        assert "Destination: GitHub repository org/repo" in shown
+        assert self._CHAT["title"] in shown
+        assert self._CHAT["body"] in shown
+        assert f"Confirmation code: {draft['confirmation_code']}" in shown
+        # A rebuilt AI session keeps only stored chat text: the proposal id has
+        # to be in the notice too, or the confirmed draft can never be filed.
+        assert f"Proposal id: {draft['confirmation_id']}" in shown
+        # Consent is bound to that row: the code has to arrive after it.
+        assert (
+            main_mod._chat_issue_drafts[draft["confirmation_id"]]["watermark"]
+            == notices[0]["id"]
+        )
+
+    @pytest.mark.asyncio
+    async def test_the_jira_preview_names_the_project_and_issue_type(self, test_client):
+        headers = await self._user(
+            "chat-preview-jira", jira_token="user_jira_token", jira_email="u@e.com"
+        )
+        with _enable_feature("jira_enabled"):
+            proposal = test_client.post(
+                "/api/chat-issue/propose",
+                json={**self._CHAT, "target": "jira"},
+                headers=headers,
+            )
+        assert proposal.status_code == 201, proposal.text
+        preview = proposal.json()["preview"]
+        assert "Tracker: Jira" in preview
+        assert "Destination: Jira project TEST, issue type Bug" in preview
+        assert f"Confirmation code: {proposal.json()['confirmation_code']}" in preview
+
+    @pytest.mark.asyncio
+    async def test_a_create_nobody_confirmed_files_nothing(self, test_client):
+        """The model may propose and create in one turn — it gets the skipped step.
+
+        It holds the id and the code (both come back in the proposal), so this
+        is the case that proves the gate is not a shared secret: what is missing
+        is a message from the user.
+        """
+        headers = await self._admin("chat-unconfirmed", github_token="ghp_row_token")
+        draft = await self._propose_only(test_client, "github", headers)
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post("/api/chat-issue", json=draft, headers=headers)
+        assert response.status_code == 400, response.text
+        assert (
+            "the user must confirm by replying with the code shown in the preview"
+            in response.json()["detail"]
+        )
+        mock_create.assert_not_called()
+        # Nothing was spent: the same draft still files once the user replies.
+        await self._user_reply(headers, draft["confirmation_code"])
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/11",
+                "number": 11,
+            }
+            with _with_github_issue_config():
+                filed = test_client.post("/api/chat-issue", json=draft, headers=headers)
+        assert filed.status_code == 201, filed.text
+
+    @pytest.mark.asyncio
+    async def test_a_model_authored_message_does_not_confirm(self, test_client):
+        """Only a stored USER message counts: the model writes the others."""
+        headers = await self._admin("chat-selfconfirm", github_token="ghp_row_token")
+        draft = await self._propose_only(test_client, "github", headers)
+        # Exactly what the chat model's own turn stores — and the code in it.
+        await self._user_reply(headers, draft["confirmation_code"], role="assistant")
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post("/api/chat-issue", json=draft, headers=headers)
+        assert response.status_code == 400, response.text
+        assert (
+            "the user must confirm by replying with the code shown in the preview"
+            in response.json()["detail"]
+        )
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_code_from_another_conversation_does_not_confirm(self, test_client):
+        """The reply has to land in the chat the draft belongs to."""
+        headers = await self._user("chat-other-conv", github_token="ghp_row_token")
+        await self._run("chat-conv-a", tests_repo_url="https://github.com/org/a")
+        await self._run("chat-conv-b", tests_repo_url="https://github.com/org/b")
+        draft = await self._propose_only(
+            test_client, "github", headers, job_id="chat-conv-a"
+        )
+        await self._user_reply(
+            headers, draft["confirmation_code"], conversation="chat-conv-b"
+        )
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post(
+                "/api/chat-issue",
+                json={**draft, "job_id": "chat-conv-a"},
+                headers=headers,
+            )
+        assert response.status_code == 400, response.text
+        assert "nobody confirmed this draft" in response.json()["detail"]
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_another_users_reply_does_not_confirm(self, test_client):
+        """A second account's message in the same chat is not this user's consent."""
+        headers = await self._user("chat-code-mine", github_token="ghp_row_token")
+        await self._run("chat-code-shared", tests_repo_url="https://github.com/org/a")
+        draft = await self._propose_only(
+            test_client, "github", headers, job_id="chat-code-shared"
+        )
+        await self._user_reply(
+            None,
+            draft["confirmation_code"],
+            conversation="chat-code-shared",
+            username="chat-code-theirs",
+        )
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post(
+                "/api/chat-issue",
+                json={**draft, "job_id": "chat-code-shared"},
+                headers=headers,
+            )
+        assert response.status_code == 400, response.text
+        assert "nobody confirmed this draft" in response.json()["detail"]
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_wrong_or_missing_code_is_refused(self, test_client):
+        headers = await self._admin("chat-wrong-code", github_token="ghp_row_token")
+        draft = await self._propose_only(test_client, "github", headers)
+        await self._user_reply(headers, draft["confirmation_code"])
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            wrong = test_client.post(
+                "/api/chat-issue",
+                json={**draft, "confirmation_code": "ZZZZZZ"},
+                headers=headers,
+            )
+            missing = test_client.post(
+                "/api/chat-issue",
+                json={**draft, "confirmation_code": ""},
+                headers=headers,
+            )
+        for response in (wrong, missing):
+            assert response.status_code == 400, response.text
+            assert "confirmation code" in response.json()["detail"]
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_the_code_dies_with_the_id_on_use(self, test_client):
+        """One file per draft: the code cannot be replayed after it worked."""
+        headers = await self._admin("chat-code-once", github_token="ghp_row_token")
+        draft = await self._propose_only(test_client, "github", headers)
+        await self._user_reply(headers, draft["confirmation_code"])
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/12",
+                "number": 12,
+            }
+            with _with_github_issue_config():
+                first = test_client.post("/api/chat-issue", json=draft, headers=headers)
+                replay = test_client.post(
+                    "/api/chat-issue", json=draft, headers=headers
+                )
+        assert first.status_code == 201, first.text
+        assert replay.status_code == 400
+        assert "already used" in replay.json()["detail"]
+        assert mock_create.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_direct_caller_confirms_with_the_code_alone(self, test_client):
+        """No conversation (the CLI): the human running the two commands typed
+        the code, and no chat tool can propose such a draft."""
+        headers = await self._admin("chat-cli", github_token="ghp_row_token")
+        draft = await self._propose_only(
+            test_client, "github", headers, conversation=""
+        )
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/13",
+                "number": 13,
+            }
+            response = test_client.post("/api/chat-issue", json=draft, headers=headers)
+        assert response.status_code == 201, response.text
+
+    # -- the claim, the caps and retries --------------------------------------
+
+    @pytest.fixture(autouse=True)
+    def _no_leftover_drafts(self):
+        """Drafts are process state: every test here starts and ends empty."""
+        from rootcoz import main as main_mod
+
+        main_mod._chat_issue_drafts.clear()
+        yield
+        main_mod._chat_issue_drafts.clear()
+
+    @pytest.mark.asyncio
+    async def test_two_parallel_creates_file_one_issue(self, test_client):
+        """One confirmation files once, however many creates arrive together.
+
+        Both requests are held inside the consent read at the same time: without
+        an atomic claim both pass it and both file, so the second has to be
+        refused by the claim itself and not by timing.
+        """
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        headers = await self._admin("chat-race", github_token="ghp_row_token")
+        draft = await self._propose(test_client, "github", headers)
+
+        scans: list[int] = []
+        # Both POSTs start together, then the patched consent read keeps the
+        # first one inside it long enough for the second to arrive.
+        start = threading.Barrier(2, timeout=5)
+
+        async def _slow_reply_check(**_kwargs) -> bool:
+            scans.append(1)
+            await asyncio.sleep(0.2)
+            return True
+
+        def _create() -> int:
+            start.wait()
+            return test_client.post(
+                "/api/chat-issue", json=draft, headers=headers
+            ).status_code
+
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            patch("rootcoz.main._user_replied_with_code", new=_slow_reply_check),
+            _with_github_issue_config(),
+        ):
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/20",
+                "number": 20,
+            }
+            with ThreadPoolExecutor(max_workers=2) as pool:
+                statuses = [
+                    future.result(timeout=30)
+                    for future in [pool.submit(_create) for _ in range(2)]
+                ]
+
+        assert sorted(statuses) == [201, 400], statuses
+        # Exactly one request ever reached the consent read: the loser lost the
+        # claim before it could.
+        assert len(scans) == 1
+        assert mock_create.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_a_new_proposal_replaces_this_users_oldest_draft(self, test_client):
+        """Five live previews per account: the sixth evicts the first."""
+        from rootcoz import main as main_mod
+
+        headers = await self._admin("chat-cap", github_token="ghp_row_token")
+        drafts = [
+            await self._propose_only(test_client, "github", headers)
+            for _ in range(main_mod._ISSUE_DRAFTS_PER_USER + 1)
+        ]
+        live = {
+            draft_id
+            for draft_id, draft in main_mod._chat_issue_drafts.items()
+            if draft["username"] == "chat-cap"
+        }
+        assert len(live) == main_mod._ISSUE_DRAFTS_PER_USER
+        assert drafts[0]["confirmation_id"] not in live
+        assert drafts[-1]["confirmation_id"] in live
+        # The evicted draft is gone, and says so the way any spent id does.
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post(
+                "/api/chat-issue", json=drafts[0], headers=headers
+            )
+        assert response.status_code == 400
+        assert "unknown, expired or already used" in response.json()["detail"]
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_full_store_refuses_the_new_proposal(
+        self, test_client, monkeypatch
+    ):
+        """The whole map has a ceiling, and hitting it is a refusable 503."""
+        from rootcoz import main as main_mod
+
+        monkeypatch.setattr(main_mod, "_ISSUE_DRAFTS_MAX", 1)
+        first = await self._admin("chat-fill", github_token="ghp_row_token")
+        await self._propose_only(test_client, "github", first)
+        second = await self._admin("chat-full", github_token="ghp_row_token")
+        with _with_github_issue_config():
+            proposal = test_client.post(
+                "/api/chat-issue/propose",
+                json={
+                    **self._CHAT,
+                    "target": "github",
+                    "conversation": self._ADMIN_CHAT,
+                },
+                headers=second,
+            )
+        assert proposal.status_code == 503, proposal.text
+        detail = proposal.json()["detail"]
+        assert "too many unconfirmed issue previews" in detail
+        assert "propose the issue again" in detail
+        # Nothing was kept for the refused account.
+        assert not [
+            draft
+            for draft in main_mod._chat_issue_drafts.values()
+            if draft["username"] == "chat-full"
+        ]
+
+    @pytest.mark.asyncio
+    async def test_a_failed_store_evicts_nothing(self, test_client):
+        """The caps are applied only once nothing can fail any more.
+
+        A proposal at the per-account cap whose watermark read fails must not
+        cost the user the draft the old ordering evicted before that read.
+        """
+        from rootcoz import main as main_mod
+
+        headers = await self._admin("chat-insert-fail", github_token="ghp_row_token")
+        drafts = [
+            await self._propose_only(test_client, "github", headers)
+            for _ in range(main_mod._ISSUE_DRAFTS_PER_USER)
+        ]
+        with (
+            patch(
+                "rootcoz.main._chat_last_message_id",
+                side_effect=RuntimeError("storage is down"),
+            ),
+            _with_github_issue_config(),
+            pytest.raises(RuntimeError),
+        ):
+            test_client.post(
+                "/api/chat-issue/propose",
+                json={
+                    **self._CHAT,
+                    "target": "github",
+                    "conversation": self._ADMIN_CHAT,
+                },
+                headers=headers,
+            )
+        live = {
+            draft_id
+            for draft_id, draft in main_mod._chat_issue_drafts.items()
+            if draft["username"] == "chat-insert-fail"
+        }
+        assert live == {draft["confirmation_id"] for draft in drafts}
+
+    @pytest.mark.asyncio
+    async def test_a_released_draft_cannot_exceed_the_cap(self, test_client):
+        """The claim freed a slot and a new proposal took it: the caps win."""
+        from rootcoz import main as main_mod
+
+        headers = await self._admin("chat-release", github_token="ghp_row_token")
+        drafts = [
+            await self._propose_only(test_client, "github", headers)
+            for _ in range(main_mod._ISSUE_DRAFTS_PER_USER)
+        ]
+        claimed = main_mod._chat_issue_drafts.pop(drafts[0]["confirmation_id"])
+        await self._propose_only(test_client, "github", headers)
+        main_mod._release_issue_draft(drafts[0]["confirmation_id"], claimed)
+        live = [
+            draft
+            for draft in main_mod._chat_issue_drafts.values()
+            if draft["username"] == "chat-release"
+        ]
+        assert len(live) == main_mod._ISSUE_DRAFTS_PER_USER
+        assert drafts[0]["confirmation_id"] not in main_mod._chat_issue_drafts
+
+    @pytest.mark.asyncio
+    async def test_a_draft_evicted_while_its_notice_is_written_is_refused(
+        self, test_client
+    ):
+        """A burst at the cap must not return a preview that can file nothing.
+
+        The draft is inserted before the server-notice write is awaited, so a
+        proposal in between can evict it. The id then answers "unknown, expired
+        or already used" although the user was shown a live-looking preview: the
+        proposal now takes that notice back and refuses instead.
+        """
+        from rootcoz import main as main_mod
+
+        headers = await self._admin("chat-evict-post", github_token="ghp_row_token")
+        for _ in range(main_mod._ISSUE_DRAFTS_PER_USER):
+            await self._propose_only(test_client, "github", headers)
+        real_post = main_mod._post_issue_consent_request
+        posted_codes: list[str] = []
+
+        async def _evict_during_post(**kwargs: str) -> int:
+            """Write the notice, then let a newer proposal evict that draft."""
+            message_id = await real_post(**kwargs)
+            posted_codes.append(kwargs["code"])
+            for draft_id, draft in list(main_mod._chat_issue_drafts.items()):
+                if draft["code"] == kwargs["code"]:
+                    main_mod._chat_issue_drafts.pop(draft_id)
+            return message_id
+
+        with (
+            patch(
+                "rootcoz.main._post_issue_consent_request",
+                side_effect=_evict_during_post,
+            ),
+            _with_github_issue_config(),
+        ):
+            response = test_client.post(
+                "/api/chat-issue/propose",
+                json={
+                    **self._CHAT,
+                    "target": "github",
+                    "conversation": self._ADMIN_CHAT,
+                },
+                headers=headers,
+            )
+        assert response.status_code == 503, response.text
+        assert "propose the issue again" in response.json()["detail"].lower()
+        # The confirmed preview was taken back, so no code in this chat is dead.
+        messages = await storage.get_chat_messages(
+            self._ADMIN_CHAT, username="chat-evict-post"
+        )
+        assert not [
+            message for message in messages if posted_codes[0] in message["content"]
+        ], messages
+
+    @pytest.mark.asyncio
+    async def test_parallel_proposals_cannot_exceed_the_per_account_cap(
+        self, test_client
+    ):
+        """The check and the insert are one step, so N proposals keep five drafts.
+
+        Every proposal is held inside the watermark read together: the caps used
+        to be checked before that read and the insert after it, so all of them
+        passed and all of them inserted. A proposal a burst evicted while its
+        server notice was being written is refused (503), never returned with a
+        code whose draft is already gone.
+        """
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        from rootcoz import main as main_mod
+
+        headers = await self._admin("chat-propose-race", github_token="ghp_row_token")
+        start = threading.Barrier(8, timeout=5)
+
+        async def _slow_watermark(_conversation: str, _username: str) -> int:
+            await asyncio.sleep(0.2)
+            return 0
+
+        def _propose() -> int:
+            start.wait()
+            return test_client.post(
+                "/api/chat-issue/propose",
+                json={
+                    **self._CHAT,
+                    "target": "github",
+                    "conversation": self._ADMIN_CHAT,
+                },
+                headers=headers,
+            ).status_code
+
+        with (
+            patch("rootcoz.main._chat_last_message_id", new=_slow_watermark),
+            _with_github_issue_config(),
+            ThreadPoolExecutor(max_workers=8) as pool,
+        ):
+            statuses = [
+                future.result(timeout=30)
+                for future in [pool.submit(_propose) for _ in range(8)]
+            ]
+
+        assert set(statuses) <= {201, 503}, statuses
+        assert statuses.count(201) >= 1, statuses
+        live = [
+            draft
+            for draft in main_mod._chat_issue_drafts.values()
+            if draft["username"] == "chat-propose-race"
+        ]
+        assert len(live) == main_mod._ISSUE_DRAFTS_PER_USER
+
+    @pytest.mark.asyncio
+    async def test_parallel_proposals_cannot_exceed_the_global_cap(
+        self, test_client, monkeypatch
+    ):
+        """A full store refuses the parallel proposals instead of growing."""
+        import threading
+        from concurrent.futures import ThreadPoolExecutor
+
+        from rootcoz import main as main_mod
+
+        monkeypatch.setattr(main_mod, "_ISSUE_DRAFTS_MAX", 2)
+        headers = await self._admin("chat-global-race", github_token="ghp_row_token")
+        start = threading.Barrier(6, timeout=5)
+
+        async def _slow_watermark(_conversation: str, _username: str) -> int:
+            await asyncio.sleep(0.2)
+            return 0
+
+        def _propose() -> int:
+            start.wait()
+            return test_client.post(
+                "/api/chat-issue/propose",
+                json={
+                    **self._CHAT,
+                    "target": "github",
+                    "conversation": self._ADMIN_CHAT,
+                },
+                headers=headers,
+            ).status_code
+
+        with (
+            patch("rootcoz.main._chat_last_message_id", new=_slow_watermark),
+            _with_github_issue_config(),
+            ThreadPoolExecutor(max_workers=6) as pool,
+        ):
+            statuses = [
+                future.result(timeout=30)
+                for future in [pool.submit(_propose) for _ in range(6)]
+            ]
+
+        assert sorted(statuses) == [201, 201, 503, 503, 503, 503], statuses
+        assert len(main_mod._chat_issue_drafts) == 2
+
+    @pytest.mark.asyncio
+    async def test_a_consent_read_error_leaves_the_draft_usable(self, test_client):
+        """A storage error is not a decision: no new approval is needed."""
+        from rootcoz import main as main_mod
+
+        headers = await self._admin("chat-read-error", github_token="ghp_row_token")
+        draft = await self._propose(test_client, "github", headers)
+        with (
+            patch(
+                "rootcoz.storage.get_chat_user_messages_since",
+                side_effect=RuntimeError("storage is down"),
+            ),
+            _with_github_issue_config(),
+            pytest.raises(RuntimeError),
+        ):
+            test_client.post("/api/chat-issue", json=draft, headers=headers)
+        # The claim was handed back with the error, not swallowed by it.
+        assert draft["confirmation_id"] in main_mod._chat_issue_drafts
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/22",
+                "number": 22,
+            }
+            with _with_github_issue_config():
+                retried = test_client.post(
+                    "/api/chat-issue", json=draft, headers=headers
+                )
+        assert retried.status_code == 201, retried.text
+
+    @pytest.mark.asyncio
+    async def test_a_confirmation_buried_under_later_replies_still_counts(
+        self, test_client
+    ):
+        """Later chat cannot hide the user's confirmation from the scan."""
+        from rootcoz import main as main_mod
+
+        headers = await self._admin("chat-buried", github_token="ghp_row_token")
+        draft = await self._propose(test_client, "github", headers)
+        for _ in range(main_mod._CONFIRM_SCAN_MESSAGES + 5):
+            await self._user_reply(headers, "no code in this one")
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/23",
+                "number": 23,
+            }
+            with _with_github_issue_config():
+                response = test_client.post(
+                    "/api/chat-issue", json=draft, headers=headers
+                )
+        assert response.status_code == 201, response.text
+
+    @pytest.mark.asyncio
+    async def test_an_upstream_outage_leaves_the_confirmation_usable(self, test_client):
+        """A 5xx is not a decision: the same id and code file once it recovers."""
+        headers = await self._admin("chat-outage", github_token="ghp_row_token")
+        draft = await self._propose(test_client, "github", headers)
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.side_effect = httpx.HTTPStatusError(
+                "outage",
+                request=httpx.Request("POST", "https://api.github.com"),
+                response=httpx.Response(502),
+            )
+            with _with_github_issue_config():
+                failed = test_client.post(
+                    "/api/chat-issue", json=draft, headers=headers
+                )
+        assert failed.status_code == 502, failed.text
+        assert "Try again in a few minutes" in failed.json()["detail"]
+        # The user retries with exactly what they approved — no new preview.
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/21",
+                "number": 21,
+            }
+            with _with_github_issue_config():
+                retried = test_client.post(
+                    "/api/chat-issue", json=draft, headers=headers
+                )
+        assert retried.status_code == 201, retried.text
+        assert mock_create.call_count == 1
+        # Filed once is spent: the retry was the single successful use.
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            again = test_client.post("/api/chat-issue", json=draft, headers=headers)
+        assert again.status_code == 400
+        assert "already used" in again.json()["detail"]
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_timed_out_create_spends_the_confirmation(self, test_client):
+        """A timeout may have filed the issue: the code must not file a second.
+
+        The refusal itself says the issue may already exist, so handing the draft
+        back and letting the model retry the same confirmation would create a
+        duplicate without the user approving a retry.
+        """
+        headers = await self._admin("chat-timeout", github_token="ghp_row_token")
+        draft = await self._propose(test_client, "github", headers)
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.side_effect = httpx.TimeoutException("timed out")
+            with _with_github_issue_config():
+                timed_out = test_client.post(
+                    "/api/chat-issue", json=draft, headers=headers
+                )
+        assert timed_out.status_code == 502, timed_out.text
+        assert "may already be filed" in timed_out.json()["detail"]
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/25",
+                "number": 25,
+            }
+            retried = test_client.post("/api/chat-issue", json=draft, headers=headers)
+        assert retried.status_code == 400, retried.text
+        assert "unknown, expired or already used" in retried.json()["detail"]
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_create_that_never_reached_the_tracker_keeps_the_code(
+        self, test_client
+    ):
+        """A connect error proves nothing was sent, so the confirmation stays."""
+        headers = await self._admin("chat-connect", github_token="ghp_row_token")
+        draft = await self._propose(test_client, "github", headers)
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.side_effect = httpx.ConnectError("connection refused")
+            with _with_github_issue_config():
+                unreachable = test_client.post(
+                    "/api/chat-issue", json=draft, headers=headers
+                )
+        assert unreachable.status_code == 502, unreachable.text
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/24",
+                "number": 24,
+            }
+            with _with_github_issue_config():
+                retried = test_client.post(
+                    "/api/chat-issue", json=draft, headers=headers
+                )
+        assert retried.status_code == 201, retried.text
+
+    @pytest.mark.asyncio
+    async def test_a_dropped_read_spends_the_confirmation(self, test_client):
+        """The POST reached GitHub and the answer was lost: the draft is spent.
+
+        A read error happens after the request was sent, so nothing proves it
+        filed nothing — releasing the draft would let the same confirmation file
+        the issue a second time.
+        """
+        headers = await self._admin("chat-read-error", github_token="ghp_row_token")
+        draft = await self._propose(test_client, "github", headers)
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.side_effect = httpx.ReadError("connection reset")
+            with _with_github_issue_config():
+                failed = test_client.post(
+                    "/api/chat-issue", json=draft, headers=headers
+                )
+        assert failed.status_code == 502, failed.text
+        assert "may have been filed" in failed.json()["detail"]
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            retried = test_client.post("/api/chat-issue", json=draft, headers=headers)
+        assert retried.status_code == 400, retried.text
+        assert "unknown, expired or already used" in retried.json()["detail"]
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_unreadable_answer_spends_the_confirmation(self, test_client):
+        """A 2xx whose body cannot be parsed may still have filed the issue."""
+        headers = await self._admin("chat-parse-error", github_token="ghp_row_token")
+        draft = await self._propose(test_client, "github", headers)
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.side_effect = KeyError("html_url")
+            with _with_github_issue_config():
+                failed = test_client.post(
+                    "/api/chat-issue", json=draft, headers=headers
+                )
+        assert failed.status_code == 502, failed.text
+        assert "may have been filed" in failed.json()["detail"]
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            retried = test_client.post("/api/chat-issue", json=draft, headers=headers)
+        assert retried.status_code == 400, retried.text
+        assert "unknown, expired or already used" in retried.json()["detail"]
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_a_reply_from_before_the_draft_does_not_confirm(self, test_client):
+        """The code only counts in a message stored AFTER the preview."""
+        headers = await self._admin("chat-stale-reply", github_token="ghp_row_token")
+        # A reply sent for an earlier draft, carrying a code this draft never had.
+        await self._user_reply(headers, "ABCDEF")
+        draft = await self._propose_only(test_client, "github", headers)
+        await self._user_reply(headers, "ABCDEF")
+        # Rewind the watermark: the only matching reply is now older than the draft.
+        from rootcoz import main as main_mod
+
+        main_mod._chat_issue_drafts[draft["confirmation_id"]]["watermark"] = 10**6
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post("/api/chat-issue", json=draft, headers=headers)
+        assert response.status_code == 400, response.text
+        assert "nobody confirmed this draft" in response.json()["detail"]
+        mock_create.assert_not_called()
+
+    # -- audit trail ----------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_an_internal_failure_still_writes_a_row(self, test_client):
+        """A 500 is an attempt too: one failure row, no token and no issue text."""
+        headers = await self._admin("chat-boom", github_token="ghp_row_token")
+        draft = await self._propose(test_client, "github", headers)
+        with (
+            patch(
+                "rootcoz.main._create_issue_from_text",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("storage is down"),
+            ),
+            _with_github_issue_config(),
+            pytest.raises(RuntimeError),
+        ):
+            test_client.post("/api/chat-issue", json=draft, headers=headers)
+        audit = await self._chat_audit()
+        assert audit["total"] == 1
+        event = audit["events"][0]
+        assert event["outcome"] == "failure"
+        assert event["details"]["reason"] == "internal_error"
+        assert event["details"]["tracker"] == "github"
+        assert "ghp_row_token" not in json.dumps(event)
+        assert self._CHAT["title"] not in json.dumps(event)
+        assert self._CHAT["body"] not in json.dumps(event)
+
+    @pytest.mark.asyncio
+    async def test_a_refusal_records_the_upstream_status(self, test_client):
+        """No permission (403) and rate limited (429) are told apart in the row."""
+        import httpx
+
+        headers = await self._admin("chat-upstream", github_token="ghp_row_token")
+        for upstream, response_headers in (
+            (403, {}),
+            (429, {"x-ratelimit-remaining": "0"}),
+        ):
+            draft = await self._propose(test_client, "github", headers)
+            with patch("rootcoz.main.create_github_issue") as mock_create:
+                mock_create.side_effect = httpx.HTTPStatusError(
+                    "refused",
+                    request=httpx.Request("POST", "https://api.github.com"),
+                    response=httpx.Response(upstream, headers=response_headers),
+                )
+                with _with_github_issue_config():
+                    response = test_client.post(
+                        "/api/chat-issue", json=draft, headers=headers
+                    )
+            assert response.status_code in (403, 429), response.text
+            refused = (await self._chat_audit())["events"][0]
+            assert refused["details"]["upstream_status"] == upstream
+            # A create that filed nothing names no issue.
+            assert "url" not in refused["details"]
+            assert "number" not in refused["details"]
+
+    @pytest.mark.asyncio
+    async def test_a_full_draft_store_audits_the_refused_proposal(
+        self, test_client, monkeypatch
+    ):
+        """Storing the draft is part of the attempt, so its 503 leaves a row."""
+        from rootcoz import main as main_mod
+
+        monkeypatch.setattr(main_mod, "_ISSUE_DRAFTS_MAX", 1)
+        first = await self._admin("chat-store-full-a", github_token="ghp_row_token")
+        await self._propose_only(test_client, "github", first)
+        second = await self._admin("chat-store-full-b", github_token="ghp_row_token")
+        with _with_github_issue_config():
+            proposal = test_client.post(
+                "/api/chat-issue/propose",
+                json={
+                    **self._CHAT,
+                    "target": "github",
+                    "conversation": self._ADMIN_CHAT,
+                },
+                headers=second,
+            )
+        assert proposal.status_code == 503, proposal.text
+        audit = await self._chat_audit()
+        assert audit["total"] == 1, audit
+        event = audit["events"][0]
+        assert event["outcome"] == "failure"
+        assert event["details"]["step"] == "propose"
+        assert event["details"]["reason"] == "http_503"
+
+    @pytest.mark.asyncio
+    async def test_a_draft_storage_failure_leaves_a_failure_row(self, test_client):
+        """A storage error while drafting is an attempt too — no draft text."""
+        headers = await self._admin("chat-store-boom", github_token="ghp_row_token")
+        with (
+            patch(
+                "rootcoz.main._chat_last_message_id",
+                side_effect=RuntimeError("storage is down"),
+            ),
+            _with_github_issue_config(),
+            pytest.raises(RuntimeError),
+        ):
+            test_client.post(
+                "/api/chat-issue/propose",
+                json={
+                    **self._CHAT,
+                    "target": "github",
+                    "conversation": self._ADMIN_CHAT,
+                },
+                headers=headers,
+            )
+        audit = await self._chat_audit()
+        assert audit["total"] == 1, audit
+        event = audit["events"][0]
+        assert event["outcome"] == "failure"
+        assert event["details"]["reason"] == "internal_error"
+        assert event["details"]["tracker"] == "github"
+        assert self._CHAT["title"] not in json.dumps(event)
+        assert self._CHAT["body"] not in json.dumps(event)
+
+    # -- the destination the draft binds --------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_an_approved_draft_cannot_switch_the_repo(self, test_client):
+        """The id approves this text for this repo — not the same text elsewhere."""
+        headers = await self._admin("chat-repo-switch", github_token="ghp_row_token")
+        draft = await self._propose(test_client, "github", headers, repo="org/one")
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/one/issues/1",
+                "number": 1,
+            }
+            with _with_github_issue_config():
+                elsewhere = test_client.post(
+                    "/api/chat-issue",
+                    json={**draft, "repo": "org/two"},
+                    headers=headers,
+                )
+                approved = test_client.post(
+                    "/api/chat-issue",
+                    json={**draft, "repo": "org/one"},
+                    headers=headers,
+                )
+        assert elsewhere.status_code == 400, elsewhere.text
+        detail = elsewhere.json()["detail"]
+        assert "destination" in detail
+        assert "propose_tracker_issue" in detail
+        # The repo the user approved still files, and only once.
+        assert approved.status_code == 201, approved.text
+        assert mock_create.call_count == 1
+        assert mock_create.call_args[1]["repo_url"] == "https://github.com/org/one"
+
+    @pytest.mark.asyncio
+    async def test_an_approved_draft_cannot_switch_the_run(self, test_client):
+        """An empty repo means the drafted run's test repo, not another run's."""
+        headers = await self._user("chat-run-switch", github_token="ghp_row_token")
+        await self._run("chat-run-a", tests_repo_url="https://github.com/org/a")
+        await self._run("chat-run-b", tests_repo_url="https://github.com/org/b")
+        draft = await self._propose(test_client, "github", headers, job_id="chat-run-a")
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post(
+                "/api/chat-issue",
+                json={**draft, "job_id": "chat-run-b"},
+                headers=headers,
+            )
+        assert response.status_code == 400, response.text
+        assert "destination" in response.json()["detail"]
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_approved_draft_cannot_switch_the_jira_project(self, test_client):
+        """The project, security level and issue type are the approved ones."""
+        headers = await self._user(
+            "chat-jira-switch", jira_token="user_jira_token", jira_email="u@example.com"
+        )
+        with patch("rootcoz.main.create_jira_bug") as mock_create:
+            mock_create.return_value = {
+                "key": "TEST-7",
+                "url": "https://jira.example.com/browse/TEST-7",
+            }
+            with _enable_feature("jira_enabled"):
+                for override in (
+                    {"jira_project_key": "OTHER"},
+                    {"jira_security_level": "Secret"},
+                ):
+                    draft = await self._propose(
+                        test_client, "jira", headers, jira_project_key="TEST"
+                    )
+                    response = test_client.post(
+                        "/api/chat-issue",
+                        json={**draft, "jira_project_key": "TEST", **override},
+                        headers=headers,
+                    )
+                    assert response.status_code == 400, response.text
+                    assert "destination" in response.json()["detail"]
+                approved = await self._propose(
+                    test_client, "jira", headers, jira_project_key="TEST"
+                )
+                filed = test_client.post(
+                    "/api/chat-issue",
+                    json={**approved, "jira_project_key": "TEST"},
+                    headers=headers,
+                )
+        assert filed.status_code == 201, filed.text
+        assert mock_create.call_count == 1
+        assert mock_create.call_args[1]["project_key"] == "TEST"
+
+    @pytest.mark.asyncio
+    async def test_the_default_repo_placeholder_is_the_default_repo(self, test_client):
+        """An omitted ``repo`` reaches the server as ``{repo}``, not as a slug."""
+        headers = await self._user("chat-placeholder", github_token="ghp_row_token")
+        job_id = await self._run(
+            "chat-placeholder-run", tests_repo_url="https://github.com/org/repo"
+        )
+        draft = await self._propose(
+            test_client, "github", headers, job_id=job_id, repo="{repo}"
+        )
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/3",
+                "number": 3,
+            }
+            with _with_github_issue_config():
+                response = test_client.post(
+                    "/api/chat-issue",
+                    json={**draft, "job_id": job_id, "repo": "{repo}"},
+                    headers=headers,
+                )
+        assert response.status_code == 201, response.text
+        assert mock_create.call_args[1]["repo_url"] == "https://github.com/org/repo"
 
 
 class TestHistoryEndpoints:
@@ -14228,6 +16213,8 @@ async def test_admin_chat_processing_uses_session_source_and_resets_context(
             ai_provider="openai",
             ai_model="test-model",
             ai_call_timeout=30,
+            enable_github_issues=False,
+            enable_jira_issues=False,
         ),
     )
     monkeypatch.setattr(

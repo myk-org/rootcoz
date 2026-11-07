@@ -679,8 +679,43 @@ describe('AdminAuditPage', () => {
       'href',
       '/results/job-42',
     )
+    // An internal destination never leaves the app.
+    expect(comment).not.toHaveAttribute('target')
     // A value with no destination stays plain text.
     expect(within(details).getByText('plain')).toBeInTheDocument()
+  })
+
+  it('links an http detail url out to the external site', async () => {
+    mockAuditApi(1, () => [
+      event({ details: { url: 'https://github.com/acme/widgets/issues/7' } }),
+    ])
+    renderPage()
+
+    fireEvent.click(await screen.findByText('Settings updated'))
+    const details = await screen.findByTestId('event-details')
+
+    const link = within(details).getByRole('link', {
+      name: 'https://github.com/acme/widgets/issues/7',
+    })
+    expect(link).toHaveAttribute('href', 'https://github.com/acme/widgets/issues/7')
+    expect(link).toHaveAttribute('target', '_blank')
+    expect(link).toHaveAttribute('rel', 'noopener noreferrer')
+  })
+
+  it.each([
+    'javascript:alert(1)',
+    'data:text/html,<b>x</b>',
+    '/results/job-42',
+    'not a url',
+  ])('keeps a detail url %s as plain text, never a link', async (url) => {
+    mockAuditApi(1, () => [event({ details: { url } })])
+    renderPage()
+
+    fireEvent.click(await screen.findByText('Settings updated'))
+    const details = await screen.findByTestId('event-details')
+
+    expect(within(details).getByText(url)).toBeInTheDocument()
+    expect(within(details).queryByRole('link')).not.toBeInTheDocument()
   })
 
   it('shows a load error using the API detail', async () => {

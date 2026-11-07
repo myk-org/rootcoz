@@ -242,6 +242,23 @@ it('shows existing history before starting and clears explicitly without reiniti
   await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled())
 })
 
+it('renders a server-written notice verbatim, not as the assistant', async () => {
+  const notice = 'Proposed GitHub issue — nothing has been filed yet.\n\nDestination: GitHub repository org/repo\n\nConfirmation code: ABCDEF'
+  setup({ total: 3, active_session: { ai_provider: 'openai', ai_model: 'gpt', credential_source: 'user' }, messages: [
+    { id: 1, job_id: 'job', role: 'user', content: 'file this', username: 'alice', ai_provider: 'openai', ai_model: 'gpt', status: 'completed', created_at: '2026-01-01T00:00:00Z' },
+    { id: 2, job_id: 'job', role: 'system', content: notice, username: 'alice', ai_provider: '', ai_model: '', status: 'completed', created_at: '2026-01-01T00:00:01Z' },
+    { id: 3, job_id: 'job', role: 'assistant', content: 'reply with the code', username: 'alice', ai_provider: 'openai', ai_model: 'gpt', status: 'completed', created_at: '2026-01-01T00:00:02Z' },
+  ] })
+  render(page())
+
+  const label = await screen.findByText('Server notice')
+  const noticeRow = label.parentElement?.parentElement
+  expect(noticeRow).toHaveTextContent('Destination: GitHub repository org/repo')
+  expect(noticeRow).toHaveTextContent('Confirmation code: ABCDEF')
+  // The model's own words stay a separate, assistant-styled bubble.
+  expect(await screen.findByText('reply with the code')).toBeInTheDocument()
+})
+
 it('restores a hidden init session with no visible messages', async () => {
   setup({ total: 1, active_session: { ai_provider: 'openai', ai_model: 'gpt', credential_source: 'user' }, messages: [] })
   render(page('', ''))

@@ -446,16 +446,30 @@ function targetText(event: AuditEvent): string {
   }
 }
 
-/** Details values that point at a report; unknown keys and values stay plain. */
-function detailHref(key: string, value: unknown, parentJobId: unknown): string | null {
+/** A detail value that leads somewhere: internal, or out to the site the value names. */
+type DetailLink = { href: string; external: boolean }
+
+/**
+ * Details values that point somewhere; unknown keys, empty values and non-http(s)
+ * urls stay plain. Only http(s) becomes a link: this text comes from an audit row.
+ */
+function detailHref(key: string, value: unknown, parentJobId: unknown): DetailLink | null {
   if (typeof value !== 'string' && typeof value !== 'number') return null
   const id = String(value)
   if (!id) return null
-  if (key === 'job_id') return reportHref(id)
+  if (key === 'url') {
+    try {
+      const { protocol } = new URL(id)
+      return protocol === 'http:' || protocol === 'https:' ? { href: id, external: true } : null
+    } catch {
+      return null
+    }
+  }
+  if (key === 'job_id') return { href: reportHref(id), external: false }
   if (typeof parentJobId !== 'string' && typeof parentJobId !== 'number') return null
   if (!String(parentJobId)) return null
-  if (key === 'failure_uuid') return reportHref(String(parentJobId))
-  if (key === 'comment_id') return reportHref(String(parentJobId), id)
+  if (key === 'failure_uuid') return { href: reportHref(String(parentJobId)), external: false }
+  if (key === 'comment_id') return { href: reportHref(String(parentJobId), id), external: false }
   return null
 }
 
@@ -1173,11 +1187,17 @@ export function AdminAuditPage() {
                                       <Fragment key={key}>
                                         <dt className="text-text-tertiary">{key}</dt>
                                         <dd className="break-all text-text-secondary">
-                                          {detailLink ? (
-                                            <Link
-                                              to={detailLink}
-                                              className="select-text text-text-link hover:underline"
+                                          {detailLink?.external ? (
+                                            <a
+                                              href={detailLink.href}
+                                              target="_blank"
+                                              rel="noopener noreferrer"
+                                              className={TARGET_LINK_CLASS}
                                             >
+                                              {valueText}
+                                            </a>
+                                          ) : detailLink ? (
+                                            <Link to={detailLink.href} className={TARGET_LINK_CLASS}>
                                               {valueText}
                                             </Link>
                                           ) : (

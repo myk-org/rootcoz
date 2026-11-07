@@ -67,6 +67,17 @@ This confirms the CLI is using an admin identity, then asks a server-wide questi
 
    > **Tip:** Use the web UI when you want the clearest live experience. It shows the busy state from the moment you send, tells you how long the turn has been running, and gives you a `Stop` button while the assistant is still working.
 
+   > **From an answer to a ticket:** ask the assistant to file it — "create a GitHub issue for this" or "open a Jira ticket" — and it drafts the title and body from the conversation. The server posts the preview to the chat itself, and nothing is filed until you reply there with the six-character code it shows. Server Chat itself resolves no tracker credential — the issue is filed with the token saved in *your* account, so add one in Profile Settings first, or the assistant relays the `400` that says none is available. The same gate from the CLI, in the same two steps and with no token flags (the proposal files nothing and prints the code to confirm with):
+
+   ```bash
+   rootcoz propose-chat-issue --target jira \
+     --title "Dashboard filters drop the team" --body "$(cat ticket-body.md)"
+   # review the preview, then run the create command it printed, for example:
+   rootcoz create-chat-issue --target jira \
+     --confirmation-id CONFIRMATION_ID --confirmation-code CONFIRMATION_CODE \
+     --title "Dashboard filters drop the team" --body "$(cat ticket-body.md)"
+   ```
+
 4. Stop the current reply or start over.
 
    Use the web UI `Stop` button when a reply is still running and you want to cancel it. When you want a completely fresh conversation, click `New Session` in the web UI or clear the current chat from the CLI:

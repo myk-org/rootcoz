@@ -633,6 +633,113 @@ class TestRootCozClientBugCreation:
         )
         assert result["key"] == "PROJ-456"
 
+    def test_create_chat_issue(self):
+        def handler(request):
+            assert request.method == "POST"
+            assert str(request.url).endswith("/api/chat-issue")
+            # No credential ever rides in the request body.
+            assert json.loads(request.content) == {
+                "target": "jira",
+                "title": "DNS timeout",
+                "body": "Description...",
+                "confirmation_id": "draft-1",
+                "confirmation_code": "ABC234",
+                "jira_project_key": "PROJ",
+            }
+            return httpx.Response(
+                201,
+                json={
+                    "url": "https://jira.example.com/browse/PROJ-7",
+                    "key": "PROJ-7",
+                    "title": "DNS timeout",
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.create_chat_issue(
+            target="jira",
+            title="DNS timeout",
+            body="Description...",
+            confirmation_id="draft-1",
+            confirmation_code="ABC234",
+            jira_project_key="PROJ",
+        )
+        assert result["key"] == "PROJ-7"
+
+    def test_create_chat_issue_sends_the_github_destination(self):
+        """CLI parity: the repo and run the draft binds must reach the server."""
+
+        def handler(request):
+            assert json.loads(request.content) == {
+                "target": "github",
+                "title": "DNS timeout",
+                "body": "Description...",
+                "confirmation_id": "draft-1",
+                "confirmation_code": "ABC234",
+                "repo": "org/tests",
+                "job_id": "job-1",
+            }
+            return httpx.Response(
+                201, json={"url": "https://github.com/org/tests/1", "number": 1}
+            )
+
+        result = _make_client(handler).create_chat_issue(
+            target="github",
+            title="DNS timeout",
+            body="Description...",
+            confirmation_id="draft-1",
+            confirmation_code="ABC234",
+            repo="org/tests",
+            job_id="job-1",
+        )
+        assert result["number"] == 1
+
+    def test_propose_chat_issue(self):
+        def handler(request):
+            assert request.method == "POST"
+            assert str(request.url).endswith("/api/chat-issue/propose")
+            assert json.loads(request.content) == {
+                "target": "jira",
+                "title": "DNS timeout",
+                "body": "Description...",
+            }
+            return httpx.Response(
+                201,
+                json={
+                    "confirmation_id": "draft-1",
+                    "title": "DNS timeout",
+                    "body": "Description...",
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.propose_chat_issue(
+            target="jira", title="DNS timeout", body="Description..."
+        )
+        assert result["confirmation_id"] == "draft-1"
+
+    def test_propose_chat_issue_sends_the_github_destination(self):
+        """The draft is proposed for the same repo and run the create names."""
+
+        def handler(request):
+            assert json.loads(request.content) == {
+                "target": "github",
+                "title": "DNS timeout",
+                "body": "Description...",
+                "repo": "org/tests",
+                "job_id": "job-1",
+            }
+            return httpx.Response(201, json={"confirmation_id": "draft-1"})
+
+        result = _make_client(handler).propose_chat_issue(
+            target="github",
+            title="DNS timeout",
+            body="Description...",
+            repo="org/tests",
+            job_id="job-1",
+        )
+        assert result["confirmation_id"] == "draft-1"
+
     def test_override_classification(self):
         def handler(request):
             assert request.method == "PUT"

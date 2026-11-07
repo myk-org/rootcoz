@@ -14,7 +14,9 @@ import logging.handlers
 import math
 import os
 import re
+import secrets
 import sqlite3
+import string
 import threading
 import time as _time
 import uuid
@@ -142,7 +144,10 @@ from rootcoz.engine.core import (
     safe_update_progress,
     set_progress_callback,
 )
-from rootcoz.error_messages import make_user_friendly_error
+from rootcoz.error_messages import (
+    make_user_friendly_error,
+    tracker_credential_message,
+)
 from rootcoz.exporters.base import ExportContext, Exporter
 from rootcoz.exporters.datadog import (
     DATADOG_SITES,
@@ -159,6 +164,7 @@ from rootcoz.exporters.reportportal import (
 from rootcoz.feedback import (
     create_feedback_from_preview,
     generate_feedback_preview,
+    scrub_sensitive_data,
 )
 from rootcoz.github_issues import enrich_with_tests_repo_matches
 from rootcoz.jenkins import JenkinsClient
@@ -177,6 +183,7 @@ from rootcoz.jira import (
 from rootcoz.logging_context import JobIdFilter, get_log_file, job_id_var
 from rootcoz.metadata_rules import match_job_metadata
 from rootcoz.models import (
+    _REPO_SLUG_RE,
     _SYSTEM_TAGS,
     AddCommentRequest,
     AdditionalRepo,
@@ -187,6 +194,8 @@ from rootcoz.models import (
     BulkDeleteRequest,
     BulkJobMetadataRequest,
     ChatInitRequest,
+    ChatIssueProposeRequest,
+    ChatIssueRequest,
     ChatMessageRequest,
     ChildJobAnalysis,
     ClassifyTestRequest,
@@ -227,6 +236,7 @@ from rootcoz.models import (
     UnsubscribeRequest,
     UpdateFilterPresetRequest,
     _JenkinsParamsMixin,
+    _validate_repo_slug,
 )
 from rootcoz.monitoring import (
     _get_app_version,
@@ -1412,6 +1422,17 @@ _AUDIT_RUN_RE = re.compile(r"[A-Za-z0-9_-]{24,}")
 # scrubbed like any other run.
 _AUDIT_HEX_DIGEST_RE = re.compile(r"\A[0-9a-f]{24,}\Z")
 _AUDIT_DIGEST_DETAIL_KEYS: frozenset[str] = frozenset({"sql_hash"})
+# A detail that names a destination the create call used (the tracker's link,
+# repository, site or project). Those are identifiers, and a repository named
+# ``OpenShiftVirtualization2024`` is credential-shaped to the bare-run heuristic
+# below — which would leave the row's own destination unreadable. A known
+# credential prefix is still scrubbed. The exemption covers a destination this
+# process RESOLVED or validated, never text a caller typed: a value that is
+# merely stored under one of these names still has to be shaped like one (see
+# :func:`_refused_issue_details`).
+_AUDIT_DESTINATION_DETAIL_KEYS: frozenset[str] = frozenset(
+    {"url", "repo", "site", "jira_project"}
+)
 # A lowercase letters-and-digits run of this length with no separator is the
 # shape of a hex/base32 blob, the one id-like form that is also credential-like.
 _AUDIT_BARE_BLOB_MIN_LENGTH = 32
@@ -1460,12 +1481,17 @@ def _looks_like_secret_run(run: str) -> bool:
     return changes / transitions >= 0.5
 
 
-def _scrub_audit_text(value: str, *, digest: bool = False) -> str:
+def _scrub_audit_text(
+    value: str, *, digest: bool = False, destination: bool = False
+) -> str:
     """Replace credential-shaped substrings in one free-text value.
 
     ``digest`` keeps a whole-value lowercase hex digest. Only
     :func:`_redact_details` sets it, and only for
     :data:`_AUDIT_DIGEST_DETAIL_KEYS` — hashes this process computes itself.
+    ``destination`` keeps the bare runs of a value named in
+    :data:`_AUDIT_DESTINATION_DETAIL_KEYS`: those name a destination, not free
+    text.
 
     Detail values only: identity is not a detail. A username is what the trail
     exists to show ("what did user X do", "which name is under attack"), so
@@ -1474,6 +1500,8 @@ def _scrub_audit_text(value: str, *, digest: bool = False) -> str:
     if digest and _AUDIT_HEX_DIGEST_RE.match(value):
         return value
     scrubbed = _AUDIT_SECRET_RE.sub("[redacted]", value)
+    if destination:
+        return scrubbed
     return _AUDIT_RUN_RE.sub(
         lambda match: (
             "[redacted]" if _looks_like_secret_run(match.group()) else match.group()
@@ -1482,14 +1510,16 @@ def _scrub_audit_text(value: str, *, digest: bool = False) -> str:
     )
 
 
-def _redact_audit_value(value: Any, *, digest: bool = False) -> Any:
+def _redact_audit_value(
+    value: Any, *, digest: bool = False, destination: bool = False
+) -> Any:
     """Scrub one detail value: names for dicts, text for strings, else as-is."""
     if isinstance(value, dict):
         return _redact_details(value)
     if isinstance(value, list):
         return [_redact_audit_value(item) for item in value]
     if isinstance(value, str):
-        return _scrub_audit_text(value, digest=digest)
+        return _scrub_audit_text(value, digest=digest, destination=destination)
     return value
 
 
@@ -1503,7 +1533,11 @@ def _redact_details(details: dict[str, Any] | None) -> dict[str, Any]:
     (no credential-shaped key name) is replaced in place, never the entry.
     """
     return {
-        name: _redact_audit_value(value, digest=name in _AUDIT_DIGEST_DETAIL_KEYS)
+        name: _redact_audit_value(
+            value,
+            digest=name in _AUDIT_DIGEST_DETAIL_KEYS,
+            destination=name in _AUDIT_DESTINATION_DETAIL_KEYS,
+        )
         for name, value in (details or {}).items()
         if name in _AUDIT_SAFE_DETAIL_KEYS or not is_sensitive_key(name)
     }
@@ -2153,6 +2187,23 @@ def _reconstruct_from_params(
     ):
         if jenkins_field in params:
             unified_fields[jenkins_field] = params[jenkins_field]
+
+    # The other types' own fields, stored by their source's
+    # ``build_request_params``: without them a replay of a prow/file/raw run
+    # fails its type validator, so the run cannot be replayed at all.
+    for type_field in (
+        "prow_job_name",
+        "build_id",
+        "prow_url",
+        "gcs_bucket",
+        "gcs_prefix",
+        "raw_xml",
+        "failures",
+        "passed_tests",
+        "skipped_tests",
+    ):
+        if type_field in params:
+            unified_fields[type_field] = params[type_field]
 
     body = UnifiedAnalyzeRequest(**unified_fields)
 
@@ -3023,6 +3074,56 @@ async def _record_account_blocked(
     )
 
 
+#: Chat issue endpoints whose every attempt is audited (#407, row G2). The auth
+#: layer can refuse one before the handler runs, and that refusal is an attempt
+#: the trail promises a row for — no other action names it.
+_AUDITED_ISSUE_PATHS = frozenset({"/api/chat-issue", "/api/chat-issue/propose"})
+
+
+async def _audit_refused_issue_call(
+    request: Request,
+    username: str,
+    reason: str,
+    details: dict[str, Any] | None = None,
+) -> None:
+    """One ``issue.create`` row for an issue attempt refused before its handler.
+
+    Two layers can refuse one: the auth layer, and request-model validation
+    (``422``), which raises before the handler body runs. Neither is seen by
+    the handler, so this is the only place such an attempt can be recorded.
+    ``reason``, ``step`` and whatever ``details`` adds — the failing field
+    names, for a ``422`` — are fixed codes and schema names, never the request
+    body, which is where a pasted credential would be.
+
+    ``username`` is empty for a request the auth layer could not authenticate:
+    the only name such a request carries is the caller-supplied
+    ``rootcoz_username`` cookie, which is trusted only once a session, a bearer
+    key or a ``TRUST_PROXY_HEADERS`` proxy identity has authenticated it — so an
+    unauthenticated call site passes ``""``. ``record_audit`` stores that as
+    ``anonymous``, and the forged name reaches neither the row nor the message.
+    """
+    path = request.url.path.rstrip("/")
+    if path not in _AUDITED_ISSUE_PATHS:
+        return
+    step = "propose" if path.endswith("propose") else "create"
+    subject = f"'{username}'" if username else "an unauthenticated caller"
+    await record_audit(
+        action="issue.create",
+        actor=username,
+        message=f"Refused {step} {path} for {subject} (denied: {reason})",
+        target_type="chat",
+        target_id=username or None,
+        outcome="denied",
+        details={
+            "reason": reason,
+            "result": "refused",
+            "step": step,
+            **(details or {}),
+        },
+        request=request,
+    )
+
+
 def _account_block_reason(user: dict[str, Any] | None) -> str | None:
     """``"disabled"`` / ``"locked"`` for a row that must not log in (#379).
 
@@ -3305,6 +3406,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 role=resolved_role,
                 request=request,
             )
+            await _audit_refused_issue_call(request, username, "account_disabled")
             return _unauthenticated_response(request, path)
 
         request.state.username = username
@@ -3345,6 +3447,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         # Require authentication for all non-public, non-optional paths
         if not has_valid_session and not self._is_public_path(path):
+            # No identity: ``username`` here can only be the untrusted
+            # ``rootcoz_username`` cookie, so it must never be attributed.
+            await _audit_refused_issue_call(request, "", "unauthenticated")
             return _unauthenticated_response(request, path)
 
         # Check pending user status when REQUIRE_APPROVAL is enabled.
@@ -3359,6 +3464,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
             user_status = await storage.get_user_status(username)
             blocked = _blocked_user_status_response(user_status)
             if blocked is not None:
+                # Pending/rejected is a refusal the handler never sees, so this
+                # is the only place its issue attempt can reach the trail.
+                await _audit_refused_issue_call(
+                    request, username, f"account_{user_status}"
+                )
                 return blocked
 
         username_token = ai_username.set(username)
@@ -3406,7 +3516,15 @@ app.add_middleware(ErrorTrackingMiddleware)
 
 
 _BODY_LOGGING_SKIP_PATHS = frozenset(
-    {"/api/feedback/preview", "/api/feedback/create", "/analyze"}
+    {
+        "/api/feedback/preview",
+        "/api/feedback/create",
+        "/analyze",
+        # Chat text is not structurally secret, so key-based masking misses a
+        # pasted credential — the same reason /api/chat/ is skipped above.
+        "/api/chat-issue",
+        "/api/chat-issue/propose",
+    }
 )
 
 
@@ -3483,11 +3601,35 @@ def _mask_pydantic_error(error: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
+def _invalid_field_names(exc: RequestValidationError) -> list[str]:
+    """The request-model fields a call failed to satisfy, as names only.
+
+    ``loc``'s last element is a schema field name, never a value, and anything
+    that is not an identifier falls back to ``body`` so no caller text can
+    reach the audit row.
+    """
+    names = set()
+    for error in exc.errors():
+        loc = error.get("loc") or ()
+        name = loc[-1] if loc else ""
+        names.add(name if isinstance(name, str) and name.isidentifier() else "body")
+    return sorted(names)
+
+
 @app.exception_handler(RequestValidationError)
 async def _validation_error_handler(
     request: Request, exc: RequestValidationError
 ) -> JSONResponse:
     """Log 422 validation error details and return standard response."""
+    # A chat-issue call rejected here never reaches its handler, so this is the
+    # only place its attempt can reach the trail (#407). Scoped to those paths:
+    # every other 422 in the product is unchanged.
+    await _audit_refused_issue_call(
+        request,
+        getattr(request.state, "username", ""),
+        "invalid_request",
+        {"fields": _invalid_field_names(exc)},
+    )
     if request.url.path in _BODY_LOGGING_SKIP_PATHS or request.url.path.startswith(
         "/api/chat/"
     ):
@@ -8771,7 +8913,7 @@ def _resolve_github_repo_url(settings: Settings) -> str:
     Returns:
         The resolved repo URL, or an empty string when unavailable.
     """
-    url, _ref = parse_repo_ref(str(settings.tests_repo_url or ""))
+    url, _ref = parse_repo_ref(str(getattr(settings, "tests_repo_url", "") or ""))
     return url
 
 
@@ -9426,10 +9568,14 @@ def _require_tracker_url(result: dict[str, Any], tracker_name: str) -> str:
     """
     issue_url = str(result.get("url", ""))
     if not issue_url:
-        raise HTTPException(
+        exc = HTTPException(
             status_code=502,
             detail=f"{tracker_name} API returned unexpected response: missing url",
         )
+        # The tracker answered, so it may have filed the issue even though the
+        # answer carried no url: a caller must not read this as "nothing filed".
+        exc.issue_may_exist = True
+        raise exc
     return issue_url
 
 
@@ -9511,6 +9657,1204 @@ async def _add_tracker_comment(
     return comment_id
 
 
+#: The chat prompt's reason code for a caller with no ``users`` row: it cannot
+#: save a token at all, so neither the 400 nor the prompt may point it at
+#: Profile Settings (see :func:`tracker_credential_message`).
+_CHAT_NO_PROFILE_REASON = "no_token_no_profile"
+
+#: The draft-time refusal when this caller has nowhere to file a GitHub issue.
+#: Both steps resolve the destination (the proposal shows it, the create files
+#: only what was shown), so both answer with this one wording.
+_CHAT_NO_REPO_DETAIL = (
+    "Nowhere to file this issue: this chat has no GitHub repository it may use. "
+    "Name a repository the run may file in, or ask an administrator to set "
+    "TESTS_REPO_URL."
+)
+
+#: The same refusal for a JOB chat, which never falls back to ``TESTS_REPO_URL``:
+#: only the run's own test repo and additional repos may receive its issue, so
+#: pointing at that setting sends the user somewhere that cannot enable it.
+_CHAT_NO_RUN_REPO_DETAIL = (
+    "Nowhere to file this issue: this run has no GitHub test repository and no "
+    "additional repo, and an issue from job chat may only go to them. A token "
+    "cannot add one."
+)
+
+
+async def _account_has_profile(username: str) -> bool:
+    """Whether this caller has a ``users`` row — false only for the bootstrap
+    ``admin``, which has nowhere to save a token."""
+    return bool(username) and await storage.get_user_by_username(username) is not None
+
+
+async def _require_user_tracker_credential(username: str, kind: str) -> str:
+    """The 400 detail for a caller with no *kind* credential in their account.
+
+    Returns the detail instead of raising, so a caller can attach its own
+    follow-up context; ``kind`` is the tracker name (``"GitHub"``/``"Jira"``).
+    """
+    if not username:
+        return tracker_credential_message(kind)
+    return tracker_credential_message(
+        kind, has_profile=await _account_has_profile(username)
+    )
+
+
+#: Everything a tracker create call can raise for a handled reason. Anything
+#: else is a real bug and stays a 500.
+_ISSUE_CREATE_REFUSALS: tuple[type[Exception], ...] = (
+    JiraOAuthMintError,
+    ValueError,
+    httpx.HTTPStatusError,
+    httpx.RequestError,
+    TypeError,
+    KeyError,
+    json.JSONDecodeError,
+)
+
+
+def _dropped_connection_refusal(label: str, what: str) -> HTTPException:
+    """502 for a tracker answer lost AFTER the request was accepted.
+
+    A read or protocol error happens after the POST reached the tracker, so
+    nothing proves it filed nothing: say so, so the user checks before a retry
+    that could create a duplicate.
+    """
+    return HTTPException(
+        status_code=502,
+        detail=(
+            f"{label} dropped the connection before answering, so {what} may "
+            f"have been filed. Check {label} before retrying — filing it again "
+            "could create a duplicate."
+        ),
+    )
+
+
+def _map_create_refusal(
+    target: Literal["github", "jira"],
+    exc: Exception,
+    *,
+    subject: str = "bug report",
+    repo: str = "",
+) -> HTTPException:
+    """The refusal a failed tracker create answers with.
+
+    A configuration error is a 400 (an unresolvable repo URL, an OAuth
+    credential that cannot mint), and a tracker answer that cannot be parsed is
+    a 502 saying the issue may exist — the tracker already answered, so nothing
+    proves it filed nothing. Everything else a tracker or the transport raises
+    goes to that tracker's own refusal helper, so the feedback form, a report's
+    bug report and chat cannot describe the same outage differently.
+    ``JiraOAuthMintError`` is caught by none of those branches — it subclasses
+    ``RuntimeError`` — so dropping it would turn the likeliest chat-path
+    failure into a 500. ``subject`` names what the caller submitted, which is
+    what the vocabulary of the refusal helpers turns on; ``repo`` is the
+    repository the call actually used, ``""`` when it is the deployment's own
+    ``TESTS_REPO_URL``.
+    """
+    github = target == "github"
+    label = "GitHub" if github else "Jira"
+    if isinstance(exc, JiraOAuthMintError):
+        return HTTPException(status_code=400, detail=str(exc))
+    if isinstance(exc, (json.JSONDecodeError, TypeError, KeyError)):
+        # The tracker answered and its answer could not be read, so it may have
+        # filed the issue: this is not the "try again" wording.
+        return HTTPException(
+            status_code=502,
+            detail=(
+                f"{label} answered with something this server could not read, so "
+                f"your {subject} may have been filed. Check {label} before "
+                "retrying — filing it again could create a duplicate."
+            ),
+        )
+    if isinstance(exc, ValueError):
+        return HTTPException(
+            status_code=400,
+            detail=f"Invalid TESTS_REPO_URL: {exc}" if github else str(exc),
+        )
+    if github and isinstance(exc, (httpx.HTTPStatusError, httpx.RequestError)):
+        return _github_issue_refusal(exc, subject=subject, repo=repo)
+    if not github and isinstance(exc, httpx.HTTPStatusError):
+        return _jira_bug_refusal(exc)
+    if isinstance(exc, httpx.RequestError):
+        if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+            return HTTPException(
+                status_code=502, detail=f"{label} API unreachable: {exc}"
+            )
+        return _dropped_connection_refusal(label, "the bug")
+    return HTTPException(
+        status_code=502,
+        detail=f"{label} API returned unexpected response: {exc}",
+    )
+
+
+def _require_tracker_enabled(
+    target: Literal["github", "jira"], settings: Settings
+) -> None:
+    """Refuse a tracker the deployment disabled, before any credential is read.
+
+    The enable gate runs first so a disabled tracker answers ``403`` even for a
+    caller with no credential for it: adding a token cannot turn it on.
+    """
+    if target == "github":
+        if settings.enable_github_issues is False:
+            raise HTTPException(
+                status_code=403,
+                detail="GitHub issue creation is disabled on this server",
+            )
+        return
+    if not _jira_issue_creation_enabled(settings):
+        raise HTTPException(
+            status_code=403,
+            detail="Jira issue creation is disabled on this server",
+        )
+
+
+def _chat_tracker_gate(
+    target: Literal["github", "jira"],
+    settings: Settings,
+    user_tokens: dict[str, str],
+    *,
+    github_repo_available: bool = True,
+    job_chat: bool = False,
+) -> tuple[str, HTTPException | None]:
+    """``(reason, refusal)``: why chat cannot file in ``target``, else ``('', None)``.
+
+    The ONE tracker gate: the chat tool list (:func:`_chat_tracker_state`) and
+    the create endpoint (:func:`_chat_issue_tracker_tokens`) both read it, so a
+    tool is advertised exactly when the endpoint would file.
+
+    The order is the endpoint's: the deployment switch first (a disabled
+    tracker answers 403 even for an account with no token for it, because
+    adding one cannot turn it on), then the caller's own credential, then
+    whether that credential can actually file — the GitHub destination, or the
+    Jira auth method the saved credential pins.
+
+    ``github_repo_available`` answers "is there a repository this caller may
+    file in?". The tool list knows its run's repos and says so; a create request
+    keeps the default, because it resolves its destination itself and its own
+    refusal names the run, the allow-list or ``TESTS_REPO_URL``. ``job_chat``
+    says the caller is a run's chat, whose empty repo set has its own reason: a
+    job chat never files in ``TESTS_REPO_URL``, so no setting can fix it.
+    """
+    try:
+        _require_tracker_enabled(target, settings)
+    except HTTPException as exc:
+        return "server_disabled", exc
+    if target == "github":
+        if not user_tokens.get("github_token"):
+            return "no_token", None
+        if not github_repo_available:
+            if job_chat:
+                return "no_run_repository", HTTPException(
+                    status_code=400, detail=_CHAT_NO_RUN_REPO_DETAIL
+                )
+            return "no_repository", HTTPException(
+                status_code=400, detail=_CHAT_NO_REPO_DETAIL
+            )
+        return "", None
+    jira_token = user_tokens.get("jira_token", "")
+    jira_sa_token = user_tokens.get("jira_sa_token", "")
+    if not (jira_token or jira_sa_token):
+        return "no_token", None
+    try:
+        # A legacy (non-ATOA) service-account secret, or a credential that pins
+        # an auth method the effective settings cannot serve, is refused by the
+        # create call — so it must not read as usable here either.
+        _require_usable_jira_sa_token(jira_token, jira_sa_token)
+        _require_jira_method_configured(
+            _build_effective_jira_settings(
+                settings,
+                jira_token,
+                user_tokens.get("jira_email", ""),
+                user_jira_sa_token=jira_sa_token,
+            )
+        )
+    except HTTPException as exc:
+        return "unusable_credential", exc
+    return "", None
+
+
+def _chat_tracker_state(
+    settings: Settings,
+    user_tokens: dict[str, str],
+    *,
+    github_repo_available: bool,
+    has_profile: bool = True,
+    job_chat: bool = False,
+) -> tuple[tuple[str, ...], dict[str, str]]:
+    """``(trackers chat may offer this user, why each other tracker is absent)``.
+
+    Reads :func:`_chat_tracker_gate` for both trackers, so a chat tool is
+    advertised only when ``POST /api/chat-issue`` would actually file.
+    ``user_tokens`` is the caller's own ``storage.get_user_tokens`` row — never
+    a deployment credential.
+
+    The reasons are what the system prompt needs to tell a server-disabled
+    tracker from a token this account has not saved: telling a user to add a
+    token cannot fix a tracker an administrator turned off. ``has_profile`` is
+    ``False`` for an account with no ``users`` row (the bootstrap ``admin``),
+    which gets its own reason code — the prompt must not send it to Profile
+    Settings, which answers 404 for it. ``job_chat`` reaches
+    :func:`_chat_tracker_gate` so a run's empty repo set reads as its own reason.
+    """
+    targets: list[str] = []
+    unavailable: dict[str, str] = {}
+    for target in ("github", "jira"):
+        reason, _refusal = _chat_tracker_gate(
+            target,
+            settings,
+            user_tokens,
+            github_repo_available=github_repo_available,
+            job_chat=job_chat,
+        )
+        if reason:
+            unavailable[target] = (
+                _CHAT_NO_PROFILE_REASON
+                if reason == "no_token" and not has_profile
+                else reason
+            )
+        else:
+            targets.append(target)
+    return tuple(targets), unavailable
+
+
+def _chat_tracker_targets(
+    settings: Settings,
+    user_tokens: dict[str, str],
+    *,
+    github_repo_available: bool,
+) -> tuple[str, ...]:
+    """Only the trackers chat may offer this user (see :func:`_chat_tracker_state`)."""
+    return _chat_tracker_state(
+        settings, user_tokens, github_repo_available=github_repo_available
+    )[0]
+
+
+# Tracker targets a chat session was created with, keyed by sidecar session id.
+_chat_session_tracker_targets: dict[str, tuple[str, ...]] = {}
+
+
+def _enable_tools_for_session(
+    session_id: str | None, targets: tuple[str, ...]
+) -> str | None:
+    """The session to resume, or ``None`` when its tools are out of date.
+
+    A resumed sidecar session keeps the tools and system prompt it was created
+    with, so a token saved (or a tracker enabled/disabled) after the session
+    started never reaches the model in it. Rather than resume with a stale tool
+    list, hand back ``None`` so the caller builds a fresh session from the
+    current tools — the conversation itself comes from stored history either
+    way.
+
+    The creation-time set lives in memory: after a restart it is unknown, so the
+    session is adopted at its current targets (no forced session churn) and a
+    later change still rebuilds it.
+
+    shortcut: a change made across a restart is only picked up on the next one,
+    upgrade to a persisted per-session value if chats commonly survive restarts.
+    """
+    if not session_id:
+        return None
+    known = _chat_session_tracker_targets.get(session_id)
+    if known is None:
+        _chat_session_tracker_targets[session_id] = targets
+        return session_id
+    if known == targets:
+        return session_id
+    logger.info(
+        "Chat: tool set changed (%s -> %s); starting a fresh session instead of "
+        "resuming %s",
+        known,
+        targets,
+        session_id,
+    )
+    # Keep the stale entry: a failed or aborted rebuild never records the new
+    # session, so the next turn must still see this session as stale rather
+    # than as "unknown after a restart" and adopt its old tools.
+    return None
+
+
+def _remember_chat_session_tools(
+    session_id: str | None, targets: tuple[str, ...]
+) -> None:
+    """Record the tracker tools a fresh chat session was created with."""
+    if not session_id:
+        return
+    # Bounded like the other in-memory chat maps: old sessions are unreachable
+    # once their chat has moved on.
+    if len(_chat_session_tracker_targets) > 512:
+        _chat_session_tracker_targets.clear()
+    _chat_session_tracker_targets[session_id] = targets
+
+
+def _github_repo_slug(repo_url: Any) -> str:
+    """``owner/name`` for a GitHub repo URL, ``''`` for any other host.
+
+    Existing parsers do the work: ``parse_repo_ref`` drops a ``:ref`` suffix and
+    ``parse_github_repo_url`` accepts github.com only — the host the issue API
+    this server calls actually serves. So a GitLab URL can never contribute a
+    slug that would point at some unrelated GitHub repository.
+    """
+    url, _ref = parse_repo_ref(str(repo_url or ""))
+    try:
+        owner, name = parse_github_repo_url(url)
+    except ValueError:
+        return ""
+    return f"{owner}/{name}"
+
+
+def _settings_github_repo_available(settings: Settings) -> bool:
+    """True when the deployment's own repo is one GitHub chat can file in.
+
+    ``TESTS_REPO_URL`` may name a host the GitHub issue API cannot serve, so a
+    chat that has no run of its own asks the same parser the create call uses
+    instead of testing the setting for emptiness.
+    """
+    return bool(_github_repo_slug(_resolve_github_repo_url(settings)))
+
+
+def _replay_shortfall(exc: Exception) -> str:
+    """``field: message`` for each validation error — never the input value.
+
+    A replay fails on a field the stored params do not carry (``ValueError``
+    from the type validator) or cannot hold (Pydantic). Naming it makes the
+    degraded chat diagnosable; Pydantic's own error text quotes
+    ``input_value``, which for a stored request can be a credential, so only
+    the location and message are returned.
+    """
+    errors = getattr(exc, "errors", None)
+    if not callable(errors):
+        return str(exc)
+    parts = []
+    for err in errors():
+        loc = ".".join(str(part) for part in err.get("loc") or ())
+        msg = str(err.get("msg", ""))
+        parts.append(f"{loc}: {msg}" if loc else msg)
+    return "; ".join(parts) or str(exc)
+
+
+def _job_issue_repo_slugs(
+    params: dict[str, Any],
+) -> tuple[str, frozenset[str]]:
+    """``(the run's test repo slug, every slug a job chat may file into)``.
+
+    Only the run's stored ``tests_repo_url`` and ``additional_repos``, resolved
+    by the same helpers the analysis itself used, so the allow-list cannot
+    drift from the repos the run actually had. The deployment's own
+    ``TESTS_REPO_URL`` is deliberately absent: a job chat is bounded by its
+    run, and a default changed after the analysis must not widen that set.
+
+    A run whose stored params cannot be replayed yields ``('', frozenset())``
+    (logged with the field that stopped it), so such a chat cannot choose a
+    repository.
+    """
+    try:
+        body, merged = _reconstruct_from_params(
+            {
+                "request_params": params,
+                "job_name": params.get("job_name"),
+                "build_number": params.get("build_number"),
+            }
+        )
+    except Exception as exc:  # noqa: BLE001 - a run that cannot replay is logged, not raised
+        logger.warning(
+            "Chat issue: cannot replay stored params to build the repo allow-list: %s",
+            _replay_shortfall(exc),
+        )
+        return "", frozenset()
+    default = _github_repo_slug(resolve_tests_repo_url(body, merged))
+    slugs: set[str] = set()
+    if default:
+        slugs.add(default)
+    for repo in resolve_additional_repos(body, merged):
+        slug = _github_repo_slug(repo.url)
+        if slug:
+            slugs.add(slug)
+    return default, frozenset(slugs)
+
+
+async def _chat_issue_repo_slugs(job_id: str) -> tuple[str, frozenset[str]]:
+    """The allow-list of the run a chat issue names (see _job_issue_repo_slugs)."""
+    stored = await storage.get_result(job_id)
+    params = ((stored or {}).get("result") or {}).get("request_params") or {}
+    if not params:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"No issue was filed: job '{job_id}' has no stored run to take "
+                "repositories from."
+            ),
+        )
+    return _job_issue_repo_slugs(params)
+
+
+def _chat_issue_is_admin(request: Request) -> bool:
+    """True for an admin caller — the bootstrap ``admin`` included."""
+    return bool(getattr(request.state, "is_admin", False)) or (
+        getattr(request.state, "role", "") == "admin"
+    )
+
+
+def _require_repo_slug(repo: str) -> str:
+    """The validated ``owner/name`` slug, or a 400 naming the accepted shape."""
+    # An omitted optional tool argument can reach the server as the literal
+    # ``{repo}`` placeholder, which means "the default repository" — not a slug.
+    try:
+        return _validate_repo_slug(_sanitize_sidecar_placeholder(repo))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+async def _chat_issue_github_repo(
+    request: Request,
+    body: ChatIssueRequest | ChatIssueProposeRequest,
+) -> str:
+    """The repo URL this chat issue files into (``''`` = the server's own).
+
+    A job chat is bounded by that run: its test repo plus its additional repos.
+    An admin is not — an administrator may name any GitHub repo.
+    """
+    repo = _require_repo_slug(body.repo)
+    if _chat_issue_is_admin(request):
+        return f"https://github.com/{repo}" if repo else ""
+    if not body.job_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No issue was filed: an issue from job chat must be tied to a "
+                "run, because only that run's repos may receive it. Open the "
+                "chat from a job analysis and ask again."
+            ),
+        )
+    default, allowed = await _chat_issue_repo_slugs(body.job_id)
+    if not repo:
+        # An empty repo is the run's test repo — never the deployment default,
+        # which is not part of this run and would escape the allow-list.
+        if default:
+            return f"https://github.com/{default}"
+        names = ", ".join(sorted(allowed)) or "none (this run has no GitHub repo)"
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No issue was filed: this run has no GitHub test repository to "
+                "file in by default, and an issue from job chat may only go to "
+                f"this run's test repo and additional repos: {names}."
+            ),
+        )
+    if repo not in allowed:
+        names = ", ".join(sorted(allowed)) or "none (this run has no GitHub repo)"
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"No issue was filed: '{repo}' is not available to this chat — "
+                "an issue from job chat may only go to this run's test repo and "
+                f"additional repos: {names}."
+            ),
+        )
+    return f"https://github.com/{repo}"
+
+
+# Pending chat issue drafts, keyed by their single-use confirmation id.
+# In-memory like the rest of the chat state: a restart drops them and the model
+# is told to propose again. Each entry holds a title and body until it expires,
+# so both the account and the whole map are capped.
+_ISSUE_DRAFT_TTL_SECONDS = 600
+#: Live previews one account keeps; a new proposal replaces its oldest.
+_ISSUE_DRAFTS_PER_USER = 5
+#: Live previews the process keeps for every account together.
+_ISSUE_DRAFTS_MAX = 200
+_chat_issue_drafts: dict[str, dict[str, Any]] = {}
+
+
+def _release_issue_draft(confirmation_id: str, draft: dict[str, Any]) -> None:
+    """Hand a claimed draft back, so a refused or failed create can be retried.
+
+    The claim is single use, not single attempt: only a create that FILED
+    something uses the draft up. An outage, an upstream refusal or a bad
+    request leaves the user's confirmation intact instead of asking them to
+    approve the same text again.
+
+    Bounded like a proposal: the claim freed a slot, and a proposal made since
+    then keeps it. Restoring on top of that one would hold more drafts than the
+    caps allow, so the caps win and this draft is dropped instead.
+    """
+    now = _time.monotonic()
+    if draft["expires_at"] <= now or confirmation_id in _chat_issue_drafts:
+        return
+    _prune_issue_drafts(now)
+    mine = [
+        held
+        for held in _chat_issue_drafts.values()
+        if held["username"] == draft["username"]
+    ]
+    if (
+        len(_chat_issue_drafts) >= _ISSUE_DRAFTS_MAX
+        or len(mine) >= _ISSUE_DRAFTS_PER_USER
+    ):
+        return
+    _chat_issue_drafts[confirmation_id] = draft
+
+
+def _create_may_have_filed(exc: BaseException) -> bool:
+    """True when a failed create cannot prove the tracker filed nothing.
+
+    Only a failure that provably happened BEFORE the request reached the
+    tracker hands the draft back: a connect error never sent it, and a refusal
+    (an ``HTTPStatusError``, or a gate raised before the create call) is its own
+    "nothing filed". Everything after the POST — a timeout, a connection dropped
+    while reading the answer, an answer that could not be parsed — may have
+    filed the issue, and spending the draft is what stops the same confirmation
+    from filing it a second time.
+    """
+    if getattr(exc, "issue_may_exist", False):
+        return True
+    cause = exc.__cause__
+    if isinstance(cause, (httpx.ConnectError, httpx.ConnectTimeout)):
+        return False
+    if isinstance(cause, httpx.HTTPStatusError):
+        return False
+    if isinstance(exc, HTTPException) and cause is None:
+        # A gate inside _create_issue_from_text (a disabled tracker, no
+        # credential, an unresolved repo) raises before the create call.
+        return False
+    # Configuration errors raised before the call prove nothing was sent: an
+    # unmintable OAuth credential, an unusable repo URL. A JSON decode error is
+    # NOT one of them — that is a tracker answer that could not be read.
+    return not (
+        isinstance(cause, (JiraOAuthMintError, ValueError))
+        and not isinstance(cause, json.JSONDecodeError)
+    )
+
+
+def _prune_issue_drafts(now: float) -> None:
+    """Drop every draft past its expiry, so the map cannot outgrow its use."""
+    for draft_id, draft in list(_chat_issue_drafts.items()):
+        if draft["expires_at"] <= now:
+            _chat_issue_drafts.pop(draft_id, None)
+
+
+def _issue_destination(
+    *,
+    target: Literal["github", "jira"],
+    repo: str = "",
+    job_id: str = "",
+    jira_project_key: str = "",
+    jira_security_level: str = "",
+    jira_issue_type: str = "",
+) -> dict[str, str]:
+    """Where an issue would be filed — the half of a draft the user approves.
+
+    Bound into the draft at propose time and compared at create time, so a
+    confirmation id approves "this text in this destination" and can never be
+    reused to file the same text somewhere else (another run's repo, another
+    Jira project or visibility). ``repo`` must already be a slug, and every
+    value here is already resolved: an omitted field is shown and bound as the
+    default it falls back to, never as "".
+    """
+    if target == "github":
+        return {"repo": repo, "job_id": job_id}
+    return {
+        "jira_project_key": jira_project_key,
+        "jira_security_level": jira_security_level,
+        "jira_issue_type": jira_issue_type or "Bug",
+    }
+
+
+#: The step a create call skips when nobody has confirmed its draft. Quoted
+#: once so every refusal names the same missing step.
+_CONFIRM_STEP = "the user must confirm by replying with the code shown in the preview"
+
+#: No ``I``/``O``/``0``/``1``: the user retypes this code from the preview.
+_ISSUE_CODE_ALPHABET = "".join(
+    char
+    for char in string.ascii_uppercase + string.digits
+    if char not in {"I", "J", "L", "O", "0", "1"}
+)
+_ISSUE_CODE_LENGTH = 6
+
+
+def _new_issue_code(*, conversation: str) -> str:
+    """A short code the user replies with, unique among this chat's live drafts.
+
+    Two open drafts of one conversation must not share a code, so a reply can
+    only ever confirm the draft it was shown for.
+    """
+    live = {
+        draft["code"]
+        for draft in _chat_issue_drafts.values()
+        if draft["conversation"] == conversation
+    }
+    while True:
+        code = "".join(
+            secrets.choice(_ISSUE_CODE_ALPHABET) for _ in range(_ISSUE_CODE_LENGTH)
+        )
+        if code not in live:
+            return code
+
+
+def _message_confirms_code(content: str, code: str) -> bool:
+    """True when *content* contains *code* as its own token, in any case."""
+    if not code:
+        return False
+    pattern = rf"(?<![A-Za-z0-9]){re.escape(code)}(?![A-Za-z0-9])"
+    return re.search(pattern, content or "", re.IGNORECASE) is not None
+
+
+async def _chat_last_message_id(conversation: str, username: str) -> int:
+    """The id of the newest stored message in *conversation*, 0 when empty.
+
+    A draft records this watermark so only a message stored AFTER the draft
+    existed can confirm it.
+    """
+    if not conversation:
+        return 0
+    return await storage.get_chat_message_max_id(conversation, username)
+
+
+#: How many of the user's OWN messages one consent page reads, newest first.
+#: The page is the smallest read per create attempt; a confirmation older than
+#: it is looked for in the next page rather than read past.
+_CONFIRM_SCAN_MESSAGES = 50
+
+#: The role of the server-authored consent message. The model never writes this
+#: role, the chat renders it as a notice, and the consent scan reads only
+#: ``user`` rows — so a draft can never be confirmed by this message itself.
+_ISSUE_CONSENT_ROLE = "system"
+
+
+async def _post_issue_consent_request(
+    *,
+    conversation: str,
+    username: str,
+    confirmation_id: str,
+    kind: str,
+    shown: str,
+    code: str,
+    minutes: int,
+) -> int:
+    """Store the consent request in the chat itself and return its message id.
+
+    The ``preview`` handed back to the model is narration: a model steered by
+    job or database content can summarise it wrongly, leave the destination out,
+    or tell the user to "reply with the code to cancel" — and the code it holds
+    still authorises the stored draft. So the same words the preview states are
+    written here, by this server, into the conversation the draft belongs to:
+    what the user approves is text the model cannot write, and the returned id
+    is the draft's watermark, so only a USER message newer than this one counts
+    as consent. The proposal id is in the message too, so a rebuilt AI session —
+    which keeps only stored chat text — can still file exactly what was approved.
+    """
+    message_id = await storage.add_chat_message(
+        conversation,
+        role=_ISSUE_CONSENT_ROLE,
+        content=(
+            f"Proposed {kind} issue — nothing has been filed yet.\n\n"
+            f"{shown}\n\n"
+            "To file exactly this, reply in this chat with the confirmation "
+            f"code {code} within {minutes} minutes. Nothing is filed until that "
+            "reply arrives, and only a reply from you can confirm it.\n\n"
+            f"Proposal id: {confirmation_id}"
+        ),
+        username=username,
+    )
+    if not message_id:
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "No issue was drafted: the preview could not be recorded in "
+                "this chat. Propose the issue again."
+            ),
+        )
+    return message_id
+
+
+async def _user_replied_with_code(
+    *, conversation: str, username: str, code: str, after_id: int
+) -> bool:
+    """True when this user STORED a user-role message with *code* after a draft.
+
+    Only the persisted chat row counts: the model writes assistant messages and
+    tool calls, never user rows, so the model cannot confirm its own draft.
+    ``after_id`` is the id of the server's own consent message, so the code has
+    to arrive in a reply NEWER than the preview the user was shown — consent
+    binds to the server's text, not to the model's summary of it. Bounded query:
+    only this user's user-role messages newer than the watermark are read (the
+    storage query filters on ``id > after_id``, the role and the username),
+    ``_CONFIRM_SCAN_MESSAGES`` at a time, and the scan stops at the first page
+    that holds the code or is shorter than the page size — so a confirmation
+    followed by any number of later replies still counts.
+    """
+    if not conversation:
+        return False
+    limit = _CONFIRM_SCAN_MESSAGES
+    while True:
+        messages = await storage.get_chat_user_messages_since(
+            conversation,
+            after_id=after_id,
+            limit=limit,
+            username=username,
+        )
+        if any(
+            # Spelled out again: an empty username's query returns every user.
+            message["username"] == username
+            and _message_confirms_code(message["content"], code)
+            for message in messages
+        ):
+            return True
+        # A short page means every message after the watermark was read.
+        if len(messages) < limit:
+            return False
+        limit *= 2
+
+
+async def _store_issue_draft(
+    *,
+    username: str,
+    target: Literal["github", "jira"],
+    title: str,
+    body: str,
+    destination: dict[str, str],
+    conversation: str = "",
+) -> tuple[str, str, str]:
+    """Store a scrubbed draft and return ``(confirmation_id, code, preview)``.
+
+    The preview states the tracker, the RESOLVED destination, the exact title and
+    body, and the code the user has to reply with — what is shown is what would
+    be filed. For a chat draft (``conversation`` non-empty) the same words are
+    also stored IN that chat by this server, and that message — not the model's
+    echo of this text — is what the user approves: the draft's watermark is its
+    id, so only a user message newer than it can confirm. ``""`` is a direct,
+    non-chat call (the CLI), where the human typing the code is the confirmation.
+
+    Bounded: a proposal is title and body held until it expires, so this
+    account's oldest draft is evicted before it exceeds
+    ``_ISSUE_DRAFTS_PER_USER``, and a store already at ``_ISSUE_DRAFTS_MAX``
+    refuses the new draft instead of growing.
+    """
+    now = _time.monotonic()
+    # Read the watermark FIRST: everything that can fail or wait happens before
+    # the caps are applied, so a failed read evicts nothing — and the check,
+    # the eviction and the insert below are one block with no ``await`` between
+    # them, which the event loop cannot interleave. Two concurrent proposals
+    # therefore cannot both pass the checks (#416).
+    watermark = await _chat_last_message_id(conversation, username)
+    _prune_issue_drafts(now)
+    if len(_chat_issue_drafts) >= _ISSUE_DRAFTS_MAX:
+        # Checked before evicting: a full store must not cost this user a draft.
+        raise HTTPException(
+            status_code=503,
+            detail=(
+                "No issue was drafted: this server is holding too many "
+                "unconfirmed issue previews right now. Wait a few minutes for "
+                "the older ones to expire, then propose the issue again."
+            ),
+        )
+    # ``expires_at`` is a fixed TTL from a monotonic clock, so sorting by it is
+    # sorting by age: the oldest draft of this account goes first.
+    mine = sorted(
+        (
+            (draft_id, draft)
+            for draft_id, draft in _chat_issue_drafts.items()
+            if draft["username"] == username
+        ),
+        key=lambda item: item[1]["expires_at"],
+    )
+    for draft_id, _draft in mine[: max(len(mine) - _ISSUE_DRAFTS_PER_USER + 1, 0)]:
+        _chat_issue_drafts.pop(draft_id, None)
+    code = _new_issue_code(conversation=conversation)
+    draft_id = uuid.uuid4().hex
+    draft: dict[str, Any] = {
+        "username": username,
+        "target": target,
+        "title": title,
+        "body": body,
+        "destination": destination,
+        "conversation": conversation,
+        "code": code,
+        "watermark": watermark,
+        "expires_at": now + _ISSUE_DRAFT_TTL_SECONDS,
+    }
+    _chat_issue_drafts[draft_id] = draft
+    kind = "GitHub" if target == "github" else "Jira"
+    if target == "github":
+        where = f"Destination: GitHub repository {destination['repo']}"
+    else:
+        where = (
+            f"Destination: Jira project {destination['jira_project_key']}, "
+            f"issue type {destination['jira_issue_type']}"
+        )
+        if destination.get("jira_security_level"):
+            where += f", security level {destination['jira_security_level']}"
+    minutes = _ISSUE_DRAFT_TTL_SECONDS // 60
+    shown = (
+        f"Tracker: {kind}\n{where}\nTitle: {title}\n\nBody:\n{body}\n\n"
+        f"Confirmation code: {code}"
+    )
+    preview = (
+        f"Proposed {kind} issue — nothing has been filed yet.\n\n"
+        f"{shown}\n\n"
+        "To file exactly this, the user has to reply in this chat with the "
+        f"confirmation code {code} within {minutes} minutes. The server has "
+        "posted this preview to the chat itself: show it to the user and wait "
+        "for their reply. Nothing is filed until that reply arrives, and the "
+        "code has to come from the user.\n\n"
+        f"Then call create_{target}_issue with confirmation_id {draft_id} and "
+        f"confirmation_code {code}, with the title, body and destination above "
+        "unchanged."
+    )
+    if conversation:
+        try:
+            # The text the user approves is written by THIS server into the chat
+            # itself, and its id becomes the draft's watermark. Consent is
+            # therefore bound to what was posted here, never to the model's
+            # narration of it. Written on the draft object, not via the map: a
+            # concurrent proposal may evict this draft while the message is
+            # being stored, and that must not turn into a 500 after the fact.
+            message_id = await _post_issue_consent_request(
+                conversation=conversation,
+                username=username,
+                confirmation_id=draft_id,
+                kind=kind,
+                shown=shown,
+                code=code,
+                minutes=minutes,
+            )
+            if _chat_issue_drafts.get(draft_id) is not draft:
+                # A proposal in between evicted this draft (the per-user cap), so
+                # the notice just written authorises nothing: take it back and
+                # refuse, instead of returning a code that only answers "unknown
+                # or already used".
+                try:
+                    await storage.delete_chat_message_by_id(message_id)
+                except Exception:
+                    logger.warning(
+                        "Could not delete the evicted issue preview %s for %s",
+                        message_id,
+                        username,
+                        exc_info=True,
+                    )
+                raise HTTPException(
+                    status_code=503,
+                    detail=(
+                        "No issue was drafted: this account proposed too many "
+                        "issues at once, so this preview was replaced by a newer "
+                        "one. Propose the issue again."
+                    ),
+                )
+            draft["watermark"] = message_id
+        except BaseException:
+            # Without the recorded preview there is nothing to consent to, so the
+            # draft must not linger as a code the user never saw.
+            _chat_issue_drafts.pop(draft_id, None)
+            raise
+    return draft_id, code, preview
+
+
+async def _consume_issue_draft(
+    confirmation_id: str,
+    *,
+    code: str,
+    username: str,
+    target: Literal["github", "jira"],
+    title: str,
+    body: str,
+    destination: dict[str, str],
+) -> dict[str, Any]:
+    """Claim a draft for this caller, once, or refuse with the next step.
+
+    This is the consent gate, and consent is something the model cannot supply:
+    a create call without a live draft of its own files nothing, the code must
+    match the one the server posted, and a chat draft is only live once a
+    USER-authored message newer than the server's own consent message carries
+    the code. A model that proposes and creates in one turn therefore gets a
+    refusal naming the step it skipped. The draft also binds the destination, so
+    an approved "this text for this repo" cannot authorise another repo, run or
+    Jira project.
+
+    The claim is atomic: the draft is popped before the first ``await``, so of
+    two concurrent creates with the same id exactly one wins it and the other
+    reads it as already used. A refusal OR a failure while checking the claim
+    hands it back (:func:`_release_issue_draft`) — only a create that files
+    something, or a failure after it (:func:`create_chat_issue`), spends it.
+    Returns the claimed draft.
+    """
+    propose = (
+        "call propose_tracker_issue first, show the user the preview and file "
+        "only after they approve it"
+    )
+    if not confirmation_id:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No issue was filed: a confirmation id is required. To file an "
+                f"issue, {propose}. Creating without a confirmation id always "
+                "fails."
+            ),
+        )
+    draft = _chat_issue_drafts.pop(confirmation_id, None)
+    expired = draft is not None and draft["expires_at"] <= _time.monotonic()
+    if draft is None or expired:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No issue was filed: that confirmation id is unknown, expired "
+                f"or already used. To file the issue, {propose} again."
+            ),
+        )
+    try:
+        _require_draft_matches(
+            draft,
+            code=code,
+            username=username,
+            target=target,
+            title=title,
+            body=body,
+            destination=destination,
+            propose=propose,
+        )
+        if draft["conversation"] and not await _user_replied_with_code(
+            conversation=draft["conversation"],
+            username=username,
+            code=draft["code"],
+            after_id=draft["watermark"],
+        ):
+            # The structural half: the code alone proves nothing, because the
+            # model reads it in the proposal result. Only a stored USER message
+            # newer than the server's own preview counts.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No issue was filed: nobody confirmed this draft — "
+                    f"{_CONFIRM_STEP}. Show the user the preview and wait for "
+                    "that reply before calling create again; you cannot confirm "
+                    "it for them."
+                ),
+            )
+    except BaseException:
+        # A refused or failed attempt is not a use: a code mismatch, an
+        # unanswered confirmation and a storage read that raised all hand the
+        # draft back, so it is still retryable and the user need not approve
+        # the same text again. Re-raised unchanged either way.
+        _release_issue_draft(confirmation_id, draft)
+        raise
+    return draft
+
+
+def _require_draft_matches(
+    draft: dict[str, Any],
+    *,
+    code: str,
+    username: str,
+    target: Literal["github", "jira"],
+    title: str,
+    body: str,
+    destination: dict[str, str],
+    propose: str,
+) -> None:
+    """Refuse a claim whose caller, code, text or destination is not the draft's.
+
+    Echoing the title and body EXACTLY is required on purpose: that is what
+    binds the filed text to the approved text, so a paraphrase is refused and
+    has to be proposed and approved again. The draft is process state (a restart
+    drops it), but the proposal id, the code and the exact text stay in the
+    chat's consent message, so a rebuilt AI session can still read them back from
+    the history.
+    """
+    if draft["username"] != username:
+        # Never a 404 and never a success: the id is real but not this caller's.
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No issue was filed: that confirmation id belongs to another "
+                f"account. To file an issue, {propose} for this account."
+            ),
+        )
+    if (code or "").strip().upper() != draft["code"]:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No issue was filed: the confirmation code is missing or does "
+                f"not match this draft. To file the issue, {propose} and pass "
+                f"the code it returned — {_CONFIRM_STEP}."
+            ),
+        )
+    if (
+        draft["target"] != target
+        or draft["title"] != title
+        or draft["body"] != body
+        or draft["destination"] != destination
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No issue was filed: the title, body, tracker or destination "
+                "(repo, run or Jira project) differ from what the user was "
+                f"shown. To file the edited issue, {propose} again and approve "
+                "the new preview."
+            ),
+        )
+
+
+async def _create_issue_from_text(
+    target: Literal["github", "jira"],
+    title: str,
+    body: str,
+    *,
+    username: str,
+    settings: Settings,
+    github_token: str = "",
+    jira_token: str = "",
+    jira_email: str = "",
+    jira_sa_token: str = "",
+    jira_project_key: str = "",
+    jira_security_level: str = "",
+    jira_issue_type: str = "Bug",
+    github_repo_url: str = "",
+    via: str = "rootcoz",
+    subject: str = "bug report",
+    pre_check: Callable[[], Awaitable[Any]] | None = None,
+) -> dict[str, Any]:
+    """File one tracker issue from an already-written title and body.
+
+    The one create sequence in the codebase: the enable gate, the credential
+    gate, target resolution, the create call with attribution and the refusal
+    mapping live here, so the report endpoints and chat cannot drift apart.
+
+    Every credential is the caller's — this function never reads a deployment
+    credential.
+
+    Args:
+        target: Which tracker to write to.
+        title: Issue title.
+        body: Issue body, without the attribution footer (added here).
+        username: The caller, for the attribution footer.
+        settings: Effective settings, used to resolve the repo / project key.
+        github_repo_url: The GitHub repo the caller is allowed to file in;
+            ``""`` means the deployment's own ``TESTS_REPO_URL``.
+        via: How the issue was produced (``rootcoz``, ``rootcoz chat``).
+        subject: What the caller submitted, for the refusal wording.
+        pre_check: Runs after the gates and before the create call — the report
+            path uses it to reject an unknown test name without filing an
+            issue.
+
+    Returns:
+        The created issue payload (``url``/``title`` plus ``number`` for GitHub
+        or ``key`` for Jira).
+    """
+    github = target == "github"
+    label = "GitHub" if github else "Jira"
+    _require_tracker_enabled(target, settings)
+    if github:
+        if not (github_token or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail=tracker_credential_message(label),
+            )
+    else:
+        if not (jira_token or "").strip() and not (jira_sa_token or "").strip():
+            raise HTTPException(
+                status_code=400,
+                detail=tracker_credential_message(label),
+            )
+        # A legacy (non-ATOA) service-account secret must be rejected, not
+        # silently dropped (which would file the bug under the SERVER's Jira
+        # identity).
+        _require_usable_jira_sa_token(jira_token, jira_sa_token)
+        # Effective settings first: the user's credential pins the auth method,
+        # so the method-configured check must run against the EFFECTIVE
+        # settings — a user credential can satisfy a method the server's own
+        # secret cannot.
+        effective_jira_settings = _build_effective_jira_settings(
+            settings,
+            jira_token,
+            jira_email,
+            jira_project_key,
+            user_jira_sa_token=jira_sa_token,
+        )
+        _require_jira_method_configured(effective_jira_settings)
+
+    if pre_check is not None:
+        await pre_check()
+
+    issue_body = body
+    if username:
+        issue_body += (
+            f"\n\n---\n_Reported by: {username} via {via}_"
+            if github
+            else f"\n\n----\nReported by: {username} via {via}"
+        )
+
+    tests_repo_url = ""
+    if github:
+        tests_repo_url = github_repo_url or _resolve_github_repo_url(settings)
+        if not tests_repo_url:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "No test repository URL available: this server has no "
+                    "TESTS_REPO_URL configured and the job was analyzed without "
+                    "tests_repo_url, so there is nowhere to file the issue."
+                ),
+            )
+    # The repository a 404 names: the one the caller picked, or "" when the
+    # deployment's TESTS_REPO_URL is the one in play (a bug report always is;
+    # a chat issue when neither the run nor the caller named a repo).
+    named_repo = _github_repo_slug(github_repo_url)
+
+    try:
+        if github:
+            # The server states the attribution explicitly; a model-specific
+            # line in a client-supplied body is stripped upstream and never
+            # decides the footer.
+            result = await create_github_issue(
+                title=title,
+                body=issue_body,
+                repo_url=tests_repo_url,
+                github_token=github_token.strip(),
+                attribution=AiProvenance(ai_used=True),
+            )
+        else:
+            if not effective_jira_settings.jira_project_key:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Jira project key is required. Provide it in the"
+                        " request or configure JIRA_PROJECT_KEY on the server."
+                    ),
+                )
+            result = await create_jira_bug(
+                title=title,
+                body=issue_body,
+                settings=effective_jira_settings,
+                project_key=jira_project_key,
+                security_level=jira_security_level,
+                issue_type=jira_issue_type,
+            )
+    except _ISSUE_CREATE_REFUSALS as exc:
+        raise _map_create_refusal(
+            target, exc, subject=subject, repo=named_repo
+        ) from exc
+
+    issue_url = _require_tracker_url(result, label)
+    if github:
+        return {
+            "url": issue_url,
+            "number": result.get("number", 0),
+            "key": "",
+            # The destination the create call actually used, for the audit row:
+            # a repo name can be credential-shaped, so the row must name it.
+            "repo": _github_repo_slug(tests_repo_url),
+            "title": title,
+        }
+    return {
+        "url": issue_url,
+        "key": result.get("key", ""),
+        "jira_project": jira_project_key or effective_jira_settings.jira_project_key,
+        "title": title,
+    }
+
+
 @app.post(
     "/results/{job_id}/create-github-issue",
     status_code=201,
@@ -9529,61 +10873,20 @@ async def create_github_issue_endpoint(
     logger.debug(
         f"POST /results/{job_id}/create-github-issue: test_name={body.test_name}"
     )
-    if settings.enable_github_issues is False:
-        raise HTTPException(
-            status_code=403,
-            detail="GitHub issue creation is disabled on this server",
-        )
-    github_token = (body.github_token or "").strip()
-    if not github_token:
-        raise HTTPException(
-            status_code=400,
-            detail=("GitHub token is required. Set up your token in Profile Settings."),
-        )
-
-    _failure, _result_data, _matched_child = await _load_effective_failure(
-        job_id, body.test_name, body.child_job_name, body.child_build_number
-    )
-
     username = request.state.username
-    issue_body = body.body
-    if username:
-        issue_body += f"\n\n---\n_Reported by: {username} via rootcoz_"
-
-    tests_repo_url = _resolve_github_repo_url(settings)
-    if not tests_repo_url:
-        raise HTTPException(
-            status_code=400,
-            detail="No test repository URL available. The job was analyzed without tests_repo_url.",
-        )
-
-    try:
-        # This path always creates from rootcoz's own failure analysis, so the
-        # server states the attribution explicitly; a model-specific line in a
-        # client-supplied --body is stripped and never decides the footer.
-        result = await create_github_issue(
-            title=body.title,
-            body=issue_body,
-            repo_url=tests_repo_url,
-            github_token=github_token,
-            attribution=AiProvenance(ai_used=True),
-        )
-    except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid TESTS_REPO_URL: {exc}",
-        ) from exc
-    except (httpx.HTTPStatusError, httpx.RequestError) as exc:
-        # One refusal for every GitHub issue creation, so the feedback form and
-        # a report's own bug report cannot describe the same outage differently.
-        raise _github_issue_refusal(exc, subject="bug report") from exc
-    except (TypeError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"GitHub API returned unexpected response: {exc}",
-        ) from exc
-
-    issue_url = _require_tracker_url(result, "GitHub")
+    result = await _create_issue_from_text(
+        "github",
+        body.title,
+        body.body,
+        username=username,
+        settings=settings,
+        github_token=body.github_token or "",
+        # Reject an unknown test name before an issue is filed for it.
+        pre_check=lambda: _load_effective_failure(
+            job_id, body.test_name, body.child_job_name, body.child_build_number
+        ),
+    )
+    issue_url = result["url"]
 
     comment_id = await _add_tracker_comment(
         "GitHub Issue", job_id, body, result, username, tracked_type="github"
@@ -9595,17 +10898,11 @@ async def create_github_issue_endpoint(
         message=f"User '{username}' created GitHub issue {issue_url} for job {job_id}",
         target_type="job",
         target_id=job_id,
-        details={"tracker": "github", "test_name": body.test_name},
+        details=_filed_issue_details("github", result, test_name=body.test_name),
         request=request,
     )
 
-    return {
-        "url": issue_url,
-        "number": result.get("number", 0),
-        "key": "",
-        "title": body.title,
-        "comment_id": comment_id,
-    }
+    return {**result, "comment_id": comment_id}
 
 
 @app.post(
@@ -9625,86 +10922,25 @@ async def create_jira_bug_endpoint(
     _check_allow_list(request)
     logger.debug(f"POST /results/{job_id}/create-jira-bug: test_name={body.test_name}")
 
-    if not _jira_issue_creation_enabled(settings):
-        raise HTTPException(
-            status_code=403,
-            detail="Jira issue creation is disabled on this server",
-        )
-
-    # User must provide their own Jira token (regular or service account) —
-    # fail fast before DB work
-    user_jira_token = (body.jira_token or "").strip()
-    user_jira_sa_token = (body.jira_sa_token or "").strip()
-    if not user_jira_token and not user_jira_sa_token:
-        raise HTTPException(
-            status_code=400,
-            detail=("Jira token is required. Set up your token in Profile Settings."),
-        )
-    # A legacy (non-ATOA) service-account secret must be rejected, not
-    # silently dropped (which would file the bug under the SERVER's Jira
-    # identity).
-    _require_usable_jira_sa_token(body.jira_token, body.jira_sa_token)
-    # Effective settings first (Finding 9): the user's credential pins the
-    # auth method, so the method-configured check must run against the
-    # EFFECTIVE settings — a user-supplied credential can satisfy a method
-    # the server's own secret cannot.
-    effective_jira_settings = _build_effective_jira_settings(
-        settings,
-        body.jira_token,
-        body.jira_email,
-        body.jira_project_key,
-        user_jira_sa_token=body.jira_sa_token,
-    )
-    _require_jira_method_configured(effective_jira_settings)
-
-    _failure, _result_data, _matched_child = await _load_effective_failure(
-        job_id, body.test_name, body.child_job_name, body.child_build_number
-    )
-
     username = request.state.username
-    bug_body = body.body
-    if username:
-        bug_body += f"\n\n----\nReported by: {username} via rootcoz"
-
-    try:
-        if not effective_jira_settings.jira_project_key:
-            raise HTTPException(
-                status_code=400,
-                detail=(
-                    "Jira project key is required. Provide it in the"
-                    " request or configure JIRA_PROJECT_KEY on the server."
-                ),
-            )
-        result = await create_jira_bug(
-            title=body.title,
-            body=bug_body,
-            settings=effective_jira_settings,
-            project_key=body.jira_project_key,
-            security_level=body.jira_security_level,
-            issue_type=body.jira_issue_type,
-        )
-    except JiraOAuthMintError as exc:
-        # OAuth 2.0 credential could not mint an access token — a
-        # configuration error, surfaced as a controlled 400.
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except ValueError as exc:
-        # Unresolvable SA cloud ID / missing site URL — a configuration
-        # error, surfaced as a controlled 400 rather than an unhandled 500.
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    except httpx.HTTPStatusError as exc:
-        raise _jira_bug_refusal(exc) from exc
-    except httpx.RequestError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Jira API unreachable: {exc}",
-        ) from exc
-    except (TypeError, KeyError, json.JSONDecodeError) as exc:
-        raise HTTPException(
-            status_code=502,
-            detail=f"Jira API returned unexpected response: {exc}",
-        ) from exc
-
-    issue_url = _require_tracker_url(result, "Jira")
+    result = await _create_issue_from_text(
+        "jira",
+        body.title,
+        body.body,
+        username=username,
+        settings=settings,
+        jira_token=body.jira_token or "",
+        jira_email=body.jira_email or "",
+        jira_sa_token=body.jira_sa_token or "",
+        jira_project_key=body.jira_project_key,
+        jira_security_level=body.jira_security_level,
+        jira_issue_type=body.jira_issue_type,
+        # Reject an unknown test name before an issue is filed for it.
+        pre_check=lambda: _load_effective_failure(
+            job_id, body.test_name, body.child_job_name, body.child_build_number
+        ),
+    )
+    issue_url = result["url"]
 
     comment_id = await _add_tracker_comment(
         "Jira Bug", job_id, body, result, username, tracked_type="jira"
@@ -9716,16 +10952,398 @@ async def create_jira_bug_endpoint(
         message=f"User '{username}' created Jira issue {issue_url} for job {job_id}",
         target_type="job",
         target_id=job_id,
-        details={"tracker": "jira", "test_name": body.test_name},
+        details=_filed_issue_details("jira", result, test_name=body.test_name),
         request=request,
     )
 
-    return {
-        "url": issue_url,
-        "key": result.get("key", ""),
-        "title": body.title,
-        "comment_id": comment_id,
+    return {**result, "comment_id": comment_id}
+
+
+def _filed_issue_details(
+    tracker: str, result: dict[str, Any], **details: Any
+) -> dict[str, Any]:
+    """``details`` for a filed issue, naming the subject: ``url`` and its place.
+
+    The URL is what a reader clicks to reach the issue the row is about, so a
+    success row carries it; the issue's own title and body never do. Every
+    tracker also records the destination its create call used (``repo`` for
+    GitHub, ``jira_project``/``site`` for Jira), so the row is still readable
+    when the link itself does not survive. The Jira identifier is ``key``
+    (``_AUDIT_SAFE_DETAIL_KEYS``), never ``issue_key``: a detail named ``*_key``
+    is dropped as credential-shaped by :func:`_redact_details`, and an issue key
+    is not a credential.
+
+    These details are best-effort decoration on an issue that is already filed:
+    nothing here may raise, because the caller cannot undo a successful create.
+    """
+    url = str(result.get("url", ""))
+    filed: dict[str, Any] = {
+        "tracker": tracker,
+        "result": "success",
+        "url": url,
     }
+    if tracker == "github":
+        filed["number"] = result.get("number", 0)
+        filed["repo"] = result.get("repo", "")
+    else:
+        filed["key"] = result.get("key", "")
+        filed["jira_project"] = result.get("jira_project", "")
+        # The site the link points at; userinfo never reaches the trail.
+        filed["site"] = _audit_url_host(url)
+    return {**details, **filed}
+
+
+def _audit_url_host(url: str) -> str:
+    """Host of ``url`` for an audit row; ``""`` when it cannot be parsed.
+
+    A malformed site setting must not turn a filed issue into a failed request:
+    the audit row is decoration on a create that already happened.
+    """
+    try:
+        return urlparse(url).hostname or ""
+    except ValueError:
+        return ""
+
+
+#: Shape a caller-typed value must have before a refusal row may store it as a
+#: destination: a bare ``owner/name`` GitHub slug, and a Jira project key or id
+#: (16 characters at most, short of the 24-character run the audit heuristic
+#: scrubs). Anything else is only text the caller typed, and the destination
+#: exemption — meant for a name this process resolved — must not cover it: a
+#: bare 40-hex token is neither shape, so it is dropped, never stored verbatim.
+_JIRA_PROJECT_KEY_RE = re.compile(r"\A(?:[A-Za-z][A-Za-z0-9_]{0,15}|[0-9]{1,10})\Z")
+
+
+def _refused_issue_details(
+    body: ChatIssueRequest | ChatIssueProposeRequest, tracker: str, step: str
+) -> dict[str, Any]:
+    """Audit details for a refused chat issue attempt: what and where, never the text.
+
+    The job and the destination the caller asked for, so a refusal row names its
+    subject; the draft's title and body are deliberately absent. ``repo`` and
+    ``jira_project`` are exempt from the bare-run heuristic because they name a
+    destination — an exemption the caller's own text must not enjoy, so a value
+    is stored only when it is shaped like that destination and dropped
+    otherwise. Raw input is what reaches here, and a pasted credential is not a
+    repo slug.
+    """
+    return {
+        "tracker": tracker,
+        "result": "refused",
+        "step": step,
+        "job_id": body.job_id,
+        "repo": (
+            body.repo
+            if tracker == "github" and _REPO_SLUG_RE.fullmatch(body.repo)
+            else ""
+        ),
+        # Not ``jira_project_key``: a detail named ``*_key`` is dropped as
+        # credential-shaped by ``_redact_details``, and a project key is not one.
+        "jira_project": (
+            body.jira_project_key
+            if tracker == "jira"
+            and _JIRA_PROJECT_KEY_RE.fullmatch(body.jira_project_key)
+            else ""
+        ),
+    }
+
+
+async def _chat_issue_tracker_tokens(
+    username: str,
+    tracker: Literal["github", "jira"],
+    settings: Settings,
+) -> dict[str, str]:
+    """The caller's own tokens, once the shared tracker gate says it can file.
+
+    The gate is :func:`_chat_tracker_gate` — the same one the chat tool list
+    reads — so a tool is advertised exactly when this endpoint would file.
+    Credentials are always the caller's account row: there is no deployment
+    fallback and no bootstrap-``admin`` exception. Access control
+    (``_require_reviewer``/``_check_allow_list``) stays in each handler so it
+    runs before anything else there.
+
+    The repo question (``github_repo_available``) is deliberately not asked
+    here: :func:`_chat_issue_github_repo` resolves this request's destination and
+    refuses with a wording that names the run, the allow-list or
+    ``TESTS_REPO_URL``, which a yes/no could not.
+    """
+    user_tokens = await storage.get_user_tokens(username)
+    reason, refusal = _chat_tracker_gate(tracker, settings, user_tokens)
+    if reason == "no_token":
+        raise HTTPException(
+            status_code=400,
+            detail=await _require_user_tracker_credential(
+                username, "GitHub" if tracker == "github" else "Jira"
+            ),
+        )
+    if refusal is not None:
+        raise refusal
+    return user_tokens
+
+
+async def _chat_issue_resolved_destination(
+    request: Request,
+    body: ChatIssueProposeRequest | ChatIssueRequest,
+    settings: Settings,
+    user_tokens: dict[str, str],
+) -> tuple[dict[str, str], str]:
+    """``(destination the issue would land in, GitHub repo URL)``, resolved now.
+
+    Both steps resolve it from the same request and the same settings, so the
+    preview states the real destination (an omitted ``repo`` is the run's test
+    repo, or ``TESTS_REPO_URL`` for an admin's chat with no run; an omitted
+    Jira project is the configured one) and the create call can only file in
+    the one the user approved. A change to a default between the two steps
+    therefore lands as a mismatch, not as a silently different destination.
+
+    The refusals are the create call's own (this chat may not use that repo,
+    nowhere to file, no Jira project), moved to the proposal so they arrive
+    before the user is asked to approve anything.
+    """
+    if body.target == "github":
+        repo_url = await _chat_issue_github_repo(request, body)
+        # An empty ``repo_url`` stays empty: the create call falls back to
+        # ``TESTS_REPO_URL`` itself, which is how a 404 knows that setting is the
+        # repository in play and can name it.
+        slug = _github_repo_slug(repo_url or _resolve_github_repo_url(settings))
+        if not slug:
+            raise HTTPException(status_code=400, detail=_CHAT_NO_REPO_DETAIL)
+        return (
+            _issue_destination(target="github", repo=slug, job_id=body.job_id),
+            repo_url,
+        )
+    effective = _build_effective_jira_settings(
+        settings,
+        user_tokens.get("jira_token", ""),
+        user_tokens.get("jira_email", ""),
+        user_jira_sa_token=user_tokens.get("jira_sa_token", ""),
+    )
+    project_key = body.jira_project_key or effective.jira_project_key
+    if not project_key:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Jira project key is required. Provide it in the request or "
+                "configure JIRA_PROJECT_KEY on the server."
+            ),
+        )
+    return (
+        _issue_destination(
+            target="jira",
+            jira_project_key=project_key,
+            jira_security_level=body.jira_security_level,
+            jira_issue_type=body.jira_issue_type,
+        ),
+        "",
+    )
+
+
+@app.post("/api/chat-issue/propose", status_code=201, operation_id="proposeChatIssue")
+async def propose_chat_issue(
+    request: Request,
+    body: ChatIssueProposeRequest,
+    settings: Settings = _SETTINGS_DEP,
+) -> dict[str, Any]:
+    """Draft a chat issue for the user to approve — files nothing.
+
+    Step one of the two-step gate. The scrubbed title and body are kept under a
+    single-use id for this caller together with the RESOLVED destination they
+    were written for and a confirmation code; the returned ``preview`` states
+    the tracker, that destination, the title and the code, and the same words
+    are posted to the chat by the server, which is what the user is asked to
+    approve. ``POST /api/chat-issue`` files that exact text only with a live id,
+    the same code and a user message NEWER than that posted preview carrying the
+    code — so an injected instruction cannot file an issue the user never saw,
+    nor redirect an approved one.
+    """
+    username = request.state.username
+    tracker = body.target
+    message = f"User '{username}' proposed a {tracker} issue from chat"
+    try:
+        # Inside the try on purpose: a viewer, an allow-list or a credential
+        # refusal is an attempt the trail promises a row for — a proposal is the
+        # half of the gate a chat model reaches most often.
+        _require_reviewer(request)
+        _check_allow_list(request)
+        if tracker == "github":
+            _require_repo_slug(body.repo)
+        user_tokens = await _chat_issue_tracker_tokens(username, tracker, settings)
+        destination, _repo_url = await _chat_issue_resolved_destination(
+            request, body, settings, user_tokens
+        )
+        # Also inside: a full draft store (503) or a storage failure is an
+        # attempt too, and the trail promises a row for every one of them.
+        title = scrub_sensitive_data(body.title)
+        issue_body = scrub_sensitive_data(body.body)
+        confirmation_id, code, preview = await _store_issue_draft(
+            username=username,
+            target=tracker,
+            title=title,
+            body=issue_body,
+            destination=destination,
+            conversation=body.conversation,
+        )
+    except HTTPException as exc:
+        logger.info("Chat issue draft refused for %s: %s", username, exc.detail)
+        # The tracker and the destination asked for — never the draft text.
+        await _record_refused_attempt(
+            action="issue.create",
+            request=request,
+            message=message,
+            target_type="chat",
+            exc=exc,
+            details=_refused_issue_details(body, tracker, "propose"),
+        )
+        raise
+    except Exception:
+        # A scrubbing or draft-storage failure is not a decision, but it is still
+        # one attempt: record it, then let the caller see the same error.
+        await _record_failed_attempt(
+            action="issue.create",
+            request=request,
+            message=message,
+            target_type="chat",
+            details={"tracker": tracker},
+        )
+        raise
+    logger.info(
+        "Chat issue draft %s prepared for %s (%s, conversation=%r, "
+        "destination=%s, %d chars)",
+        confirmation_id,
+        username,
+        tracker,
+        body.conversation,
+        destination,
+        len(issue_body),
+    )
+    return {
+        "confirmation_id": confirmation_id,
+        "confirmation_code": code,
+        "target": tracker,
+        "repo": destination.get("repo", ""),
+        "destination": destination,
+        "title": title,
+        "body": issue_body,
+        "preview": preview,
+        "expires_in_seconds": _ISSUE_DRAFT_TTL_SECONDS,
+    }
+
+
+@app.post("/api/chat-issue", status_code=201, operation_id="createChatIssue")
+async def create_chat_issue(
+    request: Request,
+    body: ChatIssueRequest,
+    settings: Settings = _SETTINGS_DEP,
+) -> dict[str, Any]:
+    """Open a GitHub issue or Jira ticket from a chat conversation.
+
+    The only tracker write reachable from chat, and it needs a ``confirmation_id``
+    and ``confirmation_code`` from ``POST /api/chat-issue/propose``: the title,
+    body and destination filed are the ones the user approved, and for a draft
+    proposed in a chat the code only works once the USER has replied with it in
+    that chat, so a model that proposes and creates in one turn files nothing.
+    Credentials come from the caller's account row — never a deployment
+    credential, and there is no bootstrap-``admin`` exception: a missing token is
+    a followable 400 that the model relays to the user.
+    """
+    username = request.state.username
+    tracker = body.target
+    message = f"User '{username}' created a {tracker} issue from chat"
+    try:
+        # Inside the try on purpose: a viewer or allow-list denial is an attempt
+        # the docs promise a row for, and this endpoint has no other refusal path.
+        _require_reviewer(request)
+        _check_allow_list(request)
+        user_tokens = await _chat_issue_tracker_tokens(username, tracker, settings)
+        title = scrub_sensitive_data(body.title)
+        issue_body = scrub_sensitive_data(body.body)
+        # Resolved exactly as the proposal resolved it, so the draft has to name
+        # the same destination and the issue is filed where it was approved.
+        destination, github_repo_url = await _chat_issue_resolved_destination(
+            request, body, settings, user_tokens
+        )
+        # The consent gate: without a live draft of its own and the user's reply,
+        # nothing is filed.
+        draft = await _consume_issue_draft(
+            body.confirmation_id,
+            code=body.confirmation_code,
+            username=username,
+            target=tracker,
+            title=title,
+            body=issue_body,
+            destination=destination,
+        )
+        try:
+            result = await _create_issue_from_text(
+                tracker,
+                title,
+                issue_body,
+                username=username,
+                settings=settings,
+                github_token=user_tokens.get("github_token", ""),
+                jira_token=user_tokens.get("jira_token", ""),
+                jira_email=user_tokens.get("jira_email", ""),
+                jira_sa_token=user_tokens.get("jira_sa_token", ""),
+                jira_project_key=destination.get("jira_project_key", ""),
+                jira_security_level=destination.get("jira_security_level", ""),
+                jira_issue_type=destination.get("jira_issue_type", "Bug"),
+                github_repo_url=github_repo_url,
+                via="rootcoz chat",
+                subject="issue",
+            )
+        except Exception as exc:
+            # An outage or a refusal is not a decision: the confirmation survives
+            # so the user can retry it once the tracker is back, and only a filed
+            # issue spends it. A timeout, or an answer that carried no issue url,
+            # may already have filed it — that one spends the draft, because the
+            # same code would otherwise file the issue twice without the user
+            # approving a retry.
+            if not _create_may_have_filed(exc):
+                _release_issue_draft(body.confirmation_id, draft)
+            raise
+    except HTTPException as exc:
+        details: dict[str, Any] = _refused_issue_details(body, tracker, "create")
+        upstream_status = _upstream_status(exc)
+        if upstream_status is not None:
+            # The number that tells an outage from a lost token; never the
+            # upstream message, which can echo the submitted text.
+            details["upstream_status"] = upstream_status
+        await _record_refused_attempt(
+            action="issue.create",
+            request=request,
+            message=message,
+            target_type="chat",
+            exc=exc,
+            details=details,
+        )
+        raise
+    except Exception:
+        # Anything else (a token row that will not decrypt, a storage failure)
+        # is still one attempt: the chat trail promises a row per attempt.
+        await _record_failed_attempt(
+            action="issue.create",
+            request=request,
+            message=message,
+            target_type="chat",
+            details={"tracker": tracker},
+        )
+        raise
+
+    # Never the body: the tracker, the repo, the outcome and the issue produced.
+    await record_audit(
+        action="issue.create",
+        actor=username,
+        message=f"{message}: {result['url']}",
+        target_type="chat",
+        target_id=None,
+        details=_filed_issue_details(
+            tracker,
+            result,
+            job_id=body.job_id,
+        ),
+        request=request,
+    )
+    return result
 
 
 def _detect_tracker_type(url: str) -> str:
@@ -19797,8 +21415,8 @@ def _upstream_error_message(response: httpx.Response) -> str:
     ``errorMessages`` are read and the result is capped at
     ``_UPSTREAM_MESSAGE_LIMIT``: the response text is never logged (it can echo
     the request) and neither is the request itself, so no token can reach the
-    log. Control characters are stripped for the same reason a request-supplied
-    name is sanitized: a crafted message must not forge extra log lines.
+    log. Control characters are stripped too, so a newline in the tracker's own
+    text cannot start a forged record inside the WARNING line that carries it.
     """
     try:
         payload = response.json()
@@ -19817,26 +21435,32 @@ def _upstream_error_message(response: httpx.Response) -> str:
     return _sanitize_control_chars(" ".join(parts))[:_UPSTREAM_MESSAGE_LIMIT]
 
 
-def _upstream_status(exc: Exception) -> int | None:
-    """The upstream status worth auditing, when the call carried one.
+def _upstream_status(exc: BaseException) -> int | None:
+    """The upstream status behind a failure or a refusal, when there was one.
 
-    401/403/429 are the credential's own answer and the audit reason code
-    already names them (unauthenticated/forbidden/rate limit), so only the
-    statuses that tell an outage from a lost token are returned.
+    ``_map_create_refusal`` raises the client-facing ``HTTPException`` with the
+    tracker/transport error as its cause, so a refusal's audit row can still
+    name the upstream number without the mapping having to carry it. Every
+    status is returned, 401/403/429 included: GitHub answers 403 both for a
+    token without repository access and for a rate limit, so the number itself
+    is what tells an administrator reading the trail which one it was.
     """
-    if not isinstance(exc, httpx.HTTPStatusError):
+    cause = exc.__cause__ if isinstance(exc, HTTPException) else exc
+    if not isinstance(cause, httpx.HTTPStatusError):
         return None
-    status = exc.response.status_code
-    return None if status in (401, 403, 429) else status
+    return cause.response.status_code
 
 
 def _github_issue_refusal(
-    exc: Exception, *, subject: str = "feedback"
+    exc: Exception, *, subject: str = "feedback", repo: str = ""
 ) -> HTTPException:
     """The refusal a failed GitHub issue creation answers with.
 
     ``subject`` names what the user submitted (the feedback form or a report's
-    bug report) so the same wording is not claimed for both.
+    bug report) so the same wording is not claimed for both. ``repo`` is the
+    ``owner/name`` the call actually used, or ``""`` when it used the
+    deployment's ``TESTS_REPO_URL`` — which is what a 404 names, so the user is
+    pointed at the repository that failed and not at an unrelated setting.
 
     401 means the token is bad; 403 means it is valid but either lacks the repo
     scope or is rate limited. A classic PAT authenticates fine without `repo`,
@@ -19900,11 +21524,19 @@ def _github_issue_refusal(
                     detail=f"GitHub token cannot access the {subject} repository. "
                     "Regenerate it in Profile Settings with access to that repository.",
                 )
+            # The repository that actually failed: chat files into a run's repo
+            # or one the caller named, and only an unnamed deployment default is
+            # TESTS_REPO_URL.
+            unseen = (
+                f"GitHub cannot see the repository {repo}"
+                if repo
+                else "GitHub cannot see the repository in TESTS_REPO_URL"
+            )
             return HTTPException(
                 status_code=403,
-                detail="GitHub cannot see the repository in TESTS_REPO_URL, so your "
-                f"{subject} was not filed. Check that the repository exists and that "
-                "your token can access it in Profile Settings.",
+                detail=f"{unseen}, so your {subject} was not filed. Check that "
+                "the repository exists and that your token can access it in "
+                "Profile Settings.",
             )
         if response.status_code >= 500:
             return HTTPException(
@@ -19915,13 +21547,34 @@ def _github_issue_refusal(
         return HTTPException(
             status_code=502, detail=f"GitHub API error: {response.status_code}"
         )
-    if isinstance(exc, httpx.RequestError):
+    if isinstance(exc, httpx.TimeoutException):
+        # A timeout is not a failed send: GitHub may have filed the issue and
+        # lost the answer, so a blind retry can file the same bug twice.
         logger.warning(
-            "GitHub API unreachable for the issue creation: %s: %s",
+            "GitHub timed out during the issue creation: %s: %s",
             type(exc).__name__,
             exc,
         )
-        return HTTPException(status_code=502, detail=f"GitHub API unreachable: {exc}")
+        return HTTPException(
+            status_code=502,
+            detail=(
+                "GitHub did not answer before the request timed out: the "
+                f"request may have been sent and your {subject} may already "
+                "be filed. Check the repository before retrying — filing it "
+                "again could create a duplicate."
+            ),
+        )
+    if isinstance(exc, httpx.RequestError):
+        logger.warning(
+            "GitHub API failed the issue creation: %s: %s",
+            type(exc).__name__,
+            exc,
+        )
+        if isinstance(exc, (httpx.ConnectError, httpx.ConnectTimeout)):
+            return HTTPException(
+                status_code=502, detail=f"GitHub API unreachable: {exc}"
+            )
+        return _dropped_connection_refusal("GitHub", f"your {subject}")
     logger.exception("Failed to create feedback issue")
     return HTTPException(status_code=500, detail="Failed to create feedback issue")
 
@@ -19984,7 +21637,6 @@ async def create_feedback(
     _check_allow_list(request)
     settings = get_settings()
     message = f"User '{request.state.username}' created a feedback issue"
-    upstream_status: int | None = None
     try:
         if not settings.feedback_enabled:
             raise HTTPException(
@@ -19997,26 +21649,19 @@ async def create_feedback(
 
         if not github_token:
             # This is the one issue-creation path that reads the token from the
-            # user's row, so the guidance must match the account that got it: a
-            # caller with no row (the bootstrap `admin`) cannot save a token at
-            # all — PUT /api/user/tokens answers 404 for it (#400).
-            if username and await storage.get_user_by_username(username) is None:
-                raise HTTPException(
-                    status_code=400,
-                    detail="GitHub token is required, and this account has no "
-                    "profile to store one. Sign in with your own account and add "
-                    "the token in Profile Settings.",
-                )
+            # user's row instead of the request, so the no-profile wording that
+            # helper owns (#400) is the one the bootstrap `admin` gets here.
             raise HTTPException(
                 status_code=400,
-                detail="GitHub token is required. Set up your token in Profile Settings.",
+                detail=await _require_user_tracker_credential(username, "GitHub"),
             )
 
         try:
-            # Attribution comes from the signed provenance the preview embedded in
-            # its body — never from the request (which carries no provider/model)
-            # and never re-resolved here, so a settings change between preview and
-            # create cannot miscredit the model that wrote the body.
+            # Attribution comes from the signed provenance the preview embedded
+            # in its body — never from the request (which carries no
+            # provider/model) and never re-resolved here, so a settings change
+            # between preview and create cannot miscredit the model that wrote
+            # the body.
             issue = await create_feedback_from_preview(
                 title=body.title,
                 body=body.body,
@@ -20024,13 +21669,16 @@ async def create_feedback(
                 github_token=github_token,
             )
         except Exception as exc:  # GitHub API failure or anything else
-            upstream_status = _upstream_status(exc)
+            # The caller-facing refusal, with the upstream error chained so the
+            # audit row can still name its status.
             raise _github_issue_refusal(exc) from exc
     except HTTPException as exc:
         details: dict[str, Any] = {"kind": "github_issue"}
-        if upstream_status is not None:
-            # The number that tells an outage from a lost token; never the
-            # upstream message, which can echo the request.
+        # The number that tells an outage from a lost token; never the upstream
+        # message, which can echo the request. 401/403/429 are the credential's
+        # own answer here and the reason code already names them.
+        upstream_status = _upstream_status(exc)
+        if upstream_status is not None and upstream_status not in (401, 403, 429):
             details["upstream_status"] = upstream_status
         await _record_refused_attempt(
             action="feedback.create",
@@ -20591,6 +22239,16 @@ async def _init_chat_under_barrier(
     _raise_if_chat_job_deleted(job_id)
     if not await _available_chat_session(job_id, username):
         custom_tools: list[dict[str, Any]] = []
+        issue_repos = _job_issue_repo_slugs(decrypted_params)[1]
+        tracker_targets, tracker_unavailable = _chat_tracker_state(
+            _settings,
+            await storage.get_user_tokens(username),
+            # This run's own repos are a destination too: a deployment with no
+            # TESTS_REPO_URL can still file into the job's test repo.
+            github_repo_available=bool(issue_repos),
+            has_profile=await _account_has_profile(username),
+            job_chat=True,
+        )
         auth_header = await _create_ai_auth_header(username)
         if auth_header:
             server_url = _build_internal_server_url()
@@ -20605,6 +22263,8 @@ async def _init_chat_under_barrier(
                 github_token=github_token,
                 github_repo=github_repo,
                 jira_connection=jira_connection,
+                tracker_targets=tracker_targets,
+                issue_repos=tuple(sorted(issue_repos)),
             )
         else:
             logger.warning(
@@ -20643,6 +22303,8 @@ async def _init_chat_under_barrier(
                 custom_tools=custom_tools,
                 repos_available=repos_available,
                 ci_build_data_available=ci_build_data_available,
+                issue_repos=tuple(sorted(issue_repos)),
+                tracker_unavailable=tracker_unavailable,
             )
         finally:
             chat_session_source.reset(source_token)
@@ -20651,6 +22313,7 @@ async def _init_chat_under_barrier(
             await _discard_unsaved_ai_session(session_id, username, ai_provider)
         _raise_if_chat_job_deleted(job_id)
         if session_id:
+            _remember_chat_session_tools(session_id, tracker_targets)
             saved = await storage.add_chat_message(
                 job_id=job_id,
                 role="assistant",
@@ -21230,7 +22893,7 @@ async def _process_chat_message(
                         # Find session_id from the last completed assistant message
                         # Scan all_history (not filtered history) because the init
                         # message has empty content but carries the session_id
-                        last_session_id = session_id
+                        last_session_id: str | None = session_id
                         for msg in reversed(all_history):
                             if (
                                 msg.get("role") == "assistant"
@@ -21305,6 +22968,21 @@ async def _process_chat_message(
                         server_url = _build_internal_server_url()
                         auth_header = await _create_ai_auth_header(username)
 
+                        issue_repos = _job_issue_repo_slugs(decrypted_params)[1]
+                        tracker_targets, tracker_unavailable = _chat_tracker_state(
+                            settings,
+                            await storage.get_user_tokens(username),
+                            github_repo_available=bool(issue_repos),
+                            has_profile=await _account_has_profile(username),
+                            job_chat=True,
+                        )
+                        # A resumed session keeps its creation-time tools, so a
+                        # token saved or a tracker toggled mid-chat only reaches
+                        # the model through a fresh session.
+                        last_session_id = _enable_tools_for_session(
+                            last_session_id, tracker_targets
+                        )
+
                         custom_tools: list[dict[str, Any]] = []
                         if auth_header:
                             custom_tools = build_chat_custom_tools(
@@ -21318,6 +22996,8 @@ async def _process_chat_message(
                                 github_token=github_token,
                                 github_repo=github_repo,
                                 jira_connection=jira_connection,
+                                tracker_targets=tracker_targets,
+                                issue_repos=tuple(sorted(issue_repos)),
                             )
                         else:
                             logger.warning(
@@ -21378,6 +23058,8 @@ async def _process_chat_message(
                         repos_available=repos_available,
                         ci_build_data_available=ci_build_data_available,
                         install_mcp=False,
+                        tracker_unavailable=tracker_unavailable,
+                        issue_repos=tuple(sorted(issue_repos)),
                     )
 
                     if abort_signal.is_set():
@@ -21444,6 +23126,7 @@ async def _process_chat_message(
                         )
                         return
 
+                    _remember_chat_session_tools(new_session_id, tracker_targets)
                     saved = await storage.complete_chat_message_if_generation(
                         assistant_msg_id,
                         content=response_text,
@@ -21815,12 +23498,23 @@ async def init_admin_chat(
             )
         if not await _available_chat_session(ADMIN_CHAT_JOB_ID, username):
             custom_tools: list[dict[str, Any]] = []
+            tracker_targets, tracker_unavailable = _chat_tracker_state(
+                get_settings(),
+                await storage.get_user_tokens(username),
+                # An admin chat belongs to no run: only the deployment's own
+                # TESTS_REPO_URL is a destination it can rely on, and the
+                # tool list asks the same parser the create call uses.
+                github_repo_available=_settings_github_repo_available(get_settings()),
+                has_profile=await _account_has_profile(username),
+            )
             auth_header = await _create_ai_auth_header(username, is_admin=True)
             if auth_header:
                 server_url = _build_internal_server_url()
                 custom_tools = build_admin_custom_tools(
                     server_url=server_url,
                     auth_token=auth_header.removeprefix("Bearer ").strip(),
+                    tracker_targets=tracker_targets,
+                    conversation=ADMIN_CHAT_JOB_ID,
                 )
             else:
                 logger.warning("Admin chat init: no auth token for %s", username)
@@ -21844,11 +23538,15 @@ async def init_admin_chat(
                     ai_model=ai_model,
                     repo_path=workspace,
                     custom_tools=custom_tools,
+                    # The first-turn prompt names why a tracker is missing, so an
+                    # admin chats with the real reason, not a placeholder.
+                    tracker_unavailable=tracker_unavailable,
                 )
             finally:
                 chat_session_source.reset(source_token)
                 ai_username.reset(token)
             if session_id:
+                _remember_chat_session_tools(session_id, tracker_targets)
                 saved = await storage.add_chat_message(
                     job_id=ADMIN_CHAT_JOB_ID,
                     role="assistant",
@@ -22068,7 +23766,7 @@ async def _process_admin_chat_message(
                 if m.get("status") != "pending" and m.get("content")
             ]
 
-            last_session_id = session_id
+            last_session_id: str | None = session_id
             for msg in reversed(all_history):
                 if (
                     msg.get("role") == "assistant"
@@ -22115,11 +23813,24 @@ async def _process_admin_chat_message(
                 )
                 return
 
+            tracker_targets, tracker_unavailable = _chat_tracker_state(
+                settings,
+                await storage.get_user_tokens(username),
+                github_repo_available=_settings_github_repo_available(settings),
+                has_profile=await _account_has_profile(username),
+            )
+            # A resumed session keeps its creation-time tools (see
+            # _enable_tools_for_session): rebuild when this user's set changed.
+            last_session_id = _enable_tools_for_session(
+                last_session_id, tracker_targets
+            )
             custom_tools = build_admin_custom_tools(
                 server_url=server_url,
                 auth_token=auth_header.removeprefix("Bearer ").strip()
                 if auth_header
                 else "",
+                tracker_targets=tracker_targets,
+                conversation=ADMIN_CHAT_JOB_ID,
             )
 
             abort_key = f"{ADMIN_CHAT_JOB_ID}:{username}"
@@ -22143,6 +23854,7 @@ async def _process_admin_chat_message(
                 ai_call_timeout=settings.ai_call_timeout,
                 session_id=last_session_id,
                 custom_tools=custom_tools,
+                tracker_unavailable=tracker_unavailable,
             )
 
             if abort_signal.is_set():
@@ -22216,6 +23928,7 @@ async def _process_admin_chat_message(
                 )
                 return
 
+            _remember_chat_session_tools(new_session_id, tracker_targets)
             saved = await storage.complete_chat_message_if_generation(
                 assistant_msg_id,
                 content=response_text,
