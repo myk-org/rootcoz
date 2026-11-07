@@ -8,7 +8,6 @@ import json
 import re
 from collections import Counter
 from collections.abc import Coroutine
-from functools import partial
 from pathlib import Path
 from typing import Any, Literal, TypedDict, cast, get_args
 
@@ -30,13 +29,11 @@ from rootcoz.engine.core import (
     build_prompt_sections,
     build_signature_section,
     parse_json_response,
+    require_workspace,
     run_single_ai_analysis,
     safe_update_progress,
     write_failure_details_file,
     write_other_groups_file,
-)
-from rootcoz.engine.http_mcp import (
-    cleanup_http_tools_mcp,
 )
 from rootcoz.models import (
     AiConfigEntry,
@@ -48,7 +45,6 @@ from rootcoz.models import (
     PeerRound,
     TokenUsageEntry,
 )
-from rootcoz.temp_paths import cleanup_off_loop, delete_tree
 
 logger = get_child_logger(__name__)
 
@@ -459,7 +455,7 @@ def _build_failure_summary(
 async def analyze_failure_group_with_peers(
     failures: list[FailedTest],
     console_context: str,
-    repo_path: Path | None,
+    repo_path: Path,
     main_ai_provider: str,
     main_ai_model: str,
     peer_ai_configs: list[AiConfigEntry],
@@ -488,7 +484,7 @@ async def analyze_failure_group_with_peers(
     Args:
         failures: List of test failures with the same error signature.
         console_context: Relevant console lines for context.
-        repo_path: Path to cloned test repo (optional).
+        repo_path: Path to the analysis workspace (all repos are subdirectories).
         main_ai_provider: AI provider for the main/orchestrator analysis.
         main_ai_model: AI model for the main/orchestrator analysis.
         peer_ai_configs: List of peer AI configurations.
@@ -511,6 +507,8 @@ async def analyze_failure_group_with_peers(
     Returns:
         List of FailureAnalysis objects, one per failure in the group.
     """
+    repo_path = require_workspace(repo_path)
+
     # Step 1: Main AI analyzes (shared helper — same prompt as single-AI path)
     logger.info(
         f"Peer analysis: calling main AI ({main_ai_provider}/{main_ai_model}) "
@@ -558,16 +556,9 @@ async def analyze_failure_group_with_peers(
     # Compute other_groups_file path for peer/revision prompts
     # (the file was already written by run_single_ai_analysis above)
     other_groups_file: Path | None = None
-    ephemeral_dirs: list[Path] = []
     if all_groups and len(all_groups) > 1:
-        workspace_dir = repo_path
-        if workspace_dir is None:
-            import tempfile
-
-            workspace_dir = Path(tempfile.mkdtemp(prefix="rootcoz-console-"))
-            ephemeral_dirs.append(workspace_dir)
         other_groups_file = write_other_groups_file(
-            all_groups, error_signature, workspace_dir
+            all_groups, error_signature, repo_path
         )
 
     # Validate orchestrator classification before feeding into consensus
@@ -583,13 +574,7 @@ async def analyze_failure_group_with_peers(
         parsed_analysis = parsed_analysis.model_copy(update={"classification": ""})
 
     # Build failure summary and resources section for peer prompts
-    peer_workspace = repo_path
-    if peer_workspace is None:
-        import tempfile
-
-        peer_workspace = Path(tempfile.mkdtemp(prefix="rootcoz-peer-"))
-        ephemeral_dirs.append(peer_workspace)
-    failure_summary = _build_failure_summary(failures, error_signature, peer_workspace)
+    failure_summary = _build_failure_summary(failures, error_signature, repo_path)
     # Peer sessions read the same clones, so they get the same read-only code
     # graph as the primary session, through the one builder every session kind
     # uses (#384).
@@ -602,7 +587,7 @@ async def analyze_failure_group_with_peers(
             job_id=job_id,
             auth_header=auth_header,
         ),
-        workspace=peer_workspace,
+        workspace=repo_path,
         job_id=job_id,
         repos=additional_repos,
     )
@@ -616,7 +601,7 @@ async def analyze_failure_group_with_peers(
     _, _, _, resources_section, _ = build_prompt_sections(
         custom_prompt,
         artifacts_context,
-        peer_workspace,
+        repo_path,
         server_url,
         job_id,
         additional_repos=additional_repos,
@@ -744,7 +729,7 @@ async def analyze_failure_group_with_peers(
                 peer_kwargs: dict[str, Any] = {
                     "ai_provider": config.ai_provider,
                     "ai_model": config.ai_model,
-                    "cwd": str(peer_workspace),
+                    "cwd": str(repo_path),
                     "ai_call_timeout": ai_call_timeout,
                     "session_id": session,
                 }
@@ -962,7 +947,7 @@ async def analyze_failure_group_with_peers(
                     rev_kwargs: dict[str, Any] = {
                         "ai_provider": main_ai_provider,
                         "ai_model": main_ai_model,
-                        "cwd": str(peer_workspace),
+                        "cwd": str(repo_path),
                         "ai_call_timeout": ai_call_timeout,
                         "tools": list(ANALYSIS_BUILTIN_TOOLS),
                         "system_prompt": system_prompt,
@@ -1138,15 +1123,6 @@ async def analyze_failure_group_with_peers(
                 logger.debug(
                     "Failed to delete peer session %s", peer_sid, exc_info=True
                 )
-        # Remove ephemeral workspaces created when repo_path was missing
-        if ephemeral_dirs:
-            steps = [
-                partial(step, temp_dir)
-                for temp_dir in ephemeral_dirs
-                for step in (cleanup_http_tools_mcp, delete_tree)
-            ]
-            await cleanup_off_loop(job_id, *steps)
-            logger.debug("Removed %d peer ephemeral workspace(s)", len(ephemeral_dirs))
 
     # Apply analysis to all failures in the group.
     # Shared with the non-peer path: all failures share the same v2 signature

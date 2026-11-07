@@ -208,7 +208,7 @@ class TestRunSingleAiAnalysis:
 
     @pytest.mark.asyncio
     async def test_returns_parsed_analysis_and_signature(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Successful AI call returns parsed AnalysisDetail and error signature."""
 
@@ -228,7 +228,7 @@ class TestRunSingleAiAnalysis:
         parsed, sig = await run_single_ai_analysis(
             failures=[failure],
             console_context="console lines",
-            repo_path=None,
+            repo_path=tmp_path,
             ai_provider="claude",
             ai_model="opus",
             ai_call_timeout=None,
@@ -240,50 +240,12 @@ class TestRunSingleAiAnalysis:
         assert parsed.classification == "CODE ISSUE"
         assert parsed.details == "broken assertion"
         assert isinstance(sig, str) and len(sig) == 64  # SHA-256 hex
-
-    @pytest.mark.asyncio
-    async def test_cwd_uses_temp_workspace_when_no_repo(
-        self, monkeypatch: pytest.MonkeyPatch
-    ) -> None:
-        """When repo_path is None, call_ai_once cwd is the temp workspace dir."""
-        captured: dict[str, object] = {}
-
-        async def mock_cli(prompt, **kwargs):
-            captured.update(kwargs)
-            return AIResult(
-                success=True,
-                text=json.dumps(
-                    {
-                        "classification": "CODE ISSUE",
-                        "affected_tests": ["test_foo"],
-                        "details": "ok",
-                    }
-                ),
-            )
-
-        monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_cli)
-        failure = FailedTest(
-            test_name="test_foo", error_message="AssertionError", stack_trace="line 42"
-        )
-        await run_single_ai_analysis(
-            failures=[failure],
-            console_context="console lines",
-            repo_path=None,
-            ai_provider="claude",
-            ai_model="opus",
-            ai_call_timeout=None,
-            custom_prompt="",
-            artifacts_context="",
-            server_url="",
-            job_id="",
-        )
-        cwd = captured.get("cwd")
-        assert isinstance(cwd, str) and cwd
-        assert Path(cwd).name.startswith("rootcoz-console-")
+        # The surviving console writer puts its file in the workspace (#443)
+        assert (tmp_path / f"console-output-{sig}.txt").read_text() == "console lines"
 
     @pytest.mark.asyncio
     async def test_failed_ai_call_returns_fallback(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Failed AI call returns AnalysisDetail with raw output in details."""
 
@@ -297,7 +259,7 @@ class TestRunSingleAiAnalysis:
             await run_single_ai_analysis(
                 failures=[failure],
                 console_context="",
-                repo_path=None,
+                repo_path=tmp_path,
                 ai_provider="claude",
                 ai_model="opus",
                 ai_call_timeout=None,
@@ -312,7 +274,7 @@ class TestRunSingleAiAnalysis:
 
     @pytest.mark.asyncio
     async def test_empty_response_retries_once_then_succeeds(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Empty success text triggers one retry; second non-empty response is used."""
         good = json.dumps(
@@ -336,7 +298,7 @@ class TestRunSingleAiAnalysis:
         parsed, _sig = await run_single_ai_analysis(
             failures=[failure],
             console_context="",
-            repo_path=None,
+            repo_path=tmp_path,
             ai_provider="cursor",
             ai_model="cursor:grok",
             ai_call_timeout=None,
@@ -351,7 +313,7 @@ class TestRunSingleAiAnalysis:
 
     @pytest.mark.asyncio
     async def test_empty_response_twice_fails_with_clear_error(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Two empty success responses fail the group with an explicit error message."""
         mock_cli = AsyncMock(return_value=AIResult(success=True, text=""))
@@ -364,7 +326,7 @@ class TestRunSingleAiAnalysis:
             await run_single_ai_analysis(
                 failures=[failure],
                 console_context="",
-                repo_path=None,
+                repo_path=tmp_path,
                 ai_provider="cursor",
                 ai_model="cursor:grok",
                 ai_call_timeout=None,
@@ -377,7 +339,7 @@ class TestRunSingleAiAnalysis:
 
     @pytest.mark.asyncio
     async def test_non_empty_first_response_does_not_retry(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """A usable first response must not trigger a retry."""
         ai_response = json.dumps(
@@ -396,7 +358,7 @@ class TestRunSingleAiAnalysis:
         parsed, _sig = await run_single_ai_analysis(
             failures=[failure],
             console_context="",
-            repo_path=None,
+            repo_path=tmp_path,
             ai_provider="claude",
             ai_model="opus",
             ai_call_timeout=None,
@@ -410,7 +372,7 @@ class TestRunSingleAiAnalysis:
 
     @pytest.mark.asyncio
     async def test_narration_only_answer_retries_then_raises_incomplete(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """An answer that is only narration is retried and then fails the group."""
         narration = (
@@ -427,7 +389,7 @@ class TestRunSingleAiAnalysis:
             await run_single_ai_analysis(
                 failures=[failure],
                 console_context="",
-                repo_path=None,
+                repo_path=tmp_path,
                 ai_provider="cursor",
                 ai_model="cursor:grok",
                 ai_call_timeout=None,
@@ -443,6 +405,7 @@ class TestRunSingleAiAnalysis:
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
         narration: str,
+        tmp_path: Path,
     ) -> list[str]:
         """Log a narration-only answer and return its DEBUG excerpt messages."""
         from rootcoz.engine.core import logger as core_logger
@@ -466,7 +429,7 @@ class TestRunSingleAiAnalysis:
                         )
                     ],
                     console_context="",
-                    repo_path=None,
+                    repo_path=tmp_path,
                     ai_provider="cursor",
                     ai_model="cursor:grok",
                     ai_call_timeout=None,
@@ -491,6 +454,7 @@ class TestRunSingleAiAnalysis:
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
+        tmp_path: Path,
     ) -> None:
         """WARNING carries length + sha256 only; DEBUG keeps the WHOLE scrubbed answer.
 
@@ -503,7 +467,9 @@ class TestRunSingleAiAnalysis:
         long_tail = 2500
 
         narration = "QUOTED-CI-LOG " + "x" * long_tail
-        excerpts = await self._narration_debug_excerpts(monkeypatch, caplog, narration)
+        excerpts = await self._narration_debug_excerpts(
+            monkeypatch, caplog, narration, tmp_path
+        )
 
         warnings = [
             r
@@ -550,10 +516,11 @@ class TestRunSingleAiAnalysis:
         caplog: pytest.LogCaptureFixture,
         narration: str,
         secret: str,
+        tmp_path: Path,
     ) -> None:
         """The DEBUG excerpt must not copy a credential the model quoted."""
         excerpt_messages = await self._narration_debug_excerpts(
-            monkeypatch, caplog, narration
+            monkeypatch, caplog, narration, tmp_path
         )
         assert excerpt_messages, "the excerpt still reaches DEBUG"
         for message in excerpt_messages:
@@ -567,6 +534,7 @@ class TestRunSingleAiAnalysis:
         self,
         monkeypatch: pytest.MonkeyPatch,
         caplog: pytest.LogCaptureFixture,
+        tmp_path: Path,
     ) -> None:
         """A credential far down the answer must not survive the DEBUG line.
 
@@ -578,7 +546,7 @@ class TestRunSingleAiAnalysis:
         )  # 40 hex chars: the generic token pattern  # pragma: allowlist secret
         narration = "y" * 5000 + " " + secret
         excerpt_messages = await self._narration_debug_excerpts(
-            monkeypatch, caplog, narration
+            monkeypatch, caplog, narration, tmp_path
         )
         assert excerpt_messages, "the answer still reaches DEBUG"
         for message in excerpt_messages:
@@ -589,7 +557,7 @@ class TestRunSingleAiAnalysis:
 
     @pytest.mark.asyncio
     async def test_excerpt_is_scrubbed_only_when_debug_is_enabled(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Scrubbing the whole answer is DEBUG-only work, never paid at INFO.
 
@@ -626,7 +594,7 @@ class TestRunSingleAiAnalysis:
                         )
                     ],
                     console_context="",
-                    repo_path=None,
+                    repo_path=tmp_path,
                     ai_provider="cursor",
                     ai_model="cursor:grok",
                     ai_call_timeout=None,
@@ -653,7 +621,7 @@ class TestRunSingleAiAnalysis:
 
     @pytest.mark.asyncio
     async def test_narration_then_valid_answer_uses_second_response(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """A narration-only first answer is retried and the second one is used."""
         good = json.dumps(
@@ -680,7 +648,7 @@ class TestRunSingleAiAnalysis:
         parsed, _sig = await run_single_ai_analysis(
             failures=[failure],
             console_context="",
-            repo_path=None,
+            repo_path=tmp_path,
             ai_provider="cursor",
             ai_model="cursor:grok",
             ai_call_timeout=None,
@@ -695,7 +663,7 @@ class TestRunSingleAiAnalysis:
 
     @pytest.mark.asyncio
     async def test_peer_analysis_uses_shared_helper(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Peer analysis module calls run_single_ai_analysis for the orchestrator's initial analysis."""
 
@@ -729,7 +697,7 @@ class TestRunSingleAiAnalysis:
         await analyze_failure_group_with_peers(
             failures=[failure],
             console_context="console",
-            repo_path=None,
+            repo_path=tmp_path,
             main_ai_provider="claude",
             main_ai_model="opus",
             peer_ai_configs=peers,
@@ -1002,7 +970,7 @@ class TestRunSingleAiAnalysisGroupContext:
 
     @pytest.mark.asyncio
     async def test_timeline_rule_in_prompt(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Timeline consistency rule is always included in the AI prompt."""
         captured_prompt = {}
@@ -1028,7 +996,7 @@ class TestRunSingleAiAnalysisGroupContext:
         await run_single_ai_analysis(
             failures=[failure],
             console_context="",
-            repo_path=None,
+            repo_path=tmp_path,
             ai_provider="claude",
             ai_model="opus",
             ai_call_timeout=None,
@@ -1042,7 +1010,7 @@ class TestRunSingleAiAnalysisGroupContext:
 
     @pytest.mark.asyncio
     async def test_no_file_when_single_group(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Single group does not create cross-reference file or add instruction."""
         captured_prompt = {}
@@ -1068,7 +1036,7 @@ class TestRunSingleAiAnalysisGroupContext:
         await run_single_ai_analysis(
             failures=[failure],
             console_context="",
-            repo_path=None,
+            repo_path=tmp_path,
             ai_provider="claude",
             ai_model="opus",
             ai_call_timeout=None,
@@ -1085,7 +1053,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
 
     @pytest.mark.asyncio
     async def test_delegates_to_peer_analysis_when_peers_configured(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """When peer_ai_configs is provided, delegates to peer analysis module."""
 
@@ -1116,7 +1084,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
         result = await analyze_failure_group(
             [failure],
             "",
-            None,
+            tmp_path,
             ai_provider="claude",
             ai_model="opus",
             peer_ai_configs=peers,
@@ -1132,7 +1100,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
 
     @pytest.mark.asyncio
     async def test_custom_max_rounds_passed_to_peers(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """peer_analysis_max_rounds is forwarded as max_rounds."""
 
@@ -1159,7 +1127,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
         await analyze_failure_group(
             [failure],
             "",
-            None,
+            tmp_path,
             ai_provider="claude",
             ai_model="opus",
             peer_ai_configs=peers,
@@ -1169,7 +1137,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
 
     @pytest.mark.asyncio
     async def test_no_delegation_without_peers(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """When no peer_ai_configs, uses single-AI path."""
 
@@ -1186,14 +1154,14 @@ class TestAnalyzeFailureGroupPeerDelegation:
         )
 
         result = await analyze_failure_group(
-            [failure], "", None, ai_provider="claude", ai_model="opus"
+            [failure], "", tmp_path, ai_provider="claude", ai_model="opus"
         )
         assert mock_cli.called  # Used single-AI path
         assert len(result) == 1
 
     @pytest.mark.asyncio
     async def test_dict_peer_configs_converted_to_models(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Dict-form peer configs are converted to AiConfigEntry objects."""
 
@@ -1221,7 +1189,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
         await analyze_failure_group(
             [failure],
             "",
-            None,
+            tmp_path,
             ai_provider="claude",
             ai_model="opus",
             peer_ai_configs=peers,
@@ -1232,7 +1200,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
 
     @pytest.mark.asyncio
     async def test_group_label_forwarded_to_peer_analysis(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """group_label is forwarded from analyze_failure_group to analyze_failure_group_with_peers."""
 
@@ -1259,7 +1227,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
         await analyze_failure_group(
             [failure],
             "",
-            None,
+            tmp_path,
             ai_provider="claude",
             ai_model="opus",
             peer_ai_configs=peers,
@@ -1269,7 +1237,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
 
     @pytest.mark.asyncio
     async def test_group_label_defaults_to_empty(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """group_label defaults to empty string when not provided."""
 
@@ -1296,7 +1264,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
         await analyze_failure_group(
             [failure],
             "",
-            None,
+            tmp_path,
             ai_provider="claude",
             ai_model="opus",
             peer_ai_configs=peers,
@@ -1305,7 +1273,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
 
     @pytest.mark.asyncio
     async def test_max_concurrent_ai_calls_forwarded_to_peer_analysis(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """max_concurrent_ai_calls is forwarded from analyze_failure_group to analyze_failure_group_with_peers."""
 
@@ -1332,7 +1300,7 @@ class TestAnalyzeFailureGroupPeerDelegation:
         await analyze_failure_group(
             [failure],
             "",
-            None,
+            tmp_path,
             ai_provider="claude",
             ai_model="opus",
             peer_ai_configs=peers,
@@ -3512,7 +3480,7 @@ class TestRecoverableFailureRetry:
 
     @pytest.mark.asyncio
     async def test_truncated_stream_failure_is_retried(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """A transport failure retries once and uses the successful second attempt."""
         complete = json.dumps(
@@ -3539,7 +3507,7 @@ class TestRecoverableFailureRetry:
         parsed, _sig = await run_single_ai_analysis(
             failures=[failure],
             console_context="",
-            repo_path=None,
+            repo_path=tmp_path,
             ai_provider="openai",
             ai_model="gpt-5.6-luna",
             ai_call_timeout=None,
@@ -3554,7 +3522,7 @@ class TestRecoverableFailureRetry:
 
     @pytest.mark.asyncio
     async def test_auth_failure_does_not_retry(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """An auth fault will not fix itself, so it must fail fast."""
         mock_cli = AsyncMock(
@@ -3573,7 +3541,7 @@ class TestRecoverableFailureRetry:
             await run_single_ai_analysis(
                 failures=[failure],
                 console_context="",
-                repo_path=None,
+                repo_path=tmp_path,
                 ai_provider="openai",
                 ai_model="gpt-5.6-luna",
                 ai_call_timeout=None,
@@ -3586,7 +3554,10 @@ class TestRecoverableFailureRetry:
 
     @pytest.mark.asyncio
     async def test_retry_log_does_not_leak_provider_error(
-        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+        tmp_path: Path,
     ) -> None:
         """A provider error can echo a credential; it must never reach the logs."""
         # Assembled at runtime: a key-shaped literal in source would need a
@@ -3627,7 +3598,7 @@ class TestRecoverableFailureRetry:
             await run_single_ai_analysis(
                 failures=[failure],
                 console_context="",
-                repo_path=None,
+                repo_path=tmp_path,
                 ai_provider="openai",
                 ai_model="gpt-5.6-luna",
                 ai_call_timeout=None,
@@ -3650,7 +3621,7 @@ class TestRecoverableFailureRetry:
 
     @pytest.mark.asyncio
     async def test_invalid_api_key_marker_does_not_retry(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """The credential path emits invalid_api_key; that key is not recoverable."""
         mock_cli = AsyncMock(
@@ -3665,7 +3636,7 @@ class TestRecoverableFailureRetry:
             await run_single_ai_analysis(
                 failures=[failure],
                 console_context="",
-                repo_path=None,
+                repo_path=tmp_path,
                 ai_provider="openai",
                 ai_model="gpt-5.6-luna",
                 ai_call_timeout=None,
@@ -3678,7 +3649,7 @@ class TestRecoverableFailureRetry:
 
     @pytest.mark.asyncio
     async def test_partial_analysis_text_does_not_block_retry(
-        self, monkeypatch: pytest.MonkeyPatch
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     ) -> None:
         """Model-authored text quoting an auth phrase must not suppress a retry."""
         complete = json.dumps(
@@ -3706,7 +3677,7 @@ class TestRecoverableFailureRetry:
         parsed, _sig = await run_single_ai_analysis(
             failures=[failure],
             console_context="",
-            repo_path=None,
+            repo_path=tmp_path,
             ai_provider="openai",
             ai_model="gpt-5.6-luna",
             ai_call_timeout=None,
@@ -3717,3 +3688,33 @@ class TestRecoverableFailureRetry:
         )
         assert mock_cli.await_count == 2
         assert parsed.classification == "CODE ISSUE"
+
+
+@pytest.mark.asyncio
+async def test_analyze_failure_group_refuses_no_workspace() -> None:
+    """A caller that forgot a workspace gets a RuntimeError naming the requirement.
+
+    Every caller creates a workspace first (#443); a ``None`` here is a caller
+    bug, so the refusal must reach the handlers that recover RuntimeError --
+    an AssertionError would escape all three.
+    """
+    failure = FailedTest(test_name="test_a", error_message="err_a")
+
+    with pytest.raises(RuntimeError, match="requires a workspace path"):
+        await analyze_failure_group([failure], "", None, ai_provider="test")
+
+
+def test_no_ephemeral_workspace_fallbacks() -> None:
+    """No analysis module may silently mkdtemp its own workspace (#443).
+
+    mypy cannot see inside a callee and ``warn_unreachable`` is off, so a
+    re-added ``if repo_path is None: mkdtemp(...)`` would type-check silently.
+    This source scan is the only CI-checkable guard against it.
+    """
+    repo_root = Path(__file__).resolve().parents[1]
+    for relative in ("src/rootcoz/engine/core.py", "src/rootcoz/peer_analysis.py"):
+        source = (repo_root / relative).read_text()
+        for prefix in ("rootcoz-peer-", "rootcoz-console-", "rootcoz-orchestrator-"):
+            assert prefix not in source, (
+                f"{prefix} transient workspace re-added in {relative}"
+            )
