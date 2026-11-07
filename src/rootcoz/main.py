@@ -8544,6 +8544,17 @@ async def set_reviewed(
     }
 
 
+class EnrichmentSnapshot(dict[str, list[dict[str, Any]]]):
+    """A job's enrichments, plus whether a lookup behind them failed.
+
+    Carried rather than raised: the endpoint reports it so a client can tell
+    "nothing to enrich" from "the lookup broke" — both are an empty mapping
+    (issue #452).
+    """
+
+    failed: bool = False
+
+
 # Per-job enrichment cache: every report load asks for the live badges, and each
 # miss costs one rate-limited GitHub/Jira call per link in the thread. Comment
 # links change rarely, so 60 s of staleness is invisible while it removes the
@@ -8558,15 +8569,11 @@ _ENRICHMENTS_TTL_SECONDS = 60
 # authenticated caller minting distinct ids. Worst case for a wrong eviction is
 # one extra collection.
 _ENRICHMENTS_CACHE_MAX_ENTRIES = 512
-_enrichments_cache: dict[
-    tuple[str, str], tuple[float, dict[str, list[dict[str, Any]]]]
-] = {}
+_enrichments_cache: dict[tuple[str, str], tuple[float, EnrichmentSnapshot]] = {}
 # Collections in flight, keyed like the cache: a report load that arrives while
 # the first one is still looking up links joins it instead of repeating its
 # GitHub/Jira calls.
-_enrichments_inflight: dict[
-    tuple[str, str], asyncio.Task[dict[str, list[dict[str, Any]]]]
-] = {}
+_enrichments_inflight: dict[tuple[str, str], asyncio.Task[EnrichmentSnapshot]] = {}
 # Bumped on every comment change. A collector notes it after its cache miss and
 # skips its write once it moved — otherwise a snapshot read before the change
 # would overwrite the invalidation and leave the new link badge-less for a whole
@@ -8620,7 +8627,7 @@ def _enrichments_settings_fingerprint(settings: Settings) -> str:
 
 
 def _remember_enrichments(
-    cache_key: tuple[str, str], now: float, enrichments: dict[str, list[dict[str, Any]]]
+    cache_key: tuple[str, str], now: float, enrichments: EnrichmentSnapshot
 ) -> None:
     """Store one snapshot: drop expired entries, then evict down to the cap."""
     for stale_key, (cached_at, _) in list(_enrichments_cache.items()):
@@ -8634,7 +8641,7 @@ def _remember_enrichments(
 
 async def _collect_comment_enrichments(
     job_id: str, settings: Settings
-) -> dict[str, list[dict[str, Any]]]:
+) -> EnrichmentSnapshot:
     """Resolve live statuses for every tracker link found in a job's comments.
 
     Serves a cached result when the job was collected with the same tracker
@@ -8658,7 +8665,7 @@ async def _collect_comment_enrichments(
     task = asyncio.create_task(_fetch_comment_enrichments(cache_key, settings, epoch))
     _enrichments_inflight[cache_key] = task
 
-    def _forget(done: asyncio.Task[dict[str, list[dict[str, Any]]]]) -> None:
+    def _forget(done: asyncio.Task[EnrichmentSnapshot]) -> None:
         if _enrichments_inflight.get(cache_key) is done:
             _enrichments_inflight.pop(cache_key, None)
         if not done.cancelled():
@@ -8670,7 +8677,7 @@ async def _collect_comment_enrichments(
 
 async def _fetch_comment_enrichments(
     cache_key: tuple[str, str], settings: Settings, epoch: int
-) -> dict[str, list[dict[str, Any]]]:
+) -> EnrichmentSnapshot:
     """Look up every tracker link in a job's comments and cache the result."""
     job_id = cache_key[0]
     comments = await storage.get_comments_for_job(job_id)
@@ -8763,7 +8770,7 @@ async def _fetch_comment_enrichments(
             tasks.append(fetch_jira_ticket_status(jira_connection, jira_key))
             task_map[idx] = (str(c["id"]), {"type": "jira", "key": jira_key})
 
-    enrichments: dict[str, list[dict[str, Any]]] = {}
+    enrichments = EnrichmentSnapshot()
     failed = jira_failed and jira_keys_seen
     logger.debug(f"enrich_comments: job_id={job_id}, enrichment_tasks={len(tasks)}")
 
@@ -8783,8 +8790,10 @@ async def _fetch_comment_enrichments(
             info["status"] = result
             enrichments.setdefault(comment_id, []).append(info)
 
+    enrichments.failed = failed
     logger.debug(
-        f"enrich_comments: job_id={job_id}, enrichments_count={len(enrichments)}"
+        f"enrich_comments: job_id={job_id}, enrichments_count={len(enrichments)}, "
+        f"failed={failed}"
     )
     if failed:
         logger.debug(f"enrich_comments: job_id={job_id}, a lookup failed; not cached")
@@ -8841,7 +8850,7 @@ async def enrich_comments(
             details={"job_id": job_id},
         )
         raise
-    return {"enrichments": enrichments}
+    return {"enrichments": enrichments, "failed": enrichments.failed}
 
 
 def _resolve_analyzed_repo(

@@ -1817,7 +1817,8 @@ def test_comment_enrich_success_is_not_audited(app_client) -> None:
     assert response.json() == {
         "enrichments": {
             "1": [{"type": "github_pr", "key": "o/r#1", "status": {"state": "open"}}]
-        }
+        },
+        "failed": False,
     }
 
     assert _events(action="comment.enrich") == []
@@ -1946,7 +1947,7 @@ def test_comment_enrich_failure_is_not_cached(app_client) -> None:
         response = app_client.get("/results/job-enrich-retry/enrich-comments")
 
     assert response.status_code == 200, response.text
-    assert response.json() == {"enrichments": {}}
+    assert response.json() == {"enrichments": {}, "failed": False}
     assert collect.await_count == 2
 
 
@@ -1955,7 +1956,10 @@ def test_comment_enrich_expired_entry_is_pruned_on_write(app_client) -> None:
     admin_login(app_client)
     _store_job("job-enrich-prune")
     expired = main._time.monotonic() - main._ENRICHMENTS_TTL_SECONDS - 1
-    main._enrichments_cache[("job-already-gone", "fp")] = (expired, {})
+    main._enrichments_cache[("job-already-gone", "fp")] = (
+        expired,
+        main.EnrichmentSnapshot(),
+    )
 
     response = app_client.get("/results/job-enrich-prune/enrich-comments")
 
@@ -2013,11 +2017,12 @@ def test_comment_enrich_failed_lookup_is_not_cached(app_client) -> None:
         first = app_client.get("/results/job-enrich-badge/enrich-comments")
         second = app_client.get("/results/job-enrich-badge/enrich-comments")
 
-    assert first.json() == {"enrichments": {}}
+    assert first.json() == {"enrichments": {}, "failed": True}
     assert second.json() == {
         "enrichments": {
             "1": [{"type": "github_pr", "key": "o/r#4", "status": {"state": "open"}}]
-        }
+        },
+        "failed": False,
     }
     assert fetch.await_count == 2
 
@@ -2168,7 +2173,7 @@ def test_comment_enrich_cache_follows_the_jira_settings(app_client) -> None:
     assert enabled.json()["enrichments"] == {
         "1": [{"type": "jira", "key": "PROJ-10", "status": "Open"}]
     }
-    assert disabled.json() == {"enrichments": {}}
+    assert disabled.json() == {"enrichments": {}, "failed": False}
     assert fetch.await_count == 1
 
 

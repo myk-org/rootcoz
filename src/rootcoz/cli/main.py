@@ -1385,8 +1385,15 @@ def enrich_comments_cmd(
         emit_output=False,
     )
     if not _state.get("json", False):
-        enriched = data.get("enriched", 0)
-        typer.echo(f"Enriched {enriched} comment(s).")
+        # Server sends {comment_id: [badges]}; count the comments and their badges.
+        enrichments = data.get("enrichments") or {}
+        comments = len(enrichments)
+        badges = sum(len(badge_list) for badge_list in enrichments.values())
+        typer.echo(f"Enriched {comments} comment(s).")
+        typer.echo(f"Status badges: {badges}.")
+        # An empty mapping is also what a failed lookup returns (#452).
+        if data.get("failed"):
+            typer.echo("Some lookups failed; these counts may be incomplete.")
 
 
 # -- Analyze ------------------------------------------------------------------
