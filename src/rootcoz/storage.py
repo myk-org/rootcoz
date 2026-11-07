@@ -1630,6 +1630,9 @@ async def init_db() -> None:
         )
         await _migrate_add_column(db, "results", "analysis_started_at", "TIMESTAMP")
         await _migrate_add_column(db, "results", "error", "TEXT NOT NULL DEFAULT ''")
+        await _migrate_add_column(
+            db, "results", "failure_reason", "TEXT NOT NULL DEFAULT ''"
+        )
         await _migrate_add_column(db, "results", "job_name", "TEXT NOT NULL DEFAULT ''")
         await _migrate_add_column(
             db, "results", "build_number", "INTEGER NOT NULL DEFAULT 0"
@@ -3730,7 +3733,13 @@ def _end_active_clone_operations(
         result["progress_phase"] = status
 
 
-async def fail_job_without_result_write(job_id: str, reason: str) -> None:
+async def fail_job_without_result_write(
+    job_id: str,
+    reason: str,
+    *,
+    failure_reason: str = "",
+    only_statuses: Sequence[str] | None = None,
+) -> bool:
     """Mark *job_id* failed when a write to its ``result_json`` was refused.
 
     Only the status columns are written: the stored payload belongs to a build
@@ -3741,6 +3750,14 @@ async def fail_job_without_result_write(job_id: str, reason: str) -> None:
     A job that already reached a terminal status keeps it: this fallback is a
     consequence of a refused write, not a decision about the job, so it must not
     end one an abort or a completion already ended (see :func:`_write_status`).
+
+    *failure_reason* is the machine-readable companion to *reason* (see
+    :data:`SERVER_RESTART_FAILURE_REASON`), and *only_statuses* narrows the
+    statuses this failure may end -- the shutdown mark passes
+    :data:`ORPHAN_STATUSES`, because a ``waiting`` job is resumed, not failed.
+
+    Returns:
+        Whether the failure landed on the row.
     """
 
     async def attempt() -> _WriteOutcome:
@@ -3758,6 +3775,14 @@ async def fail_job_without_result_write(job_id: str, reason: str) -> None:
                 "status and its error are kept"
             )
             return "refused"
+        # Last, because it is the narrowest condition: a vanished row must report
+        # its own cause, not a status message on top of it.
+        if only_statuses is not None and expect[1] not in only_statuses:
+            logger.info(
+                f"job_id={job_id}: status '{expect[1]}' is not one this failure "
+                "may end, so the row was left alone"
+            )
+            return "refused"
         async with _connect_db() as db:
             if not await _begin_guarded_write(db, job_id, expect):
                 return "stale"
@@ -3772,17 +3797,53 @@ async def fail_job_without_result_write(job_id: str, reason: str) -> None:
                 await db.execute("ROLLBACK")
                 return "refused"
             await db.execute(
-                "UPDATE results SET error = ?, completed_at = ? WHERE job_id = ?",
-                (reason, datetime.now(UTC).isoformat(), job_id),
+                "UPDATE results SET error = ?, completed_at = ?, failure_reason = ? "
+                "WHERE job_id = ?",
+                (reason, datetime.now(UTC).isoformat(), failure_reason, job_id),
             )
             await db.commit()
         return "landed"
 
-    if await _write_result(job_id, "fail_job_without_result_write", attempt):
+    landed = await _write_result(job_id, "fail_job_without_result_write", attempt)
+    if landed:
         logger.info(
             f"job_id={job_id}: marked failed without writing result_json (only the "
             "status columns changed)"
         )
+    return landed
+
+
+async def mark_jobs_failed_for_restart(job_ids: Sequence[str]) -> list[str]:
+    """Fail the jobs that were in flight when the process took SIGTERM (#458).
+
+    Runs from the lifespan shutdown, so it must never raise: one row per guarded
+    write, one bad row must not stop the rest. A ``waiting`` job is skipped on
+    purpose -- it is resumed by the next boot (see ORPHAN_STATUSES).
+
+    Returns:
+        The job ids the mark landed on.
+    """
+    marked: list[str] = []
+    for job_id in job_ids:
+        try:
+            if await fail_job_without_result_write(
+                job_id,
+                RESTART_ERROR_MSG,
+                failure_reason=SERVER_RESTART_FAILURE_REASON,
+                only_statuses=ORPHAN_STATUSES,
+            ):
+                marked.append(job_id)
+        except Exception:
+            logger.exception(
+                f"job_id={job_id}: could not record it as a server-restart failure"
+            )
+    if marked:
+        logger.warning(
+            "Marked %d in-flight job(s) failed for a server restart: %s",
+            len(marked),
+            ", ".join(marked),
+        )
+    return marked
 
 
 async def claim_submitted_job_for_analyze(job_id: str) -> bool:
@@ -4339,6 +4400,7 @@ async def get_result(
                     "build_url": _row_build_url(row),
                     "status": row_data["status"],
                     "error": row_data.get("error", ""),
+                    "failure_reason": row_data.get("failure_reason", ""),
                     "result": parsed,
                     "created_at": row_data["created_at"],
                     "completed_at": row_data.get("completed_at"),
@@ -5977,6 +6039,10 @@ ENDED_STATUSES = ("completed", "failed", "aborted")
 # waiting jobs can be safely resumed.
 ORPHAN_STATUSES = ("pending", "running")
 RESTART_ERROR_MSG = "Analysis interrupted by server restart. Please re-submit."
+#: Machine-readable companion to RESTART_ERROR_MSG, in results.failure_reason:
+#: a restart and a crash read the same sentence, and only the process that took
+#: the signal can tell them apart (issue #458).
+SERVER_RESTART_FAILURE_REASON = "server_restart"
 
 DEFAULT_DASHBOARD_LIMIT = 500
 

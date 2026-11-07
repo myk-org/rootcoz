@@ -115,8 +115,16 @@ extra_args=""
 if [ "$has_uvicorn" = true ] && [ "$has_port" = false ]; then
     extra_args="$extra_args --port $PORT"
 fi
+# Bounded graceful shutdown, so SIGTERM always reaches the lifespan shutdown that
+# records an in-flight analysis as a server restart (#458). Budget: 15 s here +
+# SHUTDOWN_DRAIN_SECONDS (40) in the app, under the chart's 60 s grace period --
+# tox's chart env asserts the relationship, reading these two numbers from here
+# and from src/rootcoz/main.py.
+if [ "$has_uvicorn" = true ]; then
+    extra_args="$extra_args --timeout-graceful-shutdown 15"
+fi
 if [ "$has_uvicorn" = true ] && [ "${DEV_MODE:-}" = "true" ]; then
-    extra_args="$extra_args --reload --reload-dir /app/src --timeout-graceful-shutdown 3"
+    extra_args="$extra_args --reload --reload-dir /app/src"
 fi
 
 # When sidecar is running, run app in background + wait so EXIT trap fires

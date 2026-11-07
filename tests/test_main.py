@@ -2173,6 +2173,68 @@ class TestAppLifespan:
             await asyncio.gather(*main._background_tasks, return_exceptions=True)
             main._background_tasks.clear()
 
+    async def _boot_with_a_job(self, status: str) -> dict[str, Any]:
+        """Start the lifespan, park one job at *status*, and shut it down.
+
+        Event-driven, no sleeps: the ``asyncio.Event`` proves the analysis task
+        started, and leaving the context is the shutdown signal.
+        """
+        from rootcoz import main
+
+        started = asyncio.Event()
+
+        async def _running_analysis() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        async def _nothing() -> None:
+            return None
+
+        try:
+            with patch.object(main, "_compress_stored_results", _nothing):
+                async with main.lifespan(main.app):
+                    await storage.save_result("job-restart", "http://j/1", status)
+                    main._register_job_task(
+                        "job-restart", asyncio.create_task(_running_analysis())
+                    )
+                    await asyncio.wait_for(started.wait(), 5)
+            return await storage.get_result("job-restart")
+        finally:
+            for task in list(main._background_tasks):
+                task.cancel()
+            await asyncio.gather(*main._background_tasks, return_exceptions=True)
+            main._background_tasks.clear()
+            main._job_tasks.clear()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_marks_the_in_flight_job_as_a_server_restart(
+        self, mock_settings, temp_db_path: Path
+    ) -> None:
+        """The job running when the app stops is failed for a restart, here (#458).
+
+        Driven through the lifespan directly: TestClient ends its loop on exit,
+        which hides whether the shutdown itself wrote the row.
+        """
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            stored = await self._boot_with_a_job("running")
+
+        assert stored["status"] == "failed"
+        assert stored["error"] == storage.RESTART_ERROR_MSG
+        assert stored["failure_reason"] == storage.SERVER_RESTART_FAILURE_REASON
+        assert stored["completed_at"] is not None
+
+    @pytest.mark.asyncio
+    async def test_shutdown_leaves_a_waiting_job_to_be_resumed(
+        self, mock_settings, temp_db_path: Path
+    ) -> None:
+        """A ``waiting`` job is resumed by the next boot, so shutdown keeps it."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            stored = await self._boot_with_a_job("waiting")
+
+        assert stored["status"] == "waiting"
+        assert stored["failure_reason"] == ""
+        assert stored["completed_at"] is None
+
     @pytest.mark.asyncio
     async def test_a_backfill_writes_the_database_it_started_on(
         self, mock_settings, tmp_path: Path, monkeypatch

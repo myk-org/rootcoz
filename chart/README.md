@@ -244,13 +244,17 @@ pod once.
 
 ### Rollout on upgrade
 
-The byte-identical default render holds for installs that **do not** set `sidecar.agentDir`. Installs
-that do get **one pod restart** from this chart version alone: the `copy-sidecar-agent` init
-container's request and limit changed (`10m/16Mi` request + `100m/128Mi` limit → `10m/32Mi` on both
-sides), and any pod-template change is a rollout. The equality is the point — without it the pod is
-Burstable whenever the sidecar agent dir is set, so the restart is what buys Guaranteed QoS. It is
-still a restart: one replica, `Recreate`, 30 s grace period, so an analysis running at that moment is
-interrupted and has to be re-submitted (results are written on completion; SQLite recovers via WAL).
+This chart version rolls **every** install once: `terminationGracePeriodSeconds` went from `30` to
+`60`, and any pod-template change is a rollout. The 60 is the shutdown budget — 15 s for uvicorn to
+close connections, 40 s for cancelled tasks to unwind, 5 s to exit — and the restart mark the app
+writes before that unwind is what keeps a SIGTERM from looking like a crash on the next boot. Installs
+that **do** set `sidecar.agentDir` get their restart from a second change: the `copy-sidecar-agent`
+init container's request and limit went from `10m/16Mi` request + `100m/128Mi` limit to `10m/32Mi` on
+both sides. The equality is the point — without it the pod is Burstable whenever the sidecar agent dir
+is set, so the restart is what buys Guaranteed QoS. Either way it is a restart: one replica,
+`Recreate`, so an analysis running at that moment is marked failed for a server restart
+(`failure_reason: "server_restart"`) and has to be re-submitted (results are written on completion;
+SQLite recovers via WAL).
 
 ### Extended resources
 
@@ -390,8 +394,12 @@ The `chart` tox env lints the chart, renders every recipe and fixture, renders
 `ai.provider`, `ai.model` and the required secrets, no overlay — has a **baseline assertion**: its
 container `resources` block must equal the chart defaults (`requests` `1`/`4Gi`, `limits` `2`/`8Gi`),
 and it must carry no `ephemeral-storage`, no `sizeLimit`, no `/tmp` mount and no `TMPDIR`, so a
-values or template change that alters the default pod template fails CI instead of silently rolling
-every install. The env also asserts the schema negatives (`resources.limit.cpu`,
+values or template change that alters the default resources fails CI instead of reaching every
+install unnoticed. The same render is where the shutdown budget is asserted:
+`terminationGracePeriodSeconds` must be `60`, and greater than uvicorn's
+`--timeout-graceful-shutdown` plus the app's `SHUTDOWN_DRAIN_SECONDS` — both numbers are read from
+`entrypoint.sh` and `src/rootcoz/main.py`, so a lowered grace period or a longer drain fails the test.
+The env also asserts the schema negatives (`resources.limit.cpu`,
 `resources.requests.cpuu`, a bad `memory` unit `4GiB`), the quantity positives (numeric `cpu`/`memory`
 and `ephemeral-storage`, `.5Gi`, `1e3`, `4m`, an explicit string quantity, extended resources —
 `nvidia.com/gpu`, `hugepages-2Mi`, a mixed-case name `example.com/GPU_2`, and the rejection of a

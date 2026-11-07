@@ -228,12 +228,14 @@ that allocatable. On smaller nodes request `16Gi` memory instead — Burstable, 
 deployment uses. The live `.dev/openshift/deployment.yaml` request is therefore deliberately
 different from this profile.
 
-**Upgrading to this chart version.** The default render is byte-identical for installs that do not set
-`sidecar.agentDir`, so those do not roll. Installs that set it get **one pod restart**: the
-`copy-sidecar-agent` init container's request and limit are now equal (`10m/32Mi`) where they were
-`10m/16Mi` and `100m/128Mi`, and that equality is what keeps a Guaranteed pod Guaranteed. With one
-replica on `Recreate` and a 30 s grace period, an analysis in flight at that moment is interrupted and
-has to be re-submitted.
+**Upgrading to this chart version.** Every install rolls once: `terminationGracePeriodSeconds` went
+from `30` to `60`, and a pod-template change is a rollout. Installs that also set `sidecar.agentDir`
+get their restart from that change as well: the `copy-sidecar-agent` init container's request and
+limit are now equal (`10m/32Mi`) where they were `10m/16Mi` and `100m/128Mi`, and that equality is
+what keeps a Guaranteed pod Guaranteed. With one replica on `Recreate`, an analysis in flight when the
+pod goes is marked failed for a server restart before the process exits (`GET /results/{job_id}`
+returns `failure_reason: "server_restart"`); it still has to be re-submitted, because the analysis
+itself is gone.
 
 **Clearing a request does not remove the floor.** Setting `resources.requests.memory=""` drops only
 the explicit request; Kubernetes copies the matching limit into the request when no admission policy

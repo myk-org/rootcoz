@@ -238,7 +238,11 @@ spec:
           secret:
             secretName: {{ include "rootcoz.sidecarAgentSecretName" . }}
         {{- end }}
-      terminationGracePeriodSeconds: 30
+      # The app's own shutdown budget is 15 s (uvicorn) + 40 s (task unwind, the
+      # residual) and the restart mark is written before that unwind: the grace
+      # period is what the teardown is sized from, it is not a requirement of the
+      # mark (#458). tox's chart env asserts 60 and grace > 15 + 40.
+      terminationGracePeriodSeconds: 60
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

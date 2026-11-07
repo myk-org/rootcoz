@@ -1438,6 +1438,59 @@ async def test_fail_job_without_result_write_keeps_a_newer_terminal_status(
     assert failed["completed_at"]
 
 
+class TestMarkJobsFailedForRestart:
+    """The mark the shutdown writes before it drains (#458)."""
+
+    async def test_a_restart_marked_job_is_not_recovered_as_an_orphan(
+        self, setup_test_db: Path
+    ) -> None:
+        """The next boot does not report it: it is failed, not an orphan."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result("job-x", "", "running")
+            assert await storage.mark_jobs_failed_for_restart(["job-x"]) == ["job-x"]
+
+            waiting, recovered = await storage.mark_stale_results_failed()
+            assert waiting == []
+            assert recovered == []
+            row = await storage.get_result("job-x")
+
+        assert row["status"] == "failed"
+        assert row["error"] == storage.RESTART_ERROR_MSG
+        assert row["failure_reason"] == "server_restart"
+        assert row["completed_at"] is not None
+
+    async def test_the_restart_mark_keeps_a_job_that_already_ended(
+        self, setup_test_db: Path
+    ) -> None:
+        """A job that finished inside the shutdown window keeps its own status."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result("job-done", "", "running")
+            await storage.update_status("job-done", "completed")
+            assert await storage.mark_jobs_failed_for_restart(["job-done"]) == []
+            row = await storage.get_result("job-done")
+
+        assert row["status"] == "completed"
+        assert row["failure_reason"] == ""
+
+    async def test_a_waiting_row_is_refused_by_the_storage_guard(
+        self, setup_test_db: Path
+    ) -> None:
+        """``waiting`` is resumed by the next boot, so the write must refuse it."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result("job-w", "", "waiting")
+            landed = await storage.fail_job_without_result_write(
+                "job-w",
+                storage.RESTART_ERROR_MSG,
+                failure_reason=storage.SERVER_RESTART_FAILURE_REASON,
+                only_statuses=storage.ORPHAN_STATUSES,
+            )
+            row = await storage.get_result("job-w")
+
+        assert landed is False
+        assert row["status"] == "waiting"
+        assert row["failure_reason"] == ""
+
+
 @pytest.mark.asyncio
 async def test_list_distinct_job_names(setup_test_db: Path):
     """list_distinct_job_names returns unique non-empty job names."""

@@ -2319,6 +2319,18 @@ _PROCESS_STARTED_AT = _time.time()
 # Track analysis background tasks by job_id for abort support
 _job_tasks: dict[str, asyncio.Task[Any]] = {}
 
+#: How long the shutdown lets cancelled tasks unwind. Their ``finally`` blocks can
+#: delete a workspace tree for minutes (#402 A1), so the restart mark below is
+#: written *before* this wait: whatever is still running when it expires is
+#: abandoned by *this* process on its own terms (log line written, DB handle
+#: closed) instead of by the kubelet's SIGKILL mid-delete. The number is the
+#: residual budget, not a round guess: 60 s grace - 15 s uvicorn ceiling - 5 s to
+#: exit = 40, which is all the cleanup time the grace period can actually give.
+#: The 15 s lives only in entrypoint.sh (see the chart/tox assertions); app-side
+#: code does not repeat it, because a second copy under a "must match" comment is
+#: a number nothing checks.
+SHUTDOWN_DRAIN_SECONDS = 40
+
 
 def _remove_job_task(job_id: str) -> Callable[[asyncio.Task[object]], None]:
     """Create a done-callback that removes a job from the task tracker."""
@@ -2937,14 +2949,24 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         server_status.stop_loop_lag_watchdog()
-        # Nothing tracked may outlive the app: a surviving task keeps reading the
-        # module-global DB_PATH and races whatever runs next in this process.
+        # Read before the cancel: a cancelled task's done-callback pops it from
+        # _job_tasks, and the mark needs the ids that were in flight.
+        in_flight = list(_job_tasks)
         pending = list(_background_tasks)
         for task in pending:
             task.cancel()
+        # Before the drain, not after: this write is the only thing that keeps a
+        # SIGTERM from looking like a crash on the next boot, and the drain below
+        # can outlive the kubelet's grace period.
+        await storage.mark_jobs_failed_for_restart(in_flight)
+        # Nothing tracked may outlive the app: a surviving task keeps reading the
+        # module-global DB_PATH and races whatever runs next in this process.
         if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+            with contextlib.suppress(TimeoutError):
+                async with asyncio.timeout(SHUTDOWN_DRAIN_SECONDS):
+                    await asyncio.gather(*pending, return_exceptions=True)
         _background_tasks.clear()
+        _job_tasks.clear()
         cleanup_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await cleanup_task
