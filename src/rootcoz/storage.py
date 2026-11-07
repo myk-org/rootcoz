@@ -276,19 +276,26 @@ class _SweepDb:
         if self.gone:  # a stopped pass stays stopped; the second stage must not resume
             return None
         try:
+            before = self.path.stat()
+        except FileNotFoundError:
+            return None
+        if self.identity is None:
+            self.identity = (before.st_dev, before.st_ino)
+        elif (before.st_dev, before.st_ino) != self.identity:
+            # Another database at our path: sweeping it would count its bytes as
+            # the ones this pass started with.
+            return None
+        try:
             db = await aiosqlite.connect(_db_uri(self.path), uri=True)
         except sqlite3.OperationalError:  # gone: rw refuses to create the file again
             return None
         try:
-            # Verified after the open, never before it: the connection holds the
-            # descriptor, so a path swapped during the await is the only way to be
-            # handed another file, and this stat still sees that swap.
-            stat = self.path.stat()
-            if self.identity is None:
-                self.identity = (stat.st_dev, stat.st_ino)
-            elif (stat.st_dev, stat.st_ino) != self.identity:
-                # Another database at our path: sweeping it would count its bytes
-                # as the ones this pass started with.
+            # Read on both sides of the open: the identity is pinned to a file that
+            # stayed put across it, so a swap landing inside the await -- after the
+            # descriptor was taken, before this stat -- is a mismatch instead of the
+            # new pin, and the batches behind it cannot follow the path.
+            after = self.path.stat()
+            if (after.st_dev, after.st_ino) != self.identity:
                 await db.close()
                 return None
             has_results = await _has_results_table(db)

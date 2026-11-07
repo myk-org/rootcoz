@@ -717,11 +717,11 @@ async def test_a_sweep_stops_when_its_path_becomes_another_rootcoz_database(
 async def test_a_sweep_refuses_a_database_swapped_while_it_opens(
     _storage, storage_logs, tmp_path: Path
 ) -> None:
-    """The identity is read after the open, not before it.
+    """A swap that lands while a connection opens is refused, not committed to.
 
-    A ``stat`` taken before the await cannot see a swap that lands during it, and
-    the pass would then read and commit to the replacement. What the connection
-    actually opened is the file that has to be verified.
+    A ``stat`` taken only before the await cannot see a swap that lands during it,
+    and the pass would then read and commit to the replacement. What the
+    connection actually opened is the file that has to be verified.
     """
     db_path = _storage
     await _insert_legacy("job-raced-1", _payload(failure_count=20))
@@ -746,6 +746,48 @@ async def test_a_sweep_refuses_a_database_swapped_while_it_opens(
         stats = await storage.backfill_result_json_compression()
 
     assert calls == 3, "the swap must have landed before the write open"
+    assert stats["rows"] == 0, "the pass committed a batch into the replacement"
+    stopped = [r for r in storage_logs.records if _STOPPED in r.getMessage()]
+    assert len(stopped) == 1, [r.getMessage() for r in storage_logs.records]
+    assert db_path.read_bytes() == replacement_bytes, (
+        "the sweep wrote into the database that replaced it"
+    )
+
+
+async def test_a_sweep_does_not_pin_a_database_it_did_not_open(
+    _storage, storage_logs, tmp_path: Path
+) -> None:
+    """The first connection pins the file it opened, not whatever sits at the path.
+
+    The identity is read on both sides of the open, so a swap landing inside the
+    await -- after the descriptor was taken but before that stat -- is a mismatch
+    instead of becoming the pinned identity. Pinned to the replacement, every
+    later batch would accept it and commit into it.
+    """
+    db_path = _storage
+    await _insert_legacy("job-raced-0", _payload(failure_count=20))
+    await storage.backfill_results_denorm()
+    async with storage._connect_db() as db:  # a self-contained copy of a rootcoz db
+        await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    replacement = tmp_path / "replacement.db"
+    replacement_bytes = db_path.read_bytes()
+    replacement.write_bytes(replacement_bytes)
+
+    real_connect = storage.aiosqlite.connect
+    calls = 0
+
+    async def swap_after_the_open(*args: Any, **kwargs: Any) -> Any:
+        nonlocal calls
+        calls += 1
+        db = await real_connect(*args, **kwargs)
+        if calls == 1:  # the check open: the swap lands once its descriptor exists
+            replacement.replace(db_path)
+        return db
+
+    with patch.object(storage.aiosqlite, "connect", new=swap_after_the_open):
+        stats = await storage.backfill_result_json_compression()
+
+    assert calls == 1, "the pass must have stopped at the first connection"
     assert stats["rows"] == 0, "the pass committed a batch into the replacement"
     stopped = [r for r in storage_logs.records if _STOPPED in r.getMessage()]
     assert len(stopped) == 1, [r.getMessage() for r in storage_logs.records]
