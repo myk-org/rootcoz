@@ -139,10 +139,11 @@ probes:
     periodSeconds: 2
     timeoutSeconds: 10
     failureThreshold: 30
-    # shortcut: one legal value — the schema pins enum [1] and a literal `1` in
-    # the template renders identically. Kept (on all three probes) only because
-    # the issue asks for every field; delete key, reference and schema entry
-    # together when nobody cares. See the identical line under readiness.
+    # shortcut: one legal value — Kubernetes requires 1 for startup and
+    # liveness, the schema pins enum [1], and a literal `1` in the template
+    # renders identically. Kept on both probes only because the issue asks for
+    # every field; delete key, reference and schema entry together when nobody
+    # cares. Readiness is the odd one out: it may be > 1.
     successThreshold: 1
   readiness:
     # /health answers in ~1 ms (main.py:14448-14451). This timeout absorbs a
@@ -153,7 +154,10 @@ probes:
     periodSeconds: 10
     timeoutSeconds: 5
     failureThreshold: 3
-    successThreshold: 1  # shortcut: constant, see the note under startup
+    # Consecutive successes required before an unready pod gets traffic again.
+    # 1 matches the old literal; raise it to 2+ to stop a pod flapping on a
+    # half-recovered backend. Kubernetes allows any value >= 1 here.
+    successThreshold: 1
   liveness:
     # Budget: 30 s × 5 ≈ 2.5 min of unresponsiveness before SIGTERM, up to ~5 min
     # when every attempt burns its 30 s timeout. It fired correctly on 2026-11-04;
@@ -162,7 +166,7 @@ probes:
     periodSeconds: 30
     timeoutSeconds: 30
     failureThreshold: 5
-    successThreshold: 1  # shortcut: constant, see the note under startup
+    successThreshold: 1  # shortcut: constant (Kubernetes requires 1), see startup
 
 env:
   # OpenShift arbitrary-UID compatibility → XDG_DATA_HOME

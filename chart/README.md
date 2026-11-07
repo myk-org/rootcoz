@@ -226,9 +226,11 @@ only the two numbers below are restated because CI asserts them.
   stall** — it fired correctly on 2026-11-04.
 
 Every other timing field — startup `2/10/30`, readiness `5/10/3`, liveness `15/30/5`
-(`periodSeconds`/`timeoutSeconds`/`failureThreshold`) — is in `chart/values.yaml`, where
-`successThreshold: 1` is a constant, not a knob: Kubernetes accepts no other value, and the schema
-pins it.
+(`periodSeconds`/`timeoutSeconds`/`failureThreshold`) — is in `chart/values.yaml`, along with each
+probe's `successThreshold: 1`. **Readiness `successThreshold` is a real knob**: Kubernetes allows any
+value ≥ 1 there, so raise it if you want a pod to prove itself over consecutive checks before it gets
+traffic. Startup and liveness pin it to `1` — Kubernetes accepts no other value, and the schema
+enforces that.
 
 **Targets are not values.** Readiness and liveness are `GET /health` — a dict literal, no I/O.
 Never point them at `/api/health`: it runs the DB, Jenkins, sidecar and Report Portal checks behind a
@@ -437,7 +439,8 @@ values are asserted too: the default render must carry readiness `timeoutSeconds
 comparing each block verbatim (a literal drifting back into the template fails), readiness and
 liveness must GET `/health` with no `api/health` between them, the startup probe must keep its
 exec `/api/health` wait, and the schema rejects `probes.readiness.timeoutSeconds=5s`, a typo'd
-`probes.readines.` key and `successThreshold: 2`.
+`probes.readines.` key, liveness `successThreshold: 2` and readiness `successThreshold: 0`,
+while readiness `successThreshold: 2` renders.
 
 ## Limitations
 

@@ -210,7 +210,7 @@
             "periodSeconds": { "type": "integer", "minimum": 1 },
             "timeoutSeconds": { "type": "integer", "minimum": 1 },
             "failureThreshold": { "type": "integer", "minimum": 1 },
-            "successThreshold": { "type": "integer", "enum": [1], "description": "Kubernetes requires 1 for startup, readiness and liveness probes." }
+            "successThreshold": { "type": "integer", "enum": [1], "description": "Kubernetes requires 1 for startup and liveness probes." }
           }
         },
         "readiness": {
@@ -222,7 +222,7 @@
             "periodSeconds": { "type": "integer", "minimum": 1 },
             "timeoutSeconds": { "type": "integer", "minimum": 1 },
             "failureThreshold": { "type": "integer", "minimum": 1 },
-            "successThreshold": { "type": "integer", "enum": [1], "description": "Kubernetes requires 1 for startup, readiness and liveness probes." }
+            "successThreshold": { "type": "integer", "minimum": 1, "description": "Readiness may require more than one consecutive success before a pod gets traffic." }
           }
         },
         "liveness": {
@@ -234,7 +234,7 @@
             "periodSeconds": { "type": "integer", "minimum": 1 },
             "timeoutSeconds": { "type": "integer", "minimum": 1 },
             "failureThreshold": { "type": "integer", "minimum": 1 },
-            "successThreshold": { "type": "integer", "enum": [1], "description": "Kubernetes requires 1 for startup, readiness and liveness probes." }
+            "successThreshold": { "type": "integer", "enum": [1], "description": "Kubernetes requires 1 for startup and liveness probes." }
           }
         }
       }
