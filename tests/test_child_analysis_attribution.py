@@ -1,5 +1,6 @@
 """Regressions for Jenkins child analysis failure and usage boundaries."""
 
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -17,7 +18,9 @@ from rootcoz.sources.jenkins_source import (
 
 
 @pytest.mark.asyncio
-async def test_console_only_usage_attaches_to_each_child_build(temp_db_path) -> None:
+async def test_console_only_usage_attaches_to_each_child_build(
+    temp_db_path, tmp_path: Path
+) -> None:
     from rootcoz.token_tracking import _child_context
 
     async def ai_response(_prompt, **_kwargs):
@@ -50,7 +53,7 @@ async def test_console_only_usage_attaches_to_each_child_build(temp_db_path) -> 
                 settings=Settings(),
                 depth=0,
                 max_depth=3,
-                repo_path=None,
+                repo_path=tmp_path,
                 ai_provider="test",
                 ai_model="test",
                 ai_call_timeout=None,
