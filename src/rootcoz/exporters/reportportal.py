@@ -20,7 +20,6 @@ from reportportal_client import RPClient
 
 from rootcoz import get_child_logger
 from rootcoz.exporters.base import ExportContext, Exporter, ExporterResult
-from rootcoz.models import is_failed_analysis
 
 if TYPE_CHECKING:
     from rootcoz.models import FailureAnalysis
@@ -701,12 +700,12 @@ class ReportPortalClient(Exporter):
         Returns:
             Dict with keys: ``pushed``, ``unmatched``, ``defaulted``, ``errors``,
             ``launch_id``. ``defaulted`` lists items whose classification maps
-            to no RP defect type; they are still pushed with the neutral
-            ``TO_INVESTIGATE`` locator, and each entry names that
-            classification. ``unmatched`` lists items carrying no analysis at
-            all (:func:`rootcoz.models.is_failed_analysis`): they are left out
-            untouched rather than reset to a defect type we did not pick, and
-            an item that could not be pushed at all is named in ``errors``.
+            to no RP defect type -- including an item with no analysis at all,
+            whose classification is empty; they are still pushed with the
+            neutral ``TO_INVESTIGATE`` locator so the test reaches the launch,
+            and each entry names that classification. ``unmatched`` is always
+            empty since #397 and kept only for clients that read it; an item
+            that could not be pushed at all is named in ``errors``.
         """
         if not matched_pairs:
             return {
@@ -732,7 +731,6 @@ class ReportPortalClient(Exporter):
 
         history = history_classifications or {}
         reviewed_by = reviewed_by or {}
-        unmatched: list[str] = []
         defaulted: list[str] = []
         errors: list[str] = []
         launch_id: int | None = None
@@ -764,13 +762,10 @@ class ReportPortalClient(Exporter):
                 locators.get("TO_INVESTIGATE") or _DEFAULT_LOCATORS["TO_INVESTIGATE"]
             )
             if push_classifications and not locator:
-                if is_failed_analysis(failure):
-                    # No analysis at all — a provider-outage placeholder or a
-                    # narration-only answer. Pushing TO_INVESTIGATE here would
-                    # reset a defect type a human set on the RP item and comment
-                    # a link to an analysis that does not exist, so leave it be.
-                    unmatched.append(f"{item_name} (no analysis)")
-                    continue
+                # An empty classification (a provider-outage placeholder, a
+                # narration-only answer, a legacy plain-text analysis) falls
+                # back exactly like an unmapped one: #397 requires the test to
+                # reach the launch, not be dropped (#3148201).
                 defaulted.append(
                     f"{item_name} (classification: {ai_classification or 'none'})"
                 )
@@ -896,7 +891,8 @@ class ReportPortalClient(Exporter):
 
         return {
             "pushed": pushed,
-            "unmatched": unmatched,
+            # Always empty since #397 -- see the docstring.
+            "unmatched": [],
             # A failed batch pushed nothing, so claiming these reached RP under
             # TO_INVESTIGATE would be false; the failure is in `errors`.
             "defaulted": defaulted if pushed else [],

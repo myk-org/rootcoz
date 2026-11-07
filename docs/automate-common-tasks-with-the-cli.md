@@ -200,7 +200,7 @@ Bound the wait as well (for example `for i in $(seq 1 240)`) so a job stuck in `
    rootcoz --json push-reportportal "$JOB_ID"
    ```
 
-   The response includes `pushed`, `errors`, `defaulted`, `unmatched`, and `launch_id`. `defaulted` names items pushed as `TO INVESTIGATE` because they had no classification to map; `unmatched` names items left untouched because they carry no analysis at all, so a defect type a human set on them survives.
+   The response includes `pushed`, `errors`, `defaulted`, `unmatched`, and `launch_id`. `defaulted` names items pushed as `TO INVESTIGATE` because they had no classification to map, `none` when the analysis carried none at all; `unmatched` is always empty since #397 and kept only for clients that still read it.
 
 8. **Script report output.**
 
@@ -297,7 +297,7 @@ Bound the wait as well (for example `for i in $(seq 1 240)`) so a job stuck in `
 - `results tests` returns fewer entries than the dashboard failure count.  
   The dashboard counts analysis failures, while `results tests` pages the CI test entries. Raise `--limit` to 200 and keep incrementing `--offset` until `has_more` is `false`.
 - `push` reports items under `defaulted`.  
-  Those failures had no classification (or an unknown one) to map, so they were pushed as `TO INVESTIGATE`. Re-analyze the job to classify them and push again. A test with no analysis at all is left untouched and named under `unmatched`; a test that never reached the launch is named under `errors`, not here.
+  Those failures had no classification (or an unknown one) to map, so they were pushed as `TO INVESTIGATE`; an analysis with none at all is named as `none`. Re-analyze the job to classify them and push again. A test that never reached the launch is named under `errors`, not here.
 - A `403` mentions `can_view_reports`.  
   Your role is fine but the reports grant is missing. An admin can add it with `rootcoz admin users set-can-view-reports USERNAME true`.
 

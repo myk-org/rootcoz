@@ -106,7 +106,8 @@ export interface CodeFix {
 }
 
 export interface AnalysisDetail {
-  classification: string
+  /** Absent on legacy plain-text analyses stored before v2 (#397). */
+  classification?: string
   pattern: string
   affected_tests: string[]
   details: string

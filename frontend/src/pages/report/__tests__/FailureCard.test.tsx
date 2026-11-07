@@ -129,6 +129,22 @@ describe('FailureCard incomplete analysis', () => {
     )
   })
 
+  it('renders the reason of a legacy member whose analysis has no classification', () => {
+    // A pre-v2 analysis was stored as plain text with no classification field at
+    // all; re-analysis can fail again and only attach the reason, so the card
+    // must not throw on the missing value.
+    showGroup([
+      { id: 'id-0', test_name: 'test-0', error: 'boom', error_signature: 'shared',
+        analysis: { classification: 'CODE ISSUE', pattern: '', affected_tests: [], details: '', artifacts_evidence: '' } },
+      { id: 'id-1', test_name: 'test-1', error: 'boom', error_signature: 'shared',
+        analysis: { pattern: '', affected_tests: [], details: 'legacy narration', artifacts_evidence: '' },
+        analysis_error: 'AI analysis incomplete: no usable classification' },
+    ])
+    expect(screen.getByTestId('analysis-incomplete-reason')).toHaveTextContent(
+      'no usable classification',
+    )
+  })
+
   it('renders nothing when the row has a real analysis', () => {
     showCard(1)
     expect(screen.queryByTestId('analysis-incomplete-reason')).toBeNull()

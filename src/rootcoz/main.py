@@ -12360,9 +12360,9 @@ async def _execute_rp_push(
 
     Returns:
         Dict with keys: ``pushed``, ``unmatched``, ``defaulted``, ``errors``,
-        ``launch_id``. An unmappable classification is pushed as
-        ``TO INVESTIGATE`` and named in ``defaulted``; an item with no analysis
-        at all is left untouched and named in ``unmatched``.
+        ``launch_id``. An unmappable classification -- including the empty one
+        of an item with no analysis at all -- is pushed as ``TO INVESTIGATE``
+        and named in ``defaulted``; ``unmatched`` is always empty since #397.
     """
     context = await _build_export_context(
         job_id=job_id,

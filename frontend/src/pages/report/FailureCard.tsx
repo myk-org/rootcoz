@@ -253,8 +253,10 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
   const incompleteReasons = [
     ...new Set(
       group.tests.flatMap((t) => {
+        // A legacy analysis stored as plain text has no classification at all,
+        // so default it before trimming (failureKeys does the same).
         const effective =
-          classifications[scopedReviewKey(t.test_name)] ?? t.analysis.classification
+          classifications[scopedReviewKey(t.test_name)] ?? t.analysis.classification ?? ''
         return t.analysis_error && !effective.trim() ? [t.analysis_error] : []
       }),
     ),

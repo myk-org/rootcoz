@@ -313,7 +313,7 @@ See [Managing Users and Server Settings](manage-users-and-server-settings.html) 
 - `--child-build requires --child-job`.  
   Pass both flags together; there is no way to target a child build without naming its job.
 - A `push` reports every test under `defaulted`.  
-  None of the failures had a classification to map, so they were pushed as `TO INVESTIGATE`. Re-analyze the jobs first. A test with no analysis at all is left untouched and named under `unmatched`; a test that never reached the launch is named under `errors` instead.
+  None of the failures had a classification to map, so they were pushed as `TO INVESTIGATE`; an analysis with none at all is named as `none`. Re-analyze the jobs first. A test that never reached the launch is named under `errors` instead.
 
 ## Related Pages
 
