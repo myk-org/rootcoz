@@ -5,6 +5,7 @@ import errno
 import json as json_mod
 import logging
 import os
+import shlex
 import sys
 import tempfile
 from collections.abc import Callable
@@ -2683,12 +2684,12 @@ def _resolve_tracker_tokens(
     )
 
 
-def _validate_issue_type(issue_type: str) -> str:
+def _validate_issue_type(issue_type: str, option: str = "--type") -> str:
     """Validate and normalize issue type, exit on invalid input."""
     normalized = issue_type.lower()
     if normalized not in ("github", "jira"):
         typer.echo(
-            f"Error: --type must be 'github' or 'jira', got '{issue_type}'",
+            f"Error: {option} must be 'github' or 'jira', got '{issue_type}'",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -2951,6 +2952,176 @@ def create_issue(
         typer.echo(f"URL: {data.get('url', '')}")
         if data.get("comment_id"):
             typer.echo(f"Comment added (id: {data['comment_id']})")
+
+
+@app.command("propose-chat-issue")
+def propose_chat_issue(
+    target: str = typer.Option(..., "--target", help="github or jira."),
+    title: str = typer.Option(..., "--title", help="Issue title."),
+    body: str = typer.Option(..., "--body", help="Issue body."),
+    repo: str = typer.Option(
+        "",
+        "--repo",
+        help="GitHub repository to file in, as owner/name (empty: the default).",
+    ),
+    job_id: str = typer.Option(
+        "",
+        "--job-id",
+        help="Job whose repos bound a non-admin GitHub issue.",
+    ),
+    jira_project_key: str = typer.Option(
+        "",
+        "--jira-project-key",
+        help="Jira project key for bug creation (overrides server config).",
+    ),
+    jira_security_level: str = typer.Option(
+        "",
+        "--jira-security-level",
+        help="Jira security level name for restricted issues.",
+    ),
+    jira_issue_type: str = typer.Option(
+        "Bug",
+        "--jira-issue-type",
+        help="Jira issue type name (e.g. Bug, Story, Task). Default: Bug.",
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Draft an issue from chat text and print the confirmation id and code.
+
+    Files nothing. Print the returned title and body, review them, then pass the
+    id and code to `create-chat-issue` — the server files only a draft that was
+    proposed and whose code you read in the preview, and it works once.
+    """
+    _set_json(json_output)
+    normalized_target = _validate_issue_type(target, option="--target")
+    try:
+        client = _get_client()
+        data = client.propose_chat_issue(
+            target=normalized_target,
+            title=title,
+            body=body,
+            repo=repo,
+            job_id=job_id,
+            jira_project_key=jira_project_key,
+            jira_security_level=jira_security_level,
+            jira_issue_type=jira_issue_type,
+        )
+    except RootCozError as err:
+        _handle_error(err)
+
+    if _state.get("json", False):
+        print_output(data, columns=[], as_json=True)
+    else:
+        typer.echo(f"Confirmation id: {data.get('confirmation_id', '')}")
+        typer.echo(f"Confirmation code: {data.get('confirmation_code', '')}")
+        typer.echo(f"Title: {data.get('title', '')}")
+        typer.echo("Body:")
+        typer.echo(data.get("body", ""))
+        # Every option the create command needs to redeem this draft, so the
+        # command printed here can be copied and run as-is.
+        suggested = [
+            "rootcoz",
+            "create-chat-issue",
+            "--target",
+            normalized_target,
+            "--confirmation-id",
+            str(data.get("confirmation_id", "")),
+            "--confirmation-code",
+            str(data.get("confirmation_code", "")),
+            "--title",
+            shlex.quote(str(data.get("title", ""))),
+            "--body",
+            shlex.quote(str(data.get("body", ""))),
+        ]
+        if repo:
+            suggested.extend(["--repo", shlex.quote(repo)])
+        if job_id:
+            suggested.extend(["--job-id", shlex.quote(job_id)])
+        if jira_project_key:
+            suggested.extend(["--jira-project-key", shlex.quote(jira_project_key)])
+        if jira_security_level:
+            suggested.extend(
+                ["--jira-security-level", shlex.quote(jira_security_level)]
+            )
+        if jira_issue_type != "Bug":
+            suggested.extend(["--jira-issue-type", shlex.quote(jira_issue_type)])
+        typer.echo("\nReview it, then file it with: " + " ".join(suggested))
+
+
+@app.command("create-chat-issue")
+def create_chat_issue(
+    target: str = typer.Option(..., "--target", help="github or jira, as proposed."),
+    confirmation_id: str = typer.Option(
+        ...,
+        "--confirmation-id",
+        help="Id from `rootcoz propose-chat-issue` for this exact title and body.",
+    ),
+    confirmation_code: str = typer.Option(
+        ...,
+        "--confirmation-code",
+        help="Code `propose-chat-issue` printed and the user read in the preview.",
+    ),
+    title: str = typer.Option(..., "--title", help="Issue title, as proposed."),
+    body: str = typer.Option(..., "--body", help="Issue body, as proposed."),
+    repo: str = typer.Option(
+        "",
+        "--repo",
+        help="GitHub repository to file in, as proposed (empty: the default).",
+    ),
+    job_id: str = typer.Option(
+        "",
+        "--job-id",
+        help="Job whose repos bound a non-admin GitHub issue, as proposed.",
+    ),
+    jira_project_key: str = typer.Option(
+        "",
+        "--jira-project-key",
+        help="Jira project key for bug creation (overrides server config).",
+    ),
+    jira_security_level: str = typer.Option(
+        "",
+        "--jira-security-level",
+        help="Jira security level name for restricted issues.",
+    ),
+    jira_issue_type: str = typer.Option(
+        "Bug",
+        "--jira-issue-type",
+        help="Jira issue type name (e.g. Bug, Story, Task). Default: Bug.",
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """File an issue drafted with `propose-chat-issue`.
+
+    Tracker credentials are the ones saved in your account: this command
+    deliberately has no token options, so it can never file an issue under a
+    server token. The id and code authorise one draft, once, so propose again
+    after editing the title, body or destination.
+    """
+    _set_json(json_output)
+    normalized_target = _validate_issue_type(target, option="--target")
+    try:
+        client = _get_client()
+        data = client.create_chat_issue(
+            target=normalized_target,
+            title=title,
+            body=body,
+            confirmation_id=confirmation_id,
+            confirmation_code=confirmation_code,
+            repo=repo,
+            job_id=job_id,
+            jira_project_key=jira_project_key,
+            jira_security_level=jira_security_level,
+            jira_issue_type=jira_issue_type,
+        )
+    except RootCozError as err:
+        _handle_error(err)
+
+    if _state.get("json", False):
+        print_output(data, columns=[], as_json=True)
+    else:
+        key_or_number = data.get("key") or f"#{data.get('number', '')}"
+        typer.echo(f"Created: {key_or_number}")
+        typer.echo(f"URL: {data.get('url', '')}")
 
 
 @app.command("validate-token")

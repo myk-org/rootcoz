@@ -3128,6 +3128,193 @@ def test_issue_create_is_audited(app_client) -> None:
     assert len(events) == 1
     assert events[0]["details"]["tracker"] == "github"
     assert events[0]["target_id"] == "job-1"
+    # The row names the issue it filed, so the trail is where a reader finds it.
+    assert events[0]["details"]["url"] == "https://github.com/o/r/issues/1"
+
+
+def _create_github_issue_for(app_client, repo_url: str) -> dict[str, Any]:
+    """File one GitHub issue through the report endpoint; return its audit row."""
+    admin_login(app_client)
+    owner_repo = repo_url.removeprefix("https://github.com/")
+    with (
+        patch.object(
+            main, "_load_effective_failure", AsyncMock(return_value=(None, {}, None))
+        ),
+        patch.object(main, "_resolve_github_repo_url", return_value=repo_url),
+        patch.object(
+            main,
+            "create_github_issue",
+            AsyncMock(
+                return_value={
+                    "url": f"https://github.com/{owner_repo}/issues/1",
+                    "number": 1,
+                }
+            ),
+        ),
+        patch.object(main, "_add_tracker_comment", AsyncMock(return_value=1)),
+    ):
+        response = app_client.post(
+            "/results/job-1/create-github-issue",
+            json={
+                "test_name": "test_a",
+                "title": "T",
+                "body": "B",
+                "github_token": "gh-token-0123456789",
+            },
+        )
+    assert response.status_code == 201, response.text
+    events = _events(action="issue.create")
+    assert len(events) == 1
+    return events[0]["details"]
+
+
+def test_issue_create_row_names_the_repository_of_its_url(app_client) -> None:
+    """The row says which repo its url points at, not only which job (#416 3.2).
+
+    A reader of the trail can tell what the link belongs to without the log
+    line, which is not in ``audit_events``.
+    """
+    details = _create_github_issue_for(app_client, "https://github.com/o/r")
+
+    assert details["repo"] == "o/r"
+    assert f"/{details['repo']}/" in details["url"]
+
+
+def test_a_credential_shaped_repository_name_keeps_its_issue_url(
+    app_client,
+) -> None:
+    """Redaction must not eat a link's path segment (#416 3.2).
+
+    ``OpenShiftVirtualization2024`` is a repository name, but the bare-run
+    heuristic also reads it as a token, which stored the row's own url as
+    ``.../[redacted]/issues/1`` — a link that goes nowhere.
+    """
+    repo = "OpenShiftVirtualization2024"
+    url = f"https://github.com/o/{repo}/issues/1"
+
+    details = _create_github_issue_for(app_client, f"https://github.com/o/{repo}")
+
+    assert details["url"] == url
+    assert f"/{repo}/" in details["url"]
+
+
+def test_a_credential_inside_a_url_detail_is_still_scrubbed() -> None:
+    """Keeping a link's path segments does not keep a token in the link."""
+    token = "ghp_9f8e7d6c5b4a39281706f5e4d3c2b1a0ffee"  # pragma: allowlist secret  # gitleaks:allow
+
+    redacted = main._redact_details({"url": f"https://github.com/o/r?t={token}"})
+
+    assert token not in redacted["url"]
+    assert redacted["url"].startswith("https://github.com/o/r?t=")
+
+
+@pytest.mark.parametrize("name", ["repo", "site", "jira_project"])
+def test_a_credential_shaped_destination_name_is_kept(name: str) -> None:
+    """A field whose job is to name a destination is not free text (#416)."""
+    value = "OpenShiftVirtualization2024"
+    assert len(value) >= 24
+    assert main._redact_details({name: value}) == {name: value}
+
+
+@pytest.mark.parametrize("name", ["repo", "url"])
+def test_a_credential_inside_a_destination_detail_is_still_scrubbed(
+    name: str,
+) -> None:
+    """Keeping a destination name does not keep a token pasted into it."""
+    token = "ghp_9f8e7d6c5b4a39281706f5e4d3c2b1a0ffee"  # pragma: allowlist secret  # gitleaks:allow
+
+    redacted = main._redact_details(
+        {name: f"https://github.com/o/OpenShiftVirtualization2024?t={token}"}
+    )
+
+    assert redacted[name] == (
+        "https://github.com/o/OpenShiftVirtualization2024?t=[redacted]"
+    )
+
+
+def _create_jira_issue_for(
+    app_client, issue_url: str
+) -> tuple[dict[str, Any], AsyncMock]:
+    """File one Jira issue through the report endpoint; return its audit row."""
+    admin_login(app_client)
+    _use_jira_oauth_settings()
+    create = AsyncMock(return_value={"key": "PROJ-1", "url": issue_url})
+    with (
+        patch.object(
+            main, "_load_effective_failure", AsyncMock(return_value=(None, {}, None))
+        ),
+        patch.object(main, "create_jira_bug", create),
+        patch.object(main, "_add_tracker_comment", AsyncMock(return_value=1)),
+    ):
+        response = app_client.post(
+            "/results/job-1/create-jira-bug",
+            json={
+                "test_name": "test_a",
+                "title": "T",
+                "body": "B",
+                "jira_token": "ATOA-test-secret",  # pragma: allowlist secret
+            },
+        )
+    assert response.status_code == 201, response.text
+    events = _events(action="issue.create")
+    assert len(events) == 1
+    return events[0]["details"], create
+
+
+def test_a_malformed_jira_site_still_records_the_filed_issue(app_client) -> None:
+    """A URL that cannot be parsed must not fail a create that already happened.
+
+    ``urlparse`` raises ``ValueError`` on an unclosed IPv6 host, and the Jira
+    link is built straight from the raw site setting. The row keeps the link,
+    leaves the unparseable host empty, and the issue is filed exactly once.
+    """
+    details, create = _create_jira_issue_for(app_client, "https://[::1/browse/PROJ-1")
+
+    assert details["result"] == "success"
+    assert details["url"] == "https://[::1/browse/PROJ-1"
+    assert details["site"] == ""
+    assert create.await_count == 1
+
+
+def test_a_pending_users_issue_attempt_leaves_a_row(temp_db_path: Path) -> None:
+    """REQUIRE_APPROVAL blocks the handler, so the auth layer must audit it.
+
+    The approval-status refusal returns before either chat-issue endpoint runs,
+    which makes this the only place those attempts can reach the trail.
+    """
+    with patch.object(main, "create_github_issue") as mock_create:
+        for client in make_app_client(temp_db_path, {"REQUIRE_APPROVAL": "true"}):
+            registered = client.post(
+                "/api/auth/register", json={"username": "pending-issue"}
+            )
+            assert registered.status_code == 200, registered.text
+            headers = {"Authorization": f"Bearer {registered.json()['api_key']}"}
+            asyncio.run(storage.set_user_status("pending-issue", "pending"))
+            steps = {}
+            for path, step in (
+                ("/api/chat-issue/propose", "propose"),
+                ("/api/chat-issue", "create"),
+            ):
+                blocked = client.post(
+                    path,
+                    json={"target": "github", "title": "t", "body": "b"},
+                    headers=headers,
+                )
+                assert blocked.status_code == 403, blocked.text
+                steps[step] = True
+
+            events = _events(action="issue.create")
+            assert len(events) == 2, events
+            for event in events:
+                assert event["outcome"] == "denied"
+                assert event["actor"] == "pending-issue"
+                assert event["details"] == {
+                    "reason": "account_pending",
+                    "result": "refused",
+                    "step": event["details"]["step"],
+                }
+            assert {event["details"]["step"] for event in events} == set(steps)
+    mock_create.assert_not_called()
 
 
 def test_admin_db_query_is_audited_without_raw_sql(
