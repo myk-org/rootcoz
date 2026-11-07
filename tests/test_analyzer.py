@@ -1646,10 +1646,10 @@ class TestCloneAdditionalRepos:
         assert core_module._active_clones == 0
 
     @pytest.mark.asyncio
-    async def test_unexpected_clone_error_does_not_abort_the_others(
+    async def test_unexpected_clone_error_fails_the_job(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
-        """An exception outside the caught classes must not escape the gather."""
+        """An unexpected error fails the job instead of silently dropping the repo."""
         from rootcoz.engine import core as core_module
         from rootcoz.engine.core import logger as core_logger
 
@@ -1658,28 +1658,31 @@ class TestCloneAdditionalRepos:
             for i in range(3)
         ]
         manager = MagicMock(spec=RepositoryManager)
+        cloned_names: list[str] = []
 
         def fake_clone(_url, target, **_kwargs):
             if target.name == "repo1":
                 raise TypeError("malformed additional repo")
+            cloned_names.append(target.name)
             return target
 
         manager.clone_into.side_effect = fake_clone
 
         # simple_logger sets propagate=False, so attach the handler directly.
         original_level = core_logger.level
-        core_logger.setLevel(logging.WARNING)
+        core_logger.setLevel(logging.ERROR)
         core_logger.addHandler(caplog.handler)
         try:
-            cloned, result_path = await asyncio.wait_for(
-                clone_additional_repos(manager, repos, tmp_path), 5
-            )
+            with pytest.raises(TypeError):
+                await asyncio.wait_for(
+                    clone_additional_repos(manager, repos, tmp_path), 5
+                )
         finally:
             core_logger.removeHandler(caplog.handler)
             core_logger.setLevel(original_level)
 
-        assert result_path == tmp_path
-        assert set(cloned) == {"repo0", "repo2"}
+        # Siblings still cloned and every slot was released before the raise.
+        assert set(cloned_names) == {"repo0", "repo2"}
         assert any(
             "repo1" in record.message and "TypeError" in record.message
             for record in caplog.records

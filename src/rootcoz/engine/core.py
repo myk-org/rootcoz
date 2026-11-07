@@ -253,15 +253,19 @@ async def clone_additional_repos(
         *[_clone_into_subdir(ar) for ar in additional_repos_list],
         return_exceptions=True,
     )
+    # Known clone failures are handled per repo above and stay non-fatal. An
+    # exception that reaches here is unexpected, so fail the job instead of
+    # analyzing with that repo silently missing.
     for ar, outcome in zip(additional_repos_list, outcomes, strict=True):
         if isinstance(outcome, BaseException) and not isinstance(
             outcome, asyncio.CancelledError
         ):
-            logger.warning(
+            logger.error(
                 "Additional repo '%s' failed unexpectedly: %s",
                 ar.name,
                 type(outcome).__name__,
             )
+            raise outcome
 
     return cloned, repo_path
 
