@@ -440,7 +440,7 @@ comparing each block verbatim (a literal drifting back into the template fails),
 liveness must GET `/health` with no `api/health` between them, the startup probe must keep its
 exec `/api/health` wait, and the schema rejects `probes.readiness.timeoutSeconds=5s`, a typo'd
 `probes.readines.` key, liveness `successThreshold: 2` and readiness `successThreshold: 0`,
-while readiness `successThreshold: 2` renders.
+while a raised readiness `successThreshold` (the wiring entry renders `25`) is accepted.
 
 ## Limitations
 
