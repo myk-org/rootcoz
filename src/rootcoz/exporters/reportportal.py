@@ -409,6 +409,24 @@ class ReportPortalClient(Exporter):
             )
             return self._failure_result(msg, launch_id=launch_id)
 
+        # A failure with no item in this launch cannot be pushed at all, so it
+        # stays out of the response; name it here so an operator can find it
+        # instead of guessing why it is missing (#397).
+        matched_names = {failure.test_name for _, failure in matched}
+        skipped_names = [
+            f.test_name for f in rcz_failures if f.test_name not in matched_names
+        ]
+        if skipped_names:
+            logger.info(
+                "RP push: %s rootcoz failure(s) have no item in launch=%s, "
+                "job='%s' #%s: %s",
+                len(skipped_names),
+                launch_id,
+                job_name,
+                context.build_number,
+                ", ".join(skipped_names),
+            )
+
         try:
             push_result = await asyncio.to_thread(
                 self.push_classifications,

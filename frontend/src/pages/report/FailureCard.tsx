@@ -246,7 +246,9 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
     reviewKey(testName, scopedChildJobName, scopedChildBuildNumber)
 
   const repKey = scopedReviewKey(rep.test_name)
-  const classification = classifications[repKey] ?? analysis.classification
+  // Can be empty: a legacy plain-text analysis carries no classification, and
+  // both consumers below take a plain string (#397).
+  const classification = classifications[repKey] ?? analysis.classification ?? ''
   // Grouped failures share a card but not an outcome: a single-failure
   // re-analysis can leave a member unclassified while the representative is
   // classified, so every unclassified member's reason has to show (#397).

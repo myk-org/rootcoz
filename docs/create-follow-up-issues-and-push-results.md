@@ -227,7 +227,7 @@ For raw endpoints, see [API Endpoint Reference](api-reference.html) for details.
   Exporter pushes need `operator` or `admin`. Reviewers can create and link issues, but not push.
 
 - The push reports items it could not classify.  
-  Those failures have no classification (or an unknown one) to map to a Report Portal defect type, so they were still pushed as `TO INVESTIGATE`; the entry names the classification it could not map, `none` when the analysis carried no classification at all. Re-analyze the job to classify them and push again. If a test you expected to reach the launch is missing altogether, check `errors` and confirm the job name and build number match the Report Portal launch.
+  Those failures have no classification (or an unknown one) to map to a Report Portal defect type, so they were still pushed as `TO INVESTIGATE`; the entry names the classification it could not map, `none` when the analysis carried no classification at all. Re-analyze the job to classify them and push again. A failure that matches no item in the launch cannot be pushed at all, so it is named in the server log rather than in `errors`, which lists only items that failed to push: if a test you expected to reach the launch is missing altogether, confirm the job name and build number match the Report Portal launch and look for that log line.
 
 ## Related Pages
 
