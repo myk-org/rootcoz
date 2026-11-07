@@ -585,6 +585,24 @@ async def _notify_every(listeners: set[asyncio.Event], interval: float) -> None:
             event.set()
 
 
+async def _wait_for_chunk(
+    event: asyncio.Event, drain: asyncio.Task[None], timeout: float = 30
+) -> None:
+    """Wait for ``event``, re-raising the drain's own death instead of a timeout.
+
+    ``_background`` gathers with ``return_exceptions=True``, so a drain task
+    killed by a stream error would otherwise surface only as a 30s timeout.
+    """
+    waiter = asyncio.create_task(event.wait())
+    done, _ = await asyncio.wait(
+        {waiter, drain}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+    )
+    waiter.cancel()
+    if drain in done:
+        drain.result()  # the drain died: raise its real cause
+    assert event.is_set(), f"the stream produced nothing in {timeout}s"
+
+
 async def _drain_watching(
     stream, sink: list[str], watches: dict[str, asyncio.Event]
 ) -> None:
@@ -870,12 +888,12 @@ class TestNavbarPendingCountStream:
                         stream, chunks, {"dashboard": busy, event: retried}
                     ),
                     _notify_every(main._dashboard_listeners, 0.05),
-                ):
+                ) as (drain, _):
                     # A busy stream: another subscribed topic fires every 50ms,
                     # so the 30s keepalive timeout is never reached.  Both bounds
                     # are deadlock guards that only trip on a real hang, so a
                     # loaded runner can never decide the verdict.
-                    await asyncio.wait_for(busy.wait(), 30)
+                    await _wait_for_chunk(busy, drain)
                     assert not any(": keepalive" in chunk for chunk in chunks)
 
                     # The retry deadline comes due mid-traffic and delivers the
@@ -884,7 +902,7 @@ class TestNavbarPendingCountStream:
                     # arrives here, so this wait is what catches the bug.
                     fail.clear()
                     pending.append("p3")  # count is 1 until the retry lands
-                    await asyncio.wait_for(retried.wait(), 30)
+                    await _wait_for_chunk(retried, drain)
                     assert f"event: {event}\ndata: 1\n\n" in chunks
             finally:
                 await stream.aclose()
