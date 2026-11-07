@@ -1384,8 +1384,8 @@ def enrich_comments_cmd(
         emit_output=False,
     )
     if not _state.get("json", False):
-        enriched = data.get("enriched", 0)
-        typer.echo(f"Enriched {enriched} comment(s).")
+        # Server sends {comment_id: [badges]}; count the comments that got any.
+        typer.echo(f"Enriched {len(data.get('enrichments') or {})} comment(s).")
 
 
 # -- Analyze ------------------------------------------------------------------
