@@ -4647,6 +4647,11 @@ def _effective_classification(
     if overrides:
         key = (str(failure.get("test_name") or ""), child_job_name, child_build_number)
         override = overrides.get(key)
+        if not override and child_build_number:
+            # A build-0 override means "any build" of that child, the way the
+            # SQL scoping reads it -- so it clears a failure stored under a
+            # concrete build even when no row was fanned out to it.
+            override = overrides.get((key[0], child_job_name, 0))
         if override:
             return str(override).strip()
     analysis = failure.get("analysis")

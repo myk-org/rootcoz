@@ -1989,12 +1989,15 @@ async def _call_ai_with_retry(
                 ],
             )
             # Scrub the WHOLE answer, then cut: truncating first can leave a
-            # token fragment the pattern no longer matches.
-            logger.debug(
-                "AI answer with no usable classification, first %d chars: %s",
-                AI_LOG_EXCERPT_CHARS,
-                scrub_sensitive_data(result.text or "")[:AI_LOG_EXCERPT_CHARS],
-            )
+            # token fragment the pattern no longer matches. Guarded because the
+            # argument is eager: at INFO this would scrub the entire answer for
+            # a line nobody emits.
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug(
+                    "AI answer with no usable classification, first %d chars: %s",
+                    AI_LOG_EXCERPT_CHARS,
+                    scrub_sensitive_data(result.text or "")[:AI_LOG_EXCERPT_CHARS],
+                )
             if attempt >= max_attempts:
                 break
             continue

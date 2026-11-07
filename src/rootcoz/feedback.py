@@ -96,6 +96,17 @@ _USERINFO = rf"[^\s]{{0,{_USERINFO_WINDOW}}}"
 _LONG_CREDENTIAL_RUN = re.compile(
     rf"(?<!\S)(?=[^\s]*[@:])[^\s]{{{_USERINFO_WINDOW + 1},}}"
 )
+# Both credential patterns below scan their left context from the *start* of the
+# run they anchor on, never from every word boundary inside that run. `\b[…]`
+# held on at each boundary of an `a.`/`a-` run and re-scanned the run to its end,
+# so one crafted 32 000-char excerpt cost 0.6 s in the scheme pattern and 3.3 s
+# in the bare one -- quadratic, and the scrubber runs on user-supplied log
+# excerpts and issue bodies (#399). `(?<![…])` enters a run once and the
+# possessive `*+`/`++` never backtracks (the `:`/`://` that must follow is not in
+# the class, so a backtrack could never have succeeded), which keeps the scan to
+# one pass over the text. Starting at the run start rather than at an inner
+# boundary only widens a match, so no credential the old anchors redacted comes
+# back.
 
 # Patterns for sensitive data scrubbing.
 # Order matters: more specific patterns first to avoid partial matches.
@@ -165,7 +176,7 @@ _SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # URL userinfo: keep the scheme and host, redact the credentials (see
     # `_USERINFO`).
     (
-        re.compile(r"(\b[a-zA-Z][a-zA-Z0-9+.\-]*://)" + _USERINFO + "@"),
+        re.compile(r"(?<![a-zA-Z0-9+.\-])((?:[a-zA-Z0-9+.\-]++)://)" + _USERINFO + "@"),
         r"\1[REDACTED]@",
     ),
     # Bare `user:secret@` in a clone URL, e.g. `user:pass@host:path`. The host
@@ -180,7 +191,7 @@ _SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # same, so widen only with a rule that still spares `@sha256:…`.
     (
         re.compile(
-            r"\b(?!mailto:)[^\s/:@]+:(?!/)" + _USERINFO + "@"
+            r"(?<![^\s/:@])(?!mailto:)[^\s/:@]++:(?!/)" + _USERINFO + "@"
             r"(?=[^\s/@:]+(?:\.[^\s/@:]+)+|localhost\b)"
         ),
         "[REDACTED]@",

@@ -584,6 +584,71 @@ class TestRunSingleAiAnalysis:
             assert secret[:5] not in message
 
     @pytest.mark.asyncio
+    async def test_excerpt_is_scrubbed_only_when_debug_is_enabled(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Scrubbing the whole answer is DEBUG-only work, never paid at INFO.
+
+        The excerpt argument of the DEBUG line is evaluated eagerly, so an
+        unguarded call pushes the entire answer (78K tokens on the job that
+        opened this) through every redaction regex on the event loop for a line
+        nobody emits (#399).
+        """
+        from rootcoz.engine.core import AI_LOG_EXCERPT_CHARS
+        from rootcoz.engine.core import logger as core_logger
+
+        narration = "Now let me read the log: " + "x" * (AI_LOG_EXCERPT_CHARS * 2)
+        scrubbed: list[str] = []
+
+        def counting_scrub(text: str) -> str:
+            scrubbed.append(text)
+            return text
+
+        monkeypatch.setattr("rootcoz.engine.core.scrub_sensitive_data", counting_scrub)
+        monkeypatch.setattr(
+            "rootcoz.engine.core.call_ai_once",
+            AsyncMock(
+                side_effect=lambda *a, **kw: AIResult(success=True, text=narration)
+            ),
+        )
+
+        async def drive() -> None:
+            with pytest.raises(AnalysisIncompleteError):
+                await run_single_ai_analysis(
+                    failures=[
+                        FailedTest(
+                            test_name="test_foo",
+                            error_message="timeout",
+                            stack_trace="st",
+                        )
+                    ],
+                    console_context="",
+                    repo_path=None,
+                    ai_provider="cursor",
+                    ai_model="cursor:grok",
+                    ai_call_timeout=None,
+                    custom_prompt="",
+                    artifacts_context="",
+                    server_url="",
+                    job_id="job-1",
+                )
+
+        original_level = core_logger.level
+        try:
+            core_logger.setLevel(logging.INFO)
+            await drive()
+            assert scrubbed == [], "the excerpt must not be scrubbed at INFO"
+
+            core_logger.setLevel(logging.DEBUG)
+            await drive()
+        finally:
+            core_logger.setLevel(original_level)
+
+        assert scrubbed, "DEBUG still scrubs the excerpt"
+        # The whole answer, not a truncated slice: scrub first, cut after.
+        assert set(scrubbed) == {narration}
+
+    @pytest.mark.asyncio
     async def test_narration_then_valid_answer_uses_second_response(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

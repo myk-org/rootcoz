@@ -441,15 +441,30 @@ class TestScrubSensitiveData:
         no `@` in reach the greedy nested quantifier re-scanned the rest of the
         excerpt from every `:` the bare pattern anchors on, so `a:`*k cost
         quadratic time in attacker-supplied text (0.23 s at 4 000 chars,
-        1.73 s at 16 000) (#397). Both sizes must fit the same generous bound,
-        which only a linear scan can do -- the point is to catch the blowup,
-        not to police microseconds."""
-        for size in (4000, 16000):
-            adversarial = ("a:" * (size // 2))[:size]
-            start = time.perf_counter()
-            scrub_sensitive_data(adversarial)
-            elapsed = time.perf_counter() - start
-            assert elapsed < 0.5, f"{size}-char adversarial input took {elapsed:.2f}s"
+        1.73 s at 16 000) (#397). The `\b`-anchored scheme and bare patterns had
+        the same shape: they held on at every word boundary of an `a.`/`a-` run
+        and re-scanned that run to its end, so the same excerpt cost 0.9 s at
+        16 000 chars and 4.5 s at 32 000 (#399). Both sizes must fit the same
+        generous bound and a 4x bigger input must not cost 16x, which only a
+        scan that enters each run once can do -- the point is to catch the
+        blowup, not to police microseconds."""
+
+        def elapsed(text: str) -> float:
+            best = float("inf")
+            for _ in range(3):
+                start = time.perf_counter()
+                scrub_sensitive_data(text)
+                best = min(best, time.perf_counter() - start)
+            return best
+
+        for unit in ("a:", "a.", "a-"):
+            small = elapsed((unit * 4000)[:8000])
+            large = elapsed((unit * 16000)[:32000])
+            assert large < 0.5, f"{unit!r} 32 000-char input took {large:.2f}s"
+            assert large < small * 8 + 0.05, (
+                f"{unit!r} scaled {large / max(small, 1e-9):.1f}x for 4x input "
+                f"({small:.3f}s at 8 000, {large:.3f}s at 32 000)"
+            )
 
     def test_redacts_quoted_compound_keys(self):
         """A quoted JSON/literal key must not hide a secret behind its `_`."""

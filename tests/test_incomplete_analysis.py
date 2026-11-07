@@ -106,6 +106,39 @@ class TestIncompletePredicate:
         assert storage.incomplete_failures(payload) == ["t2", "t3"]
 
 
+class TestWildcardOverrideScope:
+    """A child-name override stored with build 0 means "any build" of that
+    child -- the SQL scoping already reads it that way
+    (``child_build_number = 0 OR child_build_number = <build>``). The predicate
+    matched the exact ``(test, child, build)`` tuple only, so a wildcard row
+    (a legacy one, or one whose job had no ``failure_history`` row to fan out
+    to) never cleared the failure it was made for (#399)."""
+
+    def test_a_build_zero_override_clears_a_concrete_build_failure(self) -> None:
+        payload = _result_payload(
+            [],
+            child_job_analyses=[
+                {"job_name": "child", "build_number": 5, "failures": [_failure("t1")]}
+            ],
+        )
+        overrides = {("t1", "child", 0): "CODE ISSUE"}
+        assert (
+            storage._effective_classification(_failure("t1"), "child", 5, overrides)
+            == "CODE ISSUE"
+        )
+        assert storage.incomplete_failures(payload, overrides) == []
+
+    def test_an_exact_build_override_wins_over_the_wildcard(self) -> None:
+        overrides = {
+            ("t1", "child", 5): "PRODUCT BUG",
+            ("t1", "child", 0): "CODE ISSUE",
+        }
+        assert (
+            storage._effective_classification(_failure("t1"), "child", 5, overrides)
+            == "PRODUCT BUG"
+        )
+
+
 class TestResultPayloadExposesCount:
     async def test_result_response_counts_incomplete_failures(
         self, client: TestClient, temp_db_path: Path
