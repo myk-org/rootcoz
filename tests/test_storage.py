@@ -1398,6 +1398,46 @@ class TestFindFailureByUuid:
             assert result is None
 
 
+async def test_fail_job_without_result_write_keeps_a_newer_terminal_status(
+    setup_test_db: Path,
+) -> None:
+    """The status-only fallback must not end a job an abort already ended (#419).
+
+    It exists because a write to an unsupported payload was refused, so it is a
+    consequence of the refusal and not a decision about the job: a terminal status
+    that landed first is newer than that refusal and keeps its error. A job still
+    running is still marked failed. Both go through the guarded write path every
+    other status write uses.
+    """
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.save_result("job-aborted-first", "", "running")
+        await storage.update_status("job-aborted-first", "aborted")
+        await storage.fail_job_without_result_write("job-aborted-first", "refused")
+
+        await storage.save_result("job-running", "", "running")
+        await storage.fail_job_without_result_write("job-running", "refused")
+
+        async def stored(job_id: str) -> Any:
+            async with storage._connect_db() as db:
+                return await (
+                    await db.execute(
+                        "SELECT status, error, completed_at FROM results"
+                        " WHERE job_id = ?",
+                        (job_id,),
+                    )
+                ).fetchone()
+
+        aborted = await stored("job-aborted-first")
+        failed = await stored("job-running")
+
+    assert aborted["status"] == "aborted"
+    assert not aborted["error"]
+    assert not aborted["completed_at"], "the fallback stamped an unrelated job"
+    assert failed["status"] == "failed"
+    assert failed["error"] == "refused"
+    assert failed["completed_at"]
+
+
 @pytest.mark.asyncio
 async def test_list_distinct_job_names(setup_test_db: Path):
     """list_distinct_job_names returns unique non-empty job names."""
@@ -2337,36 +2377,70 @@ class TestExtractDenormalizedFields:
     def test_none_input(self):
         from rootcoz.storage import _extract_denormalized_fields
 
-        assert _extract_denormalized_fields(None) == ("", 0, "")
+        assert _extract_denormalized_fields(None) == (
+            "",
+            0,
+            "",
+            "",
+            "",
+            "",
+            "",
+        )
 
     def test_empty_dict(self):
         from rootcoz.storage import _extract_denormalized_fields
 
-        assert _extract_denormalized_fields({}) == ("", 0, "")
+        assert _extract_denormalized_fields({}) == ("", 0, "", "", "", "", "")
 
     def test_valid_fields(self):
         from rootcoz.storage import _extract_denormalized_fields
 
-        result = {"job_name": "my-job", "build_number": 42, "build_id": "999"}
-        assert _extract_denormalized_fields(result) == ("my-job", 42, "999")
+        result = {
+            "job_name": "my-job",
+            "build_number": 42,
+            "build_id": "999",
+            "request_params": {"submitted_by": "  yuval  "},
+            "summary": "two failures",
+            "display_name": "Human Name",
+            "failures": [{"id": "f-1"}, {"id": "f-2"}],
+            "child_job_analyses": [
+                {"id": "c-1", "failures": [{"id": "f-3"}]},
+                {"failed_children": [{"failures": [{"id": "f-4"}]}]},
+            ],
+        }
+        assert _extract_denormalized_fields(result) == (
+            "my-job",
+            42,
+            "999",
+            "yuval",
+            "two failures",
+            "Human Name",
+            "f-1 f-2 c-1 f-3 f-4",
+        )
+
+    def test_failure_ids_are_unique_and_ordered(self):
+        from rootcoz.storage import _extract_denormalized_fields
+
+        result = {"failures": [{"id": "f-1"}, {"id": "f-1"}, {"no_id": 1}]}
+        assert _extract_denormalized_fields(result)[6] == "f-1"
 
     def test_invalid_build_number(self):
         from rootcoz.storage import _extract_denormalized_fields
 
         result = {"job_name": "x", "build_number": "not-a-number", "build_id": "1"}
-        assert _extract_denormalized_fields(result) == ("x", 0, "1")
+        assert _extract_denormalized_fields(result)[:3] == ("x", 0, "1")
 
     def test_numeric_build_id_coerced_to_string(self):
         from rootcoz.storage import _extract_denormalized_fields
 
         result = {"job_name": "x", "build_number": 1, "build_id": 12345}
-        assert _extract_denormalized_fields(result) == ("x", 1, "12345")
+        assert _extract_denormalized_fields(result)[:3] == ("x", 1, "12345")
 
     def test_missing_fields_default(self):
         from rootcoz.storage import _extract_denormalized_fields
 
         result = {"other_key": "value"}
-        assert _extract_denormalized_fields(result) == ("", 0, "")
+        assert _extract_denormalized_fields(result) == ("", 0, "", "", "", "", "")
 
 
 @pytest.mark.asyncio
@@ -2944,9 +3018,10 @@ class TestJiraUrlPerMethodSplitMigration:
                 assert await storage.get_server_setting(key) is None
 
 
-# A zstd frame header, as written into result_json by a build with compression.
-# 0xB5 in position 1 is the byte that used to blow up json.loads in a downgrade.
-_ZSTD_FRAME = b"\x28\xb5\x2f\xfd" + b"\x00\x01\x02\x03rest-of-frame"
+# A zstd frame header followed by bytes that never inflate: damage, the state a
+# truncated or corrupt stored row is in. 0xB5 in position 1 is the byte that used
+# to blow up json.loads in a downgrade.
+_DAMAGED_FRAME = b"\x28\xb5\x2f\xfd" + b"\x00\x01\x02\x03rest-of-frame"
 
 
 @pytest.fixture
@@ -3067,14 +3142,17 @@ class TestUnreadableResultJson:
     """A result_json this build cannot decode must not abort startup."""
 
     def test_frame_raises_actionable_error(self) -> None:
-        """The error names compression and tells the operator what to do."""
-        with pytest.raises(storage.UnsupportedResultEncoding) as excinfo:
-            storage.parse_result_json(_ZSTD_FRAME, job_id="frame-1")
+        """A frame our own codec refuses is damage, and says so."""
+        with pytest.raises(storage.DamagedResultEncoding) as excinfo:
+            storage.parse_result_json(_DAMAGED_FRAME, job_id="frame-1")
         message = str(excinfo.value)
         assert "frame-1" in message
         assert "zstd frame" in message
         assert "result_json compression" in message
+        assert "truncated or corrupt" in message
         assert "restore a pre-compression copy of the database" in message
+        # Damage is not an encoding this build lacks: those get their own error.
+        assert not isinstance(excinfo.value, storage.UnsupportedResultEncoding)
 
     def test_non_utf8_bytes_also_raise(self) -> None:
         """Bytes that are neither text nor a frame are an encoding problem too."""
@@ -3091,22 +3169,29 @@ class TestUnreadableResultJson:
         self, temp_db_path: Path, storage_logs: Any
     ) -> None:
         """init_db completes, counts the row, names the cause, leaves it alone."""
+        storage._undecodable_result_ids.clear()
         with patch.object(storage, "DB_PATH", temp_db_path):
             await storage.init_db()
-            await _insert_completed_result(temp_db_path, "frame-1", _ZSTD_FRAME)
+            await _insert_completed_result(temp_db_path, "frame-1", _DAMAGED_FRAME)
 
             await storage.init_db()  # must not raise
 
-            assert await _raw_result_json(temp_db_path, "frame-1") == _ZSTD_FRAME
+            assert await _raw_result_json(temp_db_path, "frame-1") == _DAMAGED_FRAME
             assert await _failure_history_job_ids(temp_db_path) == set()
             # Reads degrade to an empty result instead of failing.
             detail = await storage.get_result("frame-1")
             assert detail is not None
             assert detail["result"] is None
+            # Degraded data is counted for /api/health, which stays 200.
+            assert storage.undecodable_result_count() == 1
 
         assert "Backfill skipped 1 result(s)" in storage_logs.text
         assert "result_json compression" in storage_logs.text
         assert "restore a pre-compression copy of the database" in storage_logs.text
+        # A frame our own codec refuses is reported as damage, not as a missing
+        # encoding: the row is not intact and upgrading rootcoz will not fix it.
+        assert "truncated or corrupt" in storage_logs.text
+        assert "The row is intact" not in storage_logs.text
 
     async def test_backfill_processes_good_rows_and_counts_bad_ones(
         self, temp_db_path: Path, storage_logs: Any
@@ -3116,7 +3201,7 @@ class TestUnreadableResultJson:
             await storage.init_db()
             for index in range(2):
                 await _insert_completed_result(
-                    temp_db_path, f"frame-{index}", _ZSTD_FRAME
+                    temp_db_path, f"frame-{index}", _DAMAGED_FRAME
                 )
             for index in range(3):
                 await _insert_completed_result(
@@ -3134,7 +3219,7 @@ class TestUnreadableResultJson:
             for index in range(2):
                 assert (
                     await _raw_result_json(temp_db_path, f"frame-{index}")
-                    == _ZSTD_FRAME
+                    == _DAMAGED_FRAME
                 )
                 detail = await storage.get_result(f"frame-{index}")
                 assert detail is not None
@@ -3148,7 +3233,7 @@ class TestUnreadableResultJson:
         """Corruption keeps its own counter and message."""
         with patch.object(storage, "DB_PATH", temp_db_path):
             await storage.init_db()
-            await _insert_completed_result(temp_db_path, "frame-1", _ZSTD_FRAME)
+            await _insert_completed_result(temp_db_path, "frame-1", _DAMAGED_FRAME)
             await _insert_completed_result(temp_db_path, "corrupt-1", b"not json")
 
             await storage.backfill_failure_history()
@@ -3179,17 +3264,21 @@ class TestUnreadableResultJson:
 
             assert await _failure_history_job_ids(temp_db_path) == set()
 
-    async def test_waiting_job_with_frame_stays_waiting(
+    async def test_waiting_job_with_damaged_frame_is_failed(
         self, temp_db_path: Path, storage_logs: Any
     ) -> None:
-        """A waiting row this build cannot decode is not failed by the rollback."""
+        """A damaged waiting payload can never be resumed, so the job is failed.
+
+        Damage is terminal -- no codec upgrade inflates these bytes -- so leaving
+        the row 'waiting' stranded it forever with no task and no failure.
+        """
         with patch.object(storage, "DB_PATH", temp_db_path):
             await storage.init_db()
             async with aiosqlite.connect(temp_db_path) as db:
                 await db.execute(
                     "INSERT INTO results (job_id, build_url, status, result_json) "
                     "VALUES (?, ?, 'waiting', ?)",
-                    ("waiting-frame", "http://j/1", _ZSTD_FRAME),
+                    ("waiting-frame", "http://j/1", _DAMAGED_FRAME),
                 )
                 await db.commit()
 
@@ -3204,16 +3293,56 @@ class TestUnreadableResultJson:
                     ("waiting-frame",),
                 )
                 row = await cursor.fetchone()
-            # Not resumed (this build cannot read it), but not failed either.
+            # Failed, with the damage named as the reason, payload untouched.
+            assert row[0] == "failed"
+            assert "truncated or corrupt" in row[1]
+            assert row[1] != storage.RESTART_ERROR_MSG
+            assert row[2] is not None
+            assert row[3] == _DAMAGED_FRAME
+
+        assert "Startup skipped job_id=waiting-frame" in storage_logs.text
+        assert (
+            "Marking waiting job waiting-frame as failed: its result_json is damaged"
+            in storage_logs.text
+        )
+
+    async def test_waiting_job_with_newer_encoding_stays_waiting(
+        self, temp_db_path: Path, storage_logs: Any
+    ) -> None:
+        """An intact payload from a newer build is left waiting, untouched.
+
+        A build with the result_json codec can still resume it, so this one must
+        not fail the job or write anything into the row.
+        """
+        blob = b"\xff\xfe\x00a payload from a newer build"
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            async with aiosqlite.connect(temp_db_path) as db:
+                await db.execute(
+                    "INSERT INTO results (job_id, build_url, status, result_json) "
+                    "VALUES (?, ?, 'waiting', ?)",
+                    ("waiting-newer", "http://j/2", blob),
+                )
+                await db.commit()
+
+            waiting, recovered = await storage.mark_stale_results_failed()
+
+            assert waiting == []
+            assert recovered == []
+            async with aiosqlite.connect(temp_db_path) as db:
+                cursor = await db.execute(
+                    "SELECT status, error, completed_at, result_json FROM results "
+                    "WHERE job_id = ?",
+                    ("waiting-newer",),
+                )
+                row = await cursor.fetchone()
             assert row[0] == "waiting"
             assert row[1] == ""
             assert row[2] is None
-            assert row[3] == _ZSTD_FRAME
+            assert row[3] == blob
 
-        assert "Startup skipped job_id=waiting-frame" in storage_logs.text
-        assert "Marking unrecoverable waiting job waiting-frame" not in (
-            storage_logs.text
-        )
+        assert "Startup skipped job_id=waiting-newer" in storage_logs.text
+        assert "Marking waiting job waiting-newer" not in storage_logs.text
 
     async def test_unknown_encoding_not_blamed_on_compression(
         self, temp_db_path: Path, storage_logs: Any
@@ -3242,7 +3371,7 @@ class TestUnreadableResultJson:
             await storage.init_db()
             for index in range(2):
                 await _insert_completed_result(
-                    temp_db_path, f"frame-{index}", _ZSTD_FRAME
+                    temp_db_path, f"frame-{index}", _DAMAGED_FRAME
                 )
 
             await storage.backfill_failure_history()
@@ -3273,7 +3402,7 @@ class TestUnreadableResultJson:
                     "datetime('now'))"
                 )
                 await db.commit()
-            await _insert_completed_result(temp_db_path, "frame-1", _ZSTD_FRAME)
+            await _insert_completed_result(temp_db_path, "frame-1", _DAMAGED_FRAME)
 
             await storage._migrate_backfill_pattern_axis()
 
@@ -3315,7 +3444,7 @@ class TestUnreadableResultJson:
                     "VALUES ('t', 'j', 'CODE ISSUE', 'user', 'frame-1')"
                 )
                 await db.commit()
-            await _insert_completed_result(temp_db_path, "frame-1", _ZSTD_FRAME)
+            await _insert_completed_result(temp_db_path, "frame-1", _DAMAGED_FRAME)
 
             await storage._migrate_restore_ai_classifications()
 
@@ -3346,7 +3475,7 @@ class TestUnreadableResultJson:
                     temp_db_path, job_id, _one_failure_result(job_id)
                 )
                 await _seed_mirrored_override(temp_db_path, job_id)
-            await _insert_completed_result(temp_db_path, "frame-1", _ZSTD_FRAME)
+            await _insert_completed_result(temp_db_path, "frame-1", _DAMAGED_FRAME)
             await _seed_mirrored_override(temp_db_path, "frame-1")
 
             # Run 1: the readable jobs are restored, the frame stays deferred.
@@ -3392,3 +3521,72 @@ class TestUnreadableResultJson:
             assert await _failure_history_row_ids(temp_db_path) == settled
 
         assert "Migration: 1 job(s) skipped (frame-1)" in storage_logs.text
+
+
+class TestStaleRetryStartsFromTheCallersPayload:
+    """A stale retry must not re-write what a newer stored payload dropped."""
+
+    async def test_retry_does_not_carry_a_field_the_newer_payload_dropped(
+        self, setup_test_db: Path, monkeypatch
+    ) -> None:
+        """A field merged on attempt one cannot survive into attempt two.
+
+        ``_write_result`` re-runs the same attempt closure after a lost race, and
+        the closure merges stored progress fields into the dict it encodes. Without
+        a per-attempt copy that merge lands in the caller's payload, so the second
+        attempt re-writes a ``progress_phase`` the newer stored result no longer
+        has.
+        """
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                "job-retry",
+                status="running",
+                result={"summary": "older", "progress_phase": "cloning"},
+            )
+            real_guard = storage._begin_guarded_write
+            attempts = 0
+
+            async def _lose_the_first_race(db: Any, job_id: str, expect: Any) -> bool:
+                nonlocal attempts
+                attempts += 1
+                if attempts > 1:
+                    return await real_guard(db, job_id, expect)
+                # The rival write drops the phase the first attempt just merged in.
+                async with storage._connect_db() as rival:
+                    await rival.execute(
+                        "UPDATE results SET result_json = ? WHERE job_id = ?",
+                        (json.dumps({"summary": "newer"}), job_id),
+                    )
+                    await rival.commit()
+                return False
+
+            monkeypatch.setattr(storage, "_begin_guarded_write", _lose_the_first_race)
+
+            payload: dict[str, Any] = {"summary": "final"}
+            assert await storage.update_status("job-retry", "completed", payload)
+            assert attempts == 2
+
+            stored = await storage.get_result("job-retry")
+
+        assert "progress_phase" not in stored["result"], (
+            "the retry restored a progress_phase the newer payload had dropped"
+        )
+        assert "progress_phase" not in payload, (
+            "the attempt closure mutated the caller's payload"
+        )
+
+
+async def test_pin_db_path_without_a_path_keeps_the_inherited_pin(
+    tmp_path: Path,
+) -> None:
+    """A no-argument re-pin keeps the current pin; it does not re-read the global.
+
+    ``_spawn_background`` re-pins inside the context it copies, so a task spawned
+    from an already pinned task must stay on its parent's database (#409).
+    """
+    started_on = tmp_path / "started-on.db"
+    moved_to = tmp_path / "moved-to.db"
+    storage.pin_db_path(started_on)
+    with patch.object(storage, "DB_PATH", moved_to):
+        storage.pin_db_path()
+        assert storage.current_db_path() == started_on
