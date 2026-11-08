@@ -793,3 +793,80 @@ def test_derive_sidecar_url_from_port(monkeypatch):
     monkeypatch.setenv("SIDECAR_URL", "http://sidecar.example.com:9300")
     main._derive_sidecar_url_from_port()
     assert os.environ["SIDECAR_URL"] == "http://sidecar.example.com:9300"
+
+
+# --- The built-in health monitor (#464) ---
+
+
+HEALTH_MONITOR_SETTINGS = (
+    "enable_health_monitor",
+    "health_monitor_interval_seconds",
+    "health_alert_unhealthy_seconds",
+    "health_alert_error_rate_percent",
+    "health_alert_error_rate_seconds",
+    "health_alert_stuck_analysis_seconds",
+)
+
+
+def test_health_monitor_settings_are_registered_runtime_applied(client):
+    """Six rows in Notifications, hidden from the defaults payload, no restart."""
+    for key in HEALTH_MONITOR_SETTINGS:
+        assert key in main._SETTINGS_CATEGORIES["Notifications"], key
+        assert key in main._DEFAULTS_HIDDEN_SETTINGS, key
+        # Applied by the monitor's own settings poll: a restart is not required.
+        assert key not in main._RESTART_REQUIRED_SETTINGS, key
+        assert key not in main._SENSITIVE_SETTINGS, key
+        assert key in main._FIELD_TO_CATEGORY, key
+        label = main._setting_label(key)
+        assert label and label != key, key
+
+    response = client.get("/api/admin/settings", headers=_admin_headers())
+    by_key = {item["key"]: item for item in response.json()}
+    for key in HEALTH_MONITOR_SETTINGS:
+        assert by_key[key]["category"] == "Notifications", key
+        assert by_key[key]["restart_required"] is False, key
+
+    # The endpoint's wrapper is required: a bare body is a 400, not a save.
+    assert (
+        client.put(
+            "/api/admin/settings",
+            headers=_admin_headers(),
+            json={"health_monitor_interval_seconds": "2"},
+        ).status_code
+        == 400
+    )
+
+    # Below the ge=5 floor: a 400 naming the bound, never a silent clamp.
+    too_fast = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"health_monitor_interval_seconds": "2"}},
+    )
+    assert too_fast.status_code == 400
+    assert "5" in too_fast.json()["detail"]
+
+    # Above 100 percent is not a share.
+    assert (
+        client.put(
+            "/api/admin/settings",
+            headers=_admin_headers(),
+            json={"settings": {"health_alert_error_rate_percent": "101"}},
+        ).status_code
+        == 400
+    )
+
+    saved = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={
+            "settings": {
+                "enable_health_monitor": "true",
+                "health_monitor_interval_seconds": "30",
+            }
+        },
+    )
+    assert saved.status_code == 200
+    get_settings.cache_clear()
+    fresh = get_settings()
+    assert fresh.enable_health_monitor is True
+    assert fresh.health_monitor_interval_seconds == 30

@@ -99,6 +99,8 @@ This queues a JUnit XML analysis from the terminal and prints the job ID to poll
 
   In the web UI, a submitted job shows `Submitted` in the dashboard Mode column and an `Analyze` button in the report header instead of `Re-Analyze`.
 
+  Analyzing a submitted job starts a **fresh analysis window**: `analysis_started_at` and `completed_at` are reset when the job is claimed, so the job's duration measures the analysis run rather than the earlier ingest run. The report header and the dashboard's `Analysis took` therefore show the new run's span, and `GET /results/{job_id}` returns both fields with the new values.
+
   > **Tip:** Jobs that predate this split are stored as `analyzed`, so you never have to guess what a missing `analysis_state` means.
 
 - **Change the analysis context for one run.** `Tests Repo URL` and `Ref / Branch`, `Additional Repositories`, `Raw Prompt`, `Peer Analysis`, `Jira Integration`, and `AI Call Timeout` are all per-submission overrides that take precedence over server settings. See [Configuring Analysis Context](configure-analysis-context.html) for details.

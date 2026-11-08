@@ -4933,6 +4933,85 @@ class TestAdminServerStatusCommand:
         assert "nightly #7 running for 3600s" in result.output
         assert "2 chat turns in flight" in result.output
 
+    def _monitor_payload(self, **overrides) -> dict:
+        block: dict = {
+            "enabled": False,
+            "available": True,
+            "interval_seconds": 60,
+            "last_sample_ago_seconds": None,
+            "conditions": [
+                {
+                    "key": "health_down",
+                    "label": "Health down",
+                    "state": "ok",
+                    "held_seconds": None,
+                    "threshold_seconds": 300,
+                    "age_seconds": None,
+                    "age_known": True,
+                },
+                {
+                    "key": "stuck_analysis",
+                    "label": "Analysis stuck",
+                    "state": "firing",
+                    "held_seconds": 0,
+                    "threshold_seconds": 7200,
+                    "age_seconds": 7500,
+                    "age_known": True,
+                },
+            ],
+        }
+        block.update(overrides)
+        return block
+
+    def test_server_status_prints_the_health_monitor_line(self, mock_client):
+        """The monitor's state, and a firing condition by its human label (#464)."""
+        payload = dict(self._PAYLOAD)
+        payload["health_monitor"] = self._monitor_payload()
+        mock_client.server_status.return_value = payload
+        result = runner.invoke(app, ["admin", "server-status"])
+        assert result.exit_code == 0
+        assert "Health monitor: disabled, interval 60s" in result.output
+        assert "Analysis stuck: firing — age 7500s, threshold 7200s" in result.output, (
+            "a firing condition is named by its label, never its machine key"
+        )
+        assert "stuck_analysis" not in result.output
+
+        enabled = dict(self._PAYLOAD)
+        enabled["health_monitor"] = self._monitor_payload(
+            enabled=True, last_sample_ago_seconds=12
+        )
+        mock_client.server_status.return_value = enabled
+        result = runner.invoke(app, ["admin", "server-status"])
+        assert result.exit_code == 0
+        assert "Health monitor: enabled, interval 60s, last sample 12s ago" in (
+            result.output
+        )
+
+        unsampled = dict(self._PAYLOAD)
+        unsampled["health_monitor"] = self._monitor_payload(
+            enabled=True, last_sample_ago_seconds=None, conditions=[]
+        )
+        mock_client.server_status.return_value = unsampled
+        result = runner.invoke(app, ["admin", "server-status"])
+        assert "not sampled yet" in result.output
+
+        # The guarded fallback must never print "disabled, interval 0s": that is a
+        # false cause on the surface an operator uses to diagnose silent alerting.
+        guarded = dict(self._PAYLOAD)
+        guarded["health_monitor"] = {
+            "available": False,
+            "reason": "probe timed out after 4s",
+        }
+        mock_client.server_status.return_value = guarded
+        result = runner.invoke(app, ["admin", "server-status"])
+        assert "Health monitor: unavailable (probe timed out after 4s)" in result.output
+        assert "disabled, interval" not in result.output
+
+        # A server of another version sends no block: print nothing, invent nothing.
+        mock_client.server_status.return_value = self._PAYLOAD
+        result = runner.invoke(app, ["admin", "server-status"])
+        assert "Health monitor" not in result.output
+
     def test_server_status_json(self, mock_client):
         mock_client.server_status.return_value = self._PAYLOAD
         result = runner.invoke(app, ["--json", "admin", "server-status"])

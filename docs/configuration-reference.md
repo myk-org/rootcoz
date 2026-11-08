@@ -277,10 +277,34 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
     | `SMTP_FROM` | empty | string | no | no | yes |
     | `ALERT_EMAIL_TO` | empty | string | no | no | yes |
     | `SLACK_WEBHOOK_URL` | unset | string | yes | no | yes |
+    | `ENABLE_HEALTH_MONITOR` | `false` | boolean | no | no | yes |
+    | `HEALTH_MONITOR_INTERVAL_SECONDS` | `60` | integer 5-3600 | no | no | yes |
+    | `HEALTH_ALERT_UNHEALTHY_SECONDS` | `300` | integer 1-604800 | no | no | yes |
+    | `HEALTH_ALERT_ERROR_RATE_PERCENT` | `10` | integer 1-100 | no | no | yes |
+    | `HEALTH_ALERT_ERROR_RATE_SECONDS` | `600` | integer 1-604800 | no | no | yes |
+    | `HEALTH_ALERT_STUCK_ANALYSIS_SECONDS` | `7200` | integer 1-604800 | no | no | yes |
 
     Email alerts need `SMTP_HOST` + `ALERT_EMAIL_TO` (from address defaults to `SMTP_USER`, then `rootcoz@<host>`); Slack alerts need `SLACK_WEBHOOK_URL`. The env var stays the deployment default — a saved setting overrides it.
 
-    A webhook saved here drives only the in-process alert path. It has **no effect on the chart's health-alert CronJob** (`alerts.enabled`): that job runs outside the application and reads the release Secret under `alerts.slackSecretKey`, so configure the two separately or the CronJob will print its messages into the job log instead of posting them.
+    A webhook saved here drives only the in-process alert path. It has **no effect on the chart's health-alert CronJob** (`alerts.enabled`): that job runs outside the application and reads the release Secret under `alerts.slackSecretKey`, so configure the two separately or the CronJob will print its messages into the job log instead of posting them. The same webhook is what lets the in-process health monitor below notify anyone, so a deployment that saves it here and enables the monitor should leave `alerts.enabled` at `false` — see [Built-in health monitor](#built-in-health-monitor).
+
+    **Built-in health monitor.** `ENABLE_HEALTH_MONITOR` opts into an in-process loop that watches three conditions and notifies the channels above **only when a condition starts or stops being true** (`ok → firing`, `firing → ok`). Nothing else is required: no Prometheus, no Alertmanager, no Kubernetes CronJob.
+
+    | Condition | What it reads | Default threshold and duration |
+    | --- | --- | --- |
+    | Health down | the same probes `/api/health` runs; fires only on `unhealthy` | unhealthy for `HEALTH_ALERT_UNHEALTHY_SECONDS` (5 min) |
+    | Error rate | the 5xx share of the same 300 s rolling window `rootcoz_error_rate` counts | above `HEALTH_ALERT_ERROR_RATE_PERCENT` (10 %) for `HEALTH_ALERT_ERROR_RATE_SECONDS` (10 min) |
+    | Analysis stuck | the oldest `running` analysis, from its analysis start | running longer than `HEALTH_ALERT_STUCK_ANALYSIS_SECONDS` (2 h) |
+
+    A `degraded` server never fires Health down: only `unhealthy` counts, exactly what `rootcoz_health_up` reports. Error rate counts **server errors (5xx)**, not the all-class rate behind `rootcoz_error_rate`, so an unauthenticated client cannot pace the notification channel with 404s. Analysis stuck measures a **running** analysis from its analysis start; a `waiting` job is waiting on its Jenkins build (which can legitimately take hours) and is never "stuck".
+
+    Health down and Error rate must **hold** for their duration, and Error rate needs at least 10 requests in the same 5-minute window as well as the 5xx share — a quiet deployment therefore never fires on a lone 5xx, and the health condition is the total-failure signal. 1-9 requests above the threshold and an **empty** window are both *unjudgeable*: they do not fire, do not clear, and do not accrue hold time, so the duration counts consecutive judged readings only. Because the share lives in a 300 s rolling window, the default 600 s hold needs requests arriving to stay held, and the condition clears only once traffic returns with a share at or below the threshold. Analysis stuck has no separate duration: the analysis age *is* the duration.
+
+    `HEALTH_MONITOR_INTERVAL_SECONDS` is the sampling cadence (its floor of 5 s is deliberate — each tick runs the same dependency probes `/api/health` runs). Enabling or disabling applies within about 5 seconds without a restart; a changed interval applies after the next sampling deadline. State is in memory: a restart re-arms every duration, so a condition that is still true alerts again after its full duration, and a disable/enable toggle never announces a recovery for an alert it dropped.
+
+    A row claimed *before* the analysis-window fix below can still carry its pre-fix ingest start stamp, so such an analysis may alert once when the monitor is first enabled and clears when it ends. There is no backfill: a stale stamp is indistinguishable from a genuinely long run.
+
+    Which mechanism is authoritative: the in-app monitor, for the three conditions it owns, wherever it is enabled; the chart's CronJob is the alternative for deployments that will not enable it, and the two cannot see each other, so choose one. The instantaneous in-process 5xx trigger (`> 50 %` 5xx in the window) is not part of that choice — it keeps firing in both configurations, because a 50 % instant burst is a different signal from a 10 % share held for ten minutes.
 
 14. **Sidecar category** (added with #347 — restart required).
 
@@ -401,6 +425,12 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `SMTP_FROM` | `smtp_from` | Notifications | runtime |
 | `ALERT_EMAIL_TO` | `alert_email_to` | Notifications | runtime |
 | `SLACK_WEBHOOK_URL` | `slack_webhook_url` | Notifications | runtime (sensitive) |
+| `ENABLE_HEALTH_MONITOR` | `enable_health_monitor` | Notifications | runtime |
+| `HEALTH_MONITOR_INTERVAL_SECONDS` | `health_monitor_interval_seconds` | Notifications | runtime |
+| `HEALTH_ALERT_UNHEALTHY_SECONDS` | `health_alert_unhealthy_seconds` | Notifications | runtime |
+| `HEALTH_ALERT_ERROR_RATE_PERCENT` | `health_alert_error_rate_percent` | Notifications | runtime |
+| `HEALTH_ALERT_ERROR_RATE_SECONDS` | `health_alert_error_rate_seconds` | Notifications | runtime |
+| `HEALTH_ALERT_STUCK_ANALYSIS_SECONDS` | `health_alert_stuck_analysis_seconds` | Notifications | runtime |
 | `SIDECAR_HOST` | `sidecar_host` | Sidecar | restart (env bridge) |
 | `SIDECAR_PORT` | `sidecar_port` | Sidecar | restart (env bridge) |
 | `SIDECAR_URL` | `sidecar_url` | Sidecar | restart (env bridge; derived from `sidecar_port` when unset — not persistable) |

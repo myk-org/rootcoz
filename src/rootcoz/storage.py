@@ -4127,17 +4127,26 @@ async def mark_jobs_failed_for_restart(job_ids: Sequence[str]) -> list[str]:
     return marked
 
 
-async def claim_submitted_job_for_analyze(job_id: str) -> tuple[str, str] | None:
+async def claim_submitted_job_for_analyze(
+    job_id: str,
+) -> tuple[str, str, str | None, str | None] | None:
     """Atomically claim a completed submitted job for in-place analyze.
 
-    Returns ``(previous_status, previous_failure_reason)`` only for the caller
-    that flipped ``status`` to ``pending``, and ``None`` for everyone else. The
-    snapshot travels with the claim so :func:`release_submitted_job_analyze_claim`
-    can put the row back exactly, reason included.
+    Returns ``(previous_status, previous_failure_reason, previous_analysis_started_at,
+    previous_completed_at)`` only for the caller that flipped ``status`` to
+    ``pending``, and ``None`` for everyone else. The snapshot travels with the claim
+    so :func:`release_submitted_job_analyze_claim` can put the row back exactly.
 
     The claim also clears ``failure_reason``: this row is about to be analyzed
     again, and a restart marker left on it (#458) would still be reported beside
     the *new* run's status -- a completed job carrying ``server_restart``.
+
+    ``analysis_started_at`` and ``completed_at`` are cleared with it, so the next
+    ``running``/``completed`` transition re-stamps the analysis window (#464):
+    ``update_status`` writes both with ``COALESCE``, so without this the ingest
+    run's stamps survive and an ingest-then-analyze job carries a 24 h "running"
+    age -- and a ``completed_at`` *before* its new start, which the report header
+    renders as its invalid-date fallback.
     """
     placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
     async with _connect_db() as db:
@@ -4147,14 +4156,16 @@ async def claim_submitted_job_for_analyze(job_id: str) -> tuple[str, str] | None
         await db.execute("BEGIN IMMEDIATE")
         row = await (
             await db.execute(
-                "SELECT status, failure_reason FROM results WHERE job_id = ?",
+                "SELECT status, failure_reason, analysis_started_at, completed_at "
+                "FROM results WHERE job_id = ?",
                 (job_id,),
             )
         ).fetchone()
         cursor = await db.execute(
             f"""
             UPDATE results
-            SET status = 'pending', failure_reason = ''
+            SET status = 'pending', failure_reason = '',
+                analysis_started_at = NULL, completed_at = NULL
             WHERE job_id = ?
               AND COALESCE(analysis_state, 'analyzed') = ?
               AND status NOT IN ({placeholders})
@@ -4164,18 +4175,29 @@ async def claim_submitted_job_for_analyze(job_id: str) -> tuple[str, str] | None
         await db.commit()
         if cursor.rowcount != 1 or row is None:
             return None
-        return (str(row["status"] or "completed"), str(row["failure_reason"] or ""))
+        return (
+            str(row["status"] or "completed"),
+            str(row["failure_reason"] or ""),
+            row["analysis_started_at"],
+            row["completed_at"],
+        )
 
 
 async def release_submitted_job_analyze_claim(
-    job_id: str, previous_status: str, previous_failure_reason: str
+    job_id: str,
+    previous_status: str,
+    previous_failure_reason: str,
+    previous_analysis_started_at: str | None,
+    previous_completed_at: str | None,
 ) -> None:
     """Restore a submitted job if analyze enqueue failed after claiming.
 
-    Restores the status *and* the reason the claim cleared, in one statement: a
-    row put back to ``failed`` with an empty reason no longer says why it failed,
-    which the docs read as a crash (#458). Uses the status from before the claim
-    so a failed ingest stays ``failed``.
+    Restores the status, the reason and the analysis window (both timestamps) the
+    claim cleared, in one statement: a row put back to ``failed`` with an empty
+    reason no longer says why it failed, which the docs read as a crash (#458),
+    and a row that kept the *cleared* window would report the interrupted ingest
+    run as having no duration. Uses the status from before the claim so a failed
+    ingest stays ``failed``.
     """
     restore_status = previous_status
     if not restore_status or restore_status in ACTIVE_STATUSES:
@@ -4184,7 +4206,8 @@ async def release_submitted_job_analyze_claim(
         await db.execute(
             """
             UPDATE results
-            SET status = ?, failure_reason = ?
+            SET status = ?, failure_reason = ?, analysis_started_at = ?,
+                completed_at = ?
             WHERE job_id = ?
               AND status = 'pending'
               AND COALESCE(analysis_state, 'analyzed') = ?
@@ -4192,6 +4215,8 @@ async def release_submitted_job_analyze_claim(
             (
                 restore_status,
                 previous_failure_reason,
+                previous_analysis_started_at,
+                previous_completed_at,
                 job_id,
                 ANALYSIS_STATE_SUBMITTED,
             ),
@@ -6467,6 +6492,25 @@ async def count_active_analyses() -> int:
         return row[0] if row else 0
 
 
+def elapsed_seconds_since(since: str | None) -> int | None:
+    """Seconds since an SQLite ``CURRENT_TIMESTAMP`` value; None when unusable.
+
+    A stored timestamp is naive UTC; ``current_timestamp`` writes the same shape.
+    A future value clamps to 0 and an unparsable one is ``None`` — the one place
+    that conversion exists, shared by the admin status list, the health monitor
+    and the ``rootcoz_oldest_analysis_age_seconds`` gauge.
+    """
+    if not since:
+        return None
+    try:
+        started = datetime.fromisoformat(since)
+    except ValueError:
+        return None
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
+    return max(0, round((datetime.now(UTC) - started).total_seconds()))
+
+
 async def list_active_analyses(limit: int = 20) -> list[dict[str, Any]]:
     """Active analyses with their start times, so elapsed time can be shown.
 
@@ -6482,6 +6526,24 @@ async def list_active_analyses(limit: int = 20) -> list[dict[str, Any]]:
         )
         rows = await cursor.fetchall()
         return [dict(row) for row in rows]
+
+
+async def oldest_running_analysis_started_at() -> str | None:
+    """The analysis-start stamp of the longest-running analysis, or ``None``.
+
+    ``running`` only: ``analysis_started_at`` is stamped on that transition alone,
+    and ``waiting`` covers the whole Jenkins build wait — a job queueing for hours
+    is not a stuck analysis.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT MIN(analysis_started_at) FROM results "
+            "WHERE status = 'running' AND analysis_started_at IS NOT NULL"
+        )
+        row = await cursor.fetchone()
+    if not row or row[0] is None:
+        return None
+    return str(row[0])
 
 
 async def list_distinct_job_names() -> set[str]:

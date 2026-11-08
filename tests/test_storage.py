@@ -1438,6 +1438,147 @@ async def test_fail_job_without_result_write_keeps_a_newer_terminal_status(
     assert failed["completed_at"]
 
 
+def _stamp(seconds_ago: float) -> str:
+    """A ``CURRENT_TIMESTAMP``-shaped UTC stamp *seconds_ago* in the past."""
+    from datetime import UTC, datetime, timedelta
+
+    moment = datetime.now(UTC).replace(tzinfo=None) - timedelta(seconds=seconds_ago)
+    return moment.strftime("%Y-%m-%d %H:%M:%S")
+
+
+class TestAnalysisWindow:
+    """The age signal the health monitor's stuck condition reads (#464)."""
+
+    async def test_oldest_running_analysis_started_at_ignores_waiting_rows(
+        self, setup_test_db: Path
+    ) -> None:
+        """``waiting`` covers the whole Jenkins build wait: a queue is not a run."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result("job-waiting", "", "waiting")
+            await storage.save_result("job-running", "", "running")
+            await storage.save_result("job-done", "", "running")
+            await storage.update_status("job-done", "completed")
+            async with aiosqlite.connect(setup_test_db) as db:
+                await db.execute(
+                    "UPDATE results SET created_at = ?, analysis_started_at = NULL "
+                    "WHERE job_id = 'job-waiting'",
+                    (_stamp(10800),),
+                )
+                await db.execute(
+                    "UPDATE results SET analysis_started_at = ? WHERE job_id = 'job-running'",
+                    (_stamp(600),),
+                )
+                await db.execute(
+                    "UPDATE results SET analysis_started_at = ? WHERE job_id = 'job-done'",
+                    (_stamp(7200),),
+                )
+                await db.commit()
+
+            stamp = await storage.oldest_running_analysis_started_at()
+            age = storage.elapsed_seconds_since(stamp)
+
+        assert age is not None
+        assert age == pytest.approx(600, abs=5)
+
+    async def test_claiming_a_submitted_job_rearms_the_analysis_window_and_releases_it_intact(
+        self, setup_test_db: Path
+    ) -> None:
+        """An ingest-then-analyze job measures the analysis run, not the ingest run.
+
+        ``update_status`` writes both stamps with ``COALESCE``, so a claim that
+        only flipped the status would leave the ingest window in place: a 24 h
+        "running" age (a false stuck alert) and a ``completed_at`` *before* the new
+        start (which the report header renders as its invalid-date fallback).
+        """
+        from datetime import datetime
+
+        from rootcoz.storage import ANALYSIS_STATE_SUBMITTED
+
+        ingest_start = _stamp(86400)
+        ingest_end = _stamp(82800)
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                "job-ingest",
+                "",
+                "completed",
+                {"analysis_state": ANALYSIS_STATE_SUBMITTED, "job_name": "raw"},
+            )
+            async with aiosqlite.connect(setup_test_db) as db:
+                await db.execute(
+                    "UPDATE results SET analysis_started_at = ?, completed_at = ? "
+                    "WHERE job_id = 'job-ingest'",
+                    (ingest_start, ingest_end),
+                )
+                await db.commit()
+
+            claim = await storage.claim_submitted_job_for_analyze("job-ingest")
+            claimed = await storage.get_result("job-ingest")
+            await storage.update_status("job-ingest", "running")
+            age = storage.elapsed_seconds_since(
+                await storage.oldest_running_analysis_started_at()
+            )
+            await storage.update_status("job-ingest", "completed")
+            finished = await storage.get_result("job-ingest")
+
+            # The restore half, on its own row.
+            await storage.save_result(
+                "job-restore",
+                "",
+                "completed",
+                {"analysis_state": ANALYSIS_STATE_SUBMITTED, "job_name": "raw"},
+            )
+            async with aiosqlite.connect(setup_test_db) as db:
+                await db.execute(
+                    "UPDATE results SET analysis_started_at = ?, completed_at = ? "
+                    "WHERE job_id = 'job-restore'",
+                    (ingest_start, ingest_end),
+                )
+                await db.commit()
+            restore_claim = await storage.claim_submitted_job_for_analyze("job-restore")
+            while_claimed = await storage.get_result("job-restore")
+            assert restore_claim is not None
+            await storage.release_submitted_job_analyze_claim(
+                "job-restore", *restore_claim
+            )
+            restored = await storage.get_result("job-restore")
+
+        assert claim is not None
+        assert claim[2:] == (ingest_start, ingest_end)
+        assert claimed["analysis_started_at"] is None
+        assert claimed["completed_at"] is None
+        assert age is not None
+        assert age < 5, "the new run starts its own window, not yesterday's"
+        assert finished["analysis_started_at"] is not None
+        assert finished["completed_at"] is not None
+        span = datetime.fromisoformat(
+            finished["completed_at"]
+        ) - datetime.fromisoformat(finished["analysis_started_at"])
+        assert span.total_seconds() >= 0
+
+        assert while_claimed["analysis_started_at"] is None
+        assert while_claimed["completed_at"] is None
+        assert restored["analysis_started_at"] == ingest_start
+        assert restored["completed_at"] == ingest_end
+        assert restored["status"] == "completed"
+        assert restored["failure_reason"] == ""
+
+    async def test_oldest_running_analysis_started_at_is_none_without_running_rows(
+        self, setup_test_db: Path
+    ) -> None:
+        """No running row is ``None``, never a zero or an inverted value."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result("job-q", "", "waiting")
+            await storage.save_result("job-c", "", "running")
+            await storage.update_status("job-c", "completed")
+
+            assert await storage.oldest_running_analysis_started_at() is None
+
+        # A planted future stamp clamps to 0; garbage is None, never an age.
+        assert storage.elapsed_seconds_since(_stamp(-3600)) == 0
+        assert storage.elapsed_seconds_since("not-a-timestamp") is None
+        assert storage.elapsed_seconds_since(None) is None
+
+
 class TestMarkJobsFailedForRestart:
     """The mark the shutdown writes before it drains (#458)."""
 
@@ -1509,11 +1650,15 @@ class TestMarkJobsFailedForRestart:
                 {"analysis_state": ANALYSIS_STATE_SUBMITTED, "job_name": "raw"},
             )
             await storage.mark_jobs_failed_for_restart(["job-sub"])
+            before = await storage.get_result("job-sub")
             claim = await storage.claim_submitted_job_for_analyze("job-sub")
             row = await storage.get_result("job-sub")
 
-        # The claim reports what it overwrote, so a release can put it back.
-        assert claim == ("failed", storage.SERVER_RESTART_FAILURE_REASON)
+        # The claim reports what it overwrote -- status, reason and the analysis
+        # window -- so a release can put all four columns back (#464).
+        assert claim is not None
+        assert claim[:2] == ("failed", storage.SERVER_RESTART_FAILURE_REASON)
+        assert claim[2:] == (before["analysis_started_at"], before["completed_at"])
         assert row["status"] == "pending"
         assert row["failure_reason"] == ""
 
@@ -1548,12 +1693,14 @@ class TestMarkJobsFailedForRestart:
                 await storage.update_status("job-release", "completed")
             claim = await storage.claim_submitted_job_for_analyze("job-release")
             assert claim is not None
-            assert claim == (status, reason)
+            assert claim[:2] == (status, reason)
             await storage.release_submitted_job_analyze_claim("job-release", *claim)
             row = await storage.get_result("job-release")
 
         assert row["status"] == status
         assert row["failure_reason"] == reason
+        assert row["analysis_started_at"] == claim[2]
+        assert row["completed_at"] == claim[3]
 
     async def test_a_budget_cut_mark_logs_how_far_it_got(
         self, setup_test_db: Path, storage_logs: Any

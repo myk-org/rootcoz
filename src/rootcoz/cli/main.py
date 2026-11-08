@@ -745,8 +745,34 @@ def server_status_cmd(json_output: bool = _JSON_OPTION) -> None:
                 f"#{running.get('build_number')} {running.get('status')} "
                 f"for {_status_value(running.get('elapsed_seconds'))}s"
             )
+    # An absent block is a server of another version: print nothing rather than
+    # fabricate "disabled, interval 0s".
+    monitor = data.get("health_monitor")
+    if monitor:
+        _echo_status_block("Health monitor", monitor, _health_monitor_detail(monitor))
+        for condition in monitor.get("conditions") or []:
+            if condition.get("state") != "firing":
+                continue
+            if condition.get("key") == "stuck_analysis":
+                measured = f"age {_status_value(condition.get('age_seconds'))}s"
+            else:
+                measured = f"held {_status_value(condition.get('held_seconds'))}s"
+            typer.echo(
+                f"  {condition.get('label')}: firing — {measured}, "
+                f"threshold {_status_value(condition.get('threshold_seconds'))}s"
+            )
     for warning in data.get("warnings", []):
         typer.echo(f"[{warning.get('level', 'warn')}] {warning.get('message', '')}")
+
+
+def _health_monitor_detail(monitor: dict[str, Any]) -> str:
+    """The monitor's line: its state and how long ago it last sampled."""
+    interval = _status_value(monitor.get("interval_seconds"))
+    if not monitor.get("enabled"):
+        return f"disabled, interval {interval}s"
+    ago = monitor.get("last_sample_ago_seconds")
+    sampled = "not sampled yet" if ago is None else f"last sample {ago}s ago"
+    return f"enabled, interval {interval}s, {sampled}"
 
 
 def _echo_status_block(label: str, block: dict[str, Any], detail: str) -> None:

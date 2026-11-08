@@ -6,6 +6,7 @@ import {
   Cpu,
   Database,
   HardDrive,
+  HeartPulse,
   MemoryStick,
   RefreshCw,
   Server,
@@ -102,6 +103,27 @@ interface ActivityBlock {
   sse_clients?: number
 }
 
+interface HealthMonitorCondition {
+  key: string
+  label: string
+  state: 'ok' | 'firing'
+  /** Time the condition has held; null when it is not holding (most `ok` rows). */
+  held_seconds: number | null
+  threshold_seconds: number
+  /** The stuck condition's age; its own hold is 0, so the age is what it shows. */
+  age_seconds: number | null
+  /** false = the age could not be read — never the same thing as "not running". */
+  age_known: boolean
+}
+
+interface HealthMonitorBlock extends ProbeBlock {
+  enabled?: boolean
+  interval_seconds?: number
+  /** null means it has not sampled yet — not "just sampled". */
+  last_sample_ago_seconds?: number | null
+  conditions?: HealthMonitorCondition[]
+}
+
 interface ServerWarning {
   level: string
   code: string
@@ -116,6 +138,8 @@ export interface ServerStatus {
   database: DatabaseBlock
   sidecar: SidecarBlock
   activity: ActivityBlock
+  /** Optional: a server of another version never sent one. */
+  health_monitor?: HealthMonitorBlock
   warnings: ServerWarning[]
 }
 
@@ -264,6 +288,7 @@ export function AdminServerStatusPage() {
   const database = data?.database
   const sidecar = data?.sidecar
   const activity = data?.activity
+  const monitor = data?.health_monitor
 
   return (
     <div className="space-y-6">
@@ -503,6 +528,79 @@ export function AdminServerStatusPage() {
                 </div>
               )}
             </StatusCard>
+          {monitor && (
+            <StatusCard title="Health monitor" icon={<HeartPulse className="h-4 w-4" />}>
+              {monitor.available === false ? (
+                <NotVisible reason={monitor.reason} />
+              ) : monitor.enabled ? (
+                <div className="space-y-2">
+                  <dl>
+                    <Field label="State">
+                      <Badge variant="success">Enabled</Badge>
+                    </Field>
+                    <Field label="Interval">
+                      {monitor.interval_seconds == null
+                        ? NOT_VISIBLE
+                        : `${monitor.interval_seconds}s`}
+                    </Field>
+                    <Field label="Last sample">
+                      {monitor.last_sample_ago_seconds == null ? (
+                        <span className="text-text-tertiary">not sampled yet</span>
+                      ) : (
+                        `${monitor.last_sample_ago_seconds}s ago`
+                      )}
+                    </Field>
+                  </dl>
+                  <dl>
+                    {(monitor.conditions ?? []).map((condition) => {
+                      // Every null is its own state: a hold that has not started, no
+                      // analysis running, and an unreadable source are three things.
+                      let measured: React.ReactNode
+                      if (condition.key === 'stuck_analysis') {
+                        measured = !condition.age_known ? (
+                          <span className="text-text-tertiary">unknown</span>
+                        ) : condition.age_seconds == null ? (
+                          <span className="text-text-tertiary">not running</span>
+                        ) : (
+                          `${formatUptime(condition.age_seconds)} / ${formatUptime(condition.threshold_seconds)}`
+                        )
+                      } else {
+                        measured =
+                          condition.held_seconds == null ? (
+                            <span className="text-text-tertiary">—</span>
+                          ) : (
+                            `${formatUptime(condition.held_seconds)} / ${formatUptime(condition.threshold_seconds)}`
+                          )
+                      }
+                      return (
+                        <Field key={condition.key} label={condition.label}>
+                          <span className="flex items-center justify-end gap-2">
+                            <Badge
+                              variant={condition.state === 'firing' ? 'destructive' : 'success'}
+                            >
+                              {condition.state === 'firing' ? 'Firing' : 'OK'}
+                            </Badge>
+                            <span className="text-text-tertiary">{measured}</span>
+                          </span>
+                        </Field>
+                      )
+                    })}
+                  </dl>
+                </div>
+              ) : (
+                <dl>
+                  <Field label="State">
+                    <span className="text-text-tertiary">Disabled</span>
+                  </Field>
+                  <Field label="Interval">
+                    {monitor.interval_seconds == null
+                      ? NOT_VISIBLE
+                      : `${monitor.interval_seconds}s`}
+                  </Field>
+                </dl>
+              )}
+            </StatusCard>
+          )}
           </div>
 
           <p className="flex items-center gap-1.5 text-xs text-text-tertiary">

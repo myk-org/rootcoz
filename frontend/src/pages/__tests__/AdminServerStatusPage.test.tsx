@@ -1,8 +1,11 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter, Route, Routes } from 'react-router-dom'
 import { describe, expect, it, vi, beforeEach } from 'vitest'
-import { AdminServerStatusPage, type ServerStatus } from '@/pages/AdminServerStatusPage'
+import {
+  AdminServerStatusPage,
+  type ServerStatus,
+} from '@/pages/AdminServerStatusPage'
 import { ProtectedRoute } from '@/components/shared/ProtectedRoute'
 
 const apiGet = vi.fn()
@@ -324,5 +327,158 @@ describe('AdminServerStatusPage', () => {
     renderGuarded()
 
     expect(await screen.findByRole('heading', { name: 'Server Status' })).toBeInTheDocument()
+  })
+
+  it('renders the health monitor card with per-condition state', async () => {
+    const status = healthy()
+    status.health_monitor = {
+      available: true,
+      enabled: true,
+      interval_seconds: 60,
+      last_sample_ago_seconds: 12,
+      conditions: [
+        {
+          key: 'health_down',
+          label: 'Health down',
+          state: 'firing',
+          held_seconds: 420,
+          threshold_seconds: 300,
+          age_seconds: null,
+          age_known: true,
+        },
+        {
+          key: 'stuck_analysis',
+          label: 'Analysis stuck',
+          state: 'firing',
+          held_seconds: 0,
+          threshold_seconds: 7200,
+          age_seconds: 7500,
+          age_known: true,
+        },
+        {
+          key: 'error_rate',
+          label: 'Error rate',
+          state: 'ok',
+          held_seconds: null,
+          threshold_seconds: 600,
+          age_seconds: null,
+          age_known: true,
+        },
+      ],
+    }
+    apiGet.mockResolvedValue(status)
+    renderPage()
+
+    const card = (await screen.findByText('Health monitor')).closest(
+      'div.rounded-lg',
+    ) as HTMLElement
+    expect(within(card).getByText('Enabled')).toBeInTheDocument()
+    expect(within(card).getByText('12s ago')).toBeInTheDocument()
+    // A firing condition carries its label and held / threshold.
+    expect(within(card).getByText('Health down')).toBeInTheDocument()
+    expect(within(card).getAllByText('Firing')).toHaveLength(2)
+    expect(within(card).getByText('7m 0s / 5m 0s')).toBeInTheDocument()
+    // The stuck row shows its age, never "held 0s".
+    expect(within(card).getByText('Analysis stuck')).toBeInTheDocument()
+    expect(within(card).getByText('2h 5m / 2h 0m')).toBeInTheDocument()
+    expect(within(card).queryByText(/^0s/)).toBeNull()
+    // An ok row that has not held yet is the page's muted dash, not "not visible".
+    const errorRow = within(card).getByText('Error rate').closest('div') as HTMLElement
+    expect(within(errorRow).getByText('—')).toBeInTheDocument()
+    expect(within(card).queryByText(/not visible in this container/)).toBeNull()
+  })
+
+  it('distinguishes an idle analysis, an unreadable age, and a fresh monitor', async () => {
+    const status = healthy()
+    const condition = {
+      label: 'Analysis stuck',
+      state: 'ok' as const,
+      held_seconds: null,
+      threshold_seconds: 7200,
+      age_known: true,
+    }
+    status.health_monitor = {
+      available: true,
+      enabled: true,
+      interval_seconds: 60,
+      last_sample_ago_seconds: null,
+      conditions: [
+        { ...condition, key: 'stuck_analysis', age_seconds: null },
+        { ...condition, key: 'error_rate', label: 'Error rate', age_seconds: null },
+      ],
+    }
+    apiGet.mockResolvedValue(status)
+    const { unmount } = renderPage()
+
+    expect(await screen.findByText('not running')).toBeInTheDocument()
+    expect(screen.getByText('not sampled yet')).toBeInTheDocument()
+    expect(screen.queryByText('unknown')).toBeNull()
+    unmount()
+
+    const unreadable = healthy()
+    unreadable.health_monitor = {
+      available: true,
+      enabled: true,
+      interval_seconds: 60,
+      last_sample_ago_seconds: 5,
+      conditions: [
+        {
+          ...condition,
+          key: 'stuck_analysis',
+          age_seconds: null,
+          age_known: false,
+        },
+      ],
+    }
+    apiGet.mockResolvedValue(unreadable)
+    renderPage()
+    expect(await screen.findByText('unknown')).toBeInTheDocument()
+    expect(screen.queryByText('not running')).toBeNull()
+  })
+
+  it('renders a disabled monitor without condition rows, and no card when absent', async () => {
+    const status = healthy()
+    status.health_monitor = {
+      available: true,
+      enabled: false,
+      interval_seconds: 60,
+      last_sample_ago_seconds: null,
+      conditions: [
+        {
+          key: 'health_down',
+          label: 'Health down',
+          state: 'ok',
+          held_seconds: null,
+          threshold_seconds: 300,
+          age_seconds: null,
+          age_known: true,
+        },
+      ],
+    }
+    apiGet.mockResolvedValue(status)
+    const { unmount } = renderPage()
+
+    expect(await screen.findByText('Disabled')).toBeInTheDocument()
+    expect(screen.queryByText('Health down')).toBeNull()
+    unmount()
+
+    // The existing fixtures carry no block at all: no card, and no crash.
+    apiGet.mockResolvedValue(healthy())
+    renderPage()
+    expect(await screen.findByRole('heading', { name: 'Server Status' })).toBeInTheDocument()
+    expect(screen.queryByText('Health monitor')).toBeNull()
+  })
+
+  it('renders an unavailable monitor block with its reason', async () => {
+    const status = healthy()
+    status.health_monitor = {
+      available: false,
+      reason: 'probe timed out after 4s',
+    }
+    apiGet.mockResolvedValue(status)
+    renderPage()
+
+    expect(await screen.findByText(/probe timed out after 4s/)).toBeInTheDocument()
+    expect(screen.queryByText('Disabled')).toBeNull()
   })
 })

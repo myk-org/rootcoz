@@ -221,6 +221,10 @@ tests:
 # Health alert CronJob (optional): scrapes /metrics every `schedule` and posts
 # one Slack message combining every failing check. The script lives in
 # chart/files/health-alert.sh and is tested by tests/test_health_alert_script.py.
+# This job is the alternative for deployments without Prometheus. rootcoz also has
+# an in-process health monitor (ENABLE_HEALTH_MONITOR, "Notifications" in Server
+# Settings): leave this job off when that monitor is enabled, because the two
+# cannot see each other and would both report the same condition.
 alerts:
   # Opt-in: enabling it creates the CronJob and its script ConfigMap.
   enabled: false

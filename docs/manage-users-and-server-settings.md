@@ -127,6 +127,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | `Prow` | `prow_url`, `gcs_bucket` |
    | `Server` | `public_base_url`, `additional_repos`, `max_concurrent_repo_clones`, `wait_for_completion`, `poll_interval_minutes`, `max_wait_minutes`, `metadata_rules_file`, `enable_auto_review`, `auto_push_exporters` |
    | `Web Push` | `vapid_public_key`, `vapid_private_key`, `vapid_claim_email` |
+   | `Notifications` | `smtp_host`, `smtp_port`, `smtp_user`, `smtp_password`, `smtp_from`, `alert_email_to`, `slack_webhook_url`, `enable_health_monitor`, `health_monitor_interval_seconds`, `health_alert_unhealthy_seconds`, `health_alert_error_rate_percent`, `health_alert_error_rate_seconds`, `health_alert_stuck_analysis_seconds` |
 
    Each row shows the environment variable name, a source badge, and where relevant three other signals:
 
@@ -167,7 +168,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | `Logs` | The server log, filterable by level and text. The initial tail — and so everything the page shows after a reload — is read from the application **log file**, which every `rootcoz` module logger writes to. The live stream over SSE follows every logger as well, including third-party ones, so third-party lines are visible live but are gone after a reload. |
    | `Server Status` | A live snapshot of the container this server runs in — see below. |
 
-   **Server Status answers "is anything wrong" before "what are the numbers".** The page renders warnings above the cards from the same numbers the cards show: the data directory at 75 % / 90 %, the container's memory working set at 90 % of its limit, an event-loop stall over 5 s, and an unreachable AI sidecar. Each one is a badge plus its text (`Critical` / `Warning`), never colour alone. The page refreshes every 30 s while the tab is visible and never runs two requests at once. The CLI mirrors it: `rootcoz admin server-status` (`--json` for the raw snapshot).
+   **Server Status answers "is anything wrong" before "what are the numbers".** The page renders warnings above the cards from the server's own resource probes: the data directory at 75 % / 90 %, the container's memory working set at 90 % of its limit, an event-loop stall over 5 s, and an unreachable AI sidecar. The `Health monitor` card reports the health monitor's state separately — a firing monitor condition adds no warning. Each one is a badge plus its text (`Critical` / `Warning`), never colour alone. The page refreshes every 30 s while the tab is visible and never runs two requests at once. The CLI mirrors it: `rootcoz admin server-status` (`--json` for the raw snapshot).
 
    | Card | Shows |
    | --- | --- |
@@ -178,6 +179,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | Database | `results.db` size (main file plus its WAL), row counts for results, recorded failures and test entries, and the compression ratio. |
    | AI sidecar | Reachable or not, models available, and free models declared. |
    | Activity | Analyses running with how long each has been running, chat turns in flight, and SSE clients connected. |
+   | Health monitor | `Enabled` or `Disabled` with the sampling interval and how long ago it last sampled (`not sampled yet` before the first sample), then one row per condition: `OK` or `Firing`, its label, and its held time against the threshold — the analysis age against the threshold for `Analysis stuck`, `not running` when no analysis is running, and `unknown` when the age could not be read. `last sample` proves the monitor is sampling, never that a notification was delivered. |
 
    **The disk figures describe a filesystem, not a quota.** `Disk` measures whichever filesystem holds the data directory — a PVC, a Docker volume, a bind mount or a plain directory — using the same probe the `rootcoz_data_*` metrics publish, so the page and your alerting can never disagree. It is **not** a per-volume quota, and on a shared node filesystem it includes other tenants' usage: 60 % there does not mean 40 % of your own headroom. The card says so.
 
