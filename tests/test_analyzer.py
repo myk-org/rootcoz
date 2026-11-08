@@ -2295,6 +2295,16 @@ class TestCloneAdditionalRepos:
         # Neither repo is cloned into the shared directory: nothing is silently lost.
         assert manager.clone_into.call_count == 0
 
+    def test_duplicate_refusal_reaches_the_user_with_the_names(self) -> None:
+        """The refusal must not be re-labelled as an unexpected error (#402 C4)."""
+        from rootcoz.error_messages import make_user_friendly_error
+
+        message = make_user_friendly_error(
+            ValueError("Duplicate additional repo names: infra")
+        )
+        assert "Duplicate additional repo names: infra" in message
+        assert "unexpected error" not in message
+
 
 class TestBuildResourcesSectionAdditionalRepos:
     """Tests for build_resources_section with additional_repos."""
