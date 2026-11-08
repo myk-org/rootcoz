@@ -184,6 +184,8 @@ def test_exemptions_are_not_stale() -> None:
         "admin.user_unlock",
         "admin.user_disabled",
         "admin.user_enabled",
+        # A background startup action has no route for the walk above to see.
+        "startup.workspace_reclaim",
     ],
 )
 def test_contract_action_is_implemented(action: str) -> None:

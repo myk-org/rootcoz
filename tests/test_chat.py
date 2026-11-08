@@ -2213,6 +2213,27 @@ class TestChatCleanup:
             assert not link.exists()
             assert not target.exists()
 
+    def test_a_symlinked_workspace_is_never_walked_into(self, tmp_path):
+        """A link planted at the workspace path must not delete a live workspace.
+
+        The shipped delete derives the path from the job id and then walks it, so
+        a link swapped in after the caller's checks would delete the *target's*
+        contents. A workspace path is never a link, so the walk refuses it.
+        """
+        from rootcoz.engine.chat import cleanup_chat_workspace
+
+        live = tmp_path / "live"
+        (live / "repo").mkdir(parents=True)
+        (live / "sessions.jsonl").write_text("keep me")
+        planted = tmp_path / "rootcoz-chat-orphan"
+        planted.symlink_to(live)
+
+        with patch("rootcoz.engine.chat.get_chat_workspace", return_value=planted):
+            assert cleanup_chat_workspace("orphan") == (0, 0, 0)
+
+        assert (live / "sessions.jsonl").read_text() == "keep me"
+        assert (live / "repo").is_dir()
+
     def test_cleanup_counts_the_loose_files_it_unlinks(self, tmp_path):
         """``reclaimed=`` must include the regular files this cleanup really unlinked."""
         from rootcoz.engine.chat import cleanup_chat_repos
@@ -2292,12 +2313,16 @@ class TestChatCleanup:
         import tempfile
 
         from rootcoz import jenkins_artifacts
+        from rootcoz.engine import chat
         from rootcoz.engine.chat import cleanup_chat_workspace
 
         custom_tmp = tmp_path / "custom-tmp"
         custom_tmp.mkdir()
         monkeypatch.setenv("TMPDIR", str(custom_tmp))
         monkeypatch.setattr(tempfile, "gettempdir", lambda: str(custom_tmp))
+        # The shared conftest fixture replaces ``chat._tmp_root`` outright, so the
+        # containment check would not see the TMPDIR patch without this seam.
+        monkeypatch.setattr(chat, "_tmp_root", lambda: custom_tmp.resolve())
 
         extract_base = Path(tempfile.gettempdir()) / "rootcoz"
         monkeypatch.setattr(jenkins_artifacts, "EXTRACT_BASE", extract_base)

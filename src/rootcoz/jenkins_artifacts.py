@@ -20,6 +20,11 @@ logger = get_child_logger(__name__)
 # Under process temp root so chat symlink cleanup (honors TMPDIR) can delete it.
 EXTRACT_BASE = rootcoz_temp_base()
 
+#: The two directory names this module creates under :data:`EXTRACT_BASE`, shared
+#: with the startup reclaim so a rename cannot silently stop matching.
+JENKINS_ARTIFACTS_PREFIX = "jenkins-artifacts-"
+ARTIFACTS_PREFIX = "artifacts-"
+
 # Maximum ratio of extracted size to compressed size. Typical compression ratios
 # for Jenkins artifacts (logs, YAML, JSON) range from 3-8x; 10x provides safe
 # headroom while still catching decompression bombs.
@@ -270,7 +275,7 @@ def validate_and_extract_archive(
         return None
 
     if extract_dir is None:
-        extract_dir = EXTRACT_BASE / f"jenkins-artifacts-{uuid.uuid4().hex[:8]}"
+        extract_dir = EXTRACT_BASE / f"{JENKINS_ARTIFACTS_PREFIX}{uuid.uuid4().hex[:8]}"
     extract_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Extracting archive ({size_mb:.1f} MB) to {extract_dir}")
 
@@ -401,7 +406,7 @@ def process_build_artifacts(
         logger.debug("No artifacts to process")
         return "", None
 
-    artifacts_dir = EXTRACT_BASE / f"artifacts-{uuid.uuid4().hex[:8]}"
+    artifacts_dir = EXTRACT_BASE / f"{ARTIFACTS_PREFIX}{uuid.uuid4().hex[:8]}"
     artifacts_dir.mkdir(parents=True, exist_ok=True)
     logger.info(f"Processing {len(artifact_list)} artifacts to {artifacts_dir}")
 

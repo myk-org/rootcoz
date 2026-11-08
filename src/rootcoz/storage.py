@@ -6599,6 +6599,21 @@ async def list_distinct_job_names() -> set[str]:
         return {row[0] for row in rows if row[0]}
 
 
+async def list_job_ids() -> set[str]:
+    """Return every job id in ``results``.
+
+    The startup reclaim's reachability set: a chat workspace whose ``job_id`` is
+    absent from it cannot be opened by any request. Internal only — one statement,
+    one column, no ``result_json``.
+    """
+    async with _connect_db() as db:
+        # Streamed, not ``fetchall()``: the startup snapshot runs before uvicorn
+        # serves, so a second copy of every id is startup latency and memory for
+        # nothing.
+        cursor = await db.execute("SELECT job_id FROM results")
+        return {row[0] async for row in cursor}
+
+
 def _parse_dashboard_row(
     row: aiosqlite.Row,
     overrides: Mapping[tuple[str, str, int], str] | None = None,
