@@ -173,9 +173,9 @@ AI API keys, Vertex SA JSON, Cursor `auth.json`, and sidecar agent-dir files sup
 
 ## Production Sizing
 
-Default resources (`1 CPU / 4Gi` request, `2 CPU / 8Gi` limit) suit evaluation clusters. For
-concurrent AI analysis workloads apply the shipped production profile — an overlay, never a
-default:
+Default resources (`1 CPU / 4Gi / 12Gi ephemeral-storage` request, `2 CPU / 8Gi / 12Gi` limit) suit
+evaluation clusters. For concurrent AI analysis workloads apply the shipped production profile — an
+overlay, never a default:
 
 ```bash
 helm upgrade --install rootcoz ./chart -n rootcoz \
@@ -193,6 +193,9 @@ helm upgrade --install rootcoz ./chart -n rootcoz \
 | Memory | `32Gi` | Peak usage (analysis + graph indexing + sidecar) is ~6 GiB. 32Gi is headroom to raise `max_concurrent_ai_calls` above the default 3; the rule for sizing a smaller pod is **~1 GiB baseline + ~2 GiB per concurrent analysis**. |
 | ephemeral-storage | `16Gi` | **A judgement, not a measurement**: 1 GiB graph-index budget per analysis workspace × default concurrency 3, plus up to 10 concurrent repo clones of arbitrary size, plus Jenkins/Prow artifacts and the container writable layer. Must stay at or below the node's ephemeral allocatable. |
 
+The overlay **replaces** the default `12Gi` (see [`/tmp` and ephemeral storage](#tmp-and-ephemeral-storage));
+it does not add to it, so a `-f` profile is still one number on both keys.
+
 The PVC size is deliberately *not* in the profile: the example is applied over a live release, where
 changing `persistence.size` either no-ops or triggers a PVC resize. Database growth is tracked in #409
 (~83 KB per stored result).
@@ -209,17 +212,88 @@ thresholds. The cost is a scheduling floor of 32Gi memory + 16Gi ephemeral: the 
 allocatable. The repo's dev deployment requests `16Gi` instead (`1000m` CPU) — Burstable, the fallback
 for smaller nodes.
 
+### Probes
+
+Every probe timing field is a value under `probes:` — `startup`, `readiness` and `liveness`, each
+with `periodSeconds`, `timeoutSeconds`, `failureThreshold` and `successThreshold`, plus
+`initialDelaySeconds` on readiness and liveness. **Defaults live in `chart/values.yaml`, not here**;
+only the two numbers below are restated because CI asserts them.
+
+- **Readiness `timeoutSeconds: 5`.** `GET /health` answers in ~1 ms, so this timeout absorbs a
+  *stalled event loop*, not a slow response: one analysis can hold the loop for a few seconds, and at
+  the old 1 s a single stall counted a failure — three in a row (10 s period × 3) removed the pod
+  from the Service and tore down every SSE stream (`/api/stream`, `/api/results/*/stream`,
+  `/api/admin/logs/stream`) mid-analysis while the container kept running.
+- **Liveness budget `timeoutSeconds: 30` × `failureThreshold: 5` ≈ 2.5 min** of unresponsiveness
+  before SIGTERM (up to ~5 min if every attempt burns its timeout). **Do not widen it to hide a
+  stall** — it fired correctly on 2026-11-04.
+
+Every other timing field — startup `2/10/30`, readiness `5/10/3`, liveness `15/30/5`
+(`periodSeconds`/`timeoutSeconds`/`failureThreshold`) — is in `chart/values.yaml`, along with each
+probe's `successThreshold: 1`. **Readiness `successThreshold` is a real knob**: Kubernetes allows any
+value ≥ 1 there, so raise it if you want a pod to prove itself over consecutive checks before it gets
+traffic. Startup and liveness pin it to `1` — Kubernetes accepts no other value, and the schema
+enforces that.
+
+**Targets are not values.** Readiness and liveness are `GET /health` — a dict literal, no I/O.
+Never point them at `/api/health`: it runs the DB, Jenkins, sidecar and Report Portal checks behind a
+6 s internal timeout, so an upstream hiccup would become a restart storm. The startup probe is
+`exec curl /api/health`, waiting for the backend *and* the sidecar before the other two start; its
+comment in `chart/templates/deployment.yaml` says so.
+
+Changing a probe value changes the pod template, so it **rolls the pod** — see
+[Rollout on upgrade](#rollout-on-upgrade).
+
 ### `/tmp` and ephemeral storage
 
-Clones and code-graph indexes live under `/tmp`. Setting `resources.limits["ephemeral-storage"]`
-makes the chart mount a dedicated `/tmp` `emptyDir` with `sizeLimit` equal to that limit, verbatim,
-plus `TMPDIR=/tmp`. There is no second value to keep in sync.
+Clones and code-graph indexes live under `/tmp`, and `/tmp` is capped by default. The cap **is**
+`resources.limits["ephemeral-storage"]` — the chart mounts a dedicated `/tmp` `emptyDir` whose
+`sizeLimit` is that value, verbatim, and sets `TMPDIR=/tmp`. There is no second value to keep in sync.
+The defaults in `chart/values.yaml` set `12Gi` on **both** `requests` and `limits`; an
+`ephemeral-storage` **request** without a limit is also accepted and constrains scheduling but mounts
+nothing.
+
+Where `12Gi` comes from — **a judgement, not a measurement**, derived from the configured ceilings the
+same way the production `16Gi` is:
+
+| Term | Source | GiB |
+|---|---|---|
+| Code-graph indexes | `max_workspace_graph_mb` default `1024` × `max_concurrent_ai_calls` default `3` | 3.0 |
+| Repo clones | `max_concurrent_repo_clones` default `10` × the largest measured snapshot (`kubev2v/forklift`, 557 MB) | 5.4 |
+| CI artifacts | `jenkins_artifacts_max_size_mb` `500` + the Prow ceiling `50` | 0.5 |
+| Writable layer and logs | pip/uv/node caches, scratch outside our own dirs | ~1.0 |
+| **Worst case** | summed, rounded up to whole GiB | **12** |
+
+Roughly ten GiB is all the inputs support — the 557 MB snapshot is one repository and the writable
+layer is a guess — so the default is the sum rounded up. It is deliberately **below** the production
+profile's `16Gi`: the scheduler counts the request, and a default pod must still schedule on the small
+single-node clusters this profile exists for. Apply
+`chart/examples/values-production.yaml` for AI-heavy production.
 
 **Ownership vs. #402 C1.** This chart owns the `/tmp` cap: the number is
 `resources.limits["ephemeral-storage"]` and there is no separate `workspace.sizeLimit` key. #402 C1
-applies the same `/tmp` `emptyDir` + `sizeLimit` to the live deployment, so that deployment must carry
-the same number as the profile it runs (the production example uses `16Gi`). Two values for one
-threshold is exactly the drift the single-source rule above prevents.
+requires the capped `/tmp` `emptyDir` + `TMPDIR=/tmp` **by default**, and this default is what renders
+it. The live deployment must carry the same number as the profile it runs (the production example uses
+`16Gi`). Two values for one threshold is exactly the drift the single-source rule above prevents.
+
+**The live deployment does not carry it yet.** `.dev/openshift/deployment.yaml` sets no
+`ephemeral-storage` at all, so the live `/tmp` is still the unbounded writable layer. Matching it to
+this default needs the keys on both sides:
+
+```yaml
+resources:
+  requests:
+    ephemeral-storage: 12Gi
+  limits:
+    ephemeral-storage: 12Gi
+```
+
+**Removing the cap needs both keys.** Clearing only the limit keeps the `12Gi` request (Kubernetes
+copies a limit into the request, and the request string is still rendered): the pod keeps a 12 Gi floor
+with no cap and no volume. Clear `resources.requests.ephemeral-storage` **and**
+`resources.limits.ephemeral-storage` to drop the `/tmp` `emptyDir`, the `sizeLimit` and `TMPDIR` — `/tmp`
+then lives on the writable layer again, uncapped, and `xdgConfigHome` keeps working because the
+entrypoint creates it on the container filesystem.
 
 Behaviour and failure mode: exceeding the container's ephemeral-storage limit **or** the `emptyDir`
 `sizeLimit` is a **kubelet eviction, not a throttle** — the whole pod goes down mid-analysis. In flight,
@@ -232,25 +306,32 @@ A limit is still the right choice over no limit: with no cap the failure is node
 which evicts *every* pod on the node, including unrelated workloads. The `/tmp` cap is a bound on
 `/tmp` specifically — a runaway clone or extract dir fails at a known number instead of filling the
 node. Which of the two thresholds reports first is not deterministic and does not need to be: the
-response to both is to raise the number. An `ephemeral-storage` **request** without a limit still
-constrains scheduling but mounts nothing.
+response to both is to raise the number.
 
 Media unchanged by this: `/data` (PVC) and `PI_SIDECAR_TRANSCRIPTS_DIR` stay on the data volume.
-`XDG_CONFIG_HOME` already pointed at `/tmp/config`, so its lifetime is unchanged.
 
-**Opt-in only.** The default profile is untouched: defaults set no `ephemeral-storage` and the
-evaluation recipes render byte-identically. Setting the ephemeral limit mounts `/tmp` and rolls the
-pod once.
+**`XDG_CONFIG_HOME` on the volume.** The chart sets `env.xdgConfigHome` (`/tmp/config`) and
+`entrypoint.sh` creates that directory at start; if it cannot, the container exits 1 with a message
+naming the path, the uid and the gid, so the pod crash-loops visibly instead of failing on the first
+config write. That path is inside the `/tmp` `emptyDir`, whose root ownership is the cluster's business
+(`runAsNonRoot` with no `runAsUser`/`fsGroup`), so the check is deliberate: `tox -e chart` runs the
+shipped entrypoint and asserts both outcomes. If a restricted SCC ever owns `/tmp` as `root:root`, the
+fix is `env.xdgConfigHome: /data/config` — the data volume the container already writes — not a
+permission workaround. Setting `env.xdgConfigHome: ""` skips the block and sends config back to
+`~/.config`, which is exactly what is not writable under an arbitrary UID.
 
 ### Rollout on upgrade
 
-The byte-identical default render holds for installs that **do not** set `sidecar.agentDir`. Installs
-that do get **one pod restart** from this chart version alone: the `copy-sidecar-agent` init
-container's request and limit changed (`10m/16Mi` request + `100m/128Mi` limit → `10m/32Mi` on both
-sides), and any pod-template change is a rollout. The equality is the point — without it the pod is
-Burstable whenever the sidecar agent dir is set, so the restart is what buys Guaranteed QoS. It is
-still a restart: one replica, `Recreate`, 30 s grace period, so an analysis running at that moment is
-interrupted and has to be re-submitted (results are written on completion; SQLite recovers via WAL).
+The default pod template is **no longer byte-identical**: the defaults now set
+`ephemeral-storage: 12Gi` on both keys, which mounts the `/tmp` `emptyDir` and raises the scheduling
+floor by 12 Gi. **Every install rolls once on upgrade** — one replica, `Recreate`, 30 s grace period —
+so an analysis running at that moment is interrupted and has to be re-submitted (results are written on
+completion; SQLite recovers via WAL). A node that cannot host the extra 12 Gi leaves the pod Pending;
+the opt-out is clearing both keys, as described above.
+
+Installs that set `sidecar.agentDir` have a second, older reason to roll: the `copy-sidecar-agent` init
+container's request and limit are equal (`10m/32Mi`, where they were `10m/16Mi` request against
+`100m/128Mi` limit), and without that equality a Guaranteed pod would be Burstable.
 
 ### Extended resources
 
@@ -386,12 +467,17 @@ helm test rootcoz -n rootcoz   # requires running release
 
 The `chart` tox env lints the chart, renders every recipe and fixture, renders
 `chart/examples/values-production.yaml` and asserts its resources plus the quoted `/tmp` `sizeLimit`
-(and that the `/tmp` mount never reaches the init container). The default render — `chart/` with only
-`ai.provider`, `ai.model` and the required secrets, no overlay — has a **baseline assertion**: its
-container `resources` block must equal the chart defaults (`requests` `1`/`4Gi`, `limits` `2`/`8Gi`),
-and it must carry no `ephemeral-storage`, no `sizeLimit`, no `/tmp` mount and no `TMPDIR`, so a
-values or template change that alters the default pod template fails CI instead of silently rolling
-every install. The env also asserts the schema negatives (`resources.limit.cpu`,
+(and that the `/tmp` mount never reaches the init container), and that the overlay renders no `12Gi`.
+The default render — `chart/` with only `ai.provider`, `ai.model` and the required secrets, no overlay —
+has a **baseline assertion**: its container `resources` block must equal the chart defaults
+(`requests` `1`/`4Gi`/`12Gi`, `limits` `2`/`8Gi`/`12Gi`), and it must carry `ephemeral-storage: 12Gi`
+twice, exactly one `sizeLimit: "12Gi"`, one `mountPath: /tmp` and one `TMPDIR`, plus a
+`XDG_CONFIG_HOME` value read out of `chart/values.yaml` (never hard-coded), so a values or template
+change that alters the default pod template fails CI instead of silently rolling every install. The
+same env runs the shipped `entrypoint.sh --xdg-check` twice: an uncreatable `XDG_CONFIG_HOME` (a path
+whose parent is a regular file) must exit 1 with a message naming the path, uid and gid, and a
+creatable one must be created and writable — the arbitrary-UID question the manifests cannot answer.
+The env also asserts the schema negatives (`resources.limit.cpu`,
 `resources.requests.cpuu`, a bad `memory` unit `4GiB`), the quantity positives (numeric `cpu`/`memory`
 and `ephemeral-storage`, `.5Gi`, `1e3`, `4m`, an explicit string quantity, extended resources —
 `nvidia.com/gpu`, `hugepages-2Mi`, a mixed-case name `example.com/GPU_2`, and the rejection of a
@@ -401,7 +487,14 @@ quantity goes (`resources.limits.memory=[1]`), and a non-string value in `podAnn
 `podLabels` / `nodeSelector`, which are string→string maps. Further checks cover the pod-integrity
 rules: `--set resources.requests.memory=""` renders no `memory`
 request (empty means omit), and with the sidecar agent dir configured the init container's `requests`
-equal its `limits`, so a Guaranteed app container keeps Guaranteed QoS for the whole pod.
+equal its `limits`, so a Guaranteed app container keeps Guaranteed QoS for the whole pod. The probe
+values are asserted too: the default render must carry readiness `timeoutSeconds: 5` and the liveness
+`30` × `5` budget, every timing field is proved wired by rendering a distinct number per probe and
+comparing each block verbatim (a literal drifting back into the template fails), readiness and
+liveness must GET `/health` with no `api/health` between them, the startup probe must keep its
+exec `/api/health` wait, and the schema rejects `probes.readiness.timeoutSeconds=5s`, a typo'd
+`probes.readines.` key, liveness `successThreshold: 2` and readiness `successThreshold: 0`,
+while a raised readiness `successThreshold` (the wiring entry renders `25`) is accepted.
 
 ## Limitations
 

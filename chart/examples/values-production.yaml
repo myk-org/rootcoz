@@ -24,6 +24,7 @@
 #   * Keep ephemeral-storage at or below the node's ephemeral capacity.
 #   * Setting the ephemeral-storage limit also mounts a /tmp emptyDir with the same
 #     sizeLimit; exceeding either is a kubelet eviction, not a throttle.
+#   * These numbers replace the chart's default 12Gi ephemeral-storage, they do not add to it.
 resources:
   requests:
     cpu: "4"
