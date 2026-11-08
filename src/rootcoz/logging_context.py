@@ -231,6 +231,8 @@ class _FreeSpaceFilter(logging.Filter):
     ``rootcoz`` tree — the one place that owns a console handler — because the
     root logger has none: after ``_install_sse_log_handler()`` attaches there,
     ``lastResort`` stops and a root-level line reaches the live stream only.
+    They are emitted past that tree's level, so an ``ERROR`` setting cannot
+    hide them either.
 
     Thread-safe: handler filters run outside the handler's own lock, so two
     threads could otherwise announce the same crossing. ``RLock`` because the
@@ -274,10 +276,21 @@ class _FreeSpaceFilter(logging.Filter):
         return self._free
 
     def _announce(self, level: int, message: str, *args: object) -> None:
-        """Emit on the console-carrying tree, not the handler-less root logger."""
+        """Announce on the console-carrying tree, whatever ``LOG_LEVEL`` is.
+
+        ``handle()`` rather than ``log()``: the ``rootcoz`` parent is the single
+        level authority (#347) and can be ``ERROR`` at import or from the DB
+        override, which would discard the one notice saying file logging
+        stopped. ``handle()`` skips that gate but still runs the logger's own
+        handlers — the console one, and the file, whose own filter drops the
+        pause record for itself.
+        """
         from rootcoz import get_child_logger
 
-        get_child_logger(__name__).log(level, message, *args)
+        logger = get_child_logger(__name__)
+        logger.handle(
+            logger.makeRecord(logger.name, level, __file__, 0, message, args, None)
+        )
 
     def check(self) -> bool:
         """Whether the file may accept a record, announcing each crossing once."""

@@ -673,6 +673,27 @@ class TestFreeSpaceFloor:
             assert len(infos) == 1
             assert "resumed" in infos[0].getMessage()
 
+    def test_the_announcements_survive_an_error_level_tree(
+        self, file_logging: Path
+    ) -> None:
+        """LOG_LEVEL=ERROR must not hide the notice that explains the pause."""
+        floor_filter = logging_context._FreeSpaceFilter(
+            file_logging, 1 << 62, probe_interval=0.0
+        )
+        tree = logging.getLogger("rootcoz")
+        previous = tree.level
+        tree.setLevel(logging.ERROR)
+        try:
+            with _CaughtRecords("rootcoz.logging_context") as sink:
+                assert floor_filter.check() is False
+                floor_filter.min_free_bytes = 1
+                assert floor_filter.check() is True
+        finally:
+            tree.setLevel(previous)
+        messages = [record.getMessage() for record in sink.records]
+        assert any("File logging paused" in message for message in messages)
+        assert any("resumed" in message for message in messages)
+
     def test_a_failing_probe_keeps_logging(
         self, file_logging: Path, monkeypatch
     ) -> None:
