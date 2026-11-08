@@ -174,8 +174,9 @@ export function ModelCombobox({
     }
   }, [highlightIndex])
 
-  // A typed id of a refused row must not slip past the list's lock: the input is
-  // the value the caller sends, so the lock applies to the keystroke too.
+  // A typed id of a refused row must not slip past the list's lock, but only at the
+  // commit points (blur, Enter): refusing every keystroke made a usable id that
+  // extends a refused one ("gpt-5-mini" behind "gpt-5") impossible to type.
   const refusedValue = useCallback(
     (id: string) => {
       const option = options.find((m) => m.id === id)
