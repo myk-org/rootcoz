@@ -1156,11 +1156,17 @@ class TestSeriesScoreboard:
         payload = series_posts[0]["json"]
         assert set(payload) == {"series"}
         for entry in payload["series"]:
-            assert set(entry) == {"metric", "type", "points", "tags"}
             # The category scoreboard is a gauge; the job count is a count, so
             # Datadog sums it per team instead of averaging it down to 1.
             expected_type = 1 if entry["metric"] == _METADATA_METRIC else 3
             assert entry["type"] == expected_type
+            if entry["metric"] == _METADATA_METRIC:
+                # A count must carry its interval, or Datadog rejects the entry
+                # and takes the whole request (gauges included) with it.
+                assert entry["interval"] == 1
+                assert set(entry) == {"metric", "type", "interval", "points", "tags"}
+            else:
+                assert set(entry) == {"metric", "type", "points", "tags"}
             assert len(entry["points"]) == 1
             assert set(entry["points"][0]) == {"timestamp", "value"}
             assert isinstance(entry["points"][0]["value"], float)

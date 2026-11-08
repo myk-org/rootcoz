@@ -112,6 +112,10 @@ _SERIES_GAUGE = 3
 #: gauge would default to an average and report ``1`` instead of the count.
 _SERIES_COUNT = 1
 
+#: Interval in seconds of a count point. Datadog requires it for count series,
+#: and a rejected entry fails the whole request — including the gauges.
+_METADATA_INTERVAL = 1
+
 #: The category metric names. Three metric names in total (see
 #: ``_METADATA_METRIC``), and no per-push tag, keep the tag-combination count
 #: (Datadog's billing unit) bounded.
@@ -660,6 +664,7 @@ def _metadata_series(context: ExportContext, timestamp: int) -> dict[str, Any]:
     return {
         "metric": _METADATA_METRIC,
         "type": _SERIES_COUNT,
+        "interval": _METADATA_INTERVAL,
         "points": [{"timestamp": timestamp, "value": 1.0}],
         "tags": _metadata_tags(context.job_metadata),
     }
