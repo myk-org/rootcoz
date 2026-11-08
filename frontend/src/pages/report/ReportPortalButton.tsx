@@ -13,14 +13,13 @@ import {
   TooltipProvider,
   TooltipTrigger,
 } from '@/components/ui/tooltip'
-import { api } from '@/lib/api'
-import { pushScopeQuery } from '@/lib/pushScopes'
 import {
   isUnreviewedPushRejection,
   pushRejectionDetail,
   unreviewedPushRejectionMessage,
   unreviewedPushTooltip,
 } from '@/lib/pushGate'
+import { pushToExporter } from './useExporterPush'
 import { useUnreviewedPushGate } from './pushGate'
 import { defaultedNotice, unmatchedFailure } from '@/lib/pushResult'
 import { Upload, Loader2, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react'
@@ -117,8 +116,7 @@ export function ReportPortalButton({ jobId, jobName, buildNumber, childJobName, 
     setPushErrorDetail(null)
     setPushResult(null)
     try {
-      const qs = pushScopeQuery({ childJobName, childBuildNumber })
-      const result = await api.post<ReportPortalPushResult>(`/results/${jobId}/push-reportportal${qs}`)
+      const result = await pushToExporter<ReportPortalPushResult>(jobId, 'reportportal', { childJobName, childBuildNumber })
       setPushResult(result)
       setResultDialogOpen(true)
     } catch (err) {

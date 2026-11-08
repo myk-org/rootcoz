@@ -8,7 +8,7 @@ import { buildRepoUrls, type RepoUrl } from '@/lib/autoLink'
 import { groupFailures } from '@/lib/grouping'
 import { useExpandCollapseAll } from '@/lib/useExpandCollapseAll'
 import type { ResultResponse, CommentsAndReviews, AiModelsResponse } from '@/types'
-import { useReportState, useReportDispatch, useRefreshEnrichments } from '@/pages/report/reportState'
+import { useReportState, useReportDispatch, useRefreshEnrichments, exporterEnabled } from '@/pages/report/reportState'
 import { reviewKey } from '@/lib/reviewKey'
 import { ReportProvider } from './report/ReportContext'
 import { FailureCard } from './report/FailureCard'
@@ -33,6 +33,7 @@ import { JobAttribution } from '@/components/shared/JobAttribution'
 import { ReAnalyzeDialog } from './report/ReAnalyzeDialog'
 import { ReportPortalButton } from './report/ReportPortalButton'
 import { DatadogButton } from './report/DatadogButton'
+import { GreenwaveButton } from './report/GreenwaveButton'
 import { TokenUsageBadge } from '@/components/shared/TokenUsageBadge'
 import { OriginJobBanner, ReanalyzedForwardBanner } from '@/components/shared/ReanalysisBanner'
 import { originJobLabel } from '@/lib/originJobLabel'
@@ -158,6 +159,9 @@ function ReportContent() {
         datadog: exporters.find((e) => e.name === 'datadog')?.allow_unreviewed_push ?? false,
       },
     })
+    // Greenwave reads the same advertised list, plus its waiver flag.
+    dispatch({ type: 'SET_EXPORTERS', payload: exporters })
+    dispatch({ type: 'SET_GREENWAVE_WAIVERS_ENABLED', payload: caps.greenwave_waivers ?? false })
   }, [dispatch])
 
   useEffect(() => {
@@ -528,6 +532,14 @@ function ReportContent() {
             )}
             {isOperator && state.datadogAvailable && (result.child_job_analyses ?? []).length === 0 && (
               <DatadogButton jobId={result.job_id} jobName={result.job_name ?? result.job_id} buildNumber={resolveBuildDisplayId(result) ?? result.build_number} hasFailures={(result.failures ?? []).length > 0} />
+            )}
+            {isOperator && exporterEnabled(state.exporters, 'greenwave') && (result.child_job_analyses ?? []).length === 0 && (
+              <GreenwaveButton
+                jobId={result.job_id}
+                jobName={result.job_name ?? result.job_id}
+                buildNumber={resolveBuildDisplayId(result) ?? result.build_number}
+                failures={result.failures ?? []}
+              />
             )}
             {!isViewer && (
               <Button variant="ghost" size="sm" className="gap-1.5 text-xs" asChild>

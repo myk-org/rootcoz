@@ -8,11 +8,13 @@ from unittest.mock import MagicMock, patch
 
 import httpx
 import pytest
+from typer.main import get_command
 from typer.testing import CliRunner
 
-from rootcoz.cli.client import RootCozError
+from rootcoz.cli.client import RootCozClient, RootCozError
 from rootcoz.cli.config import ServerConfig
 from rootcoz.cli.main import app
+from rootcoz.exporters.greenwave_exporter import GreenwaveExporter
 from tests.conftest import host_env, make_test_client
 
 runner = CliRunner()
@@ -4464,6 +4466,39 @@ class TestPushRpCommand:
 
 
 class TestPushCommand:
+    def test_push_help_states_the_identifier_is_required(self):
+        """No surface may promise a job-name fallback the server refuses.
+
+        Every Greenwave push is a gating write keyed on the subject
+        identifier, so a bare ``push --plugin greenwave`` always fails with
+        422. Four places once claimed otherwise (CLI help, both docstrings,
+        the exporter docstring), so all four are pinned here. The option help
+        is read from the click command: the rendered panel is wrapped and
+        clipped to the terminal width, so asserting on it would test Rich's
+        layout instead of the wording.
+        """
+        command = get_command(app).commands["push"]
+        help_by_option = {param.name: param.help or "" for param in command.params}
+
+        identifier_help = " ".join(help_by_option["subject_identifier"].split())
+        assert "required for every Greenwave push" in identifier_help
+        assert "no job-name fallback" in identifier_help
+
+        plugin_help = help_by_option["plugin"]
+        for plugin in ("reportportal", "datadog", "greenwave"):
+            assert plugin in plugin_help
+
+        docstrings = {
+            "cli client": RootCozClient.push_to_exporter.__doc__ or "",
+            "exporter": GreenwaveExporter.push.__doc__ or "",
+        }
+        for where, doc in docstrings.items():
+            flattened = " ".join(doc.split())
+            # The wrong claim, in either wording it has appeared in.
+            assert "falls back to job_name" not in flattened, where
+            assert "Result pushes fall back" not in flattened, where
+            assert "required" in flattened, where
+
     def test_push(self, mock_client):
         mock_client.push_to_exporter.return_value = {
             "pushed": 3,
@@ -4478,6 +4513,8 @@ class TestPushCommand:
             "reportportal",
             child_job_name=None,
             child_build_number=None,
+            subject_identifier=None,
+            waiver_comment=None,
         )
 
     def test_push_json(self, mock_client):
@@ -4541,6 +4578,110 @@ class TestPushCommand:
             "reportportal",
             child_job_name="my-child",
             child_build_number=42,
+            subject_identifier=None,
+            waiver_comment=None,
+        )
+
+    def test_push_greenwave_flags(self, mock_client):
+        mock_client.push_to_exporter.return_value = {
+            "pushed": 1,
+            "skipped": 0,
+            "waived": 1,
+            "errors": [],
+            "message": "Pushed 1 result(s) to ResultsDB, 1 waiver(s)",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "push",
+                "job-123",
+                "--plugin",
+                "greenwave",
+                "--subject-identifier",
+                "pkg-1.0-1.el10",
+                "--waiver-comment",
+                "known flake",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "Pushed 1 result(s) to ResultsDB" in result.output
+        mock_client.push_to_exporter.assert_called_once_with(
+            "job-123",
+            "greenwave",
+            child_job_name=None,
+            child_build_number=None,
+            subject_identifier="pkg-1.0-1.el10",
+            waiver_comment="known flake",
+        )
+
+    def test_push_greenwave_config_fallback(self, mock_client):
+        """Only the waiver comment falls back to ServerConfig — the subject
+        identifier is per-build and must come from the CLI flag."""
+        mock_client.push_to_exporter.return_value = {
+            "pushed": 1,
+            "errors": [],
+            "message": "Pushed 1 result(s) to ResultsDB",
+        }
+        with patch(
+            "rootcoz.cli.main.get_server_config",
+            return_value=ServerConfig(
+                url=_TEST_SERVER,
+                greenwave_waiver_comment="cfg comment",
+            ),
+        ):
+            # Use a server NAME (not URL) so _resolve_server consults the config
+            result = runner.invoke(
+                app,
+                [
+                    "--server",
+                    "mygw",
+                    "push",
+                    "job-123",
+                    "-p",
+                    "greenwave",
+                    "--subject-identifier",
+                    "flag-nvr-3.0",
+                ],
+            )
+        assert result.exit_code == 0
+        mock_client.push_to_exporter.assert_called_once_with(
+            "job-123",
+            "greenwave",
+            child_job_name=None,
+            child_build_number=None,
+            subject_identifier="flag-nvr-3.0",
+            waiver_comment="cfg comment",
+        )
+
+    def test_push_greenwave_no_subject_config_fallback(self, mock_client):
+        """No --subject-identifier and no config fallback: nothing is sent.
+
+        A stored default NVR would silently waive the wrong build, so the
+        config file cannot supply the subject identifier.
+        """
+        mock_client.push_to_exporter.return_value = {
+            "pushed": 1,
+            "errors": [],
+            "message": "Pushed 1 result(s) to ResultsDB",
+        }
+        with patch(
+            "rootcoz.cli.main.get_server_config",
+            return_value=ServerConfig(
+                url=_TEST_SERVER,
+                greenwave_waiver_comment="cfg comment",
+            ),
+        ):
+            result = runner.invoke(
+                app, ["--server", "mygw", "push", "job-123", "-p", "greenwave"]
+            )
+        assert result.exit_code == 0
+        mock_client.push_to_exporter.assert_called_once_with(
+            "job-123",
+            "greenwave",
+            child_job_name=None,
+            child_build_number=None,
+            subject_identifier=None,
+            waiver_comment="cfg comment",
         )
 
 

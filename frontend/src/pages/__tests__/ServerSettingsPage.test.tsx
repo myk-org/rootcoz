@@ -120,6 +120,36 @@ const baseSettings = (): TestSetting[] => [
   mk('reportportal_url', 'Report Portal', 'https://rp.example.com'),
   mk('datadog_api_key', 'Datadog', '', { sensitive: true }),
   mk('enable_datadog', 'Datadog', 'false', { type: 'boolean' }),
+  // Greenwave — greenwave_auth_mode (managed by the auth mode selector), the
+  // mode-independent settings, and each mode's own credential fields.
+  mk('greenwave_auth_mode', 'Greenwave', '', {
+    options: ['bearer', 'oidc', 'kerberos', 'mtls', 'basic', 'none'],
+  }),
+  mk('greenwave_url', 'Greenwave', 'https://greenwave.example.com'),
+  mk('greenwave_api_token', 'Greenwave', '', { sensitive: true }),
+  mk('greenwave_oidc_token_url', 'Greenwave', ''),
+  mk('greenwave_oidc_client_id', 'Greenwave', ''),
+  mk('greenwave_oidc_client_secret', 'Greenwave', '', { sensitive: true }),
+  mk('greenwave_keytab_path', 'Greenwave', ''),
+  mk('greenwave_keytab_principal', 'Greenwave', ''),
+mk('greenwave_krb5_realm', 'Greenwave', ''),
+  mk('greenwave_krb5_service', 'Greenwave', ''),
+  mk('greenwave_client_cert', 'Greenwave', ''),
+  mk('greenwave_client_key', 'Greenwave', '', { sensitive: true }),
+  mk('greenwave_ca_bundle', 'Greenwave', ''),
+  mk('greenwave_basic_user', 'Greenwave', ''),
+  mk('greenwave_basic_password', 'Greenwave', '', { sensitive: true }),
+  mk('greenwave_waiver_url', 'Greenwave', ''),
+  mk('greenwave_waiver_token', 'Greenwave', '', { sensitive: true }),
+  mk('greenwave_push_waivers', 'Greenwave', 'false', { type: 'boolean' }),
+  mk('greenwave_waivable_classifications', 'Greenwave', ''),
+  mk('greenwave_outcome_map', 'Greenwave', ''),
+  mk('greenwave_subject_type', 'Greenwave', ''),
+  mk('greenwave_product_version', 'Greenwave', ''),
+  mk('greenwave_verify_ssl', 'Greenwave', 'true', { type: 'boolean' }),
+  // Unset is the real default (None ⇒ enablement follows the auth mode).
+  // 'false' is an EXPLICIT disable, which must not be the baseline here.
+  mk('enable_greenwave', 'Greenwave', '', { type: 'boolean' }),
   mk('prow_url', 'Prow', 'https://prow.example.com'),
   mk('admin_key', 'Auth & Security', 'key', { sensitive: true }),
   mk('vapid_public_key', 'Web Push', 'vk'),
@@ -173,6 +203,9 @@ function pickSingle(name: string, optionName: string) {
 const jiraAuthSelect = () => singlePicker('Jira auth method')
 const chooseJiraMethod = (label: string) => pickSingle('Jira auth method', label)
 
+const greenwaveAuthSelect = () => singlePicker('Greenwave auth method')
+const chooseGreenwaveMethod = (label: string) => pickSingle('Greenwave auth method', label)
+
 /** Open a searchable multi-select (it opens on click, like a real click). */
 function openPicker(envVar: string) {
   fireEvent.click(screen.getByRole('combobox', { name: `Add ${envVar}` }))
@@ -201,7 +234,7 @@ describe('ServerSettingsPage tabs and search', () => {
 
     const tabs = screen.getAllByRole('tab')
     expect(tabs.map((t) => t.textContent)).toEqual([
-      'Server', 'AI', 'Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Datadog', 'Prow',
+      'Server', 'AI', 'Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Datadog', 'Greenwave', 'Prow',
       'Auth & Security', 'Web Push',
     ])
 
@@ -798,12 +831,188 @@ describe('ServerSettingsPage Jira auth method selection', () => {
   })
 })
 
+describe('ServerSettingsPage Greenwave auth mode selection', () => {
+  // Settings whose greenwave_auth_mode value updates on save, so the
+  // refetched state reflects what the UI persisted.
+  function mockGreenwaveModeSettings(mode: string) {
+    let current = mode
+    get.mockImplementation(async () => {
+      const settings = baseSettings()
+      settings.find((s) => s.key === 'greenwave_auth_mode')!.value = current
+      return settings
+    })
+    put.mockImplementation(async (_url: string, body?: unknown) => {
+      const settings = (body as { settings?: Record<string, string> })?.settings ?? {}
+      if (settings.greenwave_auth_mode !== undefined) current = settings.greenwave_auth_mode
+      return {}
+    })
+  }
+
+  async function openGreenwaveTab() {
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Greenwave' }))
+    await waitForRow('greenwave_url')
+  }
+
+  it('mode state reflects the persisted greenwave_auth_mode value and shows only that mode\'s fields', async () => {
+    mockGreenwaveModeSettings('oidc')
+    await openGreenwaveTab()
+
+    expect(greenwaveAuthSelect()).toHaveTextContent('OIDC (client credentials)')
+
+    // oidc's three fields render
+    expect(shown('greenwave_oidc_token_url')).toBe(true)
+    expect(shown('greenwave_oidc_client_id')).toBe(true)
+    expect(shown('greenwave_oidc_client_secret')).toBe(true)
+
+    // Other modes' fields are hidden
+    expect(shown('greenwave_api_token')).toBe(false)
+    expect(shown('greenwave_keytab_path')).toBe(false)
+    expect(shown('greenwave_client_cert')).toBe(false)
+    expect(shown('greenwave_basic_user')).toBe(false)
+
+    // Mode-independent settings stay visible regardless of mode
+    expect(shown('greenwave_url')).toBe(true)
+    expect(shown('greenwave_outcome_map')).toBe(true)
+    expect(screen.getByRole('switch', { name: 'Toggle GREENWAVE_VERIFY_SSL' })).toBeInTheDocument()
+    expect(screen.getByRole('switch', { name: 'Toggle ENABLE_GREENWAVE' })).toBeInTheDocument()
+  })
+
+  it('unset mode hides all credential fields and explains the exporter is disabled', async () => {
+    mockGreenwaveModeSettings('')
+    await openGreenwaveTab()
+
+    expect(greenwaveAuthSelect()).toHaveTextContent('Not set — exporter disabled')
+    expect(
+      screen.getByText(
+        'Unset disables the exporter. None is an active mode: it sends no credentials (and is the only mode that may use a plain http:// URL).',
+      ),
+    ).toBeInTheDocument()
+
+    // No mode's credential fields render
+    expect(shown('greenwave_api_token')).toBe(false)
+    expect(shown('greenwave_oidc_token_url')).toBe(false)
+    expect(shown('greenwave_keytab_principal')).toBe(false)
+    expect(shown('greenwave_client_cert')).toBe(false)
+    expect(shown('greenwave_basic_password')).toBe(false)
+
+    // Mode-independent rows stay visible
+    expect(shown('greenwave_url')).toBe(true)
+    expect(shown('greenwave_waiver_url')).toBe(true)
+  })
+
+  it('switching modes saves greenwave_auth_mode and hides the previous mode\'s fields', async () => {
+    mockGreenwaveModeSettings('basic')
+    await openGreenwaveTab()
+    expect(shown('greenwave_basic_user')).toBe(true)
+
+    chooseGreenwaveMethod('Kerberos (keytab)')
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { greenwave_auth_mode: 'kerberos' } }),
+    )
+    await waitFor(() => expect(greenwaveAuthSelect()).toHaveTextContent('Kerberos (keytab)'))
+
+    expect(shown('greenwave_keytab_path')).toBe(true)
+    expect(shown('greenwave_keytab_principal')).toBe(true)
+    expect(shown('greenwave_krb5_service')).toBe(true)
+    // The previous mode's fields are hidden
+    expect(shown('greenwave_basic_user')).toBe(false)
+    expect(shown('greenwave_basic_password')).toBe(false)
+  })
+
+  it('kerberos owns greenwave_krb5_realm; other modes hide it', async () => {
+    mockGreenwaveModeSettings('kerberos')
+    await openGreenwaveTab()
+
+    expect(shown('greenwave_krb5_realm')).toBe(true)
+
+    chooseGreenwaveMethod('Bearer token')
+    await waitFor(() => expect(greenwaveAuthSelect()).toHaveTextContent('Bearer token'))
+    expect(shown('greenwave_krb5_realm')).toBe(false)
+  })
+
+  it('bearer owns greenwave_waiver_token; none and kerberos hide it', async () => {
+    mockGreenwaveModeSettings('bearer')
+    await openGreenwaveTab()
+
+    expect(shown('greenwave_waiver_token')).toBe(true)
+
+    chooseGreenwaveMethod('None (unauthenticated)')
+    await waitFor(() => expect(greenwaveAuthSelect()).toHaveTextContent('None (unauthenticated)'))
+    expect(shown('greenwave_waiver_token')).toBe(false)
+
+    chooseGreenwaveMethod('Kerberos (keytab)')
+    await waitFor(() => expect(greenwaveAuthSelect()).toHaveTextContent('Kerberos (keytab)'))
+    expect(shown('greenwave_waiver_token')).toBe(false)
+  })
+
+  it('offers exactly the six modes in the picker', async () => {
+    mockGreenwaveModeSettings('')
+    await openGreenwaveTab()
+
+    fireEvent.click(greenwaveAuthSelect())
+    expect(optionNames()).toEqual([
+      'Bearer token',
+      'OIDC (client credentials)',
+      'Kerberos (keytab)',
+      'mTLS (client certificate)',
+      'Basic (user + password)',
+      'None (unauthenticated)',
+    ])
+  })
+
+  it('auto-runs the Greenwave test after switching to a real mode, never for none', async () => {
+    mockGreenwaveModeSettings('')
+    testIntegration.mockResolvedValue({ ok: true, message: 'Greenwave connection verified' } as never)
+    await openGreenwaveTab()
+
+    chooseGreenwaveMethod('None (unauthenticated)')
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { greenwave_auth_mode: 'none' } }),
+    )
+    await waitFor(() => expect(greenwaveAuthSelect()).toHaveTextContent('None (unauthenticated)'))
+    expect(testIntegration).not.toHaveBeenCalled()
+
+    chooseGreenwaveMethod('Bearer token')
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', { settings: { greenwave_auth_mode: 'bearer' } }),
+    )
+    await waitFor(() => expect(testIntegration).toHaveBeenCalledWith('greenwave'))
+    const banner = await screen.findByRole('status')
+    expect(banner).toHaveTextContent('Connection successful')
+    expect(greenwaveAuthSelect()).toHaveTextContent('Bearer token')
+    expect(shown('greenwave_api_token')).toBe(true)
+  })
+
+  it('does not auto-test a mode switch while the exporter is disabled', async () => {
+    mockGreenwaveModeSettings('')
+    // enable_greenwave is explicitly false: the server excludes the exporter
+    // from every push, so a green connection test would be actively
+    // misleading. The manual button still tests on demand.
+    get.mockImplementation(async () => {
+      const settings = baseSettings()
+      settings.find((s) => s.key === 'greenwave_auth_mode')!.value = ''
+      settings.find((s) => s.key === 'enable_greenwave')!.value = 'false'
+      return settings
+    })
+    await openGreenwaveTab()
+
+    chooseGreenwaveMethod('Bearer token')
+    await waitFor(() =>
+      expect(put).toHaveBeenCalledWith('/api/admin/settings', {
+        settings: { greenwave_auth_mode: 'bearer' },
+      }),
+    )
+    expect(testIntegration).not.toHaveBeenCalled()
+  })
+})
+
 describe('ServerSettingsPage test connection buttons', () => {
-  it('renders test buttons only for the six integrable categories', async () => {
+  it('renders test buttons only for the seven integrable categories', async () => {
     renderPage()
     await waitForRow('public_base_url')
 
-    for (const tab of ['Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Datadog', 'Prow']) {
+    for (const tab of ['Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Datadog', 'Greenwave', 'Prow']) {
       fireEvent.click(screen.getByRole('tab', { name: tab }))
       expect(await screen.findByRole('button', { name: /test connection/i })).toBeInTheDocument()
     }

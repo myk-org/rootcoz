@@ -42,6 +42,7 @@ from rootcoz.encryption import (
     get_hmac_secret,
     strip_sensitive_from_response,
 )
+from rootcoz.identity import AI_SYSTEM_USERNAME
 from rootcoz.metadata_rules import match_job_metadata, merge_labels
 from rootcoz.models import (
     _SYSTEM_TAGS,
@@ -390,7 +391,9 @@ def current_session_ttl_seconds() -> int:
 
 MIN_KEY_LENGTH = 16
 VALID_USER_STATUSES = ("active", "pending", "rejected")
-AI_SYSTEM_USERNAME = "rootcoz-ai"
+# AI_SYSTEM_USERNAME is imported above from rootcoz.identity — a
+# dependency-free leaf module config.py can import without a cycle — and
+# re-exported here, which stays the supported import site for every caller.
 
 # SQLite signed INTEGER max — Prow build_id strings may exceed this.
 SQLITE_INT_MAX = 9223372036854775807

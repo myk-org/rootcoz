@@ -16,6 +16,17 @@ from typing import Any, Self
 JOB_METADATA_DIMENSIONS: tuple[str, ...] = ("team", "tier", "version")
 
 
+class ReviewersUnavailable(RuntimeError):
+    """The reviewer table could not be read, so a gating write cannot be judged.
+
+    Distinct from :class:`ExporterPrerequisiteError` on purpose: the request
+    and the configuration are fine, the SERVER could not read what it needs.
+    Callers map this to HTTP 503 (retryable), never 422 (client's fault) —
+    the same split :class:`rootcoz.main.EffectiveClassificationsUnavailable`
+    makes for the classification-override table.
+    """
+
+
 @dataclass
 class ExportContext:
     """Shared metadata that any exporter needs to push results.
@@ -41,6 +52,16 @@ class ExportContext:
         job_metadata: Declared ``team``/``tier``/``version`` (plus labels) of
             the pushed job; empty when the job has no metadata row. Exporters
             never touch storage, so this is resolved by the push pipeline.
+        subject_identifier: Optional artifact identifier (e.g. build NVR)
+            used by gating exporters like Greenwave.  Exporters decide their
+            own fallback (e.g. ``job_name``) when unset.
+        waiver_comment: Optional comment recorded with submitted waivers.
+        effective_classifications: Human classification overrides keyed by
+            ``(test_name, child_job_name, child_build_number)`` — the scope
+            keys ``storage.get_all_effective_classifications`` returns
+            (root scope uses ``("", 0)``).  Human overrides win over the
+            stored analysis; exporters that write gating records MUST
+            prefer these.
     """
 
     job_id: str
@@ -57,6 +78,16 @@ class ExportContext:
     reviewed_by: dict[str, str] = field(default_factory=dict)
     analysis_timestamp: int | None = None
     job_metadata: dict[str, Any] = field(default_factory=dict)
+    subject_identifier: str | None = None
+    waiver_comment: str | None = None
+    effective_classifications: dict[tuple[str, str, int], str] = field(
+        default_factory=dict
+    )
+    #: True when the reviewer lookup FAILED (as opposed to finding nothing).
+    #: A reader that needs reviewer identity to decide a gating write must
+    #: refuse rather than read "unknown" as "no human review": the two are
+    #: indistinguishable in ``reviewed_by`` and only one is safe to act on.
+    reviews_unavailable: bool = False
 
 
 @dataclass
@@ -72,6 +103,16 @@ class ExporterResult:
     success: bool
     message: str
     details: dict[str, Any] = field(default_factory=dict)
+
+
+class ExporterPrerequisiteError(ValueError):
+    """A prerequisite for a gating write is missing.
+
+    Raised by exporters before performing writes to external gating
+    systems (e.g. Greenwave waivers) when a required identifier was not
+    supplied.  The push endpoint maps this to HTTP 422 so callers can
+    distinguish "missing input" from "bad input" (400).
+    """
 
 
 class Exporter(ABC):
@@ -95,6 +136,21 @@ class Exporter(ABC):
     #: :class:`ExportContext`.  Subclasses that read
     #: :attr:`ExportContext.tracked_in_links` must set this to ``True``.
     needs_tracked_in_links: bool = False
+
+    #: Whether this exporter consumes human classification overrides
+    #: (``storage.get_all_effective_classifications``) when building the
+    #: :class:`ExportContext`.  Exporters that write gating records (e.g.
+    #: Greenwave) must set this to ``True`` so the overrides are fetched.
+    needs_effective_classifications: bool = False
+
+    #: Whether this exporter writes gating-relevant records whose subject
+    #: must identify a build/artifact (e.g. ResultsDB results under
+    #: ``subject_type=koji_build``).  When ``True``, the exporter must not
+    #: be pushed from a context lacking an explicit
+    #: :attr:`ExportContext.subject_identifier`: the automatic push path
+    #: supplies none, and letting the exporter fall back to the CI
+    #: ``job_name`` would write a job name as the gating subject.
+    requires_subject_identifier: bool = False
 
     @property
     @abstractmethod

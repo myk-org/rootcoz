@@ -84,6 +84,18 @@
         "appKey": { "type": "string" }
       }
     },
+    "greenwave": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "keytab": { "type": "string" },
+        "keytabBase64": { "type": "string" },
+        "clientCert": { "type": "string" },
+        "clientKey": { "type": "string" },
+        "caBundle": { "type": "string" },
+        "mountPath": { "type": "string" }
+      }
+    },
     "sidecar": {
       "type": "object",
       "properties": {

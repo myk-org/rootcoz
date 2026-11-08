@@ -9,6 +9,7 @@ from pydantic import SecretStr
 from rootcoz.config import (
     Settings,
     get_settings,
+    greenwave_method_missing_fields,
     jira_method_missing_fields,
     parse_additional_repos,
     parse_peer_configs,
@@ -51,6 +52,39 @@ class TestSettings:
         with patch.dict(os.environ, {"UNKNOWN_FIELD": "value"}, clear=False):
             settings = Settings()
             assert not hasattr(settings, "unknown_field")
+
+    def test_enabled_is_false_when_credentials_would_go_over_http(self) -> None:
+        """Availability must not advertise an exporter whose pushes all refuse.
+
+        Settings construction stays mergeable (an env http URL + a DB-only
+        mode must not drop the DB overrides), so the scheme rule is enforced
+        at the push boundary — but ``greenwave_enabled`` has to agree with it,
+        or the UI offers a push that can only fail.
+        """
+        http_bearer = Settings(
+            _env_file=None,
+            greenwave_url="http://resultsdb.example.com",
+            greenwave_auth_mode="bearer",
+            greenwave_api_token=SecretStr("token"),  # pragma: allowlist secret
+        )
+        assert http_bearer.greenwave_enabled is False
+
+        # The credential-less mode is the one http target that is legitimate.
+        http_none = Settings(
+            _env_file=None,
+            greenwave_url="http://resultsdb.example.com",
+            greenwave_auth_mode="none",
+        )
+        assert http_none.greenwave_enabled is True
+
+    def test_no_setting_can_waive_auto_reviews(self) -> None:
+        """No knob may re-enable waivers for rootcoz auto-reviews.
+
+        A waiver lifts a gate, so its justification must be a human
+        decision. The old ``greenwave_allow_ai_waivers`` switch made that
+        optional; it is gone on purpose and must not come back.
+        """
+        assert "greenwave_allow_ai_waivers" not in Settings.model_fields
 
     def test_settings_loads_tests_repo_url(self) -> None:
         """Test that tests_repo_url is loaded from environment variable."""
@@ -543,6 +577,171 @@ class TestJiraAuthMode:
             assert resolve_jira_connection(settings).mode == "atst"
 
 
+class TestGreenwaveAuthMode:
+    """Tests for the explicit greenwave_auth_mode setting."""
+
+    def test_env_var_is_ignored(self) -> None:
+        """GREENWAVE_AUTH_MODE env has no effect — Server Settings only."""
+        with patch.dict(
+            os.environ, _build_env(GREENWAVE_AUTH_MODE="bearer"), clear=True
+        ):
+            settings = Settings(_env_file=None)
+            assert settings.greenwave_auth_mode is None
+            assert not settings.greenwave_enabled
+
+    def test_invalid_value_rejected(self) -> None:
+        with pytest.raises(ValueError, match="greenwave_auth_mode"):
+            Settings(_env_file=None, greenwave_auth_mode="oauth")
+
+    def test_valid_values_accepted_case_insensitively(self) -> None:
+        for mode in ("bearer", "OIDC", " Kerberos ", "MTLS", "basic", "none"):
+            settings = Settings(_env_file=None, greenwave_auth_mode=mode)
+            assert settings.greenwave_auth_mode == mode.strip().lower()
+
+    def test_unset_defaults_to_none(self) -> None:
+        with patch.dict(os.environ, _build_env(), clear=True):
+            assert Settings(_env_file=None).greenwave_auth_mode is None
+
+    def test_missing_fields_unset_mode(self) -> None:
+        """Unset mode never reports missing fields (exporter disabled instead)."""
+        with patch.dict(os.environ, _build_env(), clear=True):
+            settings = Settings(_env_file=None)
+            assert greenwave_method_missing_fields(settings) == []
+
+    def test_missing_fields_per_mode(self) -> None:
+        """Each mode names exactly its own missing fields."""
+        cases = [
+            ("bearer", {}, ["greenwave_url", "greenwave_api_token"]),
+            (
+                "bearer",
+                {"greenwave_url": "https://resultsdb.example.com"},
+                ["greenwave_api_token"],
+            ),
+            (
+                "oidc",
+                {"greenwave_url": "https://resultsdb.example.com"},
+                [
+                    "greenwave_oidc_token_url",
+                    "greenwave_oidc_client_id",
+                    "greenwave_oidc_client_secret",
+                ],
+            ),
+            (
+                "kerberos",
+                {"greenwave_url": "https://resultsdb.example.com"},
+                ["greenwave_keytab_path", "greenwave_keytab_principal"],
+            ),
+            (
+                "mtls",
+                {"greenwave_url": "https://resultsdb.example.com"},
+                ["greenwave_client_cert", "greenwave_client_key"],
+            ),
+            (
+                "basic",
+                {"greenwave_url": "https://resultsdb.example.com"},
+                ["greenwave_basic_user", "greenwave_basic_password"],
+            ),
+            (
+                "none",
+                {"greenwave_url": "https://resultsdb.example.com"},
+                [],
+            ),
+        ]
+        for mode, extra, expected in cases:
+            settings = Settings(greenwave_auth_mode=mode, **extra)
+            assert greenwave_method_missing_fields(settings) == expected, mode
+
+    def test_missing_fields_complete(self) -> None:
+        """A fully configured method reports no missing fields."""
+        settings = Settings(
+            greenwave_auth_mode="kerberos",
+            greenwave_url="https://resultsdb.example.com",
+            greenwave_keytab_path="/secrets/rootcoz.keytab",
+            greenwave_keytab_principal="rootcoz@EXAMPLE.COM",
+        )
+        assert greenwave_method_missing_fields(settings) == []
+
+    def test_enabled_semantics_per_mode(self) -> None:
+        """Each mode enables the exporter when its own fields are set."""
+        url = "https://resultsdb.example.com"
+        complete = {
+            "bearer": {
+                "greenwave_api_token": SecretStr("tok")
+            },  # pragma: allowlist secret
+            "oidc": {
+                "greenwave_oidc_token_url": "https://sso.example.com/token",
+                "greenwave_oidc_client_id": "rootcoz",
+                "greenwave_oidc_client_secret": SecretStr(
+                    "sec"
+                ),  # pragma: allowlist secret
+            },
+            "kerberos": {
+                "greenwave_keytab_path": "/secrets/rootcoz.keytab",
+                "greenwave_keytab_principal": "rootcoz@EXAMPLE.COM",
+            },
+            "mtls": {
+                "greenwave_client_cert": "/certs/client.pem",
+                "greenwave_client_key": "/certs/client.key",
+            },
+            "basic": {
+                "greenwave_basic_user": "svc",
+                "greenwave_basic_password": SecretStr("pw"),  # pragma: allowlist secret
+            },
+            "none": {},
+        }
+        for mode, extra in complete.items():
+            settings = Settings(greenwave_auth_mode=mode, greenwave_url=url, **extra)
+            assert settings.greenwave_enabled, mode
+
+    def test_http_url_scheme_mismatch_is_not_a_construction_error(self) -> None:
+        """Plain HTTP + a credential mode must not fail Settings construction.
+
+        The scheme rule lives at the settings write path and at
+        ``build_greenwave_auth`` (which refuses to send a credential over
+        plain http): raising here would make an env URL + DB-only mode
+        unvalidatable, so ``get_settings()`` would fall back to env-only
+        and silently drop every database override.
+        """
+        settings = Settings(
+            greenwave_auth_mode="none",
+            greenwave_url="http://resultsdb.example.com",
+        )
+        assert settings.greenwave_url == "http://resultsdb.example.com"
+        assert settings.greenwave_enabled
+        # Construction succeeds; build_greenwave_auth refuses the token
+        # over plain http (TestHttpSchemeRefusedAtBuild, test_greenwave_auth).
+        assert Settings(
+            greenwave_auth_mode="bearer",
+            greenwave_url="http://resultsdb.example.com",
+        )
+
+    def test_http_url_still_rejects_userinfo_and_query_in_none_mode(self) -> None:
+        """Even in none mode, credential-bearing URL shapes are rejected."""
+        with pytest.raises(ValueError, match="GREENWAVE_URL"):
+            Settings(
+                greenwave_auth_mode="none",
+                greenwave_url="http://user:pass@resultsdb.example.com",  # pragma: allowlist secret
+            )
+        with pytest.raises(ValueError, match="GREENWAVE_URL"):
+            Settings(
+                greenwave_auth_mode="none",
+                greenwave_url="http://resultsdb.example.com?token=x",
+            )
+
+    def test_waiver_url_scheme_is_not_a_construction_error(self) -> None:
+        """An http waiver URL constructs; the refusal lives at the build.
+
+        ``build_greenwave_waiver_auth`` refuses it in every mode (a waiver
+        lifts a gate, so it is never downgraded to plain HTTP).
+        """
+        settings = Settings(
+            greenwave_auth_mode="none",
+            greenwave_url="http://resultsdb.example.com",
+            greenwave_waiver_url="http://waiverdb.example.com",
+        )
+        assert settings.greenwave_waiver_url == "http://waiverdb.example.com"
+
+
 class TestGitHubIssuesSettings:
     """Tests for GitHub issue creation configuration."""
 
@@ -994,3 +1193,43 @@ class TestDefaultUserRole:
             pytest.raises(Exception, match="DEFAULT_USER_ROLE"),
         ):
             Settings(_env_file=None)
+
+
+class TestAutoPushRequiresAutoReview:
+    """AUTO_PUSH_EXPORTERS with auto-review disabled is inert, never fatal (#183).
+
+    The Settings model must only warn — raising would hard-fail env-var
+    startups and make get_settings() silently drop every DB override via
+    its env-only fallback.  Enforcement lives on the write path
+    (_validate_settings_updates in main.py).
+    """
+
+    _INERT_ENV = _build_env(
+        ENABLE_AUTO_REVIEW="false",
+        AUTO_PUSH_EXPORTERS="reportportal",
+    )
+
+    def test_settings_does_not_raise_and_warns(self) -> None:
+        """Both env vars set: Settings constructs and logs an inert warning."""
+        with (
+            patch.dict(os.environ, self._INERT_ENV, clear=True),
+            patch("rootcoz.config.logger") as mock_logger,
+        ):
+            settings = Settings(_env_file=None)
+
+        assert settings.auto_push_exporters == "reportportal"
+        assert settings.enable_auto_review is False
+        assert mock_logger.warning.called
+        warning = mock_logger.warning.call_args.args[0]
+        assert "auto-push will not run" in warning
+        assert "ENABLE_AUTO_REVIEW" in warning
+
+    def test_get_settings_keeps_db_overrides_despite_inert_combo(self) -> None:
+        """Regression: the inert combo must not wipe DB overrides."""
+        with patch.dict(os.environ, self._INERT_ENV, clear=True):
+            update_db_settings_cache({"jenkins_url": "https://db-override.example.com"})
+            settings = get_settings()
+
+        assert settings.jenkins_url == "https://db-override.example.com"
+        assert settings.auto_push_exporters == "reportportal"
+        assert settings.enable_auto_review is False

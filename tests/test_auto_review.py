@@ -46,6 +46,158 @@ async def _insert_human_review(
 # ---------------------------------------------------------------------------
 # Signature normalization
 # ---------------------------------------------------------------------------
+def _auto_push_scopes(result_data: dict) -> list[tuple[str | None, int | None]]:
+    """Project :func:`_push_scopes` onto its (job, build) pairs."""
+    from rootcoz.main import _push_scopes
+
+    return list(_push_scopes(result_data))
+
+
+class TestAutoPushScopes:
+    """Scope traversal shared by auto-push and the AI-review gate."""
+
+    def test_root_only(self):
+        result_data = {"failures": [{"test_name": "a"}]}
+        assert _auto_push_scopes(result_data) == [(None, None)]
+
+    def test_root_and_direct_child(self):
+        result_data = {
+            "failures": [{"test_name": "a"}],
+            "child_job_analyses": [
+                {
+                    "job_name": "child-job",
+                    "build_number": 7,
+                    "failures": [{"test_name": "b"}],
+                }
+            ],
+        }
+        assert _auto_push_scopes(result_data) == [
+            (None, None),
+            ("child-job", 7),
+        ]
+
+    def test_nested_grandchild_scope(self):
+        """Failures under failed_children get their own scope.
+
+        A parent with only nested failures gets no scope of its own; the
+        grandchild with failures does.
+        """
+        result_data = {
+            "failures": [],
+            "child_job_analyses": [
+                {
+                    "job_name": "parent-job",
+                    "build_number": 3,
+                    "failures": [],
+                    "failed_children": [
+                        {
+                            "job_name": "grandchild-job",
+                            "build_number": 9,
+                            "failures": [{"test_name": "c"}],
+                        }
+                    ],
+                }
+            ],
+        }
+        assert _auto_push_scopes(result_data) == [("grandchild-job", 9)]
+
+    def test_child_without_build_number_skipped(self):
+        """The scoped context requires a build number — skip without one."""
+        result_data = {
+            "failures": [],
+            "child_job_analyses": [
+                {
+                    "job_name": "no-build",
+                    "build_number": 0,
+                    "failures": [{"test_name": "a"}],
+                },
+                {
+                    "job_name": "bad-build",
+                    "build_number": "not-a-number",
+                    "failures": [{"test_name": "b"}],
+                },
+            ],
+        }
+        assert _auto_push_scopes(result_data) == []
+
+    def test_duplicate_name_build_pair_deduplicated(self):
+        """Two nodes sharing (job_name, build) export once, not twice."""
+        result_data = {
+            "failures": [],
+            "child_job_analyses": [
+                {
+                    "job_name": "dup-job",
+                    "build_number": 4,
+                    "failures": [{"test_name": "a"}],
+                    "failed_children": [
+                        {
+                            "job_name": "dup-job",
+                            "build_number": 4,
+                            "failures": [{"test_name": "b"}],
+                        }
+                    ],
+                }
+            ],
+        }
+        assert _auto_push_scopes(result_data) == [("dup-job", 4)]
+
+    def test_empty_name_skipped(self):
+        result_data = {
+            "failures": [],
+            "child_job_analyses": [
+                {
+                    "job_name": "",
+                    "build_number": 5,
+                    "failures": [{"test_name": "a"}],
+                }
+            ],
+        }
+        assert _auto_push_scopes(result_data) == []
+
+    def test_unscopable_failure_child_reported(self):
+        """Failure-bearing children that cannot be scoped are reported.
+
+        The scoped export context requires a strictly positive integer
+        build number — a child without one cannot be pushed, so the
+        traversal must surface it instead of silently dropping its
+        failures.
+        """
+        from rootcoz.main import _unscopable_failure_children
+
+        result_data = {
+            "failures": [{"test_name": "a"}],
+            "child_job_analyses": [
+                {
+                    "job_name": "zero-build",
+                    "build_number": 0,
+                    "failures": [{"test_name": "b"}],
+                }
+            ],
+        }
+        assert _auto_push_scopes(result_data) == [(None, None)]
+        unscopable = _unscopable_failure_children(result_data)
+        assert len(unscopable) == 1
+        assert "zero-build" in unscopable[0]
+        assert "build_number=0" in unscopable[0]
+
+    def test_build0_child_without_failures_not_reported(self):
+        """A child with no failures cannot be pushed anyway — not a blocker."""
+        from rootcoz.main import _unscopable_failure_children
+
+        result_data = {
+            "failures": [{"test_name": "a"}],
+            "child_job_analyses": [
+                {
+                    "job_name": "no-failures",
+                    "build_number": 0,
+                    "failures": [],
+                }
+            ],
+        }
+        assert _auto_push_scopes(result_data) == [(None, None)]
+        assert _unscopable_failure_children(result_data) == []
+
+
 class TestNormalizeForSignature:
     """Tests for normalize_for_signature()."""
 
@@ -1095,6 +1247,9 @@ class TestAutoReviewMatchingFailures:
                 new_callable=AsyncMock,
                 return_value=0,
             ),
+            # Attribution gate is covered by TestAutoPushAiReviewGate; this
+            # test is about the scope list, so keep it open.
+            patch("rootcoz.main._all_failures_ai_reviewed", return_value=True),
             patch(
                 "rootcoz.main._build_export_context", new_callable=AsyncMock
             ) as mock_ctx,
@@ -1237,3 +1392,557 @@ class TestAutoReviewMatchingFailures:
             # No reviews should be written — auto-review was disabled
             reviews = await storage.get_reviews_for_job("current-job")
             assert len(reviews) == 0
+
+
+class TestAutoPushAiReviewGate:
+    """Auto-push must gate on reviewer identity, not a reviewed count (#183)."""
+
+    @pytest.fixture
+    async def setup_test_db(self, temp_db_path: Path):
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            yield temp_db_path
+
+    @staticmethod
+    def _settings(exporters: str) -> Settings:
+        return Settings(
+            **{
+                k.lower(): v
+                for k, v in build_test_env(AUTO_PUSH_EXPORTERS=exporters).items()
+            }
+        )
+
+    @staticmethod
+    def _mock_exporter() -> MagicMock:
+        mock_exporter = MagicMock()
+        mock_exporter.push = AsyncMock(return_value=MagicMock(details={"pushed": 1}))
+        mock_exporter.__enter__ = MagicMock(return_value=mock_exporter)
+        mock_exporter.__exit__ = MagicMock(return_value=False)
+        return mock_exporter
+
+    async def _seed_human_reviewed_history(self, temp_db_path: Path) -> None:
+        """One root and one child failure, each with human-reviewed history."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "INSERT INTO failure_history "
+                    "(job_id, job_name, build_number, test_name, error_message, "
+                    "error_signature, classification, pattern) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("prev-job", "my-job", 100, "test_a", "", "sig-a", "", ""),
+                )
+                await _insert_human_review(db, "prev-job", "test_a")
+                await db.execute(
+                    "INSERT INTO failure_history "
+                    "(job_id, job_name, build_number, test_name, error_message, "
+                    "error_signature, classification, pattern) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("prev-job2", "my-job", 100, "test_a", "", "sig-a", "", ""),
+                )
+                await db.execute(
+                    "UPDATE failure_history SET child_job_name = 'child-job' "
+                    "WHERE job_id = 'prev-job2'"
+                )
+                await _insert_human_review(
+                    db, "prev-job2", "test_a", child_job_name="child-job"
+                )
+                await db.commit()
+
+    @staticmethod
+    def _root_and_child_result() -> dict:
+        return {
+            "job_name": "my-job",
+            "build_number": 101,
+            "failures": [
+                {
+                    "test_name": "test_a",
+                    "error": "err",
+                    "error_signature": "sig-a",
+                    "analysis": {"classification": "INFRASTRUCTURE"},
+                }
+            ],
+            "child_job_analyses": [
+                {
+                    "job_name": "child-job",
+                    "build_number": 7,
+                    "failures": [
+                        {
+                            "test_name": "test_a",
+                            "error": "err",
+                            "error_signature": "sig-a",
+                            "analysis": {"classification": "PRODUCT BUG"},
+                        }
+                    ],
+                }
+            ],
+        }
+
+    async def test_push_when_every_failure_ai_reviewed(self, setup_test_db):
+        """Every failure AI-reviewed → one push per scope, AI-attributed."""
+        await self._seed_human_reviewed_history(setup_test_db)
+        result_data = self._root_and_child_result()
+        settings = self._settings("reportportal")
+
+        from rootcoz.main import _auto_review_matching_failures
+
+        mock_exporter = self._mock_exporter()
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch(
+                "rootcoz.main._create_exporter", return_value=mock_exporter
+            ) as mock_create,
+            patch(
+                "rootcoz.main._build_export_context", new_callable=AsyncMock
+            ) as mock_context,
+        ):
+            await _auto_review_matching_failures(
+                "current-job", "my-job", 101, result_data, settings
+            )
+
+            # One exporter construction per scope (root + child)
+            assert mock_create.call_count == 2
+            assert mock_exporter.push.call_count == 2
+            # Every push context is attributed to the AI system identity
+            pushed_by = {c.kwargs["pushed_by"] for c in mock_context.call_args_list}
+            assert pushed_by == {AI_SYSTEM_USERNAME}
+
+    async def test_no_push_when_human_and_ai_reviews_mixed(self, setup_test_db):
+        """A human review reaching the reviewed count must not trigger a push."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            async with storage._connect_db() as db:
+                # test_a has human-reviewed history → auto-review marks it AI
+                await db.execute(
+                    "INSERT INTO failure_history "
+                    "(job_id, job_name, build_number, test_name, error_message, "
+                    "error_signature, classification, pattern) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("prev-job", "my-job", 100, "test_a", "", "sig-a", "", ""),
+                )
+                await _insert_human_review(db, "prev-job", "test_a")
+                # test_b carries a direct HUMAN review on the current job:
+                # reviewed count reaches total, but not every review is AI
+                await _insert_human_review(db, "current-job", "test_b")
+                await db.commit()
+
+            result_data = {
+                "job_name": "my-job",
+                "build_number": 101,
+                "failures": [
+                    {
+                        "test_name": "test_a",
+                        "error": "err",
+                        "error_signature": "sig-a",
+                        "analysis": {"classification": "INFRASTRUCTURE"},
+                    },
+                    {
+                        "test_name": "test_b",
+                        "error": "err",
+                        "error_signature": "sig-b",
+                        "analysis": {"classification": "INFRASTRUCTURE"},
+                    },
+                ],
+            }
+
+            from rootcoz.main import _auto_review_matching_failures
+
+            with (
+                patch.object(storage, "DB_PATH", setup_test_db),
+                patch("rootcoz.main._create_exporter") as mock_create,
+            ):
+                await _auto_review_matching_failures(
+                    "current-job",
+                    "my-job",
+                    101,
+                    result_data,
+                    self._settings("reportportal"),
+                )
+                mock_create.assert_not_called()
+
+    async def test_no_push_when_one_failure_unreviewed(self, setup_test_db):
+        """One unreviewed failure → no push at all."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            async with storage._connect_db() as db:
+                # Only test_a has human-reviewed history; test_b stays unreviewed
+                await db.execute(
+                    "INSERT INTO failure_history "
+                    "(job_id, job_name, build_number, test_name, error_message, "
+                    "error_signature, classification, pattern) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("prev-job", "my-job", 100, "test_a", "", "sig-a", "", ""),
+                )
+                await _insert_human_review(db, "prev-job", "test_a")
+                await db.commit()
+
+            result_data = {
+                "job_name": "my-job",
+                "build_number": 101,
+                "failures": [
+                    {
+                        "test_name": "test_a",
+                        "error": "err",
+                        "error_signature": "sig-a",
+                        "analysis": {"classification": "INFRASTRUCTURE"},
+                    },
+                    {
+                        "test_name": "test_b",
+                        "error": "err",
+                        "error_signature": "sig-b",
+                        "analysis": {"classification": "INFRASTRUCTURE"},
+                    },
+                ],
+            }
+
+            from rootcoz.main import _auto_review_matching_failures
+
+            with (
+                patch.object(storage, "DB_PATH", setup_test_db),
+                patch("rootcoz.main._create_exporter") as mock_create,
+            ):
+                await _auto_review_matching_failures(
+                    "current-job",
+                    "my-job",
+                    101,
+                    result_data,
+                    self._settings("reportportal"),
+                )
+                mock_create.assert_not_called()
+
+    async def test_mixed_exporters_still_push_the_non_gating_one(self, setup_test_db):
+        """reportportal,greenwave: the gating exporter must not block RP.
+
+        Hoisting the requires_subject_identifier filter out of the loop exists
+        for this case: with Greenwave merely listed, the context build would
+        request classification overrides for every scope, and a failed read
+        used to skip the whole scope — silently dropping Report Portal's push.
+        """
+        await self._seed_human_reviewed_history(setup_test_db)
+        result_data = self._root_and_child_result()
+        # Greenwave is configured (and would need overrides) alongside RP.
+        settings = self._settings("reportportal,greenwave")
+
+        from rootcoz.main import _auto_review_matching_failures
+
+        mock_exporter = MagicMock()
+        mock_exporter.push = AsyncMock(return_value=MagicMock(details={"pushed": 1}))
+        mock_exporter.__enter__ = MagicMock(return_value=mock_exporter)
+        mock_exporter.__exit__ = MagicMock(return_value=False)
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch(
+                "rootcoz.main._match_and_auto_review_failures",
+                new_callable=AsyncMock,
+                return_value=(0, 0),
+            ),
+            patch(
+                "rootcoz.main._auto_review_child_failures",
+                new_callable=AsyncMock,
+                return_value=(1, 1),
+            ),
+            patch(
+                "rootcoz.main._unreviewed_failure_count",
+                new_callable=AsyncMock,
+                return_value=0,
+            ),
+            patch("rootcoz.main._all_failures_ai_reviewed", return_value=True),
+            # The override read fails outright — the case that used to abort
+            # the whole scope.
+            patch(
+                "rootcoz.main.storage.get_all_effective_classifications",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("db down"),
+            ),
+            patch("rootcoz.main._create_exporter", return_value=mock_exporter) as mc,
+            patch(
+                "rootcoz.main._build_export_context", new_callable=AsyncMock
+            ) as mock_ctx,
+        ):
+            await _auto_review_matching_failures(
+                "current-job", "my-job", 101, result_data, settings
+            )
+
+        # Report Portal is still pushed for its scopes; Greenwave is not.
+        assert mc.call_args_list, "expected the non-gating exporter to be pushed"
+        assert {c.args[0] for c in mc.call_args_list} == {"reportportal"}
+        assert mock_exporter.push.await_count == len(mock_ctx.call_args_list) > 0
+        # And no scope was skipped for want of overrides.
+        assert all(
+            c.kwargs.get("fetch_effective_classifications") is False
+            for c in mock_ctx.call_args_list
+        )
+
+    async def test_greenwave_auto_push_skipped_requires_subject(self, setup_test_db):
+        """AUTO_PUSH_EXPORTERS=greenwave: exporter never constructed/pushed."""
+        from rootcoz.exporters.greenwave_exporter import GreenwaveExporter
+
+        # The skip is driven by the class flag, not an exception path
+        assert GreenwaveExporter.requires_subject_identifier is True
+
+        await self._seed_human_reviewed_history(setup_test_db)
+        result_data = self._root_and_child_result()
+        settings = self._settings("greenwave")
+
+        from rootcoz.main import _auto_review_matching_failures
+
+        mock_exporter = self._mock_exporter()
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch(
+                "rootcoz.main._create_exporter", return_value=mock_exporter
+            ) as mock_create,
+            patch("rootcoz.main.logger") as mock_logger,
+        ):
+            await _auto_review_matching_failures(
+                "current-job", "my-job", 101, result_data, settings
+            )
+
+            mock_create.assert_not_called()
+            mock_exporter.push.assert_not_called()
+            skip_logs = [
+                c
+                for c in mock_logger.info.call_args_list
+                if c.args and "requires an explicit subject identifier" in c.args[0]
+            ]
+            assert skip_logs, "Expected the requires-subject-identifier skip log"
+
+    async def test_reportportal_auto_push_still_pushes(self, setup_test_db):
+        """AUTO_PUSH_EXPORTERS=reportportal is unaffected by the skip flag."""
+        await self._seed_human_reviewed_history(setup_test_db)
+        result_data = self._root_and_child_result()
+        settings = self._settings("reportportal")
+
+        from rootcoz.main import _auto_review_matching_failures
+
+        mock_exporter = self._mock_exporter()
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch(
+                "rootcoz.main._create_exporter", return_value=mock_exporter
+            ) as mock_create,
+        ):
+            await _auto_review_matching_failures(
+                "current-job", "my-job", 101, result_data, settings
+            )
+
+            mock_create.assert_called_with("reportportal", settings)
+            assert mock_exporter.push.call_count == 2
+
+
+class TestAutoPushUnscopableChildren:
+    """Un-scopable failure-bearing children refuse auto-push (#183).
+
+    A child whose build number is not a strictly positive integer (or
+    whose job name is empty) cannot get an export scope, so its
+    failures would be silently dropped — the push must refuse instead.
+    """
+
+    @pytest.fixture
+    async def setup_test_db(self, temp_db_path: Path):
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            yield temp_db_path
+
+    @staticmethod
+    def _settings() -> Settings:
+        return Settings(
+            **{
+                k.lower(): v
+                for k, v in build_test_env(AUTO_PUSH_EXPORTERS="reportportal").items()
+            }
+        )
+
+    @staticmethod
+    def _mock_exporter() -> MagicMock:
+        mock_exporter = MagicMock()
+        mock_exporter.push = AsyncMock(return_value=MagicMock(details={"pushed": 1}))
+        mock_exporter.__enter__ = MagicMock(return_value=mock_exporter)
+        mock_exporter.__exit__ = MagicMock(return_value=False)
+        return mock_exporter
+
+    async def _seed_human_reviewed_root(self, temp_db_path: Path) -> None:
+        """Root failure with human-reviewed history → auto-reviewed."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            async with storage._connect_db() as db:
+                await db.execute(
+                    "INSERT INTO failure_history "
+                    "(job_id, job_name, build_number, test_name, error_message, "
+                    "error_signature, classification, pattern) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                    ("prev-job", "my-job", 100, "test_a", "", "sig-a", "", ""),
+                )
+                await _insert_human_review(db, "prev-job", "test_a")
+                await db.commit()
+
+    def _result_with_build0_child(self, child_failures: list) -> dict:
+        return {
+            "job_name": "my-job",
+            "build_number": 101,
+            "failures": [
+                {
+                    "test_name": "test_a",
+                    "error": "err",
+                    "error_signature": "sig-a",
+                    "analysis": {"classification": "INFRASTRUCTURE"},
+                }
+            ],
+            "child_job_analyses": [
+                {
+                    "job_name": "zero-build",
+                    "build_number": 0,
+                    "failures": child_failures,
+                }
+            ],
+        }
+
+    async def test_no_push_when_failure_child_cannot_be_scoped(self, setup_test_db):
+        """Build-0 child carrying failures → no auto-push, refusal logged."""
+        await self._seed_human_reviewed_root(setup_test_db)
+        result_data = self._result_with_build0_child(
+            [
+                {
+                    "test_name": "test_c",
+                    "error": "err",
+                    "error_signature": "sig-c",
+                    "analysis": {"classification": "INFRASTRUCTURE"},
+                }
+            ]
+        )
+        settings = self._settings()
+
+        from rootcoz.main import _auto_review_matching_failures
+
+        mock_exporter = self._mock_exporter()
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch(
+                "rootcoz.main._create_exporter", return_value=mock_exporter
+            ) as mock_create,
+            patch("rootcoz.main.logger") as mock_logger,
+        ):
+            await _auto_review_matching_failures(
+                "current-job", "my-job", 101, result_data, settings
+            )
+
+            mock_create.assert_not_called()
+            mock_exporter.push.assert_not_called()
+            refusals = [
+                c
+                for c in mock_logger.warning.call_args_list
+                if c.args and "cannot be scoped for export" in c.args[0]
+            ]
+            assert refusals, "Expected the un-scopable refusal log"
+            assert "zero-build" in refusals[0].args[0]
+
+    async def test_build0_child_without_failures_does_not_block(self, setup_test_db):
+        """A child with no failures cannot be pushed anyway — root pushes."""
+        await self._seed_human_reviewed_root(setup_test_db)
+        result_data = self._result_with_build0_child([])
+        settings = self._settings()
+
+        from rootcoz.main import _auto_review_matching_failures
+
+        mock_exporter = self._mock_exporter()
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch(
+                "rootcoz.main._create_exporter", return_value=mock_exporter
+            ) as mock_create,
+        ):
+            await _auto_review_matching_failures(
+                "current-job", "my-job", 101, result_data, settings
+            )
+
+            mock_create.assert_called_once_with("reportportal", settings)
+            assert mock_exporter.push.call_count == 1
+
+
+class TestAutoPushSuppressionAudit:
+    """A configured auto-push that does not run leaves a row, not just a log."""
+
+    @pytest.fixture
+    async def setup_test_db(self, temp_db_path):
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            yield temp_db_path
+
+    async def _rows(self, db_path):
+        with patch.object(storage, "DB_PATH", db_path):
+            page = await storage.list_audit_events(action="export.push", limit=20)
+        return page["events"] if isinstance(page, dict) else page
+
+    async def test_unreviewed_suppression_is_audited(self, setup_test_db):
+        from rootcoz.main import _auto_review_matching_failures
+
+        result_data = TestAutoPushAiReviewGate._root_and_child_result()
+        settings = TestAutoPushAiReviewGate._settings("reportportal")
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch(
+                "rootcoz.main._match_and_auto_review_failures",
+                new_callable=AsyncMock,
+                return_value=(1, 1),
+            ),
+            patch(
+                "rootcoz.main._auto_review_child_failures",
+                new_callable=AsyncMock,
+                return_value=(0, 0),
+            ),
+            patch(
+                "rootcoz.main._unreviewed_failure_count",
+                new_callable=AsyncMock,
+                return_value=1,
+            ),
+            patch("rootcoz.main._create_exporter") as mock_create,
+        ):
+            await _auto_review_matching_failures(
+                "current-job", "my-job", 101, result_data, settings
+            )
+            mock_create.assert_not_called()
+            rows = await self._rows(setup_test_db)
+
+        assert rows, "a suppressed auto-push must leave an audit row"
+        row = rows[0]
+        assert row["actor"] == "rootcoz-ai"
+        assert row["details"]["trigger"] == "auto"
+        assert row["details"]["reason"] == "unreviewed"
+        assert row["details"]["plugin"] == "reportportal"
+        assert row["target_id"] == "current-job"
+
+
+class TestGatingOnlyAutoPushAudit:
+    """AUTO_PUSH_EXPORTERS with only gating exporters still leaves a row."""
+
+    @pytest.fixture
+    async def setup_test_db(self, temp_db_path):
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            yield temp_db_path
+
+    async def test_gating_only_configuration_is_audited(self, setup_test_db):
+        from rootcoz.main import _auto_review_matching_failures
+
+        result_data = TestAutoPushAiReviewGate._root_and_child_result()
+        settings = TestAutoPushAiReviewGate._settings("greenwave")
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch(
+                "rootcoz.main._match_and_auto_review_failures",
+                new_callable=AsyncMock,
+                return_value=(1, 1),
+            ),
+            patch(
+                "rootcoz.main._auto_review_child_failures",
+                new_callable=AsyncMock,
+                return_value=(0, 0),
+            ),
+            patch("rootcoz.main._create_exporter") as mock_create,
+        ):
+            await _auto_review_matching_failures(
+                "current-job", "my-job", 101, result_data, settings
+            )
+            mock_create.assert_not_called()
+            page = await storage.list_audit_events(action="export.push", limit=20)
+
+        rows = page["events"] if isinstance(page, dict) else page
+        assert rows, "an all-gating configuration must still explain itself"
+        assert rows[0]["details"]["reason"] == "gating_exporter_only"
+        assert rows[0]["details"]["plugin"] == "greenwave"

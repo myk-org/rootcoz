@@ -35,6 +35,20 @@ from tests.conftest import host_env
 # ---------------------------------------------------------------------------
 
 
+@pytest.fixture(autouse=True)
+def _hermetic_audit_counters(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Reset the process-global audit counters before every test.
+
+    ``monitoring._audit_write_failures`` is module state, and any earlier
+    test whose audit insert failed leaves it non-zero — which silently
+    flips a healthy response to ``degraded``.  The failing test then
+    depends on how pytest-xdist distributed the suite, not on the code
+    under test.
+    """
+    monkeypatch.setattr(monitoring, "_audit_write_failures", 0)
+    monkeypatch.setattr(monitoring, "_audit_suppressed_auth_events", 0)
+
+
 class TestRollingCounter:
     """Tests for _RollingCounter."""
 

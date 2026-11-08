@@ -72,6 +72,10 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- printf "%s-sidecar-agent" (include "rootcoz.fullname" .) }}
 {{- end }}
 
+{{- define "rootcoz.greenwaveSecretName" -}}
+{{- printf "%s-greenwave-auth" (include "rootcoz.fullname" .) }}
+{{- end }}
+
 {{/*
 Environment variable names that sidecar.agentDir.env entries must not shadow
 (comma-separated; splitList in consumers). Covers every variable the chart
@@ -120,6 +124,9 @@ Validate chart values: routing, AI config.
 {{- define "rootcoz.validate" -}}
 {{- if and .Values.route.enabled .Values.ingress.enabled -}}
 {{- fail "route.enabled and ingress.enabled are mutually exclusive — enable at most one" -}}
+{{- end -}}
+{{- if and .Values.greenwave.keytab .Values.greenwave.keytabBase64 -}}
+{{- fail "greenwave.keytab and greenwave.keytabBase64 are mutually exclusive — set at most one (keytabBase64 is the recommended path for keytabs)" -}}
 {{- end -}}
 {{- if and .Values.ingress.enabled (not .Values.ingress.host) -}}
 {{- fail "ingress.host is required when ingress.enabled is true" -}}
@@ -395,6 +402,38 @@ PI_SIDECAR_AGENT_DIR and the volume mount on this being non-empty.
 {{- $files := list "models.json" "auth.json" "settings.json" -}}
 {{- $sources := dict "models.json" .Values.sidecar.agentDir.modelsJson "auth.json" .Values.sidecar.agentDir.authJson "settings.json" .Values.sidecar.agentDir.settingsJson -}}
 {{- range $file := $files -}}
+{{- $payload := include "rootcoz.resolveSecretPayload" (dict "value" (index $sources $file) "secretName" $secretName "secretKey" $file "Release" $.Release) -}}
+{{- if $payload }}
+{{ $file }}: {{ $payload | b64enc | quote }}
+{{- end -}}
+{{- end -}}
+{{- end }}
+
+{{/*
+Greenwave auth-file secret data (keytab / mTLS cert / key / CA bundle) as
+`data:` lines — values override → existing secret fallback per file, so
+omitting a previously set file on upgrade preserves it (same semantics as the
+other mount secrets). Empty when no file is configured — the Deployment gates
+the volume mount on this being non-empty. Filenames are fixed so the
+Server Settings paths documented in values.yaml stay stable.
+The keytab is binary: greenwave.keytabBase64 (already base64) is written to
+the `data:` key AS-IS (never through b64enc — it is already base64), while
+greenwave.keytab holds raw text-safe content and goes through b64enc. Both
+go through the existing-secret fallback when omitted, so upgrades that do
+not re-pass the value keep the stored Secret intact.
+*/}}
+{{- define "rootcoz.greenwaveSecretData" -}}
+{{- $secretName := include "rootcoz.greenwaveSecretName" . -}}
+{{- if .Values.greenwave.keytabBase64 -}}
+keytab: {{ .Values.greenwave.keytabBase64 | quote }}
+{{- else -}}
+{{- $keytab := include "rootcoz.resolveSecretPayload" (dict "value" .Values.greenwave.keytab "secretName" $secretName "secretKey" "keytab" "Release" .Release) -}}
+{{- if $keytab }}
+keytab: {{ $keytab | b64enc | quote }}
+{{- end -}}
+{{- end -}}
+{{- $sources := dict "client.crt" .Values.greenwave.clientCert "client.key" .Values.greenwave.clientKey "ca.crt" .Values.greenwave.caBundle -}}
+{{- range $file := list "client.crt" "client.key" "ca.crt" -}}
 {{- $payload := include "rootcoz.resolveSecretPayload" (dict "value" (index $sources $file) "secretName" $secretName "secretKey" $file "Release" $.Release) -}}
 {{- if $payload }}
 {{ $file }}: {{ $payload | b64enc | quote }}

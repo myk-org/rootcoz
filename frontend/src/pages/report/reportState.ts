@@ -2,7 +2,7 @@ import { createContext, useContext, type Dispatch } from 'react'
 import { reviewKey } from '@/lib/reviewKey'
 import type { SelectedGroup } from './failureUpdates'
 import { reconcileSelection, scopeKey } from './failureUpdates'
-import type { AnalysisResult, ChildJobAnalysis, FailureAnalysis, Comment, ReviewState, CommentsAndReviews, CommentEnrichment, AiModel, TrackedInEntry } from '@/types'
+import type { AnalysisResult, ChildJobAnalysis, ExporterInfo, FailureAnalysis, Comment, ReviewState, CommentsAndReviews, CommentEnrichment, AiModel, TrackedInEntry } from '@/types'
 
 export interface ReportState {
   result: AnalysisResult | null
@@ -21,13 +21,17 @@ export interface ReportState {
   selection: Record<string, SelectedGroup>
   githubIssuesEnabled: boolean
   jiraIssuesEnabled: boolean
-  reportportalAvailable: boolean
   reportportalProject: string
+  reportportalAvailable: boolean
   datadogAvailable: boolean
   /** Escape hatches allowing pushes of jobs with unreviewed failures
    *  (RP_ALLOW_UNREVIEWED_PUSH / DD_ALLOW_UNREVIEWED_PUSH server settings). */
   rpAllowUnreviewedPush: boolean
   ddAllowUnreviewedPush: boolean
+  /** Exporters advertised by the result's capabilities (e.g. greenwave). */
+  exporters: ExporterInfo[]
+  /** Whether the greenwave exporter accepts waiver submissions. */
+  greenwaveWaiversEnabled: boolean
   serverJiraProjectKey: string
   aiModels: Record<string, AiModel[]>
   loading: boolean
@@ -54,10 +58,12 @@ export type ReportAction =
   | { type: 'SET_REVIEW'; payload: { key: string; state: ReviewState } }
   | { type: 'SET_GITHUB_ISSUES_ENABLED'; payload: boolean }
   | { type: 'SET_JIRA_ISSUES_ENABLED'; payload: boolean }
-  | { type: 'SET_REPORTPORTAL_AVAILABLE'; payload: boolean }
   | { type: 'SET_REPORTPORTAL_PROJECT'; payload: string }
+  | { type: 'SET_REPORTPORTAL_AVAILABLE'; payload: boolean }
   | { type: 'SET_DATADOG_AVAILABLE'; payload: boolean }
   | { type: 'SET_EXPORTER_ALLOW_UNREVIEWED'; payload: { reportportal: boolean; datadog: boolean } }
+  | { type: 'SET_EXPORTERS'; payload: ExporterInfo[] }
+  | { type: 'SET_GREENWAVE_WAIVERS_ENABLED'; payload: boolean }
   | { type: 'SET_SERVER_JIRA_PROJECT_KEY'; payload: string }
   | { type: 'SET_AI_MODELS'; payload: Record<string, AiModel[]> }
   | { type: 'SET_ENRICHMENTS'; payload: Record<string, CommentEnrichment[]> }
@@ -108,11 +114,13 @@ export const initialState: ReportState = {
   selection: {},
   githubIssuesEnabled: false,
   jiraIssuesEnabled: false,
-  reportportalAvailable: false,
   reportportalProject: '',
+  reportportalAvailable: false,
   datadogAvailable: false,
   rpAllowUnreviewedPush: false,
   ddAllowUnreviewedPush: false,
+  exporters: [],
+  greenwaveWaiversEnabled: false,
   serverJiraProjectKey: '',
   aiModels: {},
   loading: true,
@@ -174,14 +182,18 @@ export function reportReducer(state: ReportState, action: ReportAction): ReportS
       return { ...state, githubIssuesEnabled: action.payload }
     case 'SET_JIRA_ISSUES_ENABLED':
       return { ...state, jiraIssuesEnabled: action.payload }
-    case 'SET_REPORTPORTAL_AVAILABLE':
-      return { ...state, reportportalAvailable: action.payload }
     case 'SET_REPORTPORTAL_PROJECT':
       return { ...state, reportportalProject: action.payload }
+    case 'SET_REPORTPORTAL_AVAILABLE':
+      return { ...state, reportportalAvailable: action.payload }
     case 'SET_DATADOG_AVAILABLE':
       return { ...state, datadogAvailable: action.payload }
     case 'SET_EXPORTER_ALLOW_UNREVIEWED':
       return { ...state, rpAllowUnreviewedPush: action.payload.reportportal, ddAllowUnreviewedPush: action.payload.datadog }
+    case 'SET_EXPORTERS':
+      return { ...state, exporters: action.payload }
+    case 'SET_GREENWAVE_WAIVERS_ENABLED':
+      return { ...state, greenwaveWaiversEnabled: action.payload }
     case 'SET_SERVER_JIRA_PROJECT_KEY':
       return { ...state, serverJiraProjectKey: action.payload }
     case 'SET_AI_MODELS':
@@ -294,6 +306,14 @@ export function reportReducer(state: ReportState, action: ReportAction): ReportS
   }
 }
 
+
+/** Whether a named exporter is present and enabled in the capabilities list.
+ *  `exporters[].enabled` mirrors the server's `_available_exporters()` (which
+ *  folds in PUBLIC_BASE_URL and push-content readiness), so a gate on it shows
+ *  the control only when a push can actually succeed. */
+export function exporterEnabled(exporters: ExporterInfo[], name: string): boolean {
+  return exporters.some((e) => e.name === name && e.enabled)
+}
 
 export const StateCtx = createContext<ReportState>(initialState)
 export const DispatchCtx = createContext<Dispatch<ReportAction>>(() => {})

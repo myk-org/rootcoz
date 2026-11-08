@@ -1,0 +1,30 @@
+# Tox/helm template fixture — Greenwave exporter auth files (not for production).
+# Kerberos keytab + mTLS client pair + CA bundle, all mounted from one Secret
+# at the default greenwave.mountPath. After install, set in
+# Server Settings → Greenwave:
+#   greenwave_auth_mode:  kerberos | mtls   (DB-only, never set here)
+#   greenwave_keytab_path:  /var/run/secrets/rootcoz/greenwave/keytab
+#   greenwave_client_cert:  /var/run/secrets/rootcoz/greenwave/client.crt
+#   greenwave_client_key:   /var/run/secrets/rootcoz/greenwave/client.key
+#   greenwave_ca_bundle:    /var/run/secrets/rootcoz/greenwave/ca.crt
+# In production, supply the keytab (binary) base64-encoded, written to the
+# Secret as-is (never re-encoded):
+#   --set greenwave.keytabBase64=$(base64 -w0 my.keytab)
+greenwave:
+  keytab: test-keytab-blob  # pragma: allowlist secret
+  clientCert: |
+    -----BEGIN CERTIFICATE-----
+    test-client-cert
+    -----END CERTIFICATE-----
+  # A placeholder, deliberately NOT PEM-shaped: a fixture that looks like a
+  # real private key trips detect-private-key and detect-secrets, and the only
+  # way past that is to weaken the hooks. helm template does not care what the
+  # bytes are; supply the real key at install time with --set-file.
+  clientKey: test-client-key-placeholder  # pragma: allowlist secret
+  caBundle: |
+    -----BEGIN CERTIFICATE-----
+    test-ca-bundle
+    -----END CERTIFICATE-----
+admin:
+  key: test-admin-key  # pragma: allowlist secret
+encryptionKey: test-encryption-key-for-helm-template-render  # pragma: allowlist secret

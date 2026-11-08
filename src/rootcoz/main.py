@@ -109,18 +109,24 @@ from rootcoz.comment_enrichment import (
     fetch_jira_ticket_status,
 )
 from rootcoz.config import (
+    DB_ONLY_SETTINGS,
     DEFAULT_USER_ROLES,
+    GREENWAVE_AUTH_MODES,
     JIRA_AUTH_MODES,
     Settings,
     atlassian_cloud_id_error,
     get_settings,
+    greenwave_method_missing_fields,
+    greenwave_token_shape_error,
     jira_method_missing_fields,
+    normalize_greenwave_auth_mode,
     normalize_jira_auth_mode,
     parse_additional_repos,
     parse_peer_configs,
     parse_repo_ref,
     remove_from_db_settings_cache,
     update_db_settings_cache,
+    validate_greenwave_url,
 )
 from rootcoz.encryption import (
     SENSITIVE_KEYS,
@@ -153,6 +159,8 @@ from rootcoz.exporters.base import (
     JOB_METADATA_DIMENSIONS,
     ExportContext,
     Exporter,
+    ExporterPrerequisiteError,
+    ReviewersUnavailable,
 )
 from rootcoz.exporters.datadog import (
     DATADOG_SITES,
@@ -161,6 +169,12 @@ from rootcoz.exporters.datadog import (
     normalize_datadog_site,
     validate_datadog_credentials,
 )
+from rootcoz.exporters.greenwave_auth import (
+    GreenwaveAuthError,
+    build_greenwave_auth,
+    build_greenwave_waiver_auth,
+)
+from rootcoz.exporters.greenwave_exporter import GreenwaveExporter
 from rootcoz.exporters.reportportal import (
     INVALID_STORED_FAILURES,
     ReportPortalClient,
@@ -352,6 +366,8 @@ from rootcoz.url_utils import (
 from rootcoz.utils import (
     is_sensitive_key,
     mask_sensitive_fields,
+    normalize_identifier,
+    strip_control_chars,
 )
 from rootcoz.vapid import get_vapid_config
 from rootcoz.xml_enrichment import (
@@ -378,6 +394,10 @@ _SENSITIVE_SETTINGS: frozenset[str] = frozenset(
         "reportportal_api_token",
         "datadog_api_key",
         "datadog_app_key",
+        "greenwave_api_token",
+        "greenwave_waiver_token",
+        "greenwave_oidc_client_secret",
+        "greenwave_basic_password",
         "admin_key",
         "vapid_private_key",
         "smtp_password",
@@ -534,6 +554,7 @@ def _log_level_error(value: object) -> str | None:
 _SETTING_CHOICES: dict[str, dict[str, Any]] = {
     "default_user_role": {"options": list(DEFAULT_USER_ROLES)},
     "jira_auth_mode": {"options": list(JIRA_AUTH_MODES)},
+    "greenwave_auth_mode": {"options": list(GREENWAVE_AUTH_MODES)},
     "log_level": {"options": list(_VALID_LOG_LEVELS)},
     # Datadog publishes a finite site list; the picker offers it and the
     # server canonicalises to the bare hostname. Custom stays allowed so a
@@ -619,6 +640,32 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "dd_push_rootcoz_url",
         "dd_push_tracker_links",
         "dd_allow_unreviewed_push",
+    ],
+    "Greenwave": [
+        "greenwave_auth_mode",
+        "greenwave_url",
+        "greenwave_api_token",
+        "greenwave_oidc_token_url",
+        "greenwave_oidc_client_id",
+        "greenwave_oidc_client_secret",
+        "greenwave_keytab_path",
+        "greenwave_keytab_principal",
+        "greenwave_krb5_realm",
+        "greenwave_krb5_service",
+        "greenwave_client_cert",
+        "greenwave_client_key",
+        "greenwave_ca_bundle",
+        "greenwave_basic_user",
+        "greenwave_basic_password",
+        "greenwave_waiver_url",
+        "greenwave_waiver_token",
+        "greenwave_push_waivers",
+        "greenwave_waivable_classifications",
+        "greenwave_outcome_map",
+        "greenwave_subject_type",
+        "greenwave_product_version",
+        "greenwave_verify_ssl",
+        "enable_greenwave",
     ],
     "Auth & Security": [
         "admin_key",
@@ -874,8 +921,9 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
             {
                 "key": field_name,
                 "label": _setting_label(field_name),
-                # jira_auth_mode is DB-only (Server Settings) — no env var
-                "env_var": "" if field_name == "jira_auth_mode" else field_name.upper(),
+                # A DB-only setting has no env var — the picker in Server
+                # Settings is its only source.
+                "env_var": "" if field_name in DB_ONLY_SETTINGS else field_name.upper(),
                 "value": display_value,
                 "is_set": is_set,
                 "default": default_str,
@@ -893,13 +941,15 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
                 "allow_custom": bool(choices.get("allow_custom", False)),
                 # Persistability contract (#347): server-only settings are
                 # env bootstrap the persist/reset/PUT paths always reject,
-                # and derived settings must not be pinned (see
-                # _DERIVED_SETTINGS) — the UI hides "Save to DB" for both.
+                # DB-only settings have no env value to promote, and derived
+                # settings must not be pinned (see _DERIVED_SETTINGS) — the UI
+                # hides "Save to DB" for all three.
                 "server_only": field_name in _SERVER_ONLY_SETTINGS,
                 "derived": field_name in _DERIVED_SETTINGS,
                 "persistable": (
                     field_name not in _SERVER_ONLY_SETTINGS
                     and field_name not in _DERIVED_SETTINGS
+                    and field_name not in DB_ONLY_SETTINGS
                 ),
             }
         )
@@ -1701,6 +1751,10 @@ _AUDIT_REASON_BY_STATUS = {
     409: "conflict",
     422: "invalid_payload",
     502: "upstream_failure",
+    # A push the server refused because it could not read state it needs
+    # (e.g. the classification-override table behind a gating write) — not
+    # an upstream failure and not the client's fault.
+    503: "service_unavailable",
 }
 _AUDIT_DENIED_STATUSES = frozenset({401, 403})
 
@@ -1889,14 +1943,6 @@ def _build_internal_server_url() -> str:
     url = f"http://localhost:{APP_PORT}"
     logger.debug(f"Built internal server_url={url} for AI tool access")
     return url
-
-
-_CONTROL_CHAR_RE = re.compile(r"[\x00-\x1f\x7f]")
-
-
-def _sanitize_control_chars(value: str) -> str:
-    """Strip control characters from a string."""
-    return _CONTROL_CHAR_RE.sub("", value)
 
 
 def resolve_failure_review(
@@ -4227,17 +4273,84 @@ async def _auto_review_matching_failures(
 
         # Check if ALL failures are now reviewed → auto-push to configured exporters
         _raw_names = [
-            _sanitize_control_chars(n.strip())
+            strip_control_chars(n.strip())
             for n in (settings.auto_push_exporters or "").split(",")
         ]
         auto_push_names = list(
             dict.fromkeys(n for n in _raw_names if n and n in _EXPORTER_CLASSES)
         )
-        if (
-            auto_push_names
-            and total_failures > 0
-            and await _unreviewed_failure_count(job_id, result_data) == 0
-        ):
+        # Gating exporters write records whose subject must identify a
+        # build/artifact; the automatic path has no explicit subject
+        # identifier and must never fall back to the CI job name. Drop them
+        # here rather than inside the loop: the per-scope capability flags
+        # below (history, tracked-in, classification overrides) must describe
+        # only the exporters that will actually run, or one skipped exporter
+        # makes every scope pay for data none of them read.
+        excluded_exporters = [
+            name
+            for name in auto_push_names
+            if getattr(_EXPORTER_CLASSES[name], "requires_subject_identifier", False)
+        ]
+        for plugin_name in excluded_exporters:
+            auto_push_names.remove(plugin_name)
+            logger.info(
+                "Exporter '%s' is never auto-pushed: it requires an explicit "
+                "subject identifier, which the automatic path cannot supply",
+                plugin_name,
+            )
+        # A configured auto-push that does not run must say why — in the log
+        # and in the trail: "nothing was pushed" otherwise looks like a bug to
+        # the operator reading the job afterwards. The three gates evaluated
+        # here are named in one place; the fourth refusal (per-scope
+        # overrides-unavailable) is audited where it is caught, below.
+        suppression_reason: str | None = None
+        unscopable_children = _unscopable_failure_children(result_data)
+        if excluded_exporters and not auto_push_names and total_failures > 0:
+            # Every configured exporter was excluded above (e.g.
+            # AUTO_PUSH_EXPORTERS=greenwave): there is nothing left to run, but
+            # the operator still needs to see why in the trail, which the gate
+            # block below would skip because the list is empty.
+            suppression_reason = "gating_exporter_only"
+        elif auto_push_names and total_failures > 0:
+            unreviewed_ok = await _unreviewed_failure_count(job_id, result_data) == 0
+            if unscopable_children:
+                suppression_reason = "unscopable_children"
+            elif not unreviewed_ok:
+                suppression_reason = "unreviewed"
+            # Attribution: every pushed failure must carry an AI review, not
+            # merely "some" review — a human review stops the automatic push.
+            elif not _all_failures_ai_reviewed(
+                result_data, await storage.get_reviews_for_job(job_id)
+            ):
+                suppression_reason = "not_ai_reviewed"
+
+        if suppression_reason is not None:
+            if suppression_reason == "unscopable_children":
+                # Un-exportable failures are a real warning: the analysis
+                # succeeded, but part of it can never reach an exporter.
+                detail = (
+                    "failure-bearing children cannot be scoped for export "
+                    f"({', '.join(unscopable_children)})"
+                )
+                logger.warning(f"Auto-push skipped for job_id={job_id}: {detail}")
+            else:
+                detail = f"reason={suppression_reason}"
+                logger.info(f"Auto-push skipped for job_id={job_id}: {detail}")
+            await record_audit(
+                action="export.push",
+                actor=AI_SYSTEM_USERNAME,
+                message=(f"Auto-push suppressed for job {job_id}: {detail}"),
+                target_type="job",
+                target_id=job_id,
+                outcome="failure",
+                details={
+                    "plugin": ",".join(auto_push_names or excluded_exporters),
+                    "trigger": "auto",
+                    "reason": suppression_reason,
+                    "suppressed_exporters": ",".join(excluded_exporters),
+                },
+            )
+        elif auto_push_names and total_failures > 0:
             # Auto-push must emit the same event timestamp as the manual
             # push endpoint: reuse the stored analysis timestamp instead
             # of push time.
@@ -4246,21 +4359,56 @@ async def _auto_review_matching_failures(
             # One context per scope: a whole-job context carries only the
             # top-level failures, so a child-only pipeline would push nothing.
             for scope_job, scope_build in _push_scopes(result_data):
-                context = await _build_export_context(
-                    job_id=job_id,
-                    result_data=result_data,
-                    settings=settings,
-                    child_job_name=scope_job,
-                    child_build_number=scope_build,
-                    pushed_by=AI_SYSTEM_USERNAME,
-                    fetch_history=_exporter_needs_history_classifications(
-                        auto_push_names
-                    ),
-                    fetch_tracked_in_links=_exporter_needs_tracked_in_links(
-                        auto_push_names, settings
-                    ),
-                    analysis_timestamp=analysis_timestamp,
-                )
+                try:
+                    context = await _build_export_context(
+                        job_id=job_id,
+                        result_data=result_data,
+                        settings=settings,
+                        child_job_name=scope_job,
+                        child_build_number=scope_build,
+                        pushed_by=AI_SYSTEM_USERNAME,
+                        fetch_history=_exporter_needs_history_classifications(
+                            auto_push_names
+                        ),
+                        fetch_tracked_in_links=_exporter_needs_tracked_in_links(
+                            auto_push_names, settings
+                        ),
+                        analysis_timestamp=analysis_timestamp,
+                        fetch_effective_classifications=(
+                            _exporter_needs_effective_classifications(auto_push_names)
+                        ),
+                    )
+                except EffectiveClassificationsUnavailable:
+                    # The pipeline already succeeded; an exporter that cannot
+                    # be given safe inputs is skipped for this scope rather
+                    # than failing the analysis — but it is a refusal like the
+                    # gates above, so it leaves a row too.
+                    logger.warning(
+                        "Auto-push skipped for job_id=%s scope %s#%s: "
+                        "classification overrides are unavailable",
+                        job_id,
+                        scope_job or "root",
+                        scope_build or 0,
+                    )
+                    await record_audit(
+                        action="export.push",
+                        actor=AI_SYSTEM_USERNAME,
+                        message=(
+                            f"Auto-push suppressed for job {job_id} "
+                            f"(scope {scope_job or 'root'}#{scope_build or 0}): "
+                            f"classification overrides are unavailable"
+                        ),
+                        target_type="job",
+                        target_id=job_id,
+                        outcome="failure",
+                        details={
+                            "plugin": ",".join(auto_push_names),
+                            "trigger": "auto",
+                            "reason": "overrides_unavailable",
+                            "scope": f"{scope_job or 'root'}#{scope_build or 0}",
+                        },
+                    )
+                    continue
                 for plugin_name in auto_push_names:
                     logger.info(
                         "All failures auto-reviewed for job %s%s, pushing to "
@@ -6965,6 +7113,56 @@ async def re_analyze(
     return queued
 
 
+def _scope_walk(
+    result_data: dict[str, Any],
+) -> tuple[list[tuple[str | None, int | None]], list[str]]:
+    """One traversal of the job tree, for every consumer of push scopes.
+
+    Returns ``(scopes, unscopable)``. A scope is
+    ``(child_job_name, child_build_number)``, with ``(None, None)`` for the
+    root; duplicates (two nodes sharing a name/build pair resolve to the same
+    subtree) are emitted once.
+
+    A child scope needs an identifiable build: the scoped export context is
+    addressed by ``(job_name, build_number)``, so a node without a job name or
+    with a non-positive/non-integer build would resolve to the *root* context
+    and push the parent's failures a second time. Such failure-bearing nodes
+    are reported in ``unscopable`` instead — their own failures can never be
+    exported, which is why auto-push refuses to run at all rather than drop
+    them silently (see ``_auto_review_matching_failures``). Their children are
+    still walked, so a scopable grandchild is not lost.
+    """
+    scopes: list[tuple[str | None, int | None]] = []
+    if result_data.get("failures"):
+        scopes.append((None, None))
+    seen: set[tuple[str | None, int | None]] = {(None, None)}
+    unscopable: list[str] = []
+
+    def _walk(children: list[Any]) -> None:
+        for child in children:
+            if not isinstance(child, dict):
+                continue
+            name = child.get("job_name") or None
+            try:
+                build = int(child.get("build_number") or 0)
+            except TypeError, ValueError:
+                build = 0
+            if child.get("failures"):
+                if name and build > 0:
+                    if (name, build) not in seen:
+                        seen.add((name, build))
+                        scopes.append((name, build))
+                else:
+                    unscopable.append(
+                        f"child {name or ''!r} "
+                        f"(build_number={child.get('build_number')!r})"
+                    )
+            _walk(child.get("failed_children", []))
+
+    _walk(result_data.get("child_job_analyses", []))
+    return scopes, unscopable
+
+
 def _push_scopes(
     result_data: dict[str, Any],
 ) -> list[tuple[str | None, int | None]]:
@@ -6972,28 +7170,49 @@ def _push_scopes(
 
     Auto-push must build one context per scope — a whole-job context contains
     only the top-level ``failures`` list, so a pipeline whose failures live in
-    child jobs would push nothing at all. Two child nodes can share a
-    (name, build) pair; they resolve to the same subtree, so a duplicate
-    scope is pushed once.
+    child jobs would push nothing at all. Thin projection over
+    :func:`_scope_walk`, so the scoping rules live in one place.
     """
-    scopes: list[tuple[str | None, int | None]] = []
-    if result_data.get("failures"):
-        scopes.append((None, None))
-    seen: set[tuple[str | None, int | None]] = set(scopes)
-
-    def _walk(children: list[Any]) -> None:
-        for child in children:
-            if not isinstance(child, dict):
-                continue
-            if child.get("failures"):
-                scope = (child.get("job_name") or None, child.get("build_number"))
-                if scope not in seen:
-                    seen.add(scope)
-                    scopes.append(scope)
-            _walk(child.get("failed_children", []))
-
-    _walk(result_data.get("child_job_analyses", []))
+    scopes, _ = _scope_walk(result_data)
     return scopes
+
+
+def _unscopable_failure_children(result_data: dict[str, Any]) -> list[str]:
+    """Failure-bearing children that no export scope can address.
+
+    One entry per offending node, nested children included. Auto-push refuses
+    to run when this is non-empty: those failures can never be exported, and
+    pushing every other scope would attribute the result to the AI while
+    silently dropping them. Projection over :func:`_scope_walk`.
+    """
+    _, unscopable = _scope_walk(result_data)
+    return unscopable
+
+
+def _all_failures_ai_reviewed(
+    result_data: dict[str, Any], reviews: dict[str, dict[str, Any]]
+) -> bool:
+    """Whether every failure in the job tree was reviewed by the AI itself.
+
+    Auto-push attributes its writes to ``AI_SYSTEM_USERNAME``, so it may only
+    run when every failure that would be pushed carries an AI-authored review.
+    "No unreviewed failures" is not enough: one AI auto-review plus human
+    reviews satisfies that count and would produce an AI-attributed push.
+    Review resolution reuses :func:`resolve_failure_review`, so the
+    child-scoping semantics match the report page exactly.
+    """
+    for failure, child_job_name, child_build_number in _iter_scoped_failures(
+        result_data
+    ):
+        entry = resolve_failure_review(
+            reviews,
+            failure.get("test_name", ""),
+            child_job_name,
+            child_build_number,
+        )
+        if not entry or entry.get("username") != AI_SYSTEM_USERNAME:
+            return False
+    return True
 
 
 def _iter_scoped_failures(
@@ -7325,7 +7544,7 @@ async def get_job_result_full(
                 "child_build_number": child_build,
                 "reviewed": reviewed,
                 "reviewed_by": (
-                    _sanitize_control_chars(entry["username"]) if entry else ""
+                    strip_control_chars(entry["username"]) if entry else ""
                 ),
             }
         )
@@ -8319,6 +8538,52 @@ def _find_child_job_in_result(
         result_data.get("child_job_analyses", []),
         child_job_name,
         child_build_number,
+    )
+
+
+_ENCODE_URI_COMPONENT_SAFE = "-_.!~*'()"
+
+
+def _child_report_anchor(
+    children: list[dict[str, Any]],
+    child_job_name: str,
+    child_build_number: int,
+) -> str:
+    """URL fragment identifying a child job's report section.
+
+    Must stay in sync with ``frontend/src/lib/childJobHash.ts``
+    (``childJobHashId``): the report page assigns each child the id
+    ``child-<encodeURIComponent(job_name)>-<build_number>``, prefixed
+    with every ancestor's id joined by ``--``.  The child is located by
+    ``(child_job_name, child_build_number)`` via the shared
+    ``_child_matches`` matcher — no second matcher.  If the child is not
+    in the tree, the legacy single-segment anchor is kept rather than
+    emitting nothing (the caller has already rejected missing children;
+    this guards a stale scope drifting in later).
+    """
+
+    def _chain(nodes: list[dict[str, Any]]) -> list[dict[str, Any]] | None:
+        for node in nodes:
+            if _child_matches(node, child_job_name, child_build_number):
+                return [node]
+            nested = _chain(node.get("failed_children", []))
+            if nested:
+                return [node, *nested]
+        return None
+
+    chain = _chain(children)
+    if not chain:
+        return f"child-{_urlquote(child_job_name, safe='')}-{child_build_number}"
+    for node in chain:
+        # An ancestor is on the chain because it CONTAINS the matched child,
+        # not because it has a usable identity of its own — fall back to the
+        # single-segment anchor rather than raising on a malformed node.
+        if not node.get("job_name") or node.get("build_number") is None:
+            return f"child-{_urlquote(child_job_name, safe='')}-{child_build_number}"
+    return "--".join(
+        f"child-{_urlquote(str(node['job_name']), safe=_ENCODE_URI_COMPONENT_SAFE)}"
+        f"-{node['build_number']}"
+        for node in chain
     )
 
 
@@ -9440,6 +9705,23 @@ def _rp_has_push_content(settings: Settings) -> bool:
     return bool(rp.push_classifications or rp.push_rootcoz_url or rp.push_tracker_links)
 
 
+def _greenwave_ready(settings: Settings) -> bool:
+    """Whether GreenwaveExporter can be constructed with current settings.
+
+    Waiver prerequisites come from
+    :meth:`GreenwaveExporter.missing_waiver_settings` — the same source of
+    truth the constructor uses — so :func:`_available_exporters` never
+    advertises a plugin that cannot construct.  ``greenwave_enabled``
+    covers the ResultsDB side (enable flag + selected auth mode's
+    fields).
+    """
+    if not settings.greenwave_enabled:
+        return False
+    if settings.greenwave_push_waivers:
+        return not GreenwaveExporter.missing_waiver_settings(settings)
+    return True
+
+
 def _available_exporters(settings: Settings) -> list[ExporterInfo]:
     """Build the list of available exporter plugins with their status."""
     rp_enabled = settings.reportportal_enabled
@@ -9464,6 +9746,16 @@ def _available_exporters(settings: Settings) -> list[ExporterInfo]:
             enabled=settings.datadog_enabled,
             allow_unreviewed_push=_allows_unreviewed_push(
                 DatadogExporter.NAME, settings
+            ),
+        ),
+        ExporterInfo(
+            name=GreenwaveExporter.NAME,
+            display_name=GreenwaveExporter.DISPLAY_NAME,
+            enabled=_greenwave_ready(settings),
+            # Greenwave has no unreviewed-push escape hatch: its pushes stay
+            # gated on review completion (the waiver guard depends on it).
+            allow_unreviewed_push=_allows_unreviewed_push(
+                GreenwaveExporter.NAME, settings
             ),
         ),
     ]
@@ -9494,6 +9786,7 @@ def _build_capabilities(settings: Settings) -> dict[str, Any]:
         "datadog": settings.datadog_enabled,
         "exporters": _available_exporters(settings),
         "reportportal_project": settings.reportportal_project or "",
+        "greenwave_waivers": settings.greenwave_push_waivers,
         "feedback_enabled": settings.feedback_enabled
         and bool(settings.ai_provider)
         and bool(settings.ai_model),
@@ -11776,7 +12069,7 @@ async def push_to_reportportal(
     username = getattr(request.state, "username", "")
     # Sanitize control characters to prevent log forging (trusted-proxy
     # mode populates username from X-Forwarded-User with minimal validation)
-    safe_username = _sanitize_control_chars(username)
+    safe_username = strip_control_chars(username)
     try:
         logger.info("RP push requested by '%s' for job %s", safe_username, job_id)
         if not settings.reportportal_enabled:
@@ -11870,6 +12163,19 @@ async def push_to_exporter(
     child_build_number: int | None = Query(
         default=None, description="Child build number for pipeline child push"
     ),
+    subject_identifier: str | None = Query(
+        default=None,
+        description=(
+            "Subject identifier for exporter writes (build NVR or artifact "
+            "identifier). Required by the Greenwave exporter for every push "
+            "— results and waivers are both gating writes keyed on it, so "
+            "there is no job_name fallback (HTTP 422 without it)."
+        ),
+    ),
+    waiver_comment: str | None = Query(
+        default=None,
+        description=("Optional human comment included in Greenwave waiver submissions"),
+    ),
     settings: Settings = _SETTINGS_DEP,
     _job: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
@@ -11881,7 +12187,7 @@ async def push_to_exporter(
     _require_operator(request)
     _check_allow_list(request)
     username = getattr(request.state, "username", "")
-    safe_username = _sanitize_control_chars(username)
+    safe_username = strip_control_chars(username)
     try:
         logger.info(
             "Exporter push requested by '%s' for job %s, plugin=%s",
@@ -11913,17 +12219,33 @@ async def push_to_exporter(
                 child_job_name=child_job_name,
                 child_build_number=child_build_number,
                 pushed_by=safe_username,
+                subject_identifier=normalize_identifier(subject_identifier),
+                waiver_comment=(
+                    strip_control_chars(waiver_comment) if waiver_comment else None
+                ),
                 fetch_history=_exporter_needs_history_classifications([plugin_name]),
                 fetch_tracked_in_links=_exporter_needs_tracked_in_links(
                     [plugin_name], settings
                 ),
                 analysis_timestamp=_stored_analysis_timestamp(stored),
+                fetch_effective_classifications=(
+                    _exporter_needs_effective_classifications([plugin_name])
+                ),
             )
+        except EffectiveClassificationsUnavailable as exc:
+            # 503, not 400: the request is fine, the server cannot read the
+            # override table it needs to make a safe gating write.
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         try:
             exporter = _create_exporter(plugin_name, settings)
+        except ExporterPrerequisiteError as exc:
+            # Missing server-side prerequisite (e.g. GREENWAVE_PRODUCT_VERSION
+            # when waivers are enabled) — the configuration, not the client
+            # input, is wrong.
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except (TimeoutError, OSError, TypeError, RuntimeError) as exc:
@@ -11933,6 +12255,14 @@ async def push_to_exporter(
         try:
             with exporter:
                 result = await exporter.push(context)
+        except ReviewersUnavailable as exc:
+            # 503, not 422: the request is fine, the server could not read the
+            # reviewer table a gating write needs. Retryable.
+            raise HTTPException(status_code=503, detail=str(exc)) from exc
+        except ExporterPrerequisiteError as exc:
+            # Missing push input (e.g. Greenwave waivers without an explicit
+            # subject_identifier) — the client request, not the server, is wrong.
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         except Exception as exc:
             # Guard against unexpected exporter failures leaking as raw 500s.
             # Expected error modes are already returned inside push() as a
@@ -11964,6 +12294,22 @@ async def push_to_exporter(
                 "plugin": plugin_name,
                 "pushed": int(result.details.get("pushed") or 0),
                 "outcome": outcome,
+                # Gating writers: name the subject the write landed on and how
+                # many waivers were filed — reproducing an audit question
+                # ("which build did we waive?") otherwise needs the exporter's
+                # own result, which is not kept.
+                **(
+                    {
+                        "subject_identifier": context.subject_identifier or "",
+                        "waived": int(result.details.get("waived") or 0),
+                        "group_uuid": (
+                            (result.details.get("details") or {}).get("group_uuid")
+                            or ""
+                        ),
+                    }
+                    if _EXPORTER_CLASSES.get(plugin_name) is GreenwaveExporter
+                    else {}
+                ),
             },
             request=request,
         )
@@ -12070,6 +12416,19 @@ def _stored_analysis_timestamp(stored: dict[str, Any]) -> int | None:
     return None
 
 
+class EffectiveClassificationsUnavailable(RuntimeError):
+    """Human classification overrides could not be read for a gating export.
+
+    Exporters that declare ``needs_effective_classifications`` write
+    gating-relevant records (ResultsDB outcomes, WaiverDB waivers), and the
+    stored result JSON is only a best-effort mirror of the authoritative
+    override table. Falling back to it could publish the outcome a reviewer
+    overruled and file a waiver for the classification they rejected, so the
+    push is refused instead (HTTP 503) — a failed push is recoverable, a
+    wrong gating write is not.
+    """
+
+
 async def _build_export_context(
     *,
     job_id: str,
@@ -12078,9 +12437,12 @@ async def _build_export_context(
     child_job_name: str | None = None,
     child_build_number: int | None = None,
     pushed_by: str = "",
+    subject_identifier: str | None = None,
+    waiver_comment: str | None = None,
     fetch_history: bool = True,
     fetch_tracked_in_links: bool = True,
     analysis_timestamp: int | None = None,
+    fetch_effective_classifications: bool = True,
 ) -> ExportContext:
     """Build an ExportContext from stored result data.
 
@@ -12094,6 +12456,11 @@ async def _build_export_context(
         child_job_name: Optional child job name for scoped push.
         child_build_number: Optional child build number.
         pushed_by: Username of the user who triggered the push.
+        waiver_comment: Optional human comment included in Greenwave waiver
+            submissions.
+        subject_identifier: Required by Greenwave for every push — both a
+            ResultsDB result and a waiver are gating writes keyed on that
+            subject, so a CI job name is never used instead.
         fetch_history: When ``False``, skip the per-test history classification
             lookups (they hit the DB once per unique test name).  Set to
             ``False`` when no target exporter reads
@@ -12106,12 +12473,24 @@ async def _build_export_context(
         analysis_timestamp: Unix timestamp of the analysis, when the caller
             knows it (e.g. from the stored results row).  ``None`` lets
             exporters fall back to push time.
+        fetch_effective_classifications: When ``True``, fetch the human
+            classification overrides (``storage.get_all_effective_classifications``)
+            into ``ExportContext.effective_classifications``.  Set to
+            ``True`` when a target exporter writes gating records — see
+            :func:`_exporter_needs_effective_classifications`.  A storage
+            failure raises :class:`EffectiveClassificationsUnavailable`
+            instead of falling back to the stored result JSON: the JSON is
+            only a best-effort mirror, and a gating write made from it can
+            publish an overruled outcome or file a waiver for a rejected
+            classification.
 
     Returns:
         Populated ExportContext.
 
     Raises:
         ValueError: Invalid child job parameters.
+        EffectiveClassificationsUnavailable: A gating exporter needs the human
+            classification overrides and the override table cannot be read.
     """
     base_url = _extract_base_url()
     report_url = f"{base_url}/results/{job_id}" if base_url else ""
@@ -12122,11 +12501,15 @@ async def _build_export_context(
     # Scope to child job when requested. The same resolver serves the push
     # gate, so a push can never be reviewed against a different subtree
     # than the one it exports.
+    root_children = result_data.get("child_job_analyses", [])
     result_data, scope_job, scope_build = _resolve_push_scope(
         result_data, child_job_name, child_build_number
     )
     if scope_job:
-        anchor = f"child-{_urlquote(scope_job, safe='')}-{scope_build}"
+        # Ancestry-qualified fragment id — the format the report page assigns
+        # (frontend/src/lib/childJobHash.ts), so a pushed link resolves for
+        # nested children too.
+        anchor = _child_report_anchor(root_children, scope_job, scope_build)
         report_url = f"{report_url}#{anchor}"
 
     failures_data = result_data.get("failures", [])
@@ -12156,8 +12539,34 @@ async def _build_export_context(
     history_classifications: dict[str, str] = {}
     tracked_in_data: dict[str, list[dict[str, Any]]] = {}
     reviewed_by: dict[str, str] = {}
+    reviews_unavailable = False
+    effective_classifications: dict[tuple[str, str, int], str] = {}
 
     if failures_data:
+        if fetch_effective_classifications:
+            try:
+                effective_classifications = (
+                    await storage.get_all_effective_classifications(job_id)
+                )
+            except Exception as exc:
+                # Fail closed: the target exporter writes gating records, and
+                # the result JSON is only a best-effort mirror of the override
+                # table — pushing either could publish an overruled outcome or
+                # file a waiver for a rejected classification. The caller maps
+                # this to 503 so the operator can retry once the DB recovers.
+                logger.warning(
+                    "Refusing export push for job_id=%s: classification "
+                    "overrides are unavailable and the target exporter writes "
+                    "gating records",
+                    job_id,
+                    exc_info=True,
+                )
+                raise EffectiveClassificationsUnavailable(
+                    "Classification overrides are unavailable, so this push "
+                    "could write an out-of-date classification to a gating "
+                    "system. Retry once the database is reachable."
+                ) from exc
+
         if fetch_history:
             seen: set[str] = set()
             test_names: list[str] = []
@@ -12216,11 +12625,21 @@ async def _build_export_context(
                     continue
                 entry = resolve_failure_review(reviews, name, scope_name, scope_build)
                 if entry:
-                    safe = _sanitize_control_chars(entry["username"])
+                    safe = strip_control_chars(entry["username"])
                     if safe:
                         reviewed_by[name] = safe
         except Exception:
-            logger.debug("Failed to fetch reviews for job %s", job_id, exc_info=True)
+            # Not the same as "nobody reviewed this": a reader that needs
+            # reviewer identity (Greenwave waivers) must be able to tell the
+            # two apart, or it silently omits the gating writes it was asked
+            # for while still succeeding at the informational ones.
+            reviews_unavailable = True
+            logger.warning(
+                "Failed to fetch reviews for job %s — reviewers unknown, "
+                "gating exports will refuse",
+                job_id,
+                exc_info=True,
+            )
 
         if reviewed_by:
             logger.debug("Export push reviewed_by for job %s: %s", job_id, reviewed_by)
@@ -12238,8 +12657,12 @@ async def _build_export_context(
         history_classifications=history_classifications,
         tracked_in_links=tracked_in_data,
         reviewed_by=reviewed_by,
+        reviews_unavailable=reviews_unavailable,
         analysis_timestamp=analysis_timestamp,
         job_metadata=job_metadata,
+        subject_identifier=subject_identifier,
+        waiver_comment=waiver_comment,
+        effective_classifications=effective_classifications,
     )
 
 
@@ -12250,7 +12673,27 @@ async def _build_export_context(
 _EXPORTER_CLASSES: dict[str, type[Exporter]] = {
     ReportPortalClient.NAME: ReportPortalClient,
     DatadogExporter.NAME: DatadogExporter,
+    GreenwaveExporter.NAME: GreenwaveExporter,
 }
+
+
+def _any_exporter_needs(plugin_names: Iterable[str], capability: str) -> bool:
+    """Whether any named exporter class declares a static capability.
+
+    Unknown names are ignored here — :func:`_create_exporter` raises for
+    them when the push is actually attempted.
+
+    Args:
+        plugin_names: Exporter identifiers to check.
+        capability: Class attribute name (e.g. ``needs_history_classifications``).
+
+    Returns:
+        ``True`` if at least one known exporter declares the capability.
+    """
+    return any(
+        name in _EXPORTER_CLASSES and getattr(_EXPORTER_CLASSES[name], capability)
+        for name in plugin_names
+    )
 
 
 def _exporter_needs_history_classifications(plugin_names: Iterable[str]) -> bool:
@@ -12267,11 +12710,23 @@ def _exporter_needs_history_classifications(plugin_names: Iterable[str]) -> bool
     Returns:
         ``True`` if at least one known exporter needs history classifications.
     """
-    return any(
-        name in _EXPORTER_CLASSES
-        and _EXPORTER_CLASSES[name].needs_history_classifications
-        for name in plugin_names
-    )
+    return _any_exporter_needs(plugin_names, "needs_history_classifications")
+
+
+def _exporter_needs_effective_classifications(plugin_names: Iterable[str]) -> bool:
+    """Whether any named exporter consumes human classification overrides.
+
+    Lets the push pipeline skip ``storage.get_all_effective_classifications``
+    in :func:`_build_export_context` when no target exporter will read
+    ``ExportContext.effective_classifications``.
+
+    Args:
+        plugin_names: Exporter identifiers to check.
+
+    Returns:
+        ``True`` if at least one known exporter needs the overrides.
+    """
+    return _any_exporter_needs(plugin_names, "needs_effective_classifications")
 
 
 # Exporter name → Settings field gating tracked-in link fetches: when the
@@ -12355,7 +12810,7 @@ def _create_exporter(plugin_name: str, settings: Settings) -> Exporter:
             push_rootcoz_url=rp.push_rootcoz_url,
             push_tracker_links=rp.push_tracker_links,
         )
-    if plugin_name == DatadogExporter.NAME:
+    elif plugin_name == DatadogExporter.NAME:
         if not settings.datadog_enabled:
             raise ValueError("Datadog integration is disabled or not configured")
         api_key = settings.datadog_api_key
@@ -12372,6 +12827,14 @@ def _create_exporter(plugin_name: str, settings: Settings) -> Exporter:
             push_rootcoz_url=settings.dd_push_rootcoz_url,
             push_tracker_links=settings.dd_push_tracker_links,
         )
+    elif plugin_name == GreenwaveExporter.NAME:
+        if not settings.greenwave_enabled:
+            raise ValueError("Greenwave integration is disabled or not configured")
+        # Prerequisite validation (ResultsDB URL/token, and the waiver
+        # settings when GREENWAVE_PUSH_WAIVERS is enabled) lives in
+        # GreenwaveExporter.__init__; it raises ExporterPrerequisiteError
+        # (HTTP 422) when server configuration is incomplete.
+        return GreenwaveExporter(settings=settings)
     raise ValueError(f"Unknown exporter plugin: '{plugin_name}'")
 
 
@@ -12412,6 +12875,9 @@ async def _execute_rp_push(
         fetch_history=_exporter_needs_history_classifications(["reportportal"]),
         fetch_tracked_in_links=_exporter_needs_tracked_in_links(
             ["reportportal"], settings
+        ),
+        fetch_effective_classifications=_exporter_needs_effective_classifications(
+            ["reportportal"]
         ),
     )
 
@@ -19175,10 +19641,9 @@ def _settings_env_value(key: str, dotenv: dict[str, str] | None = None) -> str |
     own value.
     """
     env_var = key.upper()
-    if key == "jira_auth_mode":
-        # DB-only setting (#346): no env var ever maps to it — a stray
-        # JIRA_AUTH_MODE in the environment is ignored, matching the
-        # pydantic-settings source that drops it.
+    if key in DB_ONLY_SETTINGS:
+        # DB-only (#346/#183): no env var maps to it, so persist must report
+        # no-env-value rather than promote one.
         return None
     if os.environ.get(env_var) is not None:
         return os.environ[env_var]
@@ -19421,6 +19886,72 @@ async def _normalize_enumerated_value(key: str, value: str) -> tuple[str, str | 
     return value, None
 
 
+# Greenwave settings whose save must re-check the selected auth mode's
+# prerequisites: the mode itself, the ResultsDB URL scheme, and every
+# per-mode credential field (fields that never gate mode completeness —
+# krb5 service class, CA bundle — are excluded, as are the waiver
+# credentials; the waiver URL is included because its HTTPS-only scheme
+# rule is enforced on this write path).
+_GREENWAVE_AUTH_SETTING_KEYS: frozenset[str] = frozenset(
+    {
+        "greenwave_auth_mode",
+        "greenwave_url",
+        "greenwave_waiver_url",
+        "greenwave_api_token",
+        "greenwave_oidc_token_url",
+        "greenwave_oidc_client_id",
+        "greenwave_oidc_client_secret",
+        "greenwave_keytab_path",
+        "greenwave_keytab_principal",
+        "greenwave_client_cert",
+        "greenwave_client_key",
+        "greenwave_basic_user",
+        "greenwave_basic_password",
+        "greenwave_waiver_token",
+    }
+)
+
+# The bearer tokens a save WRITES, as opposed to the ones it inherits: the shape
+# rule applies only to these (see the cross-field block below).
+_GREENWAVE_TOKEN_SETTING_KEYS: frozenset[str] = frozenset(
+    {
+        "greenwave_api_token",
+        "greenwave_waiver_token",
+    }
+)
+
+
+def _effective_proposed_settings(
+    settings_updates: dict[str, Any],
+) -> Settings | None:
+    """Merge an admin update over the effective settings; None when invalid.
+
+    Shared by the cross-field save rules (Greenwave auth-mode
+    completeness, auto-push requires auto-review) so an update touching
+    only one side of a rule is still evaluated against the resulting
+    configuration. None/empty values reset to the model default, matching
+    the PUT semantics — an explicit empty override beats the env value.
+    """
+    effective = get_settings().model_dump()
+    valid_keys = set(Settings.model_fields.keys())
+    for key, value in settings_updates.items():
+        if key not in valid_keys:
+            continue
+        if value is None or value == "":
+            field = Settings.model_fields[key]
+            effective[key] = (
+                field.default_factory() if field.default_factory else field.default
+            )
+        else:
+            effective[key] = value
+    try:
+        return Settings.model_validate(effective)
+    except ValidationError:
+        # Per-field problems were already reported by the caller; skip the
+        # cross-field checks when the merged proposal cannot validate.
+        return None
+
+
 async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[str]:
     """Validate admin settings updates; return per-entry error messages.
 
@@ -19446,7 +19977,15 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
         )
 
     # Pre-validate fields with Pydantic model-level validators
-    for key in ("prow_url", "gcs_bucket", "jira_auth_mode", "default_user_role"):
+    for key in (
+        "prow_url",
+        "gcs_bucket",
+        "jira_auth_mode",
+        "greenwave_auth_mode",
+        "default_user_role",
+        "greenwave_waiver_url",
+        "greenwave_outcome_map",
+    ):
         if key not in settings_updates:
             continue
         value = settings_updates[key]
@@ -19483,7 +20022,20 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
                 errors.append(enum_error)
             else:
                 settings_updates[key] = canonical
-        if key in ("prow_url", "gcs_bucket", "default_user_role"):
+        if key in (
+            "prow_url",
+            "gcs_bucket",
+            "default_user_role",
+            # greenwave_url is NOT skipped: its STRUCTURAL problems
+            # (userinfo, query, fragment, bad port) are reported by the
+            # per-key model_validate below, while its mode-aware SCHEME rule
+            # needs the merged proposal and runs in the Greenwave cross-field
+            # block. greenwave_waiver_url skips here because the pre-validate
+            # block above already model-validates it (one message per
+            # problem, #361 Qodo r2).
+            "greenwave_waiver_url",
+            "greenwave_outcome_map",
+        ):
             continue
         # Sidecar listener overrides persist under /data and every restart
         # re-probes them — reject values that would brick container boot
@@ -19564,6 +20116,102 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
                     f"{key}: {ctx_err if ctx_err else err.get('msg', str(err))}"
                 )
 
+    # Greenwave auth mode (#183): the selected mode's required fields must
+    # be complete, and the URL schemes must match the mode (plain HTTP is
+    # valid only for the credential-less 'none' mode, or while no mode is
+    # selected — the exporter is inert then).  Like the auto-push rule
+    # below, it runs only when the update touches one of the mode's keys,
+    # and is evaluated on the EFFECTIVE proposed values via
+    # _effective_proposed_settings so absent-vs-explicitly-cleared is the
+    # helper's job: an explicit CLEAR of the mode is judged on the cleared
+    # value (a batch clearing the mode while setting an inert http URL is
+    # accepted), and a batch replacing url+mode together is judged on the
+    # new values — never on ``or``-fallbacks to the pre-batch state.
+    # Mirrors the Jira mode-field gate ("auth method 'X' is selected but
+    # missing: ...").
+    if not _GREENWAVE_AUTH_SETTING_KEYS.isdisjoint(settings_updates):
+        proposed = _effective_proposed_settings(settings_updates)
+        if proposed is not None:
+            try:
+                # Unset mode = exporter disabled, so its URL is inert; the
+                # OIDC token endpoint is always HTTPS because the client
+                # secret is POSTed to it; a waiver write gates releases, so
+                # the waiver endpoint stays HTTPS-only in every mode.
+                validate_greenwave_url(
+                    proposed.greenwave_url,
+                    "GREENWAVE_URL",
+                    allow_http=normalize_greenwave_auth_mode(
+                        proposed.greenwave_auth_mode
+                    )
+                    in ("none", ""),
+                )
+                validate_greenwave_url(
+                    proposed.greenwave_oidc_token_url, "GREENWAVE_OIDC_TOKEN_URL"
+                )
+                validate_greenwave_url(
+                    proposed.greenwave_waiver_url, "GREENWAVE_WAIVER_URL"
+                )
+            except ValueError as exc:
+                errors.append(str(exc))
+            # The token-shape rule, applied to a bearer token THIS update
+            # writes — and deliberately NOT to one it merely inherits. An
+            # unusable token already in place is inert-until-replaced: the
+            # exporter is disabled (`greenwave_enabled`), the connection test
+            # names the setting, and the same rule as the mode block below
+            # applies — a mode switch must stay storable, because the UI renders
+            # a mode's fields only once that mode is saved. Blocking the switch
+            # would lock the admin out of the field that fixes the token.
+            if not _GREENWAVE_TOKEN_SETTING_KEYS.isdisjoint(settings_updates):
+                # ``keys`` narrows the PREDICATE as well as the trigger: a save
+                # that writes one token must not be refused over the other,
+                # merely inherited one (that token is inert until replaced —
+                # `greenwave_enabled` disables the exporter meanwhile).
+                token_error = greenwave_token_shape_error(
+                    proposed,
+                    normalize_greenwave_auth_mode(proposed.greenwave_auth_mode) or "",
+                    keys=frozenset(
+                        _GREENWAVE_TOKEN_SETTING_KEYS & set(settings_updates)
+                    ),
+                )
+                if token_error:
+                    errors.append(token_error)
+        # A save is NOT rejected for an incomplete mode. The mode has to be
+        # storable first: the Server Settings UI renders a mode's fields only
+        # once that mode is persisted, so rejecting the switch would leave the
+        # admin unable to reach the inputs that complete it (Jira behaves the
+        # same way). An incomplete mode simply leaves the exporter disabled —
+        # `greenwave_enabled`, the exporters capability list and the Test
+        # connection button all name the missing fields.
+
+    # Auto-push requires auto-review.  The Settings model only warns
+    # (raising there would hard-fail env-var startups and, via
+    # get_settings()'s fallback, wipe every DB override), so the
+    # combination is rejected here where the admin can act on it.
+    # The rule only runs when the update actually changes one of the two
+    # keys: a server already carrying the inert combination (set via env
+    # or saved before this rule existed) must still be able to save
+    # unrelated settings — a Jenkins URL, a token — so unrelated batches
+    # are not rejected for a combination the admin is not touching.
+    # Evaluated on the EFFECTIVE proposed values — current get_settings()
+    # semantics (env + DB overrides, not raw env) overlaid with this
+    # update — so an update touching only one of the two keys is caught
+    # too.  Covers both PUT and settings import, which share this
+    # function.  None/empty values reset to the model default, matching
+    # the PUT semantics above.
+    if {"auto_push_exporters", "enable_auto_review"}.isdisjoint(settings_updates):
+        return errors
+    proposed = _effective_proposed_settings(settings_updates)
+    if (
+        proposed is not None
+        and proposed.auto_push_exporters.strip()
+        and proposed.enable_auto_review is False
+    ):
+        errors.append(
+            "auto_push_exporters requires enable_auto_review — auto-push "
+            "only runs for failures auto-review has marked reviewed; "
+            "enable ENABLE_AUTO_REVIEW or clear AUTO_PUSH_EXPORTERS"
+        )
+
     return errors
 
 
@@ -19584,6 +20232,9 @@ async def update_admin_settings(request: Request) -> JSONResponse:
         )
 
     username = request.state.username or "admin"
+    # Read the old mode before the save — the audit row names old/new mode
+    # only, never credential values.
+    greenwave_mode_change = _greenwave_auth_mode_audit_detail(settings_updates)
     warnings = await _save_settings_to_db(settings_updates, username)
     changed_keys = list(settings_updates.keys())
 
@@ -19604,6 +20255,7 @@ async def update_admin_settings(request: Request) -> JSONResponse:
             ],
             # Kept for consumers of the original shape.
             "keys": changed_keys,
+            **greenwave_mode_change,
         },
         request=request,
     )
@@ -19874,12 +20526,16 @@ async def import_server_settings(request: Request) -> JSONResponse:
         return JSONResponse(content=content)
 
     username = request.state.username or "admin"
+    applied_updates = {key: value for key, value in updates.items() if key in applied}
+    # Read the previous auth mode BEFORE the save: _save_settings_to_db
+    # refreshes the settings cache synchronously, so afterwards
+    # get_settings() already returns the NEW mode and the audit row would
+    # report a mode change that never happened (new -> new).
+    greenwave_mode_change = _greenwave_auth_mode_audit_detail(applied_updates)
     # Only keys the diff marked as applied are written — unchanged keys
     # (including sanitized-equal ones whose credentials the target keeps)
     # must not be overwritten (#361 Qodo r2).
-    warnings = await _save_settings_to_db(
-        {key: value for key, value in updates.items() if key in applied}, username
-    )
+    warnings = await _save_settings_to_db(applied_updates, username)
     if warnings:
         content["warnings"] = warnings
     logger.info(
@@ -19889,7 +20545,9 @@ async def import_server_settings(request: Request) -> JSONResponse:
         username,
     )
     # Key names only — ``applied`` carries the old/new values of every change,
-    # which must not be copied into the audit trail.
+    # which must not be copied into the audit trail. The one exception is
+    # the non-secret Greenwave auth mode, whose old/new values are named
+    # explicitly (read before the save).
     changed_keys = list(applied)
     await record_audit(
         action="settings.import",
@@ -19906,6 +20564,7 @@ async def import_server_settings(request: Request) -> JSONResponse:
             ],
             # Kept for consumers of the original shape.
             "keys": changed_keys,
+            **greenwave_mode_change,
         },
         request=request,
     )
@@ -19958,6 +20617,26 @@ def _empty_override_error(key: str) -> str | None:
             "empty value. Use Reset to fall back to the env/default value."
         )
     return None
+
+
+def _greenwave_auth_mode_audit_detail(
+    settings_updates: dict[str, Any],
+) -> dict[str, Any]:
+    """Audit detail for a greenwave_auth_mode change: old/new mode only.
+
+    The mode value is a non-secret enum (like default_user_role); every
+    other changed setting stays key-names-only in the audit trail. Must be
+    read BEFORE the update is saved. Returns {} when the mode is unchanged
+    by this update.
+    """
+    if "greenwave_auth_mode" not in settings_updates:
+        return {}
+    return {
+        "greenwave_auth_mode_change": {
+            "old": get_settings().greenwave_auth_mode or "",
+            "new": str(settings_updates.get("greenwave_auth_mode") or ""),
+        }
+    }
 
 
 async def _save_settings_to_db(
@@ -20054,8 +20733,28 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
     save their current env values once, then drop the envs — the setting no
     longer reverts to its default on restart. Runs server-side because the
     UI never sees decrypted sensitive env values.
+
+    A REFUSED promotion leaves an audit row like any other attempt: declining
+    to store an env value is a security-relevant decision (the value may be one
+    the PUT path forbids), not a no-op.
     """
     _require_admin(request)
+    try:
+        return await _persist_env_setting(request, key)
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="admin.setting_persist",
+            request=request,
+            message=f"Persisting setting '{key}' from the environment was refused",
+            target_type="setting",
+            target_id=key,
+            exc=exc,
+        )
+        raise
+
+
+async def _persist_env_setting(request: Request, key: str) -> JSONResponse:
+    """The persist body: validate, save, and record the successful attempt."""
     if key not in Settings.model_fields:
         raise HTTPException(status_code=400, detail=f"Unknown setting: {key}")
     if key in _SERVER_ONLY_SETTINGS:
@@ -20079,23 +20778,38 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
             status_code=400,
             detail=f"Setting '{key}' has no env value set",
         )
-    # Enumerated settings get the shared canonicalisation and validation
-    # (#379) so persist-from-env cannot store a value the PUT/import paths
-    # would reject — or a spelling the picker does not offer. A no-op for
-    # every other key.
-    env_value, enum_error = await _normalize_enumerated_value(key, env_value)
-    if enum_error:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid env value for '{key}': {enum_error}",
-        )
-    # Same validation the PUT path applies to admin-typed values
+    # ONE validator for every write path: enumerated canonicalisation, per-field
+    # Pydantic validation, integer bounds and the cross-field combination rules
+    # that PUT and import apply, so an env value cannot be promoted into a
+    # state those paths would refuse (a URL scheme the selected auth mode does
+    # not allow, an unusable waiver endpoint, …). It normalizes in place, so the
+    # value saved is the canonical one it approved.
+    updates = {key: env_value}
     try:
-        Settings.model_validate({key: env_value})
-    except ValidationError as exc:
+        validation_errors = await _validate_settings_updates(updates)
+    except HTTPException as exc:
+        # The shared validator RAISES (rather than returning) for one shape — an
+        # account-ID-shaped cloud id, which PUT answers with a 422. A promotion
+        # has no such legacy contract, so report it in the same 400 shape as
+        # every other invalid env value, which also keeps one reason code
+        # (`invalid_request`) for this class of refusal in the audit trail.
         raise HTTPException(
-            status_code=400, detail=f"Invalid env value for '{key}'"
+            status_code=400, detail=f"Invalid env value for '{key}': {exc.detail}"
         ) from exc
+    if validation_errors:
+        detail = "; ".join(validation_errors)
+        if key not in detail and key.upper() not in detail:
+            # A cross-field rule can refuse this save over a setting the admin
+            # did not touch — the effective URL/mode pair, say. Attribute that
+            # to the configuration instead of to the value being promoted, so
+            # a one-key env→DB migration is not blamed for the wrong field.
+            detail += (
+                " (rejected by the current effective configuration, not by this value)"
+            )
+        raise HTTPException(
+            status_code=400, detail=f"Invalid env value for '{key}': {detail}"
+        )
+    env_value = str(updates[key] or "")
 
     username = request.state.username or "admin"
     await _save_settings_to_db({key: env_value}, username)
@@ -20142,6 +20856,11 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
             status_code=400, detail=f"Server-only setting (env var only): {key}"
         )
 
+    # A reset removes the override, which for this DB-only setting IS the new
+    # effective value (unset). Captured BEFORE the delete, so the audit row
+    # names the transition instead of recording the already-reset state — the
+    # same old/new detail PUT and import record for a mode change.
+    mode_change = _greenwave_auth_mode_audit_detail({key: None})
     deleted = await storage.delete_server_setting(
         key, deleted_by=request.state.username or "admin"
     )
@@ -20178,7 +20897,7 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
         message=f"Admin setting reset: key={key}, by={request.state.username}",
         target_type="setting",
         target_id=key,
-        details=_audit_setting_details(key),
+        details={**_audit_setting_details(key), **mode_change},
         request=request,
     )
 
@@ -20208,23 +20927,33 @@ async def _integration_test_request(
     url: str,
     *,
     headers: dict[str, str] | None = None,
-    auth: tuple[str, str] | None = None,
+    auth: tuple[str, str] | httpx.Auth | None = None,
     verify: bool = True,
     params: dict[str, Any] | None = None,
+    client_kwargs: dict[str, Any] | None = None,
 ) -> httpx.Response:
     """GET a URL for a connection test; never follows redirects into errors.
+
+    ``auth`` accepts an :class:`httpx.Auth` strategy as well as basic-auth
+    credentials, and ``client_kwargs`` carries transport-level settings
+    (``cert``, a CA bundle via ``verify``) so strategy-based integrations
+    reuse this transport instead of hand-rolling a client.
 
     Raises :class:`_IntegrationTestError` with a human-readable, secret-free
     message on transport failure — the caller turns that into ``ok: false``.
     """
+    # Merged rather than splatted: a strategy may itself supply ``verify``
+    # (a CA bundle), which would otherwise be a duplicate keyword.
+    options: dict[str, Any] = {
+        "verify": verify,
+        "timeout": _INTEGRATION_TEST_TIMEOUT,
+        "auth": auth,
+        "headers": headers,
+        "follow_redirects": True,
+    }
+    options.update(client_kwargs or {})
     try:
-        async with httpx.AsyncClient(
-            verify=verify,
-            timeout=_INTEGRATION_TEST_TIMEOUT,
-            auth=auth,
-            headers=headers,
-            follow_redirects=True,
-        ) as client:
+        async with httpx.AsyncClient(**options) as client:
             return await client.get(url, params=params)
     except httpx.HTTPError as exc:
         raise _IntegrationTestError(
@@ -20567,6 +21296,120 @@ async def _test_datadog_connection(settings: Settings) -> dict[str, Any]:
     )
 
 
+async def _test_greenwave_connection(settings: Settings) -> dict[str, Any]:
+    """Authenticated ResultsDB ping against the effective Greenwave settings.
+
+    Exercises the SELECTED auth mode end-to-end: builds the auth strategy
+    and performs the authenticated ``GET {url}/results?limit=1`` through
+    it, so the test proves the same code path a push uses. The mode is
+    reported in the details; secrets and tokens never are.
+    """
+    mode = normalize_greenwave_auth_mode(settings.greenwave_auth_mode)
+    if not mode:
+        return _test_result(
+            False,
+            "No Greenwave auth method selected — choose one in Server Settings",
+        )
+    missing = greenwave_method_missing_fields(settings)
+    if missing:
+        return _test_result(
+            False,
+            f"Greenwave auth method '{mode}' is selected "
+            f"but missing: {', '.join(missing)}",
+        )
+    # Report EVERY missing waiver prerequisite at once, not just the one the
+    # exporter's constructor trips over first (waiver URL, token, version).
+    if settings.greenwave_push_waivers:
+        waiver_missing = GreenwaveExporter.missing_waiver_settings(settings)
+        if waiver_missing:
+            return _test_result(
+                False,
+                "Greenwave waivers are enabled but missing: "
+                f"{', '.join(waiver_missing)}",
+            )
+    try:
+        # Built ONCE — this also fails fast on a missing optional pyspnego
+        # dependency for the kerberos mode. The prerequisite checks above
+        # (mode fields + waiver settings) already cover what constructing the
+        # exporter would have re-checked.
+        auth = build_greenwave_auth(settings)
+        if settings.greenwave_push_waivers:
+            # In bearer mode a waiver writes to WaiverDB with its OWN token,
+            # which build_greenwave_auth never reads, and the presence-only
+            # check above cannot see a token the HTTP transport would refuse.
+            # Building it here is what makes the "prerequisites are satisfied"
+            # line below true: it raises the same ExporterPrerequisiteError the
+            # exporter's constructor does, naming the offending setting.
+            build_greenwave_waiver_auth(settings)
+    except ExporterPrerequisiteError as exc:
+        return _test_result(False, str(exc))
+    url = str(settings.greenwave_url).rstrip("/")
+    try:
+        # The shared integration transport, not a hand-rolled client: one
+        # timeout/redirect/error policy for every connection test.
+        response = await _integration_test_request(
+            f"{url}/results",
+            auth=auth.auth,
+            params={"limit": 1},
+            client_kwargs=auth.client_kwargs(),
+        )
+        if response.status_code >= 400:
+            return _test_result(
+                False,
+                f"ResultsDB connection failed: HTTP {response.status_code}",
+                auth_mode=mode,
+            )
+    except GreenwaveAuthError as exc:
+        return _test_result(
+            False, f"ResultsDB connection failed: {exc}", auth_mode=mode
+        )
+    except _IntegrationTestError as exc:
+        # The shared transport converts every httpx.HTTPError into this error,
+        # so a timeout, DNS, TLS or connect failure arrives HERE. Catching
+        # httpx.HTTPError instead left this path unreachable and let the outage
+        # escape into the endpoint's catch-all, reported as an unexpected crash
+        # with no auth mode and no "ResultsDB connection failed" message.
+        return _test_result(
+            False, f"ResultsDB connection failed: {exc}", auth_mode=mode
+        )
+    # Report the mode from the built strategy — the single source of truth
+    # for what was actually exercised — rather than the value re-derived
+    # above for the prerequisite messages.
+    mode = auth.mode
+    # Kerberos only authenticates when the server issues a 401 challenge,
+    # so a 200 on the first request means the credentials were never
+    # exercised — claiming "authenticated" there would green-light an
+    # unauthenticated endpoint. When the SPNEGO dance DID complete, the
+    # strategy recorded it, and the message says so. Every other mode
+    # attaches its credentials to that request.
+    if mode == "kerberos":
+        if auth.spnego_exchange_completed:
+            message = (
+                f"ResultsDB at {redact_urls_in_text(url)} is reachable and "
+                "authenticated via kerberos (SPNEGO exchange completed)"
+            )
+        else:
+            message = (
+                f"ResultsDB at {redact_urls_in_text(url)} is reachable; the "
+                "endpoint did not request Negotiate authentication, so the "
+                "keytab was not exercised by this check"
+            )
+    else:
+        message = (
+            f"ResultsDB at {redact_urls_in_text(url)} is reachable and "
+            f"authenticated via {mode}"
+        )
+    message += f" (subject_type: {settings.greenwave_subject_type})"
+    details: dict[str, Any] = {
+        "auth_mode": mode,
+        "subject_type": settings.greenwave_subject_type,
+    }
+    if settings.greenwave_push_waivers:
+        assert not GreenwaveExporter.missing_waiver_settings(settings)
+        details["waivers"] = "Greenwave waiver prerequisites are satisfied"
+    return _test_result(True, message, **details)
+
+
 async def _test_prow_connection(settings: Settings) -> dict[str, Any]:
     """Prow deck reachability plus GCS bucket listability check.
 
@@ -20614,6 +21457,7 @@ _INTEGRATION_TESTERS: dict[str, Callable[[Settings], Awaitable[dict[str, Any]]]]
     "github": _test_github_connection,
     "reportportal": _test_reportportal_connection,
     "datadog": _test_datadog_connection,
+    "greenwave": _test_greenwave_connection,
     "prow": _test_prow_connection,
 }
 
@@ -21559,7 +22403,7 @@ def _upstream_error_message(response: httpx.Response) -> str:
     error_messages = payload.get("errorMessages")
     if isinstance(error_messages, list):
         parts.extend(str(item).strip() for item in error_messages if str(item).strip())
-    return _sanitize_control_chars(" ".join(parts))[:_UPSTREAM_MESSAGE_LIMIT]
+    return strip_control_chars(" ".join(parts))[:_UPSTREAM_MESSAGE_LIMIT]
 
 
 def _upstream_status(exc: BaseException) -> int | None:

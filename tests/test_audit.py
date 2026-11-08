@@ -867,6 +867,131 @@ def test_settings_update_audits_keys_without_values(app_client) -> None:
     assert events[0]["target_type"] == "setting"
 
 
+def test_settings_update_audits_greenwave_auth_mode_change(app_client) -> None:
+    """A greenwave_auth_mode switch names old/new mode only — never credentials."""
+    admin_login(app_client)
+    response = app_client.put(
+        "/api/admin/settings",
+        json={
+            "settings": {
+                "greenwave_auth_mode": "bearer",
+                "greenwave_url": "https://resultsdb.example.com",
+                "greenwave_api_token": _SECRET,
+            }
+        },
+    )
+    assert response.status_code == 200, response.text
+    response = app_client.put(
+        "/api/admin/settings",
+        json={"settings": {"greenwave_auth_mode": "none"}},
+    )
+    assert response.status_code == 200, response.text
+
+    # Newest first: the mode switch is the latest settings.update row.
+    details = _events(action="settings.update")[0]["details"]
+    assert details["greenwave_auth_mode_change"] == {"old": "bearer", "new": "none"}
+    # The stored token never reaches the audit trail.
+    assert _SECRET not in json.dumps(_events(action="settings.update"))
+
+
+def test_refused_persist_writes_one_audit_row(app_client, monkeypatch) -> None:
+    """A refused env→DB promotion is an attempt, and leaves exactly one row.
+
+    The refusal is security-relevant (the value may be one the PUT path
+    forbids), so the trail must show it: the reason code, the key it targeted,
+    and nothing that echoes the value.
+    """
+    admin_login(app_client)
+    secret = "sk-live-should-never-be-audited"  # pragma: allowlist secret
+    monkeypatch.setenv("GREENWAVE_WAIVER_URL", secret)
+    try:
+        refused = app_client.post("/api/admin/settings/greenwave_waiver_url/persist")
+    finally:
+        monkeypatch.delenv("GREENWAVE_WAIVER_URL")
+    assert refused.status_code == 400, refused.text
+
+    events = _events(action="admin.setting_persist")
+    assert len(events) == 1
+    event = events[0]
+    assert event["outcome"] == "failure"
+    assert event["target_type"] == "setting"
+    assert event["target_id"] == "greenwave_waiver_url"
+    assert event["details"]["reason"] == "invalid_request"
+    assert secret not in json.dumps(event)
+    # Refused means NOT stored: the save happens after validation, and a
+    # reordering that stored the value would still produce this audit row.
+    assert (
+        asyncio.run(storage.get_server_settings()).get("greenwave_waiver_url") is None
+    )
+
+
+def test_settings_reset_audits_greenwave_auth_mode_change(app_client) -> None:
+    """A reset that unsets the mode names old/new — read before the delete.
+
+    ``DELETE /api/admin/settings/{key}`` is the third route that changes the
+    effective mode, alongside PUT and import, so it records the same detail.
+    Building it after the delete would record the already-unset state.
+    """
+    admin_login(app_client)
+    response = app_client.put(
+        "/api/admin/settings",
+        json={
+            "settings": {
+                "greenwave_auth_mode": "bearer",
+                "greenwave_url": "https://resultsdb.example.com",
+                "greenwave_api_token": _SECRET,
+            }
+        },
+    )
+    assert response.status_code == 200, response.text
+    response = app_client.delete("/api/admin/settings/greenwave_auth_mode")
+    assert response.status_code == 200, response.text
+
+    details = _events(action="settings.reset")[0]["details"]
+    assert details["greenwave_auth_mode_change"] == {"old": "bearer", "new": ""}
+    assert details["key"] == "greenwave_auth_mode"
+    assert _SECRET not in json.dumps(_events(action="settings.reset"))
+
+
+def test_settings_import_audits_greenwave_auth_mode_change(app_client) -> None:
+    """Import records the TRUE previous mode, not the value it just wrote.
+
+    Regression: the audit detail was built after the save had already
+    refreshed the settings cache, so the row read new -> new.
+    """
+    admin_login(app_client)
+    response = app_client.put(
+        "/api/admin/settings",
+        json={
+            "settings": {
+                "greenwave_auth_mode": "bearer",
+                "greenwave_url": "https://resultsdb.example.com",
+                "greenwave_api_token": _SECRET,
+            }
+        },
+    )
+    assert response.status_code == 200, response.text
+    response = app_client.post(
+        "/api/admin/settings/import",
+        json={
+            "version": 1,
+            "settings": {
+                "greenwave_auth_mode": "basic",
+                "greenwave_basic_user": "greenwave-user",
+                "greenwave_basic_password": _SECRET,
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+
+    details = _events(action="settings.import")[0]["details"]
+    assert details["greenwave_auth_mode_change"] == {
+        "old": "bearer",
+        "new": "basic",
+    }
+    assert _SECRET not in json.dumps(_events(action="settings.import"))
+
+
 def test_settings_import_audits_changed_keys(app_client) -> None:
     admin_login(app_client)
     response = app_client.post(
