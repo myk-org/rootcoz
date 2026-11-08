@@ -1057,6 +1057,11 @@ class TestBuildExportContextFetchHistory:
                 new_callable=AsyncMock,
                 return_value={},
             ),
+            patch(
+                "rootcoz.main.storage.get_job_metadata",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
         ):
             mock_hist.return_value = "PRODUCT BUG"
             ctx = asyncio.run(
@@ -1120,6 +1125,11 @@ class TestBuildExportContextReviewedBy:
                 "rootcoz.main.storage.get_reviews_for_job",
                 new_callable=AsyncMock,
                 return_value=reviews,
+            ),
+            patch(
+                "rootcoz.main.storage.get_job_metadata",
+                new_callable=AsyncMock,
+                return_value=None,
             ),
         ):
             return asyncio.run(
@@ -1231,6 +1241,11 @@ class TestBuildExportContextFetchTrackedIn:
                 new_callable=AsyncMock,
                 return_value={},
             ),
+            patch(
+                "rootcoz.main.storage.get_job_metadata",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
         ):
             mock_tracked.return_value = {"t1": [{"url": "https://example.com/1"}]}
             ctx = asyncio.run(
@@ -1253,6 +1268,111 @@ class TestBuildExportContextFetchTrackedIn:
         ctx, mock_tracked = self._run_build(False)
         assert mock_tracked.await_count == 0
         assert ctx.tracked_in_links == {}
+
+
+class TestBuildExportContextJobMetadata:
+    """Declared job metadata reaches the context (exporters never touch storage)."""
+
+    @staticmethod
+    def _run_build(rows, *, child_job_name=None):
+        import asyncio
+
+        from rootcoz.main import _build_export_context
+
+        async def _lookup(job_name):
+            return rows.get(job_name)
+
+        result_data = {"job_name": "parent", "failures": []}
+        if child_job_name:
+            result_data["child_job_analyses"] = [
+                {"job_name": child_job_name, "build_number": 7, "failures": []}
+            ]
+        with (
+            patch(
+                "rootcoz.main._extract_base_url",
+                return_value="https://rc.example.com",
+            ),
+            patch(
+                "rootcoz.main.storage.get_job_metadata",
+                new=AsyncMock(side_effect=_lookup),
+            ) as mock_metadata,
+        ):
+            ctx = asyncio.run(
+                _build_export_context(
+                    job_id="job-1",
+                    result_data=result_data,
+                    settings=MagicMock(),
+                    child_job_name=child_job_name,
+                    child_build_number=7 if child_job_name else None,
+                    fetch_history=False,
+                    fetch_tracked_in_links=False,
+                )
+            )
+        return ctx, mock_metadata
+
+    def test_parent_metadata_populates_the_context(self):
+        ctx, _mock = self._run_build(
+            {"parent": {"team": "mgmt", "tier": "1", "version": "v1", "labels": []}}
+        )
+        assert ctx.job_metadata["team"] == "mgmt"
+
+    def test_child_metadata_preferred_over_parent(self):
+        ctx, _mock = self._run_build(
+            {
+                "child": {"team": "linux", "tier": "", "version": "", "labels": []},
+                "parent": {"team": "mgmt", "tier": "", "version": "", "labels": []},
+            },
+            child_job_name="child",
+        )
+        assert ctx.job_metadata["team"] == "linux"
+
+    def test_parent_metadata_used_when_child_has_none(self):
+        """A child job without a row still exports the pipeline's team."""
+        ctx, mock_metadata = self._run_build(
+            {"parent": {"team": "mgmt", "tier": "", "version": "", "labels": []}},
+            child_job_name="child",
+        )
+        assert ctx.job_metadata["team"] == "mgmt"
+        assert mock_metadata.await_count == 2
+
+    def test_label_only_child_row_does_not_shadow_the_parent(self):
+        """A child that declares only labels still exports the parent's team."""
+        ctx, mock_metadata = self._run_build(
+            {
+                "child": {"team": "", "tier": "", "version": "", "labels": ["x"]},
+                "parent": {"team": "mgmt", "tier": "", "version": "", "labels": []},
+            },
+            child_job_name="child",
+        )
+        assert ctx.job_metadata["team"] == "mgmt"
+        assert mock_metadata.await_count == 2
+
+    def test_storage_failure_leaves_metadata_empty(self):
+        import asyncio
+
+        from rootcoz.main import _build_export_context
+
+        result_data = {"job_name": "parent", "failures": []}
+        with (
+            patch(
+                "rootcoz.main._extract_base_url",
+                return_value="https://rc.example.com",
+            ),
+            patch(
+                "rootcoz.main.storage.get_job_metadata",
+                new=AsyncMock(side_effect=RuntimeError("db down")),
+            ),
+        ):
+            ctx = asyncio.run(
+                _build_export_context(
+                    job_id="job-1",
+                    result_data=result_data,
+                    settings=MagicMock(),
+                    fetch_history=False,
+                    fetch_tracked_in_links=False,
+                )
+            )
+        assert ctx.job_metadata == {}
 
 
 class TestExporterModel:
