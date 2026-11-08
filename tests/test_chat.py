@@ -4623,6 +4623,39 @@ def test_a_built_sentence_keeps_its_cause_through_both_mappers():
     assert "HTTP None" not in result.text
 
 
+def test_a_sidecar_body_wearing_the_marker_is_never_forwarded():
+    """Only a whole sentence rootcoz built is trusted as a refusal.
+
+    ``_prompt_safely`` puts a non-200 body into ``AIResult.text`` verbatim, so a
+    body that merely starts with the marker must not be forwarded to a chat user
+    or skip keyed redaction.
+    """
+    from rootcoz import ai_client
+
+    body = (
+        "AI session refused: provider echoed the key sk-live-EXAMPLE-1234 and its"
+        " whole upstream payload"
+    )
+    assert not ai_client._is_own_refusal_sentence(body)
+
+    mapped = ai_client.format_chat_ai_user_error(
+        body, is_admin=True, ai_provider="openai", ai_model="undeclared"
+    )
+    assert "sk-live-EXAMPLE-1234" not in mapped
+    assert mapped.startswith(ai_client.SESSION_REFUSAL_MARKER)
+
+    async def _failing_call(**_kwargs):
+        return AIResult(success=False, text=body, error=body)
+
+    result = asyncio.run(
+        ai_client._call_with_safe_error(
+            _failing_call, ai_provider="openai", ai_model="undeclared"
+        )
+    )
+    assert "sk-live-EXAMPLE-1234" not in result.text
+    assert result.text.startswith(ai_client.SESSION_REFUSAL_MARKER)
+
+
 @pytest.mark.parametrize(
     "message",
     [

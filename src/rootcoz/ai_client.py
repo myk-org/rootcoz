@@ -14,6 +14,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
+from string import Template
 from typing import Any, cast
 from urllib.parse import quote
 
@@ -601,6 +602,52 @@ SESSION_UNSUPPORTED_REASON = (
     " agent-dir models.json models[] — limits are optional there, pi's defaults apply —"
     " or pick a model that is declared or lists both limits."
 )
+
+# The two variable sentences ``_session_refusal`` builds, as templates. They are
+# the only source of the wording: the validator below turns each into a pattern,
+# so a sidecar body that merely starts with the marker can never pass as ours.
+_REFUSAL_TEMPLATES = (
+    Template(
+        f"{SESSION_REFUSAL_MARKER}: the provider rejected the AI credential for"
+        " $pair. Check that the credential is valid for that provider, or ask an"
+        " administrator to verify the provider key on the server."
+    ),
+    Template(
+        f"{SESSION_REFUSAL_MARKER}: the session could not be created for $pair"
+        " (sidecar HTTP $status). Ask an administrator to check the server log for"
+        " the sidecar's reason."
+    ),
+)
+# Fixed sentences rootcoz builds whole: the whitelisted sidecar literals, the
+# Cursor legacy hint, and the picker reason.
+_OWN_REFUSAL_SENTENCES = (
+    *(f"{SESSION_REFUSAL_MARKER}: {literal}" for literal in _SIDECAR_REFUSAL_LITERALS),
+    f"{SESSION_REFUSAL_MARKER}: {_CURSOR_BROWSER_LOGIN_EXPIRED_HINT}",
+    SESSION_UNSUPPORTED_REASON,
+)
+_OWN_REFUSAL_PATTERNS = tuple(
+    re.compile(
+        "^"
+        + ".+?".join(re.escape(part) for part in re.split(r"\$\w+", t.template))
+        + "$"
+    )
+    for t in _REFUSAL_TEMPLATES
+)
+
+
+def _is_own_refusal_sentence(text: str) -> bool:
+    """Whether ``text`` is a sentence rootcoz built, not a raw sidecar body.
+
+    The prefix alone is not evidence: a non-200 body lands in ``AIResult.text``
+    verbatim, so a body beginning with the marker must not be forwarded to a
+    user or skip keyed redaction. Matching the whole sentence is what makes it
+    ours.
+    """
+    sentence = (text or "").strip()
+    return sentence in _OWN_REFUSAL_SENTENCES or any(
+        pattern.match(sentence) for pattern in _OWN_REFUSAL_PATTERNS
+    )
+
 
 # Builtin tools for AI sessions — no bash access (MANDATORY per project rules)
 # Separate constants to allow independent evolution: analysis may gain tools
@@ -1718,18 +1765,10 @@ def _session_refusal(status: int | None, body: str, provider: str, model: str) -
     # The rejected credential outranks the Cursor legacy hint: a 401/403 says the
     # key itself was refused, not that a browser login expired.
     if status in (401, 403):
-        return (
-            f"{SESSION_REFUSAL_MARKER}: the provider rejected the AI credential for"
-            f" {pair}. Check that the credential is valid for that provider, or ask an"
-            " administrator to verify the provider key on the server."
-        )
+        return _REFUSAL_TEMPLATES[0].substitute(pair=pair)
     if is_cursor_provider(normalize_provider(provider)):
         return f"{SESSION_REFUSAL_MARKER}: {_CURSOR_BROWSER_LOGIN_EXPIRED_HINT}"
-    return (
-        f"{SESSION_REFUSAL_MARKER}: the session could not be created for {pair}"
-        f" (sidecar HTTP {status}). Ask an administrator to check the server log for the"
-        " sidecar's reason."
-    )
+    return _REFUSAL_TEMPLATES[1].substitute(pair=pair, status=status)
 
 
 def _session_refusal_for(
@@ -1838,7 +1877,7 @@ def format_chat_ai_user_error(
     # A sentence rootcoz already built is final: re-deriving its cause would
     # lose the status a 401 sentence no longer carries. Never the body — only a
     # marker sentence, which this module constructed.
-    if text.startswith(SESSION_REFUSAL_MARKER):
+    if _is_own_refusal_sentence(text):
         return text
     # A creation refusal: the admitted text selects a cause and is dropped, and
     # the admission is the one predicate, so a mid-chat prompt 4xx, a health or
@@ -1894,9 +1933,7 @@ async def _call_with_safe_error(
         # Already our sentence (a refusal raised inside the call): re-deriving its
         # cause here would drop the status a 401 sentence no longer carries and
         # answer "sidecar HTTP None".
-        if not result.success and (result.text or "").strip().startswith(
-            SESSION_REFUSAL_MARKER
-        ):
+        if not result.success and _is_own_refusal_sentence(result.text or ""):
             return result
         # A session refusal keeps its sentence: checked before the ``redact_key is
         # None`` early return, which would otherwise leave the library's text and
