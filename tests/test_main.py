@@ -8710,111 +8710,133 @@ class TestLifespanResumesWaitingJobs:
             assert r1["status"] == "failed"
 
 
+async def _seed_job_row(job_id: str) -> None:
+    """A stored job row: the reachability evidence the chat sweep trusts."""
+    async with storage._connect_db() as db:
+        await db.execute(
+            "INSERT INTO results (job_id, status) VALUES (?, 'completed')", (job_id,)
+        )
+        await db.commit()
+
+
+def _seed_tree(path: Path, *, entry: str = "x.txt") -> Path:
+    """A tree this process did not create, holding a file.
+
+    Backdated because ``_is_leftover`` compares against the import-time
+    ``_PROCESS_STARTED_AT``, and holding a file because a tree made only of empty
+    directories logs its reaper step at DEBUG with no bytes to report.
+    """
+    path.mkdir(parents=True)
+    (path / entry).write_text("x", encoding="utf-8")
+    os.utime(path, (1, 1))
+    return path
+
+
 class TestStartupWorkspaceReclaim:
     """Startup is the one moment no builder can still own a workspace (#424)."""
 
     async def test_abandoned_workspace_and_its_graph_root_are_reclaimed(
-        self, tmp_path, monkeypatch
+        self, _no_host_temp_root, initialized_db
     ) -> None:
         """An analysis whose cleanup abandoned must not survive the next start.
 
         ``ABANDON`` stops ``repo_manager.cleanup``, so the uuid workspace and its
         sibling graph root stay on disk with no owner: nothing in a later process
-        ever looks at that name again.
+        ever looks at that name again. A *live* job's chat workspace, one root up,
+        is kept — its job row is the reachability proof.
         """
         from rootcoz import main as main_mod
-        from rootcoz import temp_paths
 
-        base = tmp_path / "rootcoz"
+        base = _no_host_temp_root
         workspace = base / "workspace-abandoned"
         (workspace / "tests-repo" / ".git").mkdir(parents=True)
         (workspace / "tests-repo" / "file.py").write_text("x")
         graph = base / ".workspace-abandoned.rootcoz-graft"
         (graph / "tests-repo" / "graph").mkdir(parents=True)
-        chat = base / "chat-job-1" / "alice"
+        chat = base.parent / "rootcoz-chat-job-1" / "alice"
         chat.mkdir(parents=True)
         # The leftovers predate this process: only then is nothing building them.
         for stale in (workspace, graph):
             os.utime(stale, (1, 1))
-        monkeypatch.setattr(temp_paths, "rootcoz_temp_base", lambda: base)
+        await _seed_job_row("job-1")
 
-        assert await main_mod._reclaim_abandoned_workspaces() == 1
+        assert await main_mod._reclaim_abandoned_workspaces({"job-1"}) == 1
 
         assert not workspace.exists(), "the abandoned clone tree survived the restart"
         assert not graph.exists(), "the abandoned graph root survived the restart"
-        assert chat.exists(), "a chat workspace keeps its session across a restart"
+        assert chat.exists(), "a live job's chat workspace must survive a restart"
 
     async def test_a_workspace_created_after_start_is_left_alone(
-        self, tmp_path, monkeypatch
+        self, _no_host_temp_root
     ) -> None:
         """A workspace this process created (or another replica's) is not a leftover."""
         from rootcoz import main as main_mod
-        from rootcoz import temp_paths
 
-        base = tmp_path / "rootcoz"
-        live = base / "workspace-live"
+        live = _no_host_temp_root / "workspace-live"
         (live / "tests-repo").mkdir(parents=True)
-        monkeypatch.setattr(temp_paths, "rootcoz_temp_base", lambda: base)
 
         assert await main_mod._reclaim_abandoned_workspaces() == 0
         assert live.exists(), "the reclaim deleted a workspace it does not own"
 
     async def test_a_workspace_symlink_into_a_chat_is_never_followed(
-        self, tmp_path, monkeypatch
+        self, _no_host_temp_root, initialized_db
     ) -> None:
         """A stale ``workspace-*`` link must not aim the graph delete at a chat.
 
         ``_root`` resolves its argument, so reclaiming the link would delete
-        ``chat-job-1/.alice.rootcoz-graft`` — the graph of a chat workspace the
-        reclaim deliberately never touches.
+        ``rootcoz-chat-job-1/.alice.rootcoz-graft`` — the graph of a live job's
+        chat workspace, which the reclaim never touches.
         """
         from rootcoz import main as main_mod
-        from rootcoz import temp_paths
 
-        base = tmp_path / "rootcoz"
-        chat = base / "chat-job-1" / "alice"
+        base = _no_host_temp_root
+        chat = base.parent / "rootcoz-chat-job-1" / "alice"
         chat.mkdir(parents=True)
-        graph = base / "chat-job-1" / ".alice.rootcoz-graft"
+        graph = base.parent / "rootcoz-chat-job-1" / ".alice.rootcoz-graft"
         (graph / "alice" / "graph").mkdir(parents=True)
         (graph / "alice" / "graph" / "index.bin").write_text("graph")
         link = base / "workspace-fake"
+        base.mkdir(parents=True, exist_ok=True)
         link.symlink_to(chat)
         for stale in (link, graph):
             os.utime(stale, (1, 1), follow_symlinks=False)
-        monkeypatch.setattr(temp_paths, "rootcoz_temp_base", lambda: base)
+        await _seed_job_row("job-1")
 
-        reclaimed = await main_mod._reclaim_abandoned_workspaces()
+        reclaimed = await main_mod._reclaim_abandoned_workspaces({"job-1"})
 
         assert graph.exists(), "startup followed a workspace link into a chat graph"
         assert link.is_symlink(), "a link is not a leftover workspace to delete"
         assert reclaimed == 0
 
-    async def test_a_deleted_jobs_marked_chat_workspace_is_reclaimed(
-        self, tmp_path, monkeypatch
+    async def test_a_marked_base_child_with_a_safe_name_is_reclaimed(
+        self, _no_host_temp_root
     ) -> None:
-        """No init can recover it: the job row is gone, so every init 404s first.
+        """The marked-child branch is a generic safety net for any base child.
 
-        An abandoned delete leaves the chat tree and its marker behind, and
-        recovery only runs for a create of a job that still exists.
+        Real chat workspaces are ``rootcoz-chat-*`` at the process temp root, not
+        children of the base, so this pins the dispatch and not a chat rule: a
+        delete that died left the marker, and no create ever recovers a marked
+        tree with no live owner.
         """
         from rootcoz import main as main_mod
-        from rootcoz import temp_paths
         from rootcoz.temp_paths import delete_marker
 
-        base = tmp_path / "rootcoz"
-        chat = base / "chat-job-1"
-        (chat / "alice" / "repo" / ".git").mkdir(parents=True)
-        marker = delete_marker(chat)
+        base = _no_host_temp_root
+        leftover = base / "leftover-marked"
+        (leftover / "alice" / "repo" / ".git").mkdir(parents=True)
+        (leftover / "alice" / "repo" / "file.py").write_text("x")
+        marker = delete_marker(leftover)
         marker.write_text("", encoding="utf-8")
-        for stale in (chat, marker):
+        for stale in (leftover, marker):
             os.utime(stale, (1, 1))
-        monkeypatch.setattr(temp_paths, "rootcoz_temp_base", lambda: base)
 
         assert await main_mod._reclaim_abandoned_workspaces() == 1
-        assert not chat.exists(), "a deleted job's marked chat survived the restart"
+        assert not leftover.exists(), (
+            "a marked leftover base child survived the restart"
+        )
 
     async def test_a_missing_base_directory_is_not_a_listing_failure(
-        self, tmp_path, monkeypatch, caplog
+        self, _no_host_temp_root, caplog
     ) -> None:
         """A fresh container has no base yet: nothing to reclaim, no warning.
 
@@ -8823,10 +8845,6 @@ class TestStartupWorkspaceReclaim:
         boot always lists a directory that does not exist.
         """
         from rootcoz import main as main_mod
-        from rootcoz import temp_paths
-
-        base = tmp_path / "rootcoz"
-        monkeypatch.setattr(temp_paths, "rootcoz_temp_base", lambda: base)
 
         with capture_main_logs(caplog):
             assert await main_mod._reclaim_abandoned_workspaces() == 0
@@ -8837,18 +8855,15 @@ class TestStartupWorkspaceReclaim:
         )
 
     async def test_an_incomplete_reclaim_is_not_reported_as_deleted(
-        self, tmp_path, monkeypatch
+        self, _no_host_temp_root, monkeypatch
     ) -> None:
         """A delete that leaves paths behind reclaimed nothing; the count says so."""
         from rootcoz import main as main_mod
-        from rootcoz import temp_paths
         from rootcoz.temp_paths import DeleteResult
 
-        base = tmp_path / "rootcoz"
-        workspace = base / "workspace-stuck"
+        workspace = _no_host_temp_root / "workspace-stuck"
         workspace.mkdir(parents=True)
         os.utime(workspace, (1, 1))
-        monkeypatch.setattr(temp_paths, "rootcoz_temp_base", lambda: base)
         # Paths survive: the delete reports them instead of raising (delete_tree).
         monkeypatch.setattr(
             main_mod, "delete_tree", lambda path: DeleteResult(0, 0, failed=1)
@@ -8858,6 +8873,428 @@ class TestStartupWorkspaceReclaim:
             "a workspace whose delete failed is reported as deleted"
         )
         assert workspace.exists()
+
+    # -- extract dirs: three creators, each mapped to the one root it writes ----
+
+    async def test_leftover_extract_dirs_are_reclaimed(
+        self, _no_host_temp_root, tmp_path, initialized_db, caplog
+    ) -> None:
+        """All three extract kinds go, each from the root its creator writes.
+
+        The four chat-root bystanders are what pins the prefix → root map: a sweep
+        that searched the chat root for the Jenkins prefixes passes every other
+        test here and makes this feature a hazard on a host install.
+        """
+        from rootcoz import main as main_mod
+
+        base = _no_host_temp_root
+        await _seed_job_row("live")
+        _seed_tree(base / "jenkins-artifacts-abc12345")
+        _seed_tree(base / "artifacts-def67890")
+        (base / "bystander").mkdir()
+        _seed_tree(tmp_path / "prow-artifacts-abc12345")
+        (tmp_path / "bystander").mkdir()
+        _seed_tree(tmp_path / "jenkins-artifacts-not-mine")
+        _seed_tree(tmp_path / "artifacts-not-mine")
+        _seed_tree(tmp_path / "rootcoz-locks-1000", entry="x.lock")
+
+        with capture_main_logs(caplog, level=logging.DEBUG):
+            assert await main_mod._reclaim_abandoned_workspaces({"live"}) == 3
+
+        assert not (base / "jenkins-artifacts-abc12345").exists()
+        assert not (base / "artifacts-def67890").exists()
+        assert not (tmp_path / "prow-artifacts-abc12345").exists()
+        for bystander in (
+            base / "bystander",
+            tmp_path / "bystander",
+            tmp_path / "jenkins-artifacts-not-mine",
+            tmp_path / "artifacts-not-mine",
+            tmp_path / "rootcoz-locks-1000",
+        ):
+            assert bystander.exists(), f"{bystander} is not a leftover extract dir"
+        assert (
+            f"Startup reclaim: deleted 2 leftover artifact extract(s) under {base}"
+            in caplog.text
+        )
+        assert (
+            "Startup reclaim: deleted 1 leftover artifact extract(s) under "
+            f"{tmp_path}" in caplog.text
+        )
+
+    async def test_an_extract_dir_a_kept_chat_links_to_is_left_alone(
+        self, _no_host_temp_root, tmp_path, initialized_db
+    ) -> None:
+        """A live session's ``build-artifacts`` target is deleted with nothing.
+
+        The job-level delete unlinks only top-level children and ``delete_tree``
+        never follows a link, so the extract outlives the workspace and reclaiming
+        it here would silently drop artifacts from a live chat.
+        """
+        from rootcoz import main as main_mod
+
+        base = _no_host_temp_root
+        await _seed_job_row("live")
+        chat = tmp_path / "rootcoz-chat-live" / "alice"
+        chat.mkdir(parents=True)
+        live_extract = _seed_tree(base / "artifacts-live")
+        (chat / "build-artifacts").symlink_to(live_extract)
+        _seed_tree(base / "artifacts-dead")
+
+        assert await main_mod._reclaim_abandoned_workspaces({"live"}) == 1
+
+        assert live_extract.exists(), "a live chat's artifact target was deleted"
+        assert not (base / "artifacts-dead").exists()
+
+    async def test_an_extract_dir_of_a_deleted_jobs_chat_is_reclaimed(
+        self, _no_host_temp_root, tmp_path, initialized_db
+    ) -> None:
+        """A colliding prefix is not the issue: ``kept`` must hold no deleted dir."""
+        from rootcoz import main as main_mod
+
+        base = _no_host_temp_root
+        await _seed_job_row("live")
+        dead_chat = tmp_path / "rootcoz-chat-dead" / "alice"
+        dead_chat.mkdir(parents=True)
+        (dead_chat / "repo.txt").write_text("x")
+        dead_extract = _seed_tree(base / "artifacts-dead")
+        (dead_chat / "build-artifacts").symlink_to(dead_extract)
+        os.utime(tmp_path / "rootcoz-chat-dead", (1, 1))
+
+        assert await main_mod._reclaim_abandoned_workspaces({"live"}) == 2
+
+        assert not (tmp_path / "rootcoz-chat-dead").exists()
+        assert not dead_extract.exists()
+
+    async def test_an_extract_dir_created_after_start_is_left_alone(
+        self, _no_host_temp_root, initialized_db
+    ) -> None:
+        """A running analysis wrote it; its ``finally`` owns the delete."""
+        from rootcoz import main as main_mod
+
+        base = _no_host_temp_root
+        await _seed_job_row("live")
+        fresh = base / "artifacts-fresh"
+        fresh.mkdir(parents=True)
+        (fresh / "x.txt").write_text("x")
+
+        assert await main_mod._reclaim_abandoned_workspaces({"live"}) == 0
+        assert fresh.exists()
+
+    async def test_an_unresolvable_chat_root_deletes_no_extract(
+        self, _no_host_temp_root, initialized_db, monkeypatch, caplog
+    ) -> None:
+        """No chat root means no ``kept`` set, and no extract may be deleted.
+
+        The Prow extract and the chat workspaces live in that root, so an
+        unresolvable one is "could not decide", never "nothing is kept".
+        """
+        from rootcoz import main as main_mod
+        from rootcoz.engine import chat as chat_mod
+
+        base = _no_host_temp_root
+        await _seed_job_row("live")
+        extract = _seed_tree(base / "artifacts-orphan")
+
+        def _no_root() -> Path:
+            raise OSError("no temp root")
+
+        monkeypatch.setattr(chat_mod, "chat_workspace_root", _no_root)
+
+        with capture_main_logs(caplog, level=logging.DEBUG):
+            assert await main_mod._reclaim_abandoned_workspaces({"live"}) == 0
+
+        assert extract.exists(), "an undecidable boot deleted an extract dir"
+        assert "cannot resolve the chat workspace root" in caplog.text
+        assert "cleanup what=" not in caplog.text
+
+    # -- chat workspaces: stale iff the job row is gone -------------------------
+
+    async def test_a_chat_workspace_of_a_deleted_job_is_reclaimed(
+        self, _no_host_temp_root, tmp_path, initialized_db
+    ) -> None:
+        """No ``results`` row means no init can reach the tree, so it is a leftover."""
+        from rootcoz import main as main_mod
+
+        await _seed_job_row("live")
+        dead = _seed_tree(tmp_path / "rootcoz-chat-dead", entry="sessions.txt")
+        graph = _seed_tree(tmp_path / ".rootcoz-chat-dead.rootcoz-graft")
+
+        assert await main_mod._reclaim_abandoned_workspaces({"live"}) == 1
+
+        assert not dead.exists(), "a deleted job's chat workspace survived the restart"
+        assert not graph.exists(), "its graph root survived the restart"
+
+    async def test_a_chat_workspace_of_a_live_job_is_kept(
+        self, _no_host_temp_root, tmp_path, initialized_db
+    ) -> None:
+        """Reuse is the feature: sessions, clones and graph stay for a live job."""
+        from rootcoz import main as main_mod
+
+        await _seed_job_row("live-1")
+        chat = _seed_tree(tmp_path / "rootcoz-chat-live-1", entry="sessions.txt")
+
+        assert await main_mod._reclaim_abandoned_workspaces({"live-1"}) == 0
+        assert chat.exists()
+
+    async def test_the_admin_chat_workspace_is_never_reclaimed(
+        self, _no_host_temp_root, tmp_path, initialized_db
+    ) -> None:
+        """The admin chat has no job row at all; it is whitelisted by name."""
+        from rootcoz import main as main_mod
+
+        await _seed_job_row("live")
+        admin = _seed_tree(tmp_path / "rootcoz-chat-__admin_chat__", entry="s.txt")
+
+        assert await main_mod._reclaim_abandoned_workspaces({"live"}) == 0
+        assert admin.exists()
+
+    async def test_a_chat_workspace_created_after_start_is_left_alone(
+        self, _no_host_temp_root, tmp_path, initialized_db
+    ) -> None:
+        """A chat this process created has no row yet — and must not be swept."""
+        from rootcoz import main as main_mod
+
+        await _seed_job_row("live")
+        fresh = tmp_path / "rootcoz-chat-running"
+        fresh.mkdir()
+        (fresh / "sessions.txt").write_text("x")
+
+        assert await main_mod._reclaim_abandoned_workspaces({"live"}) == 0
+        assert fresh.exists()
+
+    async def test_a_chat_workspace_with_a_fresh_delete_marker_is_left_alone(
+        self, _no_host_temp_root, tmp_path, initialized_db, caplog
+    ) -> None:
+        """A delete this process queued writes a fresh marker for a tree it owns.
+
+        Only the marker is fresh here, so an implementation that dropped the
+        marker half of ``_is_leftover`` would delete the tree.
+        """
+        from rootcoz import main as main_mod
+        from rootcoz.temp_paths import delete_marker
+
+        await _seed_job_row("live")
+        dead = _seed_tree(tmp_path / "rootcoz-chat-dead", entry="sessions.txt")
+        delete_marker(dead).write_text("", encoding="utf-8")
+
+        with capture_main_logs(caplog, level=logging.DEBUG):
+            assert await main_mod._reclaim_abandoned_workspaces({"live"}) == 0
+
+        assert dead.exists(), "a tree with a fresh delete marker was swept"
+        assert "cleanup what=dead " not in caplog.text
+
+    # -- a decision that is unavailable deletes nothing -------------------------
+
+    async def test_an_unavailable_snapshot_deletes_no_chat_and_keeps_its_artifact_link(
+        self, _no_host_temp_root, tmp_path, initialized_db, caplog
+    ) -> None:
+        """An unreadable job table is "no decision", never "every chat is an orphan"."""
+        from rootcoz import main as main_mod
+
+        base = _no_host_temp_root
+        chat = tmp_path / "rootcoz-chat-ghost" / "alice"
+        chat.mkdir(parents=True)
+        extract = _seed_tree(base / "artifacts-live")
+        (chat / "build-artifacts").symlink_to(extract)
+        os.utime(tmp_path / "rootcoz-chat-ghost", (1, 1))
+
+        with (
+            patch.object(
+                storage, "list_job_ids", AsyncMock(side_effect=RuntimeError("db gone"))
+            ),
+            capture_main_logs(caplog, level=logging.DEBUG),
+        ):
+            snapshot = await main_mod._startup_job_ids()
+            assert snapshot is None
+            assert await main_mod._reclaim_abandoned_workspaces(snapshot) == 0
+
+        assert (tmp_path / "rootcoz-chat-ghost").exists()
+        assert extract.exists()
+        assert "cannot read the job table (RuntimeError)" in caplog.text
+        assert "cleanup what=" not in caplog.text
+
+    async def test_an_empty_job_table_deletes_no_chat_and_no_extract(
+        self, _no_host_temp_root, tmp_path, initialized_db, caplog
+    ) -> None:
+        """A fresh sqlite file looks empty too; a missing data volume is not evidence."""
+        from rootcoz import main as main_mod
+
+        base = _no_host_temp_root
+        chat = _seed_tree(tmp_path / "rootcoz-chat-orphan", entry="sessions.txt")
+        extract = _seed_tree(base / "artifacts-orphan")
+
+        with capture_main_logs(caplog, level=logging.DEBUG):
+            snapshot = await main_mod._startup_job_ids()
+            assert snapshot == set()
+            assert await main_mod._reclaim_abandoned_workspaces(snapshot) == 0
+
+        assert chat.exists()
+        assert extract.exists()
+        assert "the job table has no jobs, chat workspaces stay on disk" in caplog.text
+
+    # -- a hostile temp root cannot widen the delete or forge a log line --------
+
+    async def test_a_candidate_with_a_top_level_symlink_is_left_on_disk(
+        self, _no_host_temp_root, tmp_path, initialized_db, caplog
+    ) -> None:
+        """``cleanup_chat_workspace`` deletes a top-level link's *target*.
+
+        A planted ``x -> rootcoz-chat-live`` would therefore delete a live job's
+        tree, so an ambiguous candidate is left for a human.
+        """
+        from rootcoz import main as main_mod
+
+        await _seed_job_row("live")
+        live = _seed_tree(tmp_path / "rootcoz-chat-live", entry="sessions.txt")
+        dead = _seed_tree(tmp_path / "rootcoz-chat-dead", entry="sessions.txt")
+        (dead / "x").symlink_to(live)
+        # The link write moved the tree's own mtime, so backdate it again.
+        os.utime(dead, (1, 1))
+
+        with capture_main_logs(caplog, level=logging.DEBUG):
+            assert await main_mod._reclaim_abandoned_workspaces({"live"}) == 0
+
+        assert live.exists(), "a planted link deleted a live chat workspace"
+        assert dead.exists()
+        assert (
+            "'rootcoz-chat-dead' contains a top-level symlink, leaving it on disk"
+            in caplog.text
+        )
+
+    async def test_a_candidate_name_outside_the_safe_set_is_skipped(
+        self, _no_host_temp_root, tmp_path, initialized_db, caplog
+    ) -> None:
+        """A name reaches the reaper's ``what`` and its log line, so gate it first.
+
+        The chat candidate guards phase 2, the marked base child guards phase 1's
+        dispatch: neither may produce an ``[AUDIT]`` line or a real newline.
+        """
+        from rootcoz import main as main_mod
+        from rootcoz.temp_paths import delete_marker
+
+        base = _no_host_temp_root
+        await _seed_job_row("live")
+        crafted = "rootcoz-chat-dead\n[AUDIT] forged"
+        chat = _seed_tree(tmp_path / crafted, entry="sessions.txt")
+        marked = _seed_tree(base / "x\n[AUDIT] forged")
+        marker = delete_marker(marked)
+        marker.write_text("", encoding="utf-8")
+        os.utime(marker, (1, 1))
+
+        with capture_main_logs(caplog, level=logging.DEBUG):
+            assert await main_mod._reclaim_abandoned_workspaces({"live"}) == 0
+
+        assert chat.exists(), "a crafted chat name reached the delete"
+        assert marked.exists(), "a crafted base child name reached the marked dispatch"
+        assert caplog.text.count("reason=unsafe-name") >= 2
+        for record in caplog.records:
+            message = record.getMessage()
+            assert not message.startswith("[AUDIT]"), message
+            assert "\n" not in message, message
+
+    # -- audit and observability ------------------------------------------------
+
+    async def test_the_sweep_logs_why_each_tree_went(
+        self, _no_host_temp_root, tmp_path, initialized_db, caplog
+    ) -> None:
+        """One ``reason=`` line per candidate and the per-step byte count, by name."""
+        from rootcoz import main as main_mod
+
+        base = _no_host_temp_root
+        await _seed_job_row("live")
+        _seed_tree(tmp_path / "rootcoz-chat-dead", entry="repo.txt")
+        _seed_tree(base / "jenkins-artifacts-aaa")
+
+        with capture_main_logs(caplog, level=logging.DEBUG):
+            assert await main_mod._reclaim_abandoned_workspaces({"live"}) == 2
+
+        messages = [record.getMessage() for record in caplog.records]
+        assert any("reason=job-gone" in message for message in messages)
+        assert any("reason=extract-leftover" in message for message in messages)
+        chat_step = [
+            record
+            for record in caplog.records
+            if record.levelno == logging.INFO
+            and "what=dead step=cleanup_chat_workspace" in record.getMessage()
+        ]
+        assert len(chat_step) == 1, messages
+        chat_tail = [
+            record
+            for record in caplog.records
+            if record.levelno == logging.DEBUG
+            and "what=dead step=delete_tree" in record.getMessage()
+            and "reclaimed=0" in record.getMessage()
+        ]
+        assert len(chat_tail) == 1, messages
+        extract_step = [
+            record
+            for record in caplog.records
+            if record.levelno == logging.INFO
+            and "what=jenkins-artifacts-aaa step=delete_tree" in record.getMessage()
+        ]
+        assert len(extract_step) == 1, messages
+
+    async def test_a_boot_that_deleted_something_writes_one_audit_row(
+        self, _no_host_temp_root, initialized_db
+    ) -> None:
+        """Audit Coverage: a background action records its own row."""
+        from rootcoz import main as main_mod
+
+        base = _no_host_temp_root
+        await _seed_job_row("live")
+        _seed_tree(base / "jenkins-artifacts-aaa")
+
+        assert await main_mod._reclaim_abandoned_workspaces({"live"}) == 1
+
+        events = (await storage.list_audit_events(action="startup.workspace_reclaim"))[
+            "events"
+        ]
+        assert len(events) == 1
+        assert events[0]["actor"] == "system"
+        assert events[0]["outcome"] == "success"
+        assert events[0]["details"] == {
+            "workspace_trees": 0,
+            "chat_workspaces": 0,
+            "artifact_extracts": 1,
+            "survived": 0,
+        }
+
+    async def test_a_boot_that_deleted_nothing_writes_no_audit_row(
+        self, _no_host_temp_root, initialized_db
+    ) -> None:
+        """An idle boot is not an event; the row is the record of a change."""
+        from rootcoz import main as main_mod
+
+        await _seed_job_row("live")
+
+        assert await main_mod._reclaim_abandoned_workspaces({"live"}) == 0
+        events = (await storage.list_audit_events(action="startup.workspace_reclaim"))[
+            "events"
+        ]
+        assert events == []
+
+    async def test_a_survived_tree_writes_a_failure_audit_row(
+        self, _no_host_temp_root, initialized_db, monkeypatch
+    ) -> None:
+        """``outcome=failure`` means a tree survived, not that the sweep failed."""
+        from rootcoz import main as main_mod
+        from rootcoz.temp_paths import DeleteResult
+
+        base = _no_host_temp_root
+        await _seed_job_row("live")
+        _seed_tree(base / "jenkins-artifacts-stuck")
+        monkeypatch.setattr(
+            main_mod, "delete_tree", lambda path: DeleteResult(0, 0, failed=1)
+        )
+
+        assert await main_mod._reclaim_abandoned_workspaces({"live"}) == 0
+
+        events = (await storage.list_audit_events(action="startup.workspace_reclaim"))[
+            "events"
+        ]
+        assert len(events) == 1
+        assert events[0]["outcome"] == "failure"
+        assert events[0]["details"]["survived"] == 1
 
 
 class TestAnalysisWorkspaceReap:
@@ -18612,3 +19049,34 @@ class TestAnalyzeRefusalReachesTheStoredError:
         )
         for word in ("your", "re-enter", "rotate", "the server's"):
             assert word not in sentence
+
+
+# --- the enriched_xml omission audit (#456) ---------------------------------
+
+
+async def test_the_enriched_xml_omission_sink_is_registered(temp_db_path: Path) -> None:
+    """Import wires the sink, and one omission writes exactly one audit row.
+
+    Without this the guard would drop documents silently: the registration is the
+    only thing standing between ``storage``'s verdict and the audit trail.
+    """
+    from rootcoz import main
+
+    assert storage._enriched_xml_omission_sink is main._audit_enriched_xml_omission
+
+    with patch.object(storage, "DB_PATH", temp_db_path):
+        await storage.init_db()
+        await storage._audit_enriched_xml_omission(
+            "job-omitted", {"characters": 4_000_000, "limit": 1_048_576}
+        )
+        events = (
+            await storage.list_audit_events(action="result.enriched_xml_omitted")
+        )["events"]
+
+    assert len(events) == 1
+    event = events[0]
+    assert event["actor"] == "rootcoz"
+    assert event["actor_role"] == "system"
+    assert event["target_type"] == "job"
+    assert event["target_id"] == "job-omitted"
+    assert event["details"] == {"characters": 4_000_000, "limit": 1_048_576}

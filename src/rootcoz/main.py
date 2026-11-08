@@ -329,6 +329,7 @@ from rootcoz.storage import (
     release_submitted_job_analyze_claim,
     replace_job_test_entries,
     save_result,
+    set_enriched_xml_omission_sink,
     stamp_build_url,
     update_status,
 )
@@ -491,6 +492,12 @@ _RESTART_REQUIRED_SETTINGS: frozenset[str] = frozenset(
         "node_binary",
         "pi_sidecar_transcripts_dir",
     }
+)
+
+# The application log file's budget and floor (#481). Runtime settings — a
+# save rebuilds the shared handler, no restart needed.
+_LOG_FILE_SETTINGS: frozenset[str] = frozenset(
+    {"log_max_bytes", "log_backup_count", "log_min_free_bytes"}
 )
 
 # Updating any of these invalidates the recorded jira_verified_method —
@@ -660,6 +667,9 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "max_wait_minutes",
         "metadata_rules_file",
         "log_level",
+        "log_max_bytes",
+        "log_backup_count",
+        "log_min_free_bytes",
         "enable_auto_review",  # runtime toggle, no restart required
         "auto_push_exporters",  # runtime toggle, no restart required
     ],
@@ -707,6 +717,9 @@ for _cat, _fields in _SETTINGS_CATEGORIES.items():
 _SETTING_LABEL_OVERRIDES: dict[str, str] = {
     "admin_key": "Admin API key",
     "log_level": "Log level",
+    "log_max_bytes": "Log file size (bytes)",
+    "log_backup_count": "Rotated log files kept",
+    "log_min_free_bytes": "Log free-space floor (bytes)",
     "ai_provider": "AI provider",
     "ai_model": "AI model",
     "ai_call_timeout": "AI call timeout",
@@ -1100,6 +1113,28 @@ set_progress_callback(notify_job_status_changed)
 set_usage_callback(notify_job_status_changed)
 
 
+async def _audit_enriched_xml_omission(job_id: str, omitted: dict[str, Any]) -> None:
+    """Audit a full-size ``enriched_xml`` document that was not stored (#456)."""
+    await record_audit(
+        action="result.enriched_xml_omitted",
+        actor="rootcoz",  # the server itself: this event has no user behind it
+        actor_role="system",
+        message=(
+            f"enriched_xml for job {job_id} was not stored: "
+            f"{omitted.get('characters')} characters, limit {omitted.get('limit')}"
+        ),
+        target_type="job",
+        target_id=job_id,
+        details={
+            "characters": omitted.get("characters"),
+            "limit": omitted.get("limit"),
+        },
+    )
+
+
+set_enriched_xml_omission_sink(_audit_enriched_xml_omission)
+
+
 def notify_comments_changed(job_id: str) -> None:
     """Signal SSE listeners for a specific job that comments changed."""
     _invalidate_enrichments_cache(job_id)
@@ -1457,10 +1492,18 @@ def _install_job_id_filter() -> None:
                 handler.addFilter(_job_id_filter)
 
 
+def _apply_log_file_settings() -> None:
+    """(Re)build the shared file handler with the current log-budget settings."""
+    enable_log_file(reconfigure=True)
+    # Unconditional: the sweep covers the console handlers too, so gating it on
+    # a non-None file handler would drop [job_id=…] from the console whenever
+    # the data directory is not writable. Its own guard keeps it idempotent.
+    _install_job_id_filter()
+
+
 # One file handler for the whole process, enabled before the job_id filter is
 # installed so the shared handler carries it (#477). Server only — never the CLI.
-enable_log_file()
-_install_job_id_filter()
+_apply_log_file_settings()
 
 
 async def _attach_token_usage(
@@ -2713,76 +2756,147 @@ async def _compress_stored_results() -> None:
         logger.exception("Failed to compress stored result_json rows")
 
 
-async def _reclaim_abandoned_workspaces() -> int:
-    """Delete the analysis workspaces a previous process abandoned; return the count.
+#: A directory name the startup reclaim may hand to the reaper as ``what`` and
+#: interpolate into a log line: server-generated ids only. Anything else is
+#: skipped, so a crafted name cannot forge a log line in any phase.
+_SAFE_NAME = re.compile(r"[A-Za-z0-9._-]+")
 
-    A ``finally`` that meets a live graph build returns ``ABANDON``, which stops
-    ``repo_manager.cleanup``: the uuid workspace and its sibling graph root then
-    stay on disk with no owner, because nothing in a later process ever looks at
-    that name again. Process start is the one moment no builder can still hold
-    the tree, so the leftovers are reaped here, off the loop, through the same
-    reaper as every other delete.
 
-    Only ``workspace-*`` trees are reclaimed unconditionally: an intact
-    ``chat-{job}`` workspace is reused across sessions and keeps its clones and
-    graph across a restart. One carrying a delete marker is reclaimed too — the
-    delete that wrote it died, and for a *deleted* job no create ever reaches
-    the recovery that would reap it, because the job row is gone and every init
-    404s first.
+async def _startup_job_ids() -> set[str] | None:
+    """Snapshot the job table for the startup reclaim; ``None`` when unreadable.
 
-    Returned count is what was really deleted: a step that abandons or leaves
-    paths behind reclaims nothing, and reporting it as deleted would hide a tree
-    that stays until the next restart.
+    Read here, in ``lifespan`` and before the sweep's task is spawned, because
+    this is the one moment no request can change the table. ``None`` means "no
+    decision": phases 2 and 3 then delete nothing. The empty set is a real
+    answer — a readable table with no jobs — and it is "no decision" too, because
+    that is also what a fresh sqlite file looks like when the data volume is not
+    mounted at boot.
+    """
+    try:
+        return await storage.list_job_ids()
+    except Exception as exc:  # noqa: BLE001 - a degraded sweep must not abort startup
+        logger.warning(
+            "Startup reclaim: cannot read the job table (%s), chat workspaces "
+            "stay on disk",
+            type(exc).__name__,
+        )
+        return None
 
-    Ownership is *single-process*: newest mtime versus this process's start, with
-    no cross-process check, so a second live server sharing the temp dir would
-    lose its workspaces. That is sound only because the product forbids a second
-    replica (``chart/templates/deployment.yaml`` ``replicas: 1``,
-    ``chart/templates/NOTES.txt`` "Do not scale replicas above 1",
-    ``docs/deploy-rootcoz.md``). Deliberately no lock protocol: it would guard a
-    deployment the chart and docs rule out.
+
+def _known_chat_names(job_ids: set[str] | None) -> set[str] | None:
+    """The chat workspace names a request can still reach; ``None`` = no decision.
+
+    A chat workspace is opened only through chat init, which 404s before touching
+    the tree when there is no stored result — so a ``results`` row *is* the
+    reachability proof. The admin chat has no row and is whitelisted by name, both
+    built from the same :func:`~rootcoz.engine.chat.chat_workspace_name` that
+    creates them, so creator and sweeper cannot disagree.
+    """
+    from rootcoz.engine.chat import chat_workspace_name
+
+    if job_ids is None:
+        # ``_startup_job_ids`` already logged why.
+        return None
+    if not job_ids:
+        logger.info(
+            "Startup reclaim: the job table has no jobs, chat workspaces stay on disk"
+        )
+        return None
+    names = {chat_workspace_name(job_id) for job_id in job_ids}
+    names.add(chat_workspace_name(ADMIN_CHAT_JOB_ID))
+    return names
+
+
+def _is_leftover(path: Path) -> bool:
+    """A tree this process did not create and no delete of it is in flight."""
+    from rootcoz.temp_paths import delete_marker
+
+    if path.is_symlink() or not path.is_dir():
+        return False
+    try:
+        newest = path.lstat().st_mtime
+        marker = delete_marker(path)
+        if marker.exists():
+            # A delete *this* process queued writes a fresh marker for a tree it
+            # still owns, so the newest of the two decides.
+            newest = max(newest, marker.lstat().st_mtime)
+    except OSError:
+        return False
+    return newest < _PROCESS_STARTED_AT
+
+
+def _linked_artifact_targets(kept_chats: list[Path]) -> set[Path]:
+    """Extract dirs a kept chat workspace still hands to its session.
+
+    ``link_artifacts_to_workspace`` symlinks an extract dir into the chat
+    workspace, and the extract is *not* deleted with it: the job-level delete
+    unlinks only top-level children and ``delete_tree`` never follows a link. So
+    the target outlives the workspace and the startup reclaim is what reclaims it
+    — except for a chat that is still reachable, where deleting it would silently
+    drop ``build-artifacts`` until the next message re-downloads them.
+    """
+    targets: set[Path] = set()
+    for chat_dir in kept_chats:
+        try:
+            links = list(chat_dir.glob("*/build-artifacts"))
+            links += list(chat_dir.glob("*/*/build-artifacts"))
+        except OSError:
+            continue
+        for link in links:
+            if link.is_symlink():
+                targets.add(Path(os.path.realpath(link)))
+    return targets
+
+
+async def _reclaim_workspace_trees(base: Path) -> tuple[int, int]:
+    """Phase 1: the uuid analysis workspaces and marked children of ``base``.
+
+    Returns ``(reclaimed, considered)``. ``workspace-*`` is reclaimed
+    unconditionally (its ``finally`` abandoned it and nothing looks at that name
+    again); any *other* child only when it carries a delete marker, which is the
+    generic safety net for an abandoned delete of a reusable tree. Real chat
+    workspaces are ``rootcoz-chat-*`` at the process temp root, i.e. not children
+    of this base at all — phase 2 sweeps those.
     """
     from rootcoz.engine.graft import _root
-    from rootcoz.temp_paths import CleanupOutcome, delete_marker, rootcoz_temp_base
-
-    base = rootcoz_temp_base()
-
-    def abandoned(path: Path) -> bool:
-        # Never follow a link: ``_root`` resolves the entry, so a stale
-        # ``workspace-*`` link into a chat workspace would delete *that* chat's
-        # graph tree while the chat itself is deliberately never reclaimed.
-        if path.is_symlink() or not path.is_dir():
-            return False
-        try:
-            marker = delete_marker(path)
-            # The newest of the tree and its marker: a delete queued by *this*
-            # process writes a fresh marker for a tree it still owns.
-            newest = path.lstat().st_mtime
-            if marker.exists():
-                newest = max(newest, marker.lstat().st_mtime)
-            elif not path.name.startswith("workspace-"):
-                return False
-        except OSError:
-            return False
-        return newest < _PROCESS_STARTED_AT
+    from rootcoz.temp_paths import CleanupOutcome, cleanup_off_loop, delete_marker
 
     try:
         # Snapshot before the first await: a job resumed from the DB clones into
         # a *new* workspace in this directory, and that one must not be in the list.
-        leftovers = sorted(path for path in base.iterdir() if abandoned(path))
+        children = sorted(base.iterdir())
     except FileNotFoundError:
         # ``rootcoz_temp_base`` only joins a path; the base is created lazily by
         # the first ``RepositoryManager``, i.e. *after* this task runs. A fresh
         # container has no base, and that means no abandoned workspace — not a
         # listing failure.
-        return 0
+        return (0, 0)
     except OSError:
         logger.warning(
             "Startup reclaim: cannot list %s, abandoned workspaces stay on disk",
             base,
             exc_info=True,
         )
-        return 0
+        return (0, 0)
+
+    leftovers: list[Path] = []
+    for path in children:
+        # Before anything reads the name: it becomes the reaper's ``what``, which
+        # is interpolated verbatim into its log line.
+        if not _SAFE_NAME.fullmatch(path.name):
+            logger.debug(f"Startup reclaim: candidate {path!r} reason=unsafe-name")
+            continue
+        if path.name.startswith("workspace-"):
+            reason = "workspace-leftover"
+        elif delete_marker(path).exists():
+            reason = "marked-leftover"
+        else:
+            continue
+        if not _is_leftover(path):
+            continue
+        logger.debug(f"Startup reclaim: candidate {path!r} reason={reason}")
+        leftovers.append(path)
+
     reclaimed = 0
     for workspace in leftovers:
         outcome = await cleanup_off_loop(
@@ -2804,6 +2918,259 @@ async def _reclaim_abandoned_workspaces() -> int:
             "delete and stay until the next restart",
             survivors,
             base,
+        )
+    return (reclaimed, len(leftovers))
+
+
+async def _reclaim_chat_workspaces(
+    job_ids: set[str] | None,
+) -> tuple[int, int, list[Path] | None]:
+    """Phase 2: chat workspaces whose job row is gone.
+
+    Returns ``(reclaimed, considered, kept)``. ``kept is None`` means no decision
+    was available (unreadable or empty table, an unresolvable or unlistable chat
+    root) and phase 3 must then delete nothing. The delete is the shipped
+    job-delete protocol, :func:`_cleanup_deleted_job_chat_workspaces` — marker,
+    deleting-mark, per-job barrier, reaper — so an init racing this sweep is
+    refused instead of reusing a tree that is about to go.
+    """
+    from rootcoz.engine import chat
+
+    names = _known_chat_names(job_ids)
+    if names is None:
+        return (0, 0, None)
+    try:
+        root = chat.chat_workspace_root()
+    except OSError:
+        logger.warning(
+            "Startup reclaim: cannot resolve the chat workspace root, chat "
+            "workspaces stay on disk"
+        )
+        return (0, 0, None)
+    try:
+        entries = sorted(root.iterdir())
+    except OSError:
+        logger.warning(
+            f"Startup reclaim: cannot list {root}, chat workspaces stay on disk"
+        )
+        return (0, 0, None)
+
+    kept: list[Path] = []
+    candidates: list[tuple[Path, str]] = []
+    for path in entries:
+        name = path.name
+        if not name.startswith(chat._CHAT_WORKSPACE_PREFIX):
+            continue
+        if name in names:
+            kept.append(path)
+            continue
+        if not _SAFE_NAME.fullmatch(name):
+            logger.debug(f"Startup reclaim: candidate {path!r} reason=unsafe-name")
+            kept.append(path)
+            continue
+        if not _is_leftover(path):
+            kept.append(path)
+            continue
+        # A chat workspace never carries a top-level link (``build-artifacts``
+        # lives at ``<job>/<user>/build-artifacts``), and the shipped delete hands
+        # every top-level link to ``_safe_remove_symlink``, which deletes the
+        # link's *target* anywhere under the temp root. A planted
+        # ``x -> rootcoz-chat-<live job>`` would therefore delete a live tree.
+        try:
+            links = any(child.is_symlink() for child in path.iterdir())
+        except OSError:
+            kept.append(path)
+            continue
+        if links:
+            logger.warning(
+                f"Startup reclaim: {name!r} contains a top-level symlink, "
+                "leaving it on disk"
+            )
+            kept.append(path)
+            continue
+        job_id = name.removeprefix(chat._CHAT_WORKSPACE_PREFIX)
+        try:
+            expected = chat.get_chat_workspace(job_id)
+        except ValueError:
+            logger.debug(f"Startup reclaim: candidate {path!r} reason=outside-root")
+            kept.append(path)
+            continue
+        if expected.resolve() != path.resolve():
+            logger.warning(
+                f"Startup reclaim: {name!r} does not resolve to its chat "
+                "workspace path, leaving it on disk"
+            )
+            kept.append(path)
+            continue
+        logger.debug(f"Startup reclaim: candidate {path!r} reason=job-gone")
+        candidates.append((path, job_id))
+
+    reclaimed = 0
+    considered = 0
+    for path, job_id in candidates:
+        if not os.path.lexists(path):
+            continue
+        considered += 1
+        await _cleanup_deleted_job_chat_workspaces(job_id)
+        # The helper returns ``None`` and logs its own failures, so the filesystem
+        # is the only thing that can say whether the tree went.
+        if not os.path.lexists(path):
+            reclaimed += 1
+    if reclaimed:
+        logger.info(
+            f"Startup reclaim: deleted {reclaimed} abandoned chat workspace(s) under {root}"
+        )
+    if survivors := considered - reclaimed:
+        logger.warning(
+            f"Startup reclaim: {survivors} abandoned chat workspace(s) under {root} "
+            "survived their delete and stay until the next restart"
+        )
+    return (reclaimed, considered, kept)
+
+
+async def _reclaim_artifact_extracts(
+    base: Path, kept: list[Path] | None
+) -> tuple[int, int]:
+    """Phase 3: leftover CI artifact extract dirs, one root per creator.
+
+    Returns ``(reclaimed, considered)``. Three creators, each mapped to the one
+    root it writes, so no root is ever searched for a name its creator does not
+    write there — on a host install the process temp root is the machine's ``/tmp``.
+    ``kept is None`` means the chat decision was unavailable, and that must never
+    be read as "nothing is kept".
+    """
+    from rootcoz.engine import chat
+    from rootcoz.jenkins_artifacts import ARTIFACTS_PREFIX, JENKINS_ARTIFACTS_PREFIX
+    from rootcoz.sources.prow_source import PROW_ARTIFACTS_PREFIX
+    from rootcoz.temp_paths import CleanupOutcome, cleanup_off_loop
+
+    if kept is None:
+        return (0, 0)
+
+    roots: list[tuple[Path, tuple[str, ...]]] = [
+        (base, (JENKINS_ARTIFACTS_PREFIX, ARTIFACTS_PREFIX))
+    ]
+    try:
+        roots.append((chat.chat_workspace_root(), (PROW_ARTIFACTS_PREFIX,)))
+    except OSError:
+        logger.warning(
+            "Startup reclaim: cannot resolve the chat workspace root, leftover "
+            "artifact extract(s) stay on disk"
+        )
+
+    protected = _linked_artifact_targets(kept)
+    total_reclaimed = 0
+    total_considered = 0
+    for root, prefixes in roots:
+        try:
+            entries = sorted(root.iterdir())
+        except FileNotFoundError:
+            # A fresh container has no base yet: nothing to reclaim, not a failure.
+            continue
+        except OSError:
+            logger.warning(
+                f"Startup reclaim: cannot list {root}, leftover artifact "
+                "extract(s) stay on disk"
+            )
+            continue
+        candidates: list[Path] = []
+        for path in entries:
+            if not path.name.startswith(prefixes):
+                continue
+            if not _SAFE_NAME.fullmatch(path.name):
+                logger.debug(f"Startup reclaim: candidate {path!r} reason=unsafe-name")
+                continue
+            if not _is_leftover(path):
+                continue
+            if Path(os.path.realpath(path)) in protected:
+                continue
+            logger.debug(f"Startup reclaim: candidate {path!r} reason=extract-leftover")
+            candidates.append(path)
+        reclaimed = 0
+        for path in candidates:
+            outcome = await cleanup_off_loop(path.name, partial(delete_tree, path))
+            if outcome is CleanupOutcome.CLEAN:
+                reclaimed += 1
+        if reclaimed:
+            logger.info(
+                f"Startup reclaim: deleted {reclaimed} leftover artifact "
+                f"extract(s) under {root}"
+            )
+        if survivors := len(candidates) - reclaimed:
+            logger.warning(
+                f"Startup reclaim: {survivors} leftover artifact extract(s) under "
+                f"{root} survived their delete and stay until the next restart"
+            )
+        total_reclaimed += reclaimed
+        total_considered += len(candidates)
+    return (total_reclaimed, total_considered)
+
+
+async def _reclaim_abandoned_workspaces(job_ids: set[str] | None = None) -> int:
+    """Delete the trees a previous process abandoned; return the count reclaimed.
+
+    One pass, three phases over the two temp roots: the analysis workspaces and
+    the marked children of the base, then the chat workspaces whose ``results``
+    row is gone, then the leftover CI artifact extracts. Composed here rather than
+    spawned as separate tasks on purpose — two tasks listing the same root would
+    delete the same trees twice, log two ``cleanup`` lines per tree, and walk a
+    tree the other is deleting.
+
+    ``job_ids`` is the snapshot ``lifespan`` took *before* spawning this task.
+    ``None`` means "no decision available" and is never re-read here: a read taken
+    while uvicorn already serves requests would turn "could not decide" into
+    "every pre-existing chat is an orphan".
+
+    Why the leftovers exist: a ``finally`` that meets a live graph build returns
+    ``ABANDON``, which stops ``repo_manager.cleanup``; an extract dir is deleted at
+    the end of its use and a survivor is therefore a leftover by construction; and
+    a chat workspace is reachable only through chat init, which 404s when the job
+    has no stored result. Process start is the one moment no builder can hold any
+    of those trees, so they are reaped here, off the loop, through the same reaper
+    as every other delete.
+
+    Never touched: a live job's chat workspace (sessions, clones and graph — reuse
+    is the feature), the admin chat, anything created after this process started,
+    a tree with a fresh delete marker, and an extract dir a kept chat still links
+    to. Each is a falsifier in ``tests/test_main.py::TestStartupWorkspaceReclaim``,
+    because a wrong stale rule deletes a user's work.
+
+    Returned count is what was really deleted: a step that abandons or leaves
+    paths behind reclaims nothing, and reporting it as deleted would hide a tree
+    that stays until the next restart. One ``startup.workspace_reclaim`` audit row
+    per boot that changed something records the four counts.
+
+    Ownership is *single-process*: newest mtime versus this process's start, with
+    no cross-process check, so a second live server sharing the temp dir would
+    lose its workspaces. That is sound only because the product forbids a second
+    replica (``chart/templates/deployment.yaml`` ``replicas: 1``,
+    ``chart/templates/NOTES.txt`` "Do not scale replicas above 1",
+    ``docs/deploy-rootcoz.md``). Deliberately no lock protocol: it would guard a
+    deployment the chart and docs rule out.
+    """
+    from rootcoz.temp_paths import rootcoz_temp_base
+
+    base = rootcoz_temp_base()
+    trees, trees_seen = await _reclaim_workspace_trees(base)
+    chats, chats_seen, kept = await _reclaim_chat_workspaces(job_ids)
+    extracts, extracts_seen = await _reclaim_artifact_extracts(base, kept)
+    reclaimed = trees + chats + extracts
+    survivors = (trees_seen - trees) + (chats_seen - chats) + (extracts_seen - extracts)
+    if reclaimed or survivors:
+        await record_audit(
+            action="startup.workspace_reclaim",
+            actor="system",
+            message=(
+                f"Startup reclaim reclaimed {reclaimed} leftover tree(s) under the "
+                "process temp root"
+            ),
+            outcome="failure" if survivors else "success",
+            details={
+                "workspace_trees": trees,
+                "chat_workspaces": chats,
+                "artifact_extracts": extracts,
+                "survived": survivors,
+            },
         )
     return reclaimed
 
@@ -2973,6 +3340,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     await load_db_settings()
     _apply_log_level_setting()
+    _apply_log_file_settings()
 
     # After load_db_settings, so the persisted audit_retention_days applies:
     # a saved 0 (keep forever) must not be overridden by the env/default value.
@@ -3002,7 +3370,11 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
             "[startup] Workspace reclaim assumes a single server process "
             "(single-replica deployment)"
         )
-        _spawn_background(_reclaim_abandoned_workspaces())
+        # The snapshot is taken here, before the task is spawned: this is the one
+        # moment no request can change the job table, and the sweep must never
+        # re-read it (§460). ``None`` means "no decision" and deletes nothing.
+        job_ids = await _startup_job_ids()
+        _spawn_background(_reclaim_abandoned_workspaces(job_ids))
         # One sampler for the event-loop lag the admin status page reports.
         server_status.start_loop_lag_watchdog()
 
@@ -20201,6 +20573,11 @@ async def _save_settings_to_db(
         {k: str(v) if v is not None else "" for k, v in settings_updates.items()}
     )
 
+    # The log-file budget and floor apply to the running handler, not the next
+    # boot: rebuilding it here covers the PUT, the import and the env→DB persist.
+    if settings_updates.keys() & _LOG_FILE_SETTINGS:
+        _apply_log_file_settings()
+
     # Persist the transcript recording switch (and the other sidecar
     # settings) for the container entrypoint — the sidecar reads these from
     # its process env at start, so the bridge file is how a DB toggle
@@ -20337,6 +20714,8 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
 
     # Remove from in-memory cache so get_settings() falls back to env/default
     remove_from_db_settings_cache([key])
+    if key in _LOG_FILE_SETTINGS:
+        _apply_log_file_settings()
 
     # Keep the sidecar transcript env bridge in sync with the reset — the
     # bridge must stop assigning the removed override so the deployment
@@ -24371,8 +24750,9 @@ _ADMIN_ARTIFACTS_BASE = Path("/tmp/rootcoz-admin-artifacts")
 
 def _get_admin_artifacts_dir(username: str) -> Path:
     """Get the artifacts directory for an admin user."""
-    safe_user = username.replace("/", "_").replace("..", "_").replace("\\", "_")
-    return _ADMIN_ARTIFACTS_BASE / safe_user
+    from rootcoz.engine.chat import _sanitize_path_part
+
+    return _ADMIN_ARTIFACTS_BASE / _sanitize_path_part(username)
 
 
 def _cleanup_admin_artifacts(username: str) -> DeleteResult:
@@ -24412,9 +24792,9 @@ async def save_admin_chat_artifact(
     username = request.state.username
 
     # Sanitize filename — strip path separators, keep only the basename
-    safe_filename = (
-        body.filename.replace("/", "_").replace("\\", "_").replace("..", "_").strip()
-    )
+    from rootcoz.engine.chat import _sanitize_path_part
+
+    safe_filename = _sanitize_path_part(body.filename).strip()
     if not safe_filename:
         raise HTTPException(status_code=422, detail="Invalid filename")
     # Ensure .html extension

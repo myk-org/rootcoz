@@ -276,6 +276,14 @@ requires the capped `/tmp` `emptyDir` + `TMPDIR=/tmp` **by default**, and this d
 it. The live deployment must carry the same number as the profile it runs (the production example uses
 `16Gi`). Two values for one threshold is exactly the drift the single-source rule above prevents.
 
+**A replaced pod already discards the temp root.** Because the `/tmp` `emptyDir` is per pod, replacing
+the pod takes every clone, graph, artifact extract and chat workspace with it — the startup reclaim is
+therefore not what bounds `/tmp` here. It matters where a temp root outlives the container: a host
+install, a bind-mounted `/tmp`, or a process restart inside the same pod. What that sweep reclaims and
+what it deliberately keeps is in
+[the deployment guide](https://github.com/myk-org/rootcoz/blob/main/docs/deploy-rootcoz.md), which also
+carries the single-replica requirement it relies on.
+
 **The live deployment does not carry it yet.** `.dev/openshift/deployment.yaml` sets no
 `ephemeral-storage` at all, so the live `/tmp` is still the unbounded writable layer. Matching it to
 this default needs the keys on both sides:

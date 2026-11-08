@@ -16,6 +16,7 @@ from pydantic import HttpUrl
 
 from rootcoz import get_child_logger
 from rootcoz.temp_paths import DeleteResult, delete_tree, rootcoz_temp_base
+from rootcoz.url_utils import strip_url_credentials
 
 if TYPE_CHECKING:
     from rootcoz.models import AdditionalRepo
@@ -128,8 +129,12 @@ def _validate_repo_url(repo_url: str | HttpUrl) -> None:
     """Validate repository URL scheme to prevent SSRF."""
     url_str = str(repo_url).lower()
     if not url_str.startswith(("https://", "git://")):
+        # Redacted at the raise: every caller logs this with exc_info, and both
+        # the userinfo and a ?token= query are credentials. main.py matches the
+        # message prefix, which is unchanged.
         raise ValueError(
-            f"Invalid repository URL scheme. Only https:// and git:// are allowed, got: {repo_url}"
+            "Invalid repository URL scheme. Only https:// and git:// are allowed, "
+            f"got: {strip_url_credentials(str(repo_url))}"
         )
 
 

@@ -47,6 +47,10 @@ from rootcoz.xml_enrichment import (
 
 logger = get_child_logger(__name__)
 
+#: The temp-root directory name this module creates, shared with the startup
+#: reclaim so a rename cannot silently stop matching.
+PROW_ARTIFACTS_PREFIX = "prow-artifacts-"
+
 # Base URL for accessing GCS objects via HTTPS
 GCS_BASE_URL = "https://storage.googleapis.com"
 
@@ -659,7 +663,7 @@ async def _download_gcs_artifacts(
     if not artifact_objects:
         return None
 
-    dest_dir = Path(tempfile.mkdtemp(prefix="prow-artifacts-"))
+    dest_dir = Path(tempfile.mkdtemp(prefix=PROW_ARTIFACTS_PREFIX))
 
     total_downloaded = 0
     files_downloaded = 0
