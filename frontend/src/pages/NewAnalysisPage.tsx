@@ -25,8 +25,9 @@ function submitErrorMessage(err: unknown): string | null {
   // A 5xx detail is server internals, never something the user can fix.
   if (!(err instanceof ApiError) || err.status >= 500) return null
   const detail = extractApiDetail(err)
-  const duplicates = detail?.match(/^Duplicate additional repo names: (.+)$/)?.[1]
-  return duplicates ? `Two additional repos are named \`${duplicates}\` — rename one.` : detail
+  // `[^;]` stops at the next joined validator message; the server joins every colliding name with ", ".
+  const duplicates = detail?.match(/^Duplicate additional repo names: ([^;]+)/)?.[1]
+  return duplicates ? `Each additional repo needs a unique name — duplicated: \`${duplicates}\`.` : detail
 }
 
 export function NewAnalysisPage() {

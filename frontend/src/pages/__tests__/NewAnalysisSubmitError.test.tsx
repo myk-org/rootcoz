@@ -71,8 +71,20 @@ it('shows the duplicate repo names a 422 validation detail carries', async () =>
       ctx: { error: {} },
     }],
   }))
-  expect(await screen.findByText('Two additional repos are named `shared-infra` — rename one.')).toBeInTheDocument()
+  expect(await screen.findByText('Each additional repo needs a unique name — duplicated: `shared-infra`.')).toBeInTheDocument()
   expect(screen.queryByText(GENERIC)).not.toBeInTheDocument()
+})
+
+it('names every clashing repo when several names collide', async () => {
+  await submitDuplicateRepos(new ApiError(422, 'Unprocessable Entity', {
+    detail: [{
+      type: 'value_error',
+      loc: ['body', 'additional_repos'],
+      msg: 'Value error, Duplicate additional repo names: monitoring, shared-infra; Field required',
+      ctx: { error: {} },
+    }],
+  }))
+  expect(await screen.findByText('Each additional repo needs a unique name — duplicated: `monitoring, shared-infra`.')).toBeInTheDocument()
 })
 
 it('keeps the generic sentence for a server error', async () => {
