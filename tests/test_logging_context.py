@@ -770,6 +770,46 @@ class TestLogFilePermissions:
         assert (log_dir / "rootcoz.log.1").exists()
         assert (log_dir / "rootcoz.log").stat().st_mode & 0o777 == 0o660
 
+    def test_a_failed_chmod_is_reported_only_once_the_stream_exists(
+        self, file_logging: Path, monkeypatch
+    ) -> None:
+        """A notice emitted from inside _open() would re-enter emit().
+
+        ``doRollover()`` calls ``_open()`` with ``stream`` still None, so a
+        record logged from there makes ``shouldRollover()`` open again — and
+        only the identical message hitting ``DuplicateFilter`` stops it. The
+        stream must exist before the notice is emitted.
+        """
+        _set_log_settings(monkeypatch, log_max_bytes=1024, log_backup_count=2)
+        handler = _enable()
+        stream_missing: list[bool] = []
+        real_debug = logging_context._debug
+
+        def _record_stream_state(message: str, *args: object) -> None:
+            stream_missing.append(getattr(handler, "stream", None) is None)
+            real_debug(message, *args)
+
+        def _deny(*_args: object, **_kwargs: object) -> None:
+            raise OSError("not the owner")
+
+        monkeypatch.setattr(logging_context, "_debug", _record_stream_state)
+        monkeypatch.setattr(logging_context.os, "fchmod", _deny)
+        for index in range(40):
+            handler.emit(
+                logging.LogRecord(
+                    name="rootcoz.tests_chmod",
+                    level=logging.WARNING,
+                    pathname="",
+                    lineno=0,
+                    msg="chmod-filler-%d %s",  # type: ignore[arg-type]
+                    args=(index, "x" * 100),
+                    exc_info=None,
+                )
+            )
+        assert stream_missing, "the rollover never reported its failed chmod"
+        assert not any(stream_missing)
+        assert "chmod-filler-39" in _file_text()
+
 
 class TestLogFileReconfigure:
     """A settings change applies live, without dropping a #477 invariant."""

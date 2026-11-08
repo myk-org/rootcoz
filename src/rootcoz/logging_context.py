@@ -104,20 +104,31 @@ class _GroupWritableRotatingFileHandler(RotatingFileHandler):
     """
 
     def _open(self) -> TextIOWrapper[Any]:
-        fd = _open_mode(Path(self.baseFilename), _LOG_FILE_MODE)
-        return cast(
+        fd, mode_error = _open_mode(Path(self.baseFilename), _LOG_FILE_MODE)
+        stream = cast(
             "TextIOWrapper[Any]",
             os.fdopen(fd, self.mode or "a", encoding=self.encoding, errors=self.errors),
         )
+        # Attached here, before the notice below: ``doRollover()`` opens with
+        # ``stream`` still None, and a record emitted from inside ``_open()``
+        # makes ``shouldRollover()`` open again — one descriptor per pass. Only
+        # the identical message meeting ``DuplicateFilter`` stops that today;
+        # the notice must not depend on it.
+        self.stream = stream
+        if mode_error is not None:
+            _debug("Cannot set mode %o on %s", _LOG_FILE_MODE, self.baseFilename)
+        return stream
 
 
-def _open_mode(path: Path, mode: int) -> int:
-    """Open *path* for appending and force *mode* on it; returns the fd.
+def _open_mode(path: Path, mode: int) -> tuple[int, OSError | None]:
+    """Open *path* for appending and force *mode* on it; returns fd and chmod error.
 
     ``os.open``'s mode argument is masked by the process umask (0660 & ~0022
     == 0640), so the ``fchmod`` is what actually lands the mode. A file owned
     by another identity cannot be chmod-ed — it was writable enough to open,
-    so that stays a DEBUG line, never a reason to lose logging.
+    so that is a DEBUG line from the caller, never a reason to lose logging.
+    The error is handed back rather than logged here: this runs inside the file
+    handler's ``_open()``, where a record would re-enter ``emit()``.
 
     ``O_NOFOLLOW``: the log directory is group-writable, so anyone who can
     write it could point the log path at a file they do not own and have us
@@ -127,9 +138,9 @@ def _open_mode(path: Path, mode: int) -> int:
     fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, mode)
     try:
         os.fchmod(fd, mode)
-    except OSError:
-        _debug("Cannot set mode %o on %s", mode, path)
-    return fd
+    except OSError as exc:
+        return fd, exc
+    return fd, None
 
 
 def _apply_mode(path: Path, mode: int) -> None:
@@ -234,9 +245,11 @@ class _FreeSpaceFilter(logging.Filter):
     They are emitted past that tree's level, so an ``ERROR`` setting cannot
     hide them either.
 
-    Thread-safe: handler filters run outside the handler's own lock, so two
-    threads could otherwise announce the same crossing. ``RLock`` because the
-    announcement itself is emitted while this filter is running.
+    Thread-safe: two threads can observe the same crossing, so the latch and
+    the probe cache are read and written under one lock, and the announcement
+    is emitted only after it is released — a record logged while holding it
+    would take the handler lock second, inverting the order a plain record
+    takes them in.
 
     A probe that cannot stat the filesystem fails open — a metric that fails
     must never silence logging.
@@ -294,40 +307,54 @@ class _FreeSpaceFilter(logging.Filter):
 
     def check(self) -> bool:
         """Whether the file may accept a record, announcing each crossing once."""
+        notice: tuple[int, str, tuple[object, ...]] | None = None
         with self._lock:
             free = self._free_bytes()
             if free is None:
                 # Fail open, and say nothing about free space we do not have.
+                allowed = True
                 if self._blocked:
                     self._blocked = False
-                    _debug(
+                    notice = (
+                        logging.DEBUG,
                         "Free-space probe failed for %s; file logging resumed",
-                        self.data_dir,
+                        (self.data_dir,),
                     )
-                return True
-            if free >= self.min_free_bytes:
+            elif free >= self.min_free_bytes:
+                allowed = True
                 if self._blocked:
                     self._blocked = False
-                    self._announce(
+                    notice = (
                         logging.INFO,
-                        "File logging resumed: %s has %d bytes free, back above "
-                        "the %d-byte floor (log_min_free_bytes)",
-                        self.data_dir,
-                        free,
-                        self.min_free_bytes,
+                        (
+                            "File logging resumed: %s has %d bytes free, back "
+                            "above the %d-byte floor (log_min_free_bytes)"
+                        ),
+                        (self.data_dir, free, self.min_free_bytes),
                     )
-                return True
-            if not self._blocked:
-                self._blocked = True
-                self._announce(
-                    logging.WARNING,
-                    "File logging paused: %s has %d bytes free, below the %d-byte "
-                    "floor (log_min_free_bytes); console logging continues",
-                    self.data_dir,
-                    free,
-                    self.min_free_bytes,
-                )
-            return False
+            else:
+                allowed = False
+                if not self._blocked:
+                    self._blocked = True
+                    notice = (
+                        logging.WARNING,
+                        (
+                            "File logging paused: %s has %d bytes free, below "
+                            "the %d-byte floor (log_min_free_bytes); console "
+                            "logging continues"
+                        ),
+                        (self.data_dir, free, self.min_free_bytes),
+                    )
+        if notice is not None:
+            # Outside the lock: this filter runs under the handler's own lock,
+            # so announcing while holding ours would take the two in the
+            # opposite order to a plain record and deadlock the two threads.
+            level, message, args = notice
+            if level == logging.DEBUG:
+                _debug(message, *args)
+            else:
+                self._announce(level, message, *args)
+        return allowed
 
     def filter(self, record: logging.LogRecord) -> bool:
         return self.check()
@@ -354,7 +381,10 @@ def get_log_file() -> str | None:
             # mkdir's mode is masked by the umask; an operator's existing mode
             # is left alone — widening a directory they tightened would be rude.
             _apply_mode(log_dir, _LOG_DIR_MODE)
-        os.close(_open_mode(log_path, _LOG_FILE_MODE))
+        fd, mode_error = _open_mode(log_path, _LOG_FILE_MODE)
+        os.close(fd)
+        if mode_error is not None:
+            _debug("Cannot set mode %o on %s", _LOG_FILE_MODE, log_path)
         return str(log_path)
     except OSError:
         return None
