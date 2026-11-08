@@ -1335,6 +1335,18 @@ class TestBuildExportContextJobMetadata:
         assert ctx.job_metadata["team"] == "mgmt"
         assert mock_metadata.await_count == 2
 
+    def test_label_only_child_row_does_not_shadow_the_parent(self):
+        """A child that declares only labels still exports the parent's team."""
+        ctx, mock_metadata = self._run_build(
+            {
+                "child": {"team": "", "tier": "", "version": "", "labels": ["x"]},
+                "parent": {"team": "mgmt", "tier": "", "version": "", "labels": []},
+            },
+            child_job_name="child",
+        )
+        assert ctx.job_metadata["team"] == "mgmt"
+        assert mock_metadata.await_count == 2
+
     def test_storage_failure_leaves_metadata_empty(self):
         import asyncio
 

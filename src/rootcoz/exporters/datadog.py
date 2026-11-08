@@ -76,7 +76,12 @@ from urllib.parse import urlparse
 import httpx
 
 from rootcoz import get_child_logger
-from rootcoz.exporters.base import ExportContext, Exporter, ExporterResult
+from rootcoz.exporters.base import (
+    JOB_METADATA_DIMENSIONS,
+    ExportContext,
+    Exporter,
+    ExporterResult,
+)
 from rootcoz.storage import (
     AI_SYSTEM_USERNAME,
     HISTORY_CLASSIFICATIONS,
@@ -102,6 +107,11 @@ _SERIES_PATH = "/api/v2/series"
 #: previous push.
 _SERIES_GAUGE = 3
 
+#: Series type ``1`` is a count: Datadog sums the points over the interval
+#: (``.as_count()``), which is what "jobs pushed this hour, per team" needs. A
+#: gauge would default to an average and report ``1`` instead of the count.
+_SERIES_COUNT = 1
+
 #: The category metric names. Three metric names in total (see
 #: ``_METADATA_METRIC``), and no per-push tag, keep the tag-combination count
 #: (Datadog's billing unit) bounded.
@@ -113,8 +123,6 @@ _PATTERN_METRIC = "rootcoz.failures.pattern"
 #: instead of per job.
 _METADATA_METRIC = "rootcoz.jobs.by_metadata"
 
-#: Declared job-metadata dimensions carried as tags, in emission order.
-_METADATA_DIMENSIONS = ("team", "tier", "version")
 
 #: Per-request timeout (seconds) for event submission.
 _REQUEST_TIMEOUT = 30.0
@@ -569,10 +577,10 @@ def _metadata_tags(job_metadata: dict[str, Any]) -> list[str]:
         job_metadata: Declared metadata dict (``team``, ``tier``, ``version``).
 
     Returns:
-        Tag list, in :data:`_METADATA_DIMENSIONS` order; possibly empty.
+        Tag list, in :data:`JOB_METADATA_DIMENSIONS` order; possibly empty.
     """
     tags: list[str] = []
-    for dimension in _METADATA_DIMENSIONS:
+    for dimension in JOB_METADATA_DIMENSIONS:
         value = str(job_metadata.get(dimension) or "").strip()
         if value:
             tags.append(f"{dimension}:{sanitize_tag_value(value)}")
@@ -629,27 +637,29 @@ def _failure_analysis(failure: dict[str, Any]) -> dict[str, Any]:
 def _metadata_series(context: ExportContext, timestamp: int) -> dict[str, Any]:
     """The per-push job-count point: value ``1``, metadata tags only.
 
-    Deliberately carries **no** job/build identity. A gauge is keyed on its
+    Deliberately carries **no** job/build identity. A series is keyed on its
     tags, so adding the identity back would give one series per job — the
     very cardinality this metric exists to avoid. The aggregation (per team,
-    per tier, per version) happens in the Datadog query instead.
+    per tier, per version) happens in the Datadog query instead, which is why
+    the type is a count: Datadog sums counts over the interval, so summing by
+    ``team`` reports the number of pushes rather than a gauge of ``1``.
 
     This series is append-only history: a changed ``team``/``tier``/
     ``version`` must produce a new point on its own series, never a rewrite of
     an already-emitted one. So never ``update_tags`` it and never re-send an
     old point with the new tags — that is exactly why the shape is a plain
-    gauge stamped at push time.
+    count stamped at push time.
 
     Args:
         context: Export context carrying ``job_metadata``.
         timestamp: Push time, shared with the rest of the series of this push.
 
     Returns:
-        One gauge series entry (``tags`` empty when nothing is declared).
+        One count series entry (``tags`` empty when nothing is declared).
     """
     return {
         "metric": _METADATA_METRIC,
-        "type": _SERIES_GAUGE,
+        "type": _SERIES_COUNT,
         "points": [{"timestamp": timestamp, "value": 1.0}],
         "tags": _metadata_tags(context.job_metadata),
     }
@@ -1018,9 +1028,9 @@ class DatadogExporter(Exporter):
             timestamp: Push time, shared with the events of the same push.
 
         Returns:
-            Gauge series entries: one per classification (always, all zeros
-            when the ``dd_push_classifications`` toggle is off), one per
-            failure pattern, and the single job-metadata point.
+            Series entries: one gauge per classification (always, all zeros
+            when the ``dd_push_classifications`` toggle is off), one gauge per
+            failure pattern, and the single job-metadata count point.
         """
         classification_vocabulary = tuple(
             _tag_label(classification)

@@ -149,7 +149,11 @@ from rootcoz.error_messages import (
     make_user_friendly_error,
     tracker_credential_message,
 )
-from rootcoz.exporters.base import ExportContext, Exporter
+from rootcoz.exporters.base import (
+    JOB_METADATA_DIMENSIONS,
+    ExportContext,
+    Exporter,
+)
 from rootcoz.exporters.datadog import (
     DATADOG_SITES,
     DatadogExporter,
@@ -12130,18 +12134,22 @@ async def _build_export_context(
     # Declared job metadata (team/tier/version) travels on the context because
     # exporters never touch storage. A child-scoped push prefers the child's
     # own declaration and falls back to the parent job's, so a pipeline whose
-    # children have no row of their own still exports its team.
+    # children have no row of their own still exports its team. A row that
+    # declares only labels is not a declaration — it must not shadow the
+    # parent's team, so the fallback keys on the dimensions themselves.
     job_metadata: dict[str, Any] = {}
     for metadata_job in dict.fromkeys(
         name for name in (child_job_name, parent_job_name) if name
     ):
         try:
-            job_metadata = await storage.get_job_metadata(metadata_job) or {}
+            row = await storage.get_job_metadata(metadata_job) or {}
         except Exception:
             logger.debug(
                 "Failed to fetch job metadata for '%s'", metadata_job, exc_info=True
             )
-        if job_metadata:
+            continue
+        if any(row.get(dimension) for dimension in JOB_METADATA_DIMENSIONS):
+            job_metadata = row
             break
 
     # Build history classifications, tracked-in links, and reviewer data

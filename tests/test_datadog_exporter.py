@@ -1157,7 +1157,10 @@ class TestSeriesScoreboard:
         assert set(payload) == {"series"}
         for entry in payload["series"]:
             assert set(entry) == {"metric", "type", "points", "tags"}
-            assert entry["type"] == 3  # gauge
+            # The category scoreboard is a gauge; the job count is a count, so
+            # Datadog sums it per team instead of averaging it down to 1.
+            expected_type = 1 if entry["metric"] == _METADATA_METRIC else 3
+            assert entry["type"] == expected_type
             assert len(entry["points"]) == 1
             assert set(entry["points"][0]) == {"timestamp", "value"}
             assert isinstance(entry["points"][0]["value"], float)
@@ -1560,7 +1563,9 @@ class TestJobMetadataMetric:
         entries = _metadata_entries(_series_posts(posts)[0]["json"]["series"])
         assert len(entries) == 1
         entry = entries[0]
-        assert entry["type"] == 3  # gauge
+        # Count, not gauge: Datadog sums counts over the interval, so summing
+        # by team reports the number of pushes. A gauge would aggregate to 1.
+        assert entry["type"] == 1
         assert len(entry["points"]) == 1
         assert entry["points"][0]["value"] == 1.0
         assert entry["tags"] == ["team:mgmt", "tier:1", "version:v2.1.0"]

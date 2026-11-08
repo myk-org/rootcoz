@@ -10,6 +10,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Self
 
+#: The declared job-metadata dimensions exporters may tag with — the bounded,
+#: indexed ``job_metadata`` columns, never a free-form value. One list, so the
+#: Datadog series, the event tags and the push pipeline's fallback agree.
+JOB_METADATA_DIMENSIONS: tuple[str, ...] = ("team", "tier", "version")
+
 
 @dataclass
 class ExportContext:
