@@ -23,6 +23,13 @@ def make_user_friendly_error(error: str | Exception) -> str:
     err_str = str(error)
     err_lower = err_str.lower()
 
+    # A refusal is rootcoz's own sentence, already naming the cause and the fix.
+    # Re-mapping it here turns "sidecar HTTP 404" into a missing Jenkins build.
+    from rootcoz.ai_client import SESSION_REFUSAL_MARKER
+
+    if err_str.startswith(SESSION_REFUSAL_MARKER):
+        return err_str
+
     if (
         "not found in jenkins" in err_lower
         or "job does not exist" in err_lower

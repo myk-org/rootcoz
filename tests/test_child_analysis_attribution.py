@@ -348,12 +348,15 @@ async def test_child_only_completion_persists_nested_failed_group_count(
     from rootcoz.main import _process_ci_source_analysis
     from rootcoz.models import UnifiedAnalyzeRequest
 
-    def failure(name: str, signature: str, details: str) -> FailureAnalysis:
+    def failure(
+        name: str, signature: str, details: str, placeholder: bool = False
+    ) -> FailureAnalysis:
         return FailureAnalysis(
             test_name=name,
             error="boom",
             error_signature=signature,
-            analysis=AnalysisDetail(details=details),
+            # The typed flag the producer sets; the sentence in details is not read.
+            analysis=AnalysisDetail(details=details, placeholder=placeholder),
         )
 
     failed_details = "Analysis failed; check server logs for details"
@@ -367,15 +370,15 @@ async def test_child_only_completion_persists_nested_failed_group_count(
                     build_number=2,
                     all_groups_failed=True,
                     failures=[
-                        failure("a", "same", failed_details),
-                        failure("b", "same", failed_details),
+                        failure("a", "same", failed_details, placeholder=True),
+                        failure("b", "same", failed_details, placeholder=True),
                     ],
                 ),
                 ChildJobAnalysis(
                     job_name="leaf",
                     build_number=3,
                     all_groups_failed=True,
-                    failures=[failure("c", "same", failed_details)],
+                    failures=[failure("c", "same", failed_details, placeholder=True)],
                 ),
             ],
         ),
@@ -485,18 +488,22 @@ def test_nested_all_failed_children_are_not_counted_as_success() -> None:
 
 
 @pytest.mark.parametrize(
-    ("classification", "details", "analysis_error", "expected"),
+    ("classification", "details", "analysis_error", "placeholder", "expected"),
     [
         # A child carrying placeholder rows analysed nothing, even though the
         # rows are present so the failed tests stay reviewable.
-        ("", "Analysis failed; check server logs for details", "", False),
-        ("", "narration only", "AI analysis incomplete", False),
+        ("", "Analysis failed; check server logs for details", "", True, False),
+        ("", "narration only", "AI analysis incomplete", False, False),
         # The direction that must keep working: a classified row is a success.
-        ("CODE ISSUE", "narration only", "", True),
+        ("CODE ISSUE", "narration only", "", False, True),
     ],
 )
 def test_child_success_requires_a_usable_classification(
-    classification: str, details: str, analysis_error: str, expected: bool
+    classification: str,
+    details: str,
+    analysis_error: str,
+    placeholder: bool,
+    expected: bool,
 ) -> None:
     from rootcoz.sources.jenkins_source import child_has_successful_analysis
 
@@ -508,7 +515,11 @@ def test_child_success_requires_a_usable_classification(
                 test_name="test_a",
                 error="boom",
                 analysis_error=analysis_error,
-                analysis=AnalysisDetail(classification=classification, details=details),
+                analysis=AnalysisDetail(
+                    classification=classification,
+                    details=details,
+                    placeholder=placeholder,
+                ),
             )
         ],
     )

@@ -25,18 +25,17 @@ from rootcoz import get_child_logger
 from rootcoz.config import Settings
 from rootcoz.engine.core import (
     AnalysisIncompleteError,
+    _failed_group_analyses,
     analyze_failure_group,
     derive_error_details,
     extract_relevant_console_lines,
     get_failure_signature,
-    get_legacy_signature,
     incomplete_reason,
 )
 from rootcoz.error_messages import make_user_friendly_error
 from rootcoz.jenkins import JenkinsClient
 from rootcoz.jenkins_artifacts import process_build_artifacts
 from rootcoz.models import (
-    AnalysisDetail,
     BaseTestEntry,
     ChildJobAnalysis,
     FailedTest,
@@ -131,6 +130,11 @@ def _normalize_child_results(
                 child_num,
                 type(result).__name__,
             )
+            # A session refusal is the child's whole story: keep its sentence
+            # rather than "check server logs".
+            from rootcoz.ai_client import SESSION_REFUSAL_MARKER
+
+            child_error = str(result).lstrip()
             bundles.append(
                 ChildJobResult(
                     analysis=ChildJobAnalysis(
@@ -140,6 +144,7 @@ def _normalize_child_results(
                         note=(
                             str(result)
                             if isinstance(result, AnalysisIncompleteError)
+                            or child_error.startswith(SESSION_REFUSAL_MARKER)
                             else "Child analysis failed; check server logs for details"
                         ),
                         all_groups_failed=True,
@@ -1313,6 +1318,7 @@ async def _analyze_grouped_failures(
     failures: list[FailureAnalysis] = []
     failed_groups = 0
     group_list = list(failure_groups.values())
+    group_sigs = list(failure_groups)
     for i, result in enumerate(group_results):
         if isinstance(result, Exception):
             from rootcoz.engine.chat import safe_exception_frames
@@ -1324,20 +1330,16 @@ async def _analyze_grouped_failures(
                 type(result).__name__,
                 safe_exception_frames(result),
             )
-            for tf in group_list[i]:
-                failures.append(
-                    FailureAnalysis(
-                        test_name=tf.test_name,
-                        error=tf.error_message,
-                        stack_trace=tf.stack_trace,
-                        error_signature=get_legacy_signature(tf),
-                        error_signature_v2=get_failure_signature(tf),
-                        analysis_error=incomplete_reason(result),
-                        analysis=AnalysisDetail(
-                            details="Analysis failed; check server logs for details"
-                        ),
-                    )
+            # One placeholder builder for every path: a refusal keeps its
+            # sentence instead of "check server logs".
+            failures.extend(
+                _failed_group_analyses(
+                    group_sigs[i],
+                    group_list[i],
+                    analysis_error=incomplete_reason(result),
+                    error_text=str(result),
                 )
+            )
         else:
             failures.extend(result)
 

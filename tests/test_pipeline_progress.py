@@ -32,8 +32,9 @@ async def test_direct_and_child_failures_persist_scoped_group_count(
         test_name="bad",
         error="boom",
         error_signature="same",
+        # The typed flag the producer sets; the sentence in details is not read.
         analysis=AnalysisDetail(
-            details="Analysis failed; check server logs for details"
+            details="Analysis failed; check server logs for details", placeholder=True
         ),
     )
     good = FailureAnalysis(
@@ -139,7 +140,8 @@ async def test_all_direct_groups_fail_preserves_child_report(
                     analysis=AnalysisDetail(
                         details="diagnosed"
                         if child_success
-                        else "Analysis failed; check server logs for details"
+                        else "Analysis failed; check server logs for details",
+                        placeholder=not child_success,
                     ),
                 )
             ],
@@ -257,6 +259,85 @@ async def test_all_direct_groups_fail_preserves_child_report(
 
 
 @pytest.mark.asyncio
+async def test_child_only_failure_summary_names_the_refusal(
+    temp_db_path: Path, tmp_path: Path
+) -> None:
+    """A refused child names the cause; a bare count does not.
+
+    ``_normalize_child_results`` keeps the refusal sentence in a failed child's
+    note, and this path also reaches an all-failed job's summary.
+    """
+    from rootcoz.ai_client import SESSION_REFUSAL_MARKER
+    from rootcoz.main import _process_ci_source_analysis
+
+    sentence = (
+        f"{SESSION_REFUSAL_MARKER}: the AI credential for claude/model was"
+        " rejected (sidecar HTTP 401)."
+    )
+    children = [
+        ChildJobAnalysis(
+            job_name="leaf",
+            build_number=1,
+            all_groups_failed=True,
+            note=sentence,
+        )
+    ]
+    source_result = CISourceResult(failures=[], child_job_infos=[("leaf", 1)])
+    with (
+        patch.object(storage, "DB_PATH", temp_db_path),
+        patch("rootcoz.main.create_source_from_request") as source,
+        patch(
+            "rootcoz.main.setup_analysis_workspace",
+            new_callable=AsyncMock,
+            return_value=(WorkspaceSetupResult(tmp_path), ""),
+        ),
+        patch(
+            "rootcoz.main._preflight_sidecar_check",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "rootcoz.main._validate_catalog_pair",
+            new_callable=AsyncMock,
+            return_value=("claude", "model"),
+        ),
+        patch("rootcoz.main._auto_assign_metadata", new_callable=AsyncMock),
+        patch(
+            "rootcoz.main.storage.make_classifications_visible", new_callable=AsyncMock
+        ),
+    ):
+        source.return_value.raw_xml = None
+        source.return_value.requires_pre_fetch.return_value = False
+        source.return_value.prepare_workspace = AsyncMock(return_value=[])
+        source.return_value.fetch = AsyncMock(return_value=source_result)
+        source.return_value.analyze_children = AsyncMock(return_value=(children, []))
+        source.return_value.persist_fetch_metadata = AsyncMock()
+        await storage.init_db()
+        await storage.save_result("child-refusal", status="pending", result={})
+        await _process_ci_source_analysis(
+            job_id="child-refusal",
+            body=UnifiedAnalyzeRequest(
+                type="raw",
+                passed_tests=[BaseTestEntry(test_name="ok", status="passed")],
+            ),
+            merged=Settings(),
+            display_name="parent",
+            ai_provider="claude",
+            ai_model="model",
+            peer_ai_configs=None,
+            tests_repo_url="",
+            tests_repo_ref="",
+            resolved_tests_repo_token="",
+            additional_repos_list=[],
+            base_url="",
+        )
+        row = await storage.get_result("child-refusal")
+    assert row["status"] == "failed", row["result"]
+    assert row["result"]["summary"] == sentence
+    assert row["result"]["error"] == sentence
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "jira_enabled, keywords, partial, dedup, all_failed",
     [
@@ -305,7 +386,7 @@ async def test_pipeline_jira_and_saving_stages(
         test_name="bad",
         error="err",
         analysis=AnalysisDetail(
-            details="Analysis failed; check server logs for details"
+            details="Analysis failed; check server logs for details", placeholder=True
         ),
     )
 

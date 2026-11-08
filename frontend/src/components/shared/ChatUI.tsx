@@ -357,7 +357,7 @@ export function ChatUI({
       }
     } catch (err) {
       if (!mountedRef.current) return
-      setError(err instanceof Error ? err.message : 'Failed to start chat')
+      setError(extractApiDetail(err) ?? (err instanceof Error ? err.message : 'Failed to start chat'))
       console.warn('[ChatUI] Chat start failed')
     } finally {
       startInFlightRef.current = false

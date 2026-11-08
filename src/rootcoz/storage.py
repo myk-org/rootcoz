@@ -241,99 +241,155 @@ async def _has_results_table(db: aiosqlite.Connection) -> bool:
     return required <= {row[1] for row in await cursor.fetchall()}
 
 
-@dataclass
-class _SweepDb:
-    """The database one sweep pass resumes, re-verified before every connection.
+def _sweep_stopped(name: str, path: Path) -> None:
+    """Announce, once, that a pass was handed a file it cannot sweep."""
+    logger.info("%s stopped: %s is no longer the database it started on", name, path)
 
-    A pass that reconnects per batch would otherwise mine a database that was
-    deleted (or replaced) under it and raise ``no such table: results``. One
-    connection answers both questions -- "is this file still our database?" and
-    "read/write it" -- so a file swapped between two operations cannot slip
-    between them. A sweep never resurrects a database it was not given, and
-    never configures one that is not a rootcoz database.
-    """
+
+@dataclass(slots=True)
+class _SweepDb:
+    """The file a sweep pass pinned, and whether it is still reachable by path."""
 
     path: Path
-    name: str
-    gone: bool = False
-    identity: tuple[int, int] | None = None  # st_dev, st_ino of the first file we swept
+    db: aiosqlite.Connection
+    pinned: tuple[int, int]
+    # Set by a pass that stopped at a path which no longer names ``pinned``.
+    moved: bool = False
 
-    @asynccontextmanager
-    async def open(self) -> AsyncIterator[aiosqlite.Connection | None]:
-        """This connection, or ``None`` once the pinned file is not our database."""
-        db = await self._connect()
-        if db is None:
-            self._stop()
+
+def _sweep_path_still_pinned(sweep: _SweepDb) -> bool:
+    """Whether *sweep*'s path still names the file its connection holds.
+
+    A ``stat`` and never a reconnect: resolving the connection again would hand
+    the pass whatever file the path names now, which is the bug #473 removed.
+
+    SQLite names a connection's ``-wal``/``-shm`` after its *path*, while the
+    connection itself is pinned to an inode, so a commit after a swap addresses
+    this pass's journal frames to the replacement -- and the next process to open
+    that file replays them into it. Called before every batch commit, so a moved
+    path is a stop before anything is addressed to it.
+
+    A path that is *gone* counts as pinned: `_open_sweep_db` refuses to re-create
+    or re-open it, so the pass keeps writing to the file it holds and reports the
+    loss when it finishes. Only a file sitting at the path can be handed frames.
+    """
+    try:
+        st = sweep.path.stat()
+    except OSError:  # absent or unreadable: no other file to address frames to
+        return True
+    return (st.st_dev, st.st_ino) == sweep.pinned
+
+
+@asynccontextmanager
+async def _open_sweep_db(db_path: Path, name: str) -> AsyncIterator[_SweepDb | None]:
+    """The one connection a sweep pass runs every batch on.
+
+    A pass that reconnected per batch resolved its database from the *path* each
+    time, so a file swapped in between two connections was the file the next
+    batch read and wrote. This descriptor is opened once and held for the whole
+    pass: no later batch asks for a file, so no later batch can be handed
+    another one -- a swap after the open is invisible to the descriptor instead
+    of merely detected at the next connection.
+
+    Only the open itself has a window, and it is checked on both sides of it
+    against the path stat taken just before, so a swap landing inside the await
+    is a stop rather than the file this connection is assumed to hold.
+
+    Yields that connection with the ``(st_dev, st_ino)`` it was opened for: the
+    batches run on the connection, but the *journal* is still named after the
+    path, so a pass that keeps committing across a swap hands its frames to the
+    replacement. The pin is what lets a batch tell the two apart.
+
+    Yields ``None`` after the one-shot stop log when the file is not the
+    database the pass was given: missing (``mode=rw`` cannot create it),
+    replaced across the open, corrupt, or a foreign namesake.
+    """
+    try:
+        before = db_path.stat()
+    except FileNotFoundError:
+        _sweep_stopped(name, db_path)
+        yield None
+        return
+    try:
+        db = await aiosqlite.connect(_db_uri(db_path), uri=True)
+    except sqlite3.OperationalError:  # gone: rw refuses to create the file again
+        _sweep_stopped(name, db_path)
+        yield None
+        return
+    try:
+        after = db_path.stat()
+        if (after.st_dev, after.st_ino) != (before.st_dev, before.st_ino):
+            # Another database at our path: sweeping it would count its bytes as
+            # the ones this pass started with, and write rows this pass never read.
+            await db.close()
+            _sweep_stopped(name, db_path)
             yield None
             return
+        has_results = await _has_results_table(db)
+    except FileNotFoundError:  # deleted while it was being opened
+        await db.close()
+        _sweep_stopped(name, db_path)
+        yield None
+        return
+    except sqlite3.OperationalError:
+        # A lock or an I/O fault, not a dead database: the caller logs it as the
+        # failure it is instead of this pass calling itself stopped.
+        await db.close()
+        raise
+    except sqlite3.DatabaseError:  # corrupt: the connect is lazy, this read raises
+        await db.close()
+        _sweep_stopped(name, db_path)
+        yield None
+        return
+    except BaseException:  # any other failure still closes before it propagates
+        await db.close()
+        raise
+    if not has_results:  # a foreign sqlite database: leave it as it is
+        await db.close()
+        yield None
+        return
+    sweep = _SweepDb(path=db_path, db=db, pinned=(before.st_dev, before.st_ino))
+    try:
+        await _configure_connection(db)
+    except BaseException:
+        # Loud: past this point the file is ours, so a failure is a real fault
+        # (a lock, a broken volume), not "the database went away".
+        await db.close()
+        raise
+    try:
+        yield sweep
+    finally:
+        # Fold this pass's frames back into the file the descriptor holds before
+        # releasing it -- always, moved or not. Measured on a swap: skipping the
+        # checkpoint leaves a ``-wal`` named after the path holding 4152 B of
+        # replayable frames that the replacement's next opener folds into itself;
+        # truncating it folds those frames into the *descriptor's* inode instead
+        # and leaves 0 B beside the path. So the truncation is what makes a swap
+        # safe, and skipping it is the hazard.
         try:
-            yield db
+            with suppress(sqlite3.Error):
+                rows = await (
+                    await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                ).fetchall()
+                # (busy, frames in the journal, frames folded back). A checkpoint
+                # another connection holds busy leaves frames beside the path --
+                # the very journal the replacement replays -- so a pass that could
+                # not truncate must not read as a clean one.
+                if rows and (rows[0][0] or rows[0][1] != rows[0][2]):
+                    logger.warning(
+                        "%s: %s kept %s of %s journal frame(s) (checkpoint busy=%s);"
+                        " the next opener of that path may replay them",
+                        name,
+                        db_path,
+                        rows[0][1] - max(rows[0][2], 0),
+                        rows[0][1],
+                        rows[0][0],
+                    )
         finally:
+            # Shutdown cancels the background sweep, so a cancel can land in the
+            # checkpoint above: a close it skipped would strand the connection's
+            # worker thread for the life of the process.
             await db.close()
-
-    async def _connect(self) -> aiosqlite.Connection | None:
-        """A configured connection to our database, or ``None`` when it is not there."""
-        if self.gone:  # a stopped pass stays stopped; the second stage must not resume
-            return None
-        try:
-            before = self.path.stat()
-        except FileNotFoundError:
-            return None
-        if self.identity is None:
-            self.identity = (before.st_dev, before.st_ino)
-        elif (before.st_dev, before.st_ino) != self.identity:
-            # Another database at our path: sweeping it would count its bytes as
-            # the ones this pass started with.
-            return None
-        try:
-            db = await aiosqlite.connect(_db_uri(self.path), uri=True)
-        except sqlite3.OperationalError:  # gone: rw refuses to create the file again
-            return None
-        try:
-            # Read on both sides of the open: the identity is pinned to a file that
-            # stayed put across it, so a swap landing inside the await -- after the
-            # descriptor was taken, before this stat -- is a mismatch instead of the
-            # new pin, and the batches behind it cannot follow the path.
-            after = self.path.stat()
-            if (after.st_dev, after.st_ino) != self.identity:
-                await db.close()
-                return None
-            has_results = await _has_results_table(db)
-        except FileNotFoundError:  # deleted while it was being opened
-            await db.close()
-            return None
-        except sqlite3.OperationalError:
-            # A lock or an I/O fault, not a dead database: the caller logs it as
-            # the failure it is instead of this pass calling itself stopped.
-            await db.close()
-            raise
-        except sqlite3.DatabaseError:  # corrupt: the connect is lazy, this read raises
-            await db.close()
-            return None
-        except BaseException:  # any other failure still closes before it propagates
-            await db.close()
-            raise
-        if not has_results:  # a foreign sqlite database: leave it as it is
-            await db.close()
-            return None
-        try:
-            await _configure_connection(db)
-        except BaseException:
-            # Loud: past this point the file is ours, so a failure is a real fault
-            # (a lock, a broken volume), not "the database went away".
-            await db.close()
-            raise
-        return db
-
-    def _stop(self) -> None:
-        """Announce the stop once; every later connection returns ``None`` too."""
-        if not self.gone:
-            self.gone = True
-            logger.info(
-                "%s stopped: %s is no longer the database it started on",
-                self.name,
-                self.path,
-            )
 
 
 # Primary (override) classifications — derived from the OverrideClassificationLiteral
@@ -1045,9 +1101,16 @@ def _denorm_row_params(
 
 
 async def _derive_denorm_pages(
-    where: str, where_params: Sequence[Any], batch_size: int, sweep_db: _SweepDb
+    sweep: _SweepDb,
+    where: str,
+    where_params: Sequence[Any],
+    batch_size: int,
 ) -> int:
     """Derive one pending set, keyset-paged, one transaction per page.
+
+    Every page runs on the pass's own connection, so a page can never be
+    resolved to a file the pass did not open. The file is re-stated before each
+    page commits, and a page whose path moved is rolled back rather than counted.
 
     Returns:
         Rows whose columns this pass actually rewrote.
@@ -1055,28 +1118,31 @@ async def _derive_denorm_pages(
     rowid = 0
     done = 0
     while True:
-        async with sweep_db.open() as db:
-            if db is None:
-                return done
-            cursor = await db.execute(
-                "SELECT rowid AS rid, job_id, result_json FROM results"
-                f" WHERE rowid > ? AND {where} ORDER BY rowid LIMIT ?",
-                (rowid, *where_params, batch_size),
-            )
-            rows = await cursor.fetchall()
-            if not rows:
-                return done
-            rowid = rows[-1]["rid"]
-            # Parsing a multi-MB payload must not stall /health (#402).
-            for params in await asyncio.to_thread(_denorm_row_params, rows):
-                cursor = await db.execute(_RESULTS_DENORM_UPDATE_SQL, params)
-                done += cursor.rowcount
-            await db.commit()
-            logger.debug(
-                "Migration: %d result(s) derived so far, cursor rowid=%d",
-                done,
-                rowid,
-            )
+        cursor = await sweep.db.execute(
+            "SELECT rowid AS rid, job_id, result_json FROM results"
+            f" WHERE rowid > ? AND {where} ORDER BY rowid LIMIT ?",
+            (rowid, *where_params, batch_size),
+        )
+        rows = await cursor.fetchall()
+        if not rows:
+            return done
+        rowid = rows[-1]["rid"]
+        # Parsing a multi-MB payload must not stall /health (#402).
+        derived = 0
+        for params in await asyncio.to_thread(_denorm_row_params, rows):
+            cursor = await sweep.db.execute(_RESULTS_DENORM_UPDATE_SQL, params)
+            derived += cursor.rowcount
+        if not _sweep_path_still_pinned(sweep):
+            await sweep.db.rollback()
+            sweep.moved = True
+            return done
+        await sweep.db.commit()
+        done += derived
+        logger.debug(
+            "Migration: %d result(s) derived so far, cursor rowid=%d",
+            done,
+            rowid,
+        )
 
 
 async def backfill_results_denorm(batch_size: int = 200) -> int:
@@ -1105,31 +1171,40 @@ async def backfill_results_denorm(batch_size: int = 200) -> int:
     """
     if batch_size <= 0:
         raise ValueError("batch_size must be > 0")
-    # One path for the whole pass: a DB_PATH rebind mid-sweep must not send the
-    # next page to another database.
+    # One path and one connection for the whole pass: a DB_PATH rebind or a file
+    # swapped in mid-sweep must not send the next page to another database.
     db_path = current_db_path()
-    sweep_db = _SweepDb(db_path, "denorm backfill")
-    async with sweep_db.open() as db:
-        if db is None:
+    async with _open_sweep_db(db_path, "denorm backfill") as sweep:
+        if sweep is None:
             return 0
+        db = sweep.db
         cursor = await db.execute(
             "SELECT COUNT(*) FROM results WHERE"
             f" ({_DENORM_PENDING_BELOW}) OR ({_DENORM_PENDING_UNPROVEN})",
             (_RESULTS_DENORM_VERSION, _RESULTS_DENORM_VERSION),
         )
         pending = (await cursor.fetchone())[0]
-    if not pending:
-        return 0
-    logger.info(
-        "Migration: deriving denormalized columns for %d results row(s)", pending
-    )
-    done = await _derive_denorm_pages(
-        _DENORM_PENDING_UNPROVEN, (_RESULTS_DENORM_VERSION,), batch_size, sweep_db
-    )
-    # Second: rows an older build inserted and never derived at all.
-    done += await _derive_denorm_pages(
-        _DENORM_PENDING_BELOW, (_RESULTS_DENORM_VERSION,), batch_size, sweep_db
-    )
+        if not pending:
+            return 0
+        logger.info(
+            "Migration: deriving denormalized columns for %d results row(s)", pending
+        )
+        done = await _derive_denorm_pages(
+            sweep, _DENORM_PENDING_UNPROVEN, (_RESULTS_DENORM_VERSION,), batch_size
+        )
+        # Second: rows an older build inserted and never derived at all.
+        if not sweep.moved:
+            done += await _derive_denorm_pages(
+                sweep, _DENORM_PENDING_BELOW, (_RESULTS_DENORM_VERSION,), batch_size
+            )
+    if sweep.moved:
+        _sweep_stopped("denorm backfill", db_path)
+        logger.info(
+            "Migration: stopped after deriving %d results row(s); the last page was"
+            " rolled back, not committed",
+            done,
+        )
+        return done
     logger.info("Migration: derived denormalized columns for %d results row(s)", done)
     return done
 
@@ -1159,15 +1234,20 @@ async def _eligible_result_bytes(db: aiosqlite.Connection) -> int:
     return (await cursor.fetchone())[0]
 
 
-async def _db_storage_report(db: aiosqlite.Connection, db_path: Path) -> str:
-    """File size plus free pages — the space a VACUUM could return."""
+async def _db_storage_report(db: aiosqlite.Connection) -> str:
+    """Database size plus free pages — the space a VACUUM could return.
+
+    Both figures come from this connection, never from a ``stat`` of the path: a
+    file that took the pass's path mid-pass must not lend its own size to a report
+    about the database this pass read and wrote.
+    """
     cursor = await db.execute("PRAGMA freelist_count")
     free_pages = (await cursor.fetchone())[0]
+    cursor = await db.execute("PRAGMA page_count")
+    pages = (await cursor.fetchone())[0]
     cursor = await db.execute("PRAGMA page_size")
     page_size = (await cursor.fetchone())[0]
-    return (
-        f"{db_path.stat().st_size} bytes on disk, {free_pages * page_size} bytes free"
-    )
+    return f"{pages * page_size} bytes in {pages} pages, {free_pages * page_size} bytes free"
 
 
 def _compress_result_rows(
@@ -1203,51 +1283,45 @@ async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, i
     if batch_size <= 0:
         raise ValueError("batch_size must be > 0")
     stats = {"rows": 0, "bytes_before": 0, "bytes_after": 0}
-    # Resolved once, before the first await and every page after it: the sweep
-    # outlives whatever changed DB_PATH, and it must keep writing -- and
-    # reporting -- the file it started on.
+    # One connection for the whole pass: the sweep outlives whatever changed
+    # DB_PATH, and a batch must read, write and report on the file this pass
+    # opened rather than on whatever sits at the path when the batch runs.
     db_path = current_db_path()
-    sweep_db = _SweepDb(db_path, "result_json compression")
-    on_disk_before = "unknown"
-    async with sweep_db.open() as db:
-        if db is None:
+    async with _open_sweep_db(db_path, "result_json compression") as sweep:
+        if sweep is None:
             return stats
+        db = sweep.db
         if not await _migration_applied(db, _RESULTS_DENORM_KEY):
             logger.warning(
                 "result_json compression skipped: denormalized columns not derived"
             )
             return stats
         stats["bytes_before"] = await _eligible_result_bytes(db)
-        with suppress(FileNotFoundError):
-            on_disk_before = await _db_storage_report(db, db_path)
-    stats["bytes_after"] = stats["bytes_before"]
-    logger.info(
-        "result_json compression: starting (%d bytes of legacy results, database %s)",
-        stats["bytes_before"],
-        on_disk_before,
-    )
-    rowid = 0
-    while True:
-        async with sweep_db.open() as db:
-            if db is None:
-                break
+        on_disk_before = await _db_storage_report(db)
+        stats["bytes_after"] = stats["bytes_before"]
+        logger.info(
+            "result_json compression: starting (%d bytes of legacy results, database %s)",
+            stats["bytes_before"],
+            on_disk_before,
+        )
+        rowid = 0
+        while True:
             cursor = await db.execute(
                 _RESULT_JSON_COMPRESSION_SELECT,
                 (rowid, _RESULTS_DENORM_VERSION, _RESULT_ZSTD_MIN_BYTES, batch_size),
             )
             rows = await cursor.fetchall()
-        if not rows:
-            break
-        rowid = rows[-1]["rid"]
-        # Derive and encode off the event loop (#402): /health must answer between
-        # batches.
-        params_page = await asyncio.to_thread(_compress_result_rows, rows)
-        if not params_page:
-            continue
-        async with sweep_db.open() as db:
-            if db is None:
+            if not rows:
                 break
+            rowid = rows[-1]["rid"]
+            # Derive and encode off the event loop (#402): /health must answer
+            # between batches.
+            params_page = await asyncio.to_thread(_compress_result_rows, rows)
+            if not params_page:
+                continue
             await db.execute("BEGIN IMMEDIATE")
+            page_rows = 0
+            page_bytes = 0
             for params in params_page:
                 # Compare-and-swap on the payload, not just on its type: a
                 # concurrent patch -- or a write from a pre-compression replica --
@@ -1255,39 +1329,63 @@ async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, i
                 # this statement writes are the ones derived from that text.
                 cursor = await db.execute(_RESULTS_DENORM_UPDATE_SQL, params)
                 if cursor.rowcount and params["frame"] is not None:
-                    stats["rows"] += 1
-                    stats["bytes_after"] += len(params["frame"]) - len(
-                        params["payload"].encode()
-                    )
+                    page_rows += 1
+                    page_bytes += len(params["frame"]) - len(params["payload"].encode())
+            # A stat, not a reconnect (#473): this connection's ``-wal`` is named
+            # after the path, so a COMMIT after a swap would address this batch's
+            # frames to the replacement, where the next opener replays them into
+            # it. Residual window, documented and not closed: the path can still
+            # move between this stat and the COMMIT below, so the guarantee is
+            # "the pass stops at the first batch whose path moved", never "a swap
+            # cannot land inside a batch".
+            if not _sweep_path_still_pinned(sweep):
+                await db.rollback()  # its rows were addressed to another file
+                sweep.moved = True
+                break
             await db.commit()
-        logger.debug(
-            "result_json compression: %d row(s) so far, cursor rowid=%d",
-            stats["rows"],
-            rowid,
-        )
-    on_disk_after: str | None = None
-    async with sweep_db.open() as db:
-        if db is not None:
-            with suppress(FileNotFoundError):
-                on_disk_after = await _db_storage_report(db, db_path)
-    if on_disk_after is None:
-        logger.info(
-            "result_json compression: stopped after %d row(s) compressed,"
-            " %d -> %d bytes (no file report)",
-            stats["rows"],
-            stats["bytes_before"],
-            stats["bytes_after"],
-        )
-    else:
-        logger.info(
-            "result_json compression: done, %d row(s) compressed, %d -> %d bytes,"
-            " database %s -> %s",
-            stats["rows"],
-            stats["bytes_before"],
-            stats["bytes_after"],
-            on_disk_before,
-            on_disk_after,
-        )
+            stats["rows"] += page_rows
+            stats["bytes_after"] += page_bytes
+            logger.debug(
+                "result_json compression: %d row(s) so far, cursor rowid=%d",
+                stats["rows"],
+                rowid,
+            )
+        if sweep.moved:
+            # Not "done": the batch that saw the swap was rolled back and the path
+            # names another database, so there is no file of ours to report.
+            _sweep_stopped("result_json compression", db_path)
+            logger.info(
+                "result_json compression: stopped after %d row(s) compressed,"
+                " %d -> %d bytes (the batch that found the path moved was rolled"
+                " back, no file report: %s names another database)",
+                stats["rows"],
+                stats["bytes_before"],
+                stats["bytes_after"],
+                db_path,
+            )
+        elif db_path.exists():
+            on_disk_after = await _db_storage_report(db)
+            logger.info(
+                "result_json compression: done, %d row(s) compressed, %d -> %d bytes,"
+                " database %s -> %s",
+                stats["rows"],
+                stats["bytes_before"],
+                stats["bytes_after"],
+                on_disk_before,
+                on_disk_after,
+            )
+        else:
+            # The pass holds its descriptor, so it finished the batches it had --
+            # but the file it committed them to is no longer at the path, so there
+            # is no file size to report and this is not a completed sweep.
+            logger.info(
+                "result_json compression: stopped after %d row(s) compressed,"
+                " %d -> %d bytes (no file report: %s is gone)",
+                stats["rows"],
+                stats["bytes_before"],
+                stats["bytes_after"],
+                db_path,
+            )
     return stats
 
 
@@ -2638,8 +2736,11 @@ async def _migrate_jira_url_per_method_split() -> None:
         await db.commit()
 
 
-# Jobs whose failure_history still mirrors a user override instead of the AI
-# value stored in result_json: exactly what the restore-AI migration repairs.
+# Candidate history rows the restore-AI migration has to check: rows whose
+# classification mirrors a user override.  The predicate over-matches by design
+# -- a job whose stored AI value legitimately equals its override still matches
+# after it was restored -- so the migration confirms with
+# _history_disagrees_with_payload before it rewrites anything.
 _NEEDS_AI_RESTORE_SQL = (
     "FROM failure_history fh "
     "JOIN test_classifications tc "
@@ -2658,11 +2759,24 @@ async def _migrate_restore_ai_classifications() -> None:
     differs from the original AI value in result_json) and re-populates
     from result_json to restore the original AI values.
 
-    Only the jobs that still match are re-populated, so a restart is a no-op
-    for history already restored instead of deleting and re-inserting every
-    readable job's rows. Tracked via ``_migrations_applied``; while a job whose
-    result_json this build cannot decode is still pending, the migration stays
-    unapplied so a build with the codec finishes it.
+    That predicate only narrows the candidates: it compares a history row with
+    the *override*, so a job whose stored AI value equals the override keeps
+    matching after it was restored.  The rewrite is therefore conditional on
+    the stored rows actually differing from the rows the payload produces
+    (:func:`_history_disagrees_with_payload`), compared over every column
+    ``populate_failure_history`` sets except ``job_id`` (the filter) and
+    ``analyzed_at`` (a format-ambiguous timestamp whose realignment belongs to a
+    versioned backfill of its own).  A job whose rows already match is skipped
+    with no write, so an unfinished repair converges instead of rewriting
+    finished work on every boot.  The residual is the deferred job itself: a
+    result_json this build cannot decode keeps the migration unapplied on
+    purpose, so a build with the codec finishes it, and each boot costs that job
+    one read and no write.
+
+    The compare and the rewrite use separate connections deliberately: this runs
+    from ``init_db`` inside the lifespan hook, which does not accept requests
+    until it returns, so nothing can write those rows in between.  Tracked via
+    ``_migrations_applied``.
     """
     migration_key = "restore_ai_classifications_v1"
     async with _connect_db() as db:
@@ -2709,17 +2823,17 @@ async def _migrate_restore_ai_classifications() -> None:
         if not result_data:
             continue
 
+        if not await _history_disagrees_with_payload(job_id, result_data):
+            logger.debug(
+                f"Migration: job_id={job_id} already carries the payload's "
+                "failure_history rows; not rewritten"
+            )
+            continue
+
         await populate_failure_history(
             job_id, result_data, analyzed_at=row["created_at"]
         )
-        # Its rows now come from result_json. Re-check so a job whose stored AI
-        # value happens to equal the override is not rewritten on every run.
-        async with _connect_db() as db:
-            cursor = await db.execute(
-                f"SELECT 1 {_NEEDS_AI_RESTORE_SQL} AND fh.job_id = ?", (job_id,)
-            )
-            if await cursor.fetchone() is None:
-                restored += 1
+        restored += 1
 
     if deferred:
         logger.warning(
@@ -2839,11 +2953,12 @@ async def _migrate_backfill_pattern_axis() -> None:
             await db.commit()
 
     async with _connect_db() as db:
-        # Step 3: Set pattern = 'NEW' for root-cause classifications
-        # that don't have a pattern yet
+        # Step 3: Set pattern = _PATTERN_UNSET_MARKER for root-cause
+        # classifications that don't have a pattern yet
         await db.execute(
-            "UPDATE failure_history SET pattern = 'NEW' "
-            "WHERE pattern = '' AND classification != ''"
+            "UPDATE failure_history SET pattern = ? "
+            "WHERE pattern = '' AND classification != ''",
+            (_PATTERN_UNSET_MARKER,),
         )
 
         # Step 4: Copy pattern-like values in test_classifications to pattern column
@@ -5084,10 +5199,9 @@ def _extract_failures_for_history(
             Used during backfill to preserve historical chronology.
 
     Returns:
-        List of tuples ready for INSERT:
-        (job_id, job_name, build_number, build_id, test_name, error_message,
-         error_signature, error_signature_v2, classification,
-         child_job_name, child_build_number, analyzed_at)
+        One tuple per failure, in ``_FAILURE_HISTORY_COLUMNS`` order -- that
+        constant is the single source of the column names and their order, so
+        this docstring does not restate them a third time.
     """
     rows: list[tuple[Any, ...]] = []
 
@@ -5301,14 +5415,129 @@ async def find_matching_previous_analysis(
         return dict(row)
 
 
+# failure_history columns in the order populate_failure_history inserts them:
+# the single source behind both INSERTs, the guard's SELECT and its projection
+# of the payload's rows.
+_FAILURE_HISTORY_COLUMNS = (
+    "job_id",
+    "job_name",
+    "build_number",
+    "build_id",
+    "test_name",
+    "error_message",
+    "error_signature",
+    "error_signature_v2",
+    "classification",
+    "pattern",
+    "child_job_name",
+    "child_build_number",
+    "analyzed_at",
+)
+# Compared columns: every column the writer sets, minus job_id (the WHERE filter)
+# and analyzed_at (a format-ambiguous timestamp -- see the restore-AI migration).
+_HISTORY_COMPARED_COLUMNS = tuple(
+    column
+    for column in _FAILURE_HISTORY_COLUMNS
+    if column not in ("job_id", "analyzed_at")
+)
+# The pattern-axis backfill's "no pattern yet" default: one *named member* of
+# PatternLiteral (its derived tuple is PATTERN_CLASSIFICATIONS), not a new
+# vocabulary.  The pattern-axis step 3 binds this, and the guard normalises it,
+# so the value the axis writes and the value the guard treats as empty cannot
+# drift apart.  The assertion keeps it a member of the model's literal.
+_PATTERN_UNSET_MARKER = "NEW"
+assert _PATTERN_UNSET_MARKER in PATTERN_CLASSIFICATIONS
+
+
+def _history_rows_for_result(
+    job_id: str, result_data: dict[str, Any], analyzed_at: str = ""
+) -> list[tuple[Any, ...]]:
+    """The failure_history rows a payload produces (single source: writer + guard)."""
+    job_name = result_data.get("job_name", "")
+    build_id, build_number = _resolve_history_build_fields(result_data)
+    return _extract_failures_for_history(
+        result_data, job_id, job_name, build_number, build_id, analyzed_at=analyzed_at
+    )
+
+
+def _history_row_values(row: dict[str, Any]) -> tuple[str, ...]:
+    """One row as comparable text, in ``_HISTORY_COMPARED_COLUMNS`` order.
+
+    Text only, with **no** numeric coercion: the writer stores the payload's own
+    values and SQLite hands a TEXT value back unchanged even from an INTEGER
+    column, so a stored ``'n/a'`` already equals a payload ``'n/a'``.  Not
+    coercing keeps the comparison honest: a payload ``0`` against a legacy stored
+    ``'n/a'`` reports a difference and the repair rewrites the row -- the safe
+    direction, and the same write the unconditional pass performed.
+
+    ``pattern`` is normalised on both sides for the two shapes the pattern axis
+    writes while its own gate is unapplied, and only for those:
+
+    * ``''`` and ``NEW`` mean "nothing assigned yet" **while the row carries a
+      classification** -- ``NEW`` is the engine's default for a fresh analysis
+      and what step 3 of the pattern-axis backfill writes.  For an unclassified
+      row ``NEW`` is *not* a synonym for "unset", so ``''`` against ``NEW``
+      stays a difference and the repair keeps correcting it.
+    * a ``pattern`` equal to the row's own classification when that
+      classification is one of ``_PATTERN_AS_CLASSIFICATION`` -- the *same* set
+      step 1 of that migration copies into ``pattern`` on every boot while its
+      gate is unapplied, so without this rule exactly those rows would be
+      rewritten on every boot.
+    """
+    classification = str(row["classification"] or "")
+    classified = classification != ""
+    pattern_label = classification in _PATTERN_AS_CLASSIFICATION
+    values: list[str] = []
+    for column in _HISTORY_COMPARED_COLUMNS:
+        value = row[column]
+        if column == "pattern":
+            pattern = str(value or "")
+            # Two shapes the pattern axis writes while its own gate is
+            # unapplied; each still reports a difference in its other direction.
+            unset = classified and pattern in ("", _PATTERN_UNSET_MARKER)
+            own_label = pattern_label and pattern == classification
+            values.append("" if unset or own_label else pattern)
+        else:
+            values.append(str(value or ""))
+    return tuple(values)
+
+
+async def _history_disagrees_with_payload(
+    job_id: str, result_data: dict[str, Any]
+) -> bool:
+    """True when a restore would write any compared column differently.
+
+    Compared as multisets of whole rows, not paired by test name: the table has
+    no unique index on (job_id, test_name, child scope) and the writer inserts
+    every payload entry verbatim, so pairing by identity would compare a row
+    against the wrong counterpart on a duplicate and report a difference on
+    every boot.
+    """
+    expected = sorted(
+        _history_row_values(dict(zip(_FAILURE_HISTORY_COLUMNS, row, strict=True)))
+        for row in _history_rows_for_result(job_id, result_data)
+    )
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            f"SELECT {', '.join(_HISTORY_COMPARED_COLUMNS)} "
+            "FROM failure_history WHERE job_id = ?",
+            (job_id,),
+        )
+        stored = sorted(
+            _history_row_values(dict(row)) for row in await cursor.fetchall()
+        )
+    return stored != expected
+
+
 async def populate_failure_history(
     job_id: str, result_data: dict[str, Any], analyzed_at: str = ""
 ) -> None:
     """Populate failure_history from a completed analysis result.
 
-    Extracts all failures (top-level and nested children) and inserts
-    them into the failure_history table. Idempotent: skips if rows
-    already exist for this job_id.
+    Extracts all failures (top-level and nested children) and inserts them
+    into the failure_history table, replacing any rows this job already has
+    (a re-analysis is meant to rewrite every row).  It does not skip existing
+    rows; the startup restore is what decides whether a rewrite is needed.
 
     Args:
         job_id: Unique identifier for the analysis job.
@@ -5318,12 +5547,7 @@ async def populate_failure_history(
             If empty, the DB default (CURRENT_TIMESTAMP) is used.
     """
     logger.debug(f"populate_failure_history: job_id={job_id}")
-    job_name = result_data.get("job_name", "")
-    build_id, build_number = _resolve_history_build_fields(result_data)
-
-    rows = _extract_failures_for_history(
-        result_data, job_id, job_name, build_number, build_id, analyzed_at=analyzed_at
-    )
+    rows = _history_rows_for_result(job_id, result_data, analyzed_at=analyzed_at)
     if not rows:
         logger.debug(
             f"populate_failure_history: job_id={job_id}, no failures to insert"
@@ -5337,30 +5561,17 @@ async def populate_failure_history(
             (job_id,),
         )
 
-        # Use analyzed_at when provided (backfill), otherwise let the DB default apply
-        if analyzed_at:
-            await db.executemany(
-                """
-                INSERT INTO failure_history
-                    (job_id, job_name, build_number, build_id, test_name, error_message,
-                     error_signature, error_signature_v2, classification, pattern,
-                     child_job_name, child_build_number, analyzed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                rows,
-            )
-        else:
-            await db.executemany(
-                """
-                INSERT INTO failure_history
-                    (job_id, job_name, build_number, build_id, test_name, error_message,
-                     error_signature, error_signature_v2, classification, pattern,
-                     child_job_name, child_build_number)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                # Strip the analyzed_at field (last element) when not backfilling
-                [row[:-1] for row in rows],
-            )
+        # Use analyzed_at when provided (backfill), otherwise let the DB default
+        # apply.  analyzed_at is last in the column list, so the sliced columns
+        # pair with row[:-1] below.
+        columns = (
+            _FAILURE_HISTORY_COLUMNS if analyzed_at else _FAILURE_HISTORY_COLUMNS[:-1]
+        )
+        await db.executemany(
+            f"INSERT INTO failure_history ({', '.join(columns)}) "
+            f"VALUES ({', '.join(['?'] * len(columns))})",
+            rows if analyzed_at else [row[:-1] for row in rows],
+        )
         await db.commit()
         logger.info(
             f"Populated failure_history with {len(rows)} rows for job_id={job_id}"
@@ -11077,8 +11288,13 @@ async def add_chat_message_pair(
     username: str = "",
     ai_provider: str = "",
     ai_model: str = "",
+    notice: str = "",
 ) -> tuple[int, int]:
     """Insert user message + assistant placeholder atomically.
+
+    ``notice`` is a server-authored ``system`` row written between them, so a
+    cause the server states about this very request renders under the request
+    and above the answer it corrects.
 
     Returns (user_msg_id, assistant_msg_id).
     """
@@ -11088,6 +11304,11 @@ async def add_chat_message_pair(
             (job_id, "user", user_content, username, "", "", "", "completed"),
         )
         user_msg_id = cursor.lastrowid or 0
+        if notice:
+            await db.execute(
+                "INSERT INTO chat_messages (job_id, role, content, username, ai_provider, ai_model, session_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (job_id, "system", notice, username, "", "", "", "completed"),
+            )
         cursor = await db.execute(
             "INSERT INTO chat_messages (job_id, role, content, username, ai_provider, ai_model, session_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (job_id, "assistant", "", username, ai_provider, ai_model, "", "pending"),

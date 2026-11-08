@@ -39,7 +39,7 @@ This confirms the CLI is using an admin identity, then asks a server-wide questi
 
 2. Choose how RootCoz should pick the model.
 
-   The header preselects the provider and model you last used on this account, so leaving it alone repeats your previous choice rather than the server default. To use a different pair, pick it — both a provider and a model are always required, because chat cannot start on an empty pair. A session that is already running keeps the pair it was started with, so its reply is always attributed to what it actually used.
+   The header preselects the provider and model you last used on this account, so leaving it alone repeats your previous choice rather than the server default. To use a different pair, pick it — both a provider and a model are always required, because chat cannot start on an empty pair. A model the sidecar cannot open a session with is marked `NO SESSION` in the list and cannot be picked; the reason says to declare it in the provider's `models.json`. A session that is already running keeps the pair it was started with, so its reply is always attributed to what it actually used.
 
    | If you want | Web UI | CLI |
    | --- | --- | --- |
@@ -146,6 +146,9 @@ For every available command and flag, see [CLI Command Reference](cli-reference.
 
 - `The send button stays disabled in the web UI.`  
   The chat session only starts once a valid provider and model pair is selected in the header. Pick both, type a message, and wait for any in-flight reply to finish.
+
+- A model shows `NO SESSION` and cannot be picked, or `Start` answers `422 AI session refused`.  
+  The sidecar will not open a session with that model, so RootCoz refuses it instead of failing with a server error. The `422` detail names the cause: declare the model in that provider's `models.json`, or re-enter the key, or ask an administrator to check the server log. See [Configuration Reference](configuration-reference.html#adding-a-custom-provider) for the `models.json` rule.
 
 - `rootcoz admin-chat send` fails with an admin error, or returns `409 Start a new chat session first`. The 409 means no session exists yet — run `rootcoz admin-chat init` first, which needs `--provider` and `--model`. A genuine admin error is a different failure: check the caller's role.  
   The CLI is not using an admin identity. Confirm it with `rootcoz auth whoami`.

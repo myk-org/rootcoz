@@ -310,7 +310,7 @@ Backfill skipped 13 result(s) whose result_json was written by a build with resu
 
 This skip guard is part of rootcoz itself, so it protects you only when the build you roll back to contains it. A build predating the guard still fails at startup on such a row, so roll back to a build that has it (releases from this version on).
 
-The server keeps serving everything else. `/api/health` reports `{"status": "degraded", "undecodable_rows": <count>}` under `checks.result_json` (it stays HTTP 200 — degraded data is not a liveness failure), and the count reads `{"status": "ok", "undecodable_rows": 0}` once nothing is skipped. Affected jobs show an empty analysis, and a job that was `waiting` stays `waiting`, until you roll forward again (or restore a database copy taken before the compression build). Nothing is written over those rows, so rolling forward brings them back.
+The server keeps serving everything else. `/api/health` reports `{"status": "degraded", "undecodable_rows": <count>}` under `checks.result_json` (it stays HTTP 200 — degraded data is not a liveness failure), and the count reads `{"status": "ok", "undecodable_rows": 0}` once nothing is skipped. Affected jobs show an empty analysis, and a job that was `waiting` stays `waiting`, until you roll forward again (or restore a database copy taken before the compression build). Nothing is written over those rows, so rolling forward brings them back. While that classification restore has not run to completion (a row this build cannot decode keeps it pending), the readable jobs it repairs are restored once, and later boots leave their history rows alone as long as those rows still match the stored result; an override you make after the rollback keeps them matching too, because the override is saved into the stored result. If saving it there fails, the override response still succeeds and the server logs a warning, but the row no longer matches, so the next boot restores it from the stored result.
 
 ## Watch disk usage and alert on a filling volume
 
@@ -400,11 +400,13 @@ migration step, no setting to turn it on.
   after the next start, so startup and `/health` are never delayed by them. The
   sweep commits one batch at a time, is safe to interrupt, and resumes where it
   stopped on the following boot; the log reports the column bytes and the
-  database file size before and after. A sweep whose database file has gone
-  away, or no longer has a `results` table, stops after the batches it already
-  committed and logs that once — the log still reports the column bytes it
-  compressed, but not the database file size after, because the file it started
-  on is no longer there.
+  database file size before and after. Each pass opens its database once and
+  runs every batch on that one connection, so a file swapped in at the path
+  mid-pass is never read or written by it. A sweep that is given no database
+  file, a replaced one, or a file without a `results` table stops before its
+  first batch and logs that once; a file that goes away during the pass leaves
+  the batches already committed in place and the log reports no database file
+  size after, because the file it started on is no longer there.
 - The database **file** only shrinks after a rewrite plus `VACUUM`, which takes
   the write lock and needs free space roughly equal to the file size. That is an
   operator step, deliberately not automated on a live single-replica deployment.

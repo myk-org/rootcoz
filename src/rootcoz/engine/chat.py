@@ -5,17 +5,19 @@ Builds job-scoped system prompts and manages AI CLI conversations.
 
 import asyncio
 import base64
+import re
 import tempfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import ExitStack, asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pi_sidecar_client import get_sidecar_client
 
 from rootcoz import get_child_logger
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
+    SessionCreationRefused,
     call_ai,
     create_session_safely,
     resolve_catalog_pair,
@@ -1332,6 +1334,11 @@ def build_welcome_message(
 _COMMON_RULES = """- Do NOT modify any data — read-only. The one exception is a tracker issue tool in your tool list (`propose_tracker_issue` plus `create_github_issue` / `create_jira_issue`), and only once the user has approved the draft you proposed
 - Do NOT run arbitrary curl commands — use the provided tools"""
 
+#: Where a user adds a tracker token. The prompt reason below and the notice
+#: the server posts itself (:func:`credential_blocked_issue_notice`) read it, so
+#: the page they name cannot drift apart.
+_TRACKER_TOKEN_FIX = "Profile Settings → add the {kind} token."
+
 #: What to tell the user for each reason a tracker tool is missing from the list.
 #: `{kind}` is the tracker name. Only the missing-token case is fixed in Profile
 #: Settings — a disabled tracker or a missing repository is not, and an account
@@ -1353,7 +1360,7 @@ _TRACKER_UNAVAILABLE_REASONS = {
     ),
     "no_token": (
         "this account has no {kind} token saved. Tell the user the fix: "
-        "Profile Settings → add the {kind} token."
+        + _TRACKER_TOKEN_FIX
     ),
     "no_token_no_profile": (
         "this account has no {kind} token saved and no profile to store one in, "
@@ -1366,6 +1373,145 @@ _TRACKER_UNAVAILABLE_REASONS = {
         "user the fix: Profile Settings → re-save the {kind} credential."
     ),
 }
+
+#: The reasons a tracker is missing because THIS account never set it up — the
+#: only ones a token in Profile Settings can fix. A disabled tracker or a
+#: missing repository is not one of them, so no token advice is posted for it.
+_CREDENTIAL_UNAVAILABLE_REASONS = ("no_token", "no_token_no_profile")
+
+#: The forms people write "file an issue" in: a filing verb (any tense)
+#: before the noun, or the participle after it ("a GitHub issue filed for this").
+_FILING_VERB = (
+    r"open(?:ed)?|fil(?:e|ed)|creat(?:e|ed)|submit(?:ted)?|rais(?:e|d)?|"
+    r"report(?:ed)?|log(?:ged)?"
+)
+_FILING_PARTICIPLE = r"opened|filed|created|submitted|raised|reported|logged"
+_ISSUE_NOUN = r"issue|ticket"
+
+#: A filing request: a filing verb and an issue noun in the same sentence, in
+#: either order, so "open the console log" is not one.
+_ASKS_TO_FILE_ISSUE = re.compile(
+    rf"\b(?:{_FILING_VERB})\b[^\n.!?]{{0,40}}?\b(?:{_ISSUE_NOUN})\b"
+    rf"|\b(?:{_ISSUE_NOUN})\b[^\n.!?]{{0,20}}?\b(?:{_FILING_PARTICIPLE})\b",
+    re.IGNORECASE,
+)
+
+#: A refusal or a report of an action already taken is not a request: the words
+#: pinned to the verb negate it ("don't open a GitHub issue") or say it happened
+#: ("I already filed a GitHub issue"). Only what touches the verb counts, so
+#: "I don't have a Jira token, open a Jira issue" still asks for one.
+_NOT_A_REQUEST = re.compile(
+    r"\b(?:don'?t|do not|never|no need to|not|already)\b[^\n.!?,]{0,8}$",
+    re.IGNORECASE,
+)
+
+#: The trackers a message can name. A filing request that names none posts no
+#: notice: there is no single tracker it could be about.
+_NAMED_TRACKERS: tuple[tuple[Literal["github", "jira"], re.Pattern[str]], ...] = (
+    ("github", re.compile(r"\bgithub\b", re.IGNORECASE)),
+    ("jira", re.compile(r"\bjira\b", re.IGNORECASE)),
+)
+
+
+def _mention_gap(request: tuple[int, int], mention: tuple[int, int]) -> int:
+    """Characters between two spans, ``0`` when they touch or overlap."""
+    return max(0, max(request[0], mention[0]) - min(request[1], mention[1]))
+
+
+def asked_issue_tracker(message: str) -> Literal["", "github", "jira"]:
+    """The tracker *message* asks to file an issue in, ``""`` when it asks nothing.
+
+    The trigger half of the server's own no-credential answer: it fires only when
+    the user's own words are a request to file an issue AND name the tracker, so
+    an unrelated question never gets a credential notice. The other half — is
+    that tracker missing a credential this account can add? — is the caller's,
+    read from :func:`credential_blocked_issue_notice`'s ``reason``.
+
+    The tracker nearest the filing request wins — inside it when the request
+    carries the name ("file a Jira issue"), else the closest mention — so
+    "GitHub is blocked for me, file a Jira issue" answers about Jira and not
+    about the first tracker in the string. Every occurrence counts, so
+    "GitHub is irrelevant. Please file a GitHub issue, not a Jira issue" answers
+    about GitHub. A tie goes to the earlier mention.
+
+    A refused phrase does not swallow the message: "I already filed a GitHub
+    issue. Please create a Jira issue" answers about Jira — the first request
+    that is not negated is the one read.
+
+    shortcut: only a tracker-named request is detected ("open an issue" alone
+    posts nothing, the system prompt still covers it), and only a negation
+    pinned to the verb is read, so "a GitHub issue I already filed" still
+    fires. Upgrade if users commonly ask this way.
+    """
+    text = message or ""
+    request = next(
+        (
+            match
+            for match in _ASKS_TO_FILE_ISSUE.finditer(text)
+            if not _NOT_A_REQUEST.search(text[: match.start()])
+        ),
+        None,
+    )
+    if request is None:
+        return ""
+    named = []
+    for tracker, pattern in _NAMED_TRACKERS:
+        mentions = [
+            (_mention_gap(request.span(), mention.span()), mention.start())
+            for mention in pattern.finditer(message)
+        ]
+        if mentions:
+            gap, start = min(mentions)
+            named.append((gap, start, tracker))
+    return min(named)[2] if named else ""
+
+
+def credential_blocked_issue_notice(
+    tracker: str, reason: str, *, token_would_file: bool
+) -> str:
+    """The server's own answer when this account cannot file the asked-for issue.
+
+    The caller stores this as a ``system`` chat row (the role the model never
+    writes), above the model's answer, so the cause and the fix reach the user
+    even when the model improvises around the system prompt's instruction — it
+    claimed it would file, then blamed a "session-level tooling gap" instead of
+    the account (issue #446).
+
+    Only :data:`_CREDENTIAL_UNAVAILABLE_REASONS` produce text: a tracker an
+    administrator disabled, a server with no repository or an unusable saved
+    credential is not fixed in Profile Settings by adding a token. Returns ``""``
+    for those, and for a caller whose tool list already has the tracker.
+
+    Args:
+        tracker: ``"github"`` or ``"jira"`` — the one the user asked for.
+        reason: Its code from the chat tracker state.
+        token_would_file: Would a token this account could save make it file?
+            The gate reads the credential BEFORE the destination, so it also
+            answers ``no_token`` on a deployment with no repository (or no Jira
+            method) configured — a blocker no token fixes. Promising the token
+            there sends the user to Profile Settings to fix nothing, so the
+            notice stays silent instead.
+    """
+    if (
+        not token_would_file
+        or tracker not in {"github", "jira"}
+        or reason not in _CREDENTIAL_UNAVAILABLE_REASONS
+    ):
+        return ""
+    kind = "GitHub" if tracker == "github" else "Jira"
+    if reason == "no_token":
+        return (
+            f"No {kind} issue can be filed from this chat. This account has no "
+            f"{kind} token saved; the fix is {_TRACKER_TOKEN_FIX.format(kind=kind)}"
+        )
+    if reason == "no_token_no_profile":
+        # The bootstrap ``admin`` has no ``users`` row, so ``PUT /api/user/tokens``
+        # answers 404 for it: the fix is signing in as an account that has one.
+        return (
+            f"No {kind} issue can be filed from this chat. "
+            + tracker_credential_message(kind, has_profile=False)
+        )
+    return ""
 
 
 def _issue_repo_param(issue_repos: tuple[str, ...]) -> dict[str, Any]:
@@ -1683,6 +1829,10 @@ async def _create_chat_session(
         session_id = await create_session_safely(client, **create_kwargs)
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id
+    except SessionCreationRefused:
+        # Ahead of the broad tuple below (it holds RuntimeError): a refused
+        # session must reach the route's 422, never be swallowed into None.
+        raise
     except (OSError, RuntimeError, ValueError, KeyError, TypeError) as exc:
         logger.warning(
             "%s: failed to create session (%s)\n%s",

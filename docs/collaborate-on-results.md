@@ -129,7 +129,7 @@ Use `--json` on any of these commands when you want machine-readable output. For
   Chat requires `reviewer` access. Viewers can read results and comments but cannot start or use chat.
 
 - `Start Chat` fails with `Chat session unavailable.`  
-  The session could not be created. Clear the chat with `New Session` and start again, and check that the provider and model are still available for your credential source.
+  The session could not be created. `Start Chat` can now answer `422 AI session refused`, and that detail names the cause: declare the model in that provider's `models.json`, or re-enter the key, or ask an administrator to check the server log — clearing the chat cannot fix a model the sidecar will not open a session with. See [Configuration Reference](configuration-reference.html#adding-a-custom-provider) for the `models.json` rule.
 
 - The assistant says Jira or GitHub search is not available.  
   Those tools are only registered when your account has the matching credentials. Add them on your profile settings page, then start a new chat session so the new tool list is picked up. See [Managing Your Account and Notifications](manage-account-and-notifications.html) for details.

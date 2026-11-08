@@ -602,7 +602,7 @@ async def test_backfill_does_not_block_the_event_loop(_storage, storage_logs) ->
     assert ticks > stats["rows"] // 10
 
 
-# --- a database that stops being ours mid-sweep (#435) ---------------------
+# --- one connection per sweep pass (#473) -----------------------------------
 
 _STOPPED = "is no longer the database it started on"
 _EMPTY_STATS = {"rows": 0, "bytes_before": 0, "bytes_after": 0}
@@ -619,22 +619,292 @@ def _foreign_database(path: Path) -> bytes:
     return path.read_bytes()
 
 
+def _result_kinds(path: Path) -> list[str]:
+    """``typeof(result_json)`` of every row in *path*, read outside any sweep."""
+    conn = sqlite3.connect(path)
+    try:
+        return [
+            row[0] for row in conn.execute("SELECT typeof(result_json) FROM results")
+        ]
+    finally:
+        conn.close()
+
+
+async def _checkpoint(path: Path) -> None:
+    """Fold the WAL into *path*, so a copy of its bytes is a whole database."""
+    async with storage._connect_db(path) as db:
+        await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+
+
+async def _detached_database(source: Path, path: Path, rows: int) -> bytes:
+    """A self-contained copy of *source* at *path*, holding exactly *rows* rows.
+
+    The rows are legacy TEXT with their denormalized columns derived, so the copy
+    is a database this sweep would fully compress if it ever accepted it.
+    """
+    await _checkpoint(source)
+    path.write_bytes(source.read_bytes())
+    async with storage._connect_db(path) as db:
+        existing = (
+            await (await db.execute("SELECT COUNT(*) FROM results")).fetchone()
+        )[0]
+    with patch.object(storage, "DB_PATH", path):
+        for index in range(rows - existing):
+            await _insert_legacy(f"job-copy-{path.stem}-{index}", _payload())
+        await storage.backfill_results_denorm()
+    await _checkpoint(path)
+    return path.read_bytes()
+
+
+async def test_a_sweep_opens_its_database_once(_storage) -> None:
+    """Every batch of a pass runs on the one connection the pass opened (#473)."""
+    for index in range(3):
+        await _insert_legacy(f"job-once-{index}", _payload(failure_count=20))
+
+    real_connect = storage.aiosqlite.connect
+    opens = 0
+
+    async def counting_connect(*args: Any, **kwargs: Any) -> Any:
+        nonlocal opens
+        opens += 1
+        return await real_connect(*args, **kwargs)
+
+    with patch.object(storage.aiosqlite, "connect", new=counting_connect):
+        assert await storage.backfill_results_denorm() == 3
+        assert opens == 1, "the denorm sweep reconnected per page"
+        opens = 0
+        stats = await storage.backfill_result_json_compression(batch_size=1)
+    assert opens == 1, "the compression sweep reconnected per batch"
+    assert stats["rows"] == 3
+
+
+async def test_a_batch_never_follows_the_path_to_a_replacement(
+    _storage, storage_logs, tmp_path: Path
+) -> None:
+    """The reported shape: a pass given 1 row, its path swapped for a 5-row file.
+
+    The swap lands between the read and the write of the first batch. A batch
+    that reconnects by path is handed the replacement and reports ``5 == 1``; this
+    pass holds the connection it opened *and* re-stats the path before committing,
+    so it rolls the batch back and stops instead of addressing its journal frames
+    to the replacement.
+    """
+    db_path = _storage
+    await _insert_legacy("job-ours", _payload(failure_count=20))
+    await storage.backfill_results_denorm()
+    replacement = tmp_path / "replacement.db"
+    replacement_bytes = await _detached_database(db_path, replacement, rows=5)
+    assert len(_result_kinds(replacement)) == 5
+
+    compress = storage._compress_result_rows
+    calls = 0
+
+    def swap_on_the_first_batch(rows: list, **kwargs: Any) -> list:
+        nonlocal calls
+        calls += 1
+        if calls == 1:  # the read is done, the write has not gone out yet
+            replacement.replace(db_path)
+        return compress(rows, **kwargs)
+
+    with patch.object(storage, "_compress_result_rows", swap_on_the_first_batch):
+        stats = await storage.backfill_result_json_compression(batch_size=1)
+
+    assert calls == 1, "the pass must stop at the batch whose path moved"
+    assert stats["rows"] == 0, "the pass committed a batch into the replacement"
+    assert db_path.read_bytes() == replacement_bytes, (
+        "the sweep wrote into the database that replaced it"
+    )
+    assert _result_kinds(db_path) == ["text"] * 5
+    assert [
+        r.getMessage() for r in storage_logs.records if _STOPPED in r.getMessage()
+    ] == [
+        (
+            f"result_json compression stopped: {db_path} is no longer the database"
+            " it started on"
+        )
+    ]
+
+
+async def test_a_swap_mid_pass_leaves_no_journal_beside_the_replacement(
+    tmp_path: Path, storage_logs
+) -> None:
+    """A swap mid-pass stops the pass where no journal can reach the replacement.
+
+    The connection is pinned to an inode, its ``-wal``/``-shm`` are named after the
+    path: a commit after a swap sends this pass's frames to the replacement, and
+    the next connection that opens it replays them into it. The bytes of the
+    replacement staying put is not the whole proof -- the ``-wal`` beside it is,
+    because that is what its next opener would replay.
+    """
+    directory = tmp_path / "live"
+    directory.mkdir()
+    db_path = directory / "results.db"
+    replacement = tmp_path / "replacement.db"
+    with patch.object(storage, "DB_PATH", db_path):
+        await storage.init_db()
+        await _insert_legacy("job-live-1", _payload(failure_count=20))
+        await _insert_legacy("job-live-2", _payload(failure_count=20))
+        await storage.backfill_results_denorm()
+        replacement_bytes = await _detached_database(db_path, replacement, rows=3)
+
+        compress = storage._compress_result_rows
+        calls = 0
+
+        def swap_on_the_first_batch(rows: list, **kwargs: Any) -> list:
+            nonlocal calls
+            calls += 1
+            if calls == 1:  # the read is done, the commit has not gone out yet
+                replacement.replace(db_path)
+            return compress(rows, **kwargs)
+
+        with patch.object(storage, "_compress_result_rows", swap_on_the_first_batch):
+            stats = await storage.backfill_result_json_compression(batch_size=1)
+
+    assert calls == 1, "the pass must stop at the batch whose path moved"
+    assert stats["rows"] == 0, "the pass counted a batch it never committed"
+    assert db_path.read_bytes() == replacement_bytes, (
+        "the sweep wrote into the database that replaced it"
+    )
+    # The ``-wal`` is what a next opener replays, so its *size* is the property,
+    # not its existence: truncation folds the frames into the descriptor's own
+    # inode and leaves 0 B here, while skipping it would leave 4152 B named after
+    # the path. A surviving ``-shm`` is sqlite's shared-memory index, holds no
+    # frames, and is harmless.
+    wal = directory / f"{db_path.name}-wal"
+    assert not wal.exists() or wal.stat().st_size == 0, (
+        "a -wal beside the path still holds frames, and the replacement's next"
+        f" opener replays them into it: {wal.stat().st_size} B. A truncated"
+        " journal is safe, one with frames is not"
+    )
+    assert _result_kinds(db_path) == ["text"] * 3
+    assert "is no longer the database it started on" in storage_logs.text
+
+
+async def test_a_cancelled_checkpoint_still_closes_the_connection(_storage) -> None:
+    """A shutdown cancel landing in the checkpoint must not skip the close (#473)."""
+    closed: list[bool] = []
+    real_close = storage.aiosqlite.Connection.close
+    real_execute = storage.aiosqlite.Connection.execute
+
+    async def close(self: Any) -> None:
+        closed.append(True)
+        await real_close(self)
+
+    async def execute(self: Any, sql: str, *args: Any, **kwargs: Any) -> Any:
+        if "wal_checkpoint" in sql:
+            raise asyncio.CancelledError  # the cancel that lands at shutdown
+        return await real_execute(self, sql, *args, **kwargs)
+
+    with (
+        patch.object(storage.aiosqlite.Connection, "close", close),
+        patch.object(storage.aiosqlite.Connection, "execute", execute),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        async with storage._open_sweep_db(_storage, "cancelled"):
+            pass
+
+    assert closed == [True], "the cancelled pass left its connection open"
+
+
+async def test_a_busy_checkpoint_is_not_reported_as_a_clean_pass(
+    _storage, storage_logs
+) -> None:
+    """Frames a busy checkpoint could not fold back are logged, not swallowed."""
+    real_execute = storage.aiosqlite.Connection.execute
+
+    class _BusyCheckpoint:
+        async def fetchall(self) -> list[tuple[int, int, int]]:
+            return [(1, 4152, -1)]  # busy, 4152 frames in the journal, none folded
+
+    async def execute(self: Any, sql: str, *args: Any, **kwargs: Any) -> Any:
+        if "wal_checkpoint" in sql:
+            return _BusyCheckpoint()
+        return await real_execute(self, sql, *args, **kwargs)
+
+    with patch.object(storage.aiosqlite.Connection, "execute", execute):
+        async with storage._open_sweep_db(_storage, "busy") as sweep:
+            assert sweep is not None
+
+    assert "kept 4152 of 4152 journal frame(s) (checkpoint busy=1)" in (
+        storage_logs.text
+    ), "a pass that could not truncate its journal reported nothing"
+
+
+async def test_a_stopped_pass_reports_the_rows_it_kept_not_done(
+    _storage, storage_logs, tmp_path: Path
+) -> None:
+    """A pass that stops at a moved path reports its rows, never "done" (#473)."""
+    db_path = _storage
+    for index in range(3):
+        await _insert_legacy(f"job-stop-log-{index}", _payload(failure_count=20))
+    await storage.backfill_results_denorm()
+    replacement = tmp_path / "replacement.db"
+    await _detached_database(db_path, replacement, rows=4)
+
+    compress = storage._compress_result_rows
+    calls = 0
+
+    def swap_on_the_third_batch(rows: list, **kwargs: Any) -> list:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            replacement.replace(db_path)
+        return compress(rows, **kwargs)
+
+    with patch.object(storage, "_compress_result_rows", swap_on_the_third_batch):
+        stats = await storage.backfill_result_json_compression(batch_size=1)
+
+    assert calls == 3
+    assert stats["rows"] == 2, "the two committed batches must still be counted"
+    assert "result_json compression: done" not in storage_logs.text
+    assert "result_json compression: stopped after 2 row(s) compressed" in (
+        storage_logs.text
+    )
+    assert "is no longer the database it started on" in storage_logs.text
+
+
+async def test_the_file_report_describes_the_connection_not_the_path(
+    _storage, tmp_path: Path
+) -> None:
+    """A replacement at the path cannot lend its size to the pass's report (#473)."""
+    db_path = _storage
+    await _insert_legacy("job-report", _payload(failure_count=20))
+    bigger = tmp_path / "bigger.db"
+    conn = sqlite3.connect(bigger)
+    try:
+        conn.execute("CREATE TABLE filler (b BLOB)")
+        conn.executemany("INSERT INTO filler VALUES (?)", [(b"x" * 1024,)] * 400)
+        conn.commit()
+    finally:
+        conn.close()
+    bigger_size = bigger.stat().st_size
+
+    async with storage._open_sweep_db(db_path, "report") as sweep:
+        assert sweep is not None
+        before = await storage._db_storage_report(sweep.db)
+        assert str(bigger_size) not in before  # sanity: the two sizes differ
+        bigger.replace(db_path)
+        assert await storage._db_storage_report(sweep.db) == before
+
+
 @pytest.mark.parametrize("damage", ["unlink", "replace"])
-async def test_a_sweep_stops_when_its_database_is_damaged_between_batches(
+async def test_a_database_damaged_between_batches_cannot_reach_the_pass(
     _storage, storage_logs, tmp_path: Path, damage: str
 ) -> None:
-    """The reported frame: a database that goes away mid-pass stops the pass.
+    """A damaged path is not a new database: the pass keeps the one it holds.
 
-    ``no such table: results`` came from a batch connection that re-created the
-    file a teardown had just unlinked. Damaged between the read of batch two and
-    its write, the pass must stop, keep the batch it already committed, and say so
-    once -- and it must not write into a file that is not ours.
+    A per-batch reconnect either re-created the file a teardown unlinked or mined
+    the foreign one that took its place. The pass owns its descriptor, so the
+    batches it has committed stay in the file it opened -- and the batch whose
+    path now names a *file* is rolled back rather than committed into it, because
+    its journal is named after the path the foreign file now sits at.
     """
     db_path = _storage
     await _insert_legacy("job-stop-1", _payload(failure_count=20))
     await _insert_legacy("job-stop-2", _payload(failure_count=20))
     await storage.backfill_results_denorm()
-    foreign_bytes = _foreign_database(tmp_path / "foreign.db")
+    foreign = tmp_path / "foreign.db"
+    foreign_bytes = _foreign_database(foreign)
 
     compress = storage._compress_result_rows
     calls = 0
@@ -648,130 +918,80 @@ async def test_a_sweep_stops_when_its_database_is_damaged_between_batches(
             if damage == "unlink":
                 db_path.unlink()
             else:
-                db_path.write_bytes(foreign_bytes)
+                foreign.replace(db_path)
         return compress(rows, **kwargs)
 
     with patch.object(storage, "_compress_result_rows", damage_on_the_second_batch):
         stats = await storage.backfill_result_json_compression(batch_size=1)
 
     assert calls == 2, "the pass must have reached the second batch"
-    assert stats["rows"] == 1, "the committed batch must be kept"
-    stopped = [r for r in storage_logs.records if _STOPPED in r.getMessage()]
-    assert len(stopped) == 1, [r.getMessage() for r in storage_logs.records]
-    assert str(db_path) in stopped[0].getMessage()
     if damage == "unlink":
+        assert stats["rows"] == 2, "the pass must finish on the file it opened"
         assert not db_path.exists(), "the sweep re-created the database that was gone"
+        # The rows it committed are gone with the file: not a completed sweep.
+        assert "stopped after 2 row(s) compressed" in storage_logs.text
+        assert f"no file report: {db_path} is gone" in storage_logs.text
     else:
+        assert stats["rows"] == 1, "the pass committed a batch after the swap"
         assert db_path.read_bytes() == foreign_bytes, (
             "the sweep wrote to a foreign file"
         )
-    # The done line is the INFO form: no file to report on, nothing raised out.
-    assert "no file report" in storage_logs.text
-    assert [r.getMessage() for r in storage_logs.records if r.exc_info] == []
-    assert [
-        r.getMessage() for r in storage_logs.records if r.levelno >= logging.ERROR
-    ] == []
-
-
-async def test_a_sweep_stops_when_its_path_becomes_another_rootcoz_database(
-    _storage, storage_logs, tmp_path: Path
-) -> None:
-    """A schema match is not ownership: a swapped-in rootcoz database is not ours.
-
-    The bytes baseline of the pass describes the file it started on, so a
-    replacement -- even one that looks exactly like ours -- must stop the pass
-    instead of being swept as old.
-    """
-    db_path = _storage
-    await _insert_legacy("job-swapped-1", _payload(failure_count=20))
-    await _insert_legacy("job-swapped-2", _payload(failure_count=20))
-    await storage.backfill_results_denorm()
-    async with storage._connect_db() as db:  # a self-contained copy of a rootcoz db
-        await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-    replacement = tmp_path / "replacement.db"
-    replacement_bytes = db_path.read_bytes()
-    replacement.write_bytes(replacement_bytes)
-
-    compress = storage._compress_result_rows
-    calls = 0
-
-    def swap_on_the_second_batch(rows: list, **kwargs: Any) -> list:
-        nonlocal calls
-        calls += 1
-        if calls == 2:  # a different inode, same schema: stat is the only tell
-            replacement.replace(db_path)
-        return compress(rows, **kwargs)
-
-    with patch.object(storage, "_compress_result_rows", swap_on_the_second_batch):
-        stats = await storage.backfill_result_json_compression(batch_size=1)
-
-    assert calls == 2, "the pass must have reached the second batch"
-    assert stats["rows"] == 1, "the committed batch must be kept"
-    stopped = [r for r in storage_logs.records if _STOPPED in r.getMessage()]
-    assert len(stopped) == 1, [r.getMessage() for r in storage_logs.records]
-    assert db_path.read_bytes() == replacement_bytes, (
-        "the sweep wrote into the database that replaced it"
-    )
+        assert len([r for r in storage_logs.records if _STOPPED in r.getMessage()]) == 1
 
 
 async def test_a_sweep_refuses_a_database_swapped_while_it_opens(
     _storage, storage_logs, tmp_path: Path
 ) -> None:
-    """A swap that lands while a connection opens is refused, not committed to.
+    """A swap that lands inside the one open is refused, not committed to.
 
     A ``stat`` taken only before the await cannot see a swap that lands during it,
-    and the pass would then read and commit to the replacement. What the
-    connection actually opened is the file that has to be verified.
+    and the connection would open the replacement. Checked on both sides of the
+    open, against the path stat taken just before, so the file the pass verified
+    is the file it opened.
     """
     db_path = _storage
     await _insert_legacy("job-raced-1", _payload(failure_count=20))
     await storage.backfill_results_denorm()
-    async with storage._connect_db() as db:  # a self-contained copy of a rootcoz db
-        await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     replacement = tmp_path / "replacement.db"
-    replacement_bytes = db_path.read_bytes()
-    replacement.write_bytes(replacement_bytes)
+    replacement_bytes = await _detached_database(db_path, replacement, rows=5)
 
     real_connect = storage.aiosqlite.connect
     calls = 0
 
-    async def swap_before_the_write_open(*args: Any, **kwargs: Any) -> Any:
+    async def swap_before_the_open(*args: Any, **kwargs: Any) -> Any:
         nonlocal calls
         calls += 1
-        if calls == 3:  # the batch's write open: lands inside the await
+        if calls == 1:  # the swap lands inside the open, before the descriptor
             replacement.replace(db_path)
         return await real_connect(*args, **kwargs)
 
-    with patch.object(storage.aiosqlite, "connect", new=swap_before_the_write_open):
+    with patch.object(storage.aiosqlite, "connect", new=swap_before_the_open):
         stats = await storage.backfill_result_json_compression()
 
-    assert calls == 3, "the swap must have landed before the write open"
+    assert calls == 1, "the pass must stop at the one connection it opens"
     assert stats["rows"] == 0, "the pass committed a batch into the replacement"
     stopped = [r for r in storage_logs.records if _STOPPED in r.getMessage()]
     assert len(stopped) == 1, [r.getMessage() for r in storage_logs.records]
     assert db_path.read_bytes() == replacement_bytes, (
         "the sweep wrote into the database that replaced it"
     )
+    assert _result_kinds(db_path) == ["text"] * 5
 
 
-async def test_a_sweep_does_not_pin_a_database_it_did_not_open(
+async def test_a_sweep_refuses_a_database_swapped_after_the_open(
     _storage, storage_logs, tmp_path: Path
 ) -> None:
-    """The first connection pins the file it opened, not whatever sits at the path.
+    """A swap that lands once the descriptor exists does not become the pass's file.
 
-    The identity is read on both sides of the open, so a swap landing inside the
-    await -- after the descriptor was taken but before that stat -- is a mismatch
-    instead of becoming the pinned identity. Pinned to the replacement, every
-    later batch would accept it and commit into it.
+    The descriptor holds the original, but the path no longer names it, so the
+    pass stops: the bytes baseline it reported describes a file it can no longer
+    reach, and no batch may be run on the replacement.
     """
     db_path = _storage
     await _insert_legacy("job-raced-0", _payload(failure_count=20))
     await storage.backfill_results_denorm()
-    async with storage._connect_db() as db:  # a self-contained copy of a rootcoz db
-        await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
     replacement = tmp_path / "replacement.db"
-    replacement_bytes = db_path.read_bytes()
-    replacement.write_bytes(replacement_bytes)
+    replacement_bytes = await _detached_database(db_path, replacement, rows=5)
 
     real_connect = storage.aiosqlite.connect
     calls = 0
@@ -780,20 +1000,21 @@ async def test_a_sweep_does_not_pin_a_database_it_did_not_open(
         nonlocal calls
         calls += 1
         db = await real_connect(*args, **kwargs)
-        if calls == 1:  # the check open: the swap lands once its descriptor exists
+        if calls == 1:  # the swap lands once the descriptor exists
             replacement.replace(db_path)
         return db
 
     with patch.object(storage.aiosqlite, "connect", new=swap_after_the_open):
         stats = await storage.backfill_result_json_compression()
 
-    assert calls == 1, "the pass must have stopped at the first connection"
+    assert calls == 1, "the pass must stop at the one connection it opens"
     assert stats["rows"] == 0, "the pass committed a batch into the replacement"
     stopped = [r for r in storage_logs.records if _STOPPED in r.getMessage()]
     assert len(stopped) == 1, [r.getMessage() for r in storage_logs.records]
     assert db_path.read_bytes() == replacement_bytes, (
         "the sweep wrote into the database that replaced it"
     )
+    assert _result_kinds(db_path) == ["text"] * 5
 
 
 async def test_a_lock_error_on_the_check_is_not_a_vanished_database(_storage) -> None:

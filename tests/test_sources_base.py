@@ -381,6 +381,28 @@ class TestCISourceCleanup:
         assert source._extract_path is None
 
 
+class TestRefusalSurvivesTheFriendlyMapper:
+    """A refusal is already the sentence, so the mapper never re-labels it."""
+
+    def test_refusal_sentence_is_returned_verbatim(self) -> None:
+        from rootcoz.ai_client import SESSION_REFUSAL_MARKER
+        from rootcoz.error_messages import make_user_friendly_error
+
+        sentence = (
+            f"{SESSION_REFUSAL_MARKER}: the session could not be created for"
+            " openai/undeclared (sidecar HTTP 404). Ask an administrator to check"
+            " the server log for the sidecar's reason."
+        )
+        assert make_user_friendly_error(sentence) == sentence
+
+    def test_a_non_refusal_404_still_maps_to_jenkins(self) -> None:
+        from rootcoz.error_messages import make_user_friendly_error
+
+        assert "no longer available" in make_user_friendly_error(
+            "sidecar 404 for openai/undeclared"
+        )
+
+
 class TestRunConsoleOnlyAnalysisIncomplete:
     """A narration-only answer is a re-analysis problem, not a credential one."""
 

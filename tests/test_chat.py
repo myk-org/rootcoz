@@ -4,10 +4,12 @@ import asyncio
 import logging
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, ClassVar
 from unittest.mock import AsyncMock, call, patch
 
 import pytest
+from pi_sidecar_client import AIResult
 
 from rootcoz import storage
 from rootcoz.engine.chat import (
@@ -1351,6 +1353,355 @@ class TestChatIssueTools:
         assert "propose_tracker_issue" in names
         assert "create_github_issue" in names
         assert "this account has no GitHub token saved" not in prompt
+
+
+class TestAskedIssueTracker:
+    """The trigger half: only a filing request that names a tracker fires."""
+
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            ("can you open a GitHub issue for this failure?", "github"),
+            ("file a jira ticket about this", "jira"),
+            ("Could you create an issue in GitHub?", "github"),
+            ("submit a bug report as a Jira ticket", "jira"),
+            # Both named in the request: the nearest mention wins.
+            ("open a Jira ticket or a GitHub issue", "jira"),
+            ("open an issue in GitHub", "github"),
+            # A tracker named as background context is not the destination.
+            (
+                "GitHub is our source repository; please create a Jira issue",
+                "jira",
+            ),
+            ("GitHub is down. Please open a Jira ticket.", "jira"),
+            # The tracker is bound to the request, not to the message start.
+            ("GitHub is blocked for me, file a Jira issue", "jira"),
+            ("Jira is blocked for me, file a GitHub issue", "github"),
+            # The noun-first order people also write.
+            ("I need a GitHub issue filed for this failure", "github"),
+            # Every mention counts, so the name inside the request is the one
+            # bound to it even when the tracker is named again afterwards.
+            (
+                "GitHub is irrelevant. Please file a GitHub issue, not a Jira issue.",
+                "github",
+            ),
+            # A refusal or a report of an action already taken is not a request.
+            ("Don't open a GitHub issue about this", ""),
+            ("do not open a jira ticket", ""),
+            ("I already filed a GitHub issue about this", ""),
+            # The negation is read only where it touches the verb.
+            ("I don't have a Jira token, please open a Jira issue", "jira"),
+            # A refused phrase does not swallow the request after it.
+            (
+                "I already filed a GitHub issue. Please create a Jira issue.",
+                "jira",
+            ),
+            ("Don't open a GitHub issue. Open a Jira ticket.", "jira"),
+            # Not a filing request.
+            ("why did this test fail?", ""),
+            ("open the console log", ""),
+            # A filing request that names no tracker has no single tracker to name.
+            ("open an issue about this", ""),
+            ("", ""),
+        ],
+    )
+    def test_it_reads_a_filing_request_that_names_a_tracker(self, message, expected):
+        from rootcoz.engine.chat import asked_issue_tracker
+
+        assert asked_issue_tracker(message) == expected
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "I need a GitHub issue filed for this failure",
+            "Please have a ticket opened",
+        ],
+    )
+    def test_it_reads_the_other_word_orders_people_write(self, message):
+        """The noun first and a participle after it is still a filing request."""
+        from rootcoz.engine.chat import _ASKS_TO_FILE_ISSUE
+
+        assert _ASKS_TO_FILE_ISSUE.search(message)
+
+
+class TestCredentialBlockedIssueNotice:
+    """The text the server posts: the cause and the fix, never "tooling"."""
+
+    def test_it_names_the_token_and_the_page_that_adds_it(self):
+        from rootcoz.engine.chat import credential_blocked_issue_notice
+
+        assert credential_blocked_issue_notice(
+            "jira", "no_token", token_would_file=True
+        ) == (
+            "No Jira issue can be filed from this chat. This account has no Jira "
+            "token saved; the fix is Profile Settings → add the Jira token."
+        )
+
+    def test_a_token_that_would_not_file_is_not_the_fix(self):
+        """The gate reads the token before the repository, so ``no_token`` alone
+        does not mean a token fixes it: a deployment with no repository (or no
+        Jira method) files nothing even after the user saves one."""
+        from rootcoz.engine.chat import credential_blocked_issue_notice
+
+        for tracker, reason in (
+            ("github", "no_token"),
+            ("jira", "no_token"),
+            ("github", "no_token_no_profile"),
+        ):
+            assert (
+                credential_blocked_issue_notice(tracker, reason, token_would_file=False)
+                == ""
+            )
+
+    def test_only_a_credential_reason_posts(self):
+        """A disabled tracker or a missing repo is not fixed by adding a token."""
+        from rootcoz.engine.chat import credential_blocked_issue_notice
+
+        for reason in (
+            "",
+            "server_disabled",
+            "no_repository",
+            "no_run_repository",
+            "unusable_credential",
+        ):
+            assert (
+                credential_blocked_issue_notice("github", reason, token_would_file=True)
+                == ""
+            )
+        # An unknown tracker has no kind to name.
+        assert (
+            credential_blocked_issue_notice("", "no_token", token_would_file=True) == ""
+        )
+
+
+class TestTheServerWritesTheNoCredentialAnswer:
+    """Issue #446: the model ignored the prompt, so the server states the cause.
+
+    The text is stored as a ``system`` chat row under the user's request and
+    above the answer, so the fix is present even when the model improvises.
+    """
+
+    async def _notice(
+        self,
+        message: str,
+        tokens: dict[str, str],
+        *,
+        repo: bool = True,
+        enabled: bool = True,
+        profile: bool = True,
+    ) -> str:
+        """The text this turn would store, ``""`` when none — real gate included."""
+        from rootcoz.config import Settings
+        from rootcoz.main import _issue_blocked_notice
+
+        with (
+            patch("rootcoz.storage.get_user_tokens", AsyncMock(return_value=tokens)),
+            patch("rootcoz.main._account_has_profile", AsyncMock(return_value=profile)),
+        ):
+            return await _issue_blocked_notice(
+                message=message,
+                username="alice",
+                settings=Settings(enable_github_issues=enabled),
+                github_repo_available=repo,
+                job_chat=True,
+            )
+
+    async def test_a_github_request_with_no_token_names_profile_settings(self):
+        notice = await self._notice("can you open a GitHub issue for this failure?", {})
+        assert "Profile Settings → add the GitHub token" in notice
+        assert "No GitHub issue can be filed" in notice
+        # The cause is the account, so nothing may blame the tools.
+        assert "tooling" not in notice.lower()
+
+    async def test_a_saved_token_writes_nothing(self):
+        assert await self._notice("open a GitHub issue", {"github_token": "tok"}) == ""
+        # A token for the OTHER tracker does not make this one file either.
+        assert "GitHub token" in await self._notice(
+            "open a GitHub issue", {"jira_token": "tok"}
+        )
+
+    async def test_an_unrelated_message_writes_nothing(self):
+        assert await self._notice("why did this fail?", {}) == ""
+        assert await self._notice("open the console log", {}) == ""
+
+    async def test_a_tracker_the_server_disabled_gets_no_token_advice(self):
+        assert await self._notice("open a GitHub issue", {}, enabled=False) == ""
+
+    async def test_no_repository_configured_promises_no_token_fix(self):
+        """The gate reads the token BEFORE the destination, so it answers
+        ``no_token`` on a deployment with no repository to file in either —
+        where a token in Profile Settings would fix nothing at all."""
+        assert await self._notice("open a GitHub issue", {}, repo=False) == ""
+        # With a repository that would receive the issue, the token IS the fix.
+        assert "Profile Settings" in await self._notice("open a GitHub issue", {})
+
+    async def test_a_cloud_deployment_still_promises_the_token(self):
+        """A bare probe token reads as a PAT, which needs ``jira_server_url``.
+        On a Cloud-only deployment that shape cannot file, but the same token
+        saved with an email is Cloud basic auth — so the notice must still
+        promise the token instead of going silent."""
+        from rootcoz.config import Settings
+        from rootcoz.main import _issue_blocked_notice
+
+        settings = Settings(
+            jira_auth_mode="basic",
+            jira_cloud_url="https://example.atlassian.net",
+            jira_server_url="",
+        )
+        with (
+            patch("rootcoz.storage.get_user_tokens", AsyncMock(return_value={})),
+            patch("rootcoz.main._account_has_profile", AsyncMock(return_value=True)),
+        ):
+            notice = await _issue_blocked_notice(
+                message="please create a Jira issue for this failure",
+                username="alice",
+                settings=settings,
+                github_repo_available=True,
+            )
+        assert "Profile Settings → add the Jira token" in notice
+
+    @pytest.mark.parametrize(
+        "settings_kwargs",
+        [
+            # ATST scoped token only: no PAT and no basic auth can file there.
+            {
+                "jira_auth_mode": "atst",
+                "atlassian_oauth_cloud_id": "cloud-1",
+            },
+            # OAuth 2.0 credential only.
+            {
+                "jira_auth_mode": "oauth",
+                "atlassian_oauth_cloud_id": "cloud-1",
+                "atlassian_oauth_client_id": "client-1",
+            },
+        ],
+    )
+    async def test_a_service_account_deployment_still_promises_the_token(
+        self, settings_kwargs
+    ):
+        """The probe asks the same gate with every shape a Jira credential can
+        be saved in, so a deployment that files only with a service-account
+        credential (ATOA client secret, ATST scoped token) still names the fix
+        for an account that has none."""
+        from rootcoz.config import Settings
+        from rootcoz.main import _issue_blocked_notice
+
+        with (
+            patch("rootcoz.storage.get_user_tokens", AsyncMock(return_value={})),
+            patch("rootcoz.main._account_has_profile", AsyncMock(return_value=True)),
+        ):
+            notice = await _issue_blocked_notice(
+                message="please create a Jira issue for this failure",
+                username="alice",
+                settings=Settings(**settings_kwargs),
+                github_repo_available=True,
+            )
+        assert "Profile Settings → add the Jira token" in notice
+
+    async def test_the_bootstrap_admin_is_told_to_sign_in(self):
+        """No ``users`` row means ``PUT /api/user/tokens`` answers 404 for it."""
+        notice = await self._notice(
+            "please file a GitHub issue for this", {}, profile=False
+        )
+        assert "Sign in with your own account" in notice
+        assert "Profile Settings → add" not in notice
+        assert "tooling" not in notice.lower()
+
+    async def test_a_failed_lookup_costs_the_notice_not_the_turn(self):
+        from rootcoz.config import Settings
+        from rootcoz.main import _issue_blocked_notice
+
+        with patch(
+            "rootcoz.storage.get_user_tokens",
+            AsyncMock(side_effect=RuntimeError("db is gone")),
+        ):
+            assert (
+                await _issue_blocked_notice(
+                    message="open a GitHub issue",
+                    username="alice",
+                    settings=Settings(enable_github_issues=True),
+                    github_repo_available=True,
+                    job_chat=True,
+                )
+                == ""
+            )
+
+
+class TestTheNoticeRendersAboveTheAnswer:
+    """A correction must not arrive after the wrong answer it corrects (#446).
+
+    Both routes store it with the turn: the reader meets the cause under their
+    own request and above the placeholder the model fills in.
+    """
+
+    @pytest.mark.parametrize("admin", [False, True])
+    async def test_the_notice_is_stored_before_the_placeholder(
+        self, admin, monkeypatch, tmp_path
+    ):
+        from types import SimpleNamespace
+
+        from fastapi import BackgroundTasks
+
+        from rootcoz import main
+        from rootcoz.config import Settings
+        from rootcoz.models import ChatMessageRequest
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "notice-order.db")
+        await storage.init_db()
+        await storage.create_admin_user("alice")
+        job_id = main.ADMIN_CHAT_JOB_ID if admin else "job"
+        if not admin:
+            await storage.save_result(
+                job_id,
+                "",
+                "completed",
+                {"status": "completed", "result": {}, "request_params": {}},
+            )
+        monkeypatch.setattr(
+            main, "get_settings", lambda: Settings(enable_github_issues=True)
+        )
+        monkeypatch.setattr(
+            main,
+            "_settings_github_repo_available",
+            lambda _settings: True,
+        )
+        monkeypatch.setattr(
+            main,
+            "_job_issue_repo_slugs",
+            lambda _params: ("org/repo", frozenset({"org/repo"})),
+        )
+        monkeypatch.setattr(
+            main,
+            "_current_chat_choice",
+            AsyncMock(
+                return_value=({"ai_provider": "openai", "ai_model": "m"}, "user")
+            ),
+        )
+        monkeypatch.setattr(
+            main,
+            "_normalize_and_validate_ai_params",
+            AsyncMock(return_value=("openai", "m")),
+        )
+        monkeypatch.setattr(
+            main, "_check_chat_session_choice", AsyncMock(return_value=("sid", "user"))
+        )
+        request = SimpleNamespace(
+            state=SimpleNamespace(username="alice", is_admin=admin, role="admin")
+        )
+        body = ChatMessageRequest(message="open a GitHub issue for this failure")
+        sent = await (
+            main.send_admin_chat_message(body, request, BackgroundTasks())
+            if admin
+            else main.send_chat_message(job_id, body, request, BackgroundTasks())
+        )
+
+        rows = await storage.get_chat_messages(job_id, username="alice")
+        assert [row["role"] for row in rows] == ["user", "system", "assistant"]
+        notice = rows[1]
+        # The row the model never writes comes before the placeholder it fills.
+        assert notice["id"] < sent["assistant_message_id"]
+        assert notice["id"] > rows[0]["id"]
+        assert "Profile Settings → add the GitHub token" in notice["content"]
 
 
 class TestBuildSystemPrompt:
@@ -3129,7 +3480,12 @@ class TestChatEndpoints:
         history = test_client.get("/api/chat/chat-fail-job").json()
         assistant_msgs = [m for m in history["messages"] if m["role"] == "assistant"]
         assert assistant_msgs[-1]["status"] == "failed"
-        assert "AI CLI timed out" in assistant_msgs[-1]["content"]
+        # An unmatched provider text is never echoed back to the user (it can be
+        # a whole response body): the mapper's generic sentence is the output.
+        assert (
+            assistant_msgs[-1]["content"] == "Error: AI call failed. Please try again."
+        )
+        assert "AI CLI timed out" not in assistant_msgs[-1]["content"]
 
     async def test_get_chat_with_pagination(self, test_client, temp_db_path: Path):
         await _save_job(temp_db_path, "chat-page-job")
@@ -4289,3 +4645,715 @@ class TestChatSessionToolRefresh:
         assert main_mod._enable_tools_for_session("sid-stale", ("jira",)) is None
         assert main_mod._chat_session_tracker_targets["sid-stale"] == ("github",)
         assert main_mod._enable_tools_for_session("sid-stale", ("jira",)) is None
+
+
+# -- One refusal table, three surfaces (#423) ------------------------------
+#
+# A session refusal is a sentence rootcoz constructs, from the sidecar's three
+# static key-free literals or from its own cause text. The start-time 422, the
+# send-time mapper and the message content the send path persists must carry
+# the same bytes, and no path may echo the body it was handed.
+
+_LIMITS_LITERAL = (
+    "Model metadata missing reliable input/output token limits for unknown model. "
+    "Declare the model in the agent-dir models.json with contextWindow and maxTokens "
+    "to use it with a session API key."
+)
+_LIMITS_SENTENCE = f"AI session refused: {_LIMITS_LITERAL}"
+_MODEL_LITERAL = "Invalid model for session API key: [REDACTED]"
+_PROVIDER_LITERAL = "Selected provider does not support session API key authentication"
+_NEUTRAL_401 = (
+    "AI session refused: the provider rejected the AI credential for openai/undeclared."
+    " Check that the credential is valid for that provider, or ask an administrator to"
+    " verify the provider key on the server."
+)
+_BANNED_WORDS = ("your own", "re-enter", "your", "the server's", "rotate")
+
+
+def _generic_sentence(status: int) -> str:
+    return (
+        f"AI session refused: the session could not be created for openai/undeclared"
+        f" (sidecar HTTP {status}). Ask an administrator to check the server log for the"
+        " sidecar's reason."
+    )
+
+
+def _chat_init_request():
+    return SimpleNamespace(
+        state=SimpleNamespace(username="alice", is_admin=True, role="admin")
+    )
+
+
+async def _refused_init(
+    install_start_rig, refusing_sidecar, *, status_code, json_body=None, raw_text=""
+):
+    """Drive POST /api/chat/{job}/init with a sidecar that refuses."""
+    from fastapi import HTTPException
+
+    from rootcoz import main
+
+    client = refusing_sidecar(status_code, json_body=json_body, raw_text=raw_text)
+    await install_start_rig(
+        credential_source="server", client=client, job_id="refusal-job", admin=False
+    )
+    with pytest.raises(HTTPException) as exc:
+        await main.init_chat(
+            "refusal-job",
+            _chat_init_request(),
+            ChatInitRequest(ai_provider="openai", ai_model="undeclared"),
+        )
+    return exc.value
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("literal", [_MODEL_LITERAL, _PROVIDER_LITERAL])
+async def test_non_limit_4xx_gets_its_own_sentence(
+    install_start_rig, refusing_sidecar, literal
+):
+    """Each non-limits whitelisted literal is forwarded byte for byte.
+
+    A whitelist holding only the limits literal (or a generic sentence for these
+    causes) fails here: the detail must equal marker + the sidecar's own words.
+    """
+    refusal = await _refused_init(
+        install_start_rig,
+        refusing_sidecar,
+        status_code=400,
+        json_body={"error": literal},
+    )
+    assert refusal.status_code == 422
+    assert refusal.detail == f"AI session refused: {literal}"
+    assert refusal.detail != f"AI session refused: {_LIMITS_LITERAL}"
+    assert "models.json" not in refusal.detail
+
+
+@pytest.mark.asyncio
+async def test_cursor_session_failure_keeps_its_remediation(refusal_secret_key):
+    """A Cursor ``/sessions`` 400 keeps the ``agent login`` remediation."""
+    from rootcoz import ai_client
+
+    detail = f"sidecar said no for {refusal_secret_key}"
+    send = ai_client.format_chat_ai_user_error(
+        f"Sidecar session creation failed (HTTP 400): {detail}",
+        is_admin=True,
+        ai_provider="cursor",
+        ai_model="composer",
+    )
+    start = ai_client._session_refusal(400, detail, "cursor", "composer")
+    for message in (send, start):
+        assert "agent login" in message
+        assert "CURSOR_API_KEY" in message
+        assert refusal_secret_key not in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("status_code", "raw_text", "expected"),
+    [
+        (401, "upstream rejected the key", _NEUTRAL_401),
+        (403, "upstream rejected the key", _NEUTRAL_401),
+        (418, "upstream is a teapot", "generic"),
+    ],
+)
+async def test_401_and_403_get_the_source_neutral_sentence(
+    install_start_rig,
+    refusing_sidecar,
+    refusal_secret_key,
+    status_code,
+    raw_text,
+    expected,
+):
+    """A rejected credential gets one source-neutral sentence; other 4xx generic.
+
+    The body carries a fake key and the limits words outside the whitelisted
+    literal, and neither may reach the detail — an echo mapper cannot hide them.
+    """
+    body = f"{raw_text} {refusal_secret_key} Model metadata missing"
+    refusal = await _refused_init(
+        install_start_rig, refusing_sidecar, status_code=status_code, raw_text=body
+    )
+    assert refusal.status_code == 422
+    sentence = refusal.detail
+    if expected == "generic":
+        assert sentence == _generic_sentence(status_code)
+    else:
+        assert sentence == expected
+    assert refusal_secret_key not in sentence
+    assert "Model metadata missing" not in sentence
+    assert "upstream" not in sentence
+    for banned in _BANNED_WORDS:
+        assert banned not in sentence
+
+
+@pytest.mark.parametrize(
+    ("fixture_text", "expected"),
+    [
+        # The shapes call_ai returns on send (the library envelope), and the
+        # keyless httpx shape the analysis path sees.
+        (
+            (
+                "Sidecar session creation failed (HTTP 401): rejected sk-fake Model"
+                " metadata missing"
+            ),
+            _NEUTRAL_401,
+        ),
+        (
+            f"Sidecar session creation failed (HTTP 400): {_LIMITS_LITERAL}",
+            _LIMITS_SENTENCE,
+        ),
+        (
+            "Client error '401 Unauthorized' for url 'http://127.0.0.1:9100/sessions'",
+            _NEUTRAL_401,
+        ),
+        (
+            "Client error '400 Bad Request' for url 'http://127.0.0.1:9100/sessions'",
+            _generic_sentence(400),
+        ),
+    ],
+)
+def test_credential_refusal_is_source_neutral_everywhere(
+    monkeypatch, fixture_text, expected
+):
+    """One sentence per cause, on both surfaces, and never the raw text.
+
+    The start-time sentence is built by ``_session_refusal`` and the send-time
+    one by the mapper; both must answer the same bytes for the same fixture.
+    Each parameter also names the leak it rules out.
+    """
+    from rootcoz import ai_client
+
+    send = ai_client.format_chat_ai_user_error(
+        fixture_text, is_admin=False, ai_provider="openai", ai_model="undeclared"
+    )
+    start = ai_client._session_refusal(
+        *ai_client._sidecar_failure_parts(text=fixture_text),
+        "openai",
+        "undeclared",
+    )
+    assert send == expected
+    assert start == expected
+    assert send != fixture_text
+    assert "Sidecar session creation failed" not in send
+    for banned in _BANNED_WORDS:
+        assert banned not in send
+    if "sk-fake" in fixture_text:
+        assert "sk-fake" not in send
+        assert "Model metadata missing" not in send
+    if "Client error" in fixture_text:
+        assert "Client error" not in send
+        assert "/sessions" not in send
+
+
+@pytest.mark.parametrize(
+    "fixture_text",
+    [
+        _LIMITS_SENTENCE,
+        f"Sidecar session creation failed (HTTP 400): {_LIMITS_LITERAL}",
+    ],
+)
+def test_send_after_lost_session_names_the_fix(fixture_text):
+    """A refusal met on send names the fix, not the raw library body.
+
+    The marker sentence (a session that expired between start and send) and the
+    library envelope (what ``call_ai`` returns) must both resolve to the limits
+    sentence; the httpx keyless shape carries no body, so it never gets here.
+    """
+    from rootcoz import ai_client
+
+    message = ai_client.format_chat_ai_user_error(
+        fixture_text, is_admin=False, ai_provider="openai", ai_model="undeclared"
+    )
+    assert message == _LIMITS_SENTENCE
+    if not fixture_text.startswith(ai_client.SESSION_REFUSAL_MARKER):
+        assert message != fixture_text
+    assert "Sidecar session creation failed" not in message
+
+
+@pytest.mark.asyncio
+async def test_send_time_sentence_is_byte_equal_to_the_422_detail(
+    install_start_rig, refusing_sidecar, test_client, temp_db_path
+):
+    """The same cause on all three surfaces carries the same bytes.
+
+    (a) the assistant message content the send route persists, (b) the mapper's
+    returned string, and (c) the start-time ``422`` detail — one drive each,
+    because ``init`` stores no message and ``chat_with_ai`` drops the result.
+    """
+    from rootcoz import ai_client
+
+    library_text = f"Sidecar session creation failed (HTTP 400): {_LIMITS_LITERAL}"
+    await _save_job(temp_db_path, "refusal-send-job")
+    await _start_chat(test_client, "refusal-send-job")
+    with patch("rootcoz.engine.chat.chat_with_ai", new_callable=AsyncMock) as mock_chat:
+        mock_chat.return_value = (False, library_text, None)
+        response = test_client.post(
+            "/api/chat/refusal-send-job",
+            json={"message": "hello", "ai_provider": "claude", "ai_model": "sonnet-4"},
+        )
+    assert response.status_code == 202
+    history = test_client.get("/api/chat/refusal-send-job").json()
+    assistant = [m for m in history["messages"] if m["role"] == "assistant"]
+    assert assistant[-1]["status"] == "failed"
+    assert assistant[-1]["content"] == f"Error: {_LIMITS_SENTENCE}"
+    assert "Sidecar session creation failed" not in assistant[-1]["content"]
+
+    mapped = ai_client.format_chat_ai_user_error(
+        library_text, is_admin=False, ai_provider="openai", ai_model="undeclared"
+    )
+    assert mapped == _LIMITS_SENTENCE
+    assert "Sidecar session creation failed" not in mapped
+
+    refusal = await _refused_init(
+        install_start_rig,
+        refusing_sidecar,
+        status_code=400,
+        json_body={"error": _LIMITS_LITERAL},
+    )
+    assert refusal.detail == _LIMITS_SENTENCE
+
+
+def test_prompt_4xx_keeps_its_own_wording_and_stays_retryable():
+    """A 4xx on ``/sessions/<id>/prompt`` is not a creation failure.
+
+    The keyless mapper in ``_call_with_safe_error`` leaves the wording alone and
+    the retry decision sees no non-retryable marker, so the attempt is retried —
+    rewriting it as a refusal would make a live session's 429 permanent.
+    """
+    from rootcoz import ai_client
+    from rootcoz.engine import core
+
+    prompt_text = (
+        "Client error '400 Bad Request' for url"
+        " 'http://127.0.0.1:9100/sessions/abc/prompt'\nFor more information check:"
+        " https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/400"
+    )
+    detail = prompt_text.casefold()
+    assert not any(marker in detail for marker in core._NON_RETRYABLE_AI_ERRORS)
+
+    async def _failing_call(**_kwargs):
+        return AIResult(success=False, text=prompt_text, error=prompt_text)
+
+    result = asyncio.run(
+        ai_client._call_with_safe_error(
+            _failing_call, ai_provider="openai", ai_model="undeclared"
+        )
+    )
+    assert result.text == prompt_text
+
+
+def test_a_built_sentence_keeps_its_cause_through_both_mappers():
+    """Re-mapping our own sentence must not answer ``sidecar HTTP None``.
+
+    A 401 sentence carries no status any more, so both the send mapper and the
+    safe-error wrapper have to treat a marker sentence as final.
+    """
+    from rootcoz import ai_client
+
+    sentence = ai_client._session_refusal(
+        401, "upstream rejected the key", "openai", "undeclared"
+    )
+    assert "rejected the AI credential for openai/undeclared" in sentence
+    assert (
+        ai_client.format_chat_ai_user_error(
+            sentence, ai_provider="openai", ai_model="undeclared"
+        )
+        == sentence
+    )
+
+    async def _failing_call(**_kwargs):
+        return AIResult(success=False, text=sentence, error=sentence)
+
+    result = asyncio.run(
+        ai_client._call_with_safe_error(
+            _failing_call, ai_provider="openai", ai_model="undeclared"
+        )
+    )
+    assert result.text == sentence
+    assert "HTTP None" not in result.text
+
+
+def test_a_sidecar_body_wearing_the_marker_is_never_forwarded():
+    """Only a whole sentence rootcoz built is trusted as a refusal.
+
+    ``_prompt_safely`` puts a non-200 body into ``AIResult.text`` verbatim, so a
+    body that merely starts with the marker must not be forwarded to a chat user
+    or skip keyed redaction.
+    """
+    from rootcoz import ai_client
+
+    body = (
+        "AI session refused: provider echoed the key sk-live-EXAMPLE-1234 and its"
+        " whole upstream payload"
+    )
+    assert not ai_client._is_own_refusal_sentence(body)
+    # Wearing our exact wording is not enough either: the variable slots hold a
+    # pair and a status, so free text parked in one is still a body.
+    dressed = (
+        ai_client._REFUSAL_TEMPLATES[1]
+        .template.replace(
+            "$pair", "the key sk-live-EXAMPLE-1234 from the upstream payload"
+        )
+        .replace("$status", "500")
+    )
+    assert not ai_client._is_own_refusal_sentence(dressed)
+
+    mapped = ai_client.format_chat_ai_user_error(
+        body, is_admin=True, ai_provider="openai", ai_model="undeclared"
+    )
+    assert "sk-live-EXAMPLE-1234" not in mapped
+    assert mapped.startswith(ai_client.SESSION_REFUSAL_MARKER)
+
+    async def _failing_call(**_kwargs):
+        return AIResult(success=False, text=body, error=body)
+
+    result = asyncio.run(
+        ai_client._call_with_safe_error(
+            _failing_call, ai_provider="openai", ai_model="undeclared"
+        )
+    )
+    assert "sk-live-EXAMPLE-1234" not in result.text
+    assert result.text.startswith(ai_client.SESSION_REFUSAL_MARKER)
+
+    assert "sk-live-EXAMPLE-1234" not in ai_client.format_chat_ai_user_error(
+        dressed, is_admin=True, ai_provider="openai", ai_model="undeclared"
+    )
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "AI session unavailable",
+        "Chat credential unavailable; Start a new chat",
+        "Server provider access requires an administrator grant",
+        (
+            "Server credentials for provider 'openai' are deactivated by the"
+            " administrator (active_server_providers)"
+        ),
+        (
+            "Model 'gpt-5' is excluded from server credentials for provider"
+            " 'openai' by the administrator's model selection"
+        ),
+    ],
+)
+def test_rootcoz_own_recovery_message_is_never_replaced_by_retry(message):
+    """A status-free sentence rootcoz wrote carries the fix, not "try again"."""
+    from rootcoz import ai_client
+
+    assert (
+        ai_client.format_chat_ai_user_error(
+            message, ai_provider="openai", ai_model="gpt-5"
+        )
+        == message
+    )
+
+
+def test_a_body_wearing_a_rootcoz_prefix_is_replaced():
+    """Only the whole sentence rootcoz raised is forwarded, never the prefix.
+
+    ``_is_rootcoz_actionable_error`` used to accept any text *starting* with
+    ``Model '`` or ``Server credentials for provider '``, so a sidecar body
+    wearing that prefix was returned verbatim to a chat user.
+    """
+    from rootcoz import ai_client
+
+    deactivated = (
+        "Server credentials for provider 'openai' are deactivated by the"
+        " administrator (active_server_providers)"
+    )
+    deselected = (
+        "Model 'gpt-5' is excluded from server credentials for provider 'openai'"
+        " by the administrator's model selection"
+    )
+    bodies = (
+        f"{deactivated} — upstream payload: sk-live-EXAMPLE-1234",
+        f"{deselected}; see /srv/agent/models.json with key sk-live-EXAMPLE-1234",
+        # The slot is a provider/model id: free text parked in it is a body.
+        (
+            "Server credentials for provider 'the key sk-live-EXAMPLE-1234 from the"
+            " upstream payload' are deactivated by the administrator"
+            " (active_server_providers)"
+        ),
+    )
+    for body in bodies:
+        assert not ai_client._is_rootcoz_actionable_error(body), body
+        mapped = ai_client.format_chat_ai_user_error(
+            body, is_admin=True, ai_provider="openai", ai_model="gpt-5"
+        )
+        assert "sk-live-EXAMPLE-1234" not in mapped, body
+        assert mapped == "AI call failed. Please try again.", body
+
+
+def _session_creation_error(status: int, text: str):
+    """An ``httpx.HTTPStatusError`` shaped like a sidecar creation failure."""
+    import httpx
+
+    request = httpx.Request("POST", "http://127.0.0.1:9100/sessions")
+    response = httpx.Response(status, request=request, text=text)
+    return httpx.HTTPStatusError(text, request=request, response=response)
+
+
+def test_a_library_429_text_stays_retryable():
+    """A 429 shape is never admitted as a refusal, whatever text carries it."""
+    from rootcoz import ai_client
+    from rootcoz.engine import core
+
+    library_text = (
+        "Client error '429 Too Many Requests' for url"
+        " 'http://127.0.0.1:9100/sessions'\nFor more information check:"
+        " https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/429"
+    )
+    for text in (library_text, "Sidecar session creation failed (HTTP 429): slow down"):
+        assert ai_client._is_refusal_text(text) is False, text
+        assert not any(
+            marker in text.casefold() for marker in core._NON_RETRYABLE_AI_ERRORS
+        ), text
+        mapped = ai_client.format_chat_ai_user_error(
+            text, ai_provider="openai", ai_model="undeclared"
+        )
+        assert not mapped.startswith(ai_client.SESSION_REFUSAL_MARKER), text
+
+
+@pytest.mark.parametrize("status", [408, 425, 429])
+def test_a_transient_session_creation_status_stays_retryable(status):
+    """Only 408/425/429 are transient: mapping one to a refusal kills retries.
+
+    The refusal sentence carries ``SESSION_REFUSAL_MARKER``, the one
+    non-retryable signal, so a request timeout or a rate limit must stay ``None``
+    and leave the call retryable.
+    """
+    from rootcoz import ai_client
+
+    assert ai_client._TRANSIENT_SESSION_STATUSES == frozenset({408, 425, 429})
+    exc = _session_creation_error(status, "slow down")
+    assert ai_client._session_refusal_for(exc, "openai", "undeclared") is None
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 409, 422])
+def test_a_non_transient_session_creation_status_is_a_refusal(status):
+    """Every other creation 4xx is the sidecar refusing; a retry cannot help."""
+    from rootcoz import ai_client
+
+    refusal = ai_client._session_refusal_for(
+        _session_creation_error(status, "sidecar says no"), "openai", "undeclared"
+    )
+    assert isinstance(refusal, ai_client.SessionCreationRefused)
+    assert str(refusal).startswith(f"{ai_client.SESSION_REFUSAL_MARKER}: ")
+
+
+def test_a_sentence_built_for_a_catalog_id_with_a_space_and_a_slash_is_ours():
+    """rootcoz registers what it builds, so no id shape can cost the guidance.
+
+    The bounded template slots are tighter than a real catalog id, so the
+    constructor registers each sentence it emits; the matcher trusts the
+    registry entry, not the shape.
+    """
+    from rootcoz import ai_client
+
+    provider, model = "my provider/inner", "the team's model/v2"
+
+    def deselected() -> str:
+        async def _selection():
+            return {provider.lower()}, set()
+
+        with (
+            patch.object(ai_client, "_load_server_pool_selection", _selection),
+            pytest.raises(ai_client.ExcludedServerModelError) as raised,
+        ):
+            asyncio.run(ai_client.require_selected_server_pair(provider, model))
+        return str(raised.value)
+
+    with pytest.raises(ai_client.InactiveServerProviderError) as raised:
+        ai_client._raise_inactive_server_provider(provider)
+
+    sentences = (
+        str(raised.value),
+        deselected(),
+        ai_client._session_refusal(401, "upstream rejected the key", provider, model),
+    )
+    for sentence in sentences:
+        assert ai_client._is_rootcoz_actionable_error(sentence) or (
+            ai_client._is_own_refusal_sentence(sentence)
+        ), sentence
+        assert ai_client.format_chat_ai_user_error(sentence) == sentence
+
+
+def test_a_body_copying_our_wording_is_never_ours():
+    """Registration is what makes a sentence ours — a copy was never built."""
+    from rootcoz import ai_client
+
+    hostile = (
+        "Server credentials for provider 'upstream said sk-live-EXAMPLE-1234 and"
+        " its whole payload' are deactivated by the administrator"
+        " (active_server_providers)"
+    )
+    assert not ai_client._is_rootcoz_actionable_error(hostile)
+    assert not ai_client._is_own_refusal_sentence(hostile)
+    mapped = ai_client.format_chat_ai_user_error(hostile, is_admin=True)
+    assert mapped == "AI call failed. Please try again."
+    assert "sk-live-EXAMPLE-1234" not in mapped
+
+
+def test_the_own_sentence_registry_stays_bounded():
+    """Every emitted sentence is remembered, so the registry must not grow."""
+    from rootcoz import ai_client
+
+    for index in range(ai_client._OWN_SENTENCE_REGISTRY_MAX + 50):
+        ai_client._session_refusal(500, "boom", f"p{index}", "m")
+    assert len(ai_client._own_sentences) == ai_client._OWN_SENTENCE_REGISTRY_MAX
+
+
+def test_cursor_401_names_the_rejected_credential_not_the_browser_login():
+    """A refused key is the cause; the browser-login hint is only a bare 4xx."""
+    from rootcoz import ai_client
+
+    sentence = ai_client._session_refusal(
+        401, "upstream rejected the key", "cursor", "composer"
+    )
+    assert "agent login" not in sentence
+    assert "rejected the AI credential for cursor/composer" in sentence
+    # The bare-4xx Cursor failure keeps its remediation.
+    assert "agent login" in ai_client._session_refusal(
+        400, "upstream said no", "cursor", "composer"
+    )
+
+
+def test_a_cursor_refusal_keeps_its_sentence_at_send_time_too():
+    """Start's 422 detail and the send-time message are one sentence.
+
+    A bare-4xx Cursor refusal carries the browser-login hint, whose ``agent
+    login`` marker used to re-label it; the sentence rootcoz built wins.
+    """
+    from rootcoz import ai_client
+
+    sentence = ai_client._session_refusal(400, "upstream said no", "cursor", "composer")
+    assert "agent login" in sentence
+    for is_admin in (True, False):
+        assert (
+            ai_client.format_chat_ai_user_error(
+                sentence, is_admin=is_admin, ai_provider="cursor", ai_model="composer"
+            )
+            == sentence
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_mapped_refusal_keeps_the_transcript_session_id():
+    """The refusal copy still correlates with its recorded transcript.
+
+    ``dataclasses.replace()`` drops non-field attributes, and cleanup has
+    already cleared ``session_id`` by the time this copy is returned.
+    """
+    from rootcoz import ai_client
+
+    async def _failing_call(**_kwargs):
+        result = AIResult(
+            success=False,
+            text=(
+                "Client error '400 Bad Request' for url"
+                " 'http://127.0.0.1:9100/sessions'"
+            ),
+            error="bad request",
+            session_id="old",
+        )
+        result.transcript_session_id = "11111111-2222-3333-4444-555555555555"
+        return result
+
+    mapped = await ai_client._call_with_safe_error(
+        _failing_call, ai_provider="openai", ai_model="undeclared"
+    )
+    assert mapped.text.startswith(ai_client.SESSION_REFUSAL_MARKER)
+    assert (
+        getattr(mapped, "transcript_session_id", None)
+        == "11111111-2222-3333-4444-555555555555"
+    )
+
+
+@pytest.mark.asyncio
+async def test_token_limits_substring_is_not_the_limits_cause():
+    """Only the exact sidecar literal is the limits cause — never the topic.
+
+    A body that merely *contains* "token limits" must not be labelled "declare
+    the model": on a prompt URL it keeps its own wording and stays retryable, and
+    on a creation URL it answers the generic sentence, which names no
+    ``models.json``. The admitted-by-no-shape corpus runs through both the shared
+    predicate and the mapper, so a bare ``(HTTP 4`` search fails here.
+    """
+    from rootcoz import ai_client
+    from rootcoz.engine import core
+
+    twin = ai_client.format_chat_ai_user_error(
+        f"Sidecar session creation failed (HTTP 400): {_LIMITS_LITERAL}",
+        ai_provider="openai",
+        ai_model="undeclared",
+    )
+    assert twin == _LIMITS_SENTENCE
+
+    substring = "gateway: maximum token limits exceeded"
+    assert ai_client._is_refusal_text(substring) is False
+    assert "openai/undeclared (sidecar HTTP 400)" in ai_client._session_refusal(
+        400, substring, "openai", "undeclared"
+    )
+    assert "models.json" not in ai_client._session_refusal(
+        400, substring, "openai", "undeclared"
+    )
+
+    prompt_url = "Client error '400 Bad Request' for url 'http://127.0.0.1:9100/sessions/abc/prompt'\nbody: maximum token limits exceeded"
+    assert ai_client._is_refusal_text(prompt_url) is False
+    assert not any(
+        marker in prompt_url.casefold() for marker in core._NON_RETRYABLE_AI_ERRORS
+    )
+
+    corpus = [
+        "Sidecar API key model discovery failed (HTTP 500)",
+        "Sidecar unhealthy (HTTP 503)",
+        "Sidecar unhealthy (HTTP 400)",
+        "Upstream gateway replied (HTTP 429) try later",
+        "prompt rejected by upstream (HTTP 400)",
+    ]
+    for item in corpus:
+        assert ai_client._is_refusal_text(item) is False, item
+        assert not any(
+            marker in item.casefold() for marker in core._NON_RETRYABLE_AI_ERRORS
+        ), item
+        answer = ai_client.format_chat_ai_user_error(
+            item, ai_provider="openai", ai_model="undeclared"
+        )
+        assert answer != item
+        assert item not in answer
+        assert "models.json" not in answer
+
+
+@pytest.mark.asyncio
+async def test_text_admitted_by_no_shape_is_never_echoed():
+    """A text no shape admits is answered with a constructed sentence.
+
+    (a) a status no creation shape carries stays retryable instead of claiming
+    "the session could not be created", (b) no status gets the generic AI-error
+    sentence, and (c) shape 2 is a substring: a mid-string creation phrase *is*
+    admitted, yet the cause is not claimed, so the wrapper text never survives.
+    """
+    from rootcoz import ai_client
+
+    unmapped = "Upstream gateway replied (HTTP 429) try later"
+    assert ai_client._is_refusal_text(unmapped) is False
+    answer = ai_client.format_chat_ai_user_error(
+        unmapped, ai_provider="openai", ai_model="undeclared"
+    )
+    assert answer == "AI call failed. Please try again."
+    assert "Upstream gateway" not in answer
+    assert "try later" not in answer
+
+    bare = "prompt rejected by upstream"
+    assert ai_client._is_refusal_text(bare) is False
+    assert (
+        ai_client.format_chat_ai_user_error(
+            bare, ai_provider="openai", ai_model="undeclared"
+        )
+        == "AI call failed. Please try again."
+    )
+
+    wrapped = f"wrapper: Sidecar session creation failed (HTTP 400): {_LIMITS_LITERAL}"
+    assert ai_client._is_refusal_text(wrapped) is True
+    assert ai_client.format_chat_ai_user_error(
+        wrapped, ai_provider="openai", ai_model="undeclared"
+    ) == _generic_sentence(400)

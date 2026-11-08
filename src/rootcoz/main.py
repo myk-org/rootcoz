@@ -69,6 +69,8 @@ from rootcoz import server_status, storage
 from rootcoz import transcripts as sidecar_transcripts
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
+    SESSION_REFUSAL_MARKER,
+    SessionCreationRefused,
     _cached_catalog_provider_ids,
     _get_model_catalog,
     _setup_usage_recorder,
@@ -5502,7 +5504,10 @@ async def _run_per_group_analysis(
             )
             all_analyses.extend(
                 _failed_group_analyses(
-                    signature, failures, analysis_error=incomplete_reason(result)
+                    signature,
+                    failures,
+                    analysis_error=incomplete_reason(result),
+                    error_text=str(result),
                 )
             )
         elif result:
@@ -5706,6 +5711,7 @@ async def _analyze_failures_or_exit(
                     signature,
                     failures,
                     analysis_error=incomplete_reason(fallback_exc),
+                    error_text=str(fallback_exc),
                 )
             ]
 
@@ -5721,6 +5727,15 @@ async def _analyze_failures_or_exit(
             f"All failure group(s) failed during analysis "
             f"({len(test_failures)} test failures, {unique_errors} unique errors)"
         )
+        # A refusal is what the job records: the aggregate line names no cause,
+        # and this is the one path that reaches a fully-failed job's summary.
+        for analysis in all_analyses:
+            details = (analysis.analysis.details or "").lstrip()
+            if analysis.analysis.placeholder and details.startswith(
+                SESSION_REFUSAL_MARKER
+            ):
+                error_msg = details
+                break
         logger.error(f"Analysis fully failed for job_id={job_id}: {error_msg}")
         fail_result = FailureAnalysisResult(
             job_id=job_id,
@@ -6131,6 +6146,13 @@ async def _process_ci_source_analysis(
                 ]
                 if not analyzed_children:
                     summary = f"All {len(child_job_analyses)} child job analyses failed"
+                    # A child's refusal names the cause; the count alone does
+                    # not, and this path also reaches a fully-failed summary.
+                    for child in child_job_analyses:
+                        note = (child.note or "").lstrip()
+                        if note.startswith(SESSION_REFUSAL_MARKER):
+                            summary = note
+                            break
                     fail_result = FailureAnalysisResult(
                         job_id=job_id,
                         status="failed",
@@ -10044,6 +10066,51 @@ def _chat_tracker_gate(
     return "", None
 
 
+#: Placeholder credentials the gate accepts, per tracker: the probe below asks
+#: the gate "would a real one file?" without ever reading the caller's. Jira
+#: lists every shape a token can be saved in — bare (a PAT), with an email
+#: (Cloud basic auth), and the service-account field either way (an ATOA OAuth
+#: 2.0 client secret or an ATST scoped token) — because which one files is the
+#: deployment's, not a choice the probe may make for it.
+_PROBE_TOKENS: dict[str, tuple[dict[str, str], ...]] = {
+    "github": ({"github_token": "probe"},),
+    "jira": (
+        {"jira_token": "probe"},
+        {"jira_token": "probe", "jira_email": "probe@example.com"},
+        {"jira_sa_token": "ATOAprobe"},
+        {"jira_sa_token": "ATSTprobe"},
+    ),
+}
+
+
+def _token_would_enable_filing(
+    tracker: Literal["github", "jira"],
+    settings: Settings,
+    *,
+    github_repo_available: bool,
+    job_chat: bool = False,
+) -> bool:
+    """Would a token this account can save make ``tracker`` file at all?
+
+    :func:`_chat_tracker_gate` reads the credential BEFORE the destination, so
+    it answers ``no_token`` on a deployment with no repository (or no Jira auth
+    method) configured too — a blocker no token fixes. The same gate answers it
+    with each probe credential (:data:`_PROBE_TOKENS`), so the notice promises a
+    token only where the create path would then accept one.
+    """
+    for probe in _PROBE_TOKENS[tracker]:
+        reason, _refusal = _chat_tracker_gate(
+            tracker,
+            settings,
+            probe,
+            github_repo_available=github_repo_available,
+            job_chat=job_chat,
+        )
+        if not reason:
+            return True
+    return False
+
+
 def _chat_tracker_state(
     settings: Settings,
     user_tokens: dict[str, str],
@@ -10492,6 +10559,85 @@ _CONFIRM_SCAN_MESSAGES = 50
 _ISSUE_CONSENT_ROLE = "system"
 
 
+async def _post_server_notice(*, conversation: str, username: str, content: str) -> int:
+    """Write a server-authored ``system`` row into a chat and return its id.
+
+    The model never writes this role, so a row in it is text the model cannot
+    author. Mid-turn notices come from here; the no-credential answer belongs
+    above the answer it corrects, so it is stored with the turn itself (see
+    :func:`_issue_blocked_notice`).
+    """
+    return await storage.add_chat_message(
+        conversation, role=_ISSUE_CONSENT_ROLE, content=content, username=username
+    )
+
+
+async def _issue_blocked_notice(
+    *,
+    message: str,
+    username: str,
+    settings: Settings,
+    github_repo_available: bool,
+    job_chat: bool = False,
+) -> str:
+    """Why the issue this message asks for cannot be filed, ``""`` when it can.
+
+    The narrow trigger: the message itself asks to file an issue in a named
+    tracker (:func:`asked_issue_tracker`), that tracker is enabled for this
+    server but absent from the tool list for a CREDENTIAL reason — so the cause
+    and the fix are the account's, and naming them here is the answer. Anything
+    else (no request, a disabled tracker, no repository, a usable token) yields
+    ``""``.
+
+    The caller stores the text with the turn, BEFORE the assistant placeholder,
+    so the cause renders above the model's answer rather than after it: the
+    reader must not meet the wrong answer first. Best effort — a failure here
+    costs the notice, never the turn.
+    """
+    from rootcoz.engine.chat import (
+        asked_issue_tracker,
+        credential_blocked_issue_notice,
+    )
+
+    try:
+        tracker = asked_issue_tracker(message)
+        if not tracker:
+            return ""
+        _targets, unavailable = _chat_tracker_state(
+            settings,
+            await storage.get_user_tokens(username),
+            github_repo_available=github_repo_available,
+            has_profile=await _account_has_profile(username),
+            job_chat=job_chat,
+        )
+        reason = unavailable.get(tracker, "")
+        notice = credential_blocked_issue_notice(
+            tracker,
+            reason,
+            token_would_file=_token_would_enable_filing(
+                tracker,
+                settings,
+                github_repo_available=github_repo_available,
+                job_chat=job_chat,
+            ),
+        )
+        if notice:
+            logger.info(
+                "Chat: the server answers the %s filing request for %s (reason=%s)",
+                tracker,
+                username,
+                reason,
+            )
+        return notice
+    except Exception:
+        logger.warning(
+            "Chat: could not compose the no-credential issue notice for %s",
+            username,
+            exc_info=True,
+        )
+        return ""
+
+
 async def _post_issue_consent_request(
     *,
     conversation: str,
@@ -10514,9 +10660,9 @@ async def _post_issue_consent_request(
     as consent. The proposal id is in the message too, so a rebuilt AI session —
     which keeps only stored chat text — can still file exactly what was approved.
     """
-    message_id = await storage.add_chat_message(
-        conversation,
-        role=_ISSUE_CONSENT_ROLE,
+    message_id = await _post_server_notice(
+        conversation=conversation,
+        username=username,
         content=(
             f"Proposed {kind} issue — nothing has been filed yet.\n\n"
             f"{shown}\n\n"
@@ -10525,7 +10671,6 @@ async def _post_issue_consent_request(
             "reply arrives, and only a reply from you can confirm it.\n\n"
             f"Proposal id: {confirmation_id}"
         ),
-        username=username,
     )
     if not message_id:
         raise HTTPException(
@@ -22568,6 +22713,29 @@ async def _init_chat_under_barrier(
     }
 
 
+_TRANSIENT_CHAT_START_DETAIL = "The AI service is rate limited or timed out. Try again."
+
+
+def _chat_start_sidecar_error(exc: httpx.HTTPStatusError) -> HTTPException:
+    """Shape a transient session-creation failure for both chat-start routes.
+
+    A 408/425/429 never becomes a refusal sentence, because that marker is the
+    non-retryable signal the analysis engine stops on. Chat start has no retry
+    loop of its own, so it is the caller that has to name one: the user is told
+    to try again instead of receiving a 500. Any other status is a real error
+    and keeps the path it had before.
+    """
+    from rootcoz.ai_client import _TRANSIENT_SESSION_STATUSES
+
+    if exc.response.status_code not in _TRANSIENT_SESSION_STATUSES:
+        raise exc
+    logger.warning(
+        "Chat start: sidecar answered a transient status %s",
+        exc.response.status_code,
+    )
+    return HTTPException(status_code=503, detail=_TRANSIENT_CHAT_START_DETAIL)
+
+
 @app.post("/api/chat/{job_id}/init", operation_id="initChat")
 async def init_chat(
     job_id: str, request: Request, body: ChatInitRequest | None = None
@@ -22586,6 +22754,12 @@ async def init_chat(
             _hold_chat_lock(f"{job_id}:{username}"),
         ):
             result = await _init_chat_under_barrier(job_id, username, body)
+    except SessionCreationRefused as exc:
+        # A refused session is the caller's to fix: a 4xx with the reason and
+        # the fix, never a 500.
+        raise HTTPException(status_code=422, detail=str(exc)) from None
+    except httpx.HTTPStatusError as exc:
+        raise _chat_start_sidecar_error(exc) from None
     finally:
         clear_chat_prep_phase(job_id, username)
     if result["session_id"]:
@@ -22964,6 +23138,19 @@ async def send_chat_message(
             username=request.state.username,
             ai_provider=ai_provider,
             ai_model=ai_model,
+            notice=await _issue_blocked_notice(
+                message=body.message,
+                username=request.state.username,
+                settings=get_settings(),
+                # This run's own repos are a destination too, exactly as the
+                # background task reads them for the tool list.
+                github_repo_available=bool(
+                    _job_issue_repo_slugs(
+                        (stored.get("result") or {}).get("request_params", {})
+                    )[1]
+                ),
+                job_chat=True,
+            ),
         )
     logger.info("Chat: queued user message %d for job %s", user_msg_id, job_id)
 
@@ -23280,7 +23467,10 @@ async def _process_chat_message(
                             "Chat AI call failed for job %s: %s", job_id, response_text
                         )
                         user_error = format_chat_ai_user_error(
-                            response_text, is_admin=is_admin, ai_provider=ai_provider
+                            response_text,
+                            is_admin=is_admin,
+                            ai_provider=ai_provider,
+                            ai_model=ai_model,
                         )
                         await _fail_chat_assistant_placeholder(
                             assistant_msg_id,
@@ -23736,6 +23926,10 @@ async def init_admin_chat(
                     # admin chats with the real reason, not a placeholder.
                     tracker_unavailable=tracker_unavailable,
                 )
+            except SessionCreationRefused as exc:
+                raise HTTPException(status_code=422, detail=str(exc)) from None
+            except httpx.HTTPStatusError as exc:
+                raise _chat_start_sidecar_error(exc) from None
             finally:
                 chat_session_source.reset(source_token)
                 ai_username.reset(token)
@@ -23871,12 +24065,19 @@ async def send_admin_chat_message(
             ai_model,
             credential_source,
         )
+        settings = get_settings()
         user_msg_id, assistant_msg_id = await storage.add_chat_message_pair(
             job_id=ADMIN_CHAT_JOB_ID,
             user_content=body.message,
             username=request.state.username,
             ai_provider=ai_provider,
             ai_model=ai_model,
+            notice=await _issue_blocked_notice(
+                message=body.message,
+                username=request.state.username,
+                settings=settings,
+                github_repo_available=_settings_github_repo_available(settings),
+            ),
         )
     logger.info("Admin chat: queued user message %d", user_msg_id)
 
@@ -24068,7 +24269,10 @@ async def _process_admin_chat_message(
             if not success:
                 logger.error("Admin chat AI call failed: %s", response_text)
                 user_error = format_chat_ai_user_error(
-                    response_text, is_admin=True, ai_provider=ai_provider
+                    response_text,
+                    is_admin=True,
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
                 )
                 await storage.update_chat_message_content(
                     assistant_msg_id, f"Error: {user_error}"
