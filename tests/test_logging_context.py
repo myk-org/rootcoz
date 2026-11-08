@@ -3,13 +3,23 @@
 import asyncio
 import io
 import logging
+import os
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import patch
 
+import jenkins
 import pytest
 
 import rootcoz.main
 from rootcoz import logging_context
+from rootcoz.config import clear_db_settings_cache
 from rootcoz.logging_context import JobIdFilter, get_log_file, job_id_var
+from rootcoz.sources.jenkins_source import (
+    JenkinsError,
+    handle_jenkins_exception,
+    wait_for_jenkins_completion,
+)
 
 pytestmark = pytest.mark.xdist_group("logging_context")
 
@@ -76,13 +86,20 @@ def _from_logger_name(line: str) -> str:
 
 @pytest.fixture
 def file_logging(tmp_path: Path, monkeypatch) -> Path:
-    """Clear the wiring before and after, with DB_PATH pointed at tmp_path."""
+    """Clear the wiring before and after, with DB_PATH pointed at tmp_path.
+
+    The settings cache is cleared too: ``get_settings()`` is ``@lru_cache``d, so
+    a test that changes an env var would otherwise read (and leak) a stale
+    snapshot of the log-file settings.
+    """
     _clear_file_logging_state()
     monkeypatch.setenv("DB_PATH", str(tmp_path / "results.db"))
+    clear_db_settings_cache()
     try:
         yield tmp_path
     finally:
         _clear_file_logging_state()
+        clear_db_settings_cache()
 
 
 class TestFileLoggingBaseline:
@@ -507,3 +524,430 @@ class TestFileLogging:
                 if sse_handler is not None and sse_handler in known_logger.handlers:
                     known_logger.removeHandler(sse_handler)
             rootcoz.main._sse_log_handler = None
+
+
+# ---------------------------------------------------------------------------
+# #481 — the log file's bound, its modes and its free-space floor
+# ---------------------------------------------------------------------------
+
+
+def _usage(total: int, free: int) -> SimpleNamespace:
+    """A ``shutil.disk_usage``-shaped result with the given capacity."""
+    return SimpleNamespace(total=total, used=total - free, free=free)
+
+
+def _set_log_settings(monkeypatch, **values: int) -> None:
+    """Set the log-file settings as env vars, dropping the cached snapshot."""
+    for key, value in values.items():
+        monkeypatch.setenv(key.upper(), str(value))
+    clear_db_settings_cache()
+
+
+class _RecordSink(logging.Handler):
+    """Collect the records a module logger actually emitted."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        self.records.append(record)
+
+
+class _CaughtRecords:
+    """Attach a sink to an existing module logger (propagate=False)."""
+
+    def __init__(self, logger_name: str) -> None:
+        self._logger = logging.getLogger(logger_name)
+        self.sink = _RecordSink()
+
+    def __enter__(self) -> _RecordSink:
+        self._logger.addHandler(self.sink)
+        return self.sink
+
+    def __exit__(self, *exc_info: object) -> None:
+        self._logger.removeHandler(self.sink)
+
+
+class TestLogBudget:
+    """The file's bound comes from the filesystem, never from a constant."""
+
+    def test_derives_a_small_filesystem_budget(self) -> None:
+        """A 1 GiB filesystem gets 1 % of it, split over 5 files."""
+        max_bytes, backups = logging_context._derive_log_budget(1 << 30)
+        assert (max_bytes, backups) == (2_147_483, 4)
+        assert max_bytes * (backups + 1) <= (1 << 30) * 0.01
+
+    def test_derives_a_large_filesystem_budget_at_todays_cap(self) -> None:
+        """Above ~205 GiB the budget is today's 100 MiB x 21, never larger."""
+        assert logging_context._derive_log_budget(220 << 30) == (104_857_600, 20)
+
+    def test_the_fraction_below_the_cap_is_one_percent(self) -> None:
+        """100 GiB still derives 1 % — it is not the cap."""
+        assert logging_context._derive_log_budget(100 << 30) == (51_130_563, 20)
+
+    def test_a_tiny_filesystem_still_rotates(self) -> None:
+        """A 50 MiB filesystem keeps a rotatable per-file size."""
+        max_bytes, _backups = logging_context._derive_log_budget(50 << 20)
+        assert max_bytes == 262_144
+
+    def test_the_floor_is_a_clamped_fraction(self) -> None:
+        """The floor is 5 % of capacity, clamped to [32 MiB, 512 MiB]."""
+        floor = logging_context._derive_min_free_bytes
+        assert floor(1 << 30) == 53_687_091
+        assert floor(5 << 30) == 268_435_456
+        assert floor(100 << 30) == 536_870_912
+
+    def test_the_handler_uses_the_derived_numbers(
+        self, file_logging: Path, monkeypatch
+    ) -> None:
+        """enable_log_file() sizes the handler from the data filesystem."""
+        monkeypatch.setattr(
+            logging_context.shutil, "disk_usage", lambda _p: _usage(1 << 30, 1 << 30)
+        )
+        handler = _enable()
+        assert handler.maxBytes == 2_147_483
+        assert handler.backupCount == 4
+        floor = next(
+            held for held in handler.filters if isinstance(held, logging.Filter)
+        )
+        assert floor.min_free_bytes == 53_687_091  # type: ignore[attr-defined]
+
+    def test_explicit_settings_override_the_derivation(
+        self, file_logging: Path, monkeypatch
+    ) -> None:
+        """A set log_max_bytes/log_backup_count wins over the derived value."""
+        monkeypatch.setattr(
+            logging_context.shutil, "disk_usage", lambda _p: _usage(1 << 30, 1 << 30)
+        )
+        _set_log_settings(monkeypatch, log_max_bytes=1_000_000, log_backup_count=3)
+        handler = _enable()
+        assert handler.maxBytes == 1_000_000
+        assert handler.backupCount == 3
+
+
+class TestFreeSpaceFloor:
+    """The file stops accepting records before the filesystem fills."""
+
+    def test_a_record_below_the_floor_reaches_the_console_and_not_the_file(
+        self, file_logging: Path, monkeypatch
+    ) -> None:
+        """The floor drops file records only — the console keeps flowing."""
+        _set_log_settings(monkeypatch, log_min_free_bytes=1 << 62)
+        _enable()
+        from rootcoz import get_child_logger
+
+        child = get_child_logger("rootcoz.tests_floor")
+        buffer = io.StringIO()
+        monkeypatch.setattr(_console_handler(child), "stream", buffer)
+        marker = "below-floor-marker"
+        child.warning(marker)
+        assert marker not in _file_text()
+        assert marker in buffer.getvalue()
+
+    def test_the_floor_warns_once_per_crossing(
+        self, file_logging: Path, caplog
+    ) -> None:
+        """One WARNING per crossing and one INFO on recovery, never per record."""
+        floor_filter = logging_context._FreeSpaceFilter(
+            file_logging, 1 << 62, probe_interval=0.0
+        )
+        with caplog.at_level(logging.INFO):
+            assert [floor_filter.check() for _ in range(3)] == [False, False, False]
+            warnings = [
+                record
+                for record in caplog.records
+                if record.levelno == logging.WARNING and record.name == "root"
+            ]
+            assert len(warnings) == 1
+            assert "File logging paused" in warnings[0].getMessage()
+            assert "log_min_free_bytes" in warnings[0].getMessage()
+            floor_filter.min_free_bytes = 1
+            assert floor_filter.check() is True
+        infos = [
+            record
+            for record in caplog.records
+            if record.levelno == logging.INFO and record.name == "root"
+        ]
+        assert len(infos) == 1
+        assert "resumed" in infos[0].getMessage()
+
+    def test_a_failing_probe_keeps_logging(
+        self, file_logging: Path, monkeypatch
+    ) -> None:
+        """A probe that cannot stat the filesystem must never silence logging."""
+
+        def _boom(_path: object) -> None:
+            raise OSError("cannot stat the data directory")
+
+        _set_log_settings(monkeypatch, log_min_free_bytes=1 << 62)
+        monkeypatch.setattr(logging_context.shutil, "disk_usage", _boom)
+        _enable()
+        from rootcoz import get_child_logger
+
+        marker = "failing-probe-marker"
+        get_child_logger("rootcoz.tests_probe").warning(marker)
+        assert marker in _file_text()
+
+
+class TestLogFilePermissions:
+    """Group-write is what survives a restart under a different UID."""
+
+    def test_the_log_dir_and_file_are_group_writable_under_a_hostile_umask(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """Creation sets 0770/0660 even when the umask asks for 0600."""
+        monkeypatch.setenv("DB_PATH", str(tmp_path / "results.db"))
+        previous = os.umask(0o077)
+        try:
+            path = get_log_file()
+        finally:
+            os.umask(previous)
+        assert path is not None
+        log_dir = (tmp_path / "logs").stat().st_mode & 0o777
+        log_file = Path(path).stat().st_mode & 0o777
+        assert log_dir == 0o770
+        assert log_file == 0o660
+
+    def test_the_rotated_file_keeps_the_mode(
+        self, file_logging: Path, monkeypatch
+    ) -> None:
+        """A rollover re-creates the file 0660 — the mode the deployment needs."""
+        _set_log_settings(monkeypatch, log_max_bytes=1024, log_backup_count=2)
+        previous = os.umask(0o022)
+        try:
+            handler = _enable()
+            for index in range(40):
+                handler.emit(
+                    logging.LogRecord(
+                        name="rootcoz.tests_rotate",
+                        level=logging.WARNING,
+                        pathname="",
+                        lineno=0,
+                        msg="rotation-filler-%d %s",  # type: ignore[arg-type]
+                        args=(index, "x" * 100),
+                        exc_info=None,
+                    )
+                )
+        finally:
+            os.umask(previous)
+        log_dir = file_logging / "logs"
+        assert (log_dir / "rootcoz.log.1").exists()
+        assert (log_dir / "rootcoz.log").stat().st_mode & 0o777 == 0o660
+
+
+class TestLogFileReconfigure:
+    """A settings change applies live, without dropping a #477 invariant."""
+
+    def test_reconfigure_applies_a_new_budget(
+        self, file_logging: Path, monkeypatch
+    ) -> None:
+        """reconfigure=True rebuilds the one handler with the new numbers."""
+        monkeypatch.setattr(
+            logging_context.shutil, "disk_usage", lambda _p: _usage(1 << 30, 1 << 30)
+        )
+        before = _enable()
+        _set_log_settings(monkeypatch, log_max_bytes=2_000_000)
+        after = logging_context.enable_log_file(reconfigure=True)
+        assert after is not None
+        assert after is not before
+        assert after.maxBytes == 2_000_000
+        holders = [
+            held
+            for known_logger in logging_context._known_loggers()  # type: ignore[attr-defined]
+            for held in known_logger.handlers
+            if isinstance(held, logging.handlers.RotatingFileHandler)
+        ]
+        assert {id(held) for held in holders} == {id(after)}
+
+    def test_the_job_id_prefix_survives_a_reconfigure(self, file_logging: Path) -> None:
+        """The rebuilt handler still carries JobIdFilter."""
+        _enable()
+        rootcoz.main._apply_log_file_settings()
+        from rootcoz import storage
+
+        marker = "reconfigured-jid-marker"
+        job_id_var.set("job-reconf")
+        try:
+            storage.logger.warning(marker)
+        finally:
+            job_id_var.set("")
+        assert "[job_id=job-reconf]" in _line_with(marker)
+
+    def test_the_three_settings_are_server_settings_applied_at_runtime(self) -> None:
+        """Server Settings metadata + labels for the live-applied keys (#481)."""
+        metadata = {
+            entry["key"]: entry for entry in rootcoz.main._get_settings_metadata()
+        }
+        assert rootcoz.main._LOG_FILE_SETTINGS == {
+            "log_max_bytes",
+            "log_backup_count",
+            "log_min_free_bytes",
+        }
+        for key in sorted(rootcoz.main._LOG_FILE_SETTINGS):
+            entry = metadata[key]
+            assert entry["category"] == "Server", key
+            assert entry["type"] == "integer", key
+            assert entry["restart_required"] is False, key
+            assert entry["default"] == "0", key
+            assert entry["label"] != key and entry["description"], key
+
+    def test_the_job_id_prefix_still_reaches_the_console_when_file_logging_is_off(
+        self, file_logging: Path, monkeypatch
+    ) -> None:
+        """An unwritable data dir must not cost the console its [job_id=…]."""
+        from rootcoz import get_child_logger
+
+        # Built before the sweep, like any module logger: _install_job_id_filter
+        # only reaches handlers that already exist.
+        child = get_child_logger("rootcoz.tests_console_only")
+        buffer = io.StringIO()
+        monkeypatch.setattr(_console_handler(child), "stream", buffer)
+        for known_logger in logging_context._known_loggers():  # type: ignore[attr-defined]
+            for held in known_logger.handlers:
+                while rootcoz.main._job_id_filter in held.filters:
+                    held.removeFilter(rootcoz.main._job_id_filter)
+        read_only = file_logging / "read-only"
+        read_only.mkdir()
+        read_only.chmod(0o555)
+        monkeypatch.setenv("DB_PATH", str(read_only / "results.db"))
+        try:
+            rootcoz.main._apply_log_file_settings()
+            assert logging_context.get_log_file_handler() is None
+            job_id_var.set("job-console")
+            try:
+                child.warning("console-only-marker")
+            finally:
+                job_id_var.set("")
+        finally:
+            read_only.chmod(0o755)
+        assert "[job_id=job-console]" in buffer.getvalue()
+
+
+class TestRedaction:
+    """The call sites that feed the shared log file must not render credentials."""
+
+    _USERINFO_URL = (
+        "https://ci-user:s3cr3t@jenkins.example.com/"  # pragma: allowlist secret
+    )
+    _TOKENISED = f"Error communicating with server[{_USERINFO_URL}]"
+
+    def test_a_generic_jenkins_exception_does_not_leak_credentials(self) -> None:
+        """handle_jenkins_exception's message keeps host, drops userinfo."""
+        with pytest.raises(JenkinsError) as raised:
+            handle_jenkins_exception(
+                jenkins.JenkinsException(self._TOKENISED), "my-job", 7
+            )
+        message = str(raised.value)
+        assert "jenkins.example.com" in message
+        assert "ci-user" not in message
+        assert "s3cr3t" not in message
+
+    def test_the_unreachable_log_does_not_leak_credentials(self) -> None:
+        """The connectivity log line keeps the host and drops the userinfo."""
+        error = OSError(f"Connection refused for {self._TOKENISED}")
+        with (
+            _CaughtRecords("rootcoz.sources.jenkins_source") as sink,
+            pytest.raises(JenkinsError),
+        ):
+            handle_jenkins_exception(error, "my-job", 7)
+        lines = [record.getMessage() for record in sink.records]
+        assert any("jenkins.example.com" in line for line in lines)
+        assert not any("s3cr3t" in line or "ci-user" in line for line in lines)
+
+    async def test_the_status_poll_logs_the_type_not_the_text(self) -> None:
+        """A non-transient poll failure logs the type name and no traceback."""
+        with patch("rootcoz.sources.jenkins_source.JenkinsClient") as mock_cls:
+            mock_cls.return_value.get_build_info_safe.side_effect = (
+                jenkins.JenkinsException(self._TOKENISED)
+            )
+            with _CaughtRecords("rootcoz.sources.jenkins_source") as sink:
+                result, _error = await wait_for_jenkins_completion(
+                    jenkins_url="https://jenkins.example.com",
+                    job_name="my-job",
+                    build_number=1,
+                    jenkins_user="user",
+                    jenkins_password="",
+                    jenkins_ssl_verify=True,
+                    poll_interval_minutes=1,
+                    max_wait_minutes=5,
+                )
+        assert result is False
+        failures = [
+            record
+            for record in sink.records
+            if record.levelno == logging.ERROR
+            and "JenkinsException" in record.getMessage()
+        ]
+        assert len(failures) == 1
+        assert "s3cr3t" not in failures[0].getMessage()
+        assert failures[0].exc_info is None
+
+    async def test_the_preflight_log_redacts_the_jenkins_url(self) -> None:
+        """The preflight branch interpolates the URL — the userinfo must not leak."""
+        with patch("rootcoz.sources.jenkins_source.JenkinsClient") as mock_cls:
+            mock_cls.return_value.get_whoami.side_effect = OSError("timed out")
+            with _CaughtRecords("rootcoz.sources.jenkins_source") as sink:
+                result, _error = await wait_for_jenkins_completion(
+                    jenkins_url=self._USERINFO_URL,
+                    job_name="my-job",
+                    build_number=1,
+                    jenkins_user="user",
+                    jenkins_password="",
+                    jenkins_ssl_verify=True,
+                    poll_interval_minutes=1,
+                    max_wait_minutes=5,
+                )
+        assert result is False
+        preflight = [
+            record
+            for record in sink.records
+            if "Cannot reach Jenkins at" in record.getMessage()
+        ]
+        assert len(preflight) == 1
+        line = preflight[0].getMessage()
+        assert "jenkins.example.com" in line
+        assert "ci-user" not in line
+        assert "s3cr3t" not in line
+
+    async def test_the_exhaustion_log_redacts_the_jenkins_url(self) -> None:
+        """The consecutive-failures branch interpolates the URL too."""
+        with patch("rootcoz.sources.jenkins_source.JenkinsClient") as mock_cls:
+            mock_cls.return_value.get_build_info_safe.side_effect = OSError(
+                "connection refused"
+            )
+            with _CaughtRecords("rootcoz.sources.jenkins_source") as sink:
+                result, _error = await wait_for_jenkins_completion(
+                    jenkins_url=self._USERINFO_URL,
+                    job_name="my-job",
+                    build_number=1,
+                    jenkins_user="user",
+                    jenkins_password="",
+                    jenkins_ssl_verify=True,
+                    poll_interval_minutes=1,
+                    max_wait_minutes=5,
+                    max_consecutive_failures=1,
+                )
+        assert result is False
+        exhaustion = [
+            record
+            for record in sink.records
+            if "Cannot reach Jenkins at" in record.getMessage()
+        ]
+        assert len(exhaustion) == 1
+        line = exhaustion[0].getMessage()
+        assert "jenkins.example.com" in line
+        assert "ci-user" not in line
+        assert "s3cr3t" not in line
+
+    def test_an_invalid_repo_url_reports_the_url_without_credentials(self) -> None:
+        """The ValueError keeps the scheme prefix and drops userinfo and query."""
+        from rootcoz.repository import _validate_repo_url
+
+        with pytest.raises(ValueError) as raised:
+            _validate_repo_url("ftp://u:p@example.com/x?access_token=s")
+        message = str(raised.value)
+        assert message.startswith("Invalid repository URL scheme.")
+        assert "ftp://example.com/x" in message
+        assert "u:p" not in message
+        assert "access_token" not in message

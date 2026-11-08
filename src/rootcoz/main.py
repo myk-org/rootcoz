@@ -493,6 +493,12 @@ _RESTART_REQUIRED_SETTINGS: frozenset[str] = frozenset(
     }
 )
 
+# The application log file's budget and floor (#481). Runtime settings — a
+# save rebuilds the shared handler, no restart needed.
+_LOG_FILE_SETTINGS: frozenset[str] = frozenset(
+    {"log_max_bytes", "log_backup_count", "log_min_free_bytes"}
+)
+
 # Updating any of these invalidates the recorded jira_verified_method —
 # the record reflects the last successful test of the *previous* setup.
 _JIRA_VERIFIED_INVALIDATING_KEYS: frozenset[str] = frozenset(
@@ -660,6 +666,9 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "max_wait_minutes",
         "metadata_rules_file",
         "log_level",
+        "log_max_bytes",
+        "log_backup_count",
+        "log_min_free_bytes",
         "enable_auto_review",  # runtime toggle, no restart required
         "auto_push_exporters",  # runtime toggle, no restart required
     ],
@@ -707,6 +716,9 @@ for _cat, _fields in _SETTINGS_CATEGORIES.items():
 _SETTING_LABEL_OVERRIDES: dict[str, str] = {
     "admin_key": "Admin API key",
     "log_level": "Log level",
+    "log_max_bytes": "Log file size (bytes)",
+    "log_backup_count": "Rotated log files kept",
+    "log_min_free_bytes": "Log free-space floor (bytes)",
     "ai_provider": "AI provider",
     "ai_model": "AI model",
     "ai_call_timeout": "AI call timeout",
@@ -1372,10 +1384,18 @@ def _install_job_id_filter() -> None:
                 handler.addFilter(_job_id_filter)
 
 
+def _apply_log_file_settings() -> None:
+    """(Re)build the shared file handler with the current log-budget settings."""
+    enable_log_file(reconfigure=True)
+    # Unconditional: the sweep covers the console handlers too, so gating it on
+    # a non-None file handler would drop [job_id=…] from the console whenever
+    # the data directory is not writable. Its own guard keeps it idempotent.
+    _install_job_id_filter()
+
+
 # One file handler for the whole process, enabled before the job_id filter is
 # installed so the shared handler carries it (#477). Server only — never the CLI.
-enable_log_file()
-_install_job_id_filter()
+_apply_log_file_settings()
 
 
 async def _attach_token_usage(
@@ -2879,6 +2899,7 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
     await load_db_settings()
     _apply_log_level_setting()
+    _apply_log_file_settings()
 
     # After load_db_settings, so the persisted audit_retention_days applies:
     # a saved 0 (keep forever) must not be overridden by the env/default value.
@@ -20213,6 +20234,11 @@ async def _save_settings_to_db(
         {k: str(v) if v is not None else "" for k, v in settings_updates.items()}
     )
 
+    # The log-file budget and floor apply to the running handler, not the next
+    # boot: rebuilding it here covers the PUT, the import and the env→DB persist.
+    if settings_updates.keys() & _LOG_FILE_SETTINGS:
+        _apply_log_file_settings()
+
     # Persist the transcript recording switch (and the other sidecar
     # settings) for the container entrypoint — the sidecar reads these from
     # its process env at start, so the bridge file is how a DB toggle
@@ -20349,6 +20375,8 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
 
     # Remove from in-memory cache so get_settings() falls back to env/default
     remove_from_db_settings_cache([key])
+    if key in _LOG_FILE_SETTINGS:
+        _apply_log_file_settings()
 
     # Keep the sidecar transcript env bridge in sync with the reset — the
     # bridge must stop assigning the removed override so the deployment

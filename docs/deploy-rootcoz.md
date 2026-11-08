@@ -355,6 +355,32 @@ spec:
 
 If you also want to be told when the probe itself breaks, add one line: `absent_over_time(rootcoz_data_used_ratio[15m])` — a scrape target that has been up but has no ratio for 15 minutes has a probe that is failing every time.
 
+### Bounding the application log file
+
+The application log file lives at `<data dir>/logs/rootcoz.log` on the same filesystem as the database, so a log file that grows without a bound is a `results.db` failure waiting to happen. Three things keep it in its place, and none of them need a deployment value — they all measure the filesystem that holds the data directory.
+
+**The budget.** The whole log tree is held to **1 %** of that filesystem's capacity, split into a per-file size and a backup count. Both are derived, and both are capped at the values RootCoz used before this was derived — 100 MiB per file, 20 backups — so no deployment ever gets a *larger* budget than before. A 1 GiB filesystem gets 2 147 483 B per file with 4 backups (10.7 MB in total), 5 GiB gets 7 669 584 B with 6 backups (53.7 MB), 100 GiB gets 51 130 563 B with 20 backups (1.07 GB); the cap takes over from about 205 GiB upward. A tiny filesystem still rotates: the per-file size never drops below 256 KiB.
+
+The budget is derived from **capacity**, never from free space: a budget that shrank as the filesystem filled would rotate away exactly the records that explain the fill.
+
+**The floor.** When free space on that filesystem drops below **5 %** of capacity — clamped to between 32 MiB and 512 MiB — the file stops accepting records. RootCoz writes one `File logging paused: … below the …-byte floor (log_min_free_bytes); console logging continues` WARNING, keeps logging to the console (and so to the live stream on `/admin/logs`), and writes one `File logging resumed: …` INFO when the space comes back. Records are dropped before rotation, so a full filesystem is never asked to roll a log file over. If the free-space probe itself fails, logging continues: a measurement that breaks must never silence the log.
+
+**The permissions.** `<data dir>/logs` is created `0770` and `rootcoz.log` is created — and re-created after every rollover — `0660`. Group-write is the permission that matters: the directory is created only if it does not exist (an operator's own mode is left alone), while the file's mode is enforced on every open, so a restart under a different UID or a rollover cannot leave it read-only to the group.
+
+| What your deployment needs | Why |
+| --- | --- |
+| OpenShift | The container runs as an arbitrary UID with the image's GID 0, so the group-write modes are what make the directory and file writable across restarts. No `fsGroup` is required. |
+| Docker Compose named volume | The volume inherits the image's ownership on first use, so the same group-write modes carry it. |
+| Bind mount | `chgrp` the host directory to the GID the container runs with, or run the container as the directory's owner. RootCoz will not chmod a directory it did not create. |
+
+All three numbers are Server Settings on the **Server** tab — *Log file size (bytes)*, *Rotated log files kept*, *Log free-space floor (bytes)* — and all three apply at runtime, so a save rebuilds the file handler without a restart. `0` — the default — means "derive it"; the CLI can set them the same way:
+
+```bash
+rootcoz admin settings set log_max_bytes 2000000
+rootcoz admin settings history --key log_max_bytes
+rootcoz admin settings reset log_max_bytes   # back to the derived value
+```
+
 ### The chart health-alert CronJob (the alternative for deployments without Prometheus)
 
 For clusters that scrape nothing, the chart can run its own check: a CronJob that curls `/metrics` on a schedule and posts one Slack message listing every failing check (unhealthy, error rate above the threshold, the data directory's filesystem above the warning or critical threshold with absolute sizes such as `5.4G / 6.0G (90%)`).
@@ -433,8 +459,15 @@ kubectl exec -n rootcoz deploy/rootcoz -- python -c \
   The `<data dir>/logs` directory is not writable by the container's UID/GID, so the application
   log file is off. Records still reach the console and the admin `Logs` page's live stream keeps
   working, but the page's initial tail is read from the file, so it is empty and nothing survives a
-  reload. Make `<data dir>/logs` writable by the user the container runs as; bounding the file's
-  size and setting its permissions explicitly are tracked separately.
+  reload. Make `<data dir>/logs` writable by the user the container runs as — RootCoz creates it
+  `0770` with the file at `0660`, so a group-writable directory is enough — and check that the
+  directory did not come from a host bind mount owned by another group.
+
+- `File logging paused: … below the …-byte floor (log_min_free_bytes)`
+  Free space on the filesystem holding the data directory dropped below the floor (5 % of capacity,
+  clamped to 32 MiB…512 MiB), so the file stopped accepting records. Console logging and the live
+  stream on `/admin/logs` continue. Free space — or lower *Log free-space floor (bytes)* in Server
+  Settings — and the resume INFO follows within 30 seconds.
 
 - `route.enabled and ingress.enabled are mutually exclusive`
   The chart refuses to render with both on. Set the one you are not using to `false`.
