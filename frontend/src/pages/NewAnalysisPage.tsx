@@ -20,14 +20,33 @@ import type { DefaultServerSettings } from '@/types'
 import { normalizeProvider } from '@/lib/aiProviders'
 import { useAuth } from '@/lib/auth'
 
+const DUPLICATE_PREFIX = 'Duplicate additional repo names: '
+
+/**
+ * The names that clash, read from one detail entry so a name may contain `;` and a second
+ * validator message joined into the same detail cannot leak into the copy.
+ */
+function duplicateNames(err: unknown): string | null {
+  if (!(err instanceof ApiError)) return null
+  const detail = (err.body as { detail?: unknown } | null)?.detail
+  const messages = (typeof detail === 'string'
+    ? [detail]
+    : Array.isArray(detail)
+      ? detail.map((e) => (typeof e?.msg === 'string' ? e.msg : ''))
+      : []
+  ).map((m) => m.replace(/^Value error, /, ''))
+  const hit = messages.find((m) => m.startsWith(DUPLICATE_PREFIX))
+  return hit ? hit.slice(DUPLICATE_PREFIX.length) : null
+}
+
 /** Submit-failure copy the user can act on; `null` when the API named nothing useful. */
 function submitErrorMessage(err: unknown): string | null {
   // A 5xx detail is server internals, never something the user can fix.
   if (!(err instanceof ApiError) || err.status >= 500) return null
-  const detail = extractApiDetail(err)
-  // `[^;]` stops at the next joined validator message; the server joins every colliding name with ", ".
-  const duplicates = detail?.match(/^Duplicate additional repo names: ([^;]+)/)?.[1]
-  return duplicates ? `Each additional repo needs a unique name — duplicated: \`${duplicates}\`.` : detail
+  const duplicates = duplicateNames(err)
+  return duplicates
+    ? `Each additional repo needs a unique name — duplicated: \`${duplicates}\`.`
+    : extractApiDetail(err)
 }
 
 export function NewAnalysisPage() {

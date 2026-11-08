@@ -80,11 +80,22 @@ it('names every clashing repo when several names collide', async () => {
     detail: [{
       type: 'value_error',
       loc: ['body', 'additional_repos'],
-      msg: 'Value error, Duplicate additional repo names: monitoring, shared-infra; Field required',
+      msg: 'Value error, Duplicate additional repo names: monitoring, shared-infra',
       ctx: { error: {} },
+    }, {
+      type: 'missing',
+      loc: ['body', 'jenkins_url'],
+      msg: 'Field required',
     }],
   }))
   expect(await screen.findByText('Each additional repo needs a unique name — duplicated: `monitoring, shared-infra`.')).toBeInTheDocument()
+})
+
+it('keeps a semicolon that belongs to the repo name', async () => {
+  await submitDuplicateRepos(new ApiError(422, 'Unprocessable Entity', {
+    detail: 'Duplicate additional repo names: foo;bar',
+  }))
+  expect(await screen.findByText('Each additional repo needs a unique name — duplicated: `foo;bar`.')).toBeInTheDocument()
 })
 
 it('keeps the generic sentence for a server error', async () => {
