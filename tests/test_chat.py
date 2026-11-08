@@ -1515,6 +1515,31 @@ class TestTheServerWritesTheNoCredentialAnswer:
         # With a repository that would receive the issue, the token IS the fix.
         assert "Profile Settings" in await self._notice("open a GitHub issue", {})
 
+    async def test_a_cloud_deployment_still_promises_the_token(self):
+        """A bare probe token reads as a PAT, which needs ``jira_server_url``.
+        On a Cloud-only deployment that shape cannot file, but the same token
+        saved with an email is Cloud basic auth — so the notice must still
+        promise the token instead of going silent."""
+        from rootcoz.config import Settings
+        from rootcoz.main import _issue_blocked_notice
+
+        settings = Settings(
+            jira_auth_mode="basic",
+            jira_cloud_url="https://example.atlassian.net",
+            jira_server_url="",
+        )
+        with (
+            patch("rootcoz.storage.get_user_tokens", AsyncMock(return_value={})),
+            patch("rootcoz.main._account_has_profile", AsyncMock(return_value=True)),
+        ):
+            notice = await _issue_blocked_notice(
+                message="please create a Jira issue for this failure",
+                username="alice",
+                settings=settings,
+                github_repo_available=True,
+            )
+        assert "Profile Settings → add the Jira token" in notice
+
     async def test_the_bootstrap_admin_is_told_to_sign_in(self):
         """No ``users`` row means ``PUT /api/user/tokens`` answers 404 for it."""
         notice = await self._notice(

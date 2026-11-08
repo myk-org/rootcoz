@@ -9973,11 +9973,17 @@ def _chat_tracker_gate(
     return "", None
 
 
-#: A placeholder credential the gate accepts, per tracker: the probe below asks
-#: the gate "would a real one file?" without ever reading the caller's.
-_PROBE_TOKENS: dict[str, dict[str, str]] = {
-    "github": {"github_token": "probe"},
-    "jira": {"jira_token": "probe"},
+#: Placeholder credentials the gate accepts, per tracker: the probe below asks
+#: the gate "would a real one file?" without ever reading the caller's. Jira
+#: lists every shape a token can be saved in — bare (a PAT) and with an email
+#: (Cloud basic auth) — because which one files is the deployment's, not a
+#: choice the probe may make for it.
+_PROBE_TOKENS: dict[str, tuple[dict[str, str], ...]] = {
+    "github": ({"github_token": "probe"},),
+    "jira": (
+        {"jira_token": "probe"},
+        {"jira_token": "probe", "jira_email": "probe@example.com"},
+    ),
 }
 
 
@@ -9993,17 +9999,20 @@ def _token_would_enable_filing(
     :func:`_chat_tracker_gate` reads the credential BEFORE the destination, so
     it answers ``no_token`` on a deployment with no repository (or no Jira auth
     method) configured too — a blocker no token fixes. The same gate answers it
-    with a probe credential (:data:`_PROBE_TOKENS`), so the notice promises a
+    with each probe credential (:data:`_PROBE_TOKENS`), so the notice promises a
     token only where the create path would then accept one.
     """
-    reason, _refusal = _chat_tracker_gate(
-        tracker,
-        settings,
-        _PROBE_TOKENS[tracker],
-        github_repo_available=github_repo_available,
-        job_chat=job_chat,
-    )
-    return not reason
+    for probe in _PROBE_TOKENS[tracker]:
+        reason, _refusal = _chat_tracker_gate(
+            tracker,
+            settings,
+            probe,
+            github_repo_available=github_repo_available,
+            job_chat=job_chat,
+        )
+        if not reason:
+            return True
+    return False
 
 
 def _chat_tracker_state(
