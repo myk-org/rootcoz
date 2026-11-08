@@ -733,7 +733,7 @@ async def test_a_swap_mid_pass_leaves_no_journal_beside_the_replacement(
     The connection is pinned to an inode, its ``-wal``/``-shm`` are named after the
     path: a commit after a swap sends this pass's frames to the replacement, and
     the next connection that opens it replays them into it. The bytes of the
-    replacement staying put is not the whole proof -- the journal beside it is,
+    replacement staying put is not the whole proof -- the ``-wal`` beside it is,
     because that is what its next opener would replay.
     """
     directory = tmp_path / "live"
@@ -765,8 +765,16 @@ async def test_a_swap_mid_pass_leaves_no_journal_beside_the_replacement(
     assert db_path.read_bytes() == replacement_bytes, (
         "the sweep wrote into the database that replaced it"
     )
-    assert sorted(p.name for p in directory.iterdir()) == ["results.db"], (
-        "a -wal/-shm named after the path is a journal the replacement replays"
+    # The ``-wal`` is what a next opener replays, so its *size* is the property,
+    # not its existence: truncation folds the frames into the descriptor's own
+    # inode and leaves 0 B here, while skipping it would leave 4152 B named after
+    # the path. A surviving ``-shm`` is sqlite's shared-memory index, holds no
+    # frames, and is harmless.
+    wal = directory / f"{db_path.name}-wal"
+    assert not wal.exists() or wal.stat().st_size == 0, (
+        "a -wal beside the path still holds frames, and the replacement's next"
+        f" opener replays them into it: {wal.stat().st_size} B. A truncated"
+        " journal is safe, one with frames is not"
     )
     assert _result_kinds(db_path) == ["text"] * 3
     assert "is no longer the database it started on" in storage_logs.text

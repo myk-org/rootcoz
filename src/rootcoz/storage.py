@@ -360,14 +360,14 @@ async def _open_sweep_db(db_path: Path, name: str) -> AsyncIterator[_SweepDb | N
         yield sweep
     finally:
         # Fold this pass's frames back into the file the descriptor holds before
-        # releasing it. A swap that landed during the pass leaves the ``-wal``
-        # next to the replacement, and an uncheckpointed one would replay this
-        # pass's rows into that file on the next open. Skipped once the pass saw
-        # its path move: the ``-wal`` it would truncate is named after the path,
-        # so it may already be the replacement's journal, not this pass's.
-        if not sweep.moved:
-            with suppress(sqlite3.Error):
-                await (await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")).fetchall()
+        # releasing it -- always, moved or not. Measured on a swap: skipping the
+        # checkpoint leaves a ``-wal`` named after the path holding 4152 B of
+        # replayable frames that the replacement's next opener folds into itself;
+        # truncating it folds those frames into the *descriptor's* inode instead
+        # and leaves 0 B beside the path. So the truncation is what makes a swap
+        # safe, and skipping it is the hazard.
+        with suppress(sqlite3.Error):
+            await (await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")).fetchall()
         await db.close()
 
 
