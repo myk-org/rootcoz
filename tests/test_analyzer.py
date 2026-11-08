@@ -1586,9 +1586,130 @@ class TestCloneAdditionalRepos:
     """Tests for clone_additional_repos helper."""
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("clone_limit", [10, 3])
+    @pytest.mark.parametrize(
+        ("clone_limit", "ai_calls", "share"), [(10, 3, 3), (2, 10, 2), (10, 10, 10)]
+    )
+    async def test_one_analysis_never_exceeds_its_clone_share(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        clone_limit: int,
+        ai_calls: int,
+        share: int,
+    ) -> None:
+        """One analysis may not occupy the whole server clone budget (#461)."""
+        from rootcoz.engine import core as core_module
+
+        repos = [
+            AdditionalRepo(name=f"repo{i}", url=f"https://example.com/repo{i}")
+            for i in range(13)
+        ]
+        manager = MagicMock(spec=RepositoryManager)
+        monkeypatch.setattr(
+            "rootcoz.engine.core.get_settings",
+            lambda: Settings(
+                max_concurrent_repo_clones=clone_limit,
+                max_concurrent_ai_calls=ai_calls,
+            ),
+        )
+        active = peak = 0
+        violations: list[str] = []
+        cloned_names: list[str] = []
+        full = asyncio.Event()
+        release = asyncio.Event()
+
+        async def fake_to_thread(_fn, _url, target, **_kwargs):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            if active > share:
+                violations.append(f"{active} clones in flight, share is {share}")
+            if active >= share:
+                full.set()
+            await release.wait()
+            active -= 1
+            cloned_names.append(target.name)
+
+        with patch("rootcoz.engine.core.asyncio.to_thread", side_effect=fake_to_thread):
+            task = asyncio.create_task(clone_additional_repos(manager, repos, tmp_path))
+            try:
+                await asyncio.wait_for(full.wait(), 2)
+            finally:
+                release.set()
+            cloned, result_path = await asyncio.wait_for(task, 2)
+
+        assert violations == []
+        assert peak == share
+        assert set(cloned_names) == {repo.name for repo in repos}
+        assert set(cloned) == set(cloned_names)
+        assert result_path == tmp_path
+        assert core_module._active_clones == 0
+
+    @pytest.mark.asyncio
+    async def test_unexpected_clone_error_fails_the_job(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        """An unexpected error fails the job instead of silently dropping the repo."""
+        from rootcoz.engine import core as core_module
+        from rootcoz.engine.core import logger as core_logger
+
+        repos = [
+            AdditionalRepo(name=f"repo{i}", url=f"https://example.com/repo{i}")
+            for i in range(3)
+        ]
+        manager = MagicMock(spec=RepositoryManager)
+        cloned_names: list[str] = []
+
+        def fake_clone(_url, target, **_kwargs):
+            if target.name == "repo1":
+                raise TypeError("malformed additional repo")
+            cloned_names.append(target.name)
+            return target
+
+        manager.clone_into.side_effect = fake_clone
+
+        # simple_logger sets propagate=False, so attach the handler directly.
+        original_level = core_logger.level
+        core_logger.setLevel(logging.ERROR)
+        core_logger.addHandler(caplog.handler)
+        try:
+            with pytest.raises(TypeError):
+                await asyncio.wait_for(
+                    clone_additional_repos(manager, repos, tmp_path), 5
+                )
+        finally:
+            core_logger.removeHandler(caplog.handler)
+            core_logger.setLevel(original_level)
+
+        # Siblings still cloned and every slot was released before the raise.
+        assert set(cloned_names) == {"repo0", "repo2"}
+        assert any(
+            "repo1" in record.message and "TypeError" in record.message
+            for record in caplog.records
+        ), [record.message for record in caplog.records]
+        assert core_module._active_clones == 0
+
+    @pytest.mark.asyncio
+    async def test_no_additional_repos_clones_nothing(self, tmp_path: Path) -> None:
+        """A job that needs no additional repo clones none."""
+        worker = MagicMock()
+        with patch("rootcoz.engine.core.asyncio.to_thread", worker):
+            cloned, result_path = await clone_additional_repos(
+                MagicMock(spec=RepositoryManager), [], tmp_path
+            )
+
+        worker.assert_not_called()
+        assert cloned == {}
+        assert result_path == tmp_path
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("clone_limit", "ai_calls"), [(10, 10), (10, 3), (3, 10)])
     async def test_settings_repos_all_cloned_with_bounded_concurrency(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, clone_limit: int
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        clone_limit: int,
+        ai_calls: int,
     ) -> None:
         """All settings-derived repos clone, including beyond the concurrency limit."""
         workspace = tmp_path / "workspace"
@@ -1608,10 +1729,8 @@ class TestCloneAdditionalRepos:
             load_rootcoz_repo_settings(workspace / "tests"),
         )
         manager = MagicMock(spec=RepositoryManager)
-        clone_settings = (
-            Settings()
-            if clone_limit == 10
-            else Settings(max_concurrent_repo_clones=clone_limit)
+        clone_settings = Settings(
+            max_concurrent_repo_clones=clone_limit, max_concurrent_ai_calls=ai_calls
         )
         monkeypatch.setattr("rootcoz.engine.core.get_settings", lambda: clone_settings)
         active = peak = 0
@@ -1639,7 +1758,8 @@ class TestCloneAdditionalRepos:
         assert set(attempted) == {repo["name"] for repo in repos}
         assert set(cloned) == set(attempted) - {"repo5"}
         assert all(path == workspace / name for name, path in cloned.items())
-        assert peak == clone_limit
+        # The per-analysis share, never the raw process ceiling (#461).
+        assert peak == min(clone_limit, ai_calls)
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("clone_limit", [10, 3])
@@ -1673,7 +1793,14 @@ class TestCloneAdditionalRepos:
                 active -= 1
 
         monkeypatch.setattr("rootcoz.engine.core.asyncio.to_thread", fake_to_thread)
-        update_db_settings_cache({"max_concurrent_repo_clones": str(clone_limit)})
+        # Pin the AI width at the ceiling so the share does not mask the ceiling
+        # this test is about.
+        update_db_settings_cache(
+            {
+                "max_concurrent_repo_clones": str(clone_limit),
+                "max_concurrent_ai_calls": str(clone_limit),
+            }
+        )
         try:
             jobs = [
                 asyncio.create_task(
@@ -1692,7 +1819,9 @@ class TestCloneAdditionalRepos:
                 release.set()
             results = await asyncio.wait_for(asyncio.gather(*jobs), 2)
         finally:
-            remove_from_db_settings_cache(["max_concurrent_repo_clones"])
+            remove_from_db_settings_cache(
+                ["max_concurrent_repo_clones", "max_concurrent_ai_calls"]
+            )
 
         assert set(attempted) == {repo.name for repo in repos}
         assert {name for cloned, _ in results for name in cloned} == set(attempted) - {
@@ -1789,6 +1918,9 @@ class TestCloneAdditionalRepos:
                 active -= 1
 
         monkeypatch.setattr("rootcoz.engine.core.asyncio.to_thread", fake_to_thread)
+        # Pin the AI width at the old ceiling so only the live *decrease* of the
+        # clone ceiling is under test.
+        update_db_settings_cache({"max_concurrent_ai_calls": "10"})
         try:
             job = asyncio.create_task(clone_additional_repos(manager, repos, tmp_path))
             for _ in range(10):
@@ -1805,7 +1937,9 @@ class TestCloneAdditionalRepos:
                 release.put_nowait(None)
             await asyncio.wait_for(job, 2)
         finally:
-            remove_from_db_settings_cache(["max_concurrent_repo_clones"])
+            remove_from_db_settings_cache(
+                ["max_concurrent_repo_clones", "max_concurrent_ai_calls"]
+            )
 
     @pytest.mark.asyncio
     async def test_live_limit_increase_unblocks_waiters_without_clone_finishing(
