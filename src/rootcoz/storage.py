@@ -6502,9 +6502,11 @@ async def list_job_ids() -> set[str]:
     one column, no ``result_json``.
     """
     async with _connect_db() as db:
+        # Streamed, not ``fetchall()``: the startup snapshot runs before uvicorn
+        # serves, so a second copy of every id is startup latency and memory for
+        # nothing.
         cursor = await db.execute("SELECT job_id FROM results")
-        rows = await cursor.fetchall()
-        return {row[0] for row in rows}
+        return {row[0] async for row in cursor}
 
 
 def _parse_dashboard_row(

@@ -1239,6 +1239,18 @@ def cleanup_chat_workspace(
     up.
     """
     workspace = get_chat_workspace(job_id, username)
+    if workspace.is_symlink():
+        # A workspace path is never a link (``get_chat_workspace`` is a join, and
+        # the creator makes a real dir). One planted between the caller's check
+        # and this walk would make the ``iterdir`` below delete a *live*
+        # workspace's contents through it, so refuse and let the caller's
+        # ``delete_tree`` unlink the link itself.
+        # shortcut: the lstat and the walk are not one atomic step — race-free
+        # only needs a dir_fd walk, upgrade if the temp root gains a second writer.
+        logger.warning(
+            f"Chat cleanup: refusing to delete symlinked workspace {workspace}"
+        )
+        return DeleteResult(0, 0)
     targets = _chat_mcp_lock_targets(workspace)
     from rootcoz.engine.graft import reap_graph
     from rootcoz.engine.graft_http import unregister_workspace

@@ -279,9 +279,10 @@ anything created after this process started; and an artifact extract a live chat
 analysis workspaces and the two Jenkins extract kinds live under the **base**, `$TMPDIR/rootcoz`; the
 chat workspaces and `prow-artifacts-*` live under the **process temp root**, `$TMPDIR` itself.
 Whether a temp root outlives a restart depends on the deployment shape: a process restart inside the
-same container, a host install or a bind mount keeps it, while replacing the pod or the container
-discards it (the chart's per-pod `/tmp` `emptyDir`, and `docker-compose.yaml` mounts only
-`./data:/data`) — so this sweep matters where the temp root does survive. The reclaim assumes **one
+same container — including a container restart inside the same pod, which keeps the per-pod `/tmp`
+`emptyDir` — a host install and a bind mount keep it; only replacing the **pod** discards it (the
+chart's `emptyDir` is per-pod, and `docker-compose.yaml` mounts only `./data:/data`) — so this sweep
+matters where the temp root does survive. The reclaim assumes **one
 server process per temp root**: ownership is mtime versus the process start, with no cross-process
 check, the same single-replica requirement noted below. Each boot that changed something writes one
 `startup.workspace_reclaim` audit row (`actor: system`, outcome `failure` only when a tree survived
