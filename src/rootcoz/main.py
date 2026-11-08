@@ -22487,6 +22487,29 @@ async def _init_chat_under_barrier(
     }
 
 
+_TRANSIENT_CHAT_START_DETAIL = "The AI service is rate limited or timed out. Try again."
+
+
+def _chat_start_sidecar_error(exc: httpx.HTTPStatusError) -> HTTPException:
+    """Shape a transient session-creation failure for both chat-start routes.
+
+    A 408/425/429 never becomes a refusal sentence, because that marker is the
+    non-retryable signal the analysis engine stops on. Chat start has no retry
+    loop of its own, so it is the caller that has to name one: the user is told
+    to try again instead of receiving a 500. Any other status is a real error
+    and keeps the path it had before.
+    """
+    from rootcoz.ai_client import _TRANSIENT_SESSION_STATUSES
+
+    if exc.response.status_code not in _TRANSIENT_SESSION_STATUSES:
+        raise exc
+    logger.warning(
+        "Chat start: sidecar answered a transient status %s",
+        exc.response.status_code,
+    )
+    return HTTPException(status_code=503, detail=_TRANSIENT_CHAT_START_DETAIL)
+
+
 @app.post("/api/chat/{job_id}/init", operation_id="initChat")
 async def init_chat(
     job_id: str, request: Request, body: ChatInitRequest | None = None
@@ -22509,6 +22532,8 @@ async def init_chat(
         # A refused session is the caller's to fix: a 4xx with the reason and
         # the fix, never a 500.
         raise HTTPException(status_code=422, detail=str(exc)) from None
+    except httpx.HTTPStatusError as exc:
+        raise _chat_start_sidecar_error(exc) from None
     finally:
         clear_chat_prep_phase(job_id, username)
     if result["session_id"]:
@@ -23664,6 +23689,8 @@ async def init_admin_chat(
                 )
             except SessionCreationRefused as exc:
                 raise HTTPException(status_code=422, detail=str(exc)) from None
+            except httpx.HTTPStatusError as exc:
+                raise _chat_start_sidecar_error(exc) from None
             finally:
                 chat_session_source.reset(source_token)
                 ai_username.reset(token)

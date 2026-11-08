@@ -520,3 +520,55 @@ async def test_admin_chat_init_maps_refusal_to_422(refusing_sidecar, install_sta
     assert exc.value.status_code == 422
     assert exc.value.detail.startswith(ai_client.SESSION_REFUSAL_MARKER)
     assert "session_id" not in repr(exc.value)
+
+
+# -- A transient creation status is a retry, never a 500 (#423) ------------
+#
+# 408/425/429 stay out of the refusal sentence on purpose: that marker is the
+# non-retryable signal the analysis engine stops on. Both chat-start routes have
+# no retry loop of their own, so they must name the retry instead of letting the
+# ``httpx.HTTPStatusError`` escape as a 500.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [408, 425, 429])
+async def test_chat_init_answers_a_transient_creation_status_with_retry(
+    refusing_sidecar, install_start_rig, status
+):
+    """A timeout or rate limit at Start tells the user to retry, not 500."""
+    client = refusing_sidecar(status, raw_text="slow down")
+    job_id = f"transient-{status}"
+    await install_start_rig(
+        credential_source="server", client=client, job_id=job_id, admin=False
+    )
+    with pytest.raises(HTTPException) as exc:
+        await main.init_chat(
+            job_id,
+            _start_request(admin=False),
+            ChatInitRequest(ai_provider="openai", ai_model="undeclared"),
+        )
+    assert exc.value.status_code == 503
+    assert exc.value.detail == main._TRANSIENT_CHAT_START_DETAIL
+    # A refusal marker would make the analysis engine stop retrying.
+    assert ai_client.SESSION_REFUSAL_MARKER not in exc.value.detail
+
+
+@pytest.mark.asyncio
+async def test_admin_chat_init_answers_a_transient_creation_status_with_retry(
+    refusing_sidecar, install_start_rig
+):
+    """The admin-chat route shapes the same transient status instead of 500."""
+    client = refusing_sidecar(429, raw_text="slow down")
+    await install_start_rig(
+        credential_source="server",
+        client=client,
+        job_id=main.ADMIN_CHAT_JOB_ID,
+        admin=True,
+    )
+    with pytest.raises(HTTPException) as exc:
+        await main.init_admin_chat(
+            _start_request(admin=True),
+            ChatInitRequest(ai_provider="openai", ai_model="undeclared"),
+        )
+    assert exc.value.status_code == 503
+    assert exc.value.detail == main._TRANSIENT_CHAT_START_DETAIL
