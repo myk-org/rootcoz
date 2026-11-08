@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import logging
 import time
 from dataclasses import dataclass, field
 from typing import Any
@@ -10,9 +9,10 @@ from xml.etree.ElementTree import Element
 import httpx
 from defusedxml.ElementTree import fromstring as safe_fromstring
 
+from rootcoz import get_child_logger
 from rootcoz.models import BaseTestEntry, FailedTest, FailureAnalysis
 
-logger = logging.getLogger(__name__)
+logger = get_child_logger(__name__)
 
 
 @dataclass

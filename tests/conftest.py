@@ -1,8 +1,10 @@
 """Shared fixtures for rootcoz tests."""
 
 import asyncio
+import atexit
 import logging
 import os
+import shutil
 import sys
 import tempfile
 from collections.abc import Awaitable, Callable, Generator
@@ -18,6 +20,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 os.environ["PI_SIDECAR_LOG_LEVEL"] = (
     os.environ.get("PI_SIDECAR_LOG_LEVEL", "INFO").upper() or "INFO"
 )
+
+# Pin DB_PATH to a throw-away directory before any rootcoz import: the import-time
+# logging wiring derives the log file from it, so an exported DB_PATH would point the
+# whole suite at a real data dir (and freeze storage.DB_PATH on a real database).
+# Unconditional on purpose — setdefault would let an exported value win.
+_TEST_DATA_DIR = tempfile.mkdtemp(prefix="rootcoz-tests-")
+os.environ["DB_PATH"] = str(Path(_TEST_DATA_DIR) / "results.db")
+atexit.register(shutil.rmtree, _TEST_DATA_DIR, True)
 
 import httpx
 import pytest

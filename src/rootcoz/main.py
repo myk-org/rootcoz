@@ -61,11 +61,10 @@ from pi_sidecar_client import (
     run_parallel_with_limit,
 )
 from pydantic import BaseModel, Field, SecretStr, ValidationError
-from simple_logger.logger import get_logger
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
-from rootcoz import server_status, storage
+from rootcoz import get_child_logger, server_status, storage
 from rootcoz import transcripts as sidecar_transcripts
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
@@ -187,7 +186,13 @@ from rootcoz.jira import (
     resolve_jira_connection,
     resolve_jira_connection_from_params,
 )
-from rootcoz.logging_context import JobIdFilter, get_log_file, job_id_var
+from rootcoz.logging_context import (
+    JobIdFilter,
+    _known_loggers,
+    enable_log_file,
+    get_log_file,
+    job_id_var,
+)
 from rootcoz.metadata_rules import match_job_metadata
 from rootcoz.models import (
     _REPO_SLUG_RE,
@@ -1352,34 +1357,11 @@ FAVICON_SVG = (
 
 _LOG_FILE = get_log_file()
 
-logger = get_logger(
-    name=__name__,
-    level=logging.NOTSET,  # level authority: the rootcoz parent logger (#347)
-    **({"filename": _LOG_FILE} if _LOG_FILE else {}),
-)
+logger = get_child_logger(__name__)
 
 # Install job_id filter on ALL logger handlers so module loggers
 # (which use propagate=False via python-simple-logger) get the prefix.
 _job_id_filter = JobIdFilter()
-
-
-def _known_loggers() -> list[logging.Logger]:
-    """Every registered logger, plus the root — never a loggerDict PlaceHolder.
-
-    A bare ``logging.getLogger(placeholder_name)`` builds a real logger, and
-    simple_logger's logger class defaults to INFO. That newly built logger
-    then parents every child of that name (``rootcoz.engine`` capping
-    ``rootcoz.engine.core``), silently overriding the ``rootcoz`` parent
-    level that is the single level authority (#347).
-    """
-    return [
-        logging.root,
-        *(
-            obj
-            for obj in logging.Logger.manager.loggerDict.values()
-            if isinstance(obj, logging.Logger)
-        ),
-    ]
 
 
 def _install_job_id_filter() -> None:
@@ -1390,6 +1372,9 @@ def _install_job_id_filter() -> None:
                 handler.addFilter(_job_id_filter)
 
 
+# One file handler for the whole process, enabled before the job_id filter is
+# installed so the shared handler carries it (#477). Server only — never the CLI.
+enable_log_file()
 _install_job_id_filter()
 
 

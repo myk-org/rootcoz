@@ -164,7 +164,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | Page | Shows |
    | --- | --- |
    | `Tokens` | Token usage broken down by provider, model, job, or day, with calls, input, output, cache read/write, cost, and average duration. Filter by date range and provider. |
-   | `Logs` | The live server log tail, filterable by level and text, streamed over SSE. |
+   | `Logs` | The server log, filterable by level and text. The initial tail — and so everything the page shows after a reload — is read from the application **log file**, which every `rootcoz` module logger writes to. The live stream over SSE follows every logger as well, including third-party ones, so third-party lines are visible live but are gone after a reload. |
    | `Server Status` | A live snapshot of the container this server runs in — see below. |
 
    **Server Status answers "is anything wrong" before "what are the numbers".** The page renders warnings above the cards from the same numbers the cards show: the data directory at 75 % / 90 %, the container's memory working set at 90 % of its limit, an event-loop stall over 5 s, and an unreachable AI sidecar. Each one is a badge plus its text (`Critical` / `Warning`), never colour alone. The page refreshes every 30 s while the tab is visible and never runs two requests at once. The CLI mirrors it: `rootcoz admin server-status` (`--json` for the raw snapshot).
