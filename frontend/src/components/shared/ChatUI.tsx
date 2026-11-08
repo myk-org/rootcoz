@@ -87,7 +87,7 @@ function StepIndicator({ label, done, active }: { label: string; done: boolean; 
 }
 
 /** Busy bubble shared by the transient `Sending...` row and the persistent pending row. */
-function ChatBusyRow({ label, since, canStop, onStop }: { label: string; since?: Date | null; canStop: boolean; onStop: () => void }) {
+function ChatBusyRow({ label, since, canStop, onStop, text = '' }: { label: string; since?: Date | null; canStop: boolean; onStop: () => void; text?: string }) {
   // Ticks only while this bubble is mounted, i.e. only while something is busy.
   const [now, setNow] = useState(() => Date.now())
   const sinceMs = since ? since.getTime() : null
@@ -126,6 +126,14 @@ function ChatBusyRow({ label, since, canStop, onStop }: { label: string; since?:
             </Button>
           )}
         </div>
+        {/* Provisional answer: display only — never in a live region (the hidden
+            role="status" below announces state transitions, not tokens). The
+            stored reply replaces it when the pending row goes away. */}
+        {text && (
+          <div className="mt-2">
+            <ChatMarkdown content={text} />
+          </div>
+        )}
       </div>
     </div>
   )
@@ -187,6 +195,58 @@ export function ChatUI({
 
   const hasPending = messages.some(m => m.status === 'pending')
   const sendBusy = sending || hasPending
+
+  // Provisional answer text per assistant message id (fragments only, never persisted).
+  const [streamTexts, setStreamTexts] = useState<Record<number, string>>({})
+
+  // One delta stream per busy stretch: opened when a turn starts (before the
+  // assistant id is known), closed when nothing is busy. Frames are buffered per
+  // id and flushed at most once per animation frame — a long reply must not be one
+  // React render per token.
+  useEffect(() => {
+    if (!sendBusy) return
+    const buffer = new Map<number, string>()
+    let frame = 0
+    const flush = () => {
+      frame = 0
+      const added = new Map(buffer)
+      buffer.clear()
+      if (added.size === 0) return
+      setStreamTexts(prev => {
+        const next = { ...prev }
+        for (const [id, text] of added) next[id] = (next[id] ?? '') + text
+        return next
+      })
+    }
+    const source = new EventSource(`${apiBasePath}/stream`)
+    const onDelta = (event: MessageEvent) => {
+      let frameData: { id?: number; delta?: string }
+      try {
+        frameData = JSON.parse(String(event.data))
+      } catch {
+        return
+      }
+      if (typeof frameData.id !== 'number' || typeof frameData.delta !== 'string') return
+      buffer.set(frameData.id, (buffer.get(frameData.id) ?? '') + frameData.delta)
+      if (!frame) frame = requestAnimationFrame(flush)
+    }
+    source.addEventListener('chat-delta', onDelta)
+    return () => {
+      source.removeEventListener('chat-delta', onDelta)
+      source.close()
+      if (frame) cancelAnimationFrame(frame)
+    }
+  }, [sendBusy, apiBasePath])
+
+  // Drop provisional text as soon as its row stops being pending (bounded memory).
+  useEffect(() => {
+    setStreamTexts(prev => {
+      const pendingIds = new Set(messages.filter(m => m.status === 'pending').map(m => m.id))
+      const kept = Object.keys(prev).filter(id => pendingIds.has(Number(id)))
+      if (kept.length === Object.keys(prev).length) return prev
+      return Object.fromEntries(kept.map(id => [id, prev[Number(id)]]))
+    })
+  }, [messages])
   // Mirrors the server's `_require_reviewer` on abort_chat, which never checks that a
   // session exists. Gating on sessionStarted would hide Stop whenever a pending turn
   // outlives the session (credential or server grant revoked), wedging the composer.
@@ -696,6 +756,7 @@ export function ChatUI({
               since={parseApiTimestamp(msg.created_at)}
               canStop={canStop}
               onStop={handleAbort}
+              text={streamTexts[msg.id] ?? ''}
             />
           ) : msg.role === 'system' ? (
             // Server-written notice (an issue preview the user is asked to

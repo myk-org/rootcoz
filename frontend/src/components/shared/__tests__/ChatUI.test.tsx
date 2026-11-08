@@ -5,6 +5,7 @@ import { ChatUI } from '@/components/shared/ChatUI'
 import { ApiError } from '@/lib/api'
 import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
 import { useSSE } from '@/lib/useSSE'
+import { MockEventSource } from '@/test/MockEventSource'
 
 const get = vi.fn()
 const post = vi.fn()
@@ -799,4 +800,110 @@ it('shows the refusal detail from a 422', async () => {
   await user.click(screen.getByRole('button', { name: 'Start Chat' }))
   expect(await screen.findByRole('alert')).toHaveTextContent('Declare the model in the agent-dir models.json')
   expect(screen.getByRole('alert')).not.toHaveTextContent('API error 422')
+})
+
+// ---------------------------------------------------------------------------
+// Streamed fragments (issue #475). The delta stream is a raw EventSource; the
+// shared double from src/test/setup.ts records every instance.
+// ---------------------------------------------------------------------------
+
+const ACTIVE = { ai_provider: 'openai', ai_model: 'gpt', credential_source: 'user' }
+
+function deltaStream() {
+  const source = MockEventSource.latest
+  expect(source).toBeDefined()
+  return source!
+}
+
+/** The stream only opens once a turn is busy, which needs the history loaded. */
+async function openDeltaStream() {
+  expect(await screen.findByText(/^Thinking\.\.\./)).toBeInTheDocument()
+  return deltaStream()
+}
+
+it('renders each fragment inside the pending bubble and keeps the timer and Stop', async () => {
+  MockEventSource.reset()
+  setup({ messages: [pendingRow('2026-01-01 00:00:00')], total: 1, active_session: ACTIVE })
+  render(page())
+  expect(await screen.findByText(/^Thinking\.\.\./)).toBeInTheDocument()
+  const source = deltaStream()
+  expect(source.url).toBe('/api/chat/job/stream')
+
+  act(() => source.emit('chat-delta', JSON.stringify({ id: 3, delta: 'Hel' })))
+  expect(await screen.findByText('Hel')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument()
+  expect(screen.getByText(/^Thinking\.\.\./)).toBeInTheDocument()
+
+  act(() => source.emit('chat-delta', JSON.stringify({ id: 3, delta: 'lo' })))
+  expect(await screen.findByText('Hello')).toBeInTheDocument()
+})
+
+it('replaces the provisional text with the stored reply and closes the stream', async () => {
+  MockEventSource.reset()
+  const pending = pendingRow(new Date().toISOString())
+  setup({ messages: [pending], total: 1, active_session: ACTIVE })
+  render(page())
+  const source = await openDeltaStream()
+  act(() => source.emit('chat-delta', JSON.stringify({ id: 3, delta: 'Hel' })))
+  expect(await screen.findByText('Hel')).toBeInTheDocument()
+
+  const done = { ...pending, content: 'Hello world', status: 'completed' }
+  setup({ messages: [done], total: 1, active_session: ACTIVE })
+  const changes = (useSSE as unknown as { mock: { calls: Array<[string, Record<string, (e?: unknown) => void>]> } }).mock.calls
+  const handlers = changes[changes.length - 1][1]
+  act(() => handlers['chat-changed'](''))
+
+  expect(await screen.findByText('Hello world')).toBeInTheDocument()
+  await waitFor(() => expect(source.closed).toBe(true))
+  expect(screen.queryByText('Hel')).not.toBeInTheDocument()
+  expect(screen.getAllByText(/Hello world/)).toHaveLength(1)
+})
+
+it('ignores fragments for another message id', async () => {
+  MockEventSource.reset()
+  setup({ messages: [pendingRow(new Date().toISOString())], total: 1, active_session: ACTIVE })
+  render(page())
+  const source = await openDeltaStream()
+  act(() => source.emit('chat-delta', JSON.stringify({ id: 3, delta: 'mine' })))
+  expect(await screen.findByText('mine')).toBeInTheDocument()
+  act(() => source.emit('chat-delta', JSON.stringify({ id: 999, delta: 'not mine' })))
+  await waitFor(() => expect(screen.queryByText(/not mine/)).not.toBeInTheDocument())
+  expect(screen.getByText('mine')).toBeInTheDocument()
+})
+
+it('a failed turn surfaces the error and leaves no partial text', async () => {
+  MockEventSource.reset()
+  const pending = pendingRow(new Date().toISOString())
+  setup({ messages: [pending], total: 1, active_session: ACTIVE })
+  render(page())
+  const source = await openDeltaStream()
+  act(() => source.emit('chat-delta', JSON.stringify({ id: 3, delta: 'partial' })))
+  expect(await screen.findByText('partial')).toBeInTheDocument()
+
+  const failed = { ...pending, content: 'Error: sidecar unavailable', status: 'failed' }
+  setup({ messages: [failed], total: 1, active_session: ACTIVE })
+  const changes = (useSSE as unknown as { mock: { calls: Array<[string, Record<string, (e?: unknown) => void>]> } }).mock.calls
+  act(() => changes[changes.length - 1][1]['chat-changed'](''))
+
+  expect(await screen.findByText(/sidecar unavailable/)).toBeInTheDocument()
+  await waitFor(() => expect(screen.queryByText('partial')).not.toBeInTheDocument())
+  expect(screen.queryByText(/^Thinking\.\.\./)).not.toBeInTheDocument()
+})
+
+it('closes the delta stream on unmount', async () => {
+  MockEventSource.reset()
+  setup({ messages: [pendingRow(new Date().toISOString())], total: 1, active_session: ACTIVE })
+  const { unmount } = render(page())
+  const source = await openDeltaStream()
+  unmount()
+  expect(source.closed).toBe(true)
+})
+
+it('opens no delta stream when nothing is pending', async () => {
+  MockEventSource.reset()
+  const done = { ...pendingRow(new Date().toISOString()), content: 'answer', status: 'completed' }
+  setup({ messages: [done], total: 1, active_session: ACTIVE })
+  render(page())
+  expect(await screen.findByText('answer')).toBeInTheDocument()
+  expect(MockEventSource.instances).toHaveLength(0)
 })

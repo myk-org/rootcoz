@@ -158,14 +158,15 @@ src/rootcoz/
   - **`can_use_server_providers`** (DB flag, default false, orthogonal to role): when true, the user may send analyses and chat using the server's stored AI credentials instead of their own. Same reload-per-request and admin-implies-`True` semantics as `can_view_reports`. Managed via `PUT /api/admin/users/{username}/can-use-server-providers`, admin user create (`can_use_server_providers` in body), CLI `admin users create --can-use-server-providers` / `admin users set-can-use-server-providers`, and the admin UI (`Server providers` column). Gating the "Use server credentials" toggle.
   - **`ENABLE_FREE_MODELS`** (server setting, default false, Server Settings → AI, runtime toggle): when on, **all** users may use server credentials for admin-declared **free provider+model pairs** (a pair is always provider+model; "free" is an admin decision, never the catalog's cost fields). Bootstrap admin, role admins, and users with `can_use_server_providers` already have the superset. Effective access is exposed as `can_use_free_providers` on `GET /api/auth/me` / login. The free pair list lives in the `free_ai_models` table, managed via `GET`/`PUT /api/admin/free-models` (validated against the sidecar catalog at save time), CLI `admin models free-list` / `free-add` / `free-remove`, and the Server Settings → AI "Free AI models" card. Free models carry `free: true` on `GET /api/ai-models` entries and show a `Free` badge in model pickers.
   - **`can_view_reports`** (DB flag, default false, orthogonal to role): when true, the user may call `/api/reports/*`. Non-admins reload the flag from the users table on each request (so grants/revokes apply without session invalidation); admins have effective access (`True`) without depending on the stored column. Managed via `PUT /api/admin/users/{username}/can-view-reports`, admin user create (`can_view_reports` in body), CLI `admin users create --can-view-reports` / `admin users set-can-view-reports`, and the admin UI. Exposed on `request.state.can_view_reports`, `GET /api/auth/me`, and `POST /api/auth/login`.
-- **Real-time updates**: Server-Sent Events (SSE) push real-time updates to the frontend. A polling fallback activates after sending a chat message if the SSE connection is dead, and cancels once SSE delivers an event. Backend broadcasts via per-connection `asyncio.Event` objects. Available SSE streams:
+- **Real-time updates**: Server-Sent Events (SSE) push real-time updates to the frontend. A polling fallback activates after sending a chat message if the SSE connection is dead, and cancels once SSE delivers an event. Backend broadcasts via per-connection `asyncio.Event` objects, except the two chat streams: those use the payload-carrying `_PayloadBroadcast` path (`_chat_deltas`, one channel per `(job_id, username)`), so one connection carries both the `chat-changed` notice and `chat-delta` fragments of the answer as it is written. Available SSE streams:
   - `/api/navbar/stream` — navbar badge counts (active analyses, unread mentions, pending approvals for admins)
   - `/api/stream?topics=navbar` — multiplexed stream (`SSEProvider`); emits `navbar:active-count`, `navbar:unread-count` and, for admins, `navbar:pending-count`
   - `/api/dashboard/stream` — dashboard job list changes
   - `/api/results/{job_id}/stream` — per-job status changes
   - `/api/results/{job_id}/comments/stream` — per-job comment changes
   - `/api/admin/token-usage/stream` — token usage data changes (admin only)
-  - `/api/chat/{job_id}/stream` — per-job chat message changes
+  - `/api/chat/{job_id}/stream` — per-job chat changes: `chat-changed` (`data: refresh`, or `{"dropped": N}` for a slow subscriber) plus `chat-delta` (`{"id": <assistant message id>, "delta": "<fragment>"}`) carrying the answer as it is written. Fragments are display-only and never stored
+  - `/api/admin/chat/stream` — the same two frames for admin chat
   - `/api/admin/logs/stream` — real-time server log tailing (admin only)
 - **Reports API**: Analytics endpoints for aggregated metrics (requires admin **or** `can_view_reports`):
   - `GET /api/reports/totals?team=&tier=&version=&from=&to=` — total jobs, failures, reviewed with per-job detail list
@@ -271,7 +272,7 @@ Every new API endpoint MUST also be supported via the `rootcoz` CLI tool. When a
 3. Add tests for both in `tests/test_cli_client.py` and `tests/test_cli_main.py`
 
 **Exceptions (no CLI equivalent needed):**
-- SSE streaming endpoints (`/api/navbar/stream`, `/api/dashboard/stream`, `/api/results/*/stream`, `/api/admin/token-usage/stream`, `/api/chat/*/stream`, `/api/admin/logs/stream`) — CLI is a one-shot tool, not a long-lived stream consumer. Equivalent GET endpoints remain available for CLI use.
+- SSE streaming endpoints (`/api/navbar/stream`, `/api/dashboard/stream`, `/api/results/*/stream`, `/api/admin/token-usage/stream`, `/api/chat/*/stream`, `/api/admin/chat/stream`, `/api/admin/logs/stream`) — CLI is a one-shot tool, not a long-lived stream consumer. Equivalent GET endpoints remain available for CLI use.
 - SPA bootstrap helpers (`/api/auth/needs-key`) — browser-only identity probes with no CLI use case
 
 ### AI Provider/Model Resolution
@@ -365,6 +366,7 @@ Node.js service running inside the same container, wrapping the Pi coding agent 
 **Session lifecycle:**
 - `POST /sessions` — create session with provider, model, system prompt, cwd
 - `POST /sessions/:id/prompt` — send message, get response (clean text, no chain-of-thought)
+- `GET /sessions/:id/events` — the turn stream (`4.20.1+`): SSE frames `session` / `turn_start` / `text_delta` / `turn_end` / `error`, each carrying `turnId`
 - `POST /sessions/:id/abort` — cancel in-progress prompt
 - `DELETE /sessions/:id` — cleanup session
 - `GET /models` — list all available models
@@ -375,6 +377,7 @@ Node.js service running inside the same container, wrapping the Pi coding agent 
 - `call_ai_once()` — single-shot AI call with automatic session cleanup
 - `call_ai()` — multi-turn AI call (caller manages session lifecycle)
 - `AIResult.record_usage()` — record token usage to DB
+- `_iter_sse_events()` / `_STREAM_TERMINAL_EVENTS` — chat consumes these with a **concurrent** `_prompt_safely` POST instead of `stream_prompt()`, because `stream_prompt()` discards the `AIResult` and with it the usage row the reply must record. The prompt result stays authoritative; the feed only supplies fragments and `turn_end.text`
 - Provider mapping: `cursor` → `acpx-cursor` (default) or `cli-cursor` (when the chosen model is from CLI / `CLI_AGENTS`); `claude` → `google-vertex-claude` or `cli-claude`; `gemini` → `google` or `cli-gemini`. Public API uses only `claude` / `gemini` / `cursor` — never `*-cli` provider names.
 
 **Container integration:**
