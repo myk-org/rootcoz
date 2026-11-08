@@ -1245,10 +1245,11 @@ def _chat_delta_channel(job_id: str, username: str) -> _PayloadBroadcast:
 
 
 def publish_chat_delta(key: str, frame: dict[str, Any]) -> None:
-    """Push one chat frame to that channel's streams; no channel means no work."""
-    channel = _chat_deltas.get(key)
-    if channel is None:
-        return
+    """Push one chat frame to that channel's streams; no channel means no delivery.
+
+    The running turn's text is kept whether or not a stream is attached, so a tab
+    that lost its connection mid-turn is caught up when it comes back.
+    """
     message_id = frame.get("id")
     if isinstance(message_id, int) and isinstance(frame.get("delta"), str):
         held_id, held = _chat_partials.get(key, (message_id, ""))
@@ -1258,7 +1259,9 @@ def publish_chat_delta(key: str, frame: dict[str, Any]) -> None:
         )
     else:
         _chat_partials.pop(key, None)  # a change notice: the turn is over
-    channel.publish(frame)
+    channel = _chat_deltas.get(key)
+    if channel is not None:
+        channel.publish(frame)
 
 
 def _render_chat_frame(frame: Any) -> str | None:
@@ -1274,8 +1277,10 @@ def _chat_delta_publisher(
     """The `on_delta` callable for one turn: fragments tagged with their row id."""
     key = _chat_channel_key(job_id, username)
     # Claim the channel before the first fragment, so a browser stream that
-    # subscribes after the turn started still has something to catch up from.
+    # subscribes after the turn started still has something to catch up from, and
+    # drop the previous turn's text: this turn's buffer starts empty.
     _chat_delta_channel(job_id, username)
+    _chat_partials.pop(key, None)
     return lambda delta: publish_chat_delta(key, {"id": message_id, "delta": delta})
 
 
@@ -23188,10 +23193,11 @@ def _chat_sse_response(
                     yield chunk
         finally:
             # The broadcast owns its own listener count: drop the channel only when
-            # the last subscriber has gone, and nothing awaits in between.
+            # the last subscriber has gone, and nothing awaits in between. The text
+            # so far stays: a reconnect mid-turn catches up from it instead of
+            # losing the fragments published while nobody was listening.
             if not channel.has_listeners and _chat_deltas.get(key) is channel:
                 _chat_deltas.pop(key, None)
-                _chat_partials.pop(key, None)
 
     return StreamingResponse(
         event_generator(),

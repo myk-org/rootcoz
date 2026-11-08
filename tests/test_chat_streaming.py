@@ -842,6 +842,32 @@ async def test_the_catch_up_text_belongs_to_the_turn_in_flight() -> None:
 
 
 @pytest.mark.asyncio
+async def test_a_reconnect_mid_turn_catches_up_from_the_dropped_stream() -> None:
+    # A tab that reloads mid-turn: the last listener leaving must not discard the
+    # text, and fragments published while nobody listened are kept for it too.
+    on_delta = main._chat_delta_publisher("job8", "bob", 12)
+    on_delta("first ")
+    response = await main.chat_stream("job8", FakeRequest(username="bob"))  # type: ignore[arg-type]
+    iterator = response.body_iterator
+    assert await anext(iterator) == ": connected\n\n"
+    assert await anext(iterator) == (
+        'event: chat-delta\ndata: {"id": 12, "snapshot": "first "}\n\n'
+    )
+    await iterator.aclose()  # type: ignore[attr-defined]
+    assert "job8:bob" not in main._chat_deltas
+
+    on_delta("second")  # no listener: the text is still kept
+
+    response = await main.chat_stream("job8", FakeRequest(username="bob"))  # type: ignore[arg-type]
+    iterator = response.body_iterator
+    assert await anext(iterator) == ": connected\n\n"
+    assert await anext(iterator) == (
+        'event: chat-delta\ndata: {"id": 12, "snapshot": "first second"}\n\n'
+    )
+    await iterator.aclose()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
 async def test_a_finished_turn_leaves_nothing_to_catch_up_with() -> None:
     main._chat_delta_publisher("job7", "bob", 11)("done")
     main.publish_chat_delta("job7:bob", {"type": "refresh"})
