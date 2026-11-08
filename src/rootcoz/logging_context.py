@@ -117,14 +117,13 @@ def enable_log_file() -> logging.Handler | None:
 
     log_dir = Path(os.getenv("DB_PATH", "/data/results.db")).parent / "logs"
     path = get_log_file()
-    if path is None:
-        _warn_file_logging_disabled(log_dir, "log directory is not writable")
-        return None
     if path == _ENABLED_LOG_FILE and _FILE_HANDLER is not None:
         return _FILE_HANDLER
 
-    # A different path must not leave the old descriptor attached: a re-pointed
-    # DB_PATH (tests, a restart with a new data dir) would otherwise accumulate.
+    # A different path — or no file at all — must not leave the old descriptor
+    # attached: a re-pointed DB_PATH (tests, a restart with a new data dir)
+    # would otherwise accumulate, and a now-disabled sink would keep writing to
+    # the old file while the WARNING says it is off (requirement 6).
     if _FILE_HANDLER is not None:
         for known_logger in _known_loggers():
             if _FILE_HANDLER in known_logger.handlers:
@@ -132,6 +131,10 @@ def enable_log_file() -> logging.Handler | None:
         _FILE_HANDLER.close()
     _ENABLED_LOG_FILE = None
     _FILE_HANDLER = None
+
+    if path is None:
+        _warn_file_logging_disabled(log_dir, "log directory is not writable")
+        return None
 
     try:
         from logging.handlers import RotatingFileHandler

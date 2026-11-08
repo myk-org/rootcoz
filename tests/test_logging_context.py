@@ -51,6 +51,12 @@ def _file_text() -> str:
     return Path(path).read_text()
 
 
+def _file_text_or_empty() -> str:
+    """The log file so far, or "" when nothing has opened it yet."""
+    path = get_log_file()
+    return Path(path).read_text() if path and Path(path).exists() else ""
+
+
 def _line_with(marker: str) -> str:
     return next(line for line in _file_text().splitlines() if marker in line)
 
@@ -80,15 +86,23 @@ def file_logging(tmp_path: Path, monkeypatch) -> Path:
 
 
 class TestFileLoggingBaseline:
-    """The defect itself, measured on the intact import-time wiring."""
+    """The defect itself: absent before the shared handler, present after it."""
 
-    def test_a_child_logger_never_reaches_the_configured_log_file(self) -> None:
-        """A get_child_logger module's record must land in the log file."""
+    def test_a_child_logger_reaches_the_log_file_only_once_enabled(
+        self, file_logging: Path
+    ) -> None:
+        """Without enable_log_file() a get_child_logger record stays off the file."""
         from rootcoz import get_child_logger
 
-        marker = "baseline-child-logger-marker"
-        get_child_logger("rootcoz.tests_child").warning(marker)
-        assert marker in _file_text()
+        before, after = "baseline-before-marker", "baseline-after-marker"
+
+        # The measured state: rootcoz.storage 0, rootcoz.ai_client 0.
+        get_child_logger("rootcoz.tests_child").warning(before)
+        assert before not in _file_text_or_empty()
+
+        _enable()
+        get_child_logger("rootcoz.tests_child").warning(after)
+        assert after in _file_text()
 
 
 class TestJobIdFilter:
@@ -395,6 +409,24 @@ class TestFileLogging:
         ]
         assert len(warnings) == 1
         assert str(blocker / "logs") in warnings[0].getMessage()
+
+    def test_disabling_after_enabling_detaches_the_old_file(
+        self, file_logging: Path, monkeypatch
+    ) -> None:
+        """A re-pointed DB_PATH that is unwritable stops the old file, not keep it."""
+        handler = _enable()
+        from rootcoz import get_child_logger
+
+        child = get_child_logger("rootcoz.tests_was_enabled")
+        assert handler in child.handlers
+
+        blocker = file_logging / "gone"
+        blocker.write_text("not a directory")
+        monkeypatch.setenv("DB_PATH", str(blocker / "results.db"))
+        assert logging_context.enable_log_file() is None
+
+        assert getattr(logging_context, "_FILE_HANDLER", None) is None
+        assert handler not in child.handlers
 
     def test_an_enabled_logger_never_touches_the_path_again(
         self, file_logging: Path, monkeypatch
