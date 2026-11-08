@@ -32,6 +32,15 @@ series), so it never overwrites the parent build's scoreboard. The per-push
 ids stay on the events only — a tag that changes on every push double-counts
 the previous push *and* bills as a new custom metric.
 
+The same request carries one point of ``rootcoz.jobs.by_metadata`` — value
+``1``, tagged with the job's declared ``team``/``tier``/``version`` and
+**nothing else**: no job/build identity, because a series keyed on the job is
+one series per job again and the point of the metric is aggregating per team
+in Datadog. A dimension with no value is omitted rather than emitted empty
+(``team:`` would mint a junk series nobody can delete), and a job with no
+metadata row at all still gets its point, untagged, so the total stays
+complete.
+
 Events carry a stable ``aggregation_key`` per analysis/test pair, a tag
 taxonomy (``service``, ``env``, ``tfa.stage``, ``tfa.classification``,
 job/build identity, and the push attribution) and free-form custom
@@ -67,7 +76,12 @@ from urllib.parse import urlparse
 import httpx
 
 from rootcoz import get_child_logger
-from rootcoz.exporters.base import ExportContext, Exporter, ExporterResult
+from rootcoz.exporters.base import (
+    JOB_METADATA_DIMENSIONS,
+    ExportContext,
+    Exporter,
+    ExporterResult,
+)
 from rootcoz.storage import (
     AI_SYSTEM_USERNAME,
     HISTORY_CLASSIFICATIONS,
@@ -93,10 +107,26 @@ _SERIES_PATH = "/api/v2/series"
 #: previous push.
 _SERIES_GAUGE = 3
 
-#: The only two metrics written. Two names, and no per-push tag, keep the
-#: tag-combination count (Datadog's billing unit) bounded.
+#: Series type ``1`` is a count: Datadog sums the points over the interval
+#: (``.as_count()``), which is what "jobs pushed this hour, per team" needs. A
+#: gauge would default to an average and report ``1`` instead of the count.
+_SERIES_COUNT = 1
+
+#: Interval in seconds of a count point. Datadog requires it for count series,
+#: and a rejected entry fails the whole request — including the gauges.
+_METADATA_INTERVAL = 1
+
+#: The category metric names. Three metric names in total (see
+#: ``_METADATA_METRIC``), and no per-push tag, keep the tag-combination count
+#: (Datadog's billing unit) bounded.
 _CLASSIFICATION_METRIC = "rootcoz.failures.classification"
 _PATTERN_METRIC = "rootcoz.failures.pattern"
+
+#: One point per push (value ``1``), tagged with the declared job metadata
+#: only — never the job/build identity, so Datadog aggregates it per team
+#: instead of per job.
+_METADATA_METRIC = "rootcoz.jobs.by_metadata"
+
 
 #: Per-request timeout (seconds) for event submission.
 _REQUEST_TIMEOUT = 30.0
@@ -537,6 +567,30 @@ def _metric_label(value: str, vocabulary: tuple[str, ...]) -> str:
     return label if label in vocabulary else _tag_label(_UNKNOWN_CLASSIFICATION)
 
 
+def _metadata_tags(job_metadata: dict[str, Any]) -> list[str]:
+    """The declared ``team``/``tier``/``version`` tags of a job.
+
+    The one place the metadata tags are rendered, so the ``rootcoz.jobs.
+    by_metadata`` series and the event tags carry literally the same strings.
+    A dimension with no value is **omitted**, never emitted empty: ``team:``
+    or ``team:None`` mints a junk series users cannot delete. A job without
+    any declared metadata therefore yields no tags at all — callers still
+    emit their point/tag list rather than skipping it.
+
+    Args:
+        job_metadata: Declared metadata dict (``team``, ``tier``, ``version``).
+
+    Returns:
+        Tag list, in :data:`JOB_METADATA_DIMENSIONS` order; possibly empty.
+    """
+    tags: list[str] = []
+    for dimension in JOB_METADATA_DIMENSIONS:
+        value = str(job_metadata.get(dimension) or "").strip()
+        if value:
+            tags.append(f"{dimension}:{sanitize_tag_value(value)}")
+    return tags
+
+
 def _identity_tags(context: ExportContext) -> list[str]:
     """The job/build identity tags shared by the events and the metrics.
 
@@ -582,6 +636,38 @@ def _failure_analysis(failure: dict[str, Any]) -> dict[str, Any]:
     if isinstance(analysis_value, dict):
         return analysis_value
     return {}
+
+
+def _metadata_series(context: ExportContext, timestamp: int) -> dict[str, Any]:
+    """The per-push job-count point: value ``1``, metadata tags only.
+
+    Deliberately carries **no** job/build identity. A series is keyed on its
+    tags, so adding the identity back would give one series per job — the
+    very cardinality this metric exists to avoid. The aggregation (per team,
+    per tier, per version) happens in the Datadog query instead, which is why
+    the type is a count: Datadog sums counts over the interval, so summing by
+    ``team`` reports the number of pushes rather than a gauge of ``1``.
+
+    This series is append-only history: a changed ``team``/``tier``/
+    ``version`` must produce a new point on its own series, never a rewrite of
+    an already-emitted one. So never ``update_tags`` it and never re-send an
+    old point with the new tags — that is exactly why the shape is a plain
+    count stamped at push time.
+
+    Args:
+        context: Export context carrying ``job_metadata``.
+        timestamp: Push time, shared with the rest of the series of this push.
+
+    Returns:
+        One count series entry (``tags`` empty when nothing is declared).
+    """
+    return {
+        "metric": _METADATA_METRIC,
+        "type": _SERIES_COUNT,
+        "interval": _METADATA_INTERVAL,
+        "points": [{"timestamp": timestamp, "value": 1.0}],
+        "tags": _metadata_tags(context.job_metadata),
+    }
 
 
 def _series_entry(
@@ -736,6 +822,7 @@ class DatadogExporter(Exporter):
         tags += [
             "tfa.stage:automated",
             *_identity_tags(context),
+            *_metadata_tags(context.job_metadata),
             f"rootcoz.analysis_id:{sanitize_tag_value(context.job_id)}",
         ]
         if failure_id:
@@ -934,14 +1021,21 @@ class DatadogExporter(Exporter):
         tag — never the per-push ids, which would double-count and bill as a
         new custom metric on every push.
 
+        One ``rootcoz.jobs.by_metadata`` point rides along in the same payload:
+        value ``1``, tagged with the declared job metadata only (no identity),
+        so the job count per team stays aggregatable. It is emitted on every
+        push — including a child-scoped one and a run with no failures — so the
+        total is never short a job; the flip side is that it counts pushes, so
+        a re-push adds a point (same as a re-push already duplicating events).
+
         Args:
             context: Export context; ``failures`` is already scope-resolved.
             timestamp: Push time, shared with the events of the same push.
 
         Returns:
-            Gauge series entries: one per classification (always, all zeros
-            when the ``dd_push_classifications`` toggle is off) and one per
-            failure pattern.
+            Series entries: one gauge per classification (always, all zeros
+            when the ``dd_push_classifications`` toggle is off), one gauge per
+            failure pattern, and the single job-metadata count point.
         """
         classification_vocabulary = tuple(
             _tag_label(classification)
@@ -995,6 +1089,8 @@ class DatadogExporter(Exporter):
             )
             for label, count in pattern_counts.items()
         ]
+        # Once per push, in the same request: one payload, not a second call.
+        series.append(_metadata_series(context, timestamp))
         return series
 
     async def _post_series(
@@ -1051,7 +1147,8 @@ class DatadogExporter(Exporter):
         remaining events are skipped and counted in the result details.
 
         One metrics request then carries every category series for this
-        push. It is skipped when the run aborted on rejected credentials
+        push, plus the single ``rootcoz.jobs.by_metadata`` point. It is
+        skipped when the run aborted on rejected credentials
         (the same keys would fail again), and a metrics failure is recorded
         in the result details without rolling back the events already sent.
         A run with no failures still sends that one zero-filled request: the
