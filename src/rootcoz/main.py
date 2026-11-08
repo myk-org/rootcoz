@@ -12080,8 +12080,8 @@ async def _build_export_context(
 ) -> ExportContext:
     """Build an ExportContext from stored result data.
 
-    Handles child job scoping, report URL, history classifications,
-    tracked-in links, and reviewer resolution.
+    Handles child job scoping, report URL, job metadata, history
+    classifications, tracked-in links, and reviewer resolution.
 
     Args:
         job_id: The analysis job identifier.
@@ -12111,6 +12111,9 @@ async def _build_export_context(
     """
     base_url = _extract_base_url()
     report_url = f"{base_url}/results/{job_id}" if base_url else ""
+    # The top-level job name, read before scoping replaces result_data with
+    # the child subtree: it is the fallback key for the job metadata.
+    parent_job_name = result_data.get("job_name", "")
 
     # Scope to child job when requested. The same resolver serves the push
     # gate, so a push can never be reviewed against a different subtree
@@ -12123,6 +12126,23 @@ async def _build_export_context(
         report_url = f"{report_url}#{anchor}"
 
     failures_data = result_data.get("failures", [])
+
+    # Declared job metadata (team/tier/version) travels on the context because
+    # exporters never touch storage. A child-scoped push prefers the child's
+    # own declaration and falls back to the parent job's, so a pipeline whose
+    # children have no row of their own still exports its team.
+    job_metadata: dict[str, Any] = {}
+    for metadata_job in dict.fromkeys(
+        name for name in (child_job_name, parent_job_name) if name
+    ):
+        try:
+            job_metadata = await storage.get_job_metadata(metadata_job) or {}
+        except Exception:
+            logger.debug(
+                "Failed to fetch job metadata for '%s'", metadata_job, exc_info=True
+            )
+        if job_metadata:
+            break
 
     # Build history classifications, tracked-in links, and reviewer data
     history_classifications: dict[str, str] = {}
@@ -12211,6 +12231,7 @@ async def _build_export_context(
         tracked_in_links=tracked_in_data,
         reviewed_by=reviewed_by,
         analysis_timestamp=analysis_timestamp,
+        job_metadata=job_metadata,
     )
 
 

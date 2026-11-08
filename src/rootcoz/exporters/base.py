@@ -33,6 +33,9 @@ class ExportContext:
         reviewed_by: Mapping of test name to reviewer username.
         analysis_timestamp: Unix timestamp of the analysis (when known;
             ``None`` lets exporters fall back to push time).
+        job_metadata: Declared ``team``/``tier``/``version`` (plus labels) of
+            the pushed job; empty when the job has no metadata row. Exporters
+            never touch storage, so this is resolved by the push pipeline.
     """
 
     job_id: str
@@ -48,6 +51,7 @@ class ExportContext:
     tracked_in_links: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     reviewed_by: dict[str, str] = field(default_factory=dict)
     analysis_timestamp: int | None = None
+    job_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass

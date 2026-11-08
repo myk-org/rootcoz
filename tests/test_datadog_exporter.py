@@ -38,6 +38,10 @@ _EVENTS_URL = "https://event-management-intake.datadoghq.eu/api/v2/events"
 _SERIES_URL = "https://api.datadoghq.eu/api/v2/series"
 _CLASSIFICATION_METRIC = "rootcoz.failures.classification"
 _PATTERN_METRIC = "rootcoz.failures.pattern"
+_METADATA_METRIC = "rootcoz.jobs.by_metadata"
+
+#: Metric names of the per-category scoreboard (never the metadata point).
+_CATEGORY_METRICS = frozenset({_CLASSIFICATION_METRIC, _PATTERN_METRIC})
 _EXPECTED_HEADERS = {
     "DD-API-KEY": _API_KEY,
     "DD-APPLICATION-KEY": _APP_KEY,
@@ -1159,12 +1163,12 @@ class TestSeriesScoreboard:
             assert isinstance(entry["points"][0]["value"], float)
         assert result.details["series"] == len(payload["series"])
 
-    async def test_exactly_two_metric_names(self):
+    async def test_metric_names_are_the_bounded_set(self):
         _result, posts = await self._push(_context(failures=[_failure()]))
         metrics = {
             entry["metric"] for entry in _series_posts(posts)[0]["json"]["series"]
         }
-        assert metrics == {_CLASSIFICATION_METRIC, _PATTERN_METRIC}
+        assert metrics == {*_CATEGORY_METRICS, _METADATA_METRIC}
 
     async def test_classification_vocabulary_zero_filled(self):
         """A classification at zero must still be reported, or it goes stale."""
@@ -1225,6 +1229,8 @@ class TestSeriesScoreboard:
         )
         payload = _series_posts(posts)[0]["json"]
         for entry in payload["series"]:
+            if entry["metric"] == _METADATA_METRIC:
+                continue
             prefix = (
                 "tfa.classification:"
                 if entry["metric"] == _CLASSIFICATION_METRIC
@@ -1261,6 +1267,8 @@ class TestSeriesScoreboard:
         )
         _result, posts = await self._push(context)
         for entry in _series_posts(posts)[0]["json"]["series"]:
+            if entry["metric"] == _METADATA_METRIC:
+                continue
             category = [
                 tag
                 for tag in entry["tags"]
@@ -1424,8 +1432,8 @@ class TestSeriesScoreboard:
         payload = _series_posts(posts)[0]["json"]
         classifications = _series_values(payload, "tfa.classification:")
         assert {entry["metric"] for entry in payload["series"]} == {
-            _CLASSIFICATION_METRIC,
-            _PATTERN_METRIC,
+            *_CATEGORY_METRICS,
+            _METADATA_METRIC,
         }
         assert set(classifications) == _classification_vocabulary()
         # No classification data leaks into the values while the toggle is off.
@@ -1445,8 +1453,10 @@ class TestSeriesScoreboard:
         assert patterns["unknown"] == 1
         assert set(classifications) == _classification_vocabulary()
         assert set(patterns) == _pattern_vocabulary()
-        assert len(payload["series"]) == len(_classification_vocabulary()) + len(
-            _pattern_vocabulary()
+        assert len(payload["series"]) == (
+            len(_classification_vocabulary())
+            + len(_pattern_vocabulary())
+            + 1  # the job-metadata point rides along in the same payload
         )
         assert result.details["series"] == len(payload["series"])
         # The events keep the raw value in their tag — only the series are bounded.
@@ -1497,6 +1507,159 @@ class TestSeriesScoreboard:
         for tag in ("tfa.classification:product_bug", "tfa.failure_pattern:known_bug"):
             assert tag in event_tags
             assert tag in metric_tags
+
+
+#: Declared job metadata used by the ``rootcoz.jobs.by_metadata`` tests.
+_JOB_METADATA: dict[str, Any] = {
+    "job_name": "e2e-suite",
+    "team": "mgmt",
+    "tier": "1",
+    "version": "v2.1.0",
+    "labels": ["pipeline"],
+}
+
+
+def _metadata_entries(series: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The ``rootcoz.jobs.by_metadata`` entries of one series list."""
+    return [entry for entry in series if entry["metric"] == _METADATA_METRIC]
+
+
+def _category_entries(series: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """The per-category scoreboard entries of one series list."""
+    return [entry for entry in series if entry["metric"] in _CATEGORY_METRICS]
+
+
+def _export_series(
+    context: ExportContext, timestamp: int = 1_700_000_000
+) -> list[dict[str, Any]]:
+    """The series entries one push would send, built without any HTTP call."""
+    return _exporter()._build_series(context, timestamp)
+
+
+class TestJobMetadataMetric:
+    """``rootcoz.jobs.by_metadata``: one point per push, metadata tags only.
+
+    The per-category series are keyed on the job/build identity, which makes
+    them a per-build scoreboard and useless for aggregating per team. This
+    metric drops the identity entirely: value ``1`` per push, tagged with the
+    declared ``team``/``tier``/``version``, aggregated in Datadog.
+    """
+
+    @staticmethod
+    async def _push(
+        context: ExportContext,
+    ) -> tuple[Any, list[dict[str, Any]]]:
+        mock_class, posts = _mock_http_client()
+        with patch("rootcoz.exporters.datadog.httpx.AsyncClient", mock_class):
+            result = await _exporter().push(context)
+        return result, posts
+
+    async def test_series_exists_once_with_only_metadata_tags(self):
+        context = _context(failures=[_failure()], job_metadata=dict(_JOB_METADATA))
+        _result, posts = await self._push(context)
+        entries = _metadata_entries(_series_posts(posts)[0]["json"]["series"])
+        assert len(entries) == 1
+        entry = entries[0]
+        assert entry["type"] == 3  # gauge
+        assert len(entry["points"]) == 1
+        assert entry["points"][0]["value"] == 1.0
+        assert entry["tags"] == ["team:mgmt", "tier:1", "version:v2.1.0"]
+        # No job/build identity: a series keyed on the job is one series per
+        # job again, and the aggregation per team would be gone.
+        for forbidden in (
+            "job_name:",
+            "build_number:",
+            "rootcoz.analysis_id:",
+            "rootcoz.push_id:",
+            "tfa.classification:",
+            "labels:",
+            "service:",
+            "env:",
+        ):
+            assert forbidden not in " ".join(entry["tags"]), forbidden
+
+    async def test_empty_dimension_is_absent_not_emitted_empty(self):
+        """``team:`` / ``team:None`` would mint a junk series nobody can delete."""
+        context = _context(
+            failures=[_failure()],
+            job_metadata={"team": "mgmt", "tier": "", "version": None},
+        )
+        _result, posts = await self._push(context)
+        (entry,) = _metadata_entries(_series_posts(posts)[0]["json"]["series"])
+        assert entry["tags"] == ["team:mgmt"]
+        assert "tier:" not in " ".join(entry["tags"])
+        assert "version:" not in " ".join(entry["tags"])
+
+    async def test_no_metadata_still_emits_the_point_untagged(self):
+        """The total must stay complete even when the job declares nothing."""
+        _result, posts = await self._push(_context(failures=[_failure()]))
+        (entry,) = _metadata_entries(_series_posts(posts)[0]["json"]["series"])
+        assert entry["tags"] == []
+        assert entry["points"][0]["value"] == 1.0
+
+    async def test_category_series_are_byte_identical_with_metadata(self):
+        """No existing series gains or loses a tag — that would break dashboards."""
+        plain = _export_series(_context(failures=[_failure()]))
+        tagged = _export_series(
+            _context(failures=[_failure()], job_metadata=dict(_JOB_METADATA))
+        )
+        assert _category_entries(plain) == _category_entries(tagged)
+        assert _category_entries(tagged), "the scoreboard must not be empty"
+
+    async def test_child_scoped_push_still_counts_the_job_once(self):
+        """The point carries no scope tags, so a scoped push cannot fork it."""
+        context = _context(
+            failures=[_failure()],
+            child_job_name="child job",
+            child_build_number=7,
+            job_metadata=dict(_JOB_METADATA),
+        )
+        _result, posts = await self._push(context)
+        (entry,) = _metadata_entries(_series_posts(posts)[0]["json"]["series"])
+        assert entry["tags"] == ["team:mgmt", "tier:1", "version:v2.1.0"]
+
+    async def test_metadata_point_rides_in_the_single_series_request(self):
+        """One payload per push — the point must not cost a second API call."""
+        context = _context(failures=[_failure()], job_metadata=dict(_JOB_METADATA))
+        _result, posts = await self._push(context)
+        series_posts = _series_posts(posts)
+        assert len(series_posts) == 1
+        assert series_posts[0]["url"] == _SERIES_URL
+        assert len(_metadata_entries(series_posts[0]["json"]["series"])) == 1
+
+
+class TestJobMetadataEventTags:
+    """The event stream carries the same declared metadata tags."""
+
+    def test_event_carries_the_metadata_tags(self):
+        exporter = _exporter()
+        event = exporter._build_event(
+            _context(failures=[_failure()], job_metadata=dict(_JOB_METADATA)),
+            _failure(),
+        )
+        tags = _attributes(event)["tags"]
+        assert [
+            tag for tag in tags if tag.split(":")[0] in {"team", "tier", "version"}
+        ] == [
+            "team:mgmt",
+            "tier:1",
+            "version:v2.1.0",
+        ]
+
+    def test_event_omits_empty_dimensions(self):
+        exporter = _exporter()
+        event = exporter._build_event(
+            _context(failures=[_failure()], job_metadata={"team": "", "tier": "2"}),
+            _failure(),
+        )
+        tags = _attributes(event)["tags"]
+        assert "tier:2" in tags
+        assert not any(tag.startswith(("team:", "version:")) for tag in tags)
+
+    def test_event_without_metadata_carries_no_metadata_tags(self):
+        event = _exporter()._build_event(_context(failures=[_failure()]), _failure())
+        tags = _attributes(event)["tags"]
+        assert not any(tag.startswith(("team:", "tier:", "version:")) for tag in tags)
 
 
 class TestApiErrorDetail:
