@@ -491,7 +491,7 @@ These are read straight from the process environment and have no `Settings` fiel
 | --- | --- | --- |
 | `ROOTCOZ_ENCRYPTION_KEY` | auto-generated file key | Fernet key for at-rest encryption and the HMAC secret for API key hashes |
 | `XDG_DATA_HOME` | `~/.local/share` | Where the auto-generated `.encryption_key` file lives |
-| `XDG_CONFIG_HOME` | user default | Writable config directory the container points at `/tmp/config` |
+| `XDG_CONFIG_HOME` | user default | Writable config directory the container points at `/tmp/config`; the container's entrypoint creates it at start and exits 1, naming the path and uid/gid, if it cannot |
 | `DEV_MODE` / `DEBUG` | unset | Set to `true` to enable uvicorn auto-reload |
 | `PORT` | `8000` | Port the ASGI server binds |
 | `ANTHROPIC_API_KEY` | unset | Claude credential for the sidecar |

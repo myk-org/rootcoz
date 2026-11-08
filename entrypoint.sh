@@ -7,6 +7,28 @@ set -euo pipefail
 # ~/.config non-writable. XDG_CONFIG_HOME redirects config writes
 # to a writable location.
 
+# OpenShift runs an arbitrary UID: ~/.config is not ours and /tmp is an emptyDir
+# whose root we may not own. Create the dir here so a bad mount fails at start
+# with a named cause instead of on the first config write. Probe with a real
+# create, not `test -w`: a dir that is writable but not traversable passes -w and
+# then fails on the first config subdirectory -- creating a child needs both bits.
+if [ -n "${XDG_CONFIG_HOME:-}" ]; then
+    if ! mkdir -p "$XDG_CONFIG_HOME" 2>/dev/null \
+        || ! mkdir "$XDG_CONFIG_HOME/.probe.$$" 2>/dev/null; then
+        echo "[entrypoint] ERROR: XDG_CONFIG_HOME=$XDG_CONFIG_HOME is not writable (uid=$(id -u) gid=$(id -g))" >&2
+        exit 1
+    fi
+    rmdir "$XDG_CONFIG_HOME/.probe.$$"
+    echo "[entrypoint] XDG_CONFIG_HOME=$XDG_CONFIG_HOME (uid=$(id -u))"
+fi
+# Self-check hook for the `tox -e chart` env, gated on argv and not on an env var:
+# the image's CMD is fixed, so nothing sets argv by accident, while a stray
+# ROOTCOZ_* variable in a deployment would make the container exit 0 here with no
+# server and no error -- a silent crash-loop.
+if [ "${1:-}" = "--xdg-check" ]; then
+    exit 0
+fi
+
 # Cursor auth: create config dir (owned by runtime UID so chmod works)
 # and symlink auth.json to the PVC mount for persistence
 if [ -d /home/appuser/.cursor-auth ]; then

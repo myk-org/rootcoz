@@ -1,7 +1,9 @@
 """Shared fixtures for rootcoz tests."""
 
+import asyncio
 import logging
 import os
+import sys
 import tempfile
 import types
 from collections.abc import Awaitable, Callable, Generator
@@ -283,12 +285,54 @@ async def initialized_db(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     await storage.init_db()
 
 
+_SWEEP_NAMES = frozenset(
+    {
+        "_compress_stored_results",
+        "backfill_results_denorm",
+        "_derive_denorm_pages",
+        "backfill_result_json_compression",
+    }
+)
+
+
+def _task_name(task: asyncio.Task[Any]) -> str:
+    """The coroutine name of a tracked task, for an assertion message."""
+    return getattr(task.get_coro(), "__qualname__", "?")
+
+
+def _tracked_tasks() -> set[asyncio.Task[Any]]:
+    """Background work this process still tracks, without importing the app."""
+    main = sys.modules.get("rootcoz.main")
+    if main is not None:
+        return set(main._background_tasks)
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return set()  # no loop here: nothing of ours can be running
+    return {t for t in asyncio.all_tasks() if _task_name(t) in _SWEEP_NAMES}
+
+
+def assert_no_leaked_background_tasks(db_path: Path, before: set) -> None:
+    """A test's database is removed only after the work that pins it has finished."""
+    leaked = [
+        t
+        for t in _tracked_tasks() - before
+        if not t.done() and not t.get_loop().is_closed()
+    ]
+    assert not leaked, (
+        f"{db_path.name} is still owned by {len(leaked)} background task(s): "
+        + ", ".join(_task_name(t) for t in leaked)
+    )
+
+
 @pytest.fixture
 def temp_db_path() -> Generator[Path]:
     """Create a temporary database path for testing."""
     with tempfile.NamedTemporaryFile(suffix=".db", delete=False) as f:
         db_path = Path(f.name)
+    before = _tracked_tasks()  # what was already running when this test got the file
     yield db_path
+    assert_no_leaked_background_tasks(db_path, before)
     if db_path.exists():
         db_path.unlink()
 
