@@ -4868,6 +4868,57 @@ def test_cursor_401_names_the_rejected_credential_not_the_browser_login():
     )
 
 
+def test_a_cursor_refusal_keeps_its_sentence_at_send_time_too():
+    """Start's 422 detail and the send-time message are one sentence.
+
+    A bare-4xx Cursor refusal carries the browser-login hint, whose ``agent
+    login`` marker used to re-label it; the sentence rootcoz built wins.
+    """
+    from rootcoz import ai_client
+
+    sentence = ai_client._session_refusal(400, "upstream said no", "cursor", "composer")
+    assert "agent login" in sentence
+    for is_admin in (True, False):
+        assert (
+            ai_client.format_chat_ai_user_error(
+                sentence, is_admin=is_admin, ai_provider="cursor", ai_model="composer"
+            )
+            == sentence
+        )
+
+
+@pytest.mark.asyncio
+async def test_a_mapped_refusal_keeps_the_transcript_session_id():
+    """The refusal copy still correlates with its recorded transcript.
+
+    ``dataclasses.replace()`` drops non-field attributes, and cleanup has
+    already cleared ``session_id`` by the time this copy is returned.
+    """
+    from rootcoz import ai_client
+
+    async def _failing_call(**_kwargs):
+        result = AIResult(
+            success=False,
+            text=(
+                "Client error '400 Bad Request' for url"
+                " 'http://127.0.0.1:9100/sessions'"
+            ),
+            error="bad request",
+            session_id="old",
+        )
+        result.transcript_session_id = "11111111-2222-3333-4444-555555555555"
+        return result
+
+    mapped = await ai_client._call_with_safe_error(
+        _failing_call, ai_provider="openai", ai_model="undeclared"
+    )
+    assert mapped.text.startswith(ai_client.SESSION_REFUSAL_MARKER)
+    assert (
+        getattr(mapped, "transcript_session_id", None)
+        == "11111111-2222-3333-4444-555555555555"
+    )
+
+
 @pytest.mark.asyncio
 async def test_token_limits_substring_is_not_the_limits_cause():
     """Only the exact sidecar literal is the limits cause — never the topic.

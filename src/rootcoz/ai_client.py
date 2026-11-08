@@ -1939,9 +1939,14 @@ def format_chat_ai_user_error(
     was handed selects a cause and is then dropped, never echoed.
     """
     text = (response_text or "").strip()
-    lower = text.lower()
     if not text:
         return "AI call failed. Please try again."
+    # Our own sentence is final and outranks every marker check below:
+    # re-deriving its cause would lose the status a 401 sentence no longer
+    # carries, and a Cursor refusal already names its own hint.
+    if _is_own_refusal_sentence(text):
+        return text
+    lower = text.lower()
 
     friendly = normalize_provider(ai_provider)
     cursor_only_markers = ("agent login", "cursor_api_key")
@@ -1974,11 +1979,6 @@ def format_chat_ai_user_error(
     if _is_lost_session_error(lower):
         return "AI session expired. Please try sending your message again."
 
-    # A sentence rootcoz already built is final: re-deriving its cause would
-    # lose the status a 401 sentence no longer carries. Never the body — only a
-    # marker sentence, which this module constructed.
-    if _is_own_refusal_sentence(text):
-        return text
     # A creation refusal: the admitted text selects a cause and is dropped, and
     # the admission is the one predicate, so a mid-chat prompt 4xx, a health or
     # a discovery 4xx is not dressed up as "the session could not be created".
@@ -2035,6 +2035,9 @@ async def _call_with_safe_error(
         # answer "sidecar HTTP None".
         if not result.success and _is_own_refusal_sentence(result.text or ""):
             return result
+        # dataclasses.replace() drops non-field attributes — keep the
+        # transcript correlation id across every copy.
+        transcript_session_id = getattr(result, "transcript_session_id", None)
         # A session refusal keeps its sentence: checked before the ``redact_key is
         # None`` early return, which would otherwise leave the library's text and
         # before the keyed branch, which would blank it to "AI call failed".
@@ -2048,12 +2051,12 @@ async def _call_with_safe_error(
                 str(kwargs.get("ai_provider") or ""),
                 str(kwargs.get("ai_model") or ""),
             )
-            return replace(result, text=sentence, error=sentence)
+            result = replace(result, text=sentence, error=sentence)
+            if transcript_session_id is not None:
+                result.transcript_session_id = transcript_session_id
+            return result
         if redact_key is None:
             return result
-        # dataclasses.replace() drops non-field attributes — keep the
-        # transcript correlation id across the copy.
-        transcript_session_id = getattr(result, "transcript_session_id", None)
         if result.success:
             result = replace(
                 result,

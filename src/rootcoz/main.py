@@ -6081,6 +6081,13 @@ async def _process_ci_source_analysis(
                 ]
                 if not analyzed_children:
                     summary = f"All {len(child_job_analyses)} child job analyses failed"
+                    # A child's refusal names the cause; the count alone does
+                    # not, and this path also reaches a fully-failed summary.
+                    for child in child_job_analyses:
+                        note = (child.note or "").lstrip()
+                        if note.startswith(SESSION_REFUSAL_MARKER):
+                            summary = note
+                            break
                     fail_result = FailureAnalysisResult(
                         job_id=job_id,
                         status="failed",
