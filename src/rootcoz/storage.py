@@ -10970,8 +10970,13 @@ async def add_chat_message_pair(
     username: str = "",
     ai_provider: str = "",
     ai_model: str = "",
+    notice: str = "",
 ) -> tuple[int, int]:
     """Insert user message + assistant placeholder atomically.
+
+    ``notice`` is a server-authored ``system`` row written between them, so a
+    cause the server states about this very request renders under the request
+    and above the answer it corrects.
 
     Returns (user_msg_id, assistant_msg_id).
     """
@@ -10981,6 +10986,11 @@ async def add_chat_message_pair(
             (job_id, "user", user_content, username, "", "", "", "completed"),
         )
         user_msg_id = cursor.lastrowid or 0
+        if notice:
+            await db.execute(
+                "INSERT INTO chat_messages (job_id, role, content, username, ai_provider, ai_model, session_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (job_id, "system", notice, username, "", "", "", "completed"),
+            )
         cursor = await db.execute(
             "INSERT INTO chat_messages (job_id, role, content, username, ai_provider, ai_model, session_id, status) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
             (job_id, "assistant", "", username, ai_provider, ai_model, "", "pending"),

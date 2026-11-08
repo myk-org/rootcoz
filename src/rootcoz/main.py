@@ -9973,6 +9973,39 @@ def _chat_tracker_gate(
     return "", None
 
 
+#: A placeholder credential the gate accepts, per tracker: the probe below asks
+#: the gate "would a real one file?" without ever reading the caller's.
+_PROBE_TOKENS: dict[str, dict[str, str]] = {
+    "github": {"github_token": "probe"},
+    "jira": {"jira_token": "probe"},
+}
+
+
+def _token_would_enable_filing(
+    tracker: Literal["github", "jira"],
+    settings: Settings,
+    *,
+    github_repo_available: bool,
+    job_chat: bool = False,
+) -> bool:
+    """Would a token this account can save make ``tracker`` file at all?
+
+    :func:`_chat_tracker_gate` reads the credential BEFORE the destination, so
+    it answers ``no_token`` on a deployment with no repository (or no Jira auth
+    method) configured too — a blocker no token fixes. The same gate answers it
+    with a probe credential (:data:`_PROBE_TOKENS`), so the notice promises a
+    token only where the create path would then accept one.
+    """
+    reason, _refusal = _chat_tracker_gate(
+        tracker,
+        settings,
+        _PROBE_TOKENS[tracker],
+        github_repo_available=github_repo_available,
+        job_chat=job_chat,
+    )
+    return not reason
+
+
 def _chat_tracker_state(
     settings: Settings,
     user_tokens: dict[str, str],
@@ -10424,64 +10457,80 @@ _ISSUE_CONSENT_ROLE = "system"
 async def _post_server_notice(*, conversation: str, username: str, content: str) -> int:
     """Write a server-authored ``system`` row into a chat and return its id.
 
-    The only way this server posts a notice: the model never writes this role,
-    so a row in it is text the model cannot author.
+    The model never writes this role, so a row in it is text the model cannot
+    author. Mid-turn notices come from here; the no-credential answer belongs
+    above the answer it corrects, so it is stored with the turn itself (see
+    :func:`_issue_blocked_notice`).
     """
     return await storage.add_chat_message(
         conversation, role=_ISSUE_CONSENT_ROLE, content=content, username=username
     )
 
 
-async def _post_issue_blocked_notice(
+async def _issue_blocked_notice(
     *,
-    conversation: str,
-    username: str,
     message: str,
-    tracker_unavailable: dict[str, str],
-) -> bool:
-    """Post why the issue this message asks for cannot be filed; True when posted.
+    username: str,
+    settings: Settings,
+    github_repo_available: bool,
+    job_chat: bool = False,
+) -> str:
+    """Why the issue this message asks for cannot be filed, ``""`` when it can.
 
     The narrow trigger: the message itself asks to file an issue in a named
     tracker (:func:`asked_issue_tracker`), that tracker is enabled for this
     server but absent from the tool list for a CREDENTIAL reason — so the cause
     and the fix are the account's, and naming them here is the answer. Anything
-    else (no request, a disabled tracker, no repository, a usable token) posts
-    nothing.
+    else (no request, a disabled tracker, no repository, a usable token) yields
+    ``""``.
 
-    A failed write must not fail the chat turn: the answer still comes from the
-    model, this row is the server's own copy of it.
+    The caller stores the text with the turn, BEFORE the assistant placeholder,
+    so the cause renders above the model's answer rather than after it: the
+    reader must not meet the wrong answer first. Best effort — a failure here
+    costs the notice, never the turn.
     """
     from rootcoz.engine.chat import (
         asked_issue_tracker,
         credential_blocked_issue_notice,
     )
 
-    tracker = asked_issue_tracker(message)
-    content = credential_blocked_issue_notice(
-        tracker, tracker_unavailable.get(tracker, "")
-    )
-    if not content:
-        return False
     try:
-        posted = await _post_server_notice(
-            conversation=conversation, username=username, content=content
+        tracker = asked_issue_tracker(message)
+        if not tracker:
+            return ""
+        _targets, unavailable = _chat_tracker_state(
+            settings,
+            await storage.get_user_tokens(username),
+            github_repo_available=github_repo_available,
+            has_profile=await _account_has_profile(username),
+            job_chat=job_chat,
         )
+        reason = unavailable.get(tracker, "")
+        notice = credential_blocked_issue_notice(
+            tracker,
+            reason,
+            token_would_file=_token_would_enable_filing(
+                tracker,
+                settings,
+                github_repo_available=github_repo_available,
+                job_chat=job_chat,
+            ),
+        )
+        if notice:
+            logger.info(
+                "Chat: the server answers the %s filing request for %s (reason=%s)",
+                tracker,
+                username,
+                reason,
+            )
+        return notice
     except Exception:
         logger.warning(
-            "Chat: could not post the no-credential issue notice for %s in %s",
+            "Chat: could not compose the no-credential issue notice for %s",
             username,
-            conversation,
             exc_info=True,
         )
-        return False
-    if not posted:
-        return False
-    logger.info(
-        "Chat: posted the no-credential issue notice for %s in %s",
-        username,
-        conversation,
-    )
-    return True
+        return ""
 
 
 async def _post_issue_consent_request(
@@ -22930,6 +22979,19 @@ async def send_chat_message(
             username=request.state.username,
             ai_provider=ai_provider,
             ai_model=ai_model,
+            notice=await _issue_blocked_notice(
+                message=body.message,
+                username=request.state.username,
+                settings=get_settings(),
+                # This run's own repos are a destination too, exactly as the
+                # background task reads them for the tool list.
+                github_repo_available=bool(
+                    _job_issue_repo_slugs(
+                        (stored.get("result") or {}).get("request_params", {})
+                    )[1]
+                ),
+                job_chat=True,
+            ),
         )
     logger.info("Chat: queued user message %d for job %s", user_msg_id, job_id)
 
@@ -23135,16 +23197,6 @@ async def _process_chat_message(
                             github_repo_available=bool(issue_repos),
                             has_profile=await _account_has_profile(username),
                             job_chat=True,
-                        )
-                        # The user's own words decide: a request to file an issue
-                        # in a tracker this account has no credential for is
-                        # answered by the server itself, so the fix is stated
-                        # even if the model improvises around the prompt.
-                        await _post_issue_blocked_notice(
-                            conversation=job_id,
-                            username=username,
-                            message=message,
-                            tracker_unavailable=tracker_unavailable,
                         )
                         # A resumed session keeps its creation-time tools, so a
                         # token saved or a tracker toggled mid-chat only reaches
@@ -23847,12 +23899,19 @@ async def send_admin_chat_message(
             ai_model,
             credential_source,
         )
+        settings = get_settings()
         user_msg_id, assistant_msg_id = await storage.add_chat_message_pair(
             job_id=ADMIN_CHAT_JOB_ID,
             user_content=body.message,
             username=request.state.username,
             ai_provider=ai_provider,
             ai_model=ai_model,
+            notice=await _issue_blocked_notice(
+                message=body.message,
+                username=request.state.username,
+                settings=settings,
+                github_repo_available=_settings_github_repo_available(settings),
+            ),
         )
     logger.info("Admin chat: queued user message %d", user_msg_id)
 
@@ -23988,14 +24047,6 @@ async def _process_admin_chat_message(
                 await storage.get_user_tokens(username),
                 github_repo_available=_settings_github_repo_available(settings),
                 has_profile=await _account_has_profile(username),
-            )
-            # Same trigger as the job chat: the user asked for an issue this
-            # account has no credential to file, so the server says why.
-            await _post_issue_blocked_notice(
-                conversation=ADMIN_CHAT_JOB_ID,
-                username=username,
-                message=message,
-                tracker_unavailable=tracker_unavailable,
             )
             # A resumed session keeps its creation-time tools (see
             # _enable_tools_for_session): rebuild when this user's set changed.

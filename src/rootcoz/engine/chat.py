@@ -10,7 +10,7 @@ import tempfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import ExitStack, asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from pi_sidecar_client import get_sidecar_client
 
@@ -1378,22 +1378,37 @@ _TRACKER_UNAVAILABLE_REASONS = {
 #: missing repository is not one of them, so no token advice is posted for it.
 _CREDENTIAL_UNAVAILABLE_REASONS = ("no_token", "no_token_no_profile")
 
-#: A filing request: a filing verb and an issue noun in the same sentence, so
-#: "open the console log" is not one.
+#: The forms people write "file an issue" in: a filing verb (any tense)
+#: before the noun, or the participle after it ("a GitHub issue filed for this").
+_FILING_VERB = (
+    r"open(?:ed)?|fil(?:e|ed)|creat(?:e|ed)|submit(?:ted)?|rais(?:e|d)?|"
+    r"report(?:ed)?|log(?:ged)?"
+)
+_FILING_PARTICIPLE = r"opened|filed|created|submitted|raised|reported|logged"
+_ISSUE_NOUN = r"issue|ticket"
+
+#: A filing request: a filing verb and an issue noun in the same sentence, in
+#: either order, so "open the console log" is not one.
 _ASKS_TO_FILE_ISSUE = re.compile(
-    r"\b(?:open|file|create|submit|raise|report|log)\b[^\n.!?]{0,40}?\b(?:issue|ticket)\b",
+    rf"\b(?:{_FILING_VERB})\b[^\n.!?]{{0,40}}?\b(?:{_ISSUE_NOUN})\b"
+    rf"|\b(?:{_ISSUE_NOUN})\b[^\n.!?]{{0,20}}?\b(?:{_FILING_PARTICIPLE})\b",
     re.IGNORECASE,
 )
 
 #: The trackers a message can name. A filing request that names none posts no
 #: notice: there is no single tracker it could be about.
-_NAMED_TRACKERS = (
+_NAMED_TRACKERS: tuple[tuple[Literal["github", "jira"], re.Pattern[str]], ...] = (
     ("github", re.compile(r"\bgithub\b", re.IGNORECASE)),
     ("jira", re.compile(r"\bjira\b", re.IGNORECASE)),
 )
 
 
-def asked_issue_tracker(message: str) -> str:
+def _mention_gap(request: tuple[int, int], mention: tuple[int, int]) -> int:
+    """Characters between two spans, ``0`` when they touch or overlap."""
+    return max(0, max(request[0], mention[0]) - min(request[1], mention[1]))
+
+
+def asked_issue_tracker(message: str) -> Literal["", "github", "jira"]:
     """The tracker *message* asks to file an issue in, ``""`` when it asks nothing.
 
     The trigger half of the server's own no-credential answer: it fires only when
@@ -1402,29 +1417,37 @@ def asked_issue_tracker(message: str) -> str:
     that tracker missing a credential this account can add? — is the caller's,
     read from :func:`credential_blocked_issue_notice`'s ``reason``.
 
-    When a message names both trackers, the one it mentions first wins.
+    The tracker nearest the filing request wins — inside it when the request
+    carries the name ("file a Jira issue"), else the closest mention — so
+    "GitHub is blocked for me, file a Jira issue" answers about Jira and not
+    about the first tracker in the string. A tie goes to the earlier mention.
 
     shortcut: only a tracker-named request is detected ("open an issue" alone
-    posts nothing, the system prompt still covers it); upgrade if users commonly
-    ask tracker-agnostically.
+    posts nothing, the system prompt still covers it); a tracker mentioned far
+    from the request still wins when nothing is nearer. Upgrade if users
+    commonly mix a tracker into an unrelated sentence.
     """
-    if not message or not _ASKS_TO_FILE_ISSUE.search(message):
+    request = _ASKS_TO_FILE_ISSUE.search(message or "")
+    if request is None:
         return ""
     named = [
-        (match.start(), tracker)
+        (_mention_gap(request.span(), match.span()), match.start(), tracker)
         for tracker, pattern in _NAMED_TRACKERS
         if (match := pattern.search(message))
     ]
-    return min(named)[1] if named else ""
+    return min(named)[2] if named else ""
 
 
-def credential_blocked_issue_notice(tracker: str, reason: str) -> str:
+def credential_blocked_issue_notice(
+    tracker: str, reason: str, *, token_would_file: bool
+) -> str:
     """The server's own answer when this account cannot file the asked-for issue.
 
-    Posted as a ``system`` chat row (the role the model never writes), so the
-    cause and the fix reach the user even when the model improvises around the
-    system prompt's instruction — it claimed it would file, then blamed a
-    "session-level tooling gap" instead of the account (issue #446).
+    The caller stores this as a ``system`` chat row (the role the model never
+    writes), above the model's answer, so the cause and the fix reach the user
+    even when the model improvises around the system prompt's instruction — it
+    claimed it would file, then blamed a "session-level tooling gap" instead of
+    the account (issue #446).
 
     Only :data:`_CREDENTIAL_UNAVAILABLE_REASONS` produce text: a tracker an
     administrator disabled, a server with no repository or an unusable saved
@@ -1434,9 +1457,16 @@ def credential_blocked_issue_notice(tracker: str, reason: str) -> str:
     Args:
         tracker: ``"github"`` or ``"jira"`` — the one the user asked for.
         reason: Its code from the chat tracker state.
+        token_would_file: Would a token this account could save make it file?
+            The gate reads the credential BEFORE the destination, so it also
+            answers ``no_token`` on a deployment with no repository (or no Jira
+            method) configured — a blocker no token fixes. Promising the token
+            there sends the user to Profile Settings to fix nothing, so the
+            notice stays silent instead.
     """
     if (
-        tracker not in {"github", "jira"}
+        not token_would_file
+        or tracker not in {"github", "jira"}
         or reason not in _CREDENTIAL_UNAVAILABLE_REASONS
     ):
         return ""
