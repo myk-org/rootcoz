@@ -186,6 +186,8 @@ def test_exemptions_are_not_stale() -> None:
         "admin.user_enabled",
         # A background startup action has no route for the walk above to see.
         "startup.workspace_reclaim",
+        # A background results-retention pass (#455) has no route either.
+        "storage.results_retention",
     ],
 )
 def test_contract_action_is_implemented(action: str) -> None:

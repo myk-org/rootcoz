@@ -599,6 +599,23 @@ class RootCozClient:
             "GET", "/api/admin/settings", params=params if params else None
         )
 
+    def admin_results_retention_preview(
+        self, retention_days: int | None = None, max_rows: int | None = None
+    ) -> dict[str, Any]:
+        """Dry run: what results retention would delete right now.
+
+        GET /api/admin/results-retention — an omitted bound falls back to the
+        stored setting, so only the given params are sent.
+        """
+        params: dict[str, Any] = {}
+        if retention_days is not None:
+            params["retention_days"] = retention_days
+        if max_rows is not None:
+            params["max_rows"] = max_rows
+        return self._request(
+            "GET", "/api/admin/results-retention", params=params or None
+        )
+
     def admin_set_setting(self, key: str, value: str) -> dict[str, Any]:
         """Set a server setting. PUT /api/admin/settings"""
         return self._request(

@@ -10,6 +10,8 @@ from fastapi.testclient import TestClient
 
 from rootcoz import main, monitoring, storage, transcripts
 from rootcoz.config import (
+    RESULTS_RETENTION_DAYS_MAX,
+    SQLITE_INT_MAX,
     Settings,
     clear_db_settings_cache,
     get_settings,
@@ -793,3 +795,93 @@ def test_derive_sidecar_url_from_port(monkeypatch):
     monkeypatch.setenv("SIDECAR_URL", "http://sidecar.example.com:9300")
     main._derive_sidecar_url_from_port()
     assert os.environ["SIDECAR_URL"] == "http://sidecar.example.com:9300"
+
+
+# --- results retention (#455) ----------------------------------------------
+
+
+def test_results_retention_settings_metadata(client):
+    response = client.get("/api/admin/settings", headers=_admin_headers())
+    assert response.status_code == 200
+    by_key = {item["key"]: item for item in response.json()}
+    for key in ("results_retention_days", "results_max_rows"):
+        assert by_key[key]["category"] == "Storage", key
+        assert by_key[key]["default"] == "0", key
+        assert by_key[key]["sensitive"] is False, key
+        assert by_key[key]["restart_required"] is False, key
+        assert by_key[key]["server_only"] is False, key
+    assert by_key["results_retention_days"]["env_var"] == "RESULTS_RETENTION_DAYS"
+    assert by_key["results_max_rows"]["env_var"] == "RESULTS_MAX_ROWS"
+    # Storage sits before Workspace, which stays last on the page.
+    categories = list(main._SETTINGS_CATEGORIES)
+    assert categories.index("Storage") < categories.index("Workspace")
+    assert categories[-1] == "Workspace"
+
+
+def test_results_retention_write_path_bounds(client):
+    negative = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"results_retention_days": -1}},
+    )
+    assert negative.status_code == 400
+    assert "results_retention_days: must be >= 0" in negative.json()["detail"]
+
+    too_many_days = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"results_retention_days": RESULTS_RETENTION_DAYS_MAX + 1}},
+    )
+    assert too_many_days.status_code == 400
+    assert (
+        f"results_retention_days: must be <= {RESULTS_RETENTION_DAYS_MAX}"
+        in too_many_days.json()["detail"]
+    )
+
+    # One past SQLite's signed INTEGER would look legal and then never bind.
+    too_many_rows = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"results_max_rows": SQLITE_INT_MAX + 1}},
+    )
+    assert too_many_rows.status_code == 400
+    assert (
+        f"results_max_rows: must be <= {SQLITE_INT_MAX}"
+        in too_many_rows.json()["detail"]
+    )
+
+
+def test_results_retention_setting_round_trips(client):
+    saved = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"results_retention_days": 30}},
+    )
+    assert saved.status_code == 200
+    by_key = {
+        item["key"]: item
+        for item in client.get("/api/admin/settings", headers=_admin_headers()).json()
+    }
+    assert by_key["results_retention_days"]["value"] == "30"
+    assert by_key["results_retention_days"]["source"] == "db"
+
+    reset = client.delete(
+        "/api/admin/settings/results_retention_days", headers=_admin_headers()
+    )
+    assert reset.status_code == 200
+    by_key = {
+        item["key"]: item
+        for item in client.get("/api/admin/settings", headers=_admin_headers()).json()
+    }
+    assert by_key["results_retention_days"]["value"] == "0"
+
+
+def test_results_retention_bounds_are_single_sourced():
+    """The field, the route and the CLI all take their bounds from ``config``."""
+    field = Settings.model_fields["results_retention_days"]
+    limits = {meta.le for meta in field.metadata if hasattr(meta, "le")}
+    assert RESULTS_RETENTION_DAYS_MAX in limits
+    rows_field = Settings.model_fields["results_max_rows"]
+    row_limits = {meta.le for meta in rows_field.metadata if hasattr(meta, "le")}
+    assert SQLITE_INT_MAX in row_limits
+    assert storage.SQLITE_INT_MAX is SQLITE_INT_MAX

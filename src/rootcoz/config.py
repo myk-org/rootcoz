@@ -33,6 +33,15 @@ JIRA_AUTH_MODES = ("oauth", "basic", "pat", "atst")
 # Roles a new registration may default to (``admin`` is granted, never default).
 DEFAULT_USER_ROLES = ("viewer", "reviewer", "operator")
 
+# Largest INTEGER SQLite can bind and store. A row-cap setting above it would be
+# accepted by ``ge=0`` alone and then fail to bind in the retention keep-set's
+# ``LIMIT ?``, so every pass would fail for ever on a value that looked legal.
+SQLITE_INT_MAX = 2**63 - 1
+
+# Ceiling for the results-retention age limit (100 years), the same order of
+# magnitude the audit settings accept.
+RESULTS_RETENTION_DAYS_MAX = 36500
+
 
 def _split_outside_brackets(raw: str) -> list[str]:
     """Split string on commas that are not inside square brackets."""
@@ -954,6 +963,32 @@ class Settings(BaseSettings):
             "0 keeps every row. When set, the oldest rows beyond the cap "
             "are deleted at most once a day, together with retention "
             "pruning."
+        ),
+    )
+
+    # Retention for stored analysis results (#455). Both 0 = keep every job, so
+    # an upgrade changes no behaviour; the unit of retention is the whole job.
+    results_retention_days: int = Field(
+        default=0,
+        ge=0,
+        le=RESULTS_RETENTION_DAYS_MAX,
+        description=(
+            "Delete analysed jobs older than this many days — the result payload, "
+            "its test entries, its discussion and its failure history. 0 keeps them "
+            "forever. A job still being analysed is never deleted. Runs at most once "
+            "a day; a pass that failed retries on the next hourly check."
+        ),
+    )
+    results_max_rows: int = Field(
+        default=0,
+        ge=0,
+        le=SQLITE_INT_MAX,  # must fit a bound SQLite INTEGER
+        description=(
+            "Keep at most this many analysed jobs, deleting the oldest first. 0 keeps "
+            "every job. The two limits are alternatives, not a floor: a job older than "
+            "results_retention_days is deleted even when it is inside this cap. A job "
+            "still being analysed is never deleted. Runs at most once a day, with "
+            "retention; a pass that failed retries on the next hourly check."
         ),
     )
 

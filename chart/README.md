@@ -197,8 +197,8 @@ The overlay **replaces** the default `12Gi` (see [`/tmp` and ephemeral storage](
 it does not add to it, so a `-f` profile is still one number on both keys.
 
 The PVC size is deliberately *not* in the profile: the example is applied over a live release, where
-changing `persistence.size` either no-ops or triggers a PVC resize. Database growth is tracked in #409
-(~83 KB per stored result).
+changing `persistence.size` either no-ops or triggers a PVC resize. Database growth is ~83 KB per stored
+result and is unbounded unless `results_retention_days` / `results_max_rows` are set (both default `0`).
 
 **Why `requests == limits`:** the deployment is a single stateful replica, so predictable scheduling
 beats burst. Guaranteed QoS is computed from cpu and memory only (ephemeral-storage does not

@@ -62,10 +62,10 @@ See [CLI Command Reference](cli-reference.html) for all flags, or see [API Endpo
   Reports access is a separate flag from your role. Ask an administrator to grant reports access, then reload the page. Admins always have it.
 
 - `History` is empty for a test I expect to find.  
-  Remove the classification filter, widen the date range, or search with the full test name.
+  Remove the classification filter, widen the date range, or search with the full test name. If the runs you remember are simply gone, results retention may have pruned them — `results_retention_days` / `results_max_rows` delete whole analyses, and there is no tombstone. Check what a pass removed with `rootcoz admin audit list --action storage.results_retention`, and what a pass *would* remove with `rootcoz admin retention preview`. See [Managing Users and Server Settings](manage-users-and-server-settings.html).
 
 - A report looks smaller than expected.  
-  Add the statuses you care about, then re-check your team, version, and label filters.
+  Add the statuses you care about, then re-check your team, version, and label filters. Reports aggregate the surviving rows only, so they cannot tell "no failures that day" from "those analyses were pruned" — if results retention is on, that is the first thing to check.
 
 - There is no data to explore yet.  
   Run an analysis first. See [Submitting Analyses](submit-analyses.html) for details.

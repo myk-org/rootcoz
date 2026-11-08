@@ -464,6 +464,15 @@ def _restore_process_globals():
     rootcoz_main._enrichments_cache.clear()
     rootcoz_main._enrichments_inflight.clear()
     rootcoz_main.logger.level = logger_level
+    # Results retention keeps its throttle, its two retry sets and its in-flight
+    # flag at module level, and a live re-analysis registry whose tasks a test
+    # may leave registered. A stale stamp would silently disable the next test's
+    # prune, so reset them all rather than at each call site.
+    rootcoz_main._last_results_prune_at = 0.0
+    rootcoz_main._results_retention_stuck_ids.clear()
+    rootcoz_main._results_retention_cleanup_pending.clear()
+    rootcoz_main._results_prune_in_flight = False
+    rootcoz_main._failure_reanalysis_jobs.clear()
 
 
 @pytest.fixture(autouse=True)

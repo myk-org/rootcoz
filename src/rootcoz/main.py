@@ -112,6 +112,8 @@ from rootcoz.comment_enrichment import (
 from rootcoz.config import (
     DEFAULT_USER_ROLES,
     JIRA_AUTH_MODES,
+    RESULTS_RETENTION_DAYS_MAX,
+    SQLITE_INT_MAX,
     Settings,
     atlassian_cloud_id_error,
     get_settings,
@@ -699,6 +701,11 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "node_binary",
         "pi_sidecar_transcripts_dir",
     ],
+    # Data lifecycle. Before Workspace, which stays last on the page.
+    "Storage": [
+        "results_retention_days",
+        "results_max_rows",
+    ],
     # Last on purpose: a rarely-touched disk budget should not lead the page.
     "Workspace": [
         "max_workspace_graph_mb",
@@ -954,6 +961,7 @@ async def _periodic_session_cleanup() -> None:
                 logger.info("Periodic cleanup: removed %d expired sessions", count)
             await _cleanup_revoked_ai_sessions()
             await prune_audit_events_periodically()
+            await prune_results_periodically()
         except Exception:
             logger.debug("Periodic session cleanup failed", exc_info=True)
 
@@ -1728,7 +1736,7 @@ async def record_audit(
     outcome: Literal["success", "failure", "denied"] = "success",
     details: dict[str, Any] | None = None,
     request: Request | None = None,
-) -> None:
+) -> dict[str, Any] | None:
     """Record one audited action: the ``[AUDIT]`` log line plus a DB row.
 
     ``message`` is the human-readable half (the pre-existing wording, so log
@@ -1742,7 +1750,9 @@ async def record_audit(
     over-long attempt is truncated there, never here.
 
     Role and admin flag default to the request's authenticated state. Never
-    raises: an audit failure must not fail the action being audited.
+    raises: an audit failure must not fail the action being audited. Returns the
+    stored event, or ``None`` when nothing was stored (a write failure or a
+    throttled attempt) — callers that must not silently lose the record check it.
 
     ``auth.login_failed`` / ``auth.login_blocked`` are volume-guarded (#379):
     once one actor has ``audit_auth_failure_max_per_minute`` rows for those
@@ -1800,12 +1810,13 @@ async def record_audit(
             resolved_actor,
             failures,
         )
-        return
+        return None
     if event is None:
         assert throttle is not None  # only a throttled insert can skip
         record_audit_auth_suppression(resolved_actor, throttle.limit)
-        return
+        return None
     notify_audit_event(event)
+    return event
 
 
 # Reason code per refusal class: short, stable and never derived from the
@@ -1914,8 +1925,13 @@ async def _record_failed_attempt(
 IN_PROGRESS_STATUSES = ("pending", "running", "waiting")
 
 # Monotonic timestamp of the last audit prune — retention runs at most daily.
-_AUDIT_PRUNE_INTERVAL_SECONDS = 24 * 3600
+_DAILY_PRUNE_INTERVAL_SECONDS = 24 * 3600
 _last_audit_prune_at: float = 0.0
+
+
+def _daily_prune_slot_open(last_run: float) -> bool:
+    """True when a daily-throttled prune may run now (never run ⇒ open)."""
+    return not last_run or _time.monotonic() - last_run >= _DAILY_PRUNE_INTERVAL_SECONDS
 
 
 async def prune_audit_events_periodically() -> int:
@@ -1933,9 +1949,7 @@ async def prune_audit_events_periodically() -> int:
     if days <= 0 and max_rows <= 0:
         return 0
     now = _time.monotonic()
-    if _last_audit_prune_at and now - _last_audit_prune_at < (
-        _AUDIT_PRUNE_INTERVAL_SECONDS
-    ):
+    if not _daily_prune_slot_open(_last_audit_prune_at):
         return 0
     deleted = 0
     try:
@@ -1965,6 +1979,197 @@ async def prune_audit_events_periodically() -> int:
     # slot, so the next hourly call retries instead of skipping 24 hours.
     _last_audit_prune_at = now
     return deleted
+
+
+_last_results_prune_at: float = 0.0
+_results_retention_stuck_ids: set[str] = set()  # ids that failed to delete
+_results_retention_cleanup_pending: set[str] = set()  # deleted ids, cleanup failed
+_results_prune_in_flight: bool = False
+
+
+def _retention_row_needed(stats: Mapping[str, Any]) -> bool:
+    """True when a pass must leave an audit row: it attempted something or failed."""
+    return bool(
+        stats.get("candidates")
+        or stats.get("failed")
+        or stats.get("error")
+        or stats.get("cleanup_failed")
+    )
+
+
+async def _record_results_retention_audit(
+    retention_days: int, max_rows: int, stats: Mapping[str, Any]
+) -> dict[str, Any] | None:
+    """Write the pass's one summary row; ``None`` when it could not be stored.
+
+    ``details["job_ids"]`` carries every deleted id — never truncated, because a
+    truncated list is a list nobody can act on. Every value is an integer, an id,
+    a fixed code or a timestamp, so ``_redact_details`` has nothing to scrub and
+    no exception text can reach the trail.
+    """
+    failed = list(stats.get("failed") or [])
+    cleanup_failed = list(stats.get("cleanup_failed") or [])
+    error = str(stats.get("error") or "")
+    if error:
+        reason = error
+    elif cleanup_failed:
+        reason = "cleanup_failed"
+    elif failed:
+        reason = "partial_failure"
+    else:
+        reason = ""
+    details: dict[str, Any] = {
+        "retention_days": retention_days,
+        "max_rows": max_rows,
+        "deleted_jobs": int(stats.get("deleted") or 0),
+        "failed_jobs": len(failed),
+        "skipped_jobs": int(stats.get("skipped") or 0),
+        "cleanup_failed_jobs": len(cleanup_failed),
+        "truncated": bool(stats.get("truncated")),
+        "oldest_deleted_at": stats.get("oldest_deleted_at") or "",
+        "newest_deleted_at": stats.get("newest_deleted_at") or "",
+        "job_ids": list(stats.get("deleted_ids") or []),
+    }
+    if reason:
+        details["reason"] = reason
+    return await record_audit(
+        action="storage.results_retention",
+        actor="system",
+        actor_role="system",
+        message=(
+            f"Results retention deleted {details['deleted_jobs']} job(s)"
+            f" (retention_days={retention_days}, max_rows={max_rows})"
+        ),
+        target_type="storage",
+        outcome="failure" if (failed or error or cleanup_failed) else "success",
+        details=details,
+    )
+
+
+async def _report_results_retention(
+    retention_days: int, max_rows: int, stats: dict[str, Any]
+) -> int:
+    """Audit, log, apply the stuck guard and stamp the slot when the pass succeeded."""
+    global _last_results_prune_at
+
+    failed = list(stats.get("failed") or [])
+    cleanup_failed = list(stats.get("cleanup_failed") or [])
+    deleted = int(stats.get("deleted") or 0)
+    skipped = int(stats.get("skipped") or 0)
+    if (
+        _retention_row_needed(stats)
+        and (await _record_results_retention_audit(retention_days, max_rows, stats))
+        is None
+    ):
+        # ``record_audit`` never raises, so a failed insert is only visible as
+        # ``None``. The row is not retried: the next wake finds nothing left to
+        # delete, so this line is the only record of what went.
+        stats["error"] = "audit_write_failed"
+        logger.warning(
+            "Results retention: the audit row could not be written — %s",
+            json.dumps(stats, default=str),
+        )
+    if deleted or skipped:
+        logger.info(
+            "Results retention: deleted %d job(s), skipped %d"
+            " (retention_days=%d, max_rows=%d, window %s..%s)",
+            deleted,
+            skipped,
+            retention_days,
+            max_rows,
+            stats.get("oldest_deleted_at") or "-",
+            stats.get("newest_deleted_at") or "-",
+        )
+    else:
+        logger.debug("Results retention: nothing to delete")
+    if failed:
+        logger.warning(
+            "Results retention: %d job(s) could not be deleted: %s",
+            len(failed),
+            ", ".join(str(item.get("job_id")) for item in failed),
+        )
+    if stats.get("truncated"):
+        logger.warning(
+            "Results retention: more candidates than one pass may delete;"
+            " the rest continues on the next hourly check"
+        )
+    # A job that cannot be deleted costs one row per process, not an hourly
+    # storm: the next pass excludes it, does nothing and stamps the slot.
+    stuck = {str(item.get("job_id")) for item in failed}
+    if stuck - _results_retention_stuck_ids:
+        logger.warning(
+            "Results retention: leaving %d job(s) out of later passes this process: %s",
+            len(stuck - _results_retention_stuck_ids),
+            ", ".join(sorted(stuck - _results_retention_stuck_ids)),
+        )
+    _results_retention_stuck_ids.update(stuck)
+    # Same predicate as the audit row: a failed, truncated or cleanup-failed pass
+    # must not consume the daily slot, so the next hourly wake retries.
+    if (
+        not stats.get("error")
+        and not failed
+        and not cleanup_failed
+        and not stats.get("truncated")
+    ):
+        _last_results_prune_at = _time.monotonic()
+    return deleted
+
+
+async def prune_results_periodically() -> int:
+    """Delete the jobs the retention settings name, at most once a day.
+
+    Both limits ``0`` disables the whole pass — the default, so an upgrade changes
+    no behaviour. Returns the number of jobs deleted.
+    """
+    global _results_prune_in_flight
+
+    settings = get_settings()
+    days = settings.results_retention_days
+    max_rows = settings.results_max_rows
+    if days <= 0 and max_rows <= 0:
+        return 0
+    # Ahead of every gate: these jobs are already deleted and only their cleanup
+    # is left, so the retry is not a second prune.
+    for pending_id in list(_results_retention_cleanup_pending):
+        if await _cleanup_deleted_job_chat_workspaces(pending_id):
+            _results_retention_cleanup_pending.discard(pending_id)
+    if not _daily_prune_slot_open(_last_results_prune_at) or _results_prune_in_flight:
+        return 0
+    _results_prune_in_flight = True
+    # The accumulator is created here and filled by the callee, so the committed
+    # counts stay readable however this pass ends.
+    stats: dict[str, Any] = {}
+    try:
+        await storage.prune_results(
+            days,
+            max_rows,
+            exclude=_results_retention_stuck_ids,
+            is_protected=_retention_is_protected,
+            prepare=_retention_prepare,
+            finish=_finish_job_deletion,
+            stats=stats,
+        )
+    except asyncio.CancelledError:
+        # Shutdown is the normal path (SHUTDOWN_DRAIN_SECONDS cancels background
+        # tasks). Shielded, so the row survives the cancellation it is reporting.
+        if _retention_row_needed(stats):
+            await asyncio.shield(_record_results_retention_audit(days, max_rows, stats))
+        raise
+    except Exception:
+        # A broad catch, not ``sqlite3.Error``: an unhandled exception would end
+        # this task silently, mid-run, with rows already committed.
+        logger.warning("Results retention pass failed", exc_info=True)
+        stats["error"] = stats.get("error") or "prune_failed"
+        await asyncio.shield(_record_results_retention_audit(days, max_rows, stats))
+        return 0
+    finally:
+        _results_prune_in_flight = False
+        # Queued here, not in the hook, so a cleanup that *raised* is retried too:
+        # these jobs are already deleted and only their workspace is left.
+        _results_retention_cleanup_pending.update(
+            str(job_id) for job_id in stats.get("cleanup_failed") or ()
+        )
+    return await _report_results_retention(days, max_rows, stats)
 
 
 _VALID_GROUP_BY = frozenset(
@@ -3336,6 +3541,10 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
     # After load_db_settings, so the persisted audit_retention_days applies:
     # a saved 0 (keep forever) must not be overridden by the env/default value.
     await prune_audit_events_periodically()
+    # Spawned, never awaited: this one decodes payloads and touches the
+    # filesystem per job, so awaiting it would hold startup and the health probe
+    # for the length of a first pass and get the pod killed mid-prune.
+    _spawn_background(prune_results_periodically())
 
     # Keep the transcript recording state in sync everywhere: the env bridge
     # persists the DB value for the next boot, and the sidecar runtime toggle
@@ -5449,6 +5658,98 @@ async def _unlink_reanalysis_origins(origins: Mapping[str, str]) -> None:
                 f"Failed to remove deleted re-analysis {job_id} from origin {origin_id}",
                 exc_info=True,
             )
+
+
+# Per-failure in-place re-analysis (#455). Mirrors ``_chat_job_tasks``: a set per
+# job, because the "already running" refusal is per *failure*, so two failures of
+# one job can be re-analysed concurrently and the first completion must not
+# release protection for the second.
+_failure_reanalysis_jobs: dict[str, set[asyncio.Task[Any]]] = {}
+
+
+def _retention_is_protected(job_id: str) -> bool:
+    """True while a live analysis, a chat turn or a per-failure re-analysis holds this job."""
+    return (
+        job_id in _job_tasks
+        or job_id in _chat_job_tasks
+        or job_id in _failure_reanalysis_jobs
+    )
+
+
+async def _retention_prepare(job_ids: list[str]) -> Mapping[str, str]:
+    """Read the re-analysis origins before retention deletes the rows."""
+    return await _reanalysis_origins(job_ids)
+
+
+def _track_failure_reanalysis(
+    job_id: str, task: asyncio.Task[Any], reservation: asyncio.Task[Any] | None
+) -> None:
+    """Swap a re-analysis reservation for the spawned task.
+
+    The reservation is the request's own task, held from before the payload patch
+    until the background task exists; it is dropped here so an in-place
+    re-analysis protects the job for exactly its own lifetime. The id leaves the
+    registry only when the last task of this job finishes.
+    """
+    tasks = _failure_reanalysis_jobs.setdefault(job_id, set())
+    if reservation is not None:
+        tasks.discard(reservation)
+    tasks.add(task)
+
+    def _release(_finished: asyncio.Task[Any]) -> None:
+        remaining = _failure_reanalysis_jobs.get(job_id)
+        if remaining is None:
+            return
+        remaining.discard(task)
+        if not remaining:
+            _failure_reanalysis_jobs.pop(job_id, None)
+
+    task.add_done_callback(_release)
+
+
+def _release_failure_reanalysis(
+    job_id: str, reservation: asyncio.Task[Any] | None
+) -> None:
+    """Drop a reservation whose background task was never spawned (a refusal)."""
+    if reservation is None:
+        return
+    tasks = _failure_reanalysis_jobs.get(job_id)
+    if tasks is None:
+        return
+    tasks.discard(reservation)
+    if not tasks:
+        _failure_reanalysis_jobs.pop(job_id, None)
+
+
+async def _finish_job_deletion(
+    requested_ids: list[str], deleted_ids: list[str], origins: Mapping[str, str]
+) -> list[str]:
+    """Everything a deleted job leaves behind: caches, links, sessions, disk.
+
+    ``requested_ids`` are invalidated (over-invalidating a job whose deletion failed
+    costs one extra read), ``deleted_ids`` are the ones that really went. Returns the
+    ids whose workspace cleanup did not clear, so the retention task can retry them.
+
+    One helper for every deletion path, so a pruned job ends exactly as an
+    interactively deleted one does.
+    """
+    # Before any await below: the deletion is committed, so a read arriving during
+    # the cleanup must not serve the deleted jobs' badges.
+    for job_id in requested_ids:
+        _invalidate_enrichments_cache(job_id)
+    deleted = set(deleted_ids)
+    # A job whose deletion failed keeps its row, so its origin keeps the link.
+    await _unlink_reanalysis_origins(
+        {jid: origin_id for jid, origin_id in origins.items() if jid in deleted}
+    )
+    await _cleanup_revoked_ai_sessions()
+    cleanup_failed: list[str] = []
+    for job_id in deleted_ids:
+        if not await _cleanup_deleted_job_chat_workspaces(job_id):
+            cleanup_failed.append(job_id)
+    notify_active_count_changed()
+    notify_dashboard_changed()
+    return cleanup_failed
 
 
 def _ensure_submitter_tag(tags: list[str] | None, username: str) -> list[str]:
@@ -8433,6 +8734,9 @@ async def re_analyze_failure(
     _check_allow_list(request)
     _require_operator(request)
     parent_job_id = ""
+    # Held from before the payload patch (the earlier write) until the background
+    # task exists, so results retention cannot delete a job mid-re-analysis.
+    reanalysis_reservation: asyncio.Task[Any] | None = None
 
     try:
         # Parse optional body
@@ -8583,6 +8887,14 @@ async def re_analyze_failure(
                     "ai_model": ai_model,
                 }
 
+        # Registered before the payload patch — the patch is the earlier write,
+        # and it is what makes the job look "done" with a paid re-analysis in
+        # flight. The response's task is the reservation token.
+        reanalysis_reservation = asyncio.current_task()
+        if reanalysis_reservation is not None:
+            _failure_reanalysis_jobs.setdefault(parent_job_id, set()).add(
+                reanalysis_reservation
+            )
         await patch_result_json(parent_job_id, _patch_running)
 
         if not marked:
@@ -8617,6 +8929,7 @@ async def re_analyze_failure(
             exc=exc,
             details={"trigger": "failure", "failure_uuid": failure_uuid},
         )
+        _release_failure_reanalysis(parent_job_id, reanalysis_reservation)
         raise
     notify_job_status_changed(parent_job_id)
 
@@ -8650,6 +8963,7 @@ async def re_analyze_failure(
     )
     _background_tasks.add(task)
     task.add_done_callback(_background_tasks.discard)
+    _track_failure_reanalysis(parent_job_id, task, reanalysis_reservation)
 
     await _audit_analysis_rerun(
         request=request,
@@ -13552,25 +13866,8 @@ async def bulk_delete_jobs_endpoint(
 
     origins = await _reanalysis_origins(job_ids)
     result = await storage.delete_jobs_bulk(job_ids)
-    # Invalidate before any await below: the deletion is committed, so a read
-    # arriving during the cleanup must not serve the deleted jobs' badges — and
-    # a failure in the cleanup must not leave them readable until they expire.
-    # Over-invalidating an id whose deletion failed only costs one extra read.
-    for job_id in job_ids:
-        _invalidate_enrichments_cache(job_id)
-    # A job whose deletion failed keeps its row, so its origin keeps the link.
-    deleted_ids = set(result["deleted"])
-    await _unlink_reanalysis_origins(
-        {jid: origin_id for jid, origin_id in origins.items() if jid in deleted_ids}
-    )
-    await _cleanup_revoked_ai_sessions()
+    await _finish_job_deletion(job_ids, result["deleted"], origins)
     result["unauthorized"] = unauthorized_ids
-
-    for job_id in result["deleted"]:
-        await _cleanup_deleted_job_chat_workspaces(job_id)
-
-    notify_active_count_changed()
-    notify_dashboard_changed()
 
     # Audit log each deletion individually
     actor = request.state.username
@@ -13614,15 +13911,8 @@ async def delete_job_endpoint(
         )
 
     origins = await _reanalysis_origins([job_id])
-    await storage.delete_job(job_id)
-    # The comments are gone; their cached badges must not outlive them.
-    _invalidate_enrichments_cache(job_id)
-    await _unlink_reanalysis_origins(origins)
-    await _cleanup_revoked_ai_sessions()
-    await _cleanup_deleted_job_chat_workspaces(job_id)
-
-    notify_active_count_changed()
-    notify_dashboard_changed()
+    deleted_ids = [job_id] if await storage.delete_job(job_id) else []
+    await _finish_job_deletion([job_id], deleted_ids, origins)
     await record_audit(
         action="admin.job_delete" if request.state.is_admin else "user.job_delete",
         actor=request.state.username,
@@ -16602,12 +16892,12 @@ def _validate_filter_preset_filters(page: str, filters: dict[str, Any]) -> None:
 
 
 # SQLite integers are signed 64-bit; an out-of-range preset id cannot exist.
-_SQLITE_INT_MAX = 2**63 - 1
+# ``SQLITE_INT_MAX`` is imported from ``rootcoz.config`` (single source).
 
 
 def _validate_preset_id(preset_id: int) -> None:
     """Reject ids SQLite cannot store (404) instead of raising OverflowError."""
-    if preset_id < 1 or preset_id > _SQLITE_INT_MAX:
+    if preset_id < 1 or preset_id > SQLITE_INT_MAX:
         raise HTTPException(status_code=404, detail="Preset not found")
 
 
@@ -23403,7 +23693,7 @@ async def _fail_chat_assistant_placeholder(
         )
 
 
-async def _cleanup_deleted_job_chat_workspaces(job_id: str) -> None:
+async def _cleanup_deleted_job_chat_workspaces(job_id: str) -> bool:
     """Remove chat MCP state after a job delete, serialized with in-flight chat.
 
     Marks the job as deleting first so init/message work that has not yet
@@ -23413,6 +23703,10 @@ async def _cleanup_deleted_job_chat_workspaces(job_id: str) -> None:
     not block the event loop. After cleanup the deleting marker and idle
     barrier are dropped; the job row is already gone so a later init cannot
     recreate workspace state.
+
+    Returns ``True`` when the workspace was cleared. Today this only logs its own
+    errors; the ``bool`` is what lets results retention report and retry a
+    cleanup it could not finish.
     """
     from rootcoz.engine.chat import cleanup_chat_workspace, get_chat_workspace
 
@@ -23430,10 +23724,12 @@ async def _cleanup_deleted_job_chat_workspaces(job_id: str) -> None:
             )
     except Exception:
         logger.warning("Failed to cleanup chat workspace for %s", job_id, exc_info=True)
+        return False
     finally:
         _chat_jobs_deleting.discard(job_id)
         _chat_job_tasks.pop(job_id, None)
         _discard_idle_chat_job_barrier(job_id)
+    return True
 
 
 # Per-job:user abort signals — set to cancel in-progress chat processing
@@ -24167,6 +24463,43 @@ async def admin_db_schema(request: Request) -> dict[str, Any]:
         return {"tables": tables}
     finally:
         conn.close()
+
+
+@app.get(
+    "/api/admin/results-retention",
+    operation_id="adminResultsRetentionPreview",
+)
+async def admin_results_retention_preview(
+    request: Request,
+    retention_days: int | None = Query(
+        default=None, ge=0, le=RESULTS_RETENTION_DAYS_MAX
+    ),
+    max_rows: int | None = Query(default=None, ge=0, le=SQLITE_INT_MAX),
+) -> dict[str, Any]:
+    """Dry run: what the retention settings would delete right now. Admin only.
+
+    Read-only: no audit row, no state change. An omitted parameter falls back to
+    the stored setting, so an operator can ask "what would 30 days delete?"
+    before saving a value.
+    """
+    _require_admin(request)
+    settings = get_settings()
+    days = settings.results_retention_days if retention_days is None else retention_days
+    rows = settings.results_max_rows if max_rows is None else max_rows
+    preview = await storage.preview_results_retention(
+        days,
+        rows,
+        exclude=_results_retention_stuck_ids,
+        is_protected=_retention_is_protected,
+    )
+    logger.info(
+        "Results retention preview: %d job(s) would be deleted"
+        " (retention_days=%d, max_rows=%d)",
+        preview["jobs"],
+        days,
+        rows,
+    )
+    return preview
 
 
 # A preview decodes at most this much of a frame: the query is read-only but it
