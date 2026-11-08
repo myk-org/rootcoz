@@ -17,7 +17,7 @@ import tempfile
 import time
 import traceback
 from collections.abc import AsyncIterator, Callable
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
@@ -104,6 +104,39 @@ ROOTCOZ_TEMP_DIRNAME = "rootcoz"
 #: app controls, which is exactly why it is not on the loop. Non-daemon, so the
 #: interpreter waits for queued deletes instead of leaking them.
 _CLEANUP_POOL = ThreadPoolExecutor(max_workers=1, thread_name_prefix="rootcoz-reaper")
+
+#: Reaper futures that have not finished yet. A task cancelled while awaiting the
+#: shield in :func:`cleanup_off_loop` is ``done()`` at once while its delete keeps
+#: running, so the shutdown asks this set -- never the tasks -- whether reaper work
+#: would outlive it and be joined by interpreter exit past the grace period.
+_reaper_inflight: set[Future[CleanupOutcome]] = set()
+
+
+def _submit_cleanup(
+    work: Callable[[], CleanupOutcome],
+) -> asyncio.Future[CleanupOutcome]:
+    """Queue *work* on the reaper and count it in flight until the worker ends."""
+    future = _CLEANUP_POOL.submit(work)
+    _reaper_inflight.add(future)
+    future.add_done_callback(_reaper_inflight.discard)
+    return asyncio.wrap_future(future)
+
+
+def reaper_idle() -> bool:
+    """Whether the reaper has no delete queued and none running."""
+    return not _reaper_inflight
+
+
+async def wait_for_reaper(poll: float = 0.05) -> None:
+    """Block until the reaper has no delete queued and none running.
+
+    Polled, not awaited on the futures: a wrapped future cancelled by a shutdown
+    deadline would propagate into ``concurrent.futures`` and could drop a delete
+    that had not started yet.
+    """
+    while _reaper_inflight:
+        await asyncio.sleep(poll)
+
 
 #: Locks for *reusable* workspaces only (``chat-{job}/{user}`` and the admin chat
 #: workspace), where a queued delete can race the next create of the same path.
@@ -490,11 +523,8 @@ async def cleanup_off_loop(
     Returns :class:`CleanupOutcome`; a caller deciding whether a reusable path may
     be used must read it (:func:`reusable_path_lock` does).
     """
-    loop = asyncio.get_running_loop()
     return await asyncio.shield(
-        loop.run_in_executor(
-            _CLEANUP_POOL, partial(_run_cleanup, what, *steps, always=always)
-        )
+        _submit_cleanup(partial(_run_cleanup, what, *steps, always=always))
     )
 
 
@@ -531,7 +561,6 @@ async def cleanup_path_off_loop(
     thread, and a ``threading.Lock`` taken there while the creator waits on the
     loop would reintroduce the very stall this module exists to avoid.
     """
-    loop = asyncio.get_running_loop()
     key, entry = _lock_for(path)
     try:
         await entry.lock.acquire()
@@ -547,14 +576,13 @@ async def cleanup_path_off_loop(
         partial(delete_tree, path),
     )
     try:
-        future = loop.run_in_executor(
-            _CLEANUP_POOL,
+        future = _submit_cleanup(
             partial(
                 _run_cleanup,
                 what,
                 *cleanup_steps,
                 always=(partial(_drop_deleting, path),),
-            ),
+            )
         )
     except BaseException:
         entry.lock.release()

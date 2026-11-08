@@ -324,12 +324,18 @@ permission workaround. Setting `env.xdgConfigHome: ""` skips the block and sends
 
 The default pod template is **no longer byte-identical**: the defaults now set
 `ephemeral-storage: 12Gi` on both keys, which mounts the `/tmp` `emptyDir` and raises the scheduling
-floor by 12 Gi. **Every install rolls once on upgrade** — one replica, `Recreate`, 30 s grace period —
-so an analysis running at that moment is interrupted and has to be re-submitted (results are written on
-completion; SQLite recovers via WAL). A node that cannot host the extra 12 Gi leaves the pod Pending;
-the opt-out is clearing both keys, as described above.
+floor by 12 Gi. **Every install rolls once on upgrade** — one replica, `Recreate` — so an analysis
+running at that moment is marked failed for a server restart (`failure_reason: "server_restart"`) and
+has to be re-submitted (results are written on completion; SQLite recovers via WAL). A node that
+cannot host the extra 12 Gi leaves the pod Pending; the opt-out is clearing both keys, as described
+above.
 
-Installs that set `sidecar.agentDir` have a second, older reason to roll: the `copy-sidecar-agent` init
+The same rollout carries the shutdown budget: `terminationGracePeriodSeconds` went from `30` to `60`
+— 15 s for uvicorn to close connections, 40 s for cancelled tasks to unwind, 5 s to exit — and the
+restart mark the app writes before that unwind is what keeps a SIGTERM from looking like a crash on
+the next boot (the `failure_reason: "server_restart"` above).
+
+Installs that set `sidecar.agentDir` add one more, older reason to roll: the `copy-sidecar-agent` init
 container's request and limit are equal (`10m/32Mi`, where they were `10m/16Mi` request against
 `100m/128Mi` limit), and without that equality a Guaranteed pod would be Burstable.
 
@@ -474,9 +480,13 @@ has a **baseline assertion**: its container `resources` block must equal the cha
 twice, exactly one `sizeLimit: "12Gi"`, one `mountPath: /tmp` and one `TMPDIR`, plus a
 `XDG_CONFIG_HOME` value read out of `chart/values.yaml` (never hard-coded), so a values or template
 change that alters the default pod template fails CI instead of silently rolling every install. The
-same env runs the shipped `entrypoint.sh --xdg-check` twice: an uncreatable `XDG_CONFIG_HOME` (a path
-whose parent is a regular file) must exit 1 with a message naming the path, uid and gid, and a
-creatable one must be created and writable — the arbitrary-UID question the manifests cannot answer.
+same render is where the shutdown budget is asserted: `terminationGracePeriodSeconds` must be `60`, and
+greater than uvicorn's `--timeout-graceful-shutdown` plus the app's `SHUTDOWN_DRAIN_SECONDS` — both
+numbers are read from `entrypoint.sh` and `src/rootcoz/main.py`, so a lowered grace period or a longer
+drain fails the test. The same env runs the shipped `entrypoint.sh --xdg-check` twice: an uncreatable
+`XDG_CONFIG_HOME` (a path whose parent is a regular file) must exit 1 with a message naming the path,
+uid and gid, and a creatable one must be created and writable — the arbitrary-UID question the
+manifests cannot answer.
 The env also asserts the schema negatives (`resources.limit.cpu`,
 `resources.requests.cpuu`, a bad `memory` unit `4GiB`), the quantity positives (numeric `cpu`/`memory`
 and `ephemeral-storage`, `.5Gi`, `1e3`, `4m`, an explicit string quantity, extended resources —

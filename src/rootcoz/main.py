@@ -333,6 +333,8 @@ from rootcoz.temp_paths import (
     cleanup_off_loop,
     cleanup_path_off_loop,
     delete_tree,
+    reaper_idle,
+    wait_for_reaper,
 )
 from rootcoz.token_tracking import (
     build_token_usage_summary,
@@ -2325,6 +2327,20 @@ _PROCESS_STARTED_AT = _time.time()
 # Track analysis background tasks by job_id for abort support
 _job_tasks: dict[str, asyncio.Task[Any]] = {}
 
+#: How long the shutdown may spend recording the restart mark and letting
+#: cancelled tasks unwind -- one budget for both, so the arithmetic below covers
+#: the whole shutdown. Task ``finally`` blocks can delete a workspace tree for
+#: minutes (#402 A1), so the mark is written *first*: whatever is still running
+#: when the budget expires is abandoned by *this* process on its own terms (log
+#: line written, DB handle closed) instead of by the kubelet's SIGKILL
+#: mid-delete. The number is the residual budget, not a round guess:
+#: 60 s grace - 15 s uvicorn ceiling - 5 s to exit = 40, which is all the
+#: cleanup time the grace period can actually give. The 15 s lives only in
+#: entrypoint.sh (see the chart/tox assertions); app-side code does not repeat
+#: it, because a second copy under a "must match" comment is a number nothing
+#: checks.
+SHUTDOWN_DRAIN_SECONDS = 40
+
 
 def _remove_job_task(job_id: str) -> Callable[[asyncio.Task[object]], None]:
     """Create a done-callback that removes a job from the task tracker."""
@@ -2943,14 +2959,63 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         yield
     finally:
         server_status.stop_loop_lag_watchdog()
-        # Nothing tracked may outlive the app: a surviving task keeps reading the
-        # module-global DB_PATH and races whatever runs next in this process.
+        # Read before the cancel: a cancelled task's done-callback pops it from
+        # _job_tasks, and the mark needs the ids that were in flight.
+        in_flight = list(_job_tasks)
         pending = list(_background_tasks)
         for task in pending:
             task.cancel()
-        if pending:
-            await asyncio.gather(*pending, return_exceptions=True)
+        # Marking and draining share ONE budget, because they are one shutdown:
+        # the chart asserts 60 s grace > 15 s uvicorn + SHUTDOWN_DRAIN_SECONDS,
+        # and a mark outside this timeout spends time that budget never counted.
+        with contextlib.suppress(TimeoutError):
+            async with asyncio.timeout(SHUTDOWN_DRAIN_SECONDS):
+                # Before the drain, not after: this write is the only thing that
+                # keeps a SIGTERM from looking like a crash on the next boot, and
+                # the drain below can outlive the kubelet's grace period.
+                await storage.mark_jobs_failed_for_restart(in_flight)
+                # Nothing tracked may outlive the app: a surviving task keeps
+                # reading the module-global DB_PATH and races whatever runs next.
+                # asyncio.wait, never gather: gather's future resolves only once
+                # every child has, so a child that swallows cancellation (the
+                # clone-thread wait at #458) would hold the shutdown past the
+                # budget; wait() is cancelled here instead, and those tasks are
+                # abandoned below -- which is what having a budget means.
+                if pending:
+                    done, _ = await asyncio.wait(pending)
+                    for task in done:
+                        if not task.cancelled():
+                            task.exception()  # retrieved: there is no caller to raise to
+                # Then the reaper, with whatever the budget has left: it inherits
+                # the deletes of the tasks cancelled above (a shielded future that
+                # is ``done()`` while its thread still deletes), and exiting here
+                # would cut a delete that had time to finish and leave its tree
+                # behind for the next boot's reclaim.
+                await wait_for_reaper()
+        unfinished = [task for task in pending if not task.done()]
+        # The escape is the ceiling, and it fires for every way work can outlive
+        # this lifespan: a tracked task that is not ``done()`` (a cancelled task
+        # that has not finished is still running), and the reaper still holding a
+        # delete whose asyncio task is already done -- the shielded run_in_executor
+        # in cleanup_off_loop leaves the thread behind, and interpreter exit joins
+        # it past the grace period. When everything finished inside the budget
+        # this is skipped and the fast path below runs.
+        reaper_busy = not reaper_idle()
+        if unfinished or reaper_busy:
+            logger.warning(
+                f"Shutdown budget ({SHUTDOWN_DRAIN_SECONDS}s) expired or work is "
+                f"still running: abandoning {len(unfinished)} in-flight task(s)"
+                + (" and a running reaper delete" if reaper_busy else "")
+            )
+            # Returning would hand the pod back to the grace deadline: uvicorn's
+            # asyncio.run() cancels every task still on the loop and gathers it
+            # with no timeout (its executor join allows 300 s), so a child that
+            # suppresses cancellation holds the process open no matter what this
+            # lifespan did. The budget is a budget only if the process stops
+            # here -- mark committed, log line written.
+            os._exit(0)
         _background_tasks.clear()
+        _job_tasks.clear()
         cleanup_task.cancel()
         with contextlib.suppress(asyncio.CancelledError):
             await cleanup_task
@@ -6807,13 +6872,13 @@ async def analyze_submitted_job(
         or result_data.get("job_name")
         or source_cls.default_display_name(unified_body)
     )
-    previous_status = str(stored.get("status") or "completed")
-    claimed = await claim_submitted_job_for_analyze(job_id)
-    if not claimed:
+    claim = await claim_submitted_job_for_analyze(job_id)
+    if claim is None:
         raise HTTPException(
             status_code=409,
             detail="Job is already being analyzed or is no longer submitted.",
         )
+    previous_status, previous_failure_reason = claim
     rerun = {
         "request": request,
         "job_id": job_id,
@@ -6836,7 +6901,9 @@ async def analyze_submitted_job(
             existing_job_id=job_id,
         )
     except Exception:
-        await release_submitted_job_analyze_claim(job_id, previous_status)
+        await release_submitted_job_analyze_claim(
+            job_id, previous_status, previous_failure_reason
+        )
         await _audit_analysis_rerun(**rerun, outcome="failure")
         raise
     await _audit_analysis_rerun(**rerun, outcome="success")

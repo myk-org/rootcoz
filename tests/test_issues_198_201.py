@@ -210,6 +210,20 @@ class TestSparseResultFieldsEndpoint:
         assert alias.status_code == 200
         assert alias.json()["result"]["failures"] == [{"classification": "CODE ISSUE"}]
 
+        # The shutdown mark's reason is selectable: without the allowlist entry
+        # this is 400 (unknown field), without the get_result key it is a 200
+        # with a KeyError (#458).
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.update_status("sparse-1", "running")
+            await storage.mark_jobs_failed_for_restart(["sparse-1"])
+        restart = client.get(
+            "/results/sparse-1",
+            params={"fields": "failure_reason"},
+            headers=_ADMIN_HEADERS,
+        )
+        assert restart.status_code == 200
+        assert restart.json()["failure_reason"] == "server_restart"
+
 
 class TestCanViewReports:
     async def test_storage_flag_default_and_set(self, temp_db_path: Path) -> None:

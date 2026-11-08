@@ -108,11 +108,15 @@ commands = [
   # baseline every install starts from: assert its resource block verbatim, the
   # /tmp emptyDir + sizeLimit + TMPDIR the defaults now carry (#402 C1), and the
   # XDG_CONFIG_HOME value read out of values.yaml so a change there cannot strand
-  # the mount from the env var.
+  # the mount from the env var. It also asserts the shutdown budget (#458): the
+  # grace period is 60, and it is larger than uvicorn's ceiling plus the app's
+  # drain, read from their own files. Both, because 56-59 would satisfy the
+  # relationship alone while no longer carrying the published 60, and because the
+  # arithmetic must exist once.
   [
     "sh",
     "-c",
-    "T='helm template rootcoz chart/ --set ai.provider=gemini --set ai.model=gemini-2.5-pro --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render' && OUT=/tmp/rootcoz-default-render-$$.yaml && $T > $OUT && EXP=$(printf '%s\\n' 'limits:' '  cpu: \"2\"' '  ephemeral-storage: 12Gi' '  memory: 8Gi' 'requests:' '  cpu: \"1\"' '  ephemeral-storage: 12Gi' '  memory: 4Gi') && GOT=$(awk '/^      containers:/,/^      volumes:/' $OUT | sed -n '/^          resources:/,/^          volumeMounts:/p' | sed -e '1d' -e '$d' -e 's/^            //') && if [ \"$GOT\" != \"$EXP\" ]; then printf 'default render resources changed:\\n%s\\n' \"$GOT\"; exit 1; fi && [ \"$(grep -c 'ephemeral-storage: 12Gi' $OUT)\" = 2 ] && grep -q 'sizeLimit: \"12Gi\"' $OUT && [ \"$(grep -c 'mountPath: /tmp$' $OUT)\" = 1 ] && [ \"$(grep -c 'name: TMPDIR' $OUT)\" = 1 ] && P=$(sed -n 's/^ *xdgConfigHome: *//p' chart/values.yaml) && [ -n \"$P\" ] && awk '/^      containers:/,/^      volumes:/' $OUT | grep -q \"value: \\\"$P\\\"\" && rm -f $OUT",  # pragma: allowlist secret
+    "T='helm template rootcoz chart/ --set ai.provider=gemini --set ai.model=gemini-2.5-pro --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render' && OUT=/tmp/rootcoz-default-render-$$.yaml && $T > $OUT && EXP=$(printf '%s\\n' 'limits:' '  cpu: \"2\"' '  ephemeral-storage: 12Gi' '  memory: 8Gi' 'requests:' '  cpu: \"1\"' '  ephemeral-storage: 12Gi' '  memory: 4Gi') && GOT=$(awk '/^      containers:/,/^      volumes:/' $OUT | sed -n '/^          resources:/,/^          volumeMounts:/p' | sed -e '1d' -e '$d' -e 's/^            //') && if [ \"$GOT\" != \"$EXP\" ]; then printf 'default render resources changed:\\n%s\\n' \"$GOT\"; exit 1; fi && [ \"$(grep -c 'ephemeral-storage: 12Gi' $OUT)\" = 2 ] && grep -q 'sizeLimit: \"12Gi\"' $OUT && [ \"$(grep -c 'mountPath: /tmp$' $OUT)\" = 1 ] && [ \"$(grep -c 'name: TMPDIR' $OUT)\" = 1 ] && P=$(sed -n 's/^ *xdgConfigHome: *//p' chart/values.yaml) && [ -n \"$P\" ] && awk '/^      containers:/,/^      volumes:/' $OUT | grep -q \"value: \\\"$P\\\"\" && GRACE=$(awk '/terminationGracePeriodSeconds:/ {print $2; exit}' $OUT) && GRACEFUL=$(sed -n 's/.*--timeout-graceful-shutdown \\([0-9][0-9]*\\).*/\\1/p' entrypoint.sh | head -1) && DRAIN=$(sed -n 's/^SHUTDOWN_DRAIN_SECONDS = \\([0-9][0-9]*\\)$/\\1/p' src/rootcoz/main.py) && [ -n \"$GRACE\" ] && [ -n \"$GRACEFUL\" ] && [ -n \"$DRAIN\" ] && [ \"$GRACE\" = 60 ] && [ \"$GRACE\" -gt $((GRACEFUL + DRAIN)) ] && rm -f $OUT",  # pragma: allowlist secret
   ],
   # Arbitrary-UID XDG_CONFIG_HOME, asserted on the shipped entrypoint (the `--xdg-check`
   # argv gate stops it right after the bootstrap block). A path whose parent is a
@@ -122,6 +126,99 @@ commands = [
     "sh",
     "-c",
     "D=/tmp/rootcoz-xdg-$$ && mkdir -p $D && touch $D/afile && ! XDG_CONFIG_HOME=$D/afile/config bash entrypoint.sh --xdg-check 2>$D/err && grep -qE \"XDG_CONFIG_HOME=$D/afile/config is not writable \\(uid=[0-9]+ gid=[0-9]+\\)\" $D/err && XDG_CONFIG_HOME=$D/cfg bash entrypoint.sh --xdg-check && [ -w $D/cfg ] && [ -z \"$(ls -A $D/cfg)\" ] && : > $D/cfg/probe && rm -rf $D",  # pragma: allowlist secret
+  ],
+  # The wait loop's exit status (#458), driven through the shipped script: the
+  # `--wait-check` argv gate runs the real `_supervise_app` against a child that
+  # ignores TERM until <release> exists, then exits <code>. A TERM arriving while
+  # `wait` is interrupted must not become the exit code -- 0 for a clean stop (it
+  # used to report the interruption's 143) -- while a real death must still
+  # propagate as 7. The child touches <ready> itself, after ignoring TERM, so the
+  # signal cannot land in the child's startup window.
+  [
+    "sh",
+    "-c",
+    '''
+D=/tmp/rootcoz-wait-$$
+mkdir -p $D
+bash entrypoint.sh --wait-check $D/release-clean 0 $D/ready-clean &
+P=$!
+i=0
+while [ ! -f $D/ready-clean ] && [ $i -lt 1000 ]; do i=$((i+1)); sleep 0.01; done
+if [ ! -f $D/ready-clean ]; then echo "wait-check clean never entered the wait loop"; exit 1; fi
+kill -TERM $P
+: > $D/release-clean
+wait $P
+S=$?
+if [ $S -ne 0 ]; then echo "wait-check clean expected 0, got $S"; exit 1; fi
+bash entrypoint.sh --wait-check $D/release-crash 7 $D/ready-crash &
+P=$!
+i=0
+while [ ! -f $D/ready-crash ] && [ $i -lt 1000 ]; do i=$((i+1)); sleep 0.01; done
+if [ ! -f $D/ready-crash ]; then echo "wait-check crash never entered the wait loop"; exit 1; fi
+kill -TERM $P
+: > $D/release-crash
+wait $P
+S=$?
+if [ $S -ne 7 ]; then echo "wait-check crash expected 7, got $S"; exit 1; fi
+echo "wait-check clean=0 crash=7"
+rm -rf $D
+''',
+  ],
+  # The status Docker actually gets (#458). `--wait-check` above exercises supervision in
+  # isolation, so it stayed green while every clean stop exited 143: the sidecar's EXIT
+  # trap ran `wait` on the pid it had just TERMed, errexit aborted the trap there, and its
+  # 143 replaced the status `_run_app` computed. This row drives the shipped script end to
+  # end (`--exit-check`): a live sidecar behind that same EXIT trap, the signal traps and
+  # the supervision. A clean stop -- TERM while the app is still shutting down -- must be
+  # 0, and an app that dies on its own must still report its own 7, never the trap's 143.
+  # The third case is the sidecar dying under a running app (#468 review): the app still
+  # exits 0 on its way out, and a 0 would hide the crash from every supervisor -- no
+  # CrashLoopBackOff, no restart alert. It must exit 70, and the row waits for the
+  # watcher's own "Sidecar died" line (its poll is up to 5 s) before releasing the app,
+  # so the death is recorded before the exit status is decided.
+  [
+    "sh",
+    "-c",
+    '''
+D=/tmp/rootcoz-exit-$$
+mkdir -p $D
+bash entrypoint.sh --exit-check $D/release-clean 0 $D/ready-clean &
+P=$!
+i=0
+while [ ! -f $D/ready-clean ] && [ $i -lt 1000 ]; do i=$((i+1)); sleep 0.01; done
+if [ ! -f $D/ready-clean ]; then echo "exit-check clean never started the app"; exit 1; fi
+kill -TERM $P
+: > $D/release-clean
+wait $P
+S=$?
+if [ $S -ne 0 ]; then echo "exit-check clean expected 0, got $S"; exit 1; fi
+bash entrypoint.sh --exit-check $D/release-crash 7 $D/ready-crash &
+P=$!
+i=0
+while [ ! -f $D/ready-crash ] && [ $i -lt 1000 ]; do i=$((i+1)); sleep 0.01; done
+if [ ! -f $D/ready-crash ]; then echo "exit-check crash never started the app"; exit 1; fi
+: > $D/release-crash
+wait $P
+S=$?
+if [ $S -ne 7 ]; then echo "exit-check crash expected 7, got $S"; exit 1; fi
+echo "exit-check clean=0 crash=7"
+bash entrypoint.sh --exit-check $D/release-died 0 $D/ready-died $D/sidecar-stop > $D/out 2>&1 &
+P=$!
+i=0
+while [ ! -f $D/ready-died ] && [ $i -lt 1000 ]; do i=$((i+1)); sleep 0.01; done
+if [ ! -f $D/ready-died ]; then echo "exit-check sidecar-died never started the app"; exit 1; fi
+: > $D/sidecar-stop
+i=0
+while ! grep -q 'Sidecar died, shutting down container' $D/out && [ $i -lt 1000 ]; do i=$((i+1)); sleep 0.01; done
+if ! grep -q 'Sidecar died, shutting down container' $D/out; then echo "exit-check sidecar death was never noticed"; exit 1; fi
+sleep 0.5
+: > $D/release-died
+wait $P
+S=$?
+if [ $S -ne 70 ]; then echo "exit-check sidecar-died expected 70, got $S"; exit 1; fi
+echo "exit-check sidecar-died=70"
+rm -rf $D
+''',
   ],
   # Probes are values, not template literals: 14 timing fields across three probes
   # (startup has no initialDelaySeconds — absent renders nothing and the API defaults
