@@ -37,6 +37,15 @@ ALLOW_LIST_EXEMPT_ROUTES = {
     ("POST", "/api/auth/login"),
     ("POST", "/api/auth/logout"),
     ("POST", "/api/auth/register"),
+    # First-login choice screen (SSO): both are the tail of a login, before a
+    # session exists, and both enforce the list themselves on the name they are
+    # about to write (`create` on the chosen name, `link` on the proven username),
+    # so they self-gate exactly like `register` does for its own name.
+    ("POST", "/api/auth/sso/create"),
+    ("POST", "/api/auth/sso/link"),
+    # A POST for the same reason: the ticket is the credential, and the route
+    # only reads what it stands for (no write, so no allow-list question).
+    ("POST", "/api/auth/sso/ticket"),
     ("POST", "/api/jira-projects"),
     ("POST", "/api/jira-security-levels"),
     ("POST", "/api/validate-token"),

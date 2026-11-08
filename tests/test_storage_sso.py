@@ -267,6 +267,24 @@ async def test_deleting_an_account_removes_its_identities(
         ] == "bob"
 
 
+async def test_an_orphan_identity_can_be_healed(setup_test_db: Path) -> None:
+    """A row whose account is gone holds the unique slot; deleting it frees it."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.create_user("alice")
+        await storage.add_user_identity("alice", "google", "sub-1")
+        # Simulate a row that outlived its account (a crashed delete, or history).
+        async with storage._connect_db() as db:
+            await db.execute("DELETE FROM users WHERE username = 'alice'")
+            await db.commit()
+
+        assert await storage.delete_orphan_identity("google", "sub-1") is True
+        # A live identity is never touched by the healing path.
+        await storage.create_user("bob")
+        await storage.add_user_identity("bob", "google", "sub-2")
+        assert await storage.delete_orphan_identity("google", "sub-2") is False
+        assert await storage.get_user_identity("google", "sub-2") is not None
+
+
 async def test_a_session_records_the_provider_that_issued_it(
     setup_test_db: Path,
 ) -> None:
@@ -333,6 +351,84 @@ async def test_approval_can_record_the_provider_it_was_made_with(
             "username": "alice",
             "provider": "github",
         }
+
+
+async def test_a_first_login_ticket_is_single_use(setup_test_db: Path) -> None:
+    """A leaked choice URL must not be replayable."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        ticket = await storage.create_sso_ticket(
+            provider="google",
+            subject="sub-1",
+            email="alice@example.com",
+            suggested_username="alice",
+        )
+
+        peeked = await storage.peek_sso_ticket(ticket)
+        assert peeked is not None
+        assert peeked["suggested_username"] == "alice"
+        # Peeking never burns it, so a page reload still works.
+        assert await storage.peek_sso_ticket(ticket) is not None
+
+        consumed = await storage.consume_sso_ticket(ticket)
+        assert consumed is not None
+        assert consumed["subject"] == "sub-1"
+        assert await storage.consume_sso_ticket(ticket) is None
+        assert await storage.peek_sso_ticket(ticket) is None
+
+
+async def test_concurrent_ticket_consumption_has_exactly_one_winner(
+    setup_test_db: Path,
+) -> None:
+    """Eight clients, one ticket: one redemption, seven refusals.
+
+    ``consume_sso_ticket`` holds BEGIN IMMEDIATE across the read and the delete,
+    which is what makes the handover exactly-once under concurrency.
+    """
+    import asyncio
+
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        ticket = await storage.create_sso_ticket(
+            provider="google", subject="s", email=None, suggested_username="alice"
+        )
+
+        results = await asyncio.gather(
+            *(storage.consume_sso_ticket(ticket) for _ in range(8))
+        )
+
+    winners = [result for result in results if result is not None]
+    assert len(winners) == 1
+
+
+async def test_only_the_hashed_ticket_is_stored(setup_test_db: Path) -> None:
+    """The URL value is a credential; the table must not hold it."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        ticket = await storage.create_sso_ticket(
+            provider="google", subject="s", email=None, suggested_username="alice"
+        )
+        async with storage._connect_db() as db:
+            cursor = await db.execute("SELECT * FROM sso_link_tickets")
+            row = dict(await cursor.fetchone())
+
+    assert ticket not in " ".join(str(value) for value in row.values())
+    assert row["ticket_hash"] == storage._hash_token(ticket)
+
+
+async def test_an_expired_ticket_cannot_be_used(setup_test_db: Path) -> None:
+    """Both reads check the clock; the purge is housekeeping, not the gate."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        ticket = await storage.create_sso_ticket(
+            provider="google", subject="s", email=None, suggested_username="alice"
+        )
+        past = (datetime.now(UTC) - timedelta(minutes=1)).strftime(
+            storage.SQL_TIMESTAMP_FORMAT
+        )
+        async with storage._connect_db() as db:
+            await db.execute("UPDATE sso_link_tickets SET expires_at = ?", (past,))
+            await db.commit()
+
+        assert await storage.peek_sso_ticket(ticket) is None
+        assert await storage.consume_sso_ticket(ticket) is None
+        assert await storage.purge_expired_sso_tickets() == 1
 
 
 async def test_a_device_code_is_approved_then_redeemed_exactly_once(

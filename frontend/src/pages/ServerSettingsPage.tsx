@@ -122,7 +122,7 @@ interface SettingsImportResult {
 // Deployment-level settings first, then the two CI sources adjacent and before what consumes their artifacts, then analysis/output, then the operator-facing categories (mirrors backend _SETTINGS_CATEGORIES order).
 const CATEGORY_ORDER = [
   'Server', 'Jenkins', 'Prow', 'Analysis', 'Jira', 'GitHub issues',
-  'Report Portal', 'Datadog', 'Auth & Security', 'Notifications',
+  'Report Portal', 'Datadog', 'SSO', 'Auth & Security', 'Notifications',
   'Data & retention', 'Repos & workspace', 'Logging', 'Advanced',
 ]
 
