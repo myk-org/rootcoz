@@ -39,11 +39,11 @@ This confirms the CLI is using an admin identity, then asks a server-wide questi
 
 2. Choose how RootCoz should pick the model.
 
-   RootCoz can use the server default AI settings or a one-off override for the next question.
+   The header preselects the provider and model you last used on this account, so leaving it alone repeats your previous choice rather than the server default. To use a different pair, pick it — both a provider and a model are always required, because chat cannot start on an empty pair. A session that is already running keeps the pair it was started with, so its reply is always attributed to what it actually used.
 
    | If you want | Web UI | CLI |
    | --- | --- | --- |
-   | Use the server default | Leave the provider and model already loaded in the header. | Omit `--provider` and `--model`. |
+   | Use the pair already selected | It is loaded in the header — leave it. This is the pair you used last, not necessarily the server default. | Omit `--provider` and `--model`. |
    | Override for one question | Pick a different provider and model in the header before sending. | Add `--provider` and `--model` to `rootcoz admin-chat send`. |
    | Keep using the same override | Leave the header selection in place. | Repeat the same flags on the next `send` command. |
 
@@ -51,7 +51,7 @@ This confirms the CLI is using an admin identity, then asks a server-wide questi
 
 3. Ask a cross-job question and follow the reply.
 
-   In the web UI, type your question and press `Enter` to send it. Use `Shift+Enter` when you want a newline instead. While RootCoz is working, the thread shows `Thinking...` and keeps the response in the same conversation.
+   In the web UI, type your question and press `Enter` to send it. Use `Shift+Enter` when you want a newline instead. While RootCoz is working, the thread shows `Thinking...` with the elapsed time; the reply arrives as one message when the turn ends and stays in the same conversation.
 
    In the CLI, send the question directly:
 
@@ -65,7 +65,18 @@ This confirms the CLI is using an admin identity, then asks a server-wide questi
    rootcoz admin-chat history --limit 20
    ```
 
-   > **Tip:** Use the web UI when you want the clearest live experience. It shows the active reply immediately and gives you a `Stop` button while the assistant is still working.
+   > **Tip:** Use the web UI when you want the clearest live experience. It shows the busy state from the moment you send, tells you how long the turn has been running, and gives you a `Stop` button while the assistant is still working.
+
+   > **From an answer to a ticket:** ask the assistant to file it — "create a GitHub issue for this" or "open a Jira ticket" — and it drafts the title and body from the conversation. The server posts the preview to the chat itself, and nothing is filed until you reply there with the six-character code it shows. Server Chat itself resolves no tracker credential — the issue is filed with the token saved in *your* account, so add one in Profile Settings first, or the assistant relays the `400` that says none is available. The same gate from the CLI, in the same two steps and with no token flags (the proposal files nothing and prints the code to confirm with):
+
+   ```bash
+   rootcoz propose-chat-issue --target jira \
+     --title "Dashboard filters drop the team" --body "$(cat ticket-body.md)"
+   # review the preview, then run the create command it printed, for example:
+   rootcoz create-chat-issue --target jira \
+     --confirmation-id CONFIRMATION_ID --confirmation-code CONFIRMATION_CODE \
+     --title "Dashboard filters drop the team" --body "$(cat ticket-body.md)"
+   ```
 
 4. Stop the current reply or start over.
 

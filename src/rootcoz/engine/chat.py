@@ -5,10 +5,9 @@ Builds job-scoped system prompts and manages AI CLI conversations.
 
 import asyncio
 import base64
-import shutil
 import tempfile
-from collections.abc import Callable
-from contextlib import ExitStack
+from collections.abc import AsyncIterator, Callable
+from contextlib import ExitStack, asynccontextmanager
 from pathlib import Path
 from typing import Any
 
@@ -26,12 +25,21 @@ from rootcoz.engine.http_mcp import (
     cleanup_http_tools_mcp,
     install_http_tools_mcp_best_effort_async,
 )
+from rootcoz.error_messages import tracker_credential_message
 from rootcoz.jira import (
     JiraConnection,
     classify_jira_secret,
     resolve_jira_connection_from_params,
 )
 from rootcoz.storage import AI_SYSTEM_USERNAME
+from rootcoz.temp_paths import (
+    ABANDON,
+    DeleteResult,
+    PathState,
+    _Abandoned,
+    delete_tree,
+    reusable_path_lock,
+)
 
 logger = get_child_logger(__name__)
 
@@ -71,6 +79,25 @@ def ensure_chat_workspace(job_id: str, username: str = "") -> Path:
     workspace.chmod(0o700)
     logger.info("Chat workspace created: %s", workspace)
     return workspace
+
+
+@asynccontextmanager
+async def chat_workspace_lock(
+    job_id: str, username: str = ""
+) -> AsyncIterator[PathState]:
+    """Hold the chat workspace's path lock for the create/reuse decision.
+
+    The path is deterministic and reused across messages, so a queued delete of
+    ``chat-{job}/{user}`` must finish before the next message creates into it.
+    Yields the :class:`~rootcoz.temp_paths.PathState` and raises
+    :class:`~rootcoz.temp_paths.PathStateUnknown` when a live builder still owns
+    a marked tree, or the recovery could not delete every path in it, so no caller
+    reaches repository preparation on a half-deleted workspace.
+    """
+    async with reusable_path_lock(
+        job_id, get_chat_workspace(job_id, username)
+    ) as state:
+        yield state
 
 
 def _resolve_chat_repo_target(workspace: Path, repo_name: str) -> tuple[str, Path]:
@@ -467,6 +494,178 @@ def analysis_http_tools(
     return tools
 
 
+def _tracker_issue_tools(
+    *,
+    server_url: str,
+    auth_headers: dict[str, str],
+    targets: tuple[str, ...],
+    issue_repos: tuple[str, ...] = (),
+    job_id: str = "",
+    conversation: str = "",
+) -> list[dict[str, Any]]:
+    """The tracker tools chat may call, as the two steps the server enforces.
+
+    ``propose_tracker_issue`` stores the draft the user is asked to approve and
+    returns a confirmation code; ``create_<target>_issue`` files it, and needs
+    that id and code — plus a reply from the USER carrying the code, which the
+    server looks for in this conversation and the model cannot write. Both post
+    to the server, which files under the caller's OWN saved credential.
+    ``targets`` names only the trackers the server enables, can file in, *and*
+    the user's account holds a token for; empty means no tool is advertised.
+
+    ``issue_repos`` are the repos this session may file a GitHub issue in and
+    ``job_id`` is the run they belong to — both empty for an admin chat, whose
+    repo choice the server does not cap. ``conversation`` is hardcoded into the
+    proposal so the draft belongs to THIS chat: the one the user replies in.
+    """
+    if not targets:
+        return []
+    github = "github" in targets
+    repo_body = {"repo": "{repo}"} if github else {}
+    repo_properties = {"repo": _issue_repo_param(issue_repos)} if github else {}
+    # The run a job chat belongs to, hardcoded so the model cannot name another
+    # one: the draft binds it and a create naming a different run is refused.
+    job_body = {"job_id": job_id} if job_id else {}
+    # The chat this draft belongs to, also hardcoded: a draft proposed in a chat
+    # is only redeemable after a user message in it carries the code.
+    conversation_body = {"conversation": conversation} if conversation else {}
+    tools: list[dict[str, Any]] = [
+        {
+            "name": "propose_tracker_issue",
+            "description": (
+                "Step 1 of filing an issue. Draft the title and body for the "
+                "issue the user asked about and call this first: it files "
+                "nothing, and returns a confirmation_id, a confirmation_code "
+                "and a preview naming the tracker, the destination, the exact "
+                "title and body, and that code. The server also posts that "
+                "preview to this chat itself, so the user sees it even if your "
+                "own summary is incomplete: tell them it is below and ask "
+                "them to reply in this chat with the code. Nothing is filed "
+                "until they do, and only they can confirm it. Call this again "
+                "for any edit — an id and code authorise one specific draft."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "target": {
+                        "type": "string",
+                        "enum": list(targets),
+                        "description": "Which tracker to draft the issue for",
+                    },
+                    "title": {"type": "string", "description": "Issue title"},
+                    "body": {
+                        "type": "string",
+                        "description": (
+                            "Issue description summarising the failure and "
+                            "context the user asked about"
+                        ),
+                    },
+                    **repo_properties,
+                },
+                "required": ["target", "title", "body"],
+            },
+            "http": {
+                "method": "POST",
+                "url": f"{server_url}/api/chat-issue/propose",
+                "headers": {**auth_headers, "Content-Type": "application/json"},
+                "body_template": {
+                    "target": "{target}",
+                    "title": "{title}",
+                    "body": "{body}",
+                    **repo_body,
+                    **job_body,
+                    **conversation_body,
+                },
+            },
+        }
+    ]
+    for target in targets:
+        kind = "GitHub" if target == "github" else "Jira"
+        if target != "github":
+            repo_rule = (
+                "You do not choose the Jira project: the server files it in the "
+                "configured one. "
+            )
+        elif issue_repos:
+            repo_rule = (
+                "You may only name this run's test repo or one of its "
+                "additional repos as repo; leave it empty for the test repo. "
+            )
+        else:
+            repo_rule = (
+                "You may name any GitHub repository as repo; leave it empty for "
+                "the server's configured test repo. "
+            )
+        tools.append(
+            {
+                "name": f"create_{target}_issue",
+                "description": (
+                    f"Step 2 of filing a {kind} issue: file the draft the user "
+                    "confirmed. Call this ONLY after the user has replied in "
+                    "this chat with the confirmation code from the preview, and "
+                    "pass that confirmation_id and confirmation_code with the "
+                    "same title and body. A create nobody confirmed fails and "
+                    "files nothing — the code has to come from the user, so you "
+                    "cannot confirm your own draft. The id and code are "
+                    "single-use and expire, so propose again for any change. "
+                    f"{repo_rule}"
+                    "Returns the created issue URL and number/key; a refusal "
+                    "must be relayed to the user verbatim."
+                ),
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "title": {
+                            "type": "string",
+                            "description": "Issue title, as proposed",
+                        },
+                        "body": {
+                            "type": "string",
+                            "description": ("Issue description, exactly as proposed"),
+                        },
+                        "confirmation_id": {
+                            "type": "string",
+                            "description": (
+                                "The confirmation_id propose_tracker_issue "
+                                "returned for this exact title and body"
+                            ),
+                        },
+                        "confirmation_code": {
+                            "type": "string",
+                            "description": (
+                                "The code the preview showed, as the user "
+                                "replied with it"
+                            ),
+                        },
+                        **(repo_properties if target == "github" else {}),
+                    },
+                    "required": [
+                        "title",
+                        "body",
+                        "confirmation_id",
+                        "confirmation_code",
+                    ],
+                },
+                "http": {
+                    "method": "POST",
+                    "url": f"{server_url}/api/chat-issue",
+                    "headers": {**auth_headers, "Content-Type": "application/json"},
+                    "body_template": {
+                        "target": target,
+                        "title": "{title}",
+                        "body": "{body}",
+                        "confirmation_id": "{confirmation_id}",
+                        "confirmation_code": "{confirmation_code}",
+                        **(repo_body if target == "github" else {}),
+                        # The run that bounds the repo choice, empty for admin chat.
+                        **(job_body if target == "github" else {}),
+                    },
+                },
+            }
+        )
+    return tools
+
+
 def build_chat_custom_tools(
     *,
     server_url: str,
@@ -479,6 +678,8 @@ def build_chat_custom_tools(
     github_token: str = "",
     github_repo: str = "",
     jira_connection: JiraConnection | None = None,
+    tracker_targets: tuple[str, ...] = (),
+    issue_repos: tuple[str, ...] = (),
 ) -> list[dict[str, Any]]:
     """Build HTTP-backed custom tools for a chat session.
 
@@ -743,6 +944,18 @@ def build_chat_custom_tools(
             }
         )
 
+    tools.extend(
+        _tracker_issue_tools(
+            server_url=server_url,
+            auth_headers=auth_headers,
+            targets=tracker_targets,
+            issue_repos=issue_repos,
+            job_id=job_id,
+            # This chat: the user's reply with the code has to land here.
+            conversation=job_id,
+        )
+    )
+
     return tools
 
 
@@ -778,11 +991,18 @@ def build_admin_custom_tools(
     *,
     server_url: str,
     auth_token: str,
+    tracker_targets: tuple[str, ...] = (),
+    conversation: str = "",
 ) -> list[dict[str, Any]]:
-    """Build HTTP-backed custom tools for admin chat."""
+    """Build HTTP-backed custom tools for admin chat.
+
+    ``conversation`` is the admin chat's own conversation id, passed to the
+    issue tools: a draft proposed there is only redeemable after the admin
+    replied in that chat with its code.
+    """
     auth_headers = {"Authorization": f"Bearer {auth_token}"}
 
-    return [
+    tools: list[dict[str, Any]] = [
         {
             "name": "db_schema",
             "description": (
@@ -906,52 +1126,81 @@ def build_admin_custom_tools(
             },
         },
     ]
+    tools.extend(
+        _tracker_issue_tools(
+            server_url=server_url,
+            auth_headers=auth_headers,
+            targets=tracker_targets,
+            conversation=conversation,
+        )
+    )
+    return tools
 
 
-def _safe_remove_symlink(link: Path) -> None:
+def _unlink_counted(path: Path) -> DeleteResult:
+    """Unlink ``path`` and report what that freed; an entry already gone frees nothing.
+
+    ``delete_tree`` on a single path, so a refusal (EPERM, EBUSY) is counted in
+    ``failed`` with its errno instead of raising: a raise here aborted the rest of
+    the workspace cleanup, leaving the paths behind this one untried.
+    """
+    return delete_tree(path)
+
+
+def _safe_remove_symlink(link: Path) -> DeleteResult:
     """Remove a symlink and its target directory if safe.
 
     Only deletes the target when it resolves to a path under the process
     temp root (``tempfile.gettempdir()``, honors ``TMPDIR``) to prevent
     accidental deletion of system directories if the symlink was manipulated.
+    The link itself is counted too: it is an entry this call really removed.
     """
     target = link.resolve()
-    link.unlink(missing_ok=True)
+    removed = _unlink_counted(link)
     if target.exists() and target.is_dir():
         tmp_root = _tmp_root()
         if target.is_relative_to(tmp_root):
-            shutil.rmtree(target, ignore_errors=True)
-        else:
-            logger.warning(
-                "Chat cleanup: refusing to delete symlink target outside %s: %s",
-                tmp_root,
-                target,
-            )
+            return removed.plus(delete_tree(target))
+        logger.warning(
+            "Chat cleanup: refusing to delete symlink target outside %s: %s",
+            tmp_root,
+            target,
+        )
+    return removed
 
 
-def cleanup_chat_repos(job_id: str, username: str = "") -> None:
-    """Delete cloned repos and artifacts from chat workspace but keep session files."""
+def cleanup_chat_repos(job_id: str, username: str = "") -> DeleteResult | _Abandoned:
+    """Delete cloned repos, graphs and symlinked artifact targets from a workspace.
+
+    A reaper step, never inline. The workspace itself (sessions included) is the
+    whole-tree ``delete_tree`` step the caller queues right after this one;
+    :data:`ABANDON` stops that step when a live graph builder owns the tree.
+    """
     workspace = get_chat_workspace(job_id, username)
-    from rootcoz.engine.graft import cleanup_graph
+    from rootcoz.engine.graft import reap_graph
     from rootcoz.engine.graft_http import unregister_workspace
 
     unregister_workspace(workspace)
-    cleanup_graph(workspace)
+    graph = reap_graph(job_id, workspace)
+    if isinstance(graph, _Abandoned):
+        return ABANDON
+    total = graph
     if not workspace.exists():
-        return
+        return total
 
     # Delete everything except hidden dirs (which contain session data)
     for item in workspace.iterdir():
         if item.name.startswith("."):
             continue  # Keep .claude/, .cursor/ etc (session data)
         if item.is_symlink():
-            _safe_remove_symlink(item)
+            total = total.plus(_safe_remove_symlink(item))
         elif item.is_dir():
-            shutil.rmtree(item, ignore_errors=True)
+            total = total.plus(delete_tree(item))
         else:
-            item.unlink(missing_ok=True)
+            total = total.plus(_unlink_counted(item))
 
-    logger.info(f"Cleaned up chat repos for job {job_id} (kept sessions)")
+    logger.info(f"Cleaned up chat repos for job {job_id}")
+    return total
 
 
 def _chat_mcp_lock_targets(workspace: Path) -> list[Path]:
@@ -965,16 +1214,26 @@ def _chat_mcp_lock_targets(workspace: Path) -> list[Path]:
     return list(dict.fromkeys(targets))
 
 
-def cleanup_chat_workspace(job_id: str, username: str = "") -> None:
-    """Delete the entire chat workspace including sessions."""
+def cleanup_chat_workspace(
+    job_id: str, username: str = ""
+) -> DeleteResult | _Abandoned:
+    """Delete the entire chat workspace including sessions.
+
+    :data:`ABANDON` means a live graph builder still owns the tree, so the
+    caller's whole-tree delete is skipped and the next create's recovery picks it
+    up.
+    """
     workspace = get_chat_workspace(job_id, username)
     targets = _chat_mcp_lock_targets(workspace)
-    from rootcoz.engine.graft import cleanup_graph
+    from rootcoz.engine.graft import reap_graph
     from rootcoz.engine.graft_http import unregister_workspace
 
     unregister_workspace(workspace)
-    cleanup_graph(workspace)
-    # Hold each workspace's MCP install lock for the whole rmtree + dump
+    graph = reap_graph(job_id, workspace)
+    if isinstance(graph, _Abandoned):
+        return ABANDON
+    total = graph
+    # Hold each workspace's MCP install lock for the whole delete + dump
     # unlink so an in-flight installer cannot recreate credentials after
     # the job (or nested user dir) was removed.
     with ExitStack() as stack:
@@ -982,15 +1241,16 @@ def cleanup_chat_workspace(job_id: str, username: str = "") -> None:
             stack.enter_context(_workspace_install_lock(target))
         if workspace.exists():
             # Resolve symlinks before removing workspace tree — symlinked
-            # artifact dirs live outside the workspace and won't be cleaned
-            # by shutil.rmtree (which removes the symlink, not its target).
+            # artifact dirs live outside the workspace and are not reached by
+            # the tree walk (which unlinks the symlink, not its target).
             for item in workspace.iterdir():
                 if item.is_symlink():
-                    _safe_remove_symlink(item)
-            shutil.rmtree(workspace, ignore_errors=True)
+                    total = total.plus(_safe_remove_symlink(item))
+            total = total.plus(delete_tree(workspace))
         for target in targets:
             cleanup_http_tools_mcp(target)
     logger.info(f"Deleted chat workspace for job {job_id}")
+    return total
 
 
 # -- Shared prompt building helpers --
@@ -1069,8 +1329,129 @@ def build_welcome_message(
     )
 
 
-_COMMON_RULES = """- Do NOT modify any data — read-only access only
+_COMMON_RULES = """- Do NOT modify any data — read-only. The one exception is a tracker issue tool in your tool list (`propose_tracker_issue` plus `create_github_issue` / `create_jira_issue`), and only once the user has approved the draft you proposed
 - Do NOT run arbitrary curl commands — use the provided tools"""
+
+#: What to tell the user for each reason a tracker tool is missing from the list.
+#: `{kind}` is the tracker name. Only the missing-token case is fixed in Profile
+#: Settings — a disabled tracker or a missing repository is not, and an account
+#: with no ``users`` row has nowhere to save one at all.
+_TRACKER_UNAVAILABLE_REASONS = {
+    "server_disabled": (
+        "issue creation is disabled on this server, so no token can enable it — "
+        "an administrator has to turn it on"
+    ),
+    "no_repository": (
+        "this server has no TESTS_REPO_URL configured, so there is no "
+        "repository to file in — an administrator has to set it, and a token "
+        "will not help"
+    ),
+    "no_run_repository": (
+        "this run has no GitHub test repository and no additional repo, and a "
+        "job chat files only into this run's repos — the fix is a run that names "
+        "one, not a token or a server setting"
+    ),
+    "no_token": (
+        "this account has no {kind} token saved. Tell the user the fix: "
+        "Profile Settings → add the {kind} token."
+    ),
+    "no_token_no_profile": (
+        "this account has no {kind} token saved and no profile to store one in, "
+        "so it cannot save a token at all. Tell the user the fix in these words: "
+        + tracker_credential_message("{kind}", has_profile=False)
+    ),
+    "unusable_credential": (
+        "this account's saved {kind} credential cannot be used with the "
+        "server's {kind} settings, so no issue can be filed with it. Tell the "
+        "user the fix: Profile Settings → re-save the {kind} credential."
+    ),
+}
+
+
+def _issue_repo_param(issue_repos: tuple[str, ...]) -> dict[str, Any]:
+    """The ``repo`` argument of a GitHub issue tool, with its real limits.
+
+    A job chat is capped at the run's own repos, so the model is told them;
+    an admin chat gets the unbounded wording instead.
+    """
+    if issue_repos:
+        allowed = ", ".join(issue_repos)
+        text = (
+            "GitHub repository to file in, as 'owner/name'. Must be this run's "
+            f"test repo or one of its additional repos: {allowed}. Leave empty "
+            "to use the test repo."
+        )
+    else:
+        text = (
+            "GitHub repository to file in, as 'owner/name'. Any repository may "
+            "be named here. Leave empty to use the server's configured test "
+            "repo."
+        )
+    return {"type": "string", "description": text}
+
+
+def _issue_create_rules(
+    unavailable: dict[str, str] | None = None,
+    *,
+    issue_repos: tuple[str, ...] = (),
+    admin: bool = False,
+) -> str:
+    """The issue-creation rules, with the real reason each tracker is absent.
+
+    A tracker can be missing for unrelated reasons: the server turned it off,
+    it has no repository to file in, this account never saved that tracker's
+    token, or the saved credential cannot be used with the server's settings.
+    Only the credential cases are fixed in Profile Settings, so the prompt
+    states which one applies instead of always pointing at the token.
+
+    ``issue_repos`` names the repos a job chat may file in; ``admin`` says the
+    caller is not capped by any run's repo set.
+    """
+    unavailable = unavailable or {}
+    reasons = []
+    for tracker, reason in sorted(unavailable.items()):
+        kind = "GitHub" if tracker == "github" else "Jira"
+        detail = _TRACKER_UNAVAILABLE_REASONS.get(
+            reason, "this account has no usable {kind} credential saved."
+        )
+        reasons.append(f"  - {kind}: {detail.format(kind=kind)}")
+    absent = (
+        "\n".join(reasons)
+        if reasons
+        else "  - none: every tracker this chat can file in is in your tool list."
+    )
+    if admin:
+        repo_rule = (
+            "- You may name any GitHub repository (`owner/name`) as `repo`; "
+            "leave it empty to use the server's configured test repo. The repo "
+            "is part of the draft you propose, so the user approves where the "
+            "issue goes."
+        )
+    elif issue_repos:
+        repo_rule = (
+            "- You may only file a GitHub issue in this run's repos, named as "
+            f"`owner/name`: {', '.join(issue_repos)}. Leave `repo` empty to use "
+            "the test repo. Any other repository is refused — do not promise it."
+        )
+    else:
+        repo_rule = (
+            "- You never pick the repository or Jira project: the server files "
+            "the issue where it is configured."
+        )
+    return f"""
+## Creating Issues
+- You never file an issue on your own judgement: the user files it. A create call files nothing until the user has confirmed the draft in their own words, by replying in this chat with the confirmation code the preview showed them.
+- Step 1: call `propose_tracker_issue` with the target, title and body. It files nothing and returns a `confirmation_id`, a `confirmation_code` and a preview naming the tracker, the destination (repository, or Jira project and issue type), the exact title and body, and that code.
+- Step 2: the server posts the whole preview to this chat itself — where it would be filed, the proposal id, the title, the body and the code. Tell the user it is below and ask them to reply in this chat with the code. Do not rewrite the preview as if your own wording were what they are approving, and never ask for the code outside this chat.
+- Step 3: only after the user's reply contains that code, call `create_github_issue` / `create_jira_issue` with that `confirmation_id`, that `confirmation_code` and the same title and body — copy them from the preview the server posted, never from memory. A create without them files nothing, a create the user has not confirmed fails with the step you skipped, and a paraphrased body is refused. The id and code are single-use and expire after 10 minutes, so propose again after any edit.
+- Never send the code on the user's behalf and never ask for it anywhere but this chat: the server only accepts a code that arrived in a message from the user. Do not claim a draft is confirmed until such a reply exists.
+- If the user declines, do not call the create tool — acknowledge and stop.
+{repo_rule}
+- A tracker with no tool in your tool list cannot be used. Say you cannot open that issue there and name the reason and the fix:
+{absent}
+- Never claim you can open an issue that is not in your tool list, never call another tool as a substitute, and do not send the user to Profile Settings for a tracker this server disabled or has no repository for.
+- If a tool you do have refuses, relay it verbatim and name the fix it gives.
+- Never claim an issue exists when the tool was not called or did not succeed."""
 
 
 def build_system_prompt(
@@ -1080,8 +1461,14 @@ def build_system_prompt(
     custom_tools: list[dict[str, Any]],
     repos_available: bool = False,
     ci_build_data_available: bool = False,
+    tracker_unavailable: dict[str, str] | None = None,
+    issue_repos: tuple[str, ...] = (),
 ) -> str:
-    """Build a system prompt that scopes the AI to a specific analyzed job."""
+    """Build a system prompt that scopes the AI to a specific analyzed job.
+
+    ``issue_repos`` are the repos this run may file a GitHub issue in, so the
+    model reads them instead of guessing.
+    """
     tools_section = _build_tools_section(custom_tools)
     unavailable_section = _build_unavailable_section(custom_tools)
     graph_note = ""
@@ -1119,6 +1506,7 @@ You have structured tools that you can call directly:
 {tools_section}
 
 **IMPORTANT:** Use these tools to get data when the user asks a question. Do NOT call tools proactively — only fetch data that's relevant to what the user is asking about.{repos_note}{unavailable_section}
+{_issue_create_rules(tracker_unavailable, issue_repos=issue_repos)}
 
 ## Rules — STRICT
 - You MUST only discuss this specific job and its failures
@@ -1130,6 +1518,7 @@ You have structured tools that you can call directly:
 
 def build_admin_system_prompt(
     custom_tools: list[dict[str, Any]],
+    tracker_unavailable: dict[str, str] | None = None,
 ) -> str:
     """Build system prompt for admin global chat — server-wide scope."""
     tools_section = _build_tools_section(custom_tools)
@@ -1159,6 +1548,7 @@ You have structured tools — call them directly:
 **WORKFLOW:** For analytics questions (totals, overrides, issues), use the pre-built report tools first — they're faster and more accurate. Use `db_schema` + `db_query` only for questions the report tools can't answer.
 
 **SENSITIVE DATA:** Some columns contain encrypted values (tokens, passwords). Never output raw encrypted field values.{unavailable_section}
+{_issue_create_rules(tracker_unavailable, admin=True)}
 
 ## Report Generation
 When the user asks for a "report", "generate a report", "export", or similar:
@@ -1201,6 +1591,9 @@ def build_chat_prompt(
         content = msg.get("content", "")
         if role == "user":
             parts.append(f"**User:** {content}\n")
+        elif role == "system":
+            # The server's own consent/notice rows are not the model's words.
+            parts.append(f"**System:** {content}\n")
         else:
             parts.append(f"**Assistant:** {content}\n")
 
@@ -1311,6 +1704,8 @@ async def init_chat_session(
     custom_tools: list[dict[str, Any]] | None = None,
     repos_available: bool = False,
     ci_build_data_available: bool = False,
+    issue_repos: tuple[str, ...] = (),
+    tracker_unavailable: dict[str, str] | None = None,
 ) -> str | None:
     """Initialize a chat session via the sidecar. Returns session_id or None."""
     system_prompt = build_system_prompt(
@@ -1320,6 +1715,8 @@ async def init_chat_session(
         custom_tools=custom_tools or [],
         repos_available=repos_available,
         ci_build_data_available=ci_build_data_available,
+        issue_repos=issue_repos,
+        tracker_unavailable=tracker_unavailable,
     )
     return await _create_chat_session(
         system_prompt=system_prompt,
@@ -1338,9 +1735,13 @@ async def init_admin_chat_session(
     ai_model: str,
     repo_path: Path | None = None,
     custom_tools: list[dict[str, Any]] | None = None,
+    tracker_unavailable: dict[str, str] | None = None,
 ) -> str | None:
     """Initialize an admin chat session via the sidecar. Returns session_id or None."""
-    system_prompt = build_admin_system_prompt(custom_tools=custom_tools or [])
+    system_prompt = build_admin_system_prompt(
+        custom_tools=custom_tools or [],
+        tracker_unavailable=tracker_unavailable,
+    )
     return await _create_chat_session(
         system_prompt=system_prompt,
         ai_provider=ai_provider,
@@ -1477,6 +1878,8 @@ async def chat_with_ai(
     repos_available: bool = False,
     ci_build_data_available: bool = False,
     install_mcp: bool = True,
+    tracker_unavailable: dict[str, str] | None = None,
+    issue_repos: tuple[str, ...] = (),
 ) -> tuple[bool, str, str | None]:
     """Send a chat message and get an AI response via the sidecar."""
 
@@ -1488,6 +1891,8 @@ async def chat_with_ai(
             custom_tools=custom_tools or [],
             repos_available=repos_available,
             ci_build_data_available=ci_build_data_available,
+            tracker_unavailable=tracker_unavailable,
+            issue_repos=issue_repos,
         )
 
     return await _chat_with_ai_impl(
@@ -1518,11 +1923,15 @@ async def admin_chat_with_ai(
     ai_call_timeout: int | None = None,
     session_id: str | None = None,
     custom_tools: list[dict[str, Any]] | None = None,
+    tracker_unavailable: dict[str, str] | None = None,
 ) -> tuple[bool, str, str | None]:
     """Send an admin chat message and get an AI response."""
 
     def _build_prompt() -> str:
-        return build_admin_system_prompt(custom_tools=custom_tools or [])
+        return build_admin_system_prompt(
+            custom_tools=custom_tools or [],
+            tracker_unavailable=tracker_unavailable,
+        )
 
     return await _chat_with_ai_impl(
         message=message,

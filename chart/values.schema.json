@@ -132,7 +132,83 @@
         "annotations": { "type": "object" }
       }
     },
-    "resources": { "type": "object" },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Container resource requests/limits. Unknown keys are rejected (a typo like resources.limit silently rendered an invalid pod). Extended resources (nvidia.com/gpu, example.com/GPU_2 — the name after the slash is a Kubernetes qualified name, so uppercase, '_' and '.' are legal) and hugepages-* are allowed. Any value the Kubernetes Quantity grammar accepts is allowed, including a bare number: for memory/ephemeral-storage a unit-less value is bytes.",
+      "properties": {
+        "requests": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Scheduling floor. Setting a key to \"\" omits the explicit request, but the limit still becomes the effective request unless a LimitRange defaults one.",
+          "properties": {
+            "cpu": {
+              "description": "Kubernetes quantity (500m, \"2.5\", 1e3) or a bare number of cores (4). \"\" omits the key.",
+              "anyOf": [
+                { "type": "number", "minimum": 0 },
+                { "type": "string", "pattern": "^([0-9]+(\\.[0-9]*)?|\\.[0-9]+)([eE][-+]?[0-9]+|Ki|Mi|Gi|Ti|Pi|Ei|n|u|m|k|M|G|T|P|E)?$" },
+                { "const": "" }
+              ]
+            },
+            "memory": {
+              "description": "Kubernetes quantity (4Gi, 512Mi, .5Gi) or a bare number, which Kubernetes reads as bytes. \"\" omits the key.",
+              "anyOf": [
+                { "type": "number", "minimum": 0 },
+                { "type": "string", "pattern": "^([0-9]+(\\.[0-9]*)?|\\.[0-9]+)([eE][-+]?[0-9]+|Ki|Mi|Gi|Ti|Pi|Ei|n|u|m|k|M|G|T|P|E)?$" },
+                { "const": "" }
+              ]
+            },
+            "ephemeral-storage": {
+              "description": "Kubernetes quantity (16Gi, 512Mi) or a bare number, which Kubernetes reads as bytes. \"\" omits the key.",
+              "anyOf": [
+                { "type": "number", "minimum": 0 },
+                { "type": "string", "pattern": "^([0-9]+(\\.[0-9]*)?|\\.[0-9]+)([eE][-+]?[0-9]+|Ki|Mi|Gi|Ti|Pi|Ei|n|u|m|k|M|G|T|P|E)?$" },
+                { "const": "" }
+              ]
+            }
+          },
+          "patternProperties": {
+            "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/[A-Za-z0-9]([-_.A-Za-z0-9]*[A-Za-z0-9])?$": { "type": ["string", "number"], "minLength": 1 },
+            "^hugepages-[0-9]+[KMGT]i$": { "type": ["string", "number"], "minLength": 1 }
+          }
+        },
+        "limits": {
+          "type": "object",
+          "additionalProperties": false,
+          "description": "Eviction/throttle ceiling. An ephemeral-storage limit here also caps the /tmp emptyDir at the same sizeLimit.",
+          "properties": {
+            "cpu": {
+              "description": "Kubernetes quantity (500m, \"2.5\", 1e3) or a bare number of cores (4). \"\" omits the key.",
+              "anyOf": [
+                { "type": "number", "minimum": 0 },
+                { "type": "string", "pattern": "^([0-9]+(\\.[0-9]*)?|\\.[0-9]+)([eE][-+]?[0-9]+|Ki|Mi|Gi|Ti|Pi|Ei|n|u|m|k|M|G|T|P|E)?$" },
+                { "const": "" }
+              ]
+            },
+            "memory": {
+              "description": "Kubernetes quantity (4Gi, 512Mi, .5Gi) or a bare number, which Kubernetes reads as bytes. \"\" omits the key.",
+              "anyOf": [
+                { "type": "number", "minimum": 0 },
+                { "type": "string", "pattern": "^([0-9]+(\\.[0-9]*)?|\\.[0-9]+)([eE][-+]?[0-9]+|Ki|Mi|Gi|Ti|Pi|Ei|n|u|m|k|M|G|T|P|E)?$" },
+                { "const": "" }
+              ]
+            },
+            "ephemeral-storage": {
+              "description": "Kubernetes quantity (16Gi, 512Mi) or a bare number, which Kubernetes reads as bytes. \"\" omits the key.",
+              "anyOf": [
+                { "type": "number", "minimum": 0 },
+                { "type": "string", "pattern": "^([0-9]+(\\.[0-9]*)?|\\.[0-9]+)([eE][-+]?[0-9]+|Ki|Mi|Gi|Ti|Pi|Ei|n|u|m|k|M|G|T|P|E)?$" },
+                { "const": "" }
+              ]
+            }
+          },
+          "patternProperties": {
+            "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/[A-Za-z0-9]([-_.A-Za-z0-9]*[A-Za-z0-9])?$": { "type": ["string", "number"], "minLength": 1 },
+            "^hugepages-[0-9]+[KMGT]i$": { "type": ["string", "number"], "minLength": 1 }
+          }
+        }
+      }
+    },
     "env": {
       "type": "object",
       "properties": {
@@ -165,6 +241,23 @@
         "image": { "type": "string" }
       }
     },
+    "alerts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "name": { "type": "string" },
+        "schedule": { "type": "string" },
+        "envLabel": { "type": "string" },
+        "metricsUrl": { "type": "string" },
+        "image": { "type": "string" },
+        "slackSecretName": { "type": "string" },
+        "slackSecretKey": { "type": "string" },
+        "errorRatePercent": { "type": "integer" },
+        "diskWarnPercent": { "type": "integer" },
+        "diskCritPercent": { "type": "integer" }
+      }
+    },
     "serviceAccount": {
       "type": "object",
       "properties": {
@@ -173,10 +266,10 @@
         "annotations": { "type": "object" }
       }
     },
-    "podAnnotations": { "type": "object" },
-    "podLabels": { "type": "object" },
-    "nodeSelector": { "type": "object" },
+    "podAnnotations": { "type": "object", "additionalProperties": { "type": "string" } },
+    "podLabels": { "type": "object", "additionalProperties": { "type": "string" } },
+    "nodeSelector": { "type": "object", "additionalProperties": { "type": "string" } },
     "tolerations": { "type": "array", "items": { "type": "object" } },
-    "affinity": { "type": "object" }
+    "affinity": { "type": "object", "description": "Free-form Kubernetes affinity block, rendered verbatim by the chart; not validated." }
   }
 }

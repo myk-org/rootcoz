@@ -28,7 +28,7 @@ This asks the job's assistant for a cross-failure answer and leaves the evidence
 
 1. Open the result and start the chat.
 
-   From the report header, click `Chat`. The button is hidden for viewers, and the chat page opens at `/chat/{job_id}` for the job you came from. Pick a provider and model in the header, then click `Start Chat`. `Use server credentials` chooses whose AI key runs the session; the toggle is only available when your account may use server providers.
+   From the report header, click `Chat`. The button is hidden for viewers, and the chat page opens at `/chat/{job_id}` for the job you came from. The header preselects the provider and model you last used on this account — check they are the ones you want, or pick another pair — then click `Start Chat`. There is no reset to the analysed pair here: both fields are required to start, and a session you already started keeps the pair it was started with. `Use server credentials` chooses whose AI key runs the session; the toggle is only available when your account may use server providers.
 
    Starting a chat creates a per-user, per-job workspace and session. RootCoz clones the job's tests repo and any additional repositories, then copies CI build data into that workspace when the source provides it.
 
@@ -54,9 +54,11 @@ This asks the job's assistant for a cross-failure answer and leaves the evidence
 
 3. Ask your question.
 
-   Type in the `Ask a question...` box and press `Enter` to send, `Shift+Enter` for a newline. While the answer is being generated the thread shows `Thinking...` and a `Stop` button. Replies stream into the same conversation and are saved, so you can close the page and come back later.
+   Type in the `Ask a question...` box and press `Enter` to send, `Shift+Enter` for a newline. While the answer is being generated the thread shows `Thinking...` with the elapsed time and, for reviewers and above, a `Stop` button. The reply arrives as a single message when the turn ends and is saved, so you can close the page and come back later.
 
    > **Tip:** Because the assistant can read the cloned test code, questions like `Why does test_login assert on the old token format?` are often answered faster than asking for a re-analysis with a different model.
+
+   A good answer can become the issue itself: ask the assistant to file it and it drafts the title and body from the conversation. The issue uses the token saved in your account (add one in Profile Settings if it says you have none) — see [Creating Follow-Up Issues and Pushing Results](create-follow-up-issues-and-push-results.html) for the whole flow.
 
 4. Comment on the failure, not just in the chat.
 
@@ -64,7 +66,7 @@ This asks the job's assistant for a cross-failure answer and leaves the evidence
 
    Type `@` in the comment box to get a list of usernames you can mention. A mentioned teammate gets a navbar badge and unread entry in `Mentions`; if web push is configured on the server, they also get a push notification.
 
-   Jira keys and GitHub PR links pasted into a comment are enriched with their live status as a badge next to the link.
+   Jira keys and GitHub PR links pasted into a comment are enriched with their current status as a badge next to the link.
 
    > **Note:** After you post, RootCoz checks whether the comment suggests the failure is already resolved. If it does, it asks `Mark as reviewed?` and you confirm. That suggestion never marks anything on its own.
 
@@ -103,7 +105,7 @@ rootcoz mentions-mark-all-read
 rootcoz results enrich-comments JOB_ID
 ```
 
-`enrich-comments` refreshes the live status badges for Jira tickets and GitHub PRs found in that job's comments, and `analyze-comment-intent` returns the reviewed/not-reviewed judgment behind the `Mark as reviewed?` prompt:
+`enrich-comments` re-reads the status of the Jira tickets and GitHub PRs found in that job's comments, though a repeat read may be served from the server's short-lived per-job cache (see [API Reference](api-reference.html#comments-and-mentions)); `analyze-comment-intent` returns the reviewed/not-reviewed judgment behind the `Mark as reviewed?` prompt:
 
 ```bash
 rootcoz analyze-comment-intent "Fixed by updating the token fixture." --job-id JOB_ID

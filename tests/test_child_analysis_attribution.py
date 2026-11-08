@@ -1,5 +1,6 @@
 """Regressions for Jenkins child analysis failure and usage boundaries."""
 
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -17,14 +18,16 @@ from rootcoz.sources.jenkins_source import (
 
 
 @pytest.mark.asyncio
-async def test_console_only_usage_attaches_to_each_child_build(temp_db_path) -> None:
+async def test_console_only_usage_attaches_to_each_child_build(
+    temp_db_path, tmp_path: Path
+) -> None:
     from rootcoz.token_tracking import _child_context
 
     async def ai_response(_prompt, **_kwargs):
         build = _child_context.get()
         return AIResult(
             success=True,
-            text='{"details": "diagnosed"}',
+            text='{"classification": "INFRASTRUCTURE", "details": "diagnosed"}',
             usage=AITokenUsage(input_tokens=7 if build == ("leaf", 7) else 11),
         )
 
@@ -50,7 +53,7 @@ async def test_console_only_usage_attaches_to_each_child_build(temp_db_path) -> 
                 settings=Settings(),
                 depth=0,
                 max_depth=3,
-                repo_path=None,
+                repo_path=tmp_path,
                 ai_provider="test",
                 ai_model="test",
                 ai_call_timeout=None,
@@ -479,3 +482,34 @@ def test_nested_all_failed_children_are_not_counted_as_success() -> None:
             ],
         )
     )
+
+
+@pytest.mark.parametrize(
+    ("classification", "details", "analysis_error", "expected"),
+    [
+        # A child carrying placeholder rows analysed nothing, even though the
+        # rows are present so the failed tests stay reviewable.
+        ("", "Analysis failed; check server logs for details", "", False),
+        ("", "narration only", "AI analysis incomplete", False),
+        # The direction that must keep working: a classified row is a success.
+        ("CODE ISSUE", "narration only", "", True),
+    ],
+)
+def test_child_success_requires_a_usable_classification(
+    classification: str, details: str, analysis_error: str, expected: bool
+) -> None:
+    from rootcoz.sources.jenkins_source import child_has_successful_analysis
+
+    child = ChildJobAnalysis(
+        job_name="child",
+        build_number=1,
+        failures=[
+            FailureAnalysis(
+                test_name="test_a",
+                error="boom",
+                analysis_error=analysis_error,
+                analysis=AnalysisDetail(classification=classification, details=details),
+            )
+        ],
+    )
+    assert child_has_successful_analysis(child) is expected

@@ -21,6 +21,7 @@ import {
 } from '@/lib/pushGate'
 import { pushToExporter } from './useExporterPush'
 import { useUnreviewedPushGate } from './pushGate'
+import { defaultedNotice, unmatchedFailure } from '@/lib/pushResult'
 import { Upload, Loader2, CheckCircle2, AlertTriangle, XCircle } from 'lucide-react'
 import type { ReportPortalPushResult } from '@/types'
 import { useReportState } from '@/pages/report/reportState'
@@ -140,6 +141,18 @@ export function ReportPortalButton({ jobId, jobName, buildNumber, childJobName, 
   const isFullFailure = pushFailed || (pushResult && pushResult.pushed === 0 && hasResultErrors)
   const isPartialSuccess = pushResult && pushResult.pushed > 0 && (hasResultErrors || hasUnmatched)
   const isNoop = !!(pushResult && pushResult.pushed === 0 && !hasResultErrors && hasUnmatched)
+  // A test left out of the launch has no classification to map — not an RP
+  // matching failure; the entries carry the offending classification.
+  const unmatchedInfo =
+    pushResult && pushResult.unmatched.length > 0
+      ? unmatchedFailure(pushResult.pushed, pushResult.unmatched)
+      : null
+  // Items the backend pushed under the TO INVESTIGATE fallback: pushed, so
+  // information only — they must not colour the result as a partial failure.
+  const defaulted =
+    pushResult && pushResult.defaulted && pushResult.defaulted.length > 0
+      ? defaultedNotice(pushResult.defaulted)
+      : null
 
   return (
     <>
@@ -202,14 +215,14 @@ export function ReportPortalButton({ jobId, jobName, buildNumber, childJobName, 
               ) : isFullFailure ? (
                 <><XCircle className="h-5 w-5 text-signal-red" /> Failed to push classifications to Report Portal.</>
               ) : isPartialSuccess || isNoop ? (
-                <><AlertTriangle className="h-5 w-5 text-signal-orange" /> {isNoop ? 'No classifications could be matched.' : 'Some classifications could not be pushed.'}</>
+                <><AlertTriangle className="h-5 w-5 text-signal-orange" /> {isNoop ? 'No classifications could be pushed.' : 'Some classifications could not be pushed.'}</>
               ) : (
                 <><CheckCircle2 className="h-5 w-5 text-signal-green" /> Pushed {pushResult?.pushed ?? 0} classification{pushResult?.pushed !== 1 ? 's' : ''} to Report Portal.</>
               )}
             </DialogTitle>
           </DialogHeader>
 
-          {(gateMessage || isFullFailure || isPartialSuccess || isNoop) && (
+          {(gateMessage || isFullFailure || isPartialSuccess || isNoop || defaulted) && (
             <div className="space-y-3 py-2 min-w-0">
               <RPPushMetadata
                 project={reportportalProject}
@@ -223,6 +236,18 @@ export function ReportPortalButton({ jobId, jobName, buildNumber, childJobName, 
               )}
               {pushErrorDetail && (
                 <p className="text-xs text-text-secondary" data-testid="reportportal-push-message">{pushErrorDetail}</p>
+              )}
+              {unmatchedInfo && (
+                <>
+                  <p className="text-xs text-text-secondary" data-testid="reportportal-push-unmatched">{unmatchedInfo.message}</p>
+                  <p className="text-xs text-text-tertiary" data-testid="reportportal-push-unmatched-items">{unmatchedInfo.detail}</p>
+                </>
+              )}
+              {defaulted && (
+                <>
+                  <p className="text-xs text-text-secondary" data-testid="reportportal-push-defaulted">{defaulted.message}</p>
+                  <p className="text-xs text-text-tertiary" data-testid="reportportal-push-defaulted-items">{defaulted.detail}</p>
+                </>
               )}
 
 

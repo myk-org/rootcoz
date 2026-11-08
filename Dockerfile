@@ -64,6 +64,11 @@ FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
 
 WORKDIR /app
 
+# Commit the image was built from, read by the admin Server Status page
+# (GET /api/admin/server-status) and by `rootcoz admin server-status`.
+ARG GIT_SHA=""
+ENV GIT_SHA=${GIT_SHA}
+
 # Install bash, git (runtime for gitpython), curl (for Cursor CLI + NodeSource setup),
 # and the krb5 runtime libraries the Greenwave kerberos auth mode links
 # against (libgssapi-krb5-2/libkrb5-3 are pulled in transitively by curl,

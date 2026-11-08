@@ -335,6 +335,8 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
     Email alerts need `SMTP_HOST` + `ALERT_EMAIL_TO` (from address defaults to `SMTP_USER`, then `rootcoz@<host>`); Slack alerts need `SLACK_WEBHOOK_URL`. The env var stays the deployment default — a saved setting overrides it.
 
+    A webhook saved here drives only the in-process alert path. It has **no effect on the chart's health-alert CronJob** (`alerts.enabled`): that job runs outside the application and reads the release Secret under `alerts.slackSecretKey`, so configure the two separately or the CronJob will print its messages into the job log instead of posting them.
+
 15. **Sidecar category** (added with #347 — restart required).
 
     The pi-sidecar starts **once** at container boot and reads these from its process environment. A value saved here is persisted to `/data/pi-sidecar/env`, which the container entrypoint sources before starting the sidecar — the same bridge `RECORD_TRANSCRIPTS` uses. An empty field means "no override": the deployment environment governs.

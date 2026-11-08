@@ -2,6 +2,7 @@
 
 import json
 import os
+import shlex
 from typing import ClassVar, Self
 from unittest.mock import MagicMock, patch
 
@@ -249,6 +250,86 @@ class TestResultsCommands:
         assert "job_id" in result.output
         assert "result.summary" in result.output
         mock_client.list_result_fields.assert_called_once()
+
+    def test_results_incomplete(self, mock_client):
+        mock_client.list_incomplete_analyses.return_value = [
+            {
+                "job_id": "abc-123",
+                "job_name": "example",
+                "build_number": 7,
+                "incomplete_count": 2,
+                "test_names": ["t1", "t2"],
+            }
+        ]
+        result = runner.invoke(app, ["results", "incomplete", "--limit", "10"])
+        assert result.exit_code == 0
+        assert "abc-123" in result.output
+        assert "example" in result.output
+        assert "2" in result.output
+        mock_client.list_incomplete_analyses.assert_called_once_with(limit=10)
+
+    def test_results_incomplete_scan_ceiling_does_not_advise_raising_limit(
+        self, mock_client
+    ):
+        """The ceiling, not ``limit``, stopped the scan: raising it cannot help."""
+        mock_client.list_incomplete_analyses.return_value = {
+            "jobs": [],
+            "truncated": True,
+            "truncated_by": "scan_ceiling",
+            "scanned": 5000,
+        }
+        result = runner.invoke(app, ["results", "incomplete", "--limit", "500"])
+        assert result.exit_code == 0
+        assert "5000" in result.output
+        assert "ceiling" in result.output
+        assert "--limit" not in result.output
+
+    def test_results_incomplete_limit_truncation_advises_raising_limit(
+        self, mock_client
+    ):
+        mock_client.list_incomplete_analyses.return_value = {
+            "jobs": [],
+            "truncated": True,
+            "truncated_by": "limit",
+            "scanned": 42,
+        }
+        result = runner.invoke(app, ["results", "incomplete", "--limit", "10"])
+        assert result.exit_code == 0
+        assert "42" in result.output
+        assert "raise --limit" in result.output
+
+    def test_results_incomplete_above_the_cap_does_not_advise_raising_limit(
+        self, mock_client
+    ):
+        """The server clamps the limit, so a bigger value cannot return more."""
+        mock_client.list_incomplete_analyses.return_value = {
+            "jobs": [],
+            "truncated": True,
+            "truncated_by": "limit",
+            "scanned": 500,
+        }
+        result = runner.invoke(app, ["results", "incomplete", "--limit", "5000"])
+        assert result.exit_code == 0
+        assert "raise --limit" not in result.output
+        assert "cap of 500" in result.output
+
+    def test_results_incomplete_json_includes_test_names(self, mock_client):
+        mock_client.list_incomplete_analyses.return_value = [
+            {
+                "job_id": "abc-123",
+                "job_name": "example",
+                "build_number": 7,
+                "incomplete_count": 2,
+                "test_names": ["t1", "t2"],
+            }
+        ]
+        result = runner.invoke(app, ["--json", "results", "incomplete"])
+        assert result.exit_code == 0
+        rows = json.loads(result.output)
+        assert rows[0]["job_id"] == "abc-123"
+        assert rows[0]["incomplete_count"] == 2
+        assert rows[0]["test_names"] == ["t1", "t2"]
+        mock_client.list_incomplete_analyses.assert_called_once_with(limit=100)
 
     def test_results_delete(self, mock_client):
         mock_client.delete_job.return_value = {"status": "deleted", "job_id": "abc-123"}
@@ -771,19 +852,68 @@ class TestSetReviewedCommand:
 
 
 class TestEnrichCommentsCommand:
+    # Real shape: GET /results/{job_id}/enrich-comments ->
+    # {"enrichments": {comment_id: [badges]}, "failed": bool}
+    _PAYLOAD: ClassVar[dict] = {
+        "enrichments": {
+            "comment-1": [{"kind": "pr", "state": "merged"}],
+            "comment-2": [{"kind": "ticket", "status": "Done"}],
+            "comment-3": [
+                {"kind": "pr", "state": "open"},
+                {"kind": "ticket", "status": "In Progress"},
+            ],
+        },
+        "failed": False,
+    }
+
     def test_enrich_comments(self, mock_client):
-        mock_client.enrich_comments.return_value = {"enriched": 3}
+        mock_client.enrich_comments.return_value = self._PAYLOAD
         result = runner.invoke(app, ["results", "enrich-comments", "job-1"])
         assert result.exit_code == 0
-        assert "3" in result.output
+        assert result.output.split("\n")[:2] == [
+            "Enriched 3 comment(s).",
+            "Status badges: 4.",
+        ]
+        assert "Some lookups failed" not in result.output
         mock_client.enrich_comments.assert_called_once_with("job-1")
 
+    def test_enrich_comments_empty(self, mock_client):
+        mock_client.enrich_comments.return_value = {"enrichments": {}, "failed": False}
+        result = runner.invoke(app, ["results", "enrich-comments", "job-1"])
+        assert result.exit_code == 0
+        assert result.output.split("\n")[:2] == [
+            "Enriched 0 comment(s).",
+            "Status badges: 0.",
+        ]
+
+    def test_enrich_comments_failed_lookup(self, mock_client):
+        mock_client.enrich_comments.return_value = {"enrichments": {}, "failed": True}
+        result = runner.invoke(app, ["results", "enrich-comments", "job-1"])
+        assert result.exit_code == 0
+        assert result.output.split("\n")[:3] == [
+            "Enriched 0 comment(s).",
+            "Status badges: 0.",
+            "Some lookups failed; these counts may be incomplete.",
+        ]
+
+    def test_enrich_comments_missing_failed_field(self, mock_client):
+        """An older server sends no `failed`: no warning is invented."""
+        mock_client.enrich_comments.return_value = {
+            "enrichments": {"comment-1": [{"kind": "pr", "state": "merged"}]}
+        }
+        result = runner.invoke(app, ["results", "enrich-comments", "job-1"])
+        assert result.exit_code == 0
+        assert result.output.split("\n")[:2] == [
+            "Enriched 1 comment(s).",
+            "Status badges: 1.",
+        ]
+        assert "Some lookups failed" not in result.output
+
     def test_enrich_comments_json(self, mock_client):
-        mock_client.enrich_comments.return_value = {"enriched": 3}
+        mock_client.enrich_comments.return_value = self._PAYLOAD
         result = runner.invoke(app, ["--json", "results", "enrich-comments", "job-1"])
         assert result.exit_code == 0
-        parsed = json.loads(result.output)
-        assert parsed["enriched"] == 3
+        assert json.loads(result.output) == self._PAYLOAD
 
 
 class TestDashboardSubmittersCommand:
@@ -2393,6 +2523,143 @@ class TestCreateIssueCommand:
         assert "github_token" not in kwargs
         assert kwargs["jira_token"] == _FAKE_JIRA_CLI_TOKEN
         assert kwargs["jira_email"] == "user@example.com"
+
+
+class TestCreateChatIssueCommand:
+    def test_create_chat_issue(self, mock_client):
+        mock_client.create_chat_issue.return_value = {
+            "url": "https://github.com/org/repo/issues/99",
+            "number": 99,
+            "key": "",
+            "title": "Bug fix",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "create-chat-issue",
+                "--target",
+                "github",
+                "--title",
+                "Bug fix",
+                "--body",
+                "Details...",
+                "--confirmation-id",
+                "draft-1",
+                "--confirmation-code",
+                "ABC234",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "#99" in result.output
+        assert "github.com/org/repo/issues/99" in result.output
+        mock_client.create_chat_issue.assert_called_once_with(
+            target="github",
+            title="Bug fix",
+            body="Details...",
+            confirmation_id="draft-1",
+            confirmation_code="ABC234",
+            repo="",
+            job_id="",
+            jira_project_key="",
+            jira_security_level="",
+            jira_issue_type="Bug",
+        )
+
+    def test_create_chat_issue_rejects_an_unknown_target(self, mock_client):
+        result = runner.invoke(
+            app,
+            [
+                "create-chat-issue",
+                "--target",
+                "invalid",
+                "--title",
+                "X",
+                "--body",
+                "Y",
+                "--confirmation-id",
+                "draft-1",
+                "--confirmation-code",
+                "ABC234",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "--target" in result.output
+        mock_client.create_chat_issue.assert_not_called()
+
+    def test_propose_chat_issue_prints_the_draft_to_approve(self, mock_client):
+        """The command files nothing: it prints the text and the next command."""
+        mock_client.propose_chat_issue.return_value = {
+            "confirmation_id": "draft-1",
+            "confirmation_code": "ABC234",
+            "title": "Bug fix",
+            "body": "Details...",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "propose-chat-issue",
+                "--target",
+                "github",
+                "--title",
+                "Bug fix",
+                "--body",
+                "Details...",
+            ],
+        )
+        assert result.exit_code == 0
+        assert "draft-1" in result.output
+        assert "ABC234" in result.output
+        assert "Details..." in result.output
+        assert "create-chat-issue" in result.output
+        mock_client.create_chat_issue.assert_not_called()
+
+    def test_the_proposed_command_can_actually_run(self, mock_client):
+        """Every option `create-chat-issue` requires is in the command it prints."""
+        mock_client.propose_chat_issue.return_value = {
+            "confirmation_id": "draft-1",
+            "confirmation_code": "ABC234",
+            "title": "Bug fix",
+            "body": "Details...",
+        }
+        result = runner.invoke(
+            app,
+            [
+                "propose-chat-issue",
+                "--target",
+                "github",
+                "--title",
+                "Bug fix",
+                "--body",
+                "Details...",
+                "--repo",
+                "org/tests",
+                "--job-id",
+                "job-1",
+            ],
+        )
+        assert result.exit_code == 0
+        command = result.output.split("file it with: ", 1)[1].strip()
+        for option in (
+            "--target github",
+            "--confirmation-id draft-1",
+            "--confirmation-code ABC234",
+            "--title " + shlex.quote("Bug fix"),
+            "--body " + shlex.quote("Details..."),
+            "--repo org/tests",
+            "--job-id job-1",
+        ):
+            assert option in command
+        # And it names the same destination the draft was proposed for.
+        assert mock_client.propose_chat_issue.call_args[1]["repo"] == "org/tests"
+        assert mock_client.propose_chat_issue.call_args[1]["job_id"] == "job-1"
+
+    def test_create_chat_issue_exposes_no_token_options(self, mock_client):
+        """A command that could take a token could file under a server token."""
+        result = runner.invoke(app, ["create-chat-issue", "--help"])
+        assert result.exit_code == 0
+        assert "--github-token" not in result.output
+        assert "--jira-token" not in result.output
+        assert "--jira-sa-token" not in result.output
 
 
 class TestOverrideClassificationCommand:
@@ -4143,6 +4410,21 @@ class TestPushRpCommand:
         assert result.exit_code != 0
         assert "400" in result.output or "disabled" in result.output.lower()
 
+    def test_push_rp_reports_to_investigate_fallbacks(self, mock_client):
+        """A pushed-under-TO_INVESTIGATE item must not read as a clean push."""
+        mock_client.push_reportportal.return_value = {
+            "pushed": 2,
+            "unmatched": [],
+            "defaulted": ["test_a (classification: none)"],
+            "errors": [],
+            "launch_id": 42,
+        }
+        result = runner.invoke(app, ["push-rp", "job-123"])
+        assert result.exit_code == 0
+        assert (
+            "Pushed as TO INVESTIGATE: test_a (classification: none)" in result.output
+        )
+
     def test_push_rp_with_errors(self, mock_client):
         mock_client.push_reportportal.return_value = {
             "pushed": 1,
@@ -4245,6 +4527,20 @@ class TestPushCommand:
         assert result.exit_code == 0
         parsed = json.loads(result.output)
         assert parsed["pushed"] == 3
+
+    def test_push_reports_to_investigate_fallbacks(self, mock_client):
+        """The generic push names the fallbacks, like push-reportportal does."""
+        mock_client.push_to_exporter.return_value = {
+            "pushed": 2,
+            "errors": [],
+            "defaulted": ["test_a (classification: none)"],
+            "message": "Pushed 2 item(s)",
+        }
+        result = runner.invoke(app, ["push", "job-123", "--plugin", "reportportal"])
+        assert result.exit_code == 0
+        assert (
+            "Pushed as TO INVESTIGATE: test_a (classification: none)" in result.output
+        )
 
     def test_push_with_errors(self, mock_client):
         mock_client.push_to_exporter.return_value = {
@@ -4646,6 +4942,127 @@ class TestAdminComponentVersionsCommand:
         assert result.exit_code == 0
         parsed = json.loads(result.output)
         assert parsed["components"] == {"pi": "1.0.0"}
+
+
+class TestAdminServerStatusCommand:
+    _PAYLOAD: ClassVar[dict] = {
+        "disk": {
+            "available": True,
+            "used_bytes": 75,
+            "capacity_bytes": 100,
+            "used_ratio": 0.75,
+            "filesystem_note": "note",
+            "database_bytes": 1024,
+            "transcripts_bytes": 2048,
+            "logs_bytes": 0,
+        },
+        "cpu": {
+            "available": True,
+            "process_percent": 5.0,
+            "quota_cores": 2.0,
+            "period_us": 100000,
+        },
+        "memory": {
+            "available": True,
+            "rss_bytes": 1024,
+            "current_bytes": 50,
+            "limit_bytes": 100,
+            "percent_of_limit": 50.0,
+        },
+        "process": {
+            "version": "4.14.0",
+            "git_sha": "abc123",
+            "uptime_seconds": 61.0,
+            "pid": 42,
+            "loop_lag_ms": 12.0,
+        },
+        "database": {
+            "available": True,
+            "size_bytes": 4096,
+            "results": 3,
+            "failures": 2,
+            "test_entries": 1,
+        },
+        "sidecar": {"reachable": True, "models": 7, "free_models": 1},
+        "activity": {
+            "analyses_running": 1,
+            "analyses": [
+                {
+                    "job_id": "j1",
+                    "job_name": "nightly",
+                    "build_number": 7,
+                    "status": "running",
+                    "elapsed_seconds": 3600,
+                }
+            ],
+            "chat_turns_in_flight": 2,
+            "sse_clients": 2,
+        },
+        "warnings": [
+            {
+                "level": "warn",
+                "code": "disk_high",
+                "message": "Data directory is 75% full",
+            }
+        ],
+    }
+
+    def test_server_status_table(self, mock_client):
+        mock_client.server_status.return_value = self._PAYLOAD
+        result = runner.invoke(app, ["admin", "server-status"])
+        assert result.exit_code == 0
+        assert "Process: rootcoz 4.14.0" in result.output
+        assert "Disk: 75% used" in result.output
+        assert "Sidecar: reachable" in result.output
+        assert "Data directory is 75% full" in result.output
+        # The breakdown label names the database, not the whole data dir.
+        assert "(database 1.0 KiB" in result.output
+        # Each running analysis is listed with its own elapsed time.
+        assert "nightly #7 running for 3600s" in result.output
+        assert "2 chat turns in flight" in result.output
+
+    def test_server_status_json(self, mock_client):
+        mock_client.server_status.return_value = self._PAYLOAD
+        result = runner.invoke(app, ["--json", "admin", "server-status"])
+        assert result.exit_code == 0
+        assert json.loads(result.output) == self._PAYLOAD
+
+    def test_server_status_unavailable_block(self, mock_client):
+        mock_client.server_status.return_value = {
+            **self._PAYLOAD,
+            "cpu": {"available": False, "reason": "no cgroup"},
+            "warnings": [],
+        }
+        result = runner.invoke(app, ["admin", "server-status"])
+        assert result.exit_code == 0
+        assert "CPU: unavailable (no cgroup)" in result.output
+
+    def _status_with(self, mock_client, cpu_state, memory_state):
+        mock_client.server_status.return_value = {
+            **self._PAYLOAD,
+            "cpu": {
+                **self._PAYLOAD["cpu"],
+                "quota_cores": None,
+                "quota_state": cpu_state,
+            },
+            "memory": {
+                **self._PAYLOAD["memory"],
+                "limit_bytes": None,
+                "limit_state": memory_state,
+            },
+            "warnings": [],
+        }
+        return runner.invoke(app, ["admin", "server-status"])
+
+    def test_server_status_unlimited_quota_is_not_unknown(self, mock_client):
+        """A null quota means unlimited only when the cgroup says so."""
+        unlimited = self._status_with(mock_client, "unlimited", "unlimited")
+        assert "no CPU quota (unlimited)" in unlimited.output
+        assert "no limit (unlimited)" in unlimited.output
+
+        unknown = self._status_with(mock_client, "unknown", "unknown")
+        assert "quota unknown" in unknown.output
+        assert "limit unknown" in unknown.output
 
 
 class TestAdminUsersListCommand:

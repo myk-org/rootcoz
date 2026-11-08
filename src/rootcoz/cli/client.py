@@ -675,6 +675,12 @@ class RootCozClient:
         """
         return self._request("GET", "/api/admin/component-versions")
 
+    def server_status(self) -> dict[str, Any]:
+        """Get live server status: disk, CPU, memory, DB, sidecar.
+        GET /api/admin/server-status
+        """
+        return self._request("GET", "/api/admin/server-status")
+
     # -- Health ---------------------------------------------------------------
 
     def health(self) -> dict[str, Any]:
@@ -787,6 +793,20 @@ class RootCozClient:
     def list_result_fields(self) -> dict[str, Any]:
         """List allowlisted sparse field paths. GET /api/results/fields"""
         return self._request("GET", "/api/results/fields")
+
+    def list_incomplete_analyses(
+        self, limit: int = 100
+    ) -> dict[str, Any] | list[dict[str, Any]]:
+        """List jobs with failures that have no usable classification.
+
+        GET /api/results/incomplete. Current servers return ``{"jobs": [...],
+        "truncated": bool, "truncated_by": str | None, "scanned": int}``;
+        older servers return a bare list.
+        """
+        params: dict[str, Any] | None = None
+        if limit != 100:
+            params = {"limit": limit}
+        return self._request("GET", "/api/results/incomplete", params=params)
 
     def set_tracked_in(
         self,
@@ -1201,8 +1221,9 @@ class RootCozClient:
         return self._request("PUT", f"/results/{job_id}/reviewed", json=body)
 
     def enrich_comments(self, job_id: str) -> dict[str, Any]:
-        """Enrich comments with live PR/ticket statuses. POST /results/{job_id}/enrich-comments"""
-        return self._request("POST", f"/results/{job_id}/enrich-comments")
+        """Refresh PR/ticket statuses from GitHub and Jira; a result may be served from the
+        server's 60 s per-job cache. GET /results/{job_id}/enrich-comments"""
+        return self._request("GET", f"/results/{job_id}/enrich-comments")
 
     # -- Bug Creation ---------------------------------------------------------
 
@@ -1401,6 +1422,84 @@ class RootCozClient:
             f"/results/{job_id}/create-jira-bug",
             json=payload,
             accept_statuses=(201,),
+        )
+
+    def propose_chat_issue(
+        self,
+        target: str,
+        title: str,
+        body: str,
+        repo: str = "",
+        job_id: str = "",
+        jira_project_key: str = "",
+        jira_security_level: str = "",
+        jira_issue_type: str = "Bug",
+    ) -> dict[str, Any]:
+        """Draft an issue from chat text. POST /api/chat-issue/propose
+
+        Files nothing: the reply carries the ``confirmation_id`` and
+        ``confirmation_code`` that ``create_chat_issue`` needs, plus the exact
+        title and body it would file. Drafts are single-use and expire, so
+        propose again after any edit.
+
+        The destination (``repo``, ``job_id``, the Jira overrides) is part of
+        the draft, so ``create_chat_issue`` must be given the same one.
+        """
+        payload: dict[str, Any] = {"target": target, "title": title, "body": body}
+        if repo:
+            payload["repo"] = repo
+        if job_id:
+            payload["job_id"] = job_id
+        if jira_project_key:
+            payload["jira_project_key"] = jira_project_key
+        if jira_security_level:
+            payload["jira_security_level"] = jira_security_level
+        if jira_issue_type and jira_issue_type != "Bug":
+            payload["jira_issue_type"] = jira_issue_type
+        return self._request(
+            "POST", "/api/chat-issue/propose", json=payload, accept_statuses=(201,)
+        )
+
+    def create_chat_issue(
+        self,
+        target: str,
+        title: str,
+        body: str,
+        confirmation_id: str,
+        confirmation_code: str,
+        repo: str = "",
+        job_id: str = "",
+        jira_project_key: str = "",
+        jira_security_level: str = "",
+        jira_issue_type: str = "Bug",
+    ) -> dict[str, Any]:
+        """Create an issue from chat text. POST /api/chat-issue
+
+        No token parameter on purpose: the server files the issue with the
+        credentials saved in the caller's account, and a deployment token is
+        never a fallback. ``confirmation_id`` and ``confirmation_code`` must
+        come from ``propose_chat_issue`` for the same title, body and
+        destination — a code the user did not read in the preview files nothing.
+        """
+        payload: dict[str, Any] = {
+            "target": target,
+            "title": title,
+            "body": body,
+            "confirmation_id": confirmation_id,
+            "confirmation_code": confirmation_code,
+        }
+        if repo:
+            payload["repo"] = repo
+        if job_id:
+            payload["job_id"] = job_id
+        if jira_project_key:
+            payload["jira_project_key"] = jira_project_key
+        if jira_security_level:
+            payload["jira_security_level"] = jira_security_level
+        if jira_issue_type and jira_issue_type != "Bug":
+            payload["jira_issue_type"] = jira_issue_type
+        return self._request(
+            "POST", "/api/chat-issue", json=payload, accept_statuses=(201,)
         )
 
     # -- User Tokens ----------------------------------------------------------

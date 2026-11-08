@@ -1,9 +1,11 @@
 """Shared fixtures for rootcoz tests."""
 
+import logging
 import os
 import tempfile
 import types
 from collections.abc import Awaitable, Callable, Generator
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -149,6 +151,18 @@ def build_test_env(**overrides: str) -> dict[str, str]:
     }
     base.update(overrides)
     return base
+
+
+@contextmanager
+def capture_main_logs(caplog: pytest.LogCaptureFixture) -> Generator[None]:
+    """Capture ``rootcoz.main`` logs (python-simple-logger sets propagate=False)."""
+    logger = logging.getLogger("rootcoz.main")
+    with caplog.at_level(logging.WARNING, logger="rootcoz.main"):
+        logger.propagate = True
+        try:
+            yield
+        finally:
+            logger.propagate = False
 
 
 def make_test_client(
@@ -385,21 +399,27 @@ def _clear_db_settings_cache():
 
 @pytest.fixture(autouse=True)
 def _restore_process_globals():
-    """Undo the two process-global leaks a test can leave for the next one.
+    """Undo the process-global leaks a test can leave for the next one.
 
     ``rootcoz.cli.main._state`` is module-global, so one ``--json`` invocation
     makes every later direct command call in the same worker print JSON. And
     ``tests/test_audit.py`` raises the ``rootcoz.main`` logger level to capture
-    its log lines without lowering it again. Both only show up depending on
-    which tests share a worker, so reset them here rather than at call sites.
+    its log lines without lowering it again. The comment-enrichment cache is a
+    60 s per-job dict, so a cached entry would hide the upstream calls the next
+    test asserts on. Each only shows up depending on which tests share a
+    worker, so reset them here rather than at call sites.
     """
     from rootcoz import main as rootcoz_main
     from rootcoz.cli import main as cli_main
 
     logger_level = rootcoz_main.logger.level
     cli_main._state.clear()
+    rootcoz_main._enrichments_cache.clear()
+    rootcoz_main._enrichments_inflight.clear()
     yield
     cli_main._state.clear()
+    rootcoz_main._enrichments_cache.clear()
+    rootcoz_main._enrichments_inflight.clear()
     rootcoz_main.logger.level = logger_level
 
 
@@ -411,15 +431,19 @@ def _restore_audit_health_counters() -> Generator[None]:
     ``monitoring._audit_write_failures`` is non-zero, so a test whose audit
     write fails (any test hitting ``record_audit`` without a DB) flips
     ``test_build_health_response_healthy`` depending on which tests share its
-    xdist worker. Snapshot and restore both counters around every test.
+    xdist worker. The same applies to the count of rows a startup scan could
+    not decode. Snapshot and restore all of them around every test.
     """
-    from rootcoz import monitoring
+    from rootcoz import monitoring, storage
 
     failures = monitoring._audit_write_failures
     suppressed = monitoring._audit_suppressed_auth_events
+    undecodable = set(storage._undecodable_result_ids)
     yield
     monitoring._audit_write_failures = failures
     monitoring._audit_suppressed_auth_events = suppressed
+    storage._undecodable_result_ids.clear()
+    storage._undecodable_result_ids.update(undecodable)
 
 
 _TEST_SIDECAR_CATALOG = [

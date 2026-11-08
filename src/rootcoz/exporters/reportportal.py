@@ -263,6 +263,7 @@ class ReportPortalClient(Exporter):
         details: dict[str, Any] = {
             "pushed": 0,
             "unmatched": [],
+            "defaulted": [],
             "errors": [message],
             "launch_id": launch_id,
         }
@@ -407,6 +408,24 @@ class ReportPortalClient(Exporter):
                 launch_id,
             )
             return self._failure_result(msg, launch_id=launch_id)
+
+        # A failure with no item in this launch cannot be pushed at all, so it
+        # stays out of the response; name it here so an operator can find it
+        # instead of guessing why it is missing (#397).
+        matched_names = {failure.test_name for _, failure in matched}
+        skipped_names = [
+            f.test_name for f in rcz_failures if f.test_name not in matched_names
+        ]
+        if skipped_names:
+            logger.info(
+                "RP push: %s rootcoz failure(s) have no item in launch=%s, "
+                "job='%s' #%s: %s",
+                len(skipped_names),
+                launch_id,
+                job_name,
+                context.build_number,
+                ", ".join(skipped_names),
+            )
 
         try:
             push_result = await asyncio.to_thread(
@@ -697,12 +716,20 @@ class ReportPortalClient(Exporter):
                 line is appended to the RP comment.
 
         Returns:
-            Dict with keys: ``pushed``, ``unmatched``, ``errors``, ``launch_id``.
+            Dict with keys: ``pushed``, ``unmatched``, ``defaulted``, ``errors``,
+            ``launch_id``. ``defaulted`` lists items whose classification maps
+            to no RP defect type -- including an item with no analysis at all,
+            whose classification is empty; they are still pushed with the
+            neutral ``TO_INVESTIGATE`` locator so the test reaches the launch,
+            and each entry names that classification. ``unmatched`` is always
+            empty since #397 and kept only for clients that read it; an item
+            that could not be pushed at all is named in ``errors``.
         """
         if not matched_pairs:
             return {
                 "pushed": 0,
                 "unmatched": [],
+                "defaulted": [],
                 "errors": [],
                 "launch_id": None,
             }
@@ -722,7 +749,7 @@ class ReportPortalClient(Exporter):
 
         history = history_classifications or {}
         reviewed_by = reviewed_by or {}
-        unmatched: list[str] = []
+        defaulted: list[str] = []
         errors: list[str] = []
         launch_id: int | None = None
 
@@ -735,6 +762,7 @@ class ReportPortalClient(Exporter):
             item_id = rp_item.get("id")
             item_name = rp_item.get("name", "")
             if item_id is None:
+                # No update target: the error names it.
                 errors.append(f"RP item missing 'id' field ({item_name})")
                 continue
             if launch_id is None:
@@ -745,17 +773,21 @@ class ReportPortalClient(Exporter):
             hist_cls = history.get(failure.test_name)
             locator = self._map_classification(ai_classification, hist_cls, locators)
 
-            if push_classifications:
-                if not locator:
-                    unmatched.append(item_name)
-                    continue
-                issue_type = locator
-            else:
-                # RP API requires issueType; use TO_INVESTIGATE as neutral default
-                issue_type = (
-                    locators.get("TO_INVESTIGATE")
-                    or _DEFAULT_LOCATORS["TO_INVESTIGATE"]
+            # RP API requires issueType; TO_INVESTIGATE is the neutral default
+            # for push_classifications=False and for an unmappable classification
+            # (such a test must still reach the launch, not be dropped).
+            to_investigate = (
+                locators.get("TO_INVESTIGATE") or _DEFAULT_LOCATORS["TO_INVESTIGATE"]
+            )
+            if push_classifications and not locator:
+                # An empty classification (a provider-outage placeholder, a
+                # narration-only answer, a legacy plain-text analysis) falls
+                # back exactly like an unmapped one: #397 requires the test to
+                # reach the launch, not be dropped (#3148201).
+                defaulted.append(
+                    f"{item_name} (classification: {ai_classification or 'none'})"
                 )
+            issue_type = (locator if push_classifications else None) or to_investigate
 
             # Build issue update payload (RP API uses camelCase)
             issue_payload: dict[str, Any] = {
@@ -877,7 +909,11 @@ class ReportPortalClient(Exporter):
 
         return {
             "pushed": pushed,
-            "unmatched": unmatched,
+            # Always empty since #397 -- see the docstring.
+            "unmatched": [],
+            # A failed batch pushed nothing, so claiming these reached RP under
+            # TO_INVESTIGATE would be false; the failure is in `errors`.
+            "defaulted": defaulted if pushed else [],
             "errors": errors,
             "launch_id": launch_id,
         }

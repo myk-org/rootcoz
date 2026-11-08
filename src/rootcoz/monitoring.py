@@ -195,6 +195,26 @@ async def check_db(db_path: str) -> dict[str, str]:
         return {"status": "error", "detail": str(exc)}
 
 
+def read_data_usage(db_path: str) -> tuple[int, int] | None:
+    """Return (used_bytes, capacity_bytes) for the filesystem backing db_path.
+
+    One statvfs on the directory that holds the database. The probe is
+    storage-agnostic: it measures whichever filesystem holds the data
+    directory — a PVC, a Docker volume, a bind mount or a plain directory.
+    Never raises; returns None when the probe fails so the caller can omit
+    the gauges.
+    """
+    try:
+        usage = shutil.disk_usage(pathlib.Path(db_path).parent)
+    except OSError:
+        logger.debug("Failed to read data usage for %s", db_path, exc_info=True)
+        return None
+    logger.debug(
+        "Data usage for %s: %d used of %d bytes", db_path, usage.used, usage.total
+    )
+    return (usage.used, usage.total)
+
+
 async def _check_http_service(
     url: str,
     *,
@@ -505,6 +525,17 @@ async def build_health_response(settings: Any, db_path: str) -> dict[str, Any]:
     # In-process state, no probe needed; a degraded entry makes the whole
     # response degraded without turning /api/health into a 503.
     checks["audit"] = audit_health_check()
+    # Rows a startup scan could not decode (a build with result_json compression
+    # wrote them). Degraded data, not a liveness failure: 200 with status
+    # "degraded", never 503. Reads as {"status": "ok", "undecodable_rows": 0}
+    # when nothing was skipped.
+    from rootcoz import storage  # local: monitoring takes db_path, stays DB-free
+
+    undecodable = storage.undecodable_result_count()
+    checks["result_json"] = {
+        "status": "degraded" if undecodable else "ok",
+        "undecodable_rows": undecodable,
+    }
 
     # Determine overall status. The sidecar is a hard dependency — every AI
     # feature routes through it and the container entrypoint tears the
@@ -885,6 +916,8 @@ def render_prometheus_metrics(
     health_up: int | None = None,
     active_analyses: int | None = None,
     audit_write_failures: int | None = None,
+    data_used_bytes: int | None = None,
+    data_capacity_bytes: int | None = None,
 ) -> str:
     """Render metrics in Prometheus text exposition format.
 
@@ -895,6 +928,10 @@ def render_prometheus_metrics(
             analyses. When None the metric is omitted.
         audit_write_failures: Audit rows that could not be written since
             process start. When None the metric is omitted.
+        data_used_bytes: Bytes used on the filesystem holding the data
+            directory. When None the data-directory gauges are omitted.
+        data_capacity_bytes: Capacity of that filesystem in bytes. When None
+            (or 0 for the ratio) the corresponding gauge is omitted.
 
     Returns a string ready to serve from /metrics.
     """
@@ -940,6 +977,36 @@ def render_prometheus_metrics(
         )
         lines.append("# TYPE rootcoz_audit_write_failures gauge")
         lines.append(f"rootcoz_audit_write_failures {audit_write_failures}")
+
+    if data_used_bytes is not None and data_capacity_bytes is not None:
+        # The probe measures the filesystem that holds the data directory, so the same
+        # series is correct for a PVC, a Docker volume, a bind mount or a plain
+        # directory. On a shared node filesystem it may include other tenants' usage.
+        lines.append(
+            "# HELP rootcoz_data_used_bytes Bytes used on the filesystem holding the "
+            "data directory (PVC, volume, bind mount or plain directory), not just "
+            "RootCoz data and not the node disk."
+        )
+        lines.append("# TYPE rootcoz_data_used_bytes gauge")
+        lines.append(f"rootcoz_data_used_bytes {data_used_bytes}")
+
+        lines.append(
+            "# HELP rootcoz_data_capacity_bytes Capacity of the filesystem holding the "
+            "data directory (PVC, volume, bind mount or plain directory)."
+        )
+        lines.append("# TYPE rootcoz_data_capacity_bytes gauge")
+        lines.append(f"rootcoz_data_capacity_bytes {data_capacity_bytes}")
+
+        if data_capacity_bytes > 0:
+            lines.append(
+                "# HELP rootcoz_data_used_ratio Fraction of the filesystem holding the "
+                "data directory that is used (0-1)."
+            )
+            lines.append("# TYPE rootcoz_data_used_ratio gauge")
+            # Fixed four decimals, so the exposition never prints a bare "0.25".
+            lines.append(
+                f"rootcoz_data_used_ratio {data_used_bytes / data_capacity_bytes:.4f}"
+            )
 
     lines.append("")
     return "\n".join(lines)

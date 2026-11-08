@@ -16,15 +16,18 @@ import io
 import json
 import logging
 import sqlite3
+from compression import zstd
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
+import httpx
 import pytest
 
 from rootcoz import ai_client, main, monitoring, storage
+from rootcoz.config import update_db_settings_cache
 from rootcoz.encryption import encrypt_sensitive_fields
 from tests.conftest import admin_login, make_app_client
 
@@ -1870,37 +1873,99 @@ def test_comment_add_denied_by_the_allow_list_is_audited(app_client) -> None:
     assert event["details"] == {"reason": "forbidden", "test_name": "test_a"}
 
 
-def test_comment_enrich_is_audited(app_client) -> None:
+def test_comment_enrich_success_is_not_audited(app_client) -> None:
+    """A read is not an event: the report page calls this on every load."""
     admin_login(app_client)
-    _store_job("job-enrich")
-    asyncio.run(
-        storage.add_comment(
-            job_id="job-enrich",
-            test_name="test_a",
-            comment="see https://github.com/o/r/pull/1",
-            username="admin",
-        )
-    )
+    _seed_comment("job-enrich", "see https://github.com/o/r/pull/1")
+    with _github_pr_lookup(1):
+        response = app_client.get("/results/job-enrich/enrich-comments")
+    assert response.status_code == 200, response.text
+    assert response.json() == {
+        "enrichments": {
+            "1": [{"type": "github_pr", "key": "o/r#1", "status": {"state": "open"}}]
+        },
+        "failed": False,
+    }
+
+    assert _events(action="comment.enrich") == []
+
+
+@contextlib.contextmanager
+def _github_pr_lookup(number: int, fetch: AsyncMock | None = None):
+    """Patch the tracker lookups so a job's only link is GitHub PR ``o/r#<number>``.
+
+    Yields the status mock, so a test can assert how often it was called or
+    give it a side effect.
+    """
+    fetch = fetch if fetch is not None else AsyncMock(return_value={"state": "open"})
     with (
         patch.object(
             main,
             "detect_github_prs",
-            return_value=[{"owner": "o", "repo": "r", "number": 1}],
+            return_value=[{"owner": "o", "repo": "r", "number": number}],
         ),
         patch.object(main, "detect_github_issues", return_value=[]),
-        patch.object(
-            main, "fetch_github_pr_status", AsyncMock(return_value={"state": "open"})
-        ),
+        patch.object(main, "fetch_github_pr_status", fetch),
     ):
-        response = app_client.post("/results/job-enrich/enrich-comments")
-    assert response.status_code == 200, response.text
+        yield fetch
 
-    events = _events(action="comment.enrich")
-    assert len(events) == 1
-    event = events[0]
-    assert (event["actor"], event["outcome"]) == ("admin", "success")
+
+def _cached_enrichment_job_ids() -> set[str]:
+    """Job ids holding a cached snapshot (cache keys carry a settings hash)."""
+    return {cache_key[0] for cache_key in main._enrichments_cache}
+
+
+def _seed_comment(job_id: str, comment: str) -> None:
+    """Store one completed job carrying a single comment, for the enrichment tests."""
+    _store_job(job_id)
+    asyncio.run(
+        storage.add_comment(
+            job_id=job_id, test_name="test_a", comment=comment, username="admin"
+        )
+    )
+
+
+def test_seed_comment_stores_the_job_and_its_one_comment(app_client) -> None:
+    """The shared enrichment fixture seeds a job whose comment the collector sees."""
+    _seed_comment("job-enrich-seeded", "see https://github.com/o/r/pull/1")
+    comments = asyncio.run(storage.get_comments_for_job("job-enrich-seeded"))
+    assert [(c["test_name"], c["comment"], c["username"]) for c in comments] == [
+        ("test_a", "see https://github.com/o/r/pull/1", "admin")
+    ]
+
+
+def _use_jira_oauth_settings() -> main.Settings:
+    """Configure a resolvable SA-mode Jira connection, as Server Settings would."""
+    update_db_settings_cache(
+        {
+            "jira_auth_mode": "oauth",
+            "jira_oauth_client_secret": "ATOA-test-secret",  # pragma: allowlist secret
+            "atlassian_oauth_client_id": "test-client-id",
+            "atlassian_oauth_cloud_id": "2b9e35e3-6bd3-4cec-b838-f4249ee02432",
+            "jira_site_url": "https://myorg.atlassian.net",
+            "jira_project_key": "PROJ",
+        }
+    )
+    settings = main.get_settings()
+    assert settings.jira_enabled
+    return settings
+
+
+def test_comment_enrich_refusal_is_audited(app_client) -> None:
+    """Probing a job the caller may not see writes its refused row."""
+    admin_login(app_client)
+    with patch.object(
+        main,
+        "_check_allow_list",
+        side_effect=main.HTTPException(status_code=403, detail="Not allowed"),
+    ):
+        response = app_client.get("/results/job-enrich/enrich-comments")
+    assert response.status_code == 403, response.text
+
+    event = _events(action="comment.enrich")[0]
+    assert event["outcome"] == "denied"
     assert event["target_id"] == "job-enrich"
-    assert event["details"] == {"count": 1, "job_id": "job-enrich"}
+    assert event["details"] == {"reason": "forbidden", "job_id": "job-enrich"}
 
 
 def test_comment_enrich_failure_is_audited(app_client) -> None:
@@ -1914,19 +1979,347 @@ def test_comment_enrich_failure_is_audited(app_client) -> None:
         ),
         pytest.raises(RuntimeError),
     ):
-        app_client.post("/results/job-enrich/enrich-comments")
+        app_client.get("/results/job-enrich/enrich-comments")
 
     event = _events(action="comment.enrich")[0]
     assert event["outcome"] == "failure"
     assert event["details"] == {"reason": "internal_error", "job_id": "job-enrich"}
     assert event["target_id"] == "job-enrich"
 
-    response = app_client.post("/results/job-enrich/enrich-comments")
+
+def test_comment_enrich_second_read_uses_the_cache(app_client) -> None:
+    """A second read within the TTL must not hit GitHub again."""
+    admin_login(app_client)
+    _seed_comment("job-enrich-cached", "see https://github.com/o/r/pull/2")
+    fetch = AsyncMock(return_value={"state": "open"})
+    with _github_pr_lookup(2, fetch):
+        first = app_client.get("/results/job-enrich-cached/enrich-comments")
+        second = app_client.get("/results/job-enrich-cached/enrich-comments")
+
+    assert first.status_code == 200, first.text
+    assert second.json() == first.json()
+    assert fetch.await_count == 1
+
+
+def test_comment_enrich_failure_is_not_cached(app_client) -> None:
+    """An error leaves no cache entry, so the next read retries upstream."""
+    admin_login(app_client)
+    _store_job("job-enrich-retry")
+    collect = AsyncMock(side_effect=[RuntimeError("db down"), []])
+    with patch.object(storage, "get_comments_for_job", collect):
+        with pytest.raises(RuntimeError):
+            app_client.get("/results/job-enrich-retry/enrich-comments")
+
+        response = app_client.get("/results/job-enrich-retry/enrich-comments")
+
     assert response.status_code == 200, response.text
-    assert [event["outcome"] for event in _events(action="comment.enrich")] == [
-        "success",
-        "failure",
-    ]
+    assert response.json() == {"enrichments": {}, "failed": False}
+    assert collect.await_count == 2
+
+
+def test_comment_enrich_expired_entry_is_pruned_on_write(app_client) -> None:
+    """An entry nobody reads again is evicted by the next write, not kept forever."""
+    admin_login(app_client)
+    _store_job("job-enrich-prune")
+    expired = main._time.monotonic() - main._ENRICHMENTS_TTL_SECONDS - 1
+    main._enrichments_cache[("job-already-gone", "fp")] = (
+        expired,
+        main.EnrichmentSnapshot(),
+    )
+
+    response = app_client.get("/results/job-enrich-prune/enrich-comments")
+
+    assert response.status_code == 200, response.text
+    assert "job-already-gone" not in _cached_enrichment_job_ids()
+    assert "job-enrich-prune" in _cached_enrichment_job_ids()
+
+
+def test_comment_enrich_cache_is_bounded(app_client, monkeypatch) -> None:
+    """Distinct job ids cannot grow the cache without limit."""
+    monkeypatch.setattr(main, "_ENRICHMENTS_CACHE_MAX_ENTRIES", 3, raising=False)
+    admin_login(app_client)
+    _store_job("job-enrich-cap")
+    now = main._time.monotonic()
+    for i in range(3):
+        # A nonexistent job id caches like any other: storage has no comments.
+        main._enrichments_cache[(f"job-unknown-{i}", "fp")] = (now - i, {})
+
+    response = app_client.get("/results/job-enrich-cap/enrich-comments")
+
+    assert response.status_code == 200, response.text
+    assert len(main._enrichments_cache) == 3
+    assert "job-enrich-cap" in _cached_enrichment_job_ids()
+    assert "job-unknown-2" not in _cached_enrichment_job_ids()  # the oldest
+
+
+def test_comment_enrich_mid_collect_invalidation_is_not_overwritten(app_client) -> None:
+    """A comment added mid-collect must not be hidden by the older snapshot."""
+    admin_login(app_client)
+    _seed_comment("job-enrich-race", "see https://github.com/o/r/pull/3")
+
+    async def _comment_added_while_looking_up(*_args: Any, **_kwargs: Any) -> Any:
+        # The user adds the link after the comments were read but before the
+        # badges are written back.
+        main.notify_comments_changed("job-enrich-race")
+        return {"state": "open"}
+
+    fetch = AsyncMock(side_effect=_comment_added_while_looking_up)
+    with _github_pr_lookup(3, fetch):
+        first = app_client.get("/results/job-enrich-race/enrich-comments")
+        second = app_client.get("/results/job-enrich-race/enrich-comments")
+
+    assert first.status_code == 200, first.text
+    assert "job-enrich-race" not in _cached_enrichment_job_ids()
+    assert fetch.await_count == 2
+    assert second.json() == first.json()
+
+
+def test_comment_enrich_failed_lookup_is_not_cached(app_client) -> None:
+    """A badge-less lookup failure is retried, not replayed for a whole TTL."""
+    admin_login(app_client)
+    _seed_comment("job-enrich-badge", "see https://github.com/o/r/pull/4")
+    fetch = AsyncMock(side_effect=[None, {"state": "open"}])
+    with _github_pr_lookup(4, fetch):
+        first = app_client.get("/results/job-enrich-badge/enrich-comments")
+        second = app_client.get("/results/job-enrich-badge/enrich-comments")
+
+    assert first.json() == {"enrichments": {}, "failed": True}
+    assert second.json() == {
+        "enrichments": {
+            "1": [{"type": "github_pr", "key": "o/r#4", "status": {"state": "open"}}]
+        },
+        "failed": False,
+    }
+    assert fetch.await_count == 2
+
+
+def test_comment_enrich_concurrent_loads_share_one_collection(app_client) -> None:
+    """Two loads of the same uncached job run one set of lookups, not two."""
+    admin_login(app_client)
+    _seed_comment("job-enrich-shared", "see https://github.com/o/r/pull/5")
+
+    async def _two_loads() -> tuple[Any, Any, int]:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _slow_fetch(*_args: Any, **_kwargs: Any) -> Any:
+            started.set()
+            await release.wait()
+            return {"state": "open"}
+
+        fetch = AsyncMock(side_effect=_slow_fetch)
+        with _github_pr_lookup(5, fetch):
+            first = asyncio.create_task(
+                main._collect_comment_enrichments(
+                    "job-enrich-shared", main.get_settings()
+                )
+            )
+            await started.wait()
+            second = asyncio.create_task(
+                main._collect_comment_enrichments(
+                    "job-enrich-shared", main.get_settings()
+                )
+            )
+            await asyncio.sleep(0)  # let the second request join the first
+            release.set()
+            return await first, await second, fetch.await_count
+
+    first, second, calls = asyncio.run(_two_loads())
+
+    assert (
+        first
+        == second
+        == {"1": [{"type": "github_pr", "key": "o/r#5", "status": {"state": "open"}}]}
+    )
+    assert calls == 1
+
+
+def test_comment_enrich_cancelled_reader_keeps_the_collection_alive(
+    app_client,
+) -> None:
+    """A reader whose client goes away must not cancel the shared collection."""
+    admin_login(app_client)
+    _seed_comment("job-enrich-cancelled", "see https://github.com/o/r/pull/6")
+
+    async def _cancel_one_reader() -> dict[str, list[dict[str, Any]]]:
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def _slow_fetch(*_args: Any, **_kwargs: Any) -> Any:
+            started.set()
+            await release.wait()
+            return {"state": "open"}
+
+        with _github_pr_lookup(6, AsyncMock(side_effect=_slow_fetch)):
+            first = asyncio.create_task(
+                main._collect_comment_enrichments(
+                    "job-enrich-cancelled", main.get_settings()
+                )
+            )
+            await started.wait()
+            second = asyncio.create_task(
+                main._collect_comment_enrichments(
+                    "job-enrich-cancelled", main.get_settings()
+                )
+            )
+            await asyncio.sleep(0)  # let the second read join the first
+            first.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await first
+            release.set()
+            return await second
+
+    assert asyncio.run(_cancel_one_reader()) == {
+        "1": [{"type": "github_pr", "key": "o/r#6", "status": {"state": "open"}}]
+    }
+
+
+def test_comment_enrich_failed_jira_setup_is_not_cached(app_client) -> None:
+    """An unusable Jira connection leaves the Jira badges out: retry, don't cache."""
+    admin_login(app_client)
+    settings = _use_jira_oauth_settings()
+    _seed_comment("job-enrich-jira", "see PROJ-7")
+    complete = AsyncMock(side_effect=main.JiraOAuthMintError("mint failed"))
+    with patch.object(main, "complete_jira_connection", complete):
+        first = asyncio.run(
+            main._collect_comment_enrichments("job-enrich-jira", settings)
+        )
+        second = asyncio.run(
+            main._collect_comment_enrichments("job-enrich-jira", settings)
+        )
+
+    assert first == second == {}
+    assert complete.await_count == 2
+    assert "job-enrich-jira" not in _cached_enrichment_job_ids()
+
+
+def test_comment_enrich_github_only_job_is_cached_despite_a_jira_outage(
+    app_client,
+) -> None:
+    """A Jira outage must not keep repeating a GitHub-only job's lookups."""
+    admin_login(app_client)
+    settings = _use_jira_oauth_settings()
+    _seed_comment("job-enrich-gh-only", "see https://github.com/o/r/pull/9")
+    fetch = AsyncMock(return_value={"state": "open"})
+    complete = AsyncMock(side_effect=main.JiraOAuthMintError("mint failed"))
+    with (
+        patch.object(main, "complete_jira_connection", complete),
+        _github_pr_lookup(9, fetch),
+    ):
+        first = asyncio.run(
+            main._collect_comment_enrichments("job-enrich-gh-only", settings)
+        )
+        second = asyncio.run(
+            main._collect_comment_enrichments("job-enrich-gh-only", settings)
+        )
+
+    assert first == second
+    assert first["1"][0]["status"] == {"state": "open"}
+    assert fetch.await_count == 1
+
+
+def test_comment_enrich_cache_follows_the_jira_settings(app_client) -> None:
+    """Disabling Jira must drop the Jira badges on the next read, not in 60 s."""
+    admin_login(app_client)
+    _use_jira_oauth_settings()
+    _seed_comment("job-enrich-settings", "see PROJ-10")
+    fetch = AsyncMock(return_value="Open")
+    with (
+        # SA mode passes through: the cloud ID is configured, so no network.
+        patch.object(
+            main, "complete_jira_connection", AsyncMock(side_effect=lambda c: c)
+        ),
+        patch.object(main, "fetch_jira_ticket_status", fetch),
+    ):
+        enabled = app_client.get("/results/job-enrich-settings/enrich-comments")
+        update_db_settings_cache({"enable_jira": "false"})
+        disabled = app_client.get("/results/job-enrich-settings/enrich-comments")
+
+    assert enabled.status_code == disabled.status_code == 200, enabled.text
+    assert enabled.json()["enrichments"] == {
+        "1": [{"type": "jira", "key": "PROJ-10", "status": "Open"}]
+    }
+    assert disabled.json() == {"enrichments": {}, "failed": False}
+    assert fetch.await_count == 1
+
+
+def test_comment_enrich_cache_follows_the_jira_tls_setting(app_client) -> None:
+    """Enabling cert verification must not replay an unverified Jira read."""
+    admin_login(app_client)
+    _use_jira_oauth_settings()
+    _seed_comment("job-enrich-tls", "see PROJ-11")
+    fetch = AsyncMock(return_value="Open")
+    with (
+        patch.object(
+            main, "complete_jira_connection", AsyncMock(side_effect=lambda c: c)
+        ),
+        patch.object(main, "fetch_jira_ticket_status", fetch),
+    ):
+        update_db_settings_cache({"jira_oauth_ssl_verify": "false"})
+        unverified = asyncio.run(
+            main._collect_comment_enrichments("job-enrich-tls", main.get_settings())
+        )
+        update_db_settings_cache({"jira_oauth_ssl_verify": "true"})
+        verified = asyncio.run(
+            main._collect_comment_enrichments("job-enrich-tls", main.get_settings())
+        )
+
+    assert verified == unverified
+    assert verified["1"][0]["status"] == "Open"
+    assert fetch.await_count == 2
+
+
+def test_comment_enrich_cache_is_evicted_when_the_job_is_deleted(app_client) -> None:
+    """Deleted comments must not stay readable through the cached badges."""
+    admin_login(app_client)
+    fetch = AsyncMock(return_value={"state": "open"})
+    for job_id in ("job-enrich-gone", "job-enrich-gone-bulk"):
+        _seed_comment(job_id, "see https://github.com/o/r/pull/8")
+    with _github_pr_lookup(8, fetch):
+        for job_id in ("job-enrich-gone", "job-enrich-gone-bulk"):
+            response = app_client.get(f"/results/{job_id}/enrich-comments")
+            assert response.status_code == 200, response.text
+            assert job_id in _cached_enrichment_job_ids()
+
+        deleted = app_client.delete("/results/job-enrich-gone")
+        bulk = app_client.request(
+            "DELETE",
+            "/api/results/bulk",
+            json={"job_ids": ["job-enrich-gone-bulk"]},
+        )
+
+    assert deleted.status_code == 200, deleted.text
+    assert bulk.status_code == 200, bulk.text
+    assert "job-enrich-gone" not in _cached_enrichment_job_ids()
+    assert "job-enrich-gone-bulk" not in _cached_enrichment_job_ids()
+
+
+def test_bulk_delete_invalidates_enrichments_before_the_cleanup(app_client) -> None:
+    """A read during bulk-delete cleanup must not see the deleted job's badges."""
+    admin_login(app_client)
+    _seed_comment("job-enrich-bulk-fast", "see https://github.com/o/r/pull/11")
+    with _github_pr_lookup(11):
+        assert (
+            app_client.get("/results/job-enrich-bulk-fast/enrich-comments").status_code
+            == 200
+        )
+
+    still_cached_during_cleanup: list[set[str]] = []
+
+    async def _observe(*_args: Any, **_kwargs: Any) -> None:
+        still_cached_during_cleanup.append(_cached_enrichment_job_ids())
+
+    with patch.object(
+        main, "_unlink_reanalysis_origins", AsyncMock(side_effect=_observe)
+    ):
+        response = app_client.request(
+            "DELETE",
+            "/api/results/bulk",
+            json={"job_ids": ["job-enrich-bulk-fast"]},
+        )
+
+    assert response.status_code == 200, response.text
+    assert still_cached_during_cleanup == [set()]
 
 
 def test_pattern_override_is_audited(app_client) -> None:
@@ -2420,6 +2813,47 @@ def test_feedback_create_without_a_token_is_audited(app_client) -> None:
     assert "A body" not in json.dumps(event)
 
 
+def test_feedback_create_upstream_failure_is_audited_with_its_status(
+    app_client,
+) -> None:
+    """An upstream failure names the status that tells it from a lost token."""
+    admin_login(app_client)
+    request = httpx.Request("POST", "https://api.github.com/repos/o/r/issues")
+    response = httpx.Response(503, json={"message": "Server Error"}, request=request)
+    exc = httpx.HTTPStatusError(
+        "GitHub returned 503", request=request, response=response
+    )
+    with (
+        patch.object(
+            storage,
+            "get_user_tokens",
+            AsyncMock(return_value={"github_token": "gh-token-0123456789"}),
+        ),
+        patch.object(main, "create_feedback_from_preview", AsyncMock(side_effect=exc)),
+    ):
+        refused = app_client.post(
+            "/api/feedback/create",
+            json={
+                "title": "A title",
+                "body": "body text that must not be audited",
+                "labels": ["feedback"],
+            },
+        )
+
+    assert refused.status_code == 502, refused.text
+    event = _events(action="feedback.create")[0]
+    assert event["outcome"] == "failure"
+    assert event["details"] == {
+        "reason": "upstream_failure",
+        "kind": "github_issue",
+        "upstream_status": 503,
+    }
+    stored = json.dumps(event)
+    assert "gh-token-0123456789" not in stored
+    assert "Server Error" not in stored
+    assert "body text" not in stored
+
+
 def test_global_model_refresh_is_audited(app_client) -> None:
     admin_login(app_client)
     sidecar = SimpleNamespace(refresh_models=AsyncMock(return_value={"claude": []}))
@@ -2765,6 +3199,193 @@ def test_issue_create_is_audited(app_client) -> None:
     assert len(events) == 1
     assert events[0]["details"]["tracker"] == "github"
     assert events[0]["target_id"] == "job-1"
+    # The row names the issue it filed, so the trail is where a reader finds it.
+    assert events[0]["details"]["url"] == "https://github.com/o/r/issues/1"
+
+
+def _create_github_issue_for(app_client, repo_url: str) -> dict[str, Any]:
+    """File one GitHub issue through the report endpoint; return its audit row."""
+    admin_login(app_client)
+    owner_repo = repo_url.removeprefix("https://github.com/")
+    with (
+        patch.object(
+            main, "_load_effective_failure", AsyncMock(return_value=(None, {}, None))
+        ),
+        patch.object(main, "_resolve_github_repo_url", return_value=repo_url),
+        patch.object(
+            main,
+            "create_github_issue",
+            AsyncMock(
+                return_value={
+                    "url": f"https://github.com/{owner_repo}/issues/1",
+                    "number": 1,
+                }
+            ),
+        ),
+        patch.object(main, "_add_tracker_comment", AsyncMock(return_value=1)),
+    ):
+        response = app_client.post(
+            "/results/job-1/create-github-issue",
+            json={
+                "test_name": "test_a",
+                "title": "T",
+                "body": "B",
+                "github_token": "gh-token-0123456789",
+            },
+        )
+    assert response.status_code == 201, response.text
+    events = _events(action="issue.create")
+    assert len(events) == 1
+    return events[0]["details"]
+
+
+def test_issue_create_row_names_the_repository_of_its_url(app_client) -> None:
+    """The row says which repo its url points at, not only which job (#416 3.2).
+
+    A reader of the trail can tell what the link belongs to without the log
+    line, which is not in ``audit_events``.
+    """
+    details = _create_github_issue_for(app_client, "https://github.com/o/r")
+
+    assert details["repo"] == "o/r"
+    assert f"/{details['repo']}/" in details["url"]
+
+
+def test_a_credential_shaped_repository_name_keeps_its_issue_url(
+    app_client,
+) -> None:
+    """Redaction must not eat a link's path segment (#416 3.2).
+
+    ``OpenShiftVirtualization2024`` is a repository name, but the bare-run
+    heuristic also reads it as a token, which stored the row's own url as
+    ``.../[redacted]/issues/1`` — a link that goes nowhere.
+    """
+    repo = "OpenShiftVirtualization2024"
+    url = f"https://github.com/o/{repo}/issues/1"
+
+    details = _create_github_issue_for(app_client, f"https://github.com/o/{repo}")
+
+    assert details["url"] == url
+    assert f"/{repo}/" in details["url"]
+
+
+def test_a_credential_inside_a_url_detail_is_still_scrubbed() -> None:
+    """Keeping a link's path segments does not keep a token in the link."""
+    token = "ghp_9f8e7d6c5b4a39281706f5e4d3c2b1a0ffee"  # pragma: allowlist secret  # gitleaks:allow
+
+    redacted = main._redact_details({"url": f"https://github.com/o/r?t={token}"})
+
+    assert token not in redacted["url"]
+    assert redacted["url"].startswith("https://github.com/o/r?t=")
+
+
+@pytest.mark.parametrize("name", ["repo", "site", "jira_project"])
+def test_a_credential_shaped_destination_name_is_kept(name: str) -> None:
+    """A field whose job is to name a destination is not free text (#416)."""
+    value = "OpenShiftVirtualization2024"
+    assert len(value) >= 24
+    assert main._redact_details({name: value}) == {name: value}
+
+
+@pytest.mark.parametrize("name", ["repo", "url"])
+def test_a_credential_inside_a_destination_detail_is_still_scrubbed(
+    name: str,
+) -> None:
+    """Keeping a destination name does not keep a token pasted into it."""
+    token = "ghp_9f8e7d6c5b4a39281706f5e4d3c2b1a0ffee"  # pragma: allowlist secret  # gitleaks:allow
+
+    redacted = main._redact_details(
+        {name: f"https://github.com/o/OpenShiftVirtualization2024?t={token}"}
+    )
+
+    assert redacted[name] == (
+        "https://github.com/o/OpenShiftVirtualization2024?t=[redacted]"
+    )
+
+
+def _create_jira_issue_for(
+    app_client, issue_url: str
+) -> tuple[dict[str, Any], AsyncMock]:
+    """File one Jira issue through the report endpoint; return its audit row."""
+    admin_login(app_client)
+    _use_jira_oauth_settings()
+    create = AsyncMock(return_value={"key": "PROJ-1", "url": issue_url})
+    with (
+        patch.object(
+            main, "_load_effective_failure", AsyncMock(return_value=(None, {}, None))
+        ),
+        patch.object(main, "create_jira_bug", create),
+        patch.object(main, "_add_tracker_comment", AsyncMock(return_value=1)),
+    ):
+        response = app_client.post(
+            "/results/job-1/create-jira-bug",
+            json={
+                "test_name": "test_a",
+                "title": "T",
+                "body": "B",
+                "jira_token": "ATOA-test-secret",  # pragma: allowlist secret
+            },
+        )
+    assert response.status_code == 201, response.text
+    events = _events(action="issue.create")
+    assert len(events) == 1
+    return events[0]["details"], create
+
+
+def test_a_malformed_jira_site_still_records_the_filed_issue(app_client) -> None:
+    """A URL that cannot be parsed must not fail a create that already happened.
+
+    ``urlparse`` raises ``ValueError`` on an unclosed IPv6 host, and the Jira
+    link is built straight from the raw site setting. The row keeps the link,
+    leaves the unparseable host empty, and the issue is filed exactly once.
+    """
+    details, create = _create_jira_issue_for(app_client, "https://[::1/browse/PROJ-1")
+
+    assert details["result"] == "success"
+    assert details["url"] == "https://[::1/browse/PROJ-1"
+    assert details["site"] == ""
+    assert create.await_count == 1
+
+
+def test_a_pending_users_issue_attempt_leaves_a_row(temp_db_path: Path) -> None:
+    """REQUIRE_APPROVAL blocks the handler, so the auth layer must audit it.
+
+    The approval-status refusal returns before either chat-issue endpoint runs,
+    which makes this the only place those attempts can reach the trail.
+    """
+    with patch.object(main, "create_github_issue") as mock_create:
+        for client in make_app_client(temp_db_path, {"REQUIRE_APPROVAL": "true"}):
+            registered = client.post(
+                "/api/auth/register", json={"username": "pending-issue"}
+            )
+            assert registered.status_code == 200, registered.text
+            headers = {"Authorization": f"Bearer {registered.json()['api_key']}"}
+            asyncio.run(storage.set_user_status("pending-issue", "pending"))
+            steps = {}
+            for path, step in (
+                ("/api/chat-issue/propose", "propose"),
+                ("/api/chat-issue", "create"),
+            ):
+                blocked = client.post(
+                    path,
+                    json={"target": "github", "title": "t", "body": "b"},
+                    headers=headers,
+                )
+                assert blocked.status_code == 403, blocked.text
+                steps[step] = True
+
+            events = _events(action="issue.create")
+            assert len(events) == 2, events
+            for event in events:
+                assert event["outcome"] == "denied"
+                assert event["actor"] == "pending-issue"
+                assert event["details"] == {
+                    "reason": "account_pending",
+                    "result": "refused",
+                    "step": event["details"]["step"],
+                }
+            assert {event["details"]["step"] for event in events} == set(steps)
+    mock_create.assert_not_called()
 
 
 def test_admin_db_query_is_audited_without_raw_sql(
@@ -2845,6 +3466,52 @@ def test_admin_db_query_masks_credential_columns(
     details = _events(action="admin.db_query")[0]["details"]
     assert details["rows"] == 1
     assert secret not in json.dumps(details)
+
+
+def test_admin_db_query_preview_bounds_a_crafted_frame() -> None:
+    """Read-only SQL can craft a tiny frame that expands to gigabytes (#419).
+
+    The preview decodes at most ``_ADMIN_PREVIEW_MAX_BYTES``, so a bomb costs the
+    cap, not its advertised size — and a real payload still decodes.
+    """
+    bomb = zstd.compress(b"0" * (4 << 20))
+    assert len(bomb) < 1024, "cheap to send, expensive to decode"
+    assert "not shown" in main._admin_row_value(bomb)
+    assert main._admin_row_value(zstd.compress(b'{"job_name": "j"}')) == {
+        "job_name": "j"
+    }
+    assert main._admin_row_value(b"not a frame") == "<11 undecodable frame>"
+    # A frame our own codec refuses is a marker, never an exception: the preview is
+    # a read path, so a damaged stored row must not fail the admin query.
+    damaged = b"\x28\xb5\x2f\xfd" + b"\x00\x01\x02\x03rest-of-frame"
+    assert main._admin_row_value(damaged) == f"<{len(damaged)} undecodable frame>"
+
+
+def test_admin_db_query_preview_labels_a_truncated_frame_as_damaged() -> None:
+    """A truncated frame is damaged, not oversized.
+
+    Both end with ``eof`` False, so the size cap cannot be the branch that names
+    it: a damaged stored row is exactly what the console is used to look into.
+    """
+    frame = zstd.compress(json.dumps({"job_name": "j"}).encode())
+    damaged = frame[: len(frame) // 2]
+    assert main._admin_row_value(damaged) == f"<{len(damaged)} undecodable frame>"
+
+
+def test_admin_db_query_preview_bounds_concatenated_frames() -> None:
+    """A tiny first frame must not carry a huge second one past the cap (#419).
+
+    ``ZstdDecompressor.eof`` only vouches for the frame it stopped at, while the
+    preview decodes every frame: the cap has to bound the total decoded size, or a
+    crafted ``x'...'`` literal passes the check on frame one and then inflates the
+    rest on the request path.
+    """
+    bomb = zstd.compress(b"0" * (4 << 20))
+    tiny = zstd.compress(b"")
+    assert "not shown" in main._admin_row_value(tiny + bomb)
+    # Two frames whose total fits still decode, so the cap is not a frame count.
+    small = zstd.compress(b'{"job_name": "j"}')
+    assert main._admin_row_value(small) == {"job_name": "j"}
 
 
 def test_admin_db_query_rejection_is_audited_as_denied(
@@ -4044,7 +4711,7 @@ def test_audit_list_label_prefers_display_name(audit_db: Path) -> None:
             },
         )
     )
-    refs = (JOB_ID, "Human Name", "machine-name", "origin-name")
+    refs = (JOB_ID, "Human Name", "machine-name")
     for ref in refs:
         asyncio.run(
             storage.insert_audit_event(
@@ -4059,6 +4726,34 @@ def test_audit_list_label_prefers_display_name(audit_db: Path) -> None:
     assert [(event["target_job_id"], event["target_label"]) for event in events] == [
         (JOB_ID, "Human Name")
     ] * len(refs)
+
+
+def test_audit_list_does_not_resolve_origin_job_name(audit_db: Path) -> None:
+    """``origin_job_name`` is response-only, so it is not a name a job is stored by.
+
+    It is computed per response by ``main._attach_origin_job_info`` and never
+    stored, so matching it in SQL could only ever match nothing — the ref stays
+    its own label with no job link instead of a lucky half-match.
+    """
+    asyncio.run(
+        storage.save_result(
+            JOB_ID,
+            status="completed",
+            result={"display_name": "Human Name", "job_name": "machine-name"},
+        )
+    )
+    asyncio.run(
+        storage.insert_audit_event(
+            action="job.metadata_set",
+            actor="alice",
+            target_type="job",
+            target_id="origin-name",
+        )
+    )
+    events = asyncio.run(storage.list_audit_events())["events"]
+    assert [(event["target_job_id"], event["target_label"]) for event in events] == [
+        (None, "origin-name")
+    ]
 
 
 @pytest.mark.parametrize("target_type", _NO_PRESENCE_TARGETS)
@@ -6960,7 +7655,6 @@ _DETAIL_KEYS: dict[str, set[str]] = {
     "provider.remove": {"provider", "had_stored_key", "models"},
     "provider.models_set": {"provider", "total"},
     "comment.delete": {"job_id", "test_name"},
-    "comment.enrich": {"count", "job_id"},
     "tracked_in.set": {"test_name", "changed"},
     "user.ai_credential_set": {"provider", "model"},
 }
@@ -7147,7 +7841,6 @@ _MATRIX_ACTIONS = frozenset(
         "export.push",
         "provider.remove",
         "comment.delete",
-        "comment.enrich",
         "provider.models_set",
         "tracked_in.set",
         "user.ai_credential_set",

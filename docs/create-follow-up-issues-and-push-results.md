@@ -1,6 +1,6 @@
 # Creating Follow-Up Issues and Pushing Results
 
-Turn a reviewed failure into real follow-up work: file a GitHub issue or Jira ticket from the report, link a failure to a ticket that already exists, and push the finished classifications into Report Portal. Every action here starts from a result page, and the issue content is generated from the same AI analysis you already reviewed.
+Turn a reviewed failure into real follow-up work: file a GitHub issue or Jira ticket from the report, link a failure to a ticket that already exists, and push the finished classifications into Report Portal. Every action here starts from a result page or from a chat answer, and the issue content is generated from the same AI analysis you already reviewed.
 
 ## Prerequisites
 
@@ -35,7 +35,7 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    RootCoz calls `POST /results/{job_id}/preview-github-issue` or `POST /results/{job_id}/preview-jira-bug`, which draft a title and body, and search for issues that look like duplicates of the same bug.
 
-   `Include links` adds clickable report and build URLs. `AI for issue generation` lets you pick a different provider or model for the draft. The preview also lists any similar issues it found, so you can link existing work instead of filing a duplicate.
+   `Include links` adds clickable report and build URLs. `AI for issue generation` lets you pick a different provider or model for the draft. On first use the picker starts on the pair that analysed this job. The pair you pick is remembered for your account and reused by later issue drafts and by chat; `Server default` forgets it and goes back to the server's configured model, and that choice is remembered too. The preview also lists any similar issues it found, so you can link existing work instead of filing a duplicate.
 
    > **Note:** `Include links` only has an effect when the server has a public base URL configured, because relative links would resolve against the tracker instead of RootCoz. See [Configuration Reference](configuration-reference.html) for details.
 
@@ -54,7 +54,50 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    Creation uses your own credentials. A missing or expired token returns an error that points back to your profile settings.
 
+   If creation fails, the dialog stays on the preview with the generated `Title` and `Body` — and the repository, Jira project, issue type, and security level you chose — still filled in and editable. The primary action becomes `Retry`, which resubmits that same content; the model is not called again, so a retry neither costs AI tokens nor rewrites the draft. Retrying is the whole fix for a transient failure. A credential problem is refused again with the same message until the token is corrected, and any message mentioning a token gets a link to `Profile Settings` next to it.
+
+   A failure is refused with a fixed detail instead of a generic string, and the dialog shows that wording verbatim. GitHub uses one shared set of refusals for both entry points — `Create GitHub Issue` on a failure and the `Feedback` form — and only the word changes: your *bug report* was not filed on a failure, your *feedback* was not filed on the feedback form. The one exception is a `404`: only the `Feedback` form blames your token, because only it files into a repository your token is supposed to already see — a failure's issue always goes to the deployment's `TESTS_REPO_URL`.
+
+   | GitHub answered | Detail shown | What it means for you |
+   | --- | --- | --- |
+   | `5xx` | `GitHub is unavailable right now, so your bug report was not filed. Try again in a few minutes.` (or `feedback`) — a `502` | An outage. Nothing is wrong with your draft or your token: `Retry` later. |
+   | timeout | `GitHub did not answer before the request timed out: the request may have been sent and your bug report may already be filed. Check the repository before retrying — filing it again could create a duplicate.` — a `502` | A timeout can mean the issue was created after the answer was lost: check GitHub before `Retry`, or you may file it twice. On a failure report the dialog first re-reads the failure's tracked-in links and adopts the issue that was filed instead of creating a second one. |
+   | no connection at all | `GitHub API unreachable: <error>` — the same `502` class | Also worth a `Retry`; the request never reached GitHub. |
+   | the answer was lost or unreadable | `GitHub dropped the connection before answering, so your bug report may have been filed. Check GitHub before retrying — filing it again could create a duplicate.` (an unreadable answer says `GitHub answered with something this server could not read, so your bug report may have been filed.`) — a `502` | The request reached GitHub and its answer was lost, so nothing proves it filed nothing: check GitHub before `Retry`, or you may file it twice. |
+   | `404` | `GitHub cannot see the repository in TESTS_REPO_URL, so your bug report was not filed. Check that the repository exists and that your token can access it in Profile Settings.` — a `403`; the `Feedback` form gets `GitHub token cannot access the feedback repository. Regenerate it in Profile Settings with access to that repository.` | GitHub answers `404`, not `403`, for a repository the token cannot see. A failure's issue cannot be pointed anywhere but `TESTS_REPO_URL`, so a mistyped or deleted setting answers the same way as a token that lost access — a retry with the same content changes neither. |
+   | `401` | `GitHub token is invalid or expired. Generate a new token in Profile Settings.` | The token is dead. Generate a new one before retrying. |
+   | `403` without rate-limit evidence | `GitHub token is missing the 'repo' scope. Regenerate it in Profile Settings with repo access.` | The token authenticates but is under-scoped. |
+   | `429`, or `403` with rate-limit headers or body | `GitHub API rate limit reached. Try again later.` | A spent quota: a new token cannot fix it, so wait. |
+   | anything else | `GitHub API error: <status>`, reported as `502` | Read the status; the draft is still safe to retry. |
+
+   Jira bug creation splits the same way with its own wording:
+
+   | Jira answered | Detail shown | What it means for you |
+   | --- | --- | --- |
+   | `401` or `403` | `Jira token is invalid or expired. Update your token in settings.` — a `401` | The credential or its project permission is the problem, so fix the token before retrying. |
+   | `5xx` | `Jira is unavailable right now, so the bug was not filed. Try again in a few minutes.` — a `502` | An outage. `Retry` later with the draft still on screen. |
+   | the answer was lost or unreadable | `Jira dropped the connection before answering, so the bug may have been filed. Check Jira before retrying — filing it again could create a duplicate.` — a `502` | The request reached Jira and its answer was lost, so nothing proves it filed nothing: check Jira before `Retry`, or you may file it twice. |
+   | `404` | `Jira token cannot access that Jira project. Check the project key and update your token in settings so it can see the project.` — a `403` | Jira answers `404`, not `403`, for a project the token cannot see — and also for a project key that does not exist, and the two are indistinguishable from the status alone, which is why the wording names both. A retry will not change either: fix the project key or the token first. |
+   | anything else | `Jira API error: <status>`, reported as `502` | Read the status; no wording is invented for it. |
+
+   Jira has no separate rate-limit detail: a throttled request arrives under `Jira API error: <status>` like any other unclassified status.
+
    > **Warning:** GitHub and Jira issue creation can be disabled per server with `ENABLE_GITHUB_ISSUES` and `ENABLE_JIRA_ISSUES`. When disabled, the buttons are greyed out and the endpoints refuse the request.
+
+   > **From chat:** a chat answer can become an issue too. In job chat or admin chat, ask the assistant to file it — "create a GitHub issue for this" or "open a Jira ticket". It drafts the title and body, and **the server posts the preview to the chat itself**: the tracker, the **destination** it resolved (the repository, or the Jira project and issue type), the **proposal id**, the title, the body and a six-character **confirmation code**. What you approve is that server-written message, not the assistant's summary of it. Nothing is filed until **you** reply in that chat with the code, in a message newer than the preview: the server records your own message, never the assistant's, so a model that proposes and creates in one turn is refused and told which step it skipped. The code and its id are single-use and expire after ten minutes, and they authorise that text **for that destination only**, so the same title and body cannot be redirected to another repository, run or Jira project — including by changing a server default between the two steps. The proposal id in that message is what a rebuilt chat session reads, so the draft you already approved can still be filed after the assistant's session restarts. The tool is offered for a tracker only when the server enables it, your account holds that tracker's token, **and** there is somewhere to file: a run's own test or additional repo in job chat (which never falls back to `TESTS_REPO_URL`), the server's `TESTS_REPO_URL` in admin chat. A tracker you have no token for, one the server disabled, or one with nowhere to file is not offered at all, and the assistant names the matching fix — Profile Settings for a credential, an administrator for a disable switch or a missing `TESTS_REPO_URL` — instead of claiming it can file. A refusal from a tool it does have (`400`, `403`, `401`, `502`) is relayed verbatim. The same gate from a terminal, with the same account credential and no token flags:
+
+```
+rootcoz propose-chat-issue --target github --job-id JOB_ID \
+  --title "Login fails after token refresh" --body "$(cat issue-body.md)"
+# review the preview, then run the create command it printed, for example:
+rootcoz create-chat-issue --target github --job-id JOB_ID \
+  --confirmation-id CONFIRMATION_ID --confirmation-code CONFIRMATION_CODE \
+  --title "Login fails after token refresh" --body "$(cat issue-body.md)"
+```
+
+   The code is printed by `propose-chat-issue` and shown in the preview: typing it here is the confirmation. (A draft proposed from a chat is redeemable only after you reply in that chat with the code — a terminal run of `create-chat-issue` cannot confirm it.)
+
+   `--job-id` is required for a GitHub issue from a non-admin account: only that run's repositories (its test repo and additional repos) may receive it, and `--repo owner/name` narrows the choice. Admins may name any repository. The run and repo named at `propose-chat-issue` must be the ones named at `create-chat-issue` — a confirmation id approves one destination, and a different one is refused. Chat-created issues carry no comment and no tracked-in link: there is no failure to attach them to.
 
 5. Link a failure to an issue that already exists.
 
@@ -75,7 +118,13 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
 7. Push reviewed classifications to Report Portal.
 
-   Click `Push to Report Portal` in the report header, confirm, and RootCoz matches the job to its Report Portal launch, updates the matching test items, and reports how many classifications were pushed, plus any unmatched items and errors.
+   Click `Push to Report Portal` in the report header, confirm, and RootCoz matches the job to its Report Portal launch, updates the matching test items, and reports how many classifications were pushed, plus any items pushed as `TO INVESTIGATE` and any errors.
+
+   A failure whose classification is empty or unknown is not dropped from the push: it has no defect type to map to, so it is pushed with the neutral `TO INVESTIGATE` defect type and, with `RP_PUSH_CLASSIFICATIONS` enabled, is listed under `defaulted` as `<item name> (classification: <value>)` — `<value>` is `none` when the classification is empty. The exception is a test the project history already classifies as `INFRASTRUCTURE` (a recorded `rootcoz classify` entry): that history classification takes precedence whatever the AI said, so the item is pushed with the `INFRASTRUCTURE` → `SYSTEM_ISSUE` (System Issue) defect type and is never listed under `defaulted`, because it does have a defect type to map to. With classification pushing disabled every item is sent as `TO INVESTIGATE`, so there is nothing to single out and `defaulted` stays empty.
+
+   `defaulted` is informational: those items were pushed, so they never count as skipped and never shrink the batch. That includes an item that carries no analysis at all — a provider outage left the placeholder `Analysis failed; check server logs for details`, or the model narrated an answer with no classification — because an empty classification falls back to `TO INVESTIGATE` exactly like an unmapped one, so the test still reaches the launch and the dialog says `N test(s) were pushed as TO INVESTIGATE because they have no mappable classification`. `unmatched` is always empty and kept only for clients that still read it; `errors` names anything that could not be pushed at all.
+
+   Those statements describe the current server's push response. A historical push result, or a response from an older server, may still carry `unmatched` entries worded as `<item name> (classification: <value>)` or `<item name> (no analysis)`; the dialog renders both honestly.
 
    You can also check what is available before pushing:
 
@@ -176,7 +225,9 @@ rootcoz push JOB_ID --plugin reportportal --json
 
 Tracker flags fall back to the values in your CLI server profile, so pass them explicitly only when you need to override. See [CLI Command Reference](cli-reference.html) for details.
 
-Send feedback about RootCoz itself through the `Feedback` button in the application header. You describe the problem, RootCoz collects browser context and recent console and API errors automatically, then drafts a GitHub issue you can edit before it is created. This flow is separate from failure issues and requires feedback to be enabled on the server.
+Send feedback about RootCoz itself through the `Feedback` button in the application header. You describe the problem, RootCoz collects browser context and recent console and API errors automatically, then drafts a GitHub issue you can edit before it is created. This flow is separate from failure issues and requires feedback to be enabled on the server. A failed submission keeps the draft on screen with `Retry` as the primary action, and reports the server's own reason — the same error classes as in step 4.
+
+There is no analysed job behind feedback, so its `AI for issue generation` picker starts on the server default. The pair you pick is remembered for your account and reused by later feedback and issue drafts, and `Server default` stores that choice explicitly, so it survives a reload instead of quietly reverting.
 
 For raw endpoints, see [API Endpoint Reference](api-reference.html) for details.
 
@@ -186,7 +237,7 @@ For raw endpoints, see [API Endpoint Reference](api-reference.html) for details.
   Issue creation is disabled for this server, or the job was analyzed without a repository or Jira project to target. Ask an administrator to check `ENABLE_GITHUB_ISSUES` and `ENABLE_JIRA_ISSUES`.
 
 - Creation fails with `GitHub token is required` or `Jira token is required`.  
-  Issue creation uses only your own credentials. Add the token on your profile settings page and try again.
+  Issue creation uses only your own credentials and is refused with `400` before anything is filed when you have none. A server-configured `GITHUB_TOKEN` or Jira credential is never used on your behalf — that includes the bootstrap `admin` account, which has no profile tokens of its own. Add the token on your profile settings page and try again. The bootstrap `admin` has no profile to save a token into, so that account is instead told to sign in with its own registered account — the `400` it gets never points at a page it cannot use.
 
 - The preview has no `Include links` effect.  
   The server has no public base URL configured. Set `PUBLIC_BASE_URL` so report links can be absolute.
@@ -215,8 +266,8 @@ For raw endpoints, see [API Endpoint Reference](api-reference.html) for details.
 - The push returns `Operator access required.`  
   Exporter pushes need `operator` or `admin`. Reviewers can create and link issues, but not push.
 
-- The push reports unmatched items.  
-  RootCoz matched the launch but could not pair some failures with Report Portal test items. Check the reported item names against the launch, and confirm the job name and build number match the Report Portal launch.
+- The push reports items it could not classify.  
+  Those failures have no classification (or an unknown one) to map to a Report Portal defect type, so they were still pushed as `TO INVESTIGATE`; the entry names the classification it could not map, `none` when the analysis carried no classification at all. Re-analyze the job to classify them and push again. A failure that matches no item in the launch cannot be pushed at all, so it is named in the server log rather than in `errors`, which lists only items that failed to push: if a test you expected to reach the launch is missing altogether, confirm the job name and build number match the Report Portal launch and look for that log line.
 
 ## Related Pages
 

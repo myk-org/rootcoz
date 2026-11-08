@@ -31,10 +31,8 @@ from rootcoz.ai_client import (
 )
 from rootcoz.config import Settings, get_settings, parse_additional_repos
 from rootcoz.engine.chat import analysis_http_tools
-from rootcoz.engine.http_mcp import (
-    cleanup_http_tools_mcp,
-)
 from rootcoz.engine.session_tools import build_session_tools
+from rootcoz.feedback import scrub_sensitive_data
 from rootcoz.logging_context import get_log_file
 from rootcoz.models import (
     AdditionalRepo,
@@ -49,7 +47,11 @@ from rootcoz.models import (
     ProductBugReport,
 )
 from rootcoz.repository import RepositoryManager
-from rootcoz.storage import update_clone_progress, update_progress_phase
+from rootcoz.storage import (
+    PRIMARY_CLASSIFICATIONS,
+    update_clone_progress,
+    update_progress_phase,
+)
 from rootcoz.token_tracking import failure_group_usage
 
 _log_file = get_log_file()
@@ -59,6 +61,16 @@ logger = get_logger(
     level=logging.NOTSET,  # level authority: the rootcoz parent logger (#347)
     **({"filename": _log_file} if _log_file else {}),
 )
+
+
+def require_workspace(repo_path: Path | None) -> Path:
+    """Return the analysis workspace, or refuse. No caller may analyse without one (#443)."""
+    if repo_path is None:
+        raise RuntimeError(
+            "Analysis requires a workspace path; every caller creates one before analysing "
+            "(see #443). Pass repo_manager.create_workspace()."
+        )
+    return repo_path
 
 
 def resolve_additional_repos(
@@ -991,7 +1003,7 @@ def extract_json_dict(raw_text: str) -> dict[str, Any] | None:
     return None
 
 
-def parse_json_response(raw_text: str) -> AnalysisDetail:
+def parse_json_response(raw_text: str) -> AnalysisDetail | None:
     """Parse AI JSON response into an AnalysisDetail.
 
     Attempts to extract a JSON object from the AI response text.
@@ -1002,27 +1014,83 @@ def parse_json_response(raw_text: str) -> AnalysisDetail:
     1. Try parsing the raw text directly as JSON
     2. Try extracting JSON from brace-matching ({...})
     3. Try extracting from markdown code blocks
-    4. Fallback: store raw text in details, then attempt recovery
+    4. Fallback: regex/markdown recovery, only for text that did not parse as
+       JSON — a structured answer that names no usable classification stands
+
+    A reply is only an analysis when it names a classification from the
+    taxonomy (``PRIMARY_CLASSIFICATIONS``). Narration without a final answer is
+    not one: it used to be wrapped into ``details`` and stored as a successful
+    analysis, which is how an empty classification reached the exporters.
 
     Args:
         raw_text: The raw text output from the AI.
 
     Returns:
-        An AnalysisDetail instance parsed from the JSON, or a
-        fallback instance with the raw text stored in details.
+        An AnalysisDetail parsed from the JSON, or None when the answer carries
+        no usable classification.
     """
     data = extract_json_dict(raw_text)
     if data is not None:
         try:
-            return AnalysisDetail(**data)
+            parsed = AnalysisDetail(**data)
         except (ValueError, TypeError) as exc:
             logger.warning(
                 "AI JSON validated as object but failed schema parsing: %s", exc
             )
+        else:
+            classification = _usable_classification(parsed.classification)
+            if classification:
+                return parsed.model_copy(update={"classification": classification})
+            # The structured answer is the model's answer. Salvaging a string it
+            # merely quoted (a log line, a previous run) would store a
+            # diagnosis the model never gave.
+            logger.warning(
+                "AI JSON answer has no usable classification (%r); not an analysis",
+                parsed.classification,
+            )
+            return None
 
-    # Fallback: store raw text in details, then attempt recovery
-    fallback = AnalysisDetail(details=raw_text)
-    return recover_from_details(fallback)
+    # Regex/markdown recovery for an answer that did not parse as JSON
+    recovered = recover_from_details(AnalysisDetail(details=raw_text))
+    classification = _usable_classification(recovered.classification)
+    if classification:
+        return recovered.model_copy(update={"classification": classification})
+    return None
+
+
+_USABLE_CLASSIFICATIONS = frozenset(PRIMARY_CLASSIFICATIONS)
+
+
+class AnalysisIncompleteError(RuntimeError):
+    """The AI answered, but without a usable classification.
+
+    Distinct from a provider failure: the tests stay reviewable and the group
+    can be re-analysed, but there is no diagnosis to store. It carries what the
+    caller can still use: the group signature (so a peer call keeps its
+    workspace file) and the raw narration (peer prompt).
+    """
+
+    def __init__(
+        self, message: str, *, error_signature: str = "", raw_text: str = ""
+    ) -> None:
+        super().__init__(message)
+        self.error_signature = error_signature
+        self.raw_text = raw_text
+
+
+def incomplete_reason(error: object) -> str:
+    """``analysis_error`` for a failed group: our message, or ``""``.
+
+    Only ``AnalysisIncompleteError`` is stored. Any other error is a provider
+    failure whose text may echo a credential, and it must never reach a result.
+    """
+    return str(error) if isinstance(error, AnalysisIncompleteError) else ""
+
+
+def _usable_classification(value: str) -> str:
+    """Return the canonical taxonomy classification, or ``""`` if unusable."""
+    normalized = " ".join((value or "").split()).upper()
+    return normalized if normalized in _USABLE_CLASSIFICATIONS else ""
 
 
 def _decode_recovered_json_string(value: str) -> str:
@@ -1088,12 +1156,18 @@ def recover_from_details(result: AnalysisDetail) -> AnalysisDetail:
 
     details = result.details
     if not details:
+        logger.warning("Cannot recover a classification: the AI answer is empty")
         return result
 
     # Try markdown classification recovery (e.g. "**Classification: INFRASTRUCTURE**")
     if '"classification"' not in details:
         md_match = re.search(r"\*\*Classification:\s*([A-Z][A-Z _]+?)\*\*", details)
         if not md_match:
+            logger.warning(
+                "Cannot recover a classification from the AI answer: no JSON "
+                "field and no '**Classification: X**' marker in %d chars of text",
+                len(details),
+            )
             return result
         # Found markdown classification — extract what we can
         classification = md_match.group(1).strip()
@@ -1120,6 +1194,10 @@ def recover_from_details(result: AnalysisDetail) -> AnalysisDetail:
     # Extract classification
     class_match = re.search(r'"classification"\s*:\s*"([^"]+)"', details)
     if not class_match:
+        logger.warning(
+            "Cannot recover a classification from the AI answer: the JSON "
+            "'classification' field is missing or truncated"
+        )
         return result
 
     classification = class_match.group(1)
@@ -1741,6 +1819,27 @@ _NON_RETRYABLE_AI_ERRORS = (
 )
 
 
+#: Leading hex characters of the answer's SHA-256 kept in the WARNING line. The
+#: width is part of the log format: same answer, same fingerprint, every run.
+#: The answer itself is never written at WARNING — it reaches DEBUG scrubbed and
+#: whole (see ``log_scrubbed_answer``): model narration can quote CI logs,
+#: artifact contents or tokens, and this engine runs on server credentials.
+AI_LOG_DIGEST_CHARS = 12
+
+
+def log_scrubbed_answer(answer: str, *, why: str) -> None:
+    """Write the *whole* scrubbed answer at DEBUG, the one record of model output.
+
+    WARNING carries only a length and a fingerprint, so this is what answers
+    "what did the model actually say?" for a job that failed at the default INFO
+    log level. Nothing is truncated — a cut answer hides the part that explains
+    the failure — and nothing is raw: the engine runs on server credentials, so
+    the text is scrubbed before it is logged. Guarded because the call is eager.
+    """
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("%s (scrubbed): %s", why, scrub_sensitive_data(answer))
+
+
 async def _call_ai_with_retry(
     prompt: str,
     *,
@@ -1754,6 +1853,7 @@ async def _call_ai_with_retry(
     call_type: str = "primary",
     system_prompt: str = "",
     repos: dict[str, Path] | None = None,
+    require_usable_analysis: bool = False,
 ) -> AIResult:
     """Call AI with retry on empty response and record usage.
 
@@ -1772,6 +1872,8 @@ async def _call_ai_with_retry(
         auth_header: Bearer token for history tools.
         call_type: Token usage call type label.
         system_prompt: Optional system prompt (e.g. agent file body).
+        require_usable_analysis: Treat an answer without a taxonomy
+            classification exactly like an empty one -- retry it.
 
     Returns:
         The AIResult from the AI call.
@@ -1879,7 +1981,34 @@ async def _call_ai_with_retry(
             continue
 
         if not _is_empty_ai_text(result):
-            break
+            if (
+                not require_usable_analysis
+                or parse_json_response(result.text) is not None
+            ):
+                break
+            # Narration without a final answer is not an analysis: retry it.
+            # The text itself stays out of WARNING (see log_scrubbed_answer).
+            logger.warning(
+                "AI answer has no usable classification (attempt=%d/%d) "
+                "provider=%s, model=%s, call_type=%s, job_id=%s, "
+                "text_length=%d, text_sha256=%s",
+                attempt,
+                max_attempts,
+                ai_provider,
+                ai_model,
+                call_type,
+                job_id,
+                len(result.text or ""),
+                hashlib.sha256((result.text or "").encode()).hexdigest()[
+                    :AI_LOG_DIGEST_CHARS
+                ],
+            )
+            log_scrubbed_answer(
+                result.text or "", why="AI answer with no usable classification"
+            )
+            if attempt >= max_attempts:
+                break
+            continue
 
         logger.debug(
             "AI returned empty response (attempt=%d/%d), provider=%s, "
@@ -1901,7 +2030,7 @@ async def run_single_ai_analysis(
     *,
     failures: list[FailedTest],
     console_context: str,
-    repo_path: Path | None,
+    repo_path: Path,
     ai_provider: str,
     ai_model: str,
     ai_call_timeout: int | None,
@@ -1926,7 +2055,7 @@ async def run_single_ai_analysis(
     Args:
         failures: List of test failures with the same error signature.
         console_context: Relevant console lines for context.
-        repo_path: Path to cloned test repo (optional).
+        repo_path: Path to the analysis workspace (all repos are subdirectories).
         ai_provider: AI provider name.
         ai_model: AI model identifier.
         ai_call_timeout: Timeout in minutes for the AI call.
@@ -1980,8 +2109,7 @@ async def run_single_ai_analysis(
 
     # Save console context to file so it's not embedded in the prompt
     console_file_section = ""
-    console_dir: Path | None = None
-    if console_context and repo_path:
+    if console_context:
         console_file = repo_path / f"console-output-{error_signature}.txt"
         try:
             console_file.write_text(console_context)
@@ -1998,38 +2126,9 @@ async def run_single_ai_analysis(
             "stack traces, and failure context from the CI job.\n"
             "Failure to read console output is a violation of your instructions."
         )
-    elif console_context:
-        # No repo path — write console output to a temp file
-        import tempfile
 
-        console_dir = Path(tempfile.mkdtemp(prefix="rootcoz-console-"))
-        console_file = console_dir / f"console-output-{error_signature}.txt"
-        try:
-            console_file.write_text(console_context)
-        except OSError as exc:
-            import shutil
-
-            shutil.rmtree(console_dir, ignore_errors=True)
-            raise RuntimeError(
-                f"Failed to write console output to {console_file}: {exc}. "
-                "Check filesystem permissions and available disk space."
-            ) from exc
-        console_file_section = (
-            f"\n\n=== CONSOLE OUTPUT (MANDATORY) ===\n"
-            f"Console output saved to: {console_file}\n\n"
-            "\u26a0\ufe0f  MANDATORY: You MUST read the console output file "
-            "BEFORE making any classification. It contains critical error messages, "
-            "stack traces, and failure context from the CI job.\n"
-            "Failure to read console output is a violation of your instructions."
-        )
-
-    # Ensure a workspace dir for failure-details / cross-reference files
-    workspace_dir = repo_path or console_dir
-    if workspace_dir is None:
-        import tempfile
-
-        console_dir = Path(tempfile.mkdtemp(prefix="rootcoz-console-"))
-        workspace_dir = console_dir
+    # Write failure-details / cross-reference files into the analysis workspace
+    workspace_dir = repo_path
 
     try:
         failure_file = write_failure_details_file(
@@ -2083,44 +2182,44 @@ Note: Multiple tests failed with the same error. Provide ONE analysis that appli
         ai_model,
         job_id,
     )
-    try:
-        # Both hashes: the anchor for legacy attribution and the v2 group hash
-        # so every member of a v2 group -- whose own anchors differ from it --
-        # resolves to the same usage summary (see attach_failure_usage).
-        with failure_group_usage(job_id, anchor_signature, error_signature):
-            result = await _call_ai_with_retry(
-                prompt,
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                workspace_dir=workspace_dir,
-                repos=additional_repos,
-                ai_call_timeout=ai_call_timeout,
-                server_url=server_url,
-                job_id=job_id,
-                auth_header=auth_header,
-                call_type="primary",
-                system_prompt=system_prompt,
-            )
+    # Both hashes: the anchor for legacy attribution and the v2 group hash
+    # so every member of a v2 group -- whose own anchors differ from it --
+    # resolves to the same usage summary (see attach_failure_usage).
+    with failure_group_usage(job_id, anchor_signature, error_signature):
+        result = await _call_ai_with_retry(
+            prompt,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            workspace_dir=workspace_dir,
+            repos=additional_repos,
+            ai_call_timeout=ai_call_timeout,
+            server_url=server_url,
+            job_id=job_id,
+            auth_header=auth_header,
+            call_type="primary",
+            system_prompt=system_prompt,
+            require_usable_analysis=True,
+        )
 
-        if not result.success:
-            raise RuntimeError(
-                "AI call failed. Check provider credentials and try again."
-            )
-        parsed: AnalysisDetail | None = None
-        if _is_empty_ai_text(result):
-            raise RuntimeError("AI returned empty response after retry.")
-        elif result.success:
-            parsed = parse_json_response(result.text)
-        if parsed is None:
-            parsed = AnalysisDetail(details=result.text)
-
-        return parsed, error_signature
-    finally:
-        # Clean up temp console dir if created
-        if console_dir and console_dir.exists():
-            import shutil
-
-            shutil.rmtree(console_dir, ignore_errors=True)
+    if not result.success:
+        raise RuntimeError("AI call failed. Check provider credentials and try again.")
+    if _is_empty_ai_text(result):
+        raise RuntimeError("AI returned empty response after retry.")
+    parsed = parse_json_response(result.text)
+    if parsed is None:
+        logger.error(
+            "AI analysis incomplete: no usable classification for job=%s "
+            "(text_length=%d); see the raw text logged by the retry loop",
+            job_id,
+            len(result.text),
+        )
+        raise AnalysisIncompleteError(
+            "AI analysis incomplete: response has no usable classification; "
+            "re-analyze the job",
+            error_signature=error_signature,
+            raw_text=result.text,
+        )
+    return parsed, error_signature
 
 
 async def analyze_failure_group(
@@ -2152,7 +2251,7 @@ async def analyze_failure_group(
     Args:
         failures: List of test failures with the same error signature.
         console_context: Relevant console lines for context.
-        repo_path: Path to cloned test repo (optional).
+        repo_path: Path to the analysis workspace (all repos are subdirectories).
         ai_provider: AI provider to use.
         ai_model: AI model to use.
         ai_call_timeout: Timeout in minutes (overrides AI_CALL_TIMEOUT env var).
@@ -2177,6 +2276,7 @@ async def analyze_failure_group(
     logger.debug(
         f"analyze_failure_group called with server_url='{server_url}', job_id='{job_id}'"
     )
+    repo_path = require_workspace(repo_path)
 
     if peer_ai_configs:
         _peer_mod = importlib.import_module("rootcoz.peer_analysis")
@@ -2486,6 +2586,7 @@ def _expand_group_to_analyses(
     failures: list[FailedTest],
     analysis: AnalysisDetail,
     peer_debate: PeerDebate | None = None,
+    analysis_error: str = "",
 ) -> list[FailureAnalysis]:
     """Create FailureAnalysis objects for all failures in a group.
 
@@ -2496,6 +2597,9 @@ def _expand_group_to_analyses(
     must stay in step -- a per-failure field added here and not there is a
     signature assigned in one analysis and missing from the other -- so this is
     the only mapping from a grouped failure to its stored record.
+
+    *analysis_error* carries the reason a group has no diagnosis, so an
+    unclassified row explains itself instead of looking like an empty success.
     """
     return [
         FailureAnalysis(
@@ -2503,6 +2607,7 @@ def _expand_group_to_analyses(
             error=f.error_message,
             stack_trace=f.stack_trace,
             analysis=analysis,
+            analysis_error=analysis_error,
             error_signature=get_legacy_signature(f),
             error_signature_v2=sig,
             peer_debate=peer_debate,
@@ -2596,9 +2701,13 @@ def _parse_cross_failure_response(
 
 
 def _failed_group_analyses(
-    signature: str, failures: list[FailedTest]
+    signature: str, failures: list[FailedTest], analysis_error: str = ""
 ) -> list[FailureAnalysis]:
-    """Keep failed tests visible without exposing the provider error as analysis."""
+    """Keep failed tests visible without exposing the provider error as analysis.
+
+    ``analysis_error`` marks a group whose answer carried no usable analysis
+    (e.g. narration only) so the row is reviewable and re-analysable.
+    """
     return [
         FailureAnalysis(
             test_name=f.test_name,
@@ -2606,6 +2715,7 @@ def _failed_group_analyses(
             stack_trace=f.stack_trace,
             error_signature=get_legacy_signature(f),
             error_signature_v2=signature,
+            analysis_error=analysis_error,
             analysis=AnalysisDetail(
                 details="Analysis failed; check server logs for details"
             ),
@@ -2618,7 +2728,7 @@ async def run_orchestrated_analysis(
     *,
     groups: dict[str, list[FailedTest]],
     console_context: str,
-    repo_path: Path | None,
+    repo_path: Path,
     ai_provider: str,
     ai_model: str,
     ai_call_timeout: int | None = None,
@@ -2648,7 +2758,7 @@ async def run_orchestrated_analysis(
     Args:
         groups: Failure groups keyed by error signature.
         console_context: Console output from the CI job.
-        repo_path: Workspace root path (may be None).
+        repo_path: Path to the analysis workspace (all repos are subdirectories).
         ai_provider: AI provider name.
         ai_model: AI model identifier.
         ai_call_timeout: Timeout in minutes for the AI call.
@@ -2665,195 +2775,193 @@ async def run_orchestrated_analysis(
     Returns:
         Tuple of (list of FailureAnalysis, list of CrossFailurePattern).
     """
-    # Determine workspace directory
+    # Every caller resolves a workspace before analysis; there is no
+    # repo-less mode (see #443).
     workspace_dir = repo_path
-    temp_dir: Path | None = None
-    if workspace_dir is None:
-        import tempfile
 
-        temp_dir = Path(tempfile.mkdtemp(prefix="rootcoz-orchestrator-"))
-        workspace_dir = temp_dir
+    # Copy built-in agents to workspace
+    copy_builtin_agents_to_workspace(workspace_dir)
 
-    try:
-        # Copy built-in agents to workspace
-        copy_builtin_agents_to_workspace(workspace_dir)
+    # Resolve agent system prompt
+    system_prompt = resolve_agent_prompt(workspace_dir)
 
-        # Resolve agent system prompt
-        system_prompt = resolve_agent_prompt(workspace_dir)
+    # Discover custom agents and route if any exist
+    custom_agents = discover_custom_agents(workspace_dir)
+    agent_routing: dict[str, str | None] = {sig: None for sig in groups}
 
-        # Discover custom agents and route if any exist
-        custom_agents = discover_custom_agents(workspace_dir)
-        agent_routing: dict[str, str | None] = {sig: None for sig in groups}
-
-        if custom_agents:
-            await safe_update_progress(job_id, "agent_routing")
-            logger.info("Agent routing progress started for job=%s", job_id)
-            # Prepare workspace files for routing call context
-            workspace_files = prepare_orchestrator_workspace(
-                groups, console_context, workspace_dir
-            )
-            routing_prompt = build_agent_routing_prompt(
-                groups, custom_agents, workspace_files
-            )
-            logger.info(
-                "Running agent routing call: %d groups, %d custom agents",
-                len(groups),
-                len(custom_agents),
-            )
-            routing_result = await _call_ai_with_retry(
-                routing_prompt,
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                workspace_dir=workspace_dir,
-                repos=additional_repos,
-                ai_call_timeout=ai_call_timeout,
-                server_url="",  # routing doesn't need history
-                job_id=job_id,
-                auth_header="",
-                call_type="agent_routing",
-            )
-            if routing_result.success and not _is_empty_ai_text(routing_result):
-                agent_routing = parse_agent_routing_response(
-                    routing_result.text, groups
-                )
-                logger.info("Agent routing result: %s", agent_routing)
-            else:
-                logger.warning(
-                    "Agent routing call failed; using base agent for all groups"
-                )
-
-        # Run per-group analysis in parallel via analyze_failure_group
-        # (single-AI or peer) with system_prompt from agent file
+    if custom_agents:
+        await safe_update_progress(job_id, "agent_routing")
+        logger.info("Agent routing progress started for job=%s", job_id)
+        # Prepare workspace files for routing call context
+        workspace_files = prepare_orchestrator_workspace(
+            groups, console_context, workspace_dir
+        )
+        routing_prompt = build_agent_routing_prompt(
+            groups, custom_agents, workspace_files
+        )
         logger.info(
-            "Starting orchestrated analysis: %d groups, provider=%s, model=%s, job_id=%s",
+            "Running agent routing call: %d groups, %d custom agents",
             len(groups),
-            ai_provider,
-            ai_model,
+            len(custom_agents),
+        )
+        routing_result = await _call_ai_with_retry(
+            routing_prompt,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            workspace_dir=workspace_dir,
+            repos=additional_repos,
+            ai_call_timeout=ai_call_timeout,
+            server_url="",  # routing doesn't need history
+            job_id=job_id,
+            auth_header="",
+            call_type="agent_routing",
+        )
+        if routing_result.success and not _is_empty_ai_text(routing_result):
+            agent_routing = parse_agent_routing_response(routing_result.text, groups)
+            logger.info("Agent routing result: %s", agent_routing)
+        else:
+            logger.warning("Agent routing call failed; using base agent for all groups")
+
+    # Run per-group analysis in parallel via analyze_failure_group
+    # (single-AI or peer) with system_prompt from agent file
+    logger.info(
+        "Starting orchestrated analysis: %d groups, provider=%s, model=%s, job_id=%s",
+        len(groups),
+        ai_provider,
+        ai_model,
+        job_id,
+    )
+
+    async def _analyze_group(
+        sig: str, failures: list[FailedTest], group_number: int
+    ) -> list[FailureAnalysis]:
+        """Analyze a single failure group with agent prompt."""
+        await safe_update_progress(
+            job_id, f"analyzing_failures (group {group_number}/{len(groups)})"
+        )
+        logger.info(
+            "Analyzing failure group %d/%d for job=%s",
+            group_number,
+            len(groups),
             job_id,
         )
-
-        async def _analyze_group(
-            sig: str, failures: list[FailedTest], group_number: int
-        ) -> list[FailureAnalysis]:
-            """Analyze a single failure group with agent prompt."""
-            await safe_update_progress(
-                job_id, f"analyzing_failures (group {group_number}/{len(groups)})"
-            )
-            logger.info(
-                "Analyzing failure group %d/%d for job=%s",
-                group_number,
-                len(groups),
-                job_id,
-            )
-            # Point AI at specialist agent file (do not embed body)
-            agent_appendix = ""
-            routed_agent = agent_routing.get(sig)
-            if routed_agent:
-                agent_file = workspace_dir / ".pi" / "agents" / f"{routed_agent}.md"
-                if agent_file.is_file():
-                    agent_appendix = (
-                        f"\n\n=== SPECIALIST AGENT ({routed_agent}) ===\n"
-                        f"A specialist agent has been assigned to this failure group.\n"
-                        f"MANDATORY: Read the agent instructions at {agent_file} "
-                        f"and follow them before analyzing.\n"
-                    )
-
-            # Build custom_prompt with agent appendix
-            effective_custom_prompt = custom_prompt
-            if agent_appendix:
-                effective_custom_prompt = (
-                    f"{custom_prompt}\n{agent_appendix}"
-                    if custom_prompt
-                    else agent_appendix
+        # Point AI at specialist agent file (do not embed body)
+        agent_appendix = ""
+        routed_agent = agent_routing.get(sig)
+        if routed_agent:
+            agent_file = workspace_dir / ".pi" / "agents" / f"{routed_agent}.md"
+            if agent_file.is_file():
+                agent_appendix = (
+                    f"\n\n=== SPECIALIST AGENT ({routed_agent}) ===\n"
+                    f"A specialist agent has been assigned to this failure group.\n"
+                    f"MANDATORY: Read the agent instructions at {agent_file} "
+                    f"and follow them before analyzing.\n"
                 )
 
-            results = await analyze_failure_group(
-                failures=failures,
-                console_context=console_context,
-                repo_path=repo_path,
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                ai_call_timeout=ai_call_timeout,
-                custom_prompt=effective_custom_prompt,
-                artifacts_context=artifacts_context,
-                server_url=server_url,
-                job_id=job_id,
-                peer_ai_configs=peer_ai_configs,
-                peer_analysis_max_rounds=peer_analysis_max_rounds,
-                additional_repos=additional_repos,
-                max_concurrent_ai_calls=max_concurrent_ai_calls,
-                auth_header=auth_header,
-                all_groups=groups if len(groups) > 1 else None,
-                system_prompt=system_prompt,
+        # Build custom_prompt with agent appendix
+        effective_custom_prompt = custom_prompt
+        if agent_appendix:
+            effective_custom_prompt = (
+                f"{custom_prompt}\n{agent_appendix}"
+                if custom_prompt
+                else agent_appendix
             )
-            return results
 
-        # Run all groups in parallel
-        coroutines = [
-            _analyze_group(sig, failures, number)
-            for number, (sig, failures) in enumerate(groups.items(), 1)
-        ]
-        results = await run_parallel_with_limit(
-            coroutines, max_concurrency=max_concurrent_ai_calls
+        results = await analyze_failure_group(
+            failures=failures,
+            console_context=console_context,
+            repo_path=repo_path,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            ai_call_timeout=ai_call_timeout,
+            custom_prompt=effective_custom_prompt,
+            artifacts_context=artifacts_context,
+            server_url=server_url,
+            job_id=job_id,
+            peer_ai_configs=peer_ai_configs,
+            peer_analysis_max_rounds=peer_analysis_max_rounds,
+            additional_repos=additional_repos,
+            max_concurrent_ai_calls=max_concurrent_ai_calls,
+            auth_header=auth_header,
+            all_groups=groups if len(groups) > 1 else None,
+            system_prompt=system_prompt,
         )
+        return results
 
-        # Collect results
-        all_analyses: list[FailureAnalysis] = []
-        group_results: list[tuple[str, AnalysisDetail]] = []
-        from rootcoz.engine.chat import safe_exception_frames
+    # Run all groups in parallel
+    coroutines = [
+        _analyze_group(sig, failures, number)
+        for number, (sig, failures) in enumerate(groups.items(), 1)
+    ]
+    results = await run_parallel_with_limit(
+        coroutines, max_concurrency=max_concurrent_ai_calls
+    )
 
-        for (sig, failures), result in zip(groups.items(), results):
-            if isinstance(result, Exception):
-                logger.error(
-                    "Failed to analyze group %s: %s\n%s",
-                    sig,
-                    type(result).__name__,
-                    safe_exception_frames(result),
+    # Collect results
+    all_analyses: list[FailureAnalysis] = []
+    group_results: list[tuple[str, AnalysisDetail]] = []
+    from rootcoz.engine.chat import safe_exception_frames
+
+    for (sig, failures), result in zip(groups.items(), results):
+        if isinstance(result, Exception):
+            logger.error(
+                "Failed to analyze group %s: %s\n%s",
+                sig,
+                type(result).__name__,
+                safe_exception_frames(result),
+            )
+            # Only our own message: a provider error may echo a credential
+            # and must never be persisted into the result.
+            all_analyses.extend(
+                _failed_group_analyses(
+                    sig, failures, analysis_error=incomplete_reason(result)
                 )
-                all_analyses.extend(_failed_group_analyses(sig, failures))
-                continue
-            all_analyses.extend(result)
-            if result:
-                group_results.append((sig, result[0].analysis))
-            else:
-                logger.warning("Analysis group %s returned no analyses", sig)
-                all_analyses.extend(_failed_group_analyses(sig, failures))
-
-        if not group_results:
-            logger.warning("No successful direct analysis groups for job=%s", job_id)
-
-        # Cross-failure pattern detection (only when multiple successful groups)
-        cross_patterns: list[CrossFailurePattern] = []
-        if len(group_results) > 1:
-            await safe_update_progress(job_id, "cross_failure")
+            )
+            continue
+        all_analyses.extend(result)
+        if not result:
+            logger.warning("Analysis group %s returned no analyses", sig)
+            all_analyses.extend(_failed_group_analyses(sig, failures))
+        elif not result[0].analysis.classification:
+            # Only the peer path returns rows with no classification (the
+            # single-AI path raises and lands in the branch above). Such a
+            # group has no diagnosis to correlate, so feeding it to
+            # cross-failure only dilutes the other groups' patterns (#399).
             logger.info(
-                "Running cross-failure pattern detection for %d groups",
-                len(group_results),
+                "Analysis group %s has no classification; excluded from cross-failure",
+                sig,
             )
-            cross_prompt = _build_cross_failure_prompt(group_results, workspace_dir)
-            cross_result = await _call_ai_with_retry(
-                cross_prompt,
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                workspace_dir=workspace_dir,
-                repos=additional_repos,
-                ai_call_timeout=ai_call_timeout,
-                server_url="",  # cross-failure doesn't need history
-                job_id=job_id,
-                auth_header="",
-                call_type="cross_failure",
-            )
-            if cross_result.success and not _is_empty_ai_text(cross_result):
-                cross_patterns = _parse_cross_failure_response(cross_result.text)
-                logger.info("Detected %d cross-failure patterns", len(cross_patterns))
-            else:
-                logger.warning(
-                    "Cross-failure pattern detection failed or returned empty"
-                )
+        else:
+            group_results.append((sig, result[0].analysis))
 
-        return all_analyses, cross_patterns
+    if not group_results:
+        logger.warning("No successful direct analysis groups for job=%s", job_id)
 
-    finally:
-        if temp_dir and temp_dir.exists():
-            cleanup_http_tools_mcp(temp_dir)
-            shutil.rmtree(temp_dir, ignore_errors=True)
+    # Cross-failure pattern detection (only when multiple successful groups)
+    cross_patterns: list[CrossFailurePattern] = []
+    if len(group_results) > 1:
+        await safe_update_progress(job_id, "cross_failure")
+        logger.info(
+            "Running cross-failure pattern detection for %d groups",
+            len(group_results),
+        )
+        cross_prompt = _build_cross_failure_prompt(group_results, workspace_dir)
+        cross_result = await _call_ai_with_retry(
+            cross_prompt,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            workspace_dir=workspace_dir,
+            repos=additional_repos,
+            ai_call_timeout=ai_call_timeout,
+            server_url="",  # cross-failure doesn't need history
+            job_id=job_id,
+            auth_header="",
+            call_type="cross_failure",
+        )
+        if cross_result.success and not _is_empty_ai_text(cross_result):
+            cross_patterns = _parse_cross_failure_response(cross_result.text)
+            logger.info("Detected %d cross-failure patterns", len(cross_patterns))
+        else:
+            logger.warning("Cross-failure pattern detection failed or returned empty")
+
+    return all_analyses, cross_patterns

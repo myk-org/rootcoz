@@ -14,6 +14,7 @@ import { useAuth } from '@/lib/auth'
 import { resolveBuildDisplayId } from '@/lib/utils'
 import { exporterEnabled, useReportState } from '@/pages/report/reportState'
 import { pushRejectionDetail } from '@/lib/pushGate'
+import { defaultedNotice, unmatchedFailure } from '@/lib/pushResult'
 import { pushFullySucceeded, pushToExporter } from './useExporterPush'
 import { GreenwavePushForm } from './GreenwavePushForm'
 
@@ -26,25 +27,40 @@ interface PushResponse {
   success?: boolean
   message?: string
   errors?: string[]
+  pushed?: number
   unmatched?: string[]
+  defaulted?: string[]
 }
 
 /**
  * Extract a user-facing failure detail from a push response, or null when
  * the push succeeded. Covers the generic exporter response
  * (`success`/`message`) and the Report Portal response (`errors`,
- * `unmatched` — a push with unmatched tests recorded nothing, mirroring
- * the ReportPortalButton noop semantics).
+ * `unmatched` — a test that was not pushed). `defaulted` is not a failure:
+ * those tests were pushed under the TO INVESTIGATE fallback, so it is carried
+ * separately by `pushDefaultedItems` and reported as a notice, never an error.
  */
-function pushFailureDetail(res: unknown): string | null {
+function pushFailureDetail(
+  res: unknown,
+): { message: string; detail?: string } | null {
   if (!res || typeof res !== 'object') return null
   const r = res as PushResponse
-  if (r.success === false) return r.message || r.errors?.[0] || 'push failed'
-  if (r.errors && r.errors.length > 0) return r.errors[0]
+  if (r.success === false) {
+    return { message: r.message || r.errors?.[0] || 'push failed' }
+  }
+  if (r.errors && r.errors.length > 0) return { message: r.errors[0] }
   if (r.unmatched && r.unmatched.length > 0) {
-    return `${r.unmatched.length} test(s) could not be matched to Report Portal items`
+    return unmatchedFailure(r.pushed ?? 0, r.unmatched)
   }
   return null
+}
+
+/** Tests a response pushed under TO INVESTIGATE — empty when none. */
+function pushDefaultedItems(res: unknown): string[] {
+  if (!res || typeof res !== 'object') return []
+  const r = res as PushResponse
+  if (r.success === false) return []
+  return r.defaulted ?? []
 }
 
 export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
@@ -54,6 +70,15 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
   const [dialogOpen, setDialogOpen] = useState(false)
   const [pushing, setPushing] = useState(false)
   const [pushError, setPushError] = useState<string | null>(null)
+  // Muted second line under the error — the unmatched entries, which name the
+  // classification the backend could not map
+  const [pushErrorDetail, setPushErrorDetail] = useState<string | null>(null)
+  // The push went through, but tests landed under TO INVESTIGATE — the dialog
+  // stays open to say so instead of closing as if everything was classified
+  const [pushNotice, setPushNotice] = useState<{
+    message: string
+    detail: string
+  } | null>(null)
   // Report Portal / Datadog decision, so collapsing their block never
   // dismisses the Greenwave offer sitting in the same prompt.
   const [eventPushStatus, setEventPushStatus] = useState<
@@ -155,6 +180,8 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
           pushRunRef.current++
           setEventPushStatus(null)
           setPushError(null)
+          setPushErrorDetail(null)
+          setPushNotice(null)
           resetGreenwaveSession()
           setDialogOpen(true)
         }
@@ -169,6 +196,8 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
     setDialogOpen(false)
     setPushing(false)
     setPushError(null)
+    setPushErrorDetail(null)
+    setPushNotice(null)
     setEventPushStatus(null)
     succeededRef.current = new Set()
     pushRunRef.current++
@@ -181,6 +210,8 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
       // A closed dialog must not resurrect a stale error on reopen
       if (!open) {
         setPushError(null)
+        setPushErrorDetail(null)
+        setPushNotice(null)
         setEventPushStatus(null)
         resetGreenwaveSession()
       }
@@ -199,6 +230,8 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
     const runId = ++pushRunRef.current
     setPushing(true)
     setPushError(null)
+    setPushErrorDetail(null)
+    setPushNotice(null)
     try {
       const targets: Array<'reportportal' | 'datadog'> = []
       if (rpRef.current) targets.push('reportportal')
@@ -219,20 +252,33 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
       const settled = await Promise.allSettled(pushes.map((p) => p.promise))
       if (runId !== pushRunRef.current) return
       const failures: string[] = []
+      const details: string[] = []
+      const defaulted: string[] = []
       settled.forEach((outcome, i) => {
         const { key, label } = pushes[i]
         if (outcome.status === 'rejected') {
           failures.push(`${label}: ${pushRejectionDetail(outcome.reason)}`)
         } else {
           const detail = pushFailureDetail(outcome.value)
-          if (detail) failures.push(`${label}: ${detail}`)
-          else succeededRef.current.add(key)
+          if (detail) {
+            failures.push(`${label}: ${detail.message}`)
+            if (detail.detail) details.push(detail.detail)
+          } else {
+            succeededRef.current.add(key)
+            defaulted.push(...pushDefaultedItems(outcome.value))
+          }
         }
       })
       if (failures.length > 0) {
         // Keep the dialog open so the user sees what failed
         setPushError(failures.join('; '))
+        setPushErrorDetail(details.length > 0 ? details.join('; ') : null)
         setEventPushStatus('failed')
+      } else if (defaulted.length > 0) {
+        // Pushed, but under the TO INVESTIGATE fallback — say which tests.
+        // The question stays answerable: a retry sends nothing new and closes.
+        setPushNotice(defaultedNotice(defaulted))
+        setEventPushStatus('pushed')
       } else {
         setEventPushStatus('pushed')
         // Only close when there is no Greenwave offer left to answer; the
@@ -247,6 +293,8 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
 
   const handleSkip = () => {
     setPushError(null)
+    setPushErrorDetail(null)
+    setPushNotice(null)
     setEventPushStatus('skipped')
     if (!greenwaveOffered || greenwaveDone) handleOpenChange(false)
   }
@@ -285,8 +333,12 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
                 </p>
               )}
               {/* A failed push keeps the answer editable: retrying only
-                  re-sends the combinations that have not succeeded yet. */}
-              {(eventPushStatus === null || eventPushStatus === 'failed') && (
+                  re-sends the combinations that have not succeeded yet. A
+                  TO INVESTIGATE notice does too — the tests were pushed, so
+                  a retry sends nothing new and closes the prompt. */}
+              {(eventPushStatus === null ||
+                eventPushStatus === 'failed' ||
+                pushNotice !== null) && (
                 <div className="flex gap-2">
                   <Button onClick={handleConfirm} disabled={pushing}>
                     {pushing ? 'Loading...' : 'Yes'}
@@ -299,6 +351,19 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
               {pushError && (
                 <p className="text-xs text-signal-red" role="alert">
                   {pushError}
+                </p>
+              )}
+              {pushErrorDetail && (
+                <p className="text-xs text-text-tertiary">{pushErrorDetail}</p>
+              )}
+              {pushNotice && (
+                <p className="text-xs text-text-secondary" role="status">
+                  {pushNotice.message}
+                </p>
+              )}
+              {pushNotice && (
+                <p className="text-xs text-text-tertiary" role="status">
+                  {pushNotice.detail}
                 </p>
               )}
             </div>
@@ -340,11 +405,14 @@ export function AllReviewedPrompt({ jobId }: AllReviewedPromptProps) {
                       if (gwSession !== greenwaveSessionRef.current) return
                       setGreenwaveDone(true)
                       // The event question may still be unanswered: keep the
-                      // dialog so answering it is still possible.
+                      // dialog so answering it is still possible. A TO
+                      // INVESTIGATE notice is also still unread — closing
+                      // here would swallow it.
                       if (
-                        !eventExportersOffered ||
-                        eventPushStatus === 'pushed' ||
-                        eventPushStatus === 'skipped'
+                        pushNotice === null &&
+                        (!eventExportersOffered ||
+                          eventPushStatus === 'pushed' ||
+                          eventPushStatus === 'skipped')
                       ) {
                         handleOpenChange(false)
                       }

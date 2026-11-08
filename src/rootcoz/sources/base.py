@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import logging
-import shutil
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -29,6 +28,7 @@ from rootcoz.models import (
     FailedTest,
     FailureAnalysis,
 )
+from rootcoz.temp_paths import cleanup_off_loop, delete_tree
 
 INGEST_COMPLETE_SUMMARY = (
     "CI results have been collected and stored. AI analysis has not run. "
@@ -56,11 +56,15 @@ def cleanup_extract_dir(
     if extract_path is None or not extract_path.exists():
         return
     logger.info("Cleaning up %s: %s", label, extract_path)
-    try:
-        shutil.rmtree(extract_path)
-        logger.info("Cleanup complete: %s", extract_path)
-    except OSError as exc:
-        logger.warning("Failed to clean up %s: %s", extract_path, exc)
+    nbytes, entries, failed = delete_tree(extract_path)
+    # Formatted inline for the reason ``delete_tree`` gives: a template-keyed
+    # dedupe filter would drop the second extract dir of one submission.
+    logger.log(
+        logging.WARNING if failed else logging.INFO,
+        f"Cleanup {'incomplete' if failed else 'complete'}: {extract_path} "
+        f"reclaimed={nbytes} ({nbytes / 1048576:.1f} MiB) entries={entries}"
+        + (f" survived={failed} (left for a later reclaim)" if failed else ""),
+    )
 
 
 @dataclass
@@ -447,10 +451,18 @@ class CISource(ABC):
         download artifacts set ``_extract_path`` and may override
         ``_extract_label`` for log wording. Sources without an extract
         directory are a no-op.
+
+        Sync on purpose: it is a reaper step, not something a coroutine calls
+        directly (see ``cleanup_async``).
         """
         if self._extract_path:
             cleanup_extract_dir(self._extract_path, label=self._extract_label)
             self._extract_path = None
+
+    async def cleanup_async(self) -> None:
+        """``cleanup`` off the event loop — extract trees are not small."""
+        what = self._extract_path.name if self._extract_path else type(self).__name__
+        await cleanup_off_loop(what, self.cleanup)
 
 
 @dataclass
@@ -744,7 +756,13 @@ async def run_console_only_analysis(
     max_concurrent_ai_calls: int = 3,
 ) -> tuple[bool, list[FailureAnalysis], str]:
     """Run console-only AI analysis when no structured test failures exist."""
-    from rootcoz.engine.core import analyze_failure_group, normalize_for_signature
+    from rootcoz.engine.core import (
+        AnalysisIncompleteError,
+        _failed_group_analyses,
+        analyze_failure_group,
+        get_failure_signature,
+        normalize_for_signature,
+    )
     from rootcoz.models import FailedTest
 
     synthetic_failure = FailedTest(
@@ -776,6 +794,25 @@ async def run_console_only_analysis(
             auth_header=auth_header,
         )
         return True, results, ""
+    except AnalysisIncompleteError as exc:
+        # The model answered but never classified the failure: a re-analysis can
+        # fix that, new credentials cannot. Keep the reason on the placeholder
+        # row so the report says why instead of blaming the credentials.
+        logger.error(
+            "Console-only analysis incomplete for job=%s: %s (text_length=%d)",
+            job_id,
+            exc,
+            len(exc.raw_text),
+        )
+        return (
+            False,
+            _failed_group_analyses(
+                get_failure_signature(synthetic_failure),
+                [synthetic_failure],
+                analysis_error=str(exc),
+            ),
+            str(exc),
+        )
     except (RuntimeError, ValueError, OSError, TypeError) as exc:
         from rootcoz.engine.chat import safe_exception_frames
 

@@ -14,7 +14,7 @@ function showReport(childOnly = false) {
     job_id: 'job-1', jenkins_url: null, status: 'completed', created_at: '', base_url: null, result_url: null,
     result: {
       job_id: 'job-1', job_name: 'example', build_number: 1, jenkins_url: null,
-      status: 'completed', summary: '1 analyzed successfully. 1 group(s) failed; check server logs.',
+      status: 'completed', summary: '1 analyzed successfully. 1 group(s) could not be analyzed: re-analyze the job, or classify them manually.',
       failed_analysis_groups: 1, passed_count: 3, ai_provider: '', ai_model: '',
       failures: [], child_job_analyses: childOnly ? [{
         id: 'leaf-2', job_name: 'leaf', build_number: 2, jenkins_url: null, summary: null,
@@ -28,6 +28,7 @@ function showReport(childOnly = false) {
     if (path === '/results/job-1/comments') return { comments: [], reviews: {} }
     if (path === '/api/ai-models') return { providers: {} }
     if (path.startsWith('/history/classifications')) return { classifications: [] }
+    if (path === '/results/job-1/enrich-comments') return { enrichments: {} }
     throw new Error(`Unexpected request: ${path}`)
   })
   render(<MemoryRouter initialEntries={['/results/job-1']}><Routes>
@@ -39,14 +40,18 @@ function showReport(childOnly = false) {
 describe('partial analysis report', () => {
   it('shows the persisted warning even when only a child failed', async () => {
     showReport(true)
-    expect(await screen.findByRole('alert')).toHaveTextContent('1 group(s) failed')
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('1 group(s) could not be analyzed')
+    // The banner must name the user's options, not point at server logs.
+    expect(alert).toHaveTextContent('Re-analyze the job, or classify the failures manually')
+    expect(alert).not.toHaveTextContent('server logs')
     expect(screen.queryByText('All Tests Passed')).not.toBeInTheDocument()
   })
 
   it('opens the report and visibly warns of failed groups alongside successful tests', async () => {
     showReport()
     expect(await screen.findByText('example')).toBeInTheDocument()
-    expect(screen.getByRole('alert')).toHaveTextContent('1 group(s) failed')
+    expect(screen.getByRole('alert')).toHaveTextContent('1 group(s) could not be analyzed')
     expect(screen.getByRole('button', { name: /Passed Tests.*3/ })).toBeInTheDocument()
     expect(screen.queryByText('All Tests Passed')).not.toBeInTheDocument()
     expect(screen.queryByText('Status page')).not.toBeInTheDocument()

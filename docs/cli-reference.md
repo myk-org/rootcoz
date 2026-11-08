@@ -124,16 +124,17 @@ Related lifecycle commands:
 | `submitters` | `--json` | Submitter names shown on the dashboard, one per line (sorted, deduped case-insensitively). |
 | `show JOB_ID` | `--full`/`-f`, `--fields` | Summary by default, full JSON with `--full`, or a sparse projection with `--fields`. |
 | `fields` | — | Print the allowlist of field paths accepted by `--fields`. |
+| `incomplete` | `--limit` (100, min 1, server caps at 500) | Jobs with failures that have no usable classification: job, build, and the count. `--json` also carries `test_names`. |
 | `tests JOB_ID` | `--status`/`-s` (`passed`, `skipped`, `failed`, repeatable), `--child-job`, `--child-build`, `--offset` (0), `--limit` (50, max 200) | Paginated test entries with `total` and `has_more`. |
 | `full JOB_ID` | `--status`/`-s`, `--child-job`, `--child-build`, `--offset` (0), `--limit` (50, max 200) — all scope the `tests` section | Complete job data in one call: failures with review state and effective classifications, summary, tests page, comments, tracked-in links. |
 | `review-status JOB_ID` | — | Failure, reviewed, and comment counts. |
 | `set-reviewed JOB_ID` | `--test`/`-t`, `--reviewed`/`--not-reviewed`, `--child-job`, `--child-build` | Mark one failure reviewed. |
 | `set-tracked-in JOB_ID` | `--test`/`-t`, `--url`/`-u`, `--type` (`jira` or `github`; omit for auto-detection), `--child-job`, `--child-build` | Link a failure to a ticket. |
 | `delete-tracked-in JOB_ID` | `--link-id` | Remove one tracked-in link. |
-| `enrich-comments JOB_ID` | — | Refresh live PR and ticket status on comments. |
+| `enrich-comments JOB_ID` | — | Refresh PR and ticket status on comments; a repeat read may be served from the server's per-job cache (see [API Reference](api-reference.html#comments-and-mentions)). Prints the comment and badge counts, then `Some lookups failed; these counts may be incomplete.` when the server reports a failed lookup, so an empty result is not read as nothing to enrich. Nothing extra is printed when no lookup failed, or against a server too old to send the flag. `--json` prints neither line: the payload's `failed` key is the signal there. |
 | `delete [JOB_ID ...]` | `--all`, `--confirm` | Delete jobs and related data. `--all` requires `--confirm`. |
 
-Sparse field paths include `result.summary`, `result.failed_count`, `result.failures.test_name`, `result.failures.classification`, and `result.failures.details`. Unknown paths are rejected with HTTP 400, so run `rootcoz results fields` first.
+Sparse field paths include `result.summary`, `result.failed_count`, `result.failures.test_name`, `result.failures.classification`, `result.failures.details`, and `result.incomplete_count`. Unknown paths are rejected with HTTP 400, so run `rootcoz results fields` first.
 
 > **Note:** Pass `--child-job` before `--child-build`. The CLI validates the pair and rejects a build number with no job name, because the client drops `child_build_number` when `--child-job` is absent — an unpaired `--child-build` would otherwise be applied unscoped and silently. `results set-tracked-in` is included in that validation.
 
@@ -192,6 +193,8 @@ Sparse field paths include `result.summary`, `result.failed_count`, `result.fail
 | `rootcoz preview-issue JOB_ID` | `--test`/`-t`, `--type` (`github` or `jira`), `--child-job`, `--child-build`, `--include-links`, `--ai-provider`, `--ai-model`, `--github-token`, `--github-repo-url`, `--jira-token`, `--jira-email`, `--jira-sa-token`, `--jira-project-key`, `--jira-security-level`, `--issue-prompt` | Render issue title, body, and similar issues without creating anything. |
 | `rootcoz get-issue-prompt JOB_ID` | — | The issue prompt attached to the job's tests repo. |
 | `rootcoz create-issue JOB_ID` | `--test`/`-t`, `--type`, `--title`, `--body`, `--child-job`, `--child-build`, `--github-token`, `--github-repo-url`, `--jira-token`, `--jira-email`, `--jira-sa-token`, `--jira-project-key`, `--jira-security-level`, `--jira-issue-type` (default `Bug`) | Create the issue. |
+| `rootcoz propose-chat-issue` | `--target` (`github` or `jira`), `--title`, `--body`, `--repo`, `--job-id`, `--jira-project-key`, `--jira-security-level`, `--jira-issue-type` (default `Bug`) | Draft the issue and print the confirmation id, the confirmation code, and the `create-chat-issue` command that redeems them. Files nothing. The repo/run/project named here is part of the draft, so the create call must name the same one. |
+| `rootcoz create-chat-issue` | `--target` (`github` or `jira`), `--confirmation-id`, `--confirmation-code`, `--title`, `--body`, `--repo`, `--job-id`, `--jira-project-key`, `--jira-security-level`, `--jira-issue-type` (default `Bug`) | File the issue drafted by `propose-chat-issue`, passing the confirmation id and the confirmation code it printed. Deliberately exposes **no** token flags: the issue is created with the credentials saved in your account, so it can never be filed under a server token. |
 | `rootcoz validate-token github\|jira` | `--token` (hidden prompt), `--email` | Check a tracker token before using it. An ATOA-prefixed Jira value (an Atlassian OAuth 2.0 credential client secret) is validated as a service account against the scoped Atlassian gateway, using the server's `atlassian_oauth_client_id`; an ATST-prefixed value (an Atlassian service-account scoped token) is sent as Bearer to the same gateway with no exchange. |
 | `rootcoz ai-models` | `--provider`/`-p` | Model IDs per provider, with credential sources. |
 
@@ -241,6 +244,7 @@ See [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analy
 | Command | Flags | Purpose |
 | --- | --- | --- |
 | `component-versions` | — | Installed AI-sidecar component versions. |
+| `server-status` | — | Live server status: disk (filesystem usage of the data directory plus database, transcripts and logs sizes), CPU (process percent and cgroup quota — the cores, `no CPU quota (unlimited)` when `cpu.max` says `max`, or `quota unknown` when it cannot be read), memory (RSS, usage against `memory.max`, working set and its share of the limit, with the same set/unlimited/unknown distinction), process (version, commit, uptime, PID, restarts, worst event-loop stall in the last minute), database size and row counts, sidecar reachability and model counts, activity (analyses running with their elapsed time, chat turns in flight, SSE clients), and the derived warnings. A block the server cannot read prints `unavailable` with the reason instead of a zero. |
 | `token-usage` | `--period` (`today`, `week`, `month`, `all`), `--start-date`, `--end-date`, `--provider`, `--model`, `--call-type`, `--group-by` (`provider`, `model`, `call_type`, `day`, `week`, `month`, `job`), `--job-id`, `--format` (`table`, `json`, `csv`) | AI token usage and cost. No filters prints the summary dashboard. |
 | `transcripts list` | `--job` (filter to one run), `--format` (`table`, `json`) | Recorded AI session transcripts (redacted JSONL) with per-session context. Admin only. |
 | `transcripts show SESSION_ID` | `--output`/`-o` FILE | Download one transcript JSONL. Admin only. |
@@ -309,8 +313,8 @@ See [Managing Users and Server Settings](manage-users-and-server-settings.html) 
   The path is not on the allowlist. Run `rootcoz results fields` and copy the path exactly.
 - `--child-build requires --child-job`.  
   Pass both flags together; there is no way to target a child build without naming its job.
-- A `push` reports every test as unmatched.  
-  The exporter could not match test names. Confirm the plugin is enabled with `rootcoz exporters`, and check the child scoping flags if the job is a pipeline parent.
+- A `push` reports every test under `defaulted`.  
+  None of the failures had a classification to map, so they were pushed as `TO INVESTIGATE`; an analysis with none at all is named as `none`. Re-analyze the jobs first. A test that never reached the launch is named under `errors` instead.
 
 ## Related Pages
 

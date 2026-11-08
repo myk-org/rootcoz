@@ -60,7 +60,7 @@ That single authenticated GET returns the stored analysis for one job, including
 | --- | --- | --- |
 | GET | `/health` | Liveness, returns immediately |
 | GET | `/api/health` | Detailed health including database and AI sidecar; returns 503 when the database or the sidecar (probed via its effective port) is unreachable. `checks.audit` reports `{status, write_failures}`: `degraded` once an audit row has failed to persist since process start |
-| GET | `/metrics` | Prometheus metrics, including `rootcoz_audit_write_failures` |
+| GET | `/metrics` | Prometheus metrics (text exposition format): `rootcoz_requests_total`, `rootcoz_errors_total`, `rootcoz_error_rate`, `rootcoz_errors_by_class`, `rootcoz_health_up`, `rootcoz_active_analyses`, `rootcoz_audit_write_failures`, and the unlabelled `rootcoz_data_used_bytes` / `rootcoz_data_capacity_bytes` / `rootcoz_data_used_ratio` for the filesystem that holds the data directory. The probe is storage-agnostic: the same gauges work for an OpenShift PVC, a Docker volume, a bind mount or a plain directory, because they measure whatever filesystem backs the data dir — on a shared node filesystem the number can include other tenants' usage, so read it as free space on that filesystem, not as a per-volume quota. The data gauges are **omitted when the filesystem probe fails**, never reported as `0`. The endpoint is unauthenticated, so the absolute used and capacity byte counts of the data filesystem are visible to anyone who can reach it — capacity numbers only, no content and no path label |
 | GET | `/api/releases/latest` | Proxies GitHub release metadata (version, changelog) plus `server_version` and `update_available` so clients can tell an update notice from a What's New popup |
 | GET | `/openapi.json`, `/docs`, `/redoc` | Schema and interactive API browsers |
 | POST | `/api/auth/register` | Create a user, returns the raw API key once |
@@ -132,6 +132,7 @@ The shared body accepts the server defaults as per-request overrides:
 | GET | `/results` | viewer | `limit` (max 100), `analysis_state` (`submitted`, `analyzed`) |
 | GET | `/results/{job_id}` | viewer | `fields` — comma-separated allowlisted paths |
 | GET | `/api/results/fields` | viewer | none; returns the allowlist |
+| GET | `/api/results/incomplete` | viewer | `limit` (default 100, min 1, capped at 500) |
 | GET | `/api/results/{job_id}/tests` | viewer | `status` (repeatable: `passed`, `skipped`, `failed`), `child_job_name`, `child_build_number`, `offset`, `limit` (1–200, default 50) |
 | GET | `/api/results/{job_id}/full` | viewer | `status`, `child_job_name`, `child_build_number`, `offset`, `limit` — apply to the `tests` section (same contract as `/tests`) |
 | GET | `/api/failures/{failure_uuid}` | viewer | none |
@@ -142,6 +143,10 @@ The shared body accepts the server defaults as per-request overrides:
 | GET | `/api/dashboard/active-count` | viewer | none |
 
 `fields` returns full values for allowlisted paths only and is never truncated. Unknown paths return `400`, so fetch `/api/results/fields` first when you build against it.
+
+`GET /results/{job_id}` always sets `result.incomplete_count`: the number of failures whose effective classification is empty — no `analysis.classification`, or an analysis stored as plain text by an older run. `analysis_error` only explains why there is no analysis; it is not what makes a row incomplete. It counts failures across `failures`, `child_job_analyses`, and nested `failed_children`, and it is computed from the effective classifications, so an override that sets one removes that failure from the count. It is an allowlisted `fields` path, so `?fields=result.incomplete_count` returns just it; dashboard rows carry the same key only when it is above zero.
+
+`GET /api/results/incomplete` lists the jobs holding such failures, newest first. It returns an object, never a bare array: `{"jobs": [...], "truncated": bool, "truncated_by": "limit" | "scan_ceiling" | null, "scanned": int}`. Each entry in `jobs` is `{job_id, job_name, build_number, build_id, incomplete_count, test_names}`: `incomplete_count` is `len(test_names)`, `test_names` names the failures still unclassified, and `job_name`, `build_number` and `build_id` fall back to `""`, `0` and `""` when the stored result does not carry them. Only an analysis that actually ran can be incomplete, so a job whose `analysis_state` is `submitted` is never listed — there is no entry and no count for a job that is still pending (`GET /results/{job_id}` reports `incomplete_count: 0` for it). `limit` is 1–500 (default 100; `0` is rejected with `422`) and counts matching jobs, not scanned rows, so a page is never padded with clean results. `scanned` is the number of rows examined, `truncated` is `true` when the scan stopped before examining every row, and `truncated_by` names the stop that did it: `limit` (raise `limit` to see more) or `scan_ceiling` (the fixed 5000-row bound on the most recent results, where a higher `limit` cannot help — on a very large instance this makes the list a recent window rather than the whole history). There is deliberately no total: counting every match is the full-table scan that bound exists to prevent. The endpoint is read-only and available to `viewer` and above.
 
 `GET /api/results/{job_id}/full` returns the complete picture in one call: `job` metadata, `counts` (passed/skipped/failed), a flat `failures` list across child jobs with effective classifications and review state (`reviewed`, `reviewed_by`) joined server-side, a precomputed `summary` (`total_failures`, `reviewed_count`, `classifications`), a paginated `tests` page, `comments`, and `tracked_in` links. Jobs still running return `202` with the sections that exist so far.
 
@@ -167,7 +172,7 @@ Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pat
 | GET | `/results/{job_id}/comments` | viewer | Full thread for one job |
 | POST | `/results/{job_id}/comments` | reviewer | `test_name`, `comment`; returns `201` |
 | DELETE | `/results/{job_id}/comments/{comment_id}` | reviewer | Comment author or admin |
-| POST | `/results/{job_id}/enrich-comments` | viewer | Live GitHub PR and Jira ticket status |
+| GET | `/results/{job_id}/enrich-comments` | viewer | GitHub PR and Jira ticket status, re-read from GitHub and Jira on a cache miss. Read, not audited: the report page calls it on every load and the result is cached per job for 60 s, so a repeat read can return a minute-old status. Only refused and failed attempts are recorded. Returns `{"enrichments": {comment_id: [badges]}, "failed": bool}`: `failed` is `true` when any lookup errored or answered nothing, so an empty `enrichments` mapping is never mistaken for "nothing to enrich". The field is additive — a client that ignores it behaves as before, and a failure is never cached |
 | POST | `/api/analyze-comment-intent` | reviewer | Classifies an incoming comment as a question or an action |
 | GET | `/api/users/mentions` | viewer | Mentions for the current user |
 | GET | `/api/users/mentions/unread-count` | viewer | Navbar badge count |
@@ -182,8 +187,10 @@ Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pat
 | GET | `/results/{job_id}/issue-prompt` | viewer | Custom `.rootcoz/ROOTCOZ_ISSUE_PROMPT.md` for the repo |
 | POST | `/results/{job_id}/preview-github-issue` | reviewer | `test_name`, `include_links`, AI overrides; returns preview content |
 | POST | `/results/{job_id}/preview-jira-bug` | reviewer | Same shape, Jira flavour |
-| POST | `/results/{job_id}/create-github-issue` | reviewer | `test_name`, `title`, `body`; returns `201` |
-| POST | `/results/{job_id}/create-jira-bug` | reviewer | Adds `jira_issue_type`; returns `201` |
+| POST | `/results/{job_id}/create-github-issue` | reviewer | `test_name`, `title`, `body`; returns `201`. Files with the caller's own token only — a missing one is a `400`, never the server's `GITHUB_TOKEN`. Same refusal classes as `POST /api/feedback/create` — `502` when GitHub is unreachable or failing, `403` when the token cannot see `TESTS_REPO_URL` (GitHub answers `404` for that), lacks the `repo` scope, or is invalid or expired, `429` when rate limited |
+| POST | `/results/{job_id}/create-jira-bug` | reviewer | Adds `jira_issue_type`; returns `201`. Files with the caller's own Jira token or service-account token only — `400` when neither is supplied, never a server Jira credential; server settings supply only the project key and site URL. `401` for an invalid or expired Jira token, `403` when the token cannot access the Jira project (Jira answers `404` for that), `502` with a retryable `Jira is unavailable right now…` detail on an upstream `5xx`, `502 Jira API error: <status>` for anything else |
+| POST | `/api/chat-issue/propose` | reviewer | `target` (`github`/`jira`), `title`, `body`, optional `repo`, `job_id` and the Jira overrides; files nothing and returns `201` |
+| POST | `/api/chat-issue` | reviewer | `confirmation_id` and `confirmation_code` from the proposal plus the same `target`, `title`, `body` and destination (`repo`/`job_id`, `jira_project_key`, `jira_security_level`, `jira_issue_type`); returns `201` |
 | PUT | `/results/{job_id}/tracked-in` | reviewer | `test_name`, `url`, `type` |
 | GET | `/results/{job_id}/tracked-in` | reviewer | Current tracker links |
 | DELETE | `/results/{job_id}/tracked-in/{link_id}` | reviewer | Remove one link |
@@ -192,6 +199,8 @@ Classification values are `CODE ISSUE`, `PRODUCT BUG`, and `INFRASTRUCTURE`. Pat
 | POST | `/results/{job_id}/push-reportportal` | operator | Backward-compatible Report Portal push |
 
 > **Note:** All four issue preview and create endpoints call `_require_reviewer`, so a `viewer` receives `403` before the allow list is consulted. They additionally require valid tracker credentials and the matching `ENABLE_GITHUB_ISSUES` or `ENABLE_JIRA_ISSUES` toggle.
+
+`POST /api/chat-issue` is the chat counterpart: it takes no `test_name` and no credentials. It is what the chat model calls through its `create_github_issue` / `create_jira_issue` tools when the user explicitly asks for an issue, and the title and body are the model's draft. **It always needs a `confirmation_id` and the matching `confirmation_code`** from `POST /api/chat-issue/propose`, which files nothing and returns the preview the user approves: the draft is stored per account, single-use and expires after ten minutes, and the create call must repeat the same title, body, tracker **and destination** (`repo` and `job_id` for GitHub, the project/security-level/issue-type overrides for Jira). A create whose destination differs is a `400` — an id approved for one repository, run or Jira project authorises nothing else — and the chat tools bind the run internally, so the model cannot name another one. The tracker credential is **always** the caller's saved account token (`GET /api/user/tokens` is the source of truth for which trackers are available) — never the deployment's `GITHUB_TOKEN` or Jira credential, and with no exception for the bootstrap `admin`, which has no profile to store one. Status codes: `201` created; `400` for a missing or stale `confirmation_id`, a changed draft or destination, a `repo` that is not a bare `owner/name` slug, a missing account credential, a missing `TESTS_REPO_URL` or Jira project key, or an unusable/legacy service-account secret; `403` when the allow list blocks the caller, the caller is a `viewer`, the tracker's `ENABLE_*` toggle is off, or GitHub's own answer is a token that is invalid or expired, lacks the `repo` scope, or cannot see the repository it files in — the run's, the one the caller named, or `TESTS_REPO_URL` (GitHub answers `404` for an invisible repository, and the detail names the repository that failed); `401` when Jira rejects the credential; `429` when GitHub rate limits; `502` when the tracker is unreachable or failing. Every attempt writes one `issue.create` audit row with `target_type="chat"` — the create call, a refused `POST /api/chat-issue/propose`, a call the auth layer refuses (`401`) before the handler runs, and a call these two endpoints reject for request-model validation (`422`), whose row names the `step` and the failing field names (`details.fields`) but never a value: `details.result` is `success`, `refused` (with a reason code, the `step` and, when the tracker answered, its `upstream_status`), or `failure` for an internal error; a proposal names the `job_id` and `repo` it asked for; a `success` names the issue it filed — `url`, plus `number` for GitHub or `key` for Jira; no row carries the issue text or a token. `title` and `body` pass `scrub_sensitive_data` before the draft is stored, so a pasted credential never reaches the tracker.
 
 ### History and classification lookup
 
@@ -217,6 +226,8 @@ Send `source="ai"` to attribute the classification to the reserved `rootcoz-ai` 
 | POST | `/api/chat/{job_id}/close` | reviewer | Close the AI session |
 | DELETE | `/api/chat/{job_id}` | reviewer | Clear chat history |
 | GET | `/api/chat/{job_id}/stream` | viewer | SSE stream of new messages |
+
+An answer can become a tracker issue: the chat model files it through `POST /api/chat-issue` (see [Trackers, issues, and exporters](#trackers-issues-and-exporters)) when the user asks it to, via its `create_github_issue` / `create_jira_issue` tools. Admin chat (`/api/admin/chat/*`) has no tracker credential of its own; the endpoint uses the caller's account tokens in both chats, so an issue is always filed under the person who asked.
 
 ### Server-Sent Events streams
 
@@ -268,7 +279,13 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | GET | `/api/capabilities` | viewer | Feature toggles and whether server credentials exist |
 | GET | `/api/default-server-settings` | viewer | Non-sensitive settings and defaults only |
 | POST | `/api/feedback/preview` | viewer | AI-drafted feedback issue |
-| POST | `/api/feedback/create` | viewer | Creates the GitHub issue; returns `201` |
+| POST | `/api/feedback/create` | viewer | Creates the GitHub issue; returns `201`. `503` when feedback is disabled, `400` when the caller has no GitHub token of their own stored (the server's `GITHUB_TOKEN` is never used, not even for the bootstrap `admin`), `429` when GitHub rate-limited, `403` when the token is invalid, lacks the `repo` scope, or cannot see the repository, `502` when GitHub is unreachable or failing |
+
+> **Note:** `POST /api/feedback/create` and `POST /results/{job_id}/create-github-issue` share one refusal helper, so both keep `502` for GitHub trouble (unreachable, timeout, any `5xx`) and `403` for credential trouble, including a `404` from GitHub — that is how GitHub answers a repository the token cannot see, and reporting it as `403` keeps it away from the gateway-failure class. The two are separated on purpose: `502` means retry, `403` means fix the token. Only the subject differs — a refused feedback submission says the feedback was not filed, a refused failure issue says the bug report was not filed. Each refusal is logged at `WARNING` — the upstream status and the tracker's own `message` when there was an answer, the exception type and text when the call never landed — never the token and never the submitted body.
+>
+> `POST /results/{job_id}/create-jira-bug` applies the same split to Jira: `401` for an invalid or expired token, `403` for a project the token cannot access — Jira hides it behind a `404`, the same trick GitHub plays — and `502` with a retryable outage detail on an upstream `5xx`. Anything else stays `502 Jira API error: <status>`, with no rate-limit wording invented. Its refusals are logged the same way, including Jira's own `errorMessages`.
+>
+> Auditing is narrower than that: a refused `feedback.create` is recorded as a `denied` event with reason `forbidden` for the mapped `401`/`403` refusals (an invalid token, a missing `repo` scope, a repository the token cannot see), and as a `failure` event for the rest — `upstream_failure` for a `502`, `http_429` for the rate limit. Its `details` carries `upstream_status` only when the upstream status is not already named by that reason code — `401`, `403`, and `429` are omitted, every other status (a `404`, a `5xx`, a `422`) is recorded. Refusals on `create-github-issue` are not audited at all; only a successful create writes an `issue.create` row, so that path has no `upstream_status` to read.
 
 ### Admin
 
@@ -309,6 +326,7 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | GET | `/api/admin/audit/export` | Stream every event matching the list filters: `format` (`json`/`csv`) plus the same filters as `/api/admin/audit`. Uncapped — the way to retain evidence before retention deletes it |
 | POST | `/api/admin/ai-models/refresh` | Re-discover models from the sidecar |
 | GET | `/api/admin/component-versions` | Backend, sidecar, and chart versions |
+| GET | `/api/admin/server-status` | Live server status: `disk` (filesystem usage of the data directory plus `database`/`transcripts`/`logs` sizes), `cpu` (`process_percent`, `quota_cores`, `quota_state` = `set`/`unlimited`/`unknown`), `memory` (`rss_bytes`, `current_bytes`, `working_set_bytes`, `limit_bytes`, `limit_state`, `percent_of_limit` from the working set), `process` (`git_sha`, `restart_count` — `null` inside a container), `database` (size including the WAL, row counts, `compression_ratio`), `sidecar`, `activity` (`analyses_running`, `analyses` with per-analysis `elapsed_seconds`, `chat_turns_in_flight`, `sse_clients`), and `warnings`. Each probe block carries `available`; a probe that cannot read its source answers `{"available": false, "reason": "..."}` instead of failing the request |
 | GET | `/api/admin/db/schema` | Read-only schema dump |
 | POST | `/api/admin/db/query` | Read-only SQL for the admin chat |
 | GET | `/api/admin/chat` | Admin chat history |

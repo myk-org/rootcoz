@@ -184,24 +184,22 @@ Every new environment variable added to `Settings` in `config.py` **MUST** also 
 
 ### Documentation Site (`docs/`)
 
-`docs/` is a [pi-docsite](https://pypi.org/project/pi-docsite) site, served from the `main` branch by GitHub Pages.
+`docs/` is a [pi-docsite](https://pypi.org/project/pi-docsite) site published at <https://myk-org.github.io/rootcoz/>. Only its **sources** live in git: `docs/*.md` and `docs/nav.json`, both hand-authored. The built site is produced by CI, never by a contributor's working tree.
 
-**This replaces the previous docsfy rule.** Under docsfy the `.md` files were themselves generated output, so editing them by hand was wrong. Under pi-docsite the Markdown is the source: it is a markdown-source generator, not a code-comment extractor. The generated half of `docs/` is still strictly off limits, and that is the half the rule below protects — but hand-authoring `docs/*.md` is now correct and necessary, not a violation. A generation-from-code approach is what produced 11 of the 16 pages as `*Documentation generation failed.*` placeholders.
-
-**Authored sources** (edit these):
+**Authored sources** (edit these, in the PR):
 
 - `docs/*.md` — one page each, exactly one H1 that becomes its sidebar title
 - `docs/nav.json` — sidebar layout; array order is display order, a slug with no `.md` is a build error
 
-**Generated files** (`*.html`, `assets/`, `llms.txt`, `llms-full.txt`, `search-index.json`) — **NEVER edit these by hand**; they are overwritten on every build and are excluded from AI review via the `[ignore] glob` list in `.pr_agent.toml`.
+**Generated output** (`docs/*.html`, `docs/index.html`, `docs/assets/`, `docs/llms.txt`, `docs/llms-full.txt`, `docs/search-index.json`) is **not in git and must not be committed**. It is gitignored, so a local build cannot dirty the tree.
 
-Rebuild and commit the generated files together with the source change:
+Rules:
 
-```bash
-uvx pi-docsite --docs-dir docs --tagline "AI-powered CI failure analysis for Jenkins, Prow, and JUnit XML"
-```
+- **A PR never runs `pi-docsite` and never commits generated files.** Edit the `.md`, push, done. There is no rebuild step in a contributor's workflow.
+- The site is built and deployed by `.github/workflows/docs.yml` after merge — on every push to `main` that touches `docs/**.md` or `docs/nav.json`.
+- `.github/workflows/docs-guard.yml` fails any PR whose diff contains a generated path, and tells the author to edit the source instead.
 
-Output is byte-for-byte reproducible — churn in untouched files means something else changed. Link between pages with `.html` extensions (`[Quickstart](quickstart.html)`), not `.md`.
+Link between pages with `.html` extensions (`[Quickstart](quickstart.html)`), not `.md` — the built site serves `.html`. Links from outside `docs/` point at the published URL (`https://myk-org.github.io/rootcoz/<page>.html`), never at a `docs/*.html` path.
 
 ### Project Customization (`.rootcoz/` folder)
 
@@ -347,6 +345,12 @@ After any completed analysis, each failure is checked against previous analyses 
 
 Signature comparison goes through `storage.signatures_match()`, never a raw column comparison. Failures carry two hashes: `error_signature` is the frozen **anchor** (the pre-v2 normalization rules, written once and never rewritten — every row ever stored carries it), and `error_signature_v2` is the **current-rules** hash used for grouping. Rows written before the v2 rules exist have no v2 hash. Matching is over both columns of both rows, so a failure analysed today still matches its own history from before the rules changed. Changing the rules never requires rewriting stored rows: there is no backfill, and there is no deploy boundary where old and new stop matching. Use `storage.resolve_signature(row)` when a single canonical signature is needed (grouping/dedup keys, labels). `signatures_match()` is hashes only and is the universal comparison. The one wider rule — the same normalized message as a last resort, for a pre-v2 history row meeting a noisier rerun — belongs to `storage.previous_analysis_matches()` and to the history lookup alone, because a human confirms that chain on the report while every other match is a decision nobody sees.
 
+### Issue Creation Uses the User's Own Credentials (MANDATORY)
+
+**Creating an issue always uses the requesting user's credentials. There is never a fallback to a server or deployment credential** — not for feedback, not for `POST /results/{job_id}/create-github-issue`, not for `create-jira-bug`. `github_token`, `tests_repo_token` and every Jira credential are read from the caller only; server settings supply *configuration* (project key, site URL, tests repo URL) and never identity.
+
+A caller with no credentials gets a clear, actionable error and the action is blocked (`400` naming the setting to add, e.g. "GitHub token is required. Set up your token in Profile Settings.") — never a silent retry under someone else's token, and never an exception for the bootstrap `admin` account. The error must be followable by the account that receives it: the bootstrap `admin` has no users row, so `PUT /api/user/tokens` answers `404` for it and `POST /api/feedback/create` — the one path that reads the token from the row — tells it to sign in with its own registered account instead of pointing at Profile Settings. The same rule applies to anything added later that writes to an external tracker: if the code is about to hand a server token to a create/write call, it is a bug.
+
 ### Feedback System
 
 Users submit feedback (bugs, feature requests) via the FeedbackDialog component. Feedback is previewed with AI-generated issue content, then created as a GitHub issue. This replaces the old "Report Bug" flow.
@@ -402,7 +406,7 @@ When adding an endpoint, a setting, a background action or a permission change:
 2. Never store a credential value, a message body, a comment text or SQL text — names, ids, keys and reasons only. Identity (actor, target, message) is stored verbatim, never redacted.
 3. Add the action id to the coverage contract in issue #379, and let `tests/test_audit_coverage.py` enforce it: a mutating route that is neither audited nor exempt-with-a-reason fails the build.
 4. Extend `.pi/tmp/e2e-audit-plan.md` and its runners **before writing the code**, with an ID that triggers the new behaviour against a running server and asserts it (success **and** refusal path). An ID in the plan that does not run fails the run; a behaviour without an ID is an incomplete change.
-5. Update `docs/` (`manage-users-and-server-settings.md` for behaviour, `api-reference.md` for fields, `cli-reference.md` for commands) and regenerate with `uvx pi-docsite`.
+5. Update `docs/` (`manage-users-and-server-settings.md` for behaviour, `api-reference.md` for fields, `cli-reference.md` for commands) — edit the `.md` only; CI builds the site.
 
 Gating/admin controls (lockout thresholds, allow-lists, enable/disable) are security changes: they need the audit row, the setting entry in Server Settings metadata, and a CLI equivalent under the "Configuration Parity" rule.
 

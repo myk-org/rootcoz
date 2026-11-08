@@ -1,9 +1,9 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import { useEffect } from 'react'
 import { useReportDispatch } from '@/pages/report/reportState'
 import { ReportProvider } from '../ReportContext'
-import { useAiSelection } from '../useAiSelection'
+import { useAiSelection } from '@/lib/useAiSelection'
 import { useReviewSuggestion } from '../useReviewSuggestion'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 
@@ -13,6 +13,14 @@ import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 
 vi.mock('@/lib/cookies', () => ({
   getUsername: () => 'testuser',
+}))
+
+// useAiSelection reads the per-user store through useAuth.
+vi.mock('@/lib/auth', () => ({
+  useAuth: () => ({
+    username: 'testuser', isAdmin: false, authenticated: true, loading: false,
+    canUseServerProviders: false, canUseFreeProviders: false,
+  }),
 }))
 
 const mockPut = vi.fn()
@@ -25,6 +33,10 @@ vi.mock('@/lib/api', () => ({
     get: vi.fn().mockResolvedValue({ users: [] }),
   },
 }))
+
+afterEach(() => {
+  localStorage.clear()
+})
 
 /* ------------------------------------------------------------------ */
 /*  useReviewSuggestion hook integration tests                         */
@@ -357,7 +369,7 @@ describe('useReviewSuggestion – out-of-order intent responses', () => {
 })
 
 /* ------------------------------------------------------------------ */
-/*  AI pair selection (report-scoped, shared by every AI surface)     */
+/*  AI pair selection (remembered per user, shared by every surface)   */
 /* ------------------------------------------------------------------ */
 
 function AiHarness() {
@@ -373,7 +385,7 @@ function AiHarness() {
   )
 }
 
-describe('report-scoped AI selection', () => {
+describe('remembered AI selection', () => {
   beforeEach(() => {
     mockPost.mockResolvedValue({ suggests_reviewed: false, reason: '' })
   })
@@ -419,7 +431,7 @@ describe('report-scoped AI selection', () => {
     await waitFor(() => {
       expect(screen.getAllByText('claude/sonnet')).toHaveLength(2)
     })
-    // Both surfaces read the same page-scoped pair; neither falls back to its default.
+    // Both surfaces read the same remembered pair; neither falls back to its default.
     expect(screen.queryByText('openai/gpt-4o')).toBeNull()
   })
 })

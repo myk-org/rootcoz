@@ -128,6 +128,38 @@ class TestRootCozClientResults:
         result = client.list_result_fields()
         assert "status" in result["fields"]
 
+    def test_list_incomplete_analyses(self):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/results/incomplete"
+            assert request.url.params["limit"] == "25"
+            return httpx.Response(
+                200,
+                json=[
+                    {
+                        "job_id": "job-1",
+                        "job_name": "example",
+                        "build_number": 7,
+                        "incomplete_count": 2,
+                        "test_names": ["t1", "t2"],
+                    }
+                ],
+            )
+
+        client = _make_client(handler)
+        result = client.list_incomplete_analyses(limit=25)
+        assert result[0]["job_id"] == "job-1"
+        assert result[0]["test_names"] == ["t1", "t2"]
+
+    def test_list_incomplete_analyses_default_limit_omits_param(self):
+        def handler(request):
+            assert request.url.path == "/api/results/incomplete"
+            assert "limit" not in request.url.params
+            return httpx.Response(200, json=[])
+
+        client = _make_client(handler)
+        assert client.list_incomplete_analyses() == []
+
     def test_get_result_not_found(self):
         client = _make_client(
             lambda request: httpx.Response(404, json={"detail": "Job not found"})
@@ -632,6 +664,113 @@ class TestRootCozClientBugCreation:
             body="Description...",
         )
         assert result["key"] == "PROJ-456"
+
+    def test_create_chat_issue(self):
+        def handler(request):
+            assert request.method == "POST"
+            assert str(request.url).endswith("/api/chat-issue")
+            # No credential ever rides in the request body.
+            assert json.loads(request.content) == {
+                "target": "jira",
+                "title": "DNS timeout",
+                "body": "Description...",
+                "confirmation_id": "draft-1",
+                "confirmation_code": "ABC234",
+                "jira_project_key": "PROJ",
+            }
+            return httpx.Response(
+                201,
+                json={
+                    "url": "https://jira.example.com/browse/PROJ-7",
+                    "key": "PROJ-7",
+                    "title": "DNS timeout",
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.create_chat_issue(
+            target="jira",
+            title="DNS timeout",
+            body="Description...",
+            confirmation_id="draft-1",
+            confirmation_code="ABC234",
+            jira_project_key="PROJ",
+        )
+        assert result["key"] == "PROJ-7"
+
+    def test_create_chat_issue_sends_the_github_destination(self):
+        """CLI parity: the repo and run the draft binds must reach the server."""
+
+        def handler(request):
+            assert json.loads(request.content) == {
+                "target": "github",
+                "title": "DNS timeout",
+                "body": "Description...",
+                "confirmation_id": "draft-1",
+                "confirmation_code": "ABC234",
+                "repo": "org/tests",
+                "job_id": "job-1",
+            }
+            return httpx.Response(
+                201, json={"url": "https://github.com/org/tests/1", "number": 1}
+            )
+
+        result = _make_client(handler).create_chat_issue(
+            target="github",
+            title="DNS timeout",
+            body="Description...",
+            confirmation_id="draft-1",
+            confirmation_code="ABC234",
+            repo="org/tests",
+            job_id="job-1",
+        )
+        assert result["number"] == 1
+
+    def test_propose_chat_issue(self):
+        def handler(request):
+            assert request.method == "POST"
+            assert str(request.url).endswith("/api/chat-issue/propose")
+            assert json.loads(request.content) == {
+                "target": "jira",
+                "title": "DNS timeout",
+                "body": "Description...",
+            }
+            return httpx.Response(
+                201,
+                json={
+                    "confirmation_id": "draft-1",
+                    "title": "DNS timeout",
+                    "body": "Description...",
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.propose_chat_issue(
+            target="jira", title="DNS timeout", body="Description..."
+        )
+        assert result["confirmation_id"] == "draft-1"
+
+    def test_propose_chat_issue_sends_the_github_destination(self):
+        """The draft is proposed for the same repo and run the create names."""
+
+        def handler(request):
+            assert json.loads(request.content) == {
+                "target": "github",
+                "title": "DNS timeout",
+                "body": "Description...",
+                "repo": "org/tests",
+                "job_id": "job-1",
+            }
+            return httpx.Response(201, json={"confirmation_id": "draft-1"})
+
+        result = _make_client(handler).propose_chat_issue(
+            target="github",
+            title="DNS timeout",
+            body="Description...",
+            repo="org/tests",
+            job_id="job-1",
+        )
+        assert result["confirmation_id"] == "draft-1"
 
     def test_override_classification(self):
         def handler(request):
@@ -1170,14 +1309,19 @@ class TestRootCozClientReview:
         assert result["status"] == "ok"
 
     def test_enrich_comments(self):
+        payload = {
+            "enrichments": {"comment-1": [{"kind": "pr", "state": "merged"}]},
+            "failed": False,
+        }
+
         def handler(request):
-            assert request.method == "POST"
+            assert request.method == "GET"
             assert "/results/job-1/enrich-comments" in str(request.url)
-            return httpx.Response(200, json={"enriched": 3})
+            return httpx.Response(200, json=payload)
 
         client = _make_client(handler)
         result = client.enrich_comments("job-1")
-        assert result["enriched"] == 3
+        assert result == payload
 
 
 class TestRootCozClientExcludeJobId:
@@ -2157,6 +2301,21 @@ class TestRootCozClientAdminUsers:
         client = _make_client(handler)
         result = client.admin_component_versions()
         assert result["components"]["pi"] == "1.0.0"
+
+    def test_server_status(self):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/admin/server-status"
+            return httpx.Response(
+                200,
+                json={
+                    "disk": {"available": True, "used_ratio": 0.5},
+                    "warnings": [],
+                },
+            )
+
+        result = _make_client(handler).server_status()
+        assert result["disk"]["used_ratio"] == 0.5
 
     def test_admin_create_user(self):
         def handler(request):

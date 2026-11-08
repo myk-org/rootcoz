@@ -1,5 +1,5 @@
 import { reviewKey } from '@/lib/reviewKey'
-import type { ChildJobAnalysis, ReviewState } from '@/types'
+import type { AnalysisDetail, ChildJobAnalysis, FailureAnalysis, ReviewState } from '@/types'
 
 /** Walk the child-job tree once, calling `visitor` at each node.
  *  Centralises the recursion so every consumer stays in sync. */
@@ -39,6 +39,73 @@ export function countAllFailures(failures: { test_name: string }[], children: Ch
     count += nodeFailures.length
   })
   return count
+}
+
+/** One traversal behind both incomplete-failure counts: walk the child tree and
+ *  count the failures `include` selects that have no effective classification.
+ *  A live reviewer override wins over the stored classification, so classifying
+ *  a failure clears it from either total without a refetch. A `submitted` job
+ *  never counts: its analysis has not run, so its empty classifications are not
+ *  a failed analysis (storage.incomplete_failures). */
+function countIncompleteFailures(
+  failures: { test_name: string; analysis?: AnalysisDetail }[],
+  children: ChildJobAnalysis[],
+  classifications: Record<string, string>,
+  analysisState: string | undefined,
+  include: (f: FailureAnalysis) => boolean,
+): number {
+  if (analysisState === 'submitted') return 0
+  let count = 0
+  walkChildTree(failures, children, (nodeFailures, jobName, buildNumber) => {
+    for (const f of nodeFailures) {
+      if (!include(f as FailureAnalysis)) continue
+      const stored = (f as FailureAnalysis).analysis?.classification ?? ''
+      const effective = classifications[reviewKey(f.test_name, jobName, buildNumber)] ?? stored
+      // The server strips before deciding (storage._effective_classification).
+      if (!effective.trim()) count += 1
+    }
+  })
+  return count
+}
+
+/** Failures with no effective classification, mirroring the server's
+ *  `incomplete_count`. */
+export function countUnclassifiedFailures(
+  failures: { test_name: string; analysis?: AnalysisDetail }[],
+  children: ChildJobAnalysis[],
+  classifications: Record<string, string>,
+  analysisState?: string,
+): number {
+  return countIncompleteFailures(failures, children, classifications, analysisState, () => true)
+}
+
+/** The placeholder a group carries when the provider call itself failed. */
+export const PROVIDER_FAILURE_DETAILS = 'Analysis failed; check server logs for details'
+
+/** Recursively count failures whose missing analysis is still attributed to a
+ *  failed AI call. Mirrors `countUnclassifiedFailures`: a reviewer override
+ *  classifies a provider placeholder, so it must drop out of this total too —
+ *  otherwise the banner blames the provider for failures that are no longer
+ *  incomplete. The placeholder is shared with a group whose answer carried no
+ *  usable classification (engine/core._failed_group_analyses), which explains
+ *  itself in `analysis_error`; only a row without a reason is a provider
+ *  outage, so the banner stops blaming credentials for a narration-only reply.
+ *  `analysis_error` is written from the error type alone
+ *  (engine/core.incomplete_reason), so its absence means "not the model" — a
+ *  crashed re-analysis keeps its message in `reanalysis_error` instead. */
+export function countProviderFailures(
+  failures: { test_name: string; analysis?: AnalysisDetail }[],
+  children: ChildJobAnalysis[],
+  classifications: Record<string, string>,
+  analysisState?: string,
+): number {
+  return countIncompleteFailures(
+    failures,
+    children,
+    classifications,
+    analysisState,
+    (f) => f.analysis?.details === PROVIDER_FAILURE_DETAILS && !f.analysis_error,
+  )
 }
 
 /** How many of the given review keys are marked reviewed. */

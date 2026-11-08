@@ -141,8 +141,18 @@ persistence:
     helm.sh/resource-policy: keep
 
 resources:
-  # Modest defaults for dev/evaluation clusters. For production AI workloads use
-  # requests/limits of 4 CPU and 32Gi memory (see chart/README.md).
+  # Modest defaults for dev/evaluation clusters. For production AI workloads apply
+  # chart/examples/values-production.yaml (4 CPU / 32Gi / 16Gi ephemeral-storage);
+  # sizing basis in chart/README.md. ephemeral-storage is optional and goes on both
+  # requests and limits — the limit also becomes the /tmp emptyDir sizeLimit
+  # (setting it mounts /tmp and rolls the pod once). "" drops a key, but a cleared
+  # request is not "no floor": Kubernetes copies the limit into the request, so
+  # requests.memory: "" still schedules for limits.memory. Clear both for a real
+  # no-floor pod (a LimitRange default also supplies the request).
+  # Ownership: this chart owns the /tmp sizeLimit and derives it from
+  # limits.ephemeral-storage — there is no separate workspace.sizeLimit key. #402 C1
+  # puts the same emptyDir cap on the live deployment, so both must carry the same
+  # number (the production example uses 16Gi).
   requests:
     cpu: "1"
     memory: 4Gi
@@ -189,3 +199,36 @@ imageStream:
 # Helm test pod image (must include curl)
 tests:
   image: curlimages/curl:8.12.1
+
+# Health alert CronJob (optional): scrapes /metrics every `schedule` and posts
+# one Slack message combining every failing check. The script lives in
+# chart/files/health-alert.sh and is tested by tests/test_health_alert_script.py.
+alerts:
+  # Opt-in: enabling it creates the CronJob and its script ConfigMap.
+  enabled: false
+  # CronJob name override, truncated to 52 chars (the Job controller appends 11).
+  # Empty means <fullname-trunc29>-<hash8>-health-alerts. Overriding the name does
+  # NOT adopt an existing cluster-only CronJob: adoption is Helm ownership metadata,
+  # and a name alone leaves the helm upgrade failing with `invalid ownership metadata`.
+  # Adopt one by adding that metadata to it first (or just delete it), e.g.
+  #   kubectl -n rootcoz label cronjob rootcoz-prod-health-alerts app.kubernetes.io/managed-by=Helm
+  #   kubectl -n rootcoz annotate cronjob rootcoz-prod-health-alerts \
+  #     meta.helm.sh/release-name=rootcoz meta.helm.sh/release-namespace=rootcoz
+  name: ""
+  # Cron expression for the scrape
+  schedule: "*/5 * * * *"
+  # Label prefixed to every message; empty means <fullname>
+  envLabel: ""
+  # Metrics endpoint; empty means http://<fullname>:8000/metrics
+  metricsUrl: ""
+  # Must provide sh, awk and curl. Pin by digest for production deployments.
+  image: curlimages/curl:8.12.1
+  # Secret holding the Slack webhook; empty means the release credentials Secret
+  slackSecretName: ""
+  slackSecretKey: SLACK_WEBHOOK_URL  # pragma: allowlist secret
+  # Alert when the rolling-window error rate exceeds this percentage
+  errorRatePercent: 5
+  # /data volume usage warning threshold, in percent
+  diskWarnPercent: 75
+  # /data volume usage critical threshold, in percent
+  diskCritPercent: 90

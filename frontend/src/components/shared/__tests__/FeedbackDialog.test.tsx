@@ -1,4 +1,4 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
@@ -20,7 +20,7 @@ vi.mock('@/lib/api', () => {
   return {
     api: {
       post: vi.fn(),
-      get: vi.fn(),
+      get: vi.fn(() => Promise.resolve({ providers: {}, provider_status: {} })),
     },
     getRecentFailedCalls: vi.fn(() => []),
     ApiError: _ApiError,
@@ -45,13 +45,28 @@ vi.mock('@/lib/cookies', () => ({
   getGithubToken: () => mockGetGithubToken(),
 }))
 
+// The dialog is rendered bare, so it has no AuthProvider; the hook reads the user key.
+vi.mock('@/lib/auth', () => ({
+  useAuth: () => ({
+    username: 'alice', isAdmin: false, authenticated: true, loading: false,
+    canUseServerProviders: false, canUseFreeProviders: false,
+  }),
+}))
+
 // The picker needs auth context; its own behaviour is covered in BugCreationDialog tests.
+// The value is exposed so the remembered preselection is assertable.
 vi.mock('@/components/shared/AnalysisAiPicker', () => ({
-  AnalysisProviderSelect: ({ onChange }: { onChange: (v: string) => void }) => (
-    <button type="button" aria-label="pick-provider" onClick={() => onChange('claude')} />
+  AnalysisProviderSelect: ({ value, onChange }: { value: string; onChange: (v: string) => void }) => (
+    <>
+      <span data-testid="provider-value">{value}</span>
+      <button type="button" aria-label="pick-provider" onClick={() => onChange('claude')} />
+    </>
   ),
-  AnalysisModelSelect: ({ onChange }: { onChange: (v: string) => void }) => (
-    <button type="button" aria-label="pick-model" onClick={() => onChange('sonnet')} />
+  AnalysisModelSelect: ({ value, onChange }: { value: string; onChange: (v: string) => void }) => (
+    <>
+      <span data-testid="model-value">{value}</span>
+      <button type="button" aria-label="pick-model" onClick={() => onChange('sonnet')} />
+    </>
   ),
 }))
 
@@ -76,6 +91,10 @@ describe('FeedbackDialog', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+  })
+
+  afterEach(() => {
+    localStorage.clear()
   })
 
   it('renders form with description textarea when open', () => {
@@ -248,7 +267,7 @@ describe('FeedbackDialog', () => {
     expect(screen.getByRole('button', { name: /try again/i })).toBeInTheDocument()
   })
 
-  it('shows error message on create failure', async () => {
+  it('shows error message on create failure and keeps the preview retryable', async () => {
     mockPost.mockResolvedValueOnce({
       title: 'AI title',
       body: 'AI body',
@@ -264,7 +283,7 @@ describe('FeedbackDialog', () => {
     await user.click(screen.getByRole('button', { name: /create issue/i }))
 
     await waitFor(() => expect(screen.getByText(/API error 500/)).toBeInTheDocument())
-    expect(screen.getByRole('button', { name: /try again/i })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument()
   })
 
   it('Try Again from preview error returns to form', async () => {
@@ -279,13 +298,16 @@ describe('FeedbackDialog', () => {
     expect(screen.getByLabelText('Description')).toBeInTheDocument()
   })
 
-  it('Try Again from create error returns to preview', async () => {
+  it('keeps the generated issue editable after a failed create', async () => {
     mockPost.mockResolvedValueOnce({
       title: 'AI title',
       body: 'AI body',
       labels: ['bug'],
     })
-    mockPost.mockRejectedValueOnce(new Error('Create failed'))
+    const { ApiError } = await import('@/lib/api')
+    mockPost.mockRejectedValueOnce(new ApiError(502, 'Bad Gateway', {
+      detail: 'GitHub is unavailable right now, so your feedback was not filed. Try again in a few minutes.',
+    }))
 
     const user = userEvent.setup()
     render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
@@ -293,11 +315,117 @@ describe('FeedbackDialog', () => {
     await user.click(screen.getByRole('button', { name: /preview/i }))
     await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
     await user.click(screen.getByRole('button', { name: /create issue/i }))
-    await waitFor(() => expect(screen.getByText(/Create failed/)).toBeInTheDocument())
-    await user.click(screen.getByRole('button', { name: /try again/i }))
-    // Should return to preview phase with title/body still intact
+
+    // Server detail shown verbatim, dialog still open, generated text still editable.
+    expect(await screen.findByRole('alert')).toHaveTextContent(
+      'GitHub is unavailable right now, so your feedback was not filed. Try again in a few minutes.',
+    )
     expect(screen.getByText('Preview Issue')).toBeInTheDocument()
     expect(screen.getByLabelText('Title')).toHaveValue('AI title')
+    expect(screen.getByLabelText('Body')).toHaveValue('AI body')
+
+    const titleInput = screen.getByLabelText('Title')
+    await user.clear(titleInput)
+    await user.type(titleInput, 'Edited after failure')
+    expect(titleInput).toHaveValue('Edited after failure')
+  })
+
+  it('Retry resubmits the same payload without regenerating', async () => {
+    mockPost.mockResolvedValueOnce({
+      title: 'AI title',
+      body: 'AI body',
+      labels: ['bug'],
+    })
+    mockPost.mockRejectedValueOnce(new Error('Create failed'))
+    mockPost.mockResolvedValueOnce({
+      issue_url: 'https://github.com/org/repo/issues/7',
+      issue_number: 7,
+      title: 'AI title',
+    })
+
+    const user = userEvent.setup()
+    render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
+    await user.type(screen.getByLabelText('Description'), 'Some feedback')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /create issue/i }))
+    await waitFor(() => expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument())
+
+    await user.click(screen.getByRole('button', { name: /retry/i }))
+    await waitFor(() => expect(screen.getByText('Thank you for your feedback!')).toBeInTheDocument())
+
+    const callsByPath = (path: string) => mockPost.mock.calls.filter(([p]) => p === path)
+    expect(callsByPath('/api/feedback/preview')).toHaveLength(1)
+    const createCalls = callsByPath('/api/feedback/create')
+    expect(createCalls).toHaveLength(2)
+    expect(createCalls[1][1]).toEqual({ title: 'AI title', body: 'AI body', labels: ['bug'] })
+  })
+
+  it('clears a stale create error when a new preview is generated', async () => {
+    mockPost.mockResolvedValueOnce({ title: 'AI title', body: 'AI body', labels: ['bug'] })
+    mockPost.mockRejectedValueOnce(new Error('Create failed'))
+    mockPost.mockResolvedValueOnce({ title: 'Second title', body: 'Second body', labels: ['bug'] })
+
+    const user = userEvent.setup()
+    render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
+    await user.type(screen.getByLabelText('Description'), 'Some feedback')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /create issue/i }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Create failed')
+
+    // Back to the form and generate a fresh preview: the old failure belongs to
+    // the previous issue, so it must not paint the new one.
+    await user.click(screen.getByRole('button', { name: /back/i }))
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+
+    await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('Second title'))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /retry/i })).not.toBeInTheDocument()
+  })
+
+  it('falls back to the generic message when the server sends no detail', async () => {
+    mockPost.mockResolvedValueOnce({ title: 'AI title', body: 'AI body', labels: ['bug'] })
+    const { ApiError } = await import('@/lib/api')
+    mockPost.mockRejectedValueOnce(new ApiError(502, 'Bad Gateway', {}))
+
+    const user = userEvent.setup()
+    render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
+    await user.type(screen.getByLabelText('Description'), 'Some feedback')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /create issue/i }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Failed to create issue')
+    // The HTTP status text is never shown to the user.
+    expect(alert).not.toHaveTextContent('Bad Gateway')
+  })
+
+  it('double-clicking Retry submits once', async () => {
+    mockPost.mockResolvedValueOnce({ title: 'AI title', body: 'AI body', labels: ['bug'] })
+    mockPost.mockRejectedValueOnce(new Error('Create failed'))
+    mockPost.mockResolvedValueOnce({
+      issue_url: 'https://github.com/org/repo/issues/8',
+      issue_number: 8,
+      title: 'AI title',
+    })
+
+    const user = userEvent.setup()
+    render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
+    await user.type(screen.getByLabelText('Description'), 'Some feedback')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /create issue/i }))
+    await waitFor(() => expect(screen.getByRole('button', { name: /retry/i })).toBeInTheDocument())
+
+    const retryButton = screen.getByRole('button', { name: /retry/i })
+    fireEvent.click(retryButton)
+    fireEvent.click(retryButton)
+    await waitFor(() => expect(screen.getByText('Thank you for your feedback!')).toBeInTheDocument())
+
+    // One failed create + exactly one retry.
+    expect(mockPost.mock.calls.filter(([p]) => p === '/api/feedback/create')).toHaveLength(2)
   })
 
   it('includes failed API calls in the preview payload', async () => {
@@ -453,7 +581,7 @@ describe('FeedbackDialog', () => {
     expect('ai_model' in payload).toBe(false)
   })
 
-  it('sends no pair after close and reopen', async () => {
+  it('remembers the pair after close and reopen', async () => {
     mockPost.mockResolvedValue({ title: 'T', body: 'B', labels: [] })
     mockGetFailedCalls.mockReturnValue([])
     const user = userEvent.setup()
@@ -468,11 +596,31 @@ describe('FeedbackDialog', () => {
     await act(async () => { await new Promise((r) => setTimeout(r, 300)) })
     fireEvent.click(screen.getByTestId('reopen'))
 
+    // The description is per dialog session and still resets; only the pair is remembered.
+    expect(screen.getByLabelText('Description')).toHaveValue('')
     await user.type(screen.getByLabelText('Description'), 'second session')
     await user.click(screen.getByRole('button', { name: /preview/i }))
     await waitFor(() => expect(mockPost).toHaveBeenCalled())
     const payload = mockPost.mock.calls[0][1] as Record<string, unknown>
-    expect('ai_provider' in payload).toBe(false)
-    expect('ai_model' in payload).toBe(false)
+    expect(payload.ai_provider).toBe('claude')
+    expect(payload.ai_model).toBe('sonnet')
+  })
+
+  it('preselects the pair remembered for this user and sends it', async () => {
+    localStorage.setItem('rootcoz_last_ai_pair:alice', JSON.stringify({ provider: 'claude', model: 'sonnet' }))
+    mockPost.mockResolvedValue({ title: 'T', body: 'B', labels: [] })
+    mockGetFailedCalls.mockReturnValue([])
+    const user = userEvent.setup()
+    render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
+
+    expect(screen.getByTestId('provider-value')).toHaveTextContent('claude')
+    expect(screen.getByTestId('model-value')).toHaveTextContent('sonnet')
+
+    await user.type(screen.getByLabelText('Description'), 'x')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(mockPost).toHaveBeenCalled())
+    const payload = mockPost.mock.calls[0][1] as Record<string, unknown>
+    expect(payload.ai_provider).toBe('claude')
+    expect(payload.ai_model).toBe('sonnet')
   })
 })

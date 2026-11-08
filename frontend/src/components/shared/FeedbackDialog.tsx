@@ -1,8 +1,11 @@
 import { useState, useRef, useEffect } from 'react'
-import { api, extractApiDetail } from '@/lib/api'
+import { api } from '@/lib/api'
+import { createIssueFailureMessage } from '@/lib/issueCreateError'
 import { getRecentFailedCalls } from '@/lib/api'
 import { getRecentErrors } from '@/lib/errorCapture'
 import { getGithubToken } from '@/lib/cookies'
+import { IssueCreateError } from '@/components/shared/IssueCreateError'
+import { useSubmitGuard } from '@/lib/useSubmitGuard'
 import {
   Dialog,
   DialogContent,
@@ -19,6 +22,7 @@ import { TokenRequiredBanner } from '@/components/shared/TokenRequiredBanner'
 import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { CheckCircle2, ExternalLink } from 'lucide-react'
 import { completeAiPairOverride } from '@/lib/analysisAi'
+import { useAiSelection } from '@/lib/useAiSelection'
 import type {
   FeedbackRequest,
   FeedbackPreviewResponse,
@@ -35,14 +39,15 @@ interface FeedbackDialogProps {
 
 export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
   const [description, setDescription] = useState('')
-  // Local state: the feedback dialog is app-global, not page-scoped, so there is no
-  // shared selection to lift. Empty = server default (resolved server-side).
-  const [aiProvider, setAiProvider] = useState('')
-  const [aiModel, setAiModel] = useState('')
+  // Empty = server default (resolved server-side). Shared with the other AI surfaces.
+  const { aiProvider, aiModel, setAiPair } = useAiSelection()
   const [phase, setPhase] = useState<Phase>('form')
   const [issueUrl, setIssueUrl] = useState('')
   const [errorMsg, setErrorMsg] = useState('')
-  const [errorSource, setErrorSource] = useState<'preview' | 'create'>('preview')
+  // A failed create keeps the generated issue in the preview so it can be retried
+  // as-is; only a failed preview sends the user back to the form.
+  const [createError, setCreateError] = useState('')
+  const guardSubmit = useSubmitGuard()
   const generationRef = useRef(0)
   const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -98,6 +103,9 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
     if (!description.trim()) return
 
     const gen = generationRef.current
+    // A create error belongs to the issue it failed on; a new preview must not
+    // show it (or label its own button "Retry").
+    setCreateError('')
     setPhase('previewing')
     try {
       const failedCalls = getRecentFailedCalls()
@@ -129,32 +137,33 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
         setPhase('ai-not-configured')
       } else {
         setErrorMsg(msg)
-        setErrorSource('preview')
         setPhase('error')
       }
     }
   }
 
   async function handleCreate() {
-    const gen = generationRef.current
-    setPhase('creating')
-    try {
-      const payload: FeedbackCreateRequest = {
-        title: previewTitle,
-        body: previewBody,
-        labels: previewLabels,
-      }
+    await guardSubmit(async () => {
+      const gen = generationRef.current
+      setCreateError('')
+      setPhase('creating')
+      try {
+        const payload: FeedbackCreateRequest = {
+          title: previewTitle,
+          body: previewBody,
+          labels: previewLabels,
+        }
 
-      const res = await api.post<FeedbackCreateResponse>('/api/feedback/create', payload)
-      if (gen !== generationRef.current) return
-      setIssueUrl(res.issue_url)
-      setPhase('success')
-    } catch (err) {
-      if (gen !== generationRef.current) return
-      setErrorMsg(extractApiDetail(err) ?? (err instanceof Error ? err.message : 'Failed to create issue'))
-      setErrorSource('create')
-      setPhase('error')
-    }
+        const res = await api.post<FeedbackCreateResponse>('/api/feedback/create', payload)
+        if (gen !== generationRef.current) return
+        setIssueUrl(res.issue_url)
+        setPhase('success')
+      } catch (err) {
+        if (gen !== generationRef.current) return
+        setCreateError(createIssueFailureMessage(err))
+        setPhase('preview')
+      }
+    })
   }
 
   function handleBack() {
@@ -173,12 +182,11 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
       setDescription('')
       setIssueUrl('')
       setErrorMsg('')
+      setCreateError('')
       setPreviewTitle('')
       setPreviewBody('')
       setPreviewLabels([])
       setPreviewAi({ provider: '', model: '', generated: false })
-      setAiProvider('')
-      setAiModel('')
     }, 200)
   }
 
@@ -220,14 +228,16 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
               <div className="grid grid-cols-2 gap-2">
                 <AnalysisProviderSelect
                   value={aiProvider}
-                  onChange={(v) => { setAiProvider(v); setAiModel('') }}
+                  onChange={(v) => setAiPair(v, '')}
                   forceServer={false}
                   label="AI Provider for feedback"
+                  allowDefault
                 />
                 <AnalysisModelSelect
                   provider={aiProvider}
                   value={aiModel}
-                  onChange={setAiModel}
+                  onChange={(model) => setAiPair(aiProvider, model, { commit: false })}
+                  onCommit={(model) => setAiPair(aiProvider, model)}
                   forceServer={false}
                   label="AI Model for feedback"
                 />
@@ -268,6 +278,7 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
         {/* Phase 2: Preview */}
         {phase === 'preview' && (
           <div className="space-y-4">
+            {createError && <IssueCreateError message={createError} />}
             <div className="rounded-md border border-border-muted bg-surface-elevated px-3 py-2 text-xs text-text-secondary">
               {previewAi.generated
                 ? `Generated using AI with ${previewAi.provider}/${previewAi.model}`
@@ -368,13 +379,13 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
               <Button
                 onClick={handleCreate}
                 disabled={!previewTitle.trim() || !previewBody.trim() || !hasGithubToken}
-              >Create Issue</Button>
+              >{createError ? 'Retry' : 'Create Issue'}</Button>
             </div>
           )}
           {phase === 'error' && (
             <div className="flex gap-2 sm:ml-auto">
               <Button variant="outline" onClick={() => handleClose(false)}>Close</Button>
-              <Button onClick={() => setPhase(errorSource === 'preview' ? 'form' : 'preview')}>Try Again</Button>
+              <Button onClick={() => setPhase('form')}>Try Again</Button>
             </div>
           )}
           {phase === 'ai-not-configured' && (

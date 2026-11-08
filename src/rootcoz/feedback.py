@@ -28,6 +28,86 @@ _FEEDBACK_REPO_URL = "https://github.com/myk-org/rootcoz"
 # the signed preview-time provenance all live there so feedback creation and
 # the shared issue creator cannot disagree about who gets credit.
 
+# The value half of a credential assignment: the whole value, not just its
+# first token. `\S+` stopped at the first space, so the rest of a passphrase, a
+# `KEY=abc def` value or a `-----BEGIN …` PEM header stayed in the DEBUG log
+# excerpt attached to the issue. Stopping at the newline keeps the narrowing of
+# a quoted key intact, and a quoted value's closing quote is consumed with it:
+# over-redacting the remainder of that one line is the safe direction (#399).
+#
+# A PEM value is the exception: its body is the secret, so redacting the header
+# line alone leaked the key. The block is length-bounded (8192 chars, ~2x a
+# 4096-bit key) so a header whose footer never arrives cannot swallow the log.
+_PEM_WINDOW = 8192
+_PEM_HEADER = r"-----BEGIN[A-Z0-9 ]*-----"
+
+
+def _pem_branches(header: str) -> str:
+    """Header through its footer, else header plus one window (see below)."""
+    return (
+        rf"{header}[\s\S]{{0,{_PEM_WINDOW}}}?-----END[A-Z0-9 ]*-----"
+        # A header whose footer is missing (or past the window) must not fall
+        # back to "redact the header line only": the body is the secret, and it
+        # survived in full. The unterminated branch eats the header plus the
+        # same fixed window, so the bound fails closed without costing more than
+        # the terminated branch (#399).
+        rf"|{header}[\s\S]{{0,{_PEM_WINDOW}}}"
+    )
+
+
+# A PEM block pasted on its own -- no `KEY=`/`key:` in front, which is how a log
+# excerpt, a `kubectl describe` dump or an issue body carries one -- never
+# reached `_ASSIGNMENT_VALUE`, so the header and the whole body shipped
+# verbatim. The private-only header keeps the bare pattern narrower than the
+# assignment one on purpose: a `CERTIFICATE` or `PUBLIC KEY` block is public,
+# often the very thing a TLS-failure report is about, while after a `KEY=`/`key:`
+# assignment over-redacting is the safe side. A footer inside the window ends the
+# match and the text after the block survives; a missing footer fails closed
+# (#399).
+# Any token list after `PRIVATE KEY` is the header, not just the PGP `BLOCK`:
+# a vendor flavour (`PRIVATE KEY BLOCK EXTRA`, ...) matched nothing and its
+# body leaked byte-identical, so the trailing list is open-ended (#399).
+_PEM_PRIVATE_HEADER = r"-----BEGIN(?: [A-Z0-9]+)* PRIVATE KEY(?: [A-Z0-9]+)*-----"
+_PEM_BARE = _pem_branches(_PEM_PRIVATE_HEADER)
+# Header on the value's own line, or on the line right after it. Broad header:
+# whatever follows `PRIVATE_KEY=`/`key:` is treated as the secret.
+_ASSIGNMENT_VALUE = rf"(?:(?:[^\r\n]*\r?\n)?(?:{_pem_branches(_PEM_HEADER)})|[^\r\n]*)"
+
+# Userinfo of a credential URL, shared by the two URL patterns below. A `/`
+# before an `@` is credential text (base64 secrets contain them), so
+# `user:a/b+c@host` must not be cut short at the `/`; a `/` after the `@` ends
+# the authority. Greedy, so the host is still what follows the *last* `@`
+# (`user:p@ss@host`) (#399).
+#
+# One greedy class, not `[^\s/]*(?:/[^\s/]*)*`: both match the same run of
+# non-whitespace, but the nested form cost two backtracking steps per `/` and,
+# with no `@` in reach, re-scanned the rest of the text from every `:` the bare
+# pattern anchors on -- quadratic, and the scrubber runs on log excerpts and
+# issue bodies, so a crafted excerpt could burn seconds of CPU per request
+# (#397). The `{0,2048}` cap makes the work per start position constant, so a
+# scan is linear in the text.
+_USERINFO_WINDOW = 2048
+_USERINFO = rf"[^\s]{{0,{_USERINFO_WINDOW}}}"
+# Fail-closed guard for that cap: a userinfo *longer* than the window matched
+# nothing at all, so the secret came back untouched (2049 chars leaked in full).
+# A run over the window that holds a credential separator is therefore redacted
+# whole -- more aggressive, never less. `(?<!\S)` enters each run once and the
+# lookahead scans it once, so the guard stays linear (#399).
+_LONG_CREDENTIAL_RUN = re.compile(
+    rf"(?<!\S)(?=[^\s]*[@:])[^\s]{{{_USERINFO_WINDOW + 1},}}"
+)
+# Both credential patterns below scan their left context from the *start* of the
+# run they anchor on, never from every word boundary inside that run. `\b[…]`
+# held on at each boundary of an `a.`/`a-` run and re-scanned the run to its end,
+# so one crafted 32 000-char excerpt cost 0.6 s in the scheme pattern and 3.3 s
+# in the bare one -- quadratic, and the scrubber runs on user-supplied log
+# excerpts and issue bodies (#399). `(?<![…])` enters a run once and the
+# possessive `*+`/`++` never backtracks (the `:`/`://` that must follow is not in
+# the class, so a backtrack could never have succeeded), which keeps the scan to
+# one pass over the text. Starting at the run start rather than at an inner
+# boundary only widens a match, so no credential the old anchors redacted comes
+# back.
+
 # Patterns for sensitive data scrubbing.
 # Order matters: more specific patterns first to avoid partial matches.
 _SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
@@ -45,10 +125,40 @@ _SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         re.compile(r"(Authorization[\"']?\s*[:=]\s*[\"']?)\S+", re.IGNORECASE),
         r"\1[REDACTED]",
     ),
-    # API keys/tokens in query params or assignments
+    # Secret-looking environment variables: `AWS_SECRET_ACCESS_KEY=…`,
+    # `GITHUB_TOKEN=…`, and their quoted JSON/literal-key form
+    # (`"client_secret": "…"`). The keyword is not followed directly by the
+    # separator, so the assignment patterns below miss them, and the optional
+    # quote before the separator is what keeps a quoted key (which the `_` in a
+    # compound name hides from those patterns) redacted. Harmless settings such
+    # as `MAX_TOKENS=2000` keep their value: the keyword must be a whole word at
+    # that point, so the plural `TOKENS` is not a credential name.
+    #
+    # The keyword sits in a lookahead, not in the consumed name: inline, the
+    # name's unbounded `[A-Za-z0-9_]*` prefix and its unbounded `_…` suffix
+    # made the two scan the same tail once per keyword occurrence, which is the
+    # square of the run length -- `token_token_token…` (no `:`/`=`) burned 25 s
+    # on a 50 000-char body, and the scrubber runs synchronously in async issue
+    # and feedback handlers (#399). The lookahead stops at the first keyword it
+    # accepts (never scanning the tail), and the name it guards is one run of
+    # word characters, so each run is walked once and a scan stays linear. A
+    # `(?<![A-Za-z0-9_])` anchor replaces `\b` for the same reason as the two URL
+    # patterns below; it is equivalent because `_` is a word character, so both
+    # only match at the start of a word run.
     (
         re.compile(
-            r"((?:api_key|apikey|api_token|access_token|token|secret|auth_token)[\"']?\s*[:=]\s*[\"']?)\S+",
+            r"(?<![A-Za-z0-9_])(?=[A-Za-z0-9_]*(?:SECRET|TOKEN|PASSWORD|PASSWD|API_?KEY|ACCESS_KEY|PRIVATE_KEY)(?![A-Za-z0-9]))([A-Za-z0-9_]*[\"']?\s*[:=]\s*[\"']?)"
+            + _ASSIGNMENT_VALUE,
+            re.IGNORECASE,
+        ),
+        r"\1[REDACTED]",
+    ),
+    # API keys/tokens in query params or assignments. The key must be a standalone
+    # name, so the plural setting `max_tokens` is not matched here.
+    (
+        re.compile(
+            r"(?<![A-Za-z0-9_])((?:api_key|apikey|api_token|access_token|token|secret|auth_token)[\"']?\s*[:=]\s*[\"']?)"
+            + _ASSIGNMENT_VALUE,
             re.IGNORECASE,
         ),
         r"\1[REDACTED]",
@@ -56,14 +166,47 @@ _SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
     # Passwords in query params or assignments
     (
         re.compile(
-            r"((?:password|passwd|pwd)[\"']?\s*[:=]\s*[\"']?)\S+", re.IGNORECASE
+            r"((?:password|passwd|pwd)[\"']?\s*[:=]\s*[\"']?)" + _ASSIGNMENT_VALUE,
+            re.IGNORECASE,
         ),
         r"\1[REDACTED]",
     ),
+    # A bare *private* PEM block (see `_PEM_BARE`); a public `CERTIFICATE` or
+    # `PUBLIC KEY` block stays readable. After the assignment patterns above,
+    # which already end the match at the block; ahead of the URL ones so the
+    # body is not parsed for userinfo.
+    (re.compile(_PEM_BARE), "[REDACTED]"),
     # GitHub tokens (ghp_, gho_, ghs_, ghr_, github_pat_)
     (
         re.compile(r"\b(?:ghp_|gho_|ghs_|ghr_|github_pat_)[A-Za-z0-9_]+\b"),
         "[REDACTED_GITHUB_TOKEN]",
+    ),
+    # Run too long for the bounded userinfo patterns below to inspect: if it
+    # holds `@` or `:`, redact it whole (see `_LONG_CREDENTIAL_RUN`). Ahead of
+    # them so a crafted run is also never re-scanned by them.
+    (_LONG_CREDENTIAL_RUN, "[REDACTED]"),
+    # URL userinfo: keep the scheme and host, redact the credentials (see
+    # `_USERINFO`).
+    (
+        re.compile(r"(?<![a-zA-Z0-9+.\-])((?:[a-zA-Z0-9+.\-]++)://)" + _USERINFO + "@"),
+        r"\1[REDACTED]@",
+    ),
+    # Bare `user:secret@` in a clone URL, e.g. `user:pass@host:path`. The host
+    # after `@` must be a dotted name (or localhost), which is what separates
+    # credentials from a docker digest tag (`img:v4.18@sha256:…` has no host,
+    # only an algorithm). `mailto:` is exempt: a scheme without `//` is an
+    # address, not credentials. A `:` followed by `/` is a scheme too, so
+    # `name://…` is left to the pattern above instead of being re-redacted
+    # here (which would eat the scheme).
+    # shortcut: a credential URL whose host is neither dotted nor localhost
+    # (`user:token@jenkins:8080/x`) is not caught here -- a digest tag looks the
+    # same, so widen only with a rule that still spares `@sha256:…`.
+    (
+        re.compile(
+            r"(?<![^\s/:@])(?!mailto:)[^\s/:@]++:(?!/)" + _USERINFO + "@"
+            r"(?=[^\s/@:]+(?:\.[^\s/@:]+)+|localhost\b)"
+        ),
+        "[REDACTED]@",
     ),
     # Generic long hex/base64 secrets (40+ chars, likely tokens)
     (re.compile(r"\b[A-Fa-f0-9]{40,}\b"), "[REDACTED_HEX_TOKEN]"),

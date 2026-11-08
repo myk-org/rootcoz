@@ -10,11 +10,12 @@ const get = vi.fn()
 const post = vi.fn()
 const remove = vi.fn()
 let grant = true
+let currentRole = 'reviewer'
 vi.mock('@/lib/api', async importOriginal => ({
   ...(await importOriginal<typeof import('@/lib/api')>()),
   api: { get: (...args: unknown[]) => get(...args), post: (...args: unknown[]) => post(...args), delete: (...args: unknown[]) => remove(...args) },
 }))
-vi.mock('@/lib/auth', () => ({ useAuth: () => ({ username: 'alice', isAdmin: false, authenticated: true, canUseServerProviders: grant }) }))
+vi.mock('@/lib/auth', () => ({ useAuth: () => ({ username: 'alice', isAdmin: false, authenticated: true, canUseServerProviders: grant, role: currentRole }) }))
 vi.mock('@/lib/useSSE', () => ({ useSSE: vi.fn() }))
 
 HTMLElement.prototype.hasPointerCapture = () => false
@@ -65,7 +66,8 @@ afterEach(() => {
   vi.useRealTimers()
   for (const id of liveTimers) rawClearTimeout(id)
   liveTimers.clear()
-  cleanup(); grant = true; act(() => resetProviderCatalogCache()); get.mockReset(); post.mockReset(); remove.mockReset()
+  localStorage.clear()
+  cleanup(); grant = true; currentRole = 'reviewer'; act(() => resetProviderCatalogCache()); get.mockReset(); post.mockReset(); remove.mockReset()
 })
 
 it('loads history without POST init and starts only with a valid catalog pair', async () => {
@@ -110,6 +112,33 @@ it('offers server models only with the grant, and pins the reported source in me
   await user.type(screen.getByPlaceholderText(/Ask a question/), 'hello')
   await user.click(screen.getByRole('button', { name: 'Send message' }))
   expect(post).toHaveBeenCalledWith('/api/chat/job', { message: 'hello', ai_provider: 'claude', ai_model: 'sonnet' })
+})
+
+it('opens on the remembered pair and offers no server-default reset', async () => {
+  setup()
+  localStorage.setItem('rootcoz_last_ai_pair:alice', JSON.stringify({ provider: 'claude', model: 'sonnet' }))
+  const user = userEvent.setup()
+  // The job analysed with openai/gpt; the user last chose claude/sonnet.
+  render(page('openai', 'gpt'))
+  await waitFor(() => expect(screen.getByRole('combobox', { name: 'AI Model' })).toHaveValue('sonnet'))
+
+  await user.click(screen.getByRole('combobox', { name: 'AI Provider' }))
+  expect(await screen.findByRole('option', { name: /claude.*Server/i })).toBeInTheDocument()
+  // Chat cannot start on an empty pair, so it must not offer the reset either.
+  expect(screen.queryByRole('option', { name: /server default/i })).not.toBeInTheDocument()
+  await user.keyboard('{Escape}')
+
+  await user.click(screen.getByRole('button', { name: 'Start Chat' }))
+  await waitFor(() => expect(post).toHaveBeenCalledWith('/api/chat/job/init', { ai_provider: 'claude', ai_model: 'sonnet' }))
+})
+
+it('ignores a cleared remembered pair so chat starts on the analysed pair', async () => {
+  setup()
+  // "Server default" picked in the issue or feedback dialog cannot start a chat.
+  localStorage.setItem('rootcoz_last_ai_pair:alice', JSON.stringify({ provider: '', model: '' }))
+  render(page('openai', 'gpt'))
+  await waitFor(() => expect(screen.getByRole('combobox', { name: 'AI Model' })).toHaveValue('gpt'))
+  expect(await screen.findByRole('button', { name: 'Start Chat' })).toBeEnabled()
 })
 
 it('does not POST init after a history load failure', async () => {
@@ -211,6 +240,23 @@ it('shows existing history before starting and clears explicitly without reiniti
   expect(post.mock.calls.filter(([path]) => path === '/api/chat/job/init')).toHaveLength(0)
   expect(screen.getByRole('combobox', { name: 'AI Provider' })).not.toBeDisabled()
   await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled())
+})
+
+it('renders a server-written notice verbatim, not as the assistant', async () => {
+  const notice = 'Proposed GitHub issue — nothing has been filed yet.\n\nDestination: GitHub repository org/repo\n\nConfirmation code: ABCDEF'
+  setup({ total: 3, active_session: { ai_provider: 'openai', ai_model: 'gpt', credential_source: 'user' }, messages: [
+    { id: 1, job_id: 'job', role: 'user', content: 'file this', username: 'alice', ai_provider: 'openai', ai_model: 'gpt', status: 'completed', created_at: '2026-01-01T00:00:00Z' },
+    { id: 2, job_id: 'job', role: 'system', content: notice, username: 'alice', ai_provider: '', ai_model: '', status: 'completed', created_at: '2026-01-01T00:00:01Z' },
+    { id: 3, job_id: 'job', role: 'assistant', content: 'reply with the code', username: 'alice', ai_provider: 'openai', ai_model: 'gpt', status: 'completed', created_at: '2026-01-01T00:00:02Z' },
+  ] })
+  render(page())
+
+  const label = await screen.findByText('Server notice')
+  const noticeRow = label.parentElement?.parentElement
+  expect(noticeRow).toHaveTextContent('Destination: GitHub repository org/repo')
+  expect(noticeRow).toHaveTextContent('Confirmation code: ABCDEF')
+  // The model's own words stay a separate, assistant-styled bubble.
+  expect(await screen.findByText('reply with the code')).toBeInTheDocument()
 })
 
 it('restores a hidden init session with no visible messages', async () => {
@@ -559,4 +605,182 @@ it('ignores an out-of-order history response instead of rewinding preparation', 
   expect(screen.getByText('Starting AI session...')).toBeInTheDocument()
   expect(screen.queryByText('Cloning repositories: tests-repo...')).not.toBeInTheDocument()
   await act(async () => { finishInit({ ready: true, session_id: 'session' }) })
+})
+
+// --- Busy indicator (#406) ---------------------------------------------------
+
+const ACTIVE_SESSION = { ai_provider: 'openai', ai_model: 'gpt', credential_source: 'user' }
+function pendingRow(createdAt: string) {
+  return { id: 3, job_id: 'job', role: 'assistant', content: '', username: '', ai_provider: 'openai', ai_model: 'gpt', status: 'pending', created_at: createdAt }
+}
+async function readyComposer() {
+  const composer = await screen.findByPlaceholderText(/Ask a question/)
+  await waitFor(() => expect(composer).toBeEnabled())
+  await userEvent.setup().type(composer, 'hello')
+  return composer
+}
+
+it('shows the busy bubble and a Stop as soon as the send POST resolves', async () => {
+  setup({ messages: [], total: 0, active_session: ACTIVE_SESSION })
+  render(page())
+  const composer = await readyComposer()
+  const getsBefore = get.mock.calls.filter(([path]) => path === '/api/chat/job').length
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  // No SSE event and no poll tick: the bubble must come from the POST response.
+  expect(await screen.findByText(/^Thinking\.\.\./)).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument()
+  expect(get.mock.calls.filter(([path]) => path === '/api/chat/job')).toHaveLength(getsBefore)
+  expect(composer).toBeDisabled()
+})
+
+it('shows elapsed time from the pending row timestamp and ticks it', async () => {
+  // Both writers exist: SQLite `YYYY-MM-DD HH:MM:SS` (no zone) and the optimistic
+  // row's toISOString(). Reading either with plain `new Date` shifts the start by
+  // the UTC offset, so both must render the same value here.
+  for (const createdAt of ['2026-01-01 00:00:00', '2026-01-01T00:00:00.000Z']) {
+    setup({ messages: [pendingRow(createdAt)], total: 1, active_session: ACTIVE_SESSION })
+    vi.useFakeTimers()
+    vi.setSystemTime(new Date('2026-01-01T00:00:12Z'))
+    const { unmount } = render(page())
+    expect(await screen.findByText('Thinking... 12s')).toBeInTheDocument()
+    await act(async () => { vi.advanceTimersByTime(2000) })
+    expect(screen.getByText('Thinking... 14s')).toBeInTheDocument()
+    unmount()
+    vi.useRealTimers()
+  }
+})
+
+it('renders the busy bubble without a number when the clock is behind the server', async () => {
+  setup({ messages: [pendingRow('2026-01-01 00:10:00')], total: 1, active_session: ACTIVE_SESSION })
+  vi.useFakeTimers()
+  vi.setSystemTime(new Date('2026-01-01T00:00:00Z'))
+  render(page())
+  expect(await screen.findByText('Thinking...')).toBeInTheDocument()
+  expect(screen.queryByText(/^Thinking\.\.\. \S/)).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Stop' })).toBeInTheDocument()
+})
+
+it.each(['without a session', 'with a live session'])('never offers a viewer a Stop it cannot use %s', async variant => {
+  currentRole = 'viewer'
+  setup({ messages: [pendingRow(new Date(Date.now() - 5000).toISOString())], total: 1, active_session: variant === 'with a live session' ? ACTIVE_SESSION : null })
+  render(page())
+  expect(await screen.findByText(/^Thinking\.\.\. \d+s/)).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument()
+  expect(post).not.toHaveBeenCalledWith('/api/chat/job/abort', expect.anything())
+})
+
+it('offers a Stop for a pending turn that outlived its session', async () => {
+  // abort_chat only requires the reviewer role — it never checks for a session.
+  // Hiding Stop when the session is gone would wedge an authorized reviewer with
+  // no way to end the turn this bubble represents.
+  setup({ messages: [pendingRow(new Date(Date.now() - 5000).toISOString())], total: 1, active_session: null })
+  render(page())
+  const stop = await screen.findByRole('button', { name: 'Stop' })
+  fireEvent.click(stop)
+  await waitFor(() => expect(post).toHaveBeenCalledWith('/api/chat/job/abort', {}))
+  expect(post.mock.calls.filter(([path]) => path === '/api/chat/job/abort')).toHaveLength(1)
+})
+
+it('reports a refused abort once and keeps the turn running until the reply lands', async () => {
+  setup({ messages: [], total: 0, active_session: ACTIVE_SESSION })
+  render(page())
+  const composer = await readyComposer()
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  const stop = await screen.findByRole('button', { name: 'Stop' })
+  post.mockRejectedValueOnce(new ApiError(403, 'Forbidden', { detail: 'Reviewer role required' }))
+  fireEvent.click(stop)
+  expect(await screen.findByRole('alert')).toHaveTextContent('Reviewer role required')
+  expect(screen.getAllByText('Reviewer role required')).toHaveLength(1)
+  // The server row is still pending, so the bubble keeps counting and the
+  // composer stays blocked — flipping it locally would lie for a few seconds.
+  expect(screen.getByText(/^Thinking\.\.\./)).toBeInTheDocument()
+  expect(composer).toBeDisabled()
+  const reply = { ...pendingRow(new Date().toISOString()), content: 'answer', status: 'completed' }
+  get.mockImplementation((path: string) => Promise.resolve(path.startsWith('/api/ai-models') ? catalog : { messages: [reply], total: 1, active_session: ACTIVE_SESSION }))
+  act(() => { vi.mocked(useSSE).mock.lastCall![1]['chat-changed']('') })
+  expect(await screen.findByText('answer')).toBeInTheDocument()
+  await waitFor(() => expect(composer).toBeEnabled())
+})
+
+it('Stop clears the busy state even when no server row ever arrives', async () => {
+  setup({ messages: [], total: 0, active_session: ACTIVE_SESSION })
+  render(page())
+  const composer = await readyComposer()
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  fireEvent.click(await screen.findByRole('button', { name: 'Stop' }))
+  await waitFor(() => expect(post).toHaveBeenCalledWith('/api/chat/job/abort', {}))
+  await waitFor(() => expect(composer).toBeEnabled())
+  expect(screen.queryByText(/^Thinking\.\.\./)).not.toBeInTheDocument()
+})
+
+it('shows a transient Sending row at the bottom of the thread', async () => {
+  // A scrolled chat must show the row where the user is looking: below the last
+  // message, right above the scroll sentinel.
+  setup({
+    messages: [{ id: 1, job_id: 'job', role: 'user', content: 'earlier question', username: 'alice', ai_provider: '', ai_model: '', status: 'completed', created_at: new Date().toISOString() }],
+    total: 1,
+    active_session: ACTIVE_SESSION,
+  })
+  let finishPost!: (value: unknown) => void
+  post.mockImplementation((path: string) => path === '/api/chat/job' ? new Promise(resolve => { finishPost = resolve }) : Promise.resolve({}))
+  render(page())
+  const composer = await readyComposer()
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  const row = screen.getByText('Sending...')
+  expect(row.compareDocumentPosition(screen.getByText('earlier question')) & Node.DOCUMENT_POSITION_PRECEDING).toBeTruthy()
+  expect(composer).toHaveValue('')
+  expect(screen.queryByRole('button', { name: 'Stop' })).not.toBeInTheDocument()
+  await act(async () => { finishPost({ user_message: { id: 2, username: 'alice' }, assistant_message_id: 3 }) })
+  expect(screen.getByText(/^Thinking\.\.\./)).toBeInTheDocument()
+})
+
+it('scrolls the transient Sending row into view in an already bottom-scrolled thread', async () => {
+  setup({
+    messages: [{ id: 1, job_id: 'job', role: 'user', content: 'earlier question', username: 'alice', ai_provider: '', ai_model: '', status: 'completed', created_at: new Date().toISOString() }],
+    total: 1,
+    active_session: ACTIVE_SESSION,
+  })
+  post.mockImplementation((path: string) => path === '/api/chat/job' ? new Promise(() => {}) : Promise.resolve({}))
+  // The global stub is inert; this spy records which element got scrolled.
+  const scrolled: HTMLElement[] = []
+  const scrollSpy = vi.spyOn(HTMLElement.prototype, 'scrollIntoView')
+    .mockImplementation(function (this: HTMLElement) { scrolled.push(this) })
+  render(page())
+  const composer = await readyComposer()
+  const sentinel = screen.getByText('earlier question').closest('.overflow-y-auto')!.lastElementChild
+  scrolled.length = 0
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  // `messages` does not change when the row appears — only `sending` flips.
+  expect(screen.getByText('Sending...')).toBeInTheDocument()
+  await waitFor(() => expect(scrolled).toContain(sentinel))
+  expect(composer).toBeDisabled()
+  scrollSpy.mockRestore()
+})
+
+it('ignores a history fetch that started before the send so the reply stays pending', async () => {
+  setup({ messages: [], total: 0, active_session: ACTIVE_SESSION })
+  render(page())
+  const composer = await readyComposer()
+  let finishPost!: (value: unknown) => void
+  post.mockImplementation((path: string) => path === '/api/chat/job' ? new Promise(resolve => { finishPost = resolve }) : Promise.resolve({}))
+  let finishStale!: (value: unknown) => void
+  get.mockImplementation((path: string) => path.startsWith('/api/ai-models')
+    ? Promise.resolve(catalog)
+    : new Promise(resolve => { finishStale = resolve }))
+  // A sync fetch starts before the send, so its snapshot predates the turn.
+  act(() => { vi.mocked(useSSE).mock.lastCall![1]['chat-changed']('') })
+  await waitFor(() => expect(finishStale).toBeDefined())
+  fireEvent.click(screen.getByRole('button', { name: 'Send message' }))
+  await act(async () => { finishPost({ user_message: { id: 2, username: 'alice' }, assistant_message_id: 3 }) })
+  expect(screen.getByText(/^Thinking\.\.\./)).toBeInTheDocument()
+  await act(async () => { finishStale({ messages: [], total: 0, active_session: ACTIVE_SESSION }) })
+  // Without invalidating the pre-send fetch this snapshot drops the pending row
+  // and re-enables the composer while the turn is still running.
+  expect(screen.getByText(/^Thinking\.\.\./)).toBeInTheDocument()
+  expect(composer).toBeDisabled()
+  const reply = { ...pendingRow(new Date().toISOString()), content: 'answer', status: 'completed' }
+  get.mockImplementation((path: string) => Promise.resolve(path.startsWith('/api/ai-models') ? catalog : { messages: [reply], total: 1, active_session: ACTIVE_SESSION }))
+  act(() => { vi.mocked(useSSE).mock.lastCall![1]['chat-changed']('') })
+  expect(await screen.findByText('answer')).toBeInTheDocument()
+  await waitFor(() => expect(composer).toBeEnabled())
 })

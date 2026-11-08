@@ -305,6 +305,61 @@ class TestPushReportPortalEndpoint:
     @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
     @patch("rootcoz.main.get_result")
     @patch("rootcoz.main.ReportPortalClient")
+    def test_unmapped_classification_response_shape(
+        self, mock_rp_class, mock_get_result, mock_get_cls, _rp_enabled_env
+    ):
+        """An unmapped classification keeps the response shape and names the classification."""
+        mock_get_cls.return_value = ""
+        mock_get_result.return_value = {
+            "status": "completed",
+            "result": {
+                "job_name": "my-job",
+                "build_number": 42,
+                "jenkins_url": "https://jenkins.example.com/job/my-job/42/",
+                "failures": [
+                    {
+                        "test_name": "test_a",
+                        "error": "err",
+                        "analysis": {"classification": "", "details": ""},
+                    }
+                ],
+            },
+        }
+        mock_rp = _install_rp_client_mock(mock_rp_class)
+        mock_rp.find_launch.return_value = 100
+        mock_rp.get_failed_items.return_value = [
+            {"id": 1, "name": "test_a", "status": "FAILED"}
+        ]
+        mock_rp.match_failures.return_value = [
+            ({"id": 1, "name": "test_a"}, MagicMock(test_name="test_a"))
+        ]
+        mock_rp.push_classifications.return_value = {
+            "pushed": 1,
+            "unmatched": [],
+            "defaulted": ["test_a (classification: none)"],
+            "errors": [],
+            "launch_id": 100,
+        }
+
+        from rootcoz.main import app
+
+        client = TestClient(
+            app,
+            raise_server_exceptions=False,
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
+        response = client.post("/results/some-job-id/push-reportportal")
+        assert response.status_code == 200, f"Response: {response.text}"
+        data = response.json()
+        assert data["pushed"] == 1
+        assert data["defaulted"] == ["test_a (classification: none)"]
+        assert data["unmatched"] == []
+        assert data["errors"] == []
+        assert data["launch_id"] == 100
+
+    @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
+    @patch("rootcoz.main.get_result")
+    @patch("rootcoz.main.ReportPortalClient")
     def test_infrastructure_classification_passed_to_rp(
         self, mock_rp_class, mock_get_result, mock_get_cls, _rp_enabled_env
     ):

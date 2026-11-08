@@ -5,6 +5,7 @@ import errno
 import json as json_mod
 import logging
 import os
+import shlex
 import sys
 import tempfile
 from collections.abc import Callable
@@ -26,7 +27,7 @@ from rootcoz.cli.config import (
 )
 from rootcoz.cli.output import print_output
 from rootcoz.config import parse_additional_repos, parse_peer_configs
-from rootcoz.storage import VALID_ROLES
+from rootcoz.storage import MAX_INCOMPLETE_LIST_LIMIT, VALID_ROLES
 
 # -- App and sub-command groups -----------------------------------------------
 
@@ -665,6 +666,147 @@ def component_versions_cmd(json_output: bool = _JSON_OPTION) -> None:
         typer.echo(f"  {name}: {version if version else 'not installed'}")
 
 
+@admin_app.command("server-status")
+def server_status_cmd(json_output: bool = _JSON_OPTION) -> None:
+    """Show live server status: disk, CPU, memory, process, DB, sidecar.
+
+    Admin only. Every block reports whether it could be read; a probe that
+    could not reach its source says so instead of printing a zero.
+    """
+    _set_json(json_output)
+    try:
+        data = _get_client().server_status()
+    except RootCozError as exc:
+        _handle_error(exc)
+    if _state.get("json", False):
+        print_output(data, columns=[], as_json=True)
+        return
+
+    process = data.get("process", {})
+    typer.echo(
+        f"Process: rootcoz {process.get('version', 'unknown')} "
+        f"(pid {process.get('pid', '?')}, "
+        f"up {float(process.get('uptime_seconds') or 0):.0f}s, "
+        f"restarts {_status_value(process.get('restart_count'))}, "
+        f"loop lag {_status_value(process.get('loop_lag_ms'))} ms)"
+    )
+    disk = data.get("disk", {})
+    _echo_status_block(
+        "Disk",
+        disk,
+        f"{_status_ratio(disk.get('used_ratio'))}% used, "
+        f"{_status_bytes(disk.get('used_bytes'))} of "
+        f"{_status_bytes(disk.get('capacity_bytes'))} "
+        f"(database {_status_bytes(disk.get('database_bytes'))}, "
+        f"transcripts {_status_bytes(disk.get('transcripts_bytes'))}, "
+        f"logs {_status_bytes(disk.get('logs_bytes'))})",
+    )
+    cpu = data.get("cpu", {})
+    _echo_status_block(
+        "CPU",
+        cpu,
+        f"{_status_value(cpu.get('process_percent'))}% of a core, "
+        f"{_status_cpu_quota(cpu)}",
+    )
+    memory = data.get("memory", {})
+    _echo_status_block(
+        "Memory",
+        memory,
+        f"{_status_bytes(memory.get('rss_bytes'))} resident, "
+        f"{_status_value(memory.get('percent_of_limit'))}% of "
+        f"{_status_memory_limit(memory)}",
+    )
+    database = data.get("database", {})
+    _echo_status_block(
+        "Database",
+        database,
+        f"{_status_bytes(database.get('size_bytes'))} — "
+        f"{database.get('results', '?')} results, "
+        f"{database.get('failures', '?')} failures, "
+        f"{database.get('test_entries', '?')} test entries",
+    )
+    sidecar = data.get("sidecar", {})
+    typer.echo(
+        f"Sidecar: {'reachable' if sidecar.get('reachable') else 'unreachable'} — "
+        f"{_status_value(sidecar.get('models'))} models, "
+        f"{_status_value(sidecar.get('free_models'))} free"
+    )
+    activity = data.get("activity", {})
+    if activity:
+        typer.echo(
+            "Activity: "
+            f"{_status_value(activity.get('analyses_running'))} analyses running, "
+            f"{_status_value(activity.get('chat_turns_in_flight'))} chat turns in "
+            f"flight, {_status_value(activity.get('sse_clients'))} SSE clients"
+        )
+        for running in activity.get("analyses") or []:
+            typer.echo(
+                f"  {running.get('job_name') or running.get('job_id')} "
+                f"#{running.get('build_number')} {running.get('status')} "
+                f"for {_status_value(running.get('elapsed_seconds'))}s"
+            )
+    for warning in data.get("warnings", []):
+        typer.echo(f"[{warning.get('level', 'warn')}] {warning.get('message', '')}")
+
+
+def _echo_status_block(label: str, block: dict[str, Any], detail: str) -> None:
+    """Print one status block, or why it could not be read."""
+    if block.get("available", True):
+        typer.echo(f"{label}: {detail}")
+    else:
+        typer.echo(f"{label}: unavailable ({block.get('reason', 'no reason given')})")
+
+
+def _status_value(value: Any) -> str:
+    """Format a status number; a missing one reads as ``?``, never as zero."""
+    if value is None:
+        return "?"
+    return f"{value}"
+
+
+def _status_ratio(value: Any) -> str:
+    """Format a 0..1 ratio as whole percent; ``?`` when it is unknown."""
+    if value is None:
+        return "?"
+    return f"{float(value) * 100:.0f}"
+
+
+def _status_bytes(value: Any) -> str:
+    """Format a byte count for humans; ``?`` when the probe had no number."""
+    if value is None:
+        return "?"
+    size = float(value)
+    for unit in ("B", "KiB", "MiB", "GiB", "TiB"):
+        if size < 1024 or unit == "TiB":
+            return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
+        size /= 1024
+    return f"{size:.1f} TiB"
+
+
+def _status_cpu_quota(cpu: dict[str, Any]) -> str:
+    """CPU quota with the same three states the page shows.
+
+    ``quota_state`` separates an unlimited cgroup from a ``cpu.max`` that could
+    not be read, so neither renders as a bare ``?`` that reads as unknown.
+    """
+    cores = cpu.get("quota_cores")
+    if cores is not None:
+        return f"quota {cores} cores"
+    if cpu.get("quota_state") == "unlimited":
+        return "no CPU quota (unlimited)"
+    return "quota unknown"
+
+
+def _status_memory_limit(memory: dict[str, Any]) -> str:
+    """Memory limit with ``set`` / ``unlimited`` / ``unknown`` kept distinct."""
+    limit = memory.get("limit_bytes")
+    if limit is not None:
+        return f"limit {_status_bytes(limit)}"
+    if memory.get("limit_state") == "unlimited":
+        return "no limit (unlimited)"
+    return "limit unknown"
+
+
 @app.command()
 def version(
     json_output: bool = _JSON_OPTION,
@@ -869,6 +1011,50 @@ def results_fields(
         fields_list = data.get("fields", [])
         for field in fields_list:
             typer.echo(field)
+
+
+@results_app.command("incomplete")
+def results_incomplete(
+    limit: int = typer.Option(
+        100, "--limit", min=1, help="Max jobs to list (the server caps it)."
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """List jobs with failures that have no usable classification."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.list_incomplete_analyses(limit=limit),
+        emit_output=False,
+    )
+    if _state.get("json", False):
+        return
+    jobs = data.get("jobs", []) if isinstance(data, dict) else data
+    print_output(
+        jobs,
+        columns=["job_id", "job_name", "build_number", "incomplete_count"],
+    )
+    if isinstance(data, dict) and data.get("truncated"):
+        scanned = data.get("scanned", 0)
+        if data.get("truncated_by") == "scan_ceiling":
+            typer.echo(
+                f"Listing truncated after {scanned} row(s); "
+                "the server's scan ceiling stopped the scan, so older jobs "
+                "were not examined.",
+                err=True,
+            )
+        elif limit > MAX_INCOMPLETE_LIST_LIMIT:
+            # The server clamps to the cap, so a larger --limit returns nothing.
+            typer.echo(
+                f"Listing truncated after {scanned} row(s); --limit {limit} "
+                f"exceeds the server's cap of {MAX_INCOMPLETE_LIST_LIMIT}, so "
+                "a larger value returns no more jobs.",
+                err=True,
+            )
+        else:
+            typer.echo(
+                f"Listing truncated after {scanned} row(s); raise --limit to see more.",
+                err=True,
+            )
 
 
 @results_app.command("submitters")
@@ -1236,15 +1422,22 @@ def enrich_comments_cmd(
     job_id: str = typer.Argument(help="Job ID."),
     json_output: bool = _JSON_OPTION,
 ) -> None:
-    """Enrich comments with live PR/ticket statuses."""
+    """Refresh PR/ticket statuses from GitHub and Jira; a result may be served from the server's 60 s per-job cache."""
     data = _run_client_command(
         json_output,
         lambda c: c.enrich_comments(job_id),
         emit_output=False,
     )
     if not _state.get("json", False):
-        enriched = data.get("enriched", 0)
-        typer.echo(f"Enriched {enriched} comment(s).")
+        # Server sends {comment_id: [badges]}; count the comments and their badges.
+        enrichments = data.get("enrichments") or {}
+        comments = len(enrichments)
+        badges = sum(len(badge_list) for badge_list in enrichments.values())
+        typer.echo(f"Enriched {comments} comment(s).")
+        typer.echo(f"Status badges: {badges}.")
+        # An empty mapping is also what a failed lookup returns (#452).
+        if data.get("failed"):
+            typer.echo("Some lookups failed; these counts may be incomplete.")
 
 
 # -- Analyze ------------------------------------------------------------------
@@ -2542,12 +2735,12 @@ def _resolve_tracker_tokens(
     )
 
 
-def _validate_issue_type(issue_type: str) -> str:
+def _validate_issue_type(issue_type: str, option: str = "--type") -> str:
     """Validate and normalize issue type, exit on invalid input."""
     normalized = issue_type.lower()
     if normalized not in ("github", "jira"):
         typer.echo(
-            f"Error: --type must be 'github' or 'jira', got '{issue_type}'",
+            f"Error: {option} must be 'github' or 'jira', got '{issue_type}'",
             err=True,
         )
         raise typer.Exit(code=1)
@@ -2812,6 +3005,176 @@ def create_issue(
             typer.echo(f"Comment added (id: {data['comment_id']})")
 
 
+@app.command("propose-chat-issue")
+def propose_chat_issue(
+    target: str = typer.Option(..., "--target", help="github or jira."),
+    title: str = typer.Option(..., "--title", help="Issue title."),
+    body: str = typer.Option(..., "--body", help="Issue body."),
+    repo: str = typer.Option(
+        "",
+        "--repo",
+        help="GitHub repository to file in, as owner/name (empty: the default).",
+    ),
+    job_id: str = typer.Option(
+        "",
+        "--job-id",
+        help="Job whose repos bound a non-admin GitHub issue.",
+    ),
+    jira_project_key: str = typer.Option(
+        "",
+        "--jira-project-key",
+        help="Jira project key for bug creation (overrides server config).",
+    ),
+    jira_security_level: str = typer.Option(
+        "",
+        "--jira-security-level",
+        help="Jira security level name for restricted issues.",
+    ),
+    jira_issue_type: str = typer.Option(
+        "Bug",
+        "--jira-issue-type",
+        help="Jira issue type name (e.g. Bug, Story, Task). Default: Bug.",
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Draft an issue from chat text and print the confirmation id and code.
+
+    Files nothing. Print the returned title and body, review them, then pass the
+    id and code to `create-chat-issue` — the server files only a draft that was
+    proposed and whose code you read in the preview, and it works once.
+    """
+    _set_json(json_output)
+    normalized_target = _validate_issue_type(target, option="--target")
+    try:
+        client = _get_client()
+        data = client.propose_chat_issue(
+            target=normalized_target,
+            title=title,
+            body=body,
+            repo=repo,
+            job_id=job_id,
+            jira_project_key=jira_project_key,
+            jira_security_level=jira_security_level,
+            jira_issue_type=jira_issue_type,
+        )
+    except RootCozError as err:
+        _handle_error(err)
+
+    if _state.get("json", False):
+        print_output(data, columns=[], as_json=True)
+    else:
+        typer.echo(f"Confirmation id: {data.get('confirmation_id', '')}")
+        typer.echo(f"Confirmation code: {data.get('confirmation_code', '')}")
+        typer.echo(f"Title: {data.get('title', '')}")
+        typer.echo("Body:")
+        typer.echo(data.get("body", ""))
+        # Every option the create command needs to redeem this draft, so the
+        # command printed here can be copied and run as-is.
+        suggested = [
+            "rootcoz",
+            "create-chat-issue",
+            "--target",
+            normalized_target,
+            "--confirmation-id",
+            str(data.get("confirmation_id", "")),
+            "--confirmation-code",
+            str(data.get("confirmation_code", "")),
+            "--title",
+            shlex.quote(str(data.get("title", ""))),
+            "--body",
+            shlex.quote(str(data.get("body", ""))),
+        ]
+        if repo:
+            suggested.extend(["--repo", shlex.quote(repo)])
+        if job_id:
+            suggested.extend(["--job-id", shlex.quote(job_id)])
+        if jira_project_key:
+            suggested.extend(["--jira-project-key", shlex.quote(jira_project_key)])
+        if jira_security_level:
+            suggested.extend(
+                ["--jira-security-level", shlex.quote(jira_security_level)]
+            )
+        if jira_issue_type != "Bug":
+            suggested.extend(["--jira-issue-type", shlex.quote(jira_issue_type)])
+        typer.echo("\nReview it, then file it with: " + " ".join(suggested))
+
+
+@app.command("create-chat-issue")
+def create_chat_issue(
+    target: str = typer.Option(..., "--target", help="github or jira, as proposed."),
+    confirmation_id: str = typer.Option(
+        ...,
+        "--confirmation-id",
+        help="Id from `rootcoz propose-chat-issue` for this exact title and body.",
+    ),
+    confirmation_code: str = typer.Option(
+        ...,
+        "--confirmation-code",
+        help="Code `propose-chat-issue` printed and the user read in the preview.",
+    ),
+    title: str = typer.Option(..., "--title", help="Issue title, as proposed."),
+    body: str = typer.Option(..., "--body", help="Issue body, as proposed."),
+    repo: str = typer.Option(
+        "",
+        "--repo",
+        help="GitHub repository to file in, as proposed (empty: the default).",
+    ),
+    job_id: str = typer.Option(
+        "",
+        "--job-id",
+        help="Job whose repos bound a non-admin GitHub issue, as proposed.",
+    ),
+    jira_project_key: str = typer.Option(
+        "",
+        "--jira-project-key",
+        help="Jira project key for bug creation (overrides server config).",
+    ),
+    jira_security_level: str = typer.Option(
+        "",
+        "--jira-security-level",
+        help="Jira security level name for restricted issues.",
+    ),
+    jira_issue_type: str = typer.Option(
+        "Bug",
+        "--jira-issue-type",
+        help="Jira issue type name (e.g. Bug, Story, Task). Default: Bug.",
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """File an issue drafted with `propose-chat-issue`.
+
+    Tracker credentials are the ones saved in your account: this command
+    deliberately has no token options, so it can never file an issue under a
+    server token. The id and code authorise one draft, once, so propose again
+    after editing the title, body or destination.
+    """
+    _set_json(json_output)
+    normalized_target = _validate_issue_type(target, option="--target")
+    try:
+        client = _get_client()
+        data = client.create_chat_issue(
+            target=normalized_target,
+            title=title,
+            body=body,
+            confirmation_id=confirmation_id,
+            confirmation_code=confirmation_code,
+            repo=repo,
+            job_id=job_id,
+            jira_project_key=jira_project_key,
+            jira_security_level=jira_security_level,
+            jira_issue_type=jira_issue_type,
+        )
+    except RootCozError as err:
+        _handle_error(err)
+
+    if _state.get("json", False):
+        print_output(data, columns=[], as_json=True)
+    else:
+        key_or_number = data.get("key") or f"#{data.get('number', '')}"
+        typer.echo(f"Created: {key_or_number}")
+        typer.echo(f"URL: {data.get('url', '')}")
+
+
 @app.command("validate-token")
 def validate_token_cmd(
     token_type: str = typer.Argument(help="Token type: 'github' or 'jira'"),
@@ -2866,10 +3229,13 @@ def push_rp_cmd(
         pushed = data.get("pushed", 0)
         errors = data.get("errors", [])
         unmatched = data.get("unmatched", [])
+        defaulted = data.get("defaulted", [])
         launch_id = data.get("launch_id")
         typer.echo(f"Pushed {pushed} classification(s) to Report Portal")
         if launch_id is not None:
             typer.echo(f"Launch ID: {launch_id}")
+        if defaulted:
+            typer.echo(f"Pushed as TO INVESTIGATE: {', '.join(defaulted)}")
         if unmatched:
             typer.echo(f"Unmatched: {', '.join(unmatched)}")
         if errors:
@@ -2939,6 +3305,11 @@ def push_cmd(
         message = data.get("message", "")
         if message:
             typer.echo(message)
+        # Same fallback the dedicated push-reportportal command reports: an item
+        # sent under TO INVESTIGATE was pushed, but its classification was lost.
+        defaulted = data.get("defaulted", [])
+        if defaulted:
+            typer.echo(f"Pushed as TO INVESTIGATE: {', '.join(defaulted)}")
         errors = data.get("errors", [])
         if errors:
             typer.echo(f"Errors: {len(errors)}")

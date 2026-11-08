@@ -22,22 +22,22 @@ from rootcoz.engine.chat import analysis_http_tools
 from rootcoz.engine.core import (
     JSON_RESPONSE_SCHEMA,
     TIMELINE_RULE,
+    AnalysisIncompleteError,
     _expand_group_to_analyses,
     build_failure_details_instruction,
     build_other_groups_instruction,
     build_prompt_sections,
     build_signature_section,
     parse_json_response,
+    require_workspace,
     run_single_ai_analysis,
     safe_update_progress,
     write_failure_details_file,
     write_other_groups_file,
 )
-from rootcoz.engine.http_mcp import (
-    cleanup_http_tools_mcp,
-)
 from rootcoz.models import (
     AiConfigEntry,
+    AnalysisDetail,
     FailedTest,
     FailureAnalysis,
     OverrideClassificationLiteral,
@@ -455,7 +455,7 @@ def _build_failure_summary(
 async def analyze_failure_group_with_peers(
     failures: list[FailedTest],
     console_context: str,
-    repo_path: Path | None,
+    repo_path: Path,
     main_ai_provider: str,
     main_ai_model: str,
     peer_ai_configs: list[AiConfigEntry],
@@ -484,7 +484,7 @@ async def analyze_failure_group_with_peers(
     Args:
         failures: List of test failures with the same error signature.
         console_context: Relevant console lines for context.
-        repo_path: Path to cloned test repo (optional).
+        repo_path: Path to the analysis workspace (all repos are subdirectories).
         main_ai_provider: AI provider for the main/orchestrator analysis.
         main_ai_model: AI model for the main/orchestrator analysis.
         peer_ai_configs: List of peer AI configurations.
@@ -507,41 +507,58 @@ async def analyze_failure_group_with_peers(
     Returns:
         List of FailureAnalysis objects, one per failure in the group.
     """
+    repo_path = require_workspace(repo_path)
+
     # Step 1: Main AI analyzes (shared helper — same prompt as single-AI path)
     logger.info(
         f"Peer analysis: calling main AI ({main_ai_provider}/{main_ai_model}) "
         f"for failure group ({len(failures)} tests)"
     )
-    parsed_analysis, error_signature = await run_single_ai_analysis(
-        failures=failures,
-        console_context=console_context,
-        repo_path=repo_path,
-        ai_provider=main_ai_provider,
-        ai_model=main_ai_model,
-        ai_call_timeout=ai_call_timeout,
-        custom_prompt=custom_prompt,
-        artifacts_context=artifacts_context,
-        server_url=server_url,
-        job_id=job_id,
-        additional_repos=additional_repos,
-        auth_header=auth_header,
-        all_groups=all_groups,
-        system_prompt=system_prompt,
-    )
+    # Why the primary answer carried no analysis, when it didn't. Kept off the
+    # analysis/details fields and onto the rows that end up unclassified.
+    incomplete_reason = ""
+    try:
+        parsed_analysis, error_signature = await run_single_ai_analysis(
+            failures=failures,
+            console_context=console_context,
+            repo_path=repo_path,
+            ai_provider=main_ai_provider,
+            ai_model=main_ai_model,
+            ai_call_timeout=ai_call_timeout,
+            custom_prompt=custom_prompt,
+            artifacts_context=artifacts_context,
+            server_url=server_url,
+            job_id=job_id,
+            additional_repos=additional_repos,
+            auth_header=auth_header,
+            all_groups=all_groups,
+            system_prompt=system_prompt,
+        )
+    except AnalysisIncompleteError as exc:
+        # The main model narrated instead of answering. That is not a reason to
+        # abort the debate: the peers can still classify the group, and
+        # _peer_consensus_fallback needs their votes. Run with no primary
+        # analysis. The narration itself is never forwarded: peers already get
+        # the console output, failure details and artifacts from files, and the
+        # narration can quote CI credentials that a peer provider must not see.
+        logger.warning(
+            "Peer analysis: main AI produced no usable analysis (%s); "
+            "letting the peers analyze the failure",
+            exc,
+        )
+        # The answer itself is not re-logged here: _call_ai_with_retry already
+        # wrote the whole scrubbed text before raising, and one record per answer
+        # is enough. Peer run continues without a primary analysis.
+        incomplete_reason = str(exc)
+        parsed_analysis = AnalysisDetail()
+        error_signature = exc.error_signature
 
     # Compute other_groups_file path for peer/revision prompts
     # (the file was already written by run_single_ai_analysis above)
     other_groups_file: Path | None = None
-    ephemeral_dirs: list[Path] = []
     if all_groups and len(all_groups) > 1:
-        workspace_dir = repo_path
-        if workspace_dir is None:
-            import tempfile
-
-            workspace_dir = Path(tempfile.mkdtemp(prefix="rootcoz-console-"))
-            ephemeral_dirs.append(workspace_dir)
         other_groups_file = write_other_groups_file(
-            all_groups, error_signature, workspace_dir
+            all_groups, error_signature, repo_path
         )
 
     # Validate orchestrator classification before feeding into consensus
@@ -557,13 +574,7 @@ async def analyze_failure_group_with_peers(
         parsed_analysis = parsed_analysis.model_copy(update={"classification": ""})
 
     # Build failure summary and resources section for peer prompts
-    peer_workspace = repo_path
-    if peer_workspace is None:
-        import tempfile
-
-        peer_workspace = Path(tempfile.mkdtemp(prefix="rootcoz-peer-"))
-        ephemeral_dirs.append(peer_workspace)
-    failure_summary = _build_failure_summary(failures, error_signature, peer_workspace)
+    failure_summary = _build_failure_summary(failures, error_signature, repo_path)
     # Peer sessions read the same clones, so they get the same read-only code
     # graph as the primary session, through the one builder every session kind
     # uses (#384).
@@ -576,7 +587,7 @@ async def analyze_failure_group_with_peers(
             job_id=job_id,
             auth_header=auth_header,
         ),
-        workspace=peer_workspace,
+        workspace=repo_path,
         job_id=job_id,
         repos=additional_repos,
     )
@@ -590,7 +601,7 @@ async def analyze_failure_group_with_peers(
     _, _, _, resources_section, _ = build_prompt_sections(
         custom_prompt,
         artifacts_context,
-        peer_workspace,
+        repo_path,
         server_url,
         job_id,
         additional_repos=additional_repos,
@@ -718,7 +729,7 @@ async def analyze_failure_group_with_peers(
                 peer_kwargs: dict[str, Any] = {
                     "ai_provider": config.ai_provider,
                     "ai_model": config.ai_model,
-                    "cwd": str(peer_workspace),
+                    "cwd": str(repo_path),
                     "ai_call_timeout": ai_call_timeout,
                     "session_id": session,
                 }
@@ -936,7 +947,7 @@ async def analyze_failure_group_with_peers(
                     rev_kwargs: dict[str, Any] = {
                         "ai_provider": main_ai_provider,
                         "ai_model": main_ai_model,
-                        "cwd": str(peer_workspace),
+                        "cwd": str(repo_path),
                         "ai_call_timeout": ai_call_timeout,
                         "tools": list(ANALYSIS_BUILTIN_TOOLS),
                         "system_prompt": system_prompt,
@@ -990,6 +1001,13 @@ async def analyze_failure_group_with_peers(
 
                 if rev_result.success:
                     revised = parse_json_response(rev_result.text)
+                    if revised is None:
+                        logger.warning(
+                            f"Revision round {round_num} returned no usable "
+                            "classification; keeping prior analysis"
+                        )
+                        parsed_analysis = previous_analysis
+                        continue
                     normalized_revised = _coerce_supported_classification(
                         revised.classification
                     )
@@ -1105,24 +1123,16 @@ async def analyze_failure_group_with_peers(
                 logger.debug(
                     "Failed to delete peer session %s", peer_sid, exc_info=True
                 )
-        # Remove ephemeral workspaces created when repo_path was missing
-        import shutil
-
-        for temp_dir in ephemeral_dirs:
-            try:
-                cleanup_http_tools_mcp(temp_dir)
-                shutil.rmtree(temp_dir, ignore_errors=True)
-                logger.debug("Removed peer ephemeral workspace %s", temp_dir)
-            except Exception:
-                logger.debug(
-                    "Failed to remove peer ephemeral workspace %s",
-                    temp_dir,
-                    exc_info=True,
-                )
 
     # Apply analysis to all failures in the group.
     # Shared with the non-peer path: all failures share the same v2 signature
     # (that's how they were grouped), and the anchor is per failure.
+    # A peer classification means the group has a diagnosis; without one the
+    # row keeps the reason it has none.
     return _expand_group_to_analyses(
-        error_signature, failures, parsed_analysis, peer_debate
+        error_signature,
+        failures,
+        parsed_analysis,
+        peer_debate,
+        analysis_error="" if parsed_analysis.classification else incomplete_reason,
     )

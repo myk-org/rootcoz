@@ -46,6 +46,8 @@ async def _run_peer_analysis(
     max_rounds=3,
     job_id="test-job",
     group_label="",
+    *,
+    tmp_path: Path,
 ):
     """Helper to run analyze_failure_group_with_peers with mocked CLI."""
     from unittest.mock import AsyncMock
@@ -65,7 +67,7 @@ async def _run_peer_analysis(
             FailedTest(test_name="test_foo", error_message="err", stack_trace="trace")
         ],
         console_context="console output",
-        repo_path=None,
+        repo_path=tmp_path,
         main_ai_provider="claude",
         main_ai_model="opus",
         peer_ai_configs=peer_configs,
@@ -690,7 +692,7 @@ class TestBuildPeerReviewPrompt:
 class TestAnalyzeWithPeers:
     @pytest.mark.asyncio
     async def test_usage_stays_with_each_duplicate_peer_and_revision(
-        self, monkeypatch
+        self, monkeypatch, tmp_path: Path
     ) -> None:
         """Per-call usage survives duplicate models, failed calls, and new rounds."""
         from pi_sidecar_client import AITokenUsage
@@ -736,6 +738,7 @@ class TestAnalyzeWithPeers:
         result = await _run_peer_analysis(
             monkeypatch,
             ai_call,
+            tmp_path=tmp_path,
             peer_configs=[AiConfigEntry(ai_provider="gemini", ai_model="pro")] * 2,
             max_rounds=2,
         )
@@ -754,7 +757,7 @@ class TestAnalyzeWithPeers:
         assert [r.token_usage.cost_usd for r in rounds[1:3]] == [0.01, 0.02]
 
     @pytest.mark.asyncio
-    async def test_analyze_with_peers_consensus_round_1(self) -> None:
+    async def test_analyze_with_peers_consensus_round_1(self, tmp_path: Path) -> None:
         """All peers agree in round 1 -> consensus reached, 1 round used."""
         from unittest.mock import AsyncMock
 
@@ -794,7 +797,7 @@ class TestAnalyzeWithPeers:
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="some console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -808,7 +811,9 @@ class TestAnalyzeWithPeers:
         assert results[0].peer_debate.rounds_used == 1
 
     @pytest.mark.asyncio
-    async def test_analyze_with_peers_consensus_after_revision(self) -> None:
+    async def test_analyze_with_peers_consensus_after_revision(
+        self, tmp_path: Path
+    ) -> None:
         """Peers disagree round 1, main AI revises, consensus round 2."""
         from unittest.mock import AsyncMock
 
@@ -871,7 +876,7 @@ class TestAnalyzeWithPeers:
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="some console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -885,7 +890,9 @@ class TestAnalyzeWithPeers:
         assert debate.rounds_used == 2
 
     @pytest.mark.asyncio
-    async def test_failed_revision_preserves_previous_analysis(self) -> None:
+    async def test_failed_revision_preserves_previous_analysis(
+        self, tmp_path: Path
+    ) -> None:
         """When revision call fails, previous valid analysis is kept."""
         from unittest.mock import AsyncMock
 
@@ -944,7 +951,7 @@ class TestAnalyzeWithPeers:
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="some console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -961,7 +968,9 @@ class TestAnalyzeWithPeers:
         assert debate.rounds_used == 2
 
     @pytest.mark.asyncio
-    async def test_revision_exception_preserves_previous_analysis(self) -> None:
+    async def test_revision_exception_preserves_previous_analysis(
+        self, tmp_path: Path
+    ) -> None:
         """When revision call raises an exception, prior analysis is preserved."""
         from unittest.mock import AsyncMock
 
@@ -1019,7 +1028,7 @@ class TestAnalyzeWithPeers:
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="some console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -1038,6 +1047,7 @@ class TestAnalyzeWithPeers:
     @pytest.mark.asyncio
     async def test_revision_preserves_structured_fields_on_same_classification(
         self,
+        tmp_path: Path,
     ) -> None:
         """When revision keeps the same classification but drops structured fields,
         non-empty fields from the prior analysis are preserved (merged forward)."""
@@ -1116,7 +1126,7 @@ class TestAnalyzeWithPeers:
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -1139,6 +1149,7 @@ class TestAnalyzeWithPeers:
     @pytest.mark.asyncio
     async def test_revision_preserves_details_when_revision_omits_them(
         self,
+        tmp_path: Path,
     ) -> None:
         """When revision keeps the same classification but omits details,
         the prior analysis details are preserved (not replaced with empty string)."""
@@ -1213,7 +1224,7 @@ class TestAnalyzeWithPeers:
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -1233,7 +1244,9 @@ class TestAnalyzeWithPeers:
         assert analysis.code_fix.change == "fix the assertion"
 
     @pytest.mark.asyncio
-    async def test_revision_merge_uses_normalized_classification(self) -> None:
+    async def test_revision_merge_uses_normalized_classification(
+        self, tmp_path: Path
+    ) -> None:
         """Revision returning a differently-cased classification still triggers
         the merge-forward path (preserving structured fields from prior analysis)."""
         from unittest.mock import AsyncMock
@@ -1307,7 +1320,7 @@ class TestAnalyzeWithPeers:
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -1329,7 +1342,9 @@ class TestAnalyzeWithPeers:
         assert analysis.code_fix.change == "fix the assertion"
 
     @pytest.mark.asyncio
-    async def test_analyze_with_peers_max_rounds_no_consensus(self) -> None:
+    async def test_analyze_with_peers_max_rounds_no_consensus(
+        self, tmp_path: Path
+    ) -> None:
         """Peers never agree; exhausts max_rounds with consensus=False."""
         from unittest.mock import AsyncMock
 
@@ -1375,7 +1390,7 @@ class TestAnalyzeWithPeers:
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -1389,7 +1404,9 @@ class TestAnalyzeWithPeers:
         assert debate.max_rounds == 2
 
     @pytest.mark.asyncio
-    async def test_analyze_with_peers_all_peers_fail(self, monkeypatch) -> None:
+    async def test_analyze_with_peers_all_peers_fail(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
         """All peers return unparseable responses -> falls back to main AI, consensus=False."""
         orchestrator_json = _make_ai_json_response(classification="CODE ISSUE")
         call_count = 0
@@ -1403,6 +1420,7 @@ class TestAnalyzeWithPeers:
 
         results = await _run_peer_analysis(
             monkeypatch,
+            tmp_path=tmp_path,
             cli_side_effect=cli_side_effect,
             peer_configs=_peer_configs(),
         )
@@ -1416,6 +1434,7 @@ class TestAnalyzeWithPeers:
     @pytest.mark.asyncio
     async def test_peer_agrees_derived_from_classification_not_self_reported(
         self,
+        tmp_path: Path,
     ) -> None:
         """agrees_with_orchestrator is derived from classification match, not the peer's self-reported agrees field."""
         from unittest.mock import AsyncMock
@@ -1458,7 +1477,7 @@ class TestAnalyzeWithPeers:
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -1477,7 +1496,7 @@ class TestAnalyzeWithPeers:
                 assert pr.agrees_with_orchestrator is False
 
     @pytest.mark.asyncio
-    async def test_analyze_with_peers_one_peer_fails(self) -> None:
+    async def test_analyze_with_peers_one_peer_fails(self, tmp_path: Path) -> None:
         """One peer fails, remaining peer agrees -> consensus=True."""
         from unittest.mock import AsyncMock
 
@@ -1521,7 +1540,7 @@ class TestAnalyzeWithPeers:
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -1538,7 +1557,9 @@ class TestAnalyzeWithPeers:
         assert len(failed_peers) == 1
 
     @pytest.mark.asyncio
-    async def test_progress_phase_updates_during_peer_debate(self) -> None:
+    async def test_progress_phase_updates_during_peer_debate(
+        self, tmp_path: Path
+    ) -> None:
         """Progress phase is updated before each peer round and orchestrator revision."""
         from unittest.mock import AsyncMock
 
@@ -1604,7 +1625,7 @@ class TestAnalyzeWithPeers:
             await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -1617,7 +1638,7 @@ class TestAnalyzeWithPeers:
         assert "peer_review_round_2" in phases
 
     @pytest.mark.asyncio
-    async def test_progress_phase_includes_group_label(self) -> None:
+    async def test_progress_phase_includes_group_label(self, tmp_path: Path) -> None:
         """When group_label is provided, progress phases include the group info."""
         from unittest.mock import AsyncMock
 
@@ -1680,7 +1701,7 @@ class TestAnalyzeWithPeers:
             await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -1694,7 +1715,9 @@ class TestAnalyzeWithPeers:
         assert "peer_review_round_2 (group 2/3)" in phases
 
     @pytest.mark.asyncio
-    async def test_progress_phase_no_group_suffix_when_label_empty(self) -> None:
+    async def test_progress_phase_no_group_suffix_when_label_empty(
+        self, tmp_path: Path
+    ) -> None:
         """When group_label is empty, progress phases have no group suffix."""
         from unittest.mock import AsyncMock
 
@@ -1741,7 +1764,7 @@ class TestAnalyzeWithPeers:
             await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -1755,7 +1778,9 @@ class TestAnalyzeWithPeers:
         assert not any("group" in p for p in phases)
 
     @pytest.mark.asyncio
-    async def test_peer_invalid_classification_excluded_from_consensus(self) -> None:
+    async def test_peer_invalid_classification_excluded_from_consensus(
+        self, tmp_path: Path
+    ) -> None:
         """Peer returning an invalid classification (not CODE ISSUE or PRODUCT BUG) is excluded."""
         from unittest.mock import AsyncMock
 
@@ -1812,7 +1837,7 @@ class TestAnalyzeWithPeers:
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -1831,7 +1856,7 @@ class TestAnalyzeWithPeers:
 
     @pytest.mark.asyncio
     async def test_peer_null_classification_coerced_to_empty_string(
-        self, monkeypatch
+        self, monkeypatch, tmp_path: Path
     ) -> None:
         """Peer returning null classification stores empty string, not None."""
         orchestrator_json = _make_ai_json_response(classification="CODE ISSUE")
@@ -1854,6 +1879,7 @@ class TestAnalyzeWithPeers:
 
         results = await _run_peer_analysis(
             monkeypatch,
+            tmp_path=tmp_path,
             cli_side_effect=cli_side_effect,
             peer_configs=_peer_configs(),
             max_rounds=1,
@@ -1870,7 +1896,7 @@ class TestAnalyzeWithPeers:
 
     @pytest.mark.asyncio
     async def test_peer_case_insensitive_classification_agreement(
-        self, monkeypatch
+        self, monkeypatch, tmp_path: Path
     ) -> None:
         """Peer returning lowercase classification still reaches consensus."""
         orchestrator_json = _make_ai_json_response(classification="CODE ISSUE")
@@ -1889,6 +1915,7 @@ class TestAnalyzeWithPeers:
 
         results = await _run_peer_analysis(
             monkeypatch,
+            tmp_path=tmp_path,
             cli_side_effect=cli_side_effect,
             peer_configs=_peer_configs(),
             max_rounds=1,
@@ -1904,7 +1931,7 @@ class TestAnalyzeWithPeers:
                 assert pr.classification == "CODE ISSUE"
 
     @pytest.mark.asyncio
-    async def test_no_progress_phase_when_job_id_empty(self) -> None:
+    async def test_no_progress_phase_when_job_id_empty(self, tmp_path: Path) -> None:
         """When job_id is empty, update_progress_phase should not be called."""
         from unittest.mock import AsyncMock
 
@@ -1948,7 +1975,7 @@ class TestAnalyzeWithPeers:
             await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -1960,7 +1987,7 @@ class TestAnalyzeWithPeers:
 
     @pytest.mark.asyncio
     async def test_suggested_changes_preserved_in_peer_round_details(
-        self, monkeypatch
+        self, monkeypatch, tmp_path: Path
     ) -> None:
         """Peer's suggested_changes are preserved in the PeerRound details field."""
         orchestrator_json = _make_ai_json_response(classification="CODE ISSUE")
@@ -1981,6 +2008,7 @@ class TestAnalyzeWithPeers:
 
         results = await _run_peer_analysis(
             monkeypatch,
+            tmp_path=tmp_path,
             cli_side_effect=cli_side_effect,
             peer_configs=_peer_configs(),
             max_rounds=1,
@@ -1994,7 +2022,9 @@ class TestAnalyzeWithPeers:
             assert "Fix the assertion on line 42" in pr.details
 
     @pytest.mark.asyncio
-    async def test_empty_suggested_changes_not_appended(self, monkeypatch) -> None:
+    async def test_empty_suggested_changes_not_appended(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
         """When suggested_changes is empty, details contains only reasoning."""
         orchestrator_json = _make_ai_json_response(classification="CODE ISSUE")
         peer_response = _make_peer_json_response(
@@ -2014,6 +2044,7 @@ class TestAnalyzeWithPeers:
 
         results = await _run_peer_analysis(
             monkeypatch,
+            tmp_path=tmp_path,
             cli_side_effect=cli_side_effect,
             peer_configs=_peer_configs(),
             max_rounds=1,
@@ -2028,7 +2059,7 @@ class TestAnalyzeWithPeers:
 
     @pytest.mark.asyncio
     async def test_invalid_orchestrator_classification_normalized(
-        self, monkeypatch
+        self, monkeypatch, tmp_path: Path
     ) -> None:
         """Orchestrator returning an invalid classification gets normalized to empty string."""
         # Main AI returns a malformed classification
@@ -2047,6 +2078,7 @@ class TestAnalyzeWithPeers:
 
         results = await _run_peer_analysis(
             monkeypatch,
+            tmp_path=tmp_path,
             cli_side_effect=cli_side_effect,
             peer_configs=_peer_configs(),
             max_rounds=1,
@@ -2104,7 +2136,7 @@ class TestAnalyzeWithPeers:
         assert "OTHER PEER RESPONSES" not in prompt
 
     @pytest.mark.asyncio
-    async def test_peers_see_each_other_in_round_2(self) -> None:
+    async def test_peers_see_each_other_in_round_2(self, tmp_path: Path) -> None:
         """In round 2, each peer's prompt includes the other peer's round 1 response."""
         from unittest.mock import AsyncMock
 
@@ -2176,7 +2208,7 @@ class TestAnalyzeWithPeers:
             await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -2193,7 +2225,7 @@ class TestAnalyzeWithPeers:
             assert "OTHER PEER RESPONSES FROM PREVIOUS ROUND" in prompt
 
     @pytest.mark.asyncio
-    async def test_peer_excludes_own_response(self) -> None:
+    async def test_peer_excludes_own_response(self, tmp_path: Path) -> None:
         """Each peer in round 2 sees the other peer's response but NOT its own."""
         from unittest.mock import AsyncMock
 
@@ -2261,7 +2293,7 @@ class TestAnalyzeWithPeers:
             await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -2286,7 +2318,7 @@ class TestAnalyzeWithPeers:
         assert "UNIQUE_PEER2_REASONING_ABC" not in peer2_prompt
 
     @pytest.mark.asyncio
-    async def test_failed_peer_not_carried_to_next_round(self) -> None:
+    async def test_failed_peer_not_carried_to_next_round(self, tmp_path: Path) -> None:
         """Failed peer entries from round 1 must NOT appear in round 2 prompts."""
         from unittest.mock import AsyncMock
 
@@ -2353,7 +2385,7 @@ class TestAnalyzeWithPeers:
             await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -2373,7 +2405,9 @@ class TestAnalyzeWithPeers:
         assert "VALID_PEER1_REASONING" in peer2_call[0][2]
 
     @pytest.mark.asyncio
-    async def test_invalid_revision_classification_keeps_prior(self) -> None:
+    async def test_invalid_revision_classification_keeps_prior(
+        self, tmp_path: Path
+    ) -> None:
         """Revision returning an invalid classification preserves the prior valid analysis."""
         from unittest.mock import AsyncMock
 
@@ -2441,7 +2475,7 @@ class TestAnalyzeWithPeers:
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -2455,7 +2489,7 @@ class TestAnalyzeWithPeers:
         assert analysis.classification == "CODE ISSUE"
 
     @pytest.mark.asyncio
-    async def test_duplicate_peer_configs_all_called(self) -> None:
+    async def test_duplicate_peer_configs_all_called(self, tmp_path: Path) -> None:
         """Duplicate (provider, model) peers must all be called, not deduplicated."""
         from unittest.mock import AsyncMock
 
@@ -2504,7 +2538,7 @@ class TestAnalyzeWithPeers:
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=duplicate_peers,
@@ -2523,7 +2557,7 @@ class TestAnalyzeWithPeers:
         assert len(debate.ai_configs) == 4  # 1 main + 3 peers
 
     @pytest.mark.asyncio
-    async def test_cross_peer_visibility_with_failed_peer(self) -> None:
+    async def test_cross_peer_visibility_with_failed_peer(self, tmp_path: Path) -> None:
         """When a peer fails in round 1, round 2 must still correctly map
         each surviving peer's response to the right peer index so that
         self-exclusion works properly.
@@ -2608,7 +2642,7 @@ class TestAnalyzeWithPeers:
             await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=three_peers,
@@ -2640,7 +2674,9 @@ class TestAnalyzeWithPeers:
             assert "CLI_FAILURE_OUTPUT" not in prompt
 
     @pytest.mark.asyncio
-    async def test_duplicate_peers_index_based_self_exclusion(self) -> None:
+    async def test_duplicate_peers_index_based_self_exclusion(
+        self, tmp_path: Path
+    ) -> None:
         """In round 2, duplicate-model peers exclude only their own response by index,
         not all responses from the same provider+model."""
         from unittest.mock import AsyncMock
@@ -2721,7 +2757,7 @@ class TestAnalyzeWithPeers:
             await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=duplicate_peers,
@@ -2745,7 +2781,7 @@ class TestAnalyzeWithPeers:
             )
 
     @pytest.mark.asyncio
-    async def test_peer_sessions_tracked_across_rounds(self) -> None:
+    async def test_peer_sessions_tracked_across_rounds(self, tmp_path: Path) -> None:
         """Session IDs are captured per-peer in round 1 and reused in round 2+.
 
         Verifies:
@@ -2827,7 +2863,7 @@ class TestAnalyzeWithPeers:
             await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -2844,6 +2880,86 @@ class TestAnalyzeWithPeers:
         # Round 2 calls: session_id from round 1 is passed per peer
         assert captured_calls[2] == (4, "session-peer-0")
         assert captured_calls[3] == (5, "session-peer-1")
+
+    @pytest.mark.asyncio
+    async def test_real_workspace_used_and_no_temp_dir_created(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The live path: a real workspace holds every file, peer sessions are deleted.
+
+        Pins what survives #443 -- which deleted the unreachable
+        ``repo_path is None`` branch. If the workspace ever falls back to a
+        ``mkdtemp`` directory again, or the session cleanup stops running, this
+        fails.
+        """
+        import tempfile
+        from unittest.mock import AsyncMock
+
+        from rootcoz import ai_client
+        from rootcoz.models import AnalysisDetail
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
+
+        # Any mkdtemp during the call lands here instead of the real TMPDIR.
+        scratch = tmp_path / "scratch"
+        scratch.mkdir()
+        monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+
+        mock_orchestrator = AsyncMock(
+            return_value=(
+                AnalysisDetail(classification="CODE ISSUE", details="Test is broken"),
+                "sig123",
+            )
+        )
+        deleted: list[str] = []
+
+        async def fake_delete_session(_client, session_id):
+            deleted.append(session_id)
+
+        async def mock_peer_call(prompt, **_kwargs):
+            return AIResult(
+                success=True,
+                text=_make_peer_json_response(agrees=True),
+                session_id="peer-session-1",
+            )
+
+        workspace = tmp_path / "workspace"
+        workspace.mkdir()
+        with (
+            patch(
+                "rootcoz.peer_analysis.run_single_ai_analysis",
+                mock_orchestrator,
+            ),
+            _patch_peer_ai_calls(mock_peer_call),
+            patch.object(ai_client, "delete_ai_session", fake_delete_session),
+        ):
+            await analyze_failure_group_with_peers(
+                failures=[_make_failure()],
+                console_context="console output",
+                repo_path=workspace,
+                main_ai_provider="claude",
+                main_ai_model="claude-sonnet-4-20250514",
+                peer_ai_configs=_peer_configs()[:1],
+                max_rounds=1,
+                job_id="job-1",
+                all_groups={
+                    "sig123": [_make_failure()],
+                    "other-sig": [_make_failure(test_name="other")],
+                },
+            )
+
+        # Peer sessions are deleted exactly once on the way out.
+        assert deleted == ["peer-session-1"]
+        # Both file pointers live in the caller's workspace ...
+        names = sorted(f.name for f in workspace.iterdir())
+        assert any(n.startswith("failure-details-") for n in names), names
+        assert any(n.startswith("other-failure-groups-") for n in names), names
+        # ... and no ephemeral peer/console workspace was created anywhere.
+        ephemeral = [
+            d.name
+            for d in scratch.iterdir()
+            if d.name.startswith(("rootcoz-peer-", "rootcoz-console-"))
+        ]
+        assert ephemeral == []
 
 
 # ===========================================================================
@@ -3134,7 +3250,246 @@ class TestPeerConsensusFallback:
 
 class TestOrchestratorEmptyFallback:
     @pytest.mark.asyncio
-    async def test_peer_consensus_adopted_when_orchestrator_empty(self) -> None:
+    async def test_peers_still_run_when_primary_narrates(self, tmp_path: Path) -> None:
+        """A narration-only main answer must not abort the debate (#397).
+
+        ``run_single_ai_analysis`` raises ``AnalysisIncompleteError``; the peers
+        must still classify the group, and the stored row must be classified.
+        """
+        from unittest.mock import AsyncMock
+
+        from rootcoz import storage
+        from rootcoz.engine.core import AnalysisIncompleteError
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
+
+        mock_orchestrator = AsyncMock(
+            side_effect=AnalysisIncompleteError(
+                "AI analysis incomplete: response has no usable classification",
+                error_signature="sig123",
+                raw_text="Now let me read the test source code.",
+            )
+        )
+
+        peer_response = _make_peer_json_response(
+            agrees=False,
+            classification="PRODUCT BUG",
+            reasoning="This is a product bug",
+        )
+        peer_call = AsyncMock(return_value=AIResult(success=True, text=peer_response))
+
+        with (
+            patch("rootcoz.peer_analysis.run_single_ai_analysis", mock_orchestrator),
+            _patch_peer_ai_calls(peer_call),
+        ):
+            results = await analyze_failure_group_with_peers(
+                failures=[_make_failure()],
+                console_context="console output",
+                repo_path=tmp_path,
+                main_ai_provider="claude",
+                main_ai_model="claude-sonnet-4-20250514",
+                peer_ai_configs=_peer_configs(),
+                max_rounds=1,
+            )
+
+        assert peer_call.await_count >= 1
+        assert len(results) == 1
+        analysis = results[0].analysis
+        assert analysis.classification == "PRODUCT BUG"
+        # The primary's narration is context for the peers, never the analysis.
+        assert "Now let me read the test source code" not in (analysis.details or "")
+        # Classified by the peers: the row must not be reported as incomplete.
+        assert results[0].analysis_error == ""
+        assert (
+            storage.incomplete_failures(
+                {"failures": [r.model_dump(mode="json") for r in results]}
+            )
+            == []
+        )
+
+    @pytest.mark.asyncio
+    async def test_peer_prompt_does_not_carry_primary_narration(
+        self, tmp_path: Path
+    ) -> None:
+        """The primary model's narration never reaches another provider.
+
+        Peers read the console output, failure details and artifacts from files,
+        so forwarding narration adds no data they cannot get themselves -- while
+        it can quote CI credentials that must not cross a provider boundary.
+        """
+        from unittest.mock import AsyncMock
+
+        from rootcoz.engine.core import AnalysisIncompleteError
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
+
+        prompts: list[str] = []
+
+        async def mock_peer_call(prompt, **_kwargs):
+            prompts.append(prompt)
+            return AIResult(success=False, text="CLI error")
+
+        mock_orchestrator = AsyncMock(
+            side_effect=AnalysisIncompleteError(
+                "AI analysis incomplete: response has no usable classification",
+                error_signature="sig123",
+                raw_text="The deploy log said password=hunter2 before it failed.",
+            )
+        )
+        with (
+            patch("rootcoz.peer_analysis.run_single_ai_analysis", mock_orchestrator),
+            _patch_peer_ai_calls(mock_peer_call),
+        ):
+            await analyze_failure_group_with_peers(
+                failures=[_make_failure()],
+                console_context="console output",
+                repo_path=tmp_path,
+                main_ai_provider="claude",
+                main_ai_model="claude-sonnet-4-20250514",
+                peer_ai_configs=_peer_configs(),
+                max_rounds=1,
+            )
+
+        assert prompts
+        for prompt in prompts:
+            assert "hunter2" not in prompt
+            assert "The deploy log said" not in prompt
+            assert "Primary model narration" not in prompt
+            # The peer still gets the failure-details file pointer.
+            assert "FAILURE SUMMARY" in prompt
+
+    @pytest.mark.asyncio
+    async def test_primary_narration_is_logged_once_during_a_peer_run(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        """The raise path logs the answer; the peer catch must not log it again.
+
+        ``_call_ai_with_retry`` already wrote the whole scrubbed answer before it
+        raised on an exhausted retry, so re-logging ``exc.raw_text`` in the peer
+        catch put the same narration in the log twice for every peer run (#399).
+        The answer stays inspectable at DEBUG — from the one place that logs it.
+        """
+        import logging
+        from unittest.mock import AsyncMock
+
+        from rootcoz.engine import core as core_module
+        from rootcoz.engine.core import AnalysisIncompleteError
+        from rootcoz.engine.core import logger as core_logger
+        from rootcoz.feedback import scrub_sensitive_data
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
+
+        narration = "The deploy log said password=hunter2\nthen " + "z" * 3000
+        # Every logged answer passes through this scrubber, whoever logs it, so a
+        # count here counts log lines — not logger names, which simple_logger
+        # makes order-dependent.
+        scrub_inputs: list[str] = []
+
+        def recording_scrub(text: str) -> str:
+            scrub_inputs.append(text)
+            return scrub_sensitive_data(text)
+
+        async def raise_after_the_retry_log(**_kwargs: object) -> None:
+            """Stand in for the retry loop's raise path: log the answer, then raise."""
+            core_module.log_scrubbed_answer(
+                narration, why="AI answer with no usable classification"
+            )
+            raise AnalysisIncompleteError(
+                "AI analysis incomplete: response has no usable classification",
+                error_signature="sig123",
+                raw_text=narration,
+            )
+
+        mock_orchestrator = AsyncMock(side_effect=raise_after_the_retry_log)
+        mock_peer_call = AsyncMock(
+            return_value=AIResult(success=False, text="CLI error")
+        )
+
+        monkeypatch.setattr(core_module, "scrub_sensitive_data", recording_scrub)
+        original_level = core_logger.level
+        core_logger.setLevel(logging.DEBUG)
+        try:
+            with (
+                patch(
+                    "rootcoz.peer_analysis.run_single_ai_analysis", mock_orchestrator
+                ),
+                _patch_peer_ai_calls(mock_peer_call),
+            ):
+                await analyze_failure_group_with_peers(
+                    failures=[_make_failure()],
+                    console_context="console output",
+                    repo_path=tmp_path,
+                    main_ai_provider="claude",
+                    main_ai_model="claude-sonnet-4-20250514",
+                    peer_ai_configs=_peer_configs(),
+                    max_rounds=1,
+                )
+        finally:
+            core_logger.setLevel(original_level)
+
+        logged = [text for text in scrub_inputs if "z" * 3000 in text]
+        assert logged == [narration], "one log line per answer, and the whole answer"
+        # Scrub before logging, always: the line the user reads carries no secret.
+        assert "hunter2" not in scrub_sensitive_data(logged[0])
+        assert "[REDACTED]" in scrub_sensitive_data(logged[0])
+
+    @pytest.mark.asyncio
+    async def test_unclassified_group_keeps_the_incomplete_reason(
+        self, tmp_path: Path
+    ) -> None:
+        """A narration-only primary with no usable peer vote explains itself.
+
+        The narration is never stored as the analysis, and the row carries the
+        reason it has no diagnosis (#397).
+        """
+        from unittest.mock import AsyncMock
+
+        from rootcoz.engine.core import AnalysisIncompleteError
+        from rootcoz.peer_analysis import analyze_failure_group_with_peers
+
+        reason = "AI analysis incomplete: response has no usable classification"
+        mock_orchestrator = AsyncMock(
+            side_effect=AnalysisIncompleteError(
+                reason,
+                error_signature="sig123",
+                raw_text="Now let me read the test source code.",
+            )
+        )
+
+        async def mock_peer_call(
+            prompt,
+            *,
+            cwd=None,
+            ai_provider="",
+            ai_model="",
+            ai_call_timeout=None,
+            session_id=None,
+            **_kwargs,
+        ):
+            return AIResult(success=False, text="CLI error")
+
+        with (
+            patch("rootcoz.peer_analysis.run_single_ai_analysis", mock_orchestrator),
+            _patch_peer_ai_calls(mock_peer_call),
+        ):
+            results = await analyze_failure_group_with_peers(
+                failures=[_make_failure()],
+                console_context="console output",
+                repo_path=tmp_path,
+                main_ai_provider="claude",
+                main_ai_model="claude-sonnet-4-20250514",
+                peer_ai_configs=_peer_configs(),
+                max_rounds=1,
+            )
+
+        assert len(results) == 1
+        assert results[0].analysis.classification == ""
+        assert results[0].analysis_error == reason
+        assert "Now let me read the test source code" not in (
+            results[0].analysis.details or ""
+        )
+
+    @pytest.mark.asyncio
+    async def test_peer_consensus_adopted_when_orchestrator_empty(
+        self, tmp_path: Path
+    ) -> None:
         """When orchestrator returns empty classification, peer majority is adopted."""
         from unittest.mock import AsyncMock
 
@@ -3178,7 +3533,7 @@ class TestOrchestratorEmptyFallback:
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -3192,7 +3547,7 @@ class TestOrchestratorEmptyFallback:
         assert "peer consensus" in analysis.details.lower()
 
     @pytest.mark.asyncio
-    async def test_highest_confidence_picked_no_consensus(self) -> None:
+    async def test_highest_confidence_picked_no_consensus(self, tmp_path: Path) -> None:
         """When orchestrator empty and no peer majority, most frequent classification adopted."""
         from unittest.mock import AsyncMock
 
@@ -3249,7 +3604,7 @@ class TestOrchestratorEmptyFallback:
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -3264,7 +3619,9 @@ class TestOrchestratorEmptyFallback:
         assert "no peer majority" in analysis.details.lower()
 
     @pytest.mark.asyncio
-    async def test_error_when_no_valid_peer_classifications(self) -> None:
+    async def test_error_when_no_valid_peer_classifications(
+        self, tmp_path: Path
+    ) -> None:
         """When orchestrator empty and all peers failed, explicit error in details."""
         from unittest.mock import AsyncMock
 
@@ -3302,7 +3659,7 @@ class TestOrchestratorEmptyFallback:
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -3317,7 +3674,7 @@ class TestOrchestratorEmptyFallback:
         assert "no valid peer classifications" in analysis.details.lower()
 
     @pytest.mark.asyncio
-    async def test_fallback_preserves_existing_details(self) -> None:
+    async def test_fallback_preserves_existing_details(self, tmp_path: Path) -> None:
         """Fallback note is appended to existing details, not replacing them."""
         from unittest.mock import AsyncMock
 
@@ -3362,7 +3719,7 @@ class TestOrchestratorEmptyFallback:
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -3376,7 +3733,7 @@ class TestOrchestratorEmptyFallback:
         assert "FALLBACK" in analysis.details
 
     @pytest.mark.asyncio
-    async def test_fallback_clears_incompatible_code_fix(self) -> None:
+    async def test_fallback_clears_incompatible_code_fix(self, tmp_path: Path) -> None:
         """Fallback to PRODUCT BUG clears stale code_fix from orchestrator."""
         from unittest.mock import AsyncMock
 
@@ -3424,7 +3781,7 @@ class TestOrchestratorEmptyFallback:
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -3437,7 +3794,9 @@ class TestOrchestratorEmptyFallback:
         assert not analysis.code_fix
 
     @pytest.mark.asyncio
-    async def test_fallback_clears_incompatible_product_bug_report(self) -> None:
+    async def test_fallback_clears_incompatible_product_bug_report(
+        self, tmp_path: Path
+    ) -> None:
         """Fallback to CODE ISSUE clears stale product_bug_report from orchestrator."""
         from unittest.mock import AsyncMock
 
@@ -3485,7 +3844,7 @@ class TestOrchestratorEmptyFallback:
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -3498,7 +3857,9 @@ class TestOrchestratorEmptyFallback:
         assert not analysis.product_bug_report
 
     @pytest.mark.asyncio
-    async def test_fallback_keeps_code_fix_when_code_issue(self) -> None:
+    async def test_fallback_keeps_code_fix_when_code_issue(
+        self, tmp_path: Path
+    ) -> None:
         """Fallback to CODE ISSUE preserves code_fix (compatible)."""
         from unittest.mock import AsyncMock
 
@@ -3545,7 +3906,7 @@ class TestOrchestratorEmptyFallback:
             results = await analyze_failure_group_with_peers(
                 failures=[_make_failure()],
                 console_context="console output",
-                repo_path=None,
+                repo_path=tmp_path,
                 main_ai_provider="claude",
                 main_ai_model="claude-sonnet-4-20250514",
                 peer_ai_configs=_peer_configs(),
@@ -3589,4 +3950,24 @@ class TestRoundUsageCredentialSource:
         assert (
             _round_usage(result, "gemini", "pro", "revision").credential_source
             == "unknown"
+        )
+
+
+@pytest.mark.asyncio
+async def test_peer_analysis_refuses_no_workspace() -> None:
+    """Peer analysis refuses a missing workspace instead of falling back to a temp dir.
+
+    Its only call site is a dynamic ``importlib.import_module`` lookup, so mypy
+    checks nothing at that boundary (#443) — the refusal is the guard.
+    """
+    from rootcoz.peer_analysis import analyze_failure_group_with_peers
+
+    with pytest.raises(RuntimeError, match="requires a workspace path"):
+        await analyze_failure_group_with_peers(
+            failures=[_make_failure()],
+            console_context="",
+            repo_path=None,
+            main_ai_provider="claude",
+            main_ai_model="claude-sonnet-4-20250514",
+            peer_ai_configs=_peer_configs(),
         )

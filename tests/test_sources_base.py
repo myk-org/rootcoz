@@ -379,3 +379,81 @@ class TestCISourceCleanup:
         assert called["path"] == extract
         assert called["label"] == "Prow artifacts"
         assert source._extract_path is None
+
+
+class TestRunConsoleOnlyAnalysisIncomplete:
+    """A narration-only answer is a re-analysis problem, not a credential one."""
+
+    @pytest.mark.asyncio
+    async def test_no_usable_classification_is_not_blamed_on_credentials(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from rootcoz.engine.core import AnalysisIncompleteError
+        from rootcoz.error_messages import make_user_friendly_error
+        from rootcoz.sources.base import run_console_only_analysis
+
+        async def _raise(**_kwargs: object) -> None:
+            raise AnalysisIncompleteError(
+                "AI analysis incomplete: response has no usable classification; "
+                "re-analyze the job",
+                error_signature="sig123",
+                raw_text="Now let me read the test source code.",
+            )
+
+        monkeypatch.setattr("rootcoz.engine.core.analyze_failure_group", _raise)
+
+        success, failures, error_text = await run_console_only_analysis(
+            test_name="my-job#7",
+            console_context="console output",
+            artifacts_context="",
+            repo_path=None,
+            ai_provider="claude",
+            ai_model="opus",
+            ai_call_timeout=None,
+            custom_prompt="",
+            server_url="",
+            job_id="job-1",
+            additional_repos=None,
+            auth_header="",
+        )
+
+        assert success is False
+        assert "no usable classification" in error_text
+        assert "credential" not in error_text.lower()
+        # What the user reads must not blame the credentials either.
+        assert "credential" not in make_user_friendly_error(error_text).lower()
+        assert len(failures) == 1
+        assert failures[0].analysis.classification == ""
+        assert "no usable classification" in failures[0].analysis_error
+        assert "credential" not in failures[0].analysis_error.lower()
+
+
+def test_cleanup_extract_dir_reports_survivors(
+    tmp_path: Path, monkeypatch, caplog
+) -> None:
+    """A cleanup that left paths behind must not log ``Cleanup complete``."""
+    import errno
+    import logging
+    import os
+    import re
+
+    from rootcoz.sources.base import cleanup_extract_dir
+
+    extract = tmp_path / "extract"
+    extract.mkdir()
+    (extract / "stuck.txt").write_text("x")
+    real_unlink = os.unlink
+
+    def refuse_stuck(path, *args, **kwargs):
+        if Path(os.fspath(path)).name == "stuck.txt":
+            raise PermissionError(errno.EACCES, "Permission denied", os.fspath(path))
+        return real_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(os, "unlink", refuse_stuck)
+    with caplog.at_level(logging.INFO):
+        cleanup_extract_dir(extract, label="extracted artifacts")
+
+    assert "Cleanup complete" not in caplog.text
+    survived = re.search(r"survived=(\d+)", caplog.text)
+    assert survived and int(survived.group(1)) >= 1
+    assert extract.exists()
