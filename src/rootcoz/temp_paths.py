@@ -138,7 +138,7 @@ async def wait_for_reaper(poll: float = 0.05) -> None:
         await asyncio.sleep(poll)
 
 
-#: Locks for *reusable* workspaces only (``chat-{job}/{user}`` and the admin chat
+#: Locks for *reusable* workspaces only (``rootcoz-chat-{job}/{user}`` and the admin chat
 #: workspace), where a queued delete can race the next create of the same path.
 #: Keyed by ``realpath``; uuid workspaces are unique per use and need nothing.
 _path_locks: dict[str, _PathLock] = {}
@@ -209,7 +209,7 @@ def _mark_deleting(path: Path) -> _Abandoned | None:
     safe to reuse, a half-deleted one nobody can recognise is not.
 
     A path that is not there needs no marker, and must not read as an abandoned
-    delete: the marker lives *beside* the tree, in a ``chat-{job}`` parent that a
+    delete: the marker lives *beside* the tree, in a ``rootcoz-chat-{job}`` parent that a
     per-user workspace never creates, so clearing a chat nobody ever opened raised
     ENOENT and reported an incomplete cleanup with nothing on disk (#424).
     """
@@ -637,8 +637,10 @@ async def reusable_path_lock(what: str, path: Path) -> AsyncIterator[PathState]:
 
     Only the marker decides re-creation: an intact workspace is reused untouched
     (:attr:`PathState.REUSABLE`), because chat workspaces deliberately persist
-    sessions and clones across messages. A marked one is deleted first, so the
-    caller creates it from scratch (:attr:`PathState.NOT_REUSABLE`).
+    sessions and clones across messages for as long as their job exists. A marked
+    one is deleted first, so the caller creates it from scratch
+    (:attr:`PathState.NOT_REUSABLE`). Reuse does not outlive the job: the startup
+    reclaim deletes an intact chat workspace whose ``results`` row is gone.
 
     Raises :class:`PathStateUnknown` instead of yielding when the delete could not
     establish the tree is gone — a live builder still owns it, or the delete left

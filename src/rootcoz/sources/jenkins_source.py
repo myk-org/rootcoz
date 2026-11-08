@@ -51,6 +51,7 @@ from rootcoz.sources.base import (
     write_console_output_file,
 )
 from rootcoz.token_tracking import child_usage_scope
+from rootcoz.url_utils import redact_urls_in_text
 from rootcoz.utils import (
     JENKINS_CONNECTIVITY_EXCEPTIONS,
     is_jenkins_connectivity_error,
@@ -234,12 +235,17 @@ def handle_jenkins_exception(
             )
         else:
             raise JenkinsError(
-                f"Jenkins error: {e!s}",
+                f"Jenkins error: {redact_urls_in_text(str(e))}",
                 status_code=502,
             )
 
     if is_jenkins_connectivity_error(e):
-        logger.error(f"Jenkins unreachable for {job_name} #{build_number}: {e!s}")
+        logger.error(
+            "Jenkins unreachable for %s #%s: %s",
+            job_name,
+            build_number,
+            redact_urls_in_text(str(e)),
+        )
         raise JenkinsError(
             "Jenkins is unreachable or timed out. Check server connectivity.",
             status_code=504,
@@ -247,7 +253,7 @@ def handle_jenkins_exception(
 
     # For any other exception type
     raise JenkinsError(
-        f"Failed to connect to Jenkins: {e!s}",
+        f"Failed to connect to Jenkins: {redact_urls_in_text(str(e))}",
         status_code=502,
     )
 
@@ -1724,15 +1730,17 @@ async def wait_for_jenkins_completion(
         await asyncio.to_thread(client.get_whoami)
     except _JENKINS_FETCH_EXCEPTIONS as e:
         if is_jenkins_connectivity_error(e):
-            logger.exception("Cannot reach Jenkins at %s", jenkins_url)
+            # No traceback on either branch: python-jenkins renders its
+            # tokenized constructor URL into the exception text.
+            logger.error("Cannot reach Jenkins at %s", redact_urls_in_text(jenkins_url))
             return False, (
                 "Jenkins connectivity error: unable to reach Jenkins; "
                 "please verify the Jenkins URL and network connectivity"
             )
         else:
-            logger.exception(
+            logger.error(
                 "Jenkins preflight failed at %s (%s)",
-                jenkins_url,
+                redact_urls_in_text(jenkins_url),
                 type(e).__name__,
             )
             err_str = str(e).lower()
@@ -1788,19 +1796,24 @@ async def wait_for_jenkins_completion(
 
         except _JENKINS_FETCH_EXCEPTIONS as e:
             if not is_jenkins_connectivity_error(e):
-                logger.exception("Non-transient error checking Jenkins status")
+                # A traceback would print the exception text, and python-jenkins
+                # renders the tokenized constructor URL into it.
+                logger.error(
+                    "Non-transient error checking Jenkins status: %s",
+                    type(e).__name__,
+                )
                 return False, "Jenkins poll failed; check server logs for details"
             consecutive_failures += 1
             logger.warning(
                 "Transient error checking Jenkins status (%d/%d): %s",
                 consecutive_failures,
                 max_consecutive_failures,
-                e,
+                redact_urls_in_text(str(e)),
             )
             if consecutive_failures >= max_consecutive_failures:
-                logger.exception(
+                logger.error(
                     "Cannot reach Jenkins at %s after %d consecutive failures",
-                    jenkins_url,
+                    redact_urls_in_text(jenkins_url),
                     consecutive_failures,
                 )
                 return False, unreachable_error

@@ -240,6 +240,9 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
     | `MAX_WAIT_MINUTES` | `0` | integer ≥ 0 | no | no | yes |
     | `METADATA_RULES_FILE` | empty | string | no | **yes** | yes (restart) |
     | `LOG_LEVEL` | empty (`INFO`) | string | no | **yes** | yes (restart) |
+    | `LOG_MAX_BYTES` | `0` (derive) | integer ≥ 0 | no | no | yes |
+    | `LOG_BACKUP_COUNT` | `0` (derive) | integer ≥ 0 | no | no | yes |
+    | `LOG_MIN_FREE_BYTES` | `0` (derive) | integer ≥ 0 | no | no | yes |
     | `ENABLE_AUTO_REVIEW` | `true` | boolean | no | no | yes |
     | `AUTO_PUSH_EXPORTERS` | empty | string | no | no | yes |
 
@@ -249,6 +252,8 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
     `ADDITIONAL_REPOS` uses `name:url,name:url`, with an optional `:ref` and `@token` suffix per entry; names must be unique. `MAX_WAIT_MINUTES=0` means wait indefinitely. `PUBLIC_BASE_URL` is the only origin RootCoz will build absolute links from — request `Host` and `X-Forwarded-*` headers are never trusted, which is what blocks host-header injection in result and tracker links.
 
     `METADATA_RULES_FILE` points at a YAML or JSON file of name-based metadata rules. Rules load once and cache for the process lifetime, so edits need a restart. A broken rules file logs a warning and yields no rules rather than failing the server.
+
+    `LOG_MAX_BYTES`, `LOG_BACKUP_COUNT` and `LOG_MIN_FREE_BYTES` bound the application log file — see [Bounding the application log file](deploy-rootcoz.html#bounding-the-application-log-file). All three default to `0`, which means "derive it from the filesystem holding the data directory", and all three apply at runtime: saving one rebuilds the file handler without a restart. An explicit value is used as given — the `100 MiB x 21` cap applies to the derived default, not to a value you chose.
 
     `AUTO_PUSH_EXPORTERS` takes a comma-separated exporter list such as `reportportal`, and only applies when `ENABLE_AUTO_REVIEW` is also on. It runs once every failure in the job is reviewed — whether the AI auto-reviewed it or a human did, since a human review is the stronger signal — and it pushes one analysis per scope: the job's own failures plus each child job that has failures, so a pipeline whose failures live only in child jobs still publishes them instead of sending an empty list.
    
@@ -413,6 +418,9 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `MAX_WAIT_MINUTES` | `max_wait_minutes` | Server | runtime |
 | `METADATA_RULES_FILE` | `metadata_rules_file` | Server | restart |
 | `LOG_LEVEL` | `log_level` | Server | restart |
+| `LOG_MAX_BYTES` | `log_max_bytes` | Server | runtime |
+| `LOG_BACKUP_COUNT` | `log_backup_count` | Server | runtime |
+| `LOG_MIN_FREE_BYTES` | `log_min_free_bytes` | Server | runtime |
 | `ENABLE_AUTO_REVIEW` | `enable_auto_review` | Server | runtime |
 | `AUTO_PUSH_EXPORTERS` | `auto_push_exporters` | Server | runtime |
 | `VAPID_PUBLIC_KEY` | `vapid_public_key` | Web Push | restart |
