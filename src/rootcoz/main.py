@@ -96,6 +96,23 @@ from rootcoz.ai_client import (
     update_model_catalog,
 )
 from rootcoz.attribution import AiProvenance, apply_ai_attribution
+from rootcoz.auth import approval as auth_approval
+from rootcoz.auth import password as auth_password
+from rootcoz.auth import proxy as auth_proxy
+from rootcoz.auth import registry as auth_registry
+from rootcoz.auth.base import (
+    RENEW_SESSION_TOKEN_ATTR,
+    RESERVED_ADMIN_USERNAME,
+    SESSION_COOKIE,
+    SET_PROXY_COOKIE_ATTR,
+    USERNAME_COOKIE,
+    AuthContext,
+    clear_session_cookie,
+    effective_can_view_reports,
+    read_cookie,
+    set_session_cookie,
+    set_username_cookie,
+)
 from rootcoz.bug_creation import (
     create_github_issue,
     create_jira_bug,
@@ -1087,6 +1104,12 @@ async def _periodic_session_cleanup() -> None:
             count = await storage.cleanup_expired_sessions()
             if count:
                 logger.info("Periodic cleanup: removed %d expired sessions", count)
+            device_codes = await storage.purge_expired_device_codes()
+            if device_codes:
+                logger.info(
+                    "Periodic cleanup: removed %d expired SSO device codes",
+                    device_codes,
+                )
             await _cleanup_revoked_ai_sessions()
             await prune_audit_events_periodically()
             await prune_results_periodically()
@@ -4375,66 +4398,6 @@ class ErrorTrackingMiddleware(BaseHTTPMiddleware):
         return response
 
 
-# Legacy cookie names from the jenkins-job-insight era.
-# Read as fallback so existing sessions survive the rename;
-# cleared once the new cookie is set.
-_LEGACY_COOKIE_MAP: dict[str, str] = {
-    "rootcoz_username": "jji_username",
-    "rootcoz_session": "jji_session",
-}
-
-
-def _read_cookie(request: Request, name: str) -> str:
-    """Read cookie with legacy fallback."""
-    value = request.cookies.get(name, "")
-    if not value:
-        legacy = _LEGACY_COOKIE_MAP.get(name)
-        if legacy:
-            value = request.cookies.get(legacy, "")
-    return value
-
-
-def _set_username_cookie(response: Response, username: str, *, secure: bool) -> None:
-    """Set the rootcoz_username cookie with consistent attributes."""
-    response.set_cookie(
-        "rootcoz_username",
-        username,
-        path="/",
-        max_age=365 * 24 * 60 * 60,
-        samesite="lax",
-        secure=secure,
-    )
-    # Clear legacy cookie after migration
-    response.delete_cookie("jji_username", path="/")
-
-
-_APPROVAL_STATUS_RESPONSES: dict[str, str] = {
-    "pending": "Your account is awaiting admin approval",
-    "rejected": "Your account has been rejected",
-}
-
-
-def _maybe_add_custom_approval_msg(content: dict[str, Any], settings: Settings) -> None:
-    """Append custom admin approval message to response content if configured."""
-    if settings.admin_wait_approve_msg:
-        content["custom_message"] = settings.admin_wait_approve_msg
-
-
-def _blocked_user_status_response(user_status: str | None) -> JSONResponse | None:
-    """Return a 403 JSONResponse if user_status is pending/rejected, else None."""
-    detail = _APPROVAL_STATUS_RESPONSES.get(user_status or "")
-    if detail is None:
-        return None
-    settings = get_settings()
-    content: dict[str, Any] = {"detail": detail, "status": user_status}
-    if user_status == "pending":
-        _maybe_add_custom_approval_msg(content, settings)
-    return JSONResponse(
-        status_code=403,
-        content=content,
-    )
-
-
 async def _record_account_blocked(
     *, username: str, reason: str, role: str | None, request: Request
 ) -> None:
@@ -4509,26 +4472,6 @@ async def _audit_refused_issue_call(
     )
 
 
-def _account_block_reason(user: dict[str, Any] | None) -> str | None:
-    """``"disabled"`` / ``"locked"`` for a row that must not log in (#379).
-
-    Only the login path asks this. ``disabled`` is an admin taking the account
-    out of service, so the middleware refuses it on every path too; ``locked``
-    is a credential-guessing guard, and refusing it anywhere but here would let
-    a stranger who knows a username cut off that account's sessions and keys.
-
-    ``None`` for a usable account and for the bootstrap admin, which has no
-    ``users`` row and is therefore unaffected.
-    """
-    if not user:
-        return None
-    if user.get("disabled"):
-        return "disabled"
-    if user.get("locked"):
-        return "locked"
-    return None
-
-
 def _unauthenticated_response(request: Request, path: str) -> Response:
     """What an unauthenticated request gets: the login page, or the generic 401.
 
@@ -4541,17 +4484,19 @@ def _unauthenticated_response(request: Request, path: str) -> Response:
         return RedirectResponse(url="/login", status_code=303)
     return JSONResponse(
         status_code=401,
-        content={"detail": "Authentication required. Please log in with your API key."},
+        content={"detail": auth_approval.UNAUTHENTICATED_DETAIL},
     )
 
 
 class AuthMiddleware(BaseHTTPMiddleware):
-    """Authenticate all requests via session cookie, Bearer token, or trusted SSO header.
+    """Require an authenticated identity on every request.
 
-    All users (admin and regular) must authenticate. The rootcoz_username
-    cookie is for display/tracking only — it does not grant API access.
-    SSO deployments (trust_proxy_headers) use X-Forwarded-User as an
-    alternative to API key authentication.
+    Credential resolution is delegated to
+    :func:`rootcoz.auth.registry.resolve_identity` (session cookie → Bearer
+    token → trusted proxy header); this middleware owns the public-path bypass,
+    the `/login` proxy redirect, the display-cookie fallback, the disabled and
+    approval gates, and the cookie side effects. The ``rootcoz_username`` cookie
+    is for display/tracking only — it does not grant API access.
     """
 
     # Public paths that bypass authentication.
@@ -4640,173 +4585,63 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         settings = get_settings()
 
-        # SSO: when trust_proxy_headers is enabled and X-Forwarded-User is
-        # present, auto-identify the user and redirect /login → /
-        proxy_username = ""
-        if settings.trust_proxy_headers:
-            proxy_username = request.headers.get("x-forwarded-user", "").strip().lower()
-
+        # A proxy-authenticated visitor on /login goes straight to the dashboard.
         if path.startswith("/login"):
-            if proxy_username and proxy_username.lower() != "admin":
-                # Session auth takes precedence over X-Forwarded-User —
-                # only check when an SSO redirect would otherwise fire.
-                session_token = _read_cookie(request, "rootcoz_session")
-                if session_token and await storage.get_session(session_token):
-                    return await call_next(request)
-                # A blocked identity stays on the login page: sending it to "/"
-                # only bounces it back here, one audit row per hop (#379).
-                # No row here — the refusal was audited where it was decided.
-                if _account_block_reason(
-                    await storage.get_user_by_username(proxy_username)
-                ):
-                    return await call_next(request)
-                # SSO user hitting /login — redirect to dashboard
-                response: Response = RedirectResponse(url="/", status_code=303)
-                if _read_cookie(request, "rootcoz_username") != proxy_username:
-                    _set_username_cookie(
-                        response, proxy_username, secure=settings.secure_cookies
-                    )
-                return response
-            return await call_next(request)
+            redirect = await auth_proxy.proxy_login_redirect(
+                AuthContext(request=request, settings=settings)
+            )
+            return redirect if redirect is not None else await call_next(request)
 
-        is_admin = False
-        is_ai_session = False
-        username = ""
-        resolved_role = get_settings().default_user_role  # default role until resolved
-        authenticated_admin = False
-        has_valid_session = False
-        auth_session_token = ""
-        # User row already loaded via Bearer key or SSO (reuse for can_view_reports).
-        fetched_user: dict[str, Any] | None = None
+        # The credential chain (session cookie, Bearer token, trusted proxy
+        # header) lives in rootcoz.auth; the registry owns its precedence.
+        identity = await auth_registry.resolve_identity(request, settings)
 
-        # 1. Check session cookie (rootcoz_session) — user or admin session
-        session_token = _read_cookie(request, "rootcoz_session")
-        if session_token:
-            session = await storage.get_session(session_token)
-            if session:
-                is_admin = bool(session["is_admin"])
-                is_ai_session = bool(session.get("is_ai_session", False))
-                username = str(session["username"])
-                authenticated_admin = is_admin
-                has_valid_session = True
-                auth_session_token = session_token
-                if is_admin:
-                    resolved_role = "admin"
-                else:
-                    resolved_role = str(session.get("role", "reviewer"))
-
-                # Renew session (sliding window) — only when <50% TTL remains
-                expires_at_str = session.get("expires_at", "")
-                if expires_at_str:
-                    try:
-                        expires_at = datetime.strptime(
-                            str(expires_at_str), "%Y-%m-%d %H:%M:%S"
-                        ).replace(tzinfo=UTC)
-                        remaining = expires_at - datetime.now(UTC)
-                        if remaining < timedelta(
-                            hours=storage.current_session_ttl_hours() / 2
-                        ):
-                            # Await renewal so cookie refresh is only set after confirmed DB update
-                            try:
-                                renewed = await storage.renew_session(session_token)
-                                if renewed:
-                                    request.state.renew_session_token = session_token
-                            except Exception:
-                                logger.debug("Session renewal failed", exc_info=True)
-                    except ValueError, TypeError:
-                        logger.debug(
-                            "Failed to parse session expires_at for renewal",
-                            exc_info=True,
-                        )
-
-        # 2. Check Bearer token — admin API key or admin_key
-        if not authenticated_admin:
-            auth_header = request.headers.get("authorization", "")
-            if auth_header.startswith("Bearer "):
-                token = auth_header[7:]
-                if settings.admin_key and hmac.compare_digest(
-                    token, settings.admin_key
-                ):
-                    is_admin = True
-                    is_ai_session = False
-                    username = "admin"
-                    resolved_role = "admin"
-                    authenticated_admin = True
-                    has_valid_session = True
-                    auth_session_token = ""
-                else:
-                    user = await storage.get_user_by_key(token)
-                    if user:
-                        fetched_user = user
-                        is_ai_session = False
-                        username = str(user["username"])
-                        resolved_role = str(user.get("role", "reviewer"))
-                        has_valid_session = True
-                        auth_session_token = ""
-                        if resolved_role == "admin":
-                            is_admin = True
-                            authenticated_admin = True
-                    else:
-                        # Fall back to session token via Bearer header
-                        # (used by AI for internal API calls)
-                        session = await storage.get_session(token)
-                        if session:
-                            is_admin = bool(session["is_admin"])
-                            is_ai_session = bool(session.get("is_ai_session", False))
-                            username = str(session["username"])
-                            resolved_role = str(session.get("role", "reviewer"))
-                            if is_admin:
-                                resolved_role = "admin"
-                            authenticated_admin = is_admin
-                            has_valid_session = True
-                            auth_session_token = token
-
-        # 3. Check X-Forwarded-User header (SSO via trusted proxy)
-        if not username and proxy_username and proxy_username.lower() != "admin":
-            is_ai_session = False
-            username = proxy_username
-            has_valid_session = True
-            # Resolve the user's actual role from DB
-            proxy_user = await storage.get_user_by_username(username)
-            if proxy_user:
-                fetched_user = proxy_user
-                resolved_role = str(proxy_user.get("role", "reviewer"))
-                if resolved_role == "admin":
-                    is_admin = True
-                    authenticated_admin = True
-            # Flag that we need to set the rootcoz_username cookie on the response
-            request.state.set_proxy_cookie = proxy_username
-
-        # 4. Fall back to rootcoz_username cookie (regular users)
-        if not username:
-            cookie_username = _read_cookie(request, "rootcoz_username").strip().lower()
-            if cookie_username == "admin":
+        is_admin = identity.is_admin if identity else False
+        is_ai_session = identity.is_ai_session if identity else False
+        username = identity.username if identity else ""
+        resolved_role = identity.role if identity else settings.default_user_role
+        has_valid_session = identity is not None
+        # The session token the identity was authenticated with (cookie or Bearer),
+        # "" for a key or proxy identity — admin SSE revalidation rechecks it (#605).
+        auth_session_token = identity.session_token if identity else ""
+        # User row already loaded while resolving (Bearer key or proxy header) —
+        # reuse it for can_view_reports and the disabled-account check.
+        fetched_user: dict[str, Any] | None = identity.user if identity else None
+        if identity is None:
+            # Display fallback: the rootcoz_username cookie names a user but
+            # grants nothing — it sets username with has_valid_session False and
+            # must never become a chain strategy.
+            cookie_username = read_cookie(request, USERNAME_COOKIE).strip().lower()
+            if cookie_username == RESERVED_ADMIN_USERNAME:
                 # Reserved username — only valid via session/bearer auth
                 cookie_username = ""
             username = cookie_username
 
         # Every refusal below returns from this dispatch, so the auth layer
-        # is the only place their lines can be attributed. Bound after Step 4:
-        # never from the untrusted display cookie.
+        # is the only place their lines can be attributed. Bound once the
+        # identity is resolved: never from the untrusted display cookie.
         user_token = user_var.set(username) if has_valid_session and username else None
         try:
-            # 5. Refuse a disabled account on every path (#379): a key, a session and
-            #    a proxy identity are all only as good as the row they name. A
-            #    locked one is refused at login only — see _account_block_reason.
-            #    The row is loaded once here and reused for the grants below.
-            #    "admin" is reserved, so a bootstrap admin has no row to check.
+            # Refuse a disabled account on every path (#379): a key, a session and a
+            # proxy identity are all only as good as the row they name. A locked one
+            # is refused at login only — see auth_approval.account_block_reason.
+            # The row is loaded once here and reused for the grants below.
+            # "admin" is reserved, so a bootstrap admin has no row to check.
             if (
                 has_valid_session
                 and username
-                and username != "admin"
+                and username != RESERVED_ADMIN_USERNAME
                 and fetched_user is None
             ):
                 fetched_user = await storage.get_user_by_username(username)
-            if fetched_user and fetched_user.get("disabled"):
+            # The shared decision is auth_approval.account_block_reason; a lock is
+            # refused at login only, so only "disabled" stops a live credential.
+            block_reason = auth_approval.account_block_reason(fetched_user)
+            if block_reason == "disabled":
                 logger.debug("Refused disabled account '%s' on %s", username, path)
                 await _record_account_blocked(
                     username=username,
-                    reason="disabled",
+                    reason=block_reason,
                     role=resolved_role,
                     request=request,
                 )
@@ -4848,7 +4683,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 _spawn_background(_safe_track_user(username))
 
             # Admin-only path enforcement
-            if path.startswith("/api/admin/") and not authenticated_admin:
+            if path.startswith("/api/admin/") and not is_admin:
                 return JSONResponse(
                     status_code=403, content={"detail": "Admin access required"}
                 )
@@ -4870,7 +4705,9 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 and not self._is_public_path(path)
             ):
                 user_status = await storage.get_user_status(username)
-                blocked = _blocked_user_status_response(user_status)
+                blocked = auth_approval.blocked_user_status_response(
+                    user_status, settings
+                )
                 if blocked is not None:
                     # Pending/rejected is a refusal the handler never sees, so this
                     # is the only place its issue attempt can reach the trail.
@@ -4886,33 +4723,23 @@ class AuthMiddleware(BaseHTTPMiddleware):
                 ai_username.reset(username_token)
 
             # Set rootcoz_username cookie from X-Forwarded-User header (SSO)
-            if getattr(request.state, "set_proxy_cookie", None):
-                proxy_cookie_value = request.state.set_proxy_cookie
-                if _read_cookie(request, "rootcoz_username") != proxy_cookie_value:
-                    _set_username_cookie(
+            if getattr(request.state, SET_PROXY_COOKIE_ATTR, None):
+                proxy_cookie_value = getattr(request.state, SET_PROXY_COOKIE_ATTR)
+                if read_cookie(request, USERNAME_COOKIE) != proxy_cookie_value:
+                    set_username_cookie(
                         response, proxy_cookie_value, secure=settings.secure_cookies
                     )
 
             # Refresh session cookie max_age if session was renewed
-            if getattr(request.state, "renew_session_token", None):
+            if getattr(request.state, RENEW_SESSION_TOKEN_ATTR, None):
                 # Skip if downstream handler already set/cleared rootcoz_session
                 # (e.g., login sets a new session, logout deletes it)
                 path = request.url.path
                 if path not in ("/api/auth/login", "/api/auth/logout"):
                     settings = get_settings()
-                    response.set_cookie(
-                        "rootcoz_session",
-                        request.state.renew_session_token,
-                        httponly=True,
-                        samesite="lax",
-                        secure=settings.secure_cookies,
-                        max_age=storage.current_session_ttl_seconds(),
-                    )
-                    # Clear legacy cookie after migration
-                    response.delete_cookie(
-                        "jji_session",
-                        httponly=True,
-                        samesite="lax",
+                    set_session_cookie(
+                        response,
+                        getattr(request.state, RENEW_SESSION_TOKEN_ATTR),
                         secure=settings.secure_cookies,
                     )
 
@@ -6332,7 +6159,7 @@ async def _is_admin_sse_authorized(
         if isinstance(raw_state_token, str):
             session_token = raw_state_token
         elif isinstance(getattr(request, "cookies", None), Mapping):
-            raw_cookie = _read_cookie(request, "rootcoz_session")
+            raw_cookie = read_cookie(request, SESSION_COOKIE)
             session_token = raw_cookie if isinstance(raw_cookie, str) else ""
         else:
             session_token = ""
@@ -18434,11 +18261,6 @@ async def _read_json_object(request: Request) -> dict[str, Any]:
     return body
 
 
-def effective_can_view_reports(is_admin: bool, stored_flag: bool = False) -> bool:
-    """Effective reports access: admins always True; others use the stored DB flag."""
-    return True if is_admin else stored_flag
-
-
 def _require_admin(request: Request) -> None:
     """Raise 403 if the request is not from an authenticated admin."""
     if not request.state.is_admin:
@@ -18529,11 +18351,14 @@ async def _login_authentication_method(request: Request, settings: Settings) -> 
     client. The proxy wins because it is the outermost credential; a live
     session beats the key because the caller was already logged in.
     """
+    # Deliberately NOT the chain order in rootcoz.auth.registry: here the
+    # question is which credential named the caller at login time, and the proxy
+    # is the outermost of them.
     if settings.trust_proxy_headers:
-        proxy_user = request.headers.get("x-forwarded-user", "").strip()
+        proxy_user = request.headers.get(auth_proxy.PROXY_USER_HEADER, "").strip()
         if proxy_user:
             return "proxy"
-    session_token = _read_cookie(request, "rootcoz_session")
+    session_token = read_cookie(request, SESSION_COOKIE)
     if session_token and await storage.get_session(session_token):
         return "session"
     return "api_key"
@@ -18636,42 +18461,16 @@ async def login(request: Request) -> JSONResponse:
         raise HTTPException(status_code=400, detail="Username and api_key are required")
 
     settings = get_settings()
-    is_admin = False
-    resolved_role = "reviewer"
-    authenticated = False
-    can_view_reports = False
-    can_use_server_providers = False
-    can_use_free_providers = False
-    account: dict[str, Any] | None = None
-
-    # Check admin_key — username must be "admin"
-    if (
-        username == "admin"
-        and settings.admin_key
-        and hmac.compare_digest(api_key, settings.admin_key)
-    ):
-        is_admin = True
-        resolved_role = "admin"
-        authenticated = True
-        can_view_reports = effective_can_view_reports(True)
-        can_use_server_providers = True
-        can_use_free_providers = True
-    else:
-        # Check user API key
-        user = await storage.get_user_by_key(api_key)
-        account = user
-        if user and user["username"] == username:
-            authenticated = True
-            resolved_role = str(user.get("role", "reviewer"))
-            if resolved_role == "admin":
-                is_admin = True
-            can_view_reports = effective_can_view_reports(
-                is_admin, bool(user.get("can_view_reports"))
-            )
-            can_use_server_providers = bool(user.get("can_use_server_providers"))
-            # Effective free access — same rule as /api/auth/me (toggle,
-            # role admin, server grant); get_user_by_key has no free column.
-            can_use_free_providers = await storage.can_user_use_free_providers(username)
+    # Credential verification lives with the auth strategies; audit rows,
+    # lockout, approval gating, session creation and cookies stay in this route.
+    verified = await auth_password.PasswordLogin().verify(username, api_key, settings)
+    authenticated = verified.authenticated
+    is_admin = verified.is_admin
+    resolved_role = verified.role
+    can_view_reports = verified.can_view_reports
+    can_use_server_providers = verified.can_use_server_providers
+    can_use_free_providers = verified.can_use_free_providers
+    account = verified.account
 
     if not authenticated:
         reason = await _login_failure_reason(
@@ -18712,7 +18511,7 @@ async def login(request: Request) -> JSONResponse:
     # Check pending/rejected status before creating a session (non-admin only)
     if not is_admin and settings.require_approval:
         user_status = await storage.get_user_status(username)
-        blocked = _blocked_user_status_response(user_status)
+        blocked = auth_approval.blocked_user_status_response(user_status, settings)
         if blocked is not None:
             await record_audit(
                 action="auth.login_blocked",
@@ -18740,30 +18539,8 @@ async def login(request: Request) -> JSONResponse:
             "can_use_free_providers": can_use_free_providers,
         }
     )
-    response.set_cookie(
-        "rootcoz_session",
-        session_token,
-        httponly=True,
-        samesite="lax",
-        secure=settings.secure_cookies,
-        max_age=storage.current_session_ttl_seconds(),
-    )
-    # Clear legacy cookie after migration
-    response.delete_cookie(
-        "jji_session",
-        httponly=True,
-        samesite="lax",
-        secure=settings.secure_cookies,
-    )
-    # Also set rootcoz_username cookie for compatibility
-    response.set_cookie(
-        "rootcoz_username",
-        username,
-        samesite="lax",
-        secure=settings.secure_cookies,
-        max_age=365 * 24 * 60 * 60,
-    )
-    response.delete_cookie("jji_username", path="/")
+    set_session_cookie(response, session_token, secure=settings.secure_cookies)
+    set_username_cookie(response, username, secure=settings.secure_cookies)
     await record_audit(
         action="auth.login",
         actor=username,
@@ -18781,23 +18558,12 @@ async def login(request: Request) -> JSONResponse:
 @app.post("/api/auth/logout", operation_id="logout")
 async def logout(request: Request) -> JSONResponse:
     """Clear admin session."""
-    session_token = _read_cookie(request, "rootcoz_session")
+    session_token = read_cookie(request, SESSION_COOKIE)
     if session_token:
         await storage.delete_session(session_token)
     settings = get_settings()
     response = JSONResponse(content={"ok": True})
-    response.delete_cookie(
-        "rootcoz_session",
-        httponly=True,
-        samesite="lax",
-        secure=settings.secure_cookies,
-    )
-    response.delete_cookie(
-        "jji_session",
-        httponly=True,
-        samesite="lax",
-        secure=settings.secure_cookies,
-    )
+    clear_session_cookie(response, secure=settings.secure_cookies)
     await record_audit(
         action="auth.logout",
         actor=request.state.username,
@@ -18866,14 +18632,7 @@ async def rotate_own_key_endpoint(request: Request) -> JSONResponse:
         content={"username": username, "new_api_key": new_key},
         headers={"Cache-Control": "no-store"},
     )
-    response.set_cookie(
-        "rootcoz_session",
-        session_token,
-        httponly=True,
-        samesite="lax",
-        secure=settings.secure_cookies,
-        max_age=storage.current_session_ttl_seconds(),
-    )
+    set_session_cookie(response, session_token, secure=settings.secure_cookies)
 
     await record_audit(
         action="user.self_key_rotate",
@@ -18953,29 +18712,8 @@ async def register_user(request: Request) -> JSONResponse:
         content=content,
         headers={"Cache-Control": "no-store"},
     )
-    response.set_cookie(
-        "rootcoz_session",
-        session_token,
-        httponly=True,
-        samesite="lax",
-        secure=settings.secure_cookies,
-        max_age=storage.current_session_ttl_seconds(),
-    )
-    # Clear legacy session cookie after migration
-    response.delete_cookie(
-        "jji_session",
-        httponly=True,
-        samesite="lax",
-        secure=settings.secure_cookies,
-    )
-    response.set_cookie(
-        "rootcoz_username",
-        username,
-        samesite="lax",
-        secure=settings.secure_cookies,
-        max_age=365 * 24 * 60 * 60,
-    )
-    response.delete_cookie("jji_username", path="/")
+    set_session_cookie(response, session_token, secure=settings.secure_cookies)
+    set_username_cookie(response, username, secure=settings.secure_cookies)
 
     await record_audit(
         action="auth.register",
@@ -18999,7 +18737,7 @@ async def check_needs_key(request: Request) -> JSONResponse:
     cache_headers = {"Cache-Control": "no-store"}
 
     # Try session first (authenticated identity)
-    session_token = _read_cookie(request, "rootcoz_session")
+    session_token = read_cookie(request, SESSION_COOKIE)
     if session_token:
         session = await storage.get_session(session_token)
         if session:
@@ -19011,15 +18749,15 @@ async def check_needs_key(request: Request) -> JSONResponse:
     # Check trusted proxy header (SSO)
     settings = get_settings()
     if settings.trust_proxy_headers:
-        proxy_user = request.headers.get("x-forwarded-user", "").strip()
-        if proxy_user and proxy_user.lower() != "admin":
+        proxy_user = auth_proxy.proxy_username(request, settings)
+        if proxy_user:
             return JSONResponse(
                 content={"needs_key": False, "username": proxy_user},
                 headers=cache_headers,
             )
 
     # Fall back to cookie username (for migration — user may need a key)
-    cookie_username = _read_cookie(request, "rootcoz_username")
+    cookie_username = read_cookie(request, USERNAME_COOKIE)
     if cookie_username and cookie_username.lower() != "admin":
         has_key = await storage.user_has_key(cookie_username)
         return JSONResponse(
@@ -19041,7 +18779,7 @@ async def pending_status(request: Request) -> JSONResponse:
         "status": "pending",
         "message": "Your account is awaiting admin approval. Please wait for an admin to approve your registration.",
     }
-    _maybe_add_custom_approval_msg(content, settings)
+    auth_approval.maybe_add_custom_approval_msg(content, settings)
     return JSONResponse(content=content)
 
 
@@ -20480,6 +20218,8 @@ async def admin_create_user_endpoint(
                 role=role,
                 can_view_reports=stored_can_view_reports,
                 can_use_server_providers=server_grant,
+                # Every account created here was created by an administrator.
+                created_via="admin",
             )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
