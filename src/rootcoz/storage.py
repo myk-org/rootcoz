@@ -6494,6 +6494,19 @@ async def list_distinct_job_names() -> set[str]:
         return {row[0] for row in rows if row[0]}
 
 
+async def list_job_ids() -> set[str]:
+    """Return every job id in ``results``.
+
+    The startup reclaim's reachability set: a chat workspace whose ``job_id`` is
+    absent from it cannot be opened by any request. Internal only — one statement,
+    one column, no ``result_json``.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute("SELECT job_id FROM results")
+        rows = await cursor.fetchall()
+        return {row[0] for row in rows}
+
+
 def _parse_dashboard_row(
     row: aiosqlite.Row,
     overrides: Mapping[tuple[str, str, int], str] | None = None,

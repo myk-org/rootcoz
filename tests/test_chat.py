@@ -2292,12 +2292,16 @@ class TestChatCleanup:
         import tempfile
 
         from rootcoz import jenkins_artifacts
+        from rootcoz.engine import chat
         from rootcoz.engine.chat import cleanup_chat_workspace
 
         custom_tmp = tmp_path / "custom-tmp"
         custom_tmp.mkdir()
         monkeypatch.setenv("TMPDIR", str(custom_tmp))
         monkeypatch.setattr(tempfile, "gettempdir", lambda: str(custom_tmp))
+        # The shared conftest fixture replaces ``chat._tmp_root`` outright, so the
+        # containment check would not see the TMPDIR patch without this seam.
+        monkeypatch.setattr(chat, "_tmp_root", lambda: custom_tmp.resolve())
 
         extract_base = Path(tempfile.gettempdir()) / "rootcoz"
         monkeypatch.setattr(jenkins_artifacts, "EXTRACT_BASE", extract_base)

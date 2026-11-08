@@ -269,6 +269,29 @@ visibly instead of failing on the first config write. If that happens, set
 `env.xdgConfigHome: /data/config` (the data volume) rather than adding permissions;
 `tox -e chart` asserts both outcomes against the shipped entrypoint.
 
+**What a start reclaims, and what it keeps.** The server sweeps its two temp roots once at
+startup, before any job is resumed. Reclaimed: an analysis workspace whose cleanup was abandoned, a
+leftover CI artifact extract (a `jenkins-artifacts-*`, `artifacts-*` or `prow-artifacts-*` directory
+the process that created it never deleted), and a chat workspace whose job has no stored row — a
+deleted job, or one missing from a restored older database. Kept: a live job's chat workspace, with
+its sessions, clones and code graph, because reuse across messages is the feature; the admin chat;
+anything created after this process started; and an artifact extract a live chat still links to. The
+analysis workspaces and the two Jenkins extract kinds live under the **base**, `$TMPDIR/rootcoz`; the
+chat workspaces and `prow-artifacts-*` live under the **process temp root**, `$TMPDIR` itself.
+Whether a temp root outlives a restart depends on the deployment shape: a process restart inside the
+same container, a host install or a bind mount keeps it, while replacing the pod or the container
+discards it (the chart's per-pod `/tmp` `emptyDir`, and `docker-compose.yaml` mounts only
+`./data:/data`) — so this sweep matters where the temp root does survive. The reclaim assumes **one
+server process per temp root**: ownership is mtime versus the process start, with no cross-process
+check, the same single-replica requirement noted below. Each boot that changed something writes one
+`startup.workspace_reclaim` audit row (`actor: system`, outcome `failure` only when a tree survived
+its delete) recording the counts, and one `reason=` debug line per candidate says why it was chosen.
+Watch `Startup reclaim: deleted … / survived … / cannot …` for the summary and
+`cleanup what=<name> step=<cleanup_chat_workspace|delete_tree> reclaimed=… entries=…` for the bytes;
+two warnings are the only explanation you get for a chat tree that will never be reclaimed:
+`Startup reclaim: <name> contains a top-level symlink, leaving it on disk` and
+`Startup reclaim: <name> does not resolve to its chat workspace path, leaving it on disk`.
+
 **Single replica consequence.** One replica on a ReadWriteOnce PVC, `Recreate` strategy, no HA: any
 restart — eviction, upgrade, node drain — interrupts running analyses. Track them on the dashboard
 and re-submit after the rollout.

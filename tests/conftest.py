@@ -7,7 +7,7 @@ import os
 import shutil
 import sys
 import tempfile
-from collections.abc import Awaitable, Callable, Generator
+from collections.abc import Awaitable, Callable, Generator, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -34,7 +34,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pi_sidecar_client import AIResult
 
-from rootcoz import storage
+from rootcoz import storage, temp_paths
 from rootcoz.ai_client import _setup_usage_recorder
 from rootcoz.cli.client import RootCozClient
 from rootcoz.config import Settings
@@ -106,11 +106,59 @@ def build_test_env(**overrides: str) -> dict[str, str]:
     return base
 
 
+@pytest.fixture(autouse=True)
+def _capture_reaper_logs(caplog: pytest.LogCaptureFixture) -> Iterator[None]:
+    """Put caplog on the reaper's own logger.
+
+    It is a simple_logger child (``propagate=False``), so records never reach the
+    root logger caplog listens on — without this the log assertions pass vacuously.
+    Autouse in conftest because the startup reclaim tests assert per-tree reaper
+    lines as well as its own.
+    """
+    reaper_logger = temp_paths.logger
+    original_level = reaper_logger.level
+    original_filters = list(reaper_logger.filters)
+    reaper_logger.setLevel(logging.DEBUG)
+    reaper_logger.addHandler(caplog.handler)
+    # simple_logger's DuplicateFilter keys on (module, level, msg) and keeps that
+    # state for the whole session, so a later test's identical line is dropped.
+    for log_filter in original_filters:
+        reaper_logger.removeFilter(log_filter)
+    try:
+        yield
+    finally:
+        reaper_logger.removeHandler(caplog.handler)
+        reaper_logger.setLevel(original_level)
+        for log_filter in original_filters:
+            reaper_logger.addFilter(log_filter)
+
+
+@pytest.fixture(autouse=True)
+def _no_host_temp_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Aim the startup reclaim at ``tmp_path``, never at the host temp root.
+
+    ``_reclaim_abandoned_workspaces`` is spawned from ``lifespan``, so it runs in
+    every ``TestClient(app)`` test; on a machine that has run rootcoz the real
+    temp root holds live chat workspaces this sweep would delete. The chat root is
+    ``tmp_path`` itself — the base is a child of it, as in the product — so the
+    chat tests that create symlink targets directly under ``tmp_path`` keep
+    resolving inside the root.
+    """
+    from rootcoz.engine import chat
+
+    base = tmp_path / "rootcoz"
+    monkeypatch.setattr(temp_paths, "rootcoz_temp_base", lambda: base)
+    monkeypatch.setattr(chat, "_tmp_root", lambda: tmp_path)
+    return base
+
+
 @contextmanager
-def capture_main_logs(caplog: pytest.LogCaptureFixture) -> Generator[None]:
+def capture_main_logs(
+    caplog: pytest.LogCaptureFixture, level: int = logging.WARNING
+) -> Generator[None]:
     """Capture ``rootcoz.main`` logs (python-simple-logger sets propagate=False)."""
     logger = logging.getLogger("rootcoz.main")
-    with caplog.at_level(logging.WARNING, logger="rootcoz.main"):
+    with caplog.at_level(level, logger="rootcoz.main"):
         logger.propagate = True
         try:
             yield

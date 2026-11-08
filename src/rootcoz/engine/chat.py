@@ -53,20 +53,33 @@ def _tmp_root() -> Path:
     return Path(tempfile.gettempdir()).resolve()
 
 
+def _sanitize_path_part(part: str) -> str:
+    """A path component that cannot traverse: ``/``, ``..`` and ``\\`` become ``_``."""
+    return part.replace("/", "_").replace("..", "_").replace("\\", "_")
+
+
+def chat_workspace_root() -> Path:
+    """The one directory chat workspaces are created under (honours ``TMPDIR``)."""
+    return _tmp_root()
+
+
+def chat_workspace_name(job_id: str) -> str:
+    """A job's chat workspace directory name — no I/O, no ``resolve()``.
+
+    The startup reclaim builds the names it protects from the same function, so
+    the creator and the sweeper cannot disagree about the sanitisation.
+    """
+    return _CHAT_WORKSPACE_PREFIX + _sanitize_path_part(job_id)
+
+
 def get_chat_workspace(job_id: str, username: str = "") -> Path:
     """Get the chat workspace path for a job and user."""
-    # Sanitize job_id to prevent path traversal
-    safe_id = job_id.replace("/", "_").replace("..", "_").replace("\\", "_")
-    safe_user = (
-        username.replace("/", "_").replace("..", "_").replace("\\", "_")
-        if username
-        else ""
-    )
+    safe_user = _sanitize_path_part(username) if username else ""
     tmp = _tmp_root()
     if safe_user:
-        workspace = tmp / f"{_CHAT_WORKSPACE_PREFIX}{safe_id}" / safe_user
+        workspace = tmp / chat_workspace_name(job_id) / safe_user
     else:
-        workspace = tmp / f"{_CHAT_WORKSPACE_PREFIX}{safe_id}"
+        workspace = tmp / chat_workspace_name(job_id)
     # Verify the resolved path is still under the process temp root
     resolved = workspace.resolve()
     if not resolved.is_relative_to(tmp):
@@ -90,7 +103,7 @@ async def chat_workspace_lock(
     """Hold the chat workspace's path lock for the create/reuse decision.
 
     The path is deterministic and reused across messages, so a queued delete of
-    ``chat-{job}/{user}`` must finish before the next message creates into it.
+    ``rootcoz-chat-{job}/{user}`` must finish before the next message creates into it.
     Yields the :class:`~rootcoz.temp_paths.PathState` and raises
     :class:`~rootcoz.temp_paths.PathStateUnknown` when a live builder still owns
     a marked tree, or the recovery could not delete every path in it, so no caller
@@ -108,7 +121,7 @@ def _resolve_chat_repo_target(workspace: Path, repo_name: str) -> tuple[str, Pat
     Returns (safe_name, target_path). Raises ValueError if the name is
     invalid (empty, dot-prefixed, or escapes the workspace).
     """
-    safe_name = repo_name.replace("/", "_").replace("..", "_").replace("\\", "_")
+    safe_name = _sanitize_path_part(repo_name)
     if not safe_name or safe_name.startswith("."):
         raise ValueError(f"Invalid repo name for chat workspace: {repo_name}")
     target = (workspace / safe_name).resolve()
