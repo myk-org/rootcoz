@@ -10,6 +10,11 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any, Self
 
+#: The declared job-metadata dimensions exporters may tag with — the bounded,
+#: indexed ``job_metadata`` columns, never a free-form value. One list, so the
+#: Datadog series, the event tags and the push pipeline's fallback agree.
+JOB_METADATA_DIMENSIONS: tuple[str, ...] = ("team", "tier", "version")
+
 
 @dataclass
 class ExportContext:
@@ -33,6 +38,9 @@ class ExportContext:
         reviewed_by: Mapping of test name to reviewer username.
         analysis_timestamp: Unix timestamp of the analysis (when known;
             ``None`` lets exporters fall back to push time).
+        job_metadata: Declared ``team``/``tier``/``version`` (plus labels) of
+            the pushed job; empty when the job has no metadata row. Exporters
+            never touch storage, so this is resolved by the push pipeline.
     """
 
     job_id: str
@@ -48,6 +56,7 @@ class ExportContext:
     tracked_in_links: dict[str, list[dict[str, Any]]] = field(default_factory=dict)
     reviewed_by: dict[str, str] = field(default_factory=dict)
     analysis_timestamp: int | None = None
+    job_metadata: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
