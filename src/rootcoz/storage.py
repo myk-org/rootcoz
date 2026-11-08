@@ -2635,8 +2635,11 @@ async def _migrate_jira_url_per_method_split() -> None:
         await db.commit()
 
 
-# Jobs whose failure_history still mirrors a user override instead of the AI
-# value stored in result_json: exactly what the restore-AI migration repairs.
+# Candidate history rows the restore-AI migration has to check: rows whose
+# classification mirrors a user override.  The predicate over-matches by design
+# -- a job whose stored AI value legitimately equals its override still matches
+# after it was restored -- so the migration confirms with
+# _history_disagrees_with_payload before it rewrites anything.
 _NEEDS_AI_RESTORE_SQL = (
     "FROM failure_history fh "
     "JOIN test_classifications tc "
@@ -2655,11 +2658,24 @@ async def _migrate_restore_ai_classifications() -> None:
     differs from the original AI value in result_json) and re-populates
     from result_json to restore the original AI values.
 
-    Only the jobs that still match are re-populated, so a restart is a no-op
-    for history already restored instead of deleting and re-inserting every
-    readable job's rows. Tracked via ``_migrations_applied``; while a job whose
-    result_json this build cannot decode is still pending, the migration stays
-    unapplied so a build with the codec finishes it.
+    That predicate only narrows the candidates: it compares a history row with
+    the *override*, so a job whose stored AI value equals the override keeps
+    matching after it was restored.  The rewrite is therefore conditional on
+    the stored rows actually differing from the rows the payload produces
+    (:func:`_history_disagrees_with_payload`), compared over every column
+    ``populate_failure_history`` sets except ``job_id`` (the filter) and
+    ``analyzed_at`` (a format-ambiguous timestamp whose realignment belongs to a
+    versioned backfill of its own).  A job whose rows already match is skipped
+    with no write, so an unfinished repair converges instead of rewriting
+    finished work on every boot.  The residual is the deferred job itself: a
+    result_json this build cannot decode keeps the migration unapplied on
+    purpose, so a build with the codec finishes it, and each boot costs that job
+    one read and no write.
+
+    The compare and the rewrite use separate connections deliberately: this runs
+    from ``init_db`` inside the lifespan hook, which does not accept requests
+    until it returns, so nothing can write those rows in between.  Tracked via
+    ``_migrations_applied``.
     """
     migration_key = "restore_ai_classifications_v1"
     async with _connect_db() as db:
@@ -2706,17 +2722,17 @@ async def _migrate_restore_ai_classifications() -> None:
         if not result_data:
             continue
 
+        if not await _history_disagrees_with_payload(job_id, result_data):
+            logger.debug(
+                f"Migration: job_id={job_id} already carries the payload's "
+                "failure_history rows; not rewritten"
+            )
+            continue
+
         await populate_failure_history(
             job_id, result_data, analyzed_at=row["created_at"]
         )
-        # Its rows now come from result_json. Re-check so a job whose stored AI
-        # value happens to equal the override is not rewritten on every run.
-        async with _connect_db() as db:
-            cursor = await db.execute(
-                f"SELECT 1 {_NEEDS_AI_RESTORE_SQL} AND fh.job_id = ?", (job_id,)
-            )
-            if await cursor.fetchone() is None:
-                restored += 1
+        restored += 1
 
     if deferred:
         logger.warning(
@@ -2836,11 +2852,12 @@ async def _migrate_backfill_pattern_axis() -> None:
             await db.commit()
 
     async with _connect_db() as db:
-        # Step 3: Set pattern = 'NEW' for root-cause classifications
-        # that don't have a pattern yet
+        # Step 3: Set pattern = _PATTERN_UNSET_MARKER for root-cause
+        # classifications that don't have a pattern yet
         await db.execute(
-            "UPDATE failure_history SET pattern = 'NEW' "
-            "WHERE pattern = '' AND classification != ''"
+            "UPDATE failure_history SET pattern = ? "
+            "WHERE pattern = '' AND classification != ''",
+            (_PATTERN_UNSET_MARKER,),
         )
 
         # Step 4: Copy pattern-like values in test_classifications to pattern column
@@ -4981,10 +4998,9 @@ def _extract_failures_for_history(
             Used during backfill to preserve historical chronology.
 
     Returns:
-        List of tuples ready for INSERT:
-        (job_id, job_name, build_number, build_id, test_name, error_message,
-         error_signature, error_signature_v2, classification,
-         child_job_name, child_build_number, analyzed_at)
+        One tuple per failure, in ``_FAILURE_HISTORY_COLUMNS`` order -- that
+        constant is the single source of the column names and their order, so
+        this docstring does not restate them a third time.
     """
     rows: list[tuple[Any, ...]] = []
 
@@ -5198,14 +5214,129 @@ async def find_matching_previous_analysis(
         return dict(row)
 
 
+# failure_history columns in the order populate_failure_history inserts them:
+# the single source behind both INSERTs, the guard's SELECT and its projection
+# of the payload's rows.
+_FAILURE_HISTORY_COLUMNS = (
+    "job_id",
+    "job_name",
+    "build_number",
+    "build_id",
+    "test_name",
+    "error_message",
+    "error_signature",
+    "error_signature_v2",
+    "classification",
+    "pattern",
+    "child_job_name",
+    "child_build_number",
+    "analyzed_at",
+)
+# Compared columns: every column the writer sets, minus job_id (the WHERE filter)
+# and analyzed_at (a format-ambiguous timestamp -- see the restore-AI migration).
+_HISTORY_COMPARED_COLUMNS = tuple(
+    column
+    for column in _FAILURE_HISTORY_COLUMNS
+    if column not in ("job_id", "analyzed_at")
+)
+# The pattern-axis backfill's "no pattern yet" default: one *named member* of
+# PatternLiteral (its derived tuple is PATTERN_CLASSIFICATIONS), not a new
+# vocabulary.  The pattern-axis step 3 binds this, and the guard normalises it,
+# so the value the axis writes and the value the guard treats as empty cannot
+# drift apart.  The assertion keeps it a member of the model's literal.
+_PATTERN_UNSET_MARKER = "NEW"
+assert _PATTERN_UNSET_MARKER in PATTERN_CLASSIFICATIONS
+
+
+def _history_rows_for_result(
+    job_id: str, result_data: dict[str, Any], analyzed_at: str = ""
+) -> list[tuple[Any, ...]]:
+    """The failure_history rows a payload produces (single source: writer + guard)."""
+    job_name = result_data.get("job_name", "")
+    build_id, build_number = _resolve_history_build_fields(result_data)
+    return _extract_failures_for_history(
+        result_data, job_id, job_name, build_number, build_id, analyzed_at=analyzed_at
+    )
+
+
+def _history_row_values(row: dict[str, Any]) -> tuple[str, ...]:
+    """One row as comparable text, in ``_HISTORY_COMPARED_COLUMNS`` order.
+
+    Text only, with **no** numeric coercion: the writer stores the payload's own
+    values and SQLite hands a TEXT value back unchanged even from an INTEGER
+    column, so a stored ``'n/a'`` already equals a payload ``'n/a'``.  Not
+    coercing keeps the comparison honest: a payload ``0`` against a legacy stored
+    ``'n/a'`` reports a difference and the repair rewrites the row -- the safe
+    direction, and the same write the unconditional pass performed.
+
+    ``pattern`` is normalised on both sides for the two shapes the pattern axis
+    writes while its own gate is unapplied, and only for those:
+
+    * ``''`` and ``NEW`` mean "nothing assigned yet" **while the row carries a
+      classification** -- ``NEW`` is the engine's default for a fresh analysis
+      and what step 3 of the pattern-axis backfill writes.  For an unclassified
+      row ``NEW`` is *not* a synonym for "unset", so ``''`` against ``NEW``
+      stays a difference and the repair keeps correcting it.
+    * a ``pattern`` equal to the row's own classification when that
+      classification is one of ``_PATTERN_AS_CLASSIFICATION`` -- the *same* set
+      step 1 of that migration copies into ``pattern`` on every boot while its
+      gate is unapplied, so without this rule exactly those rows would be
+      rewritten on every boot.
+    """
+    classification = str(row["classification"] or "")
+    classified = classification != ""
+    pattern_label = classification in _PATTERN_AS_CLASSIFICATION
+    values: list[str] = []
+    for column in _HISTORY_COMPARED_COLUMNS:
+        value = row[column]
+        if column == "pattern":
+            pattern = str(value or "")
+            # Two shapes the pattern axis writes while its own gate is
+            # unapplied; each still reports a difference in its other direction.
+            unset = classified and pattern in ("", _PATTERN_UNSET_MARKER)
+            own_label = pattern_label and pattern == classification
+            values.append("" if unset or own_label else pattern)
+        else:
+            values.append(str(value or ""))
+    return tuple(values)
+
+
+async def _history_disagrees_with_payload(
+    job_id: str, result_data: dict[str, Any]
+) -> bool:
+    """True when a restore would write any compared column differently.
+
+    Compared as multisets of whole rows, not paired by test name: the table has
+    no unique index on (job_id, test_name, child scope) and the writer inserts
+    every payload entry verbatim, so pairing by identity would compare a row
+    against the wrong counterpart on a duplicate and report a difference on
+    every boot.
+    """
+    expected = sorted(
+        _history_row_values(dict(zip(_FAILURE_HISTORY_COLUMNS, row, strict=True)))
+        for row in _history_rows_for_result(job_id, result_data)
+    )
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            f"SELECT {', '.join(_HISTORY_COMPARED_COLUMNS)} "
+            "FROM failure_history WHERE job_id = ?",
+            (job_id,),
+        )
+        stored = sorted(
+            _history_row_values(dict(row)) for row in await cursor.fetchall()
+        )
+    return stored != expected
+
+
 async def populate_failure_history(
     job_id: str, result_data: dict[str, Any], analyzed_at: str = ""
 ) -> None:
     """Populate failure_history from a completed analysis result.
 
-    Extracts all failures (top-level and nested children) and inserts
-    them into the failure_history table. Idempotent: skips if rows
-    already exist for this job_id.
+    Extracts all failures (top-level and nested children) and inserts them
+    into the failure_history table, replacing any rows this job already has
+    (a re-analysis is meant to rewrite every row).  It does not skip existing
+    rows; the startup restore is what decides whether a rewrite is needed.
 
     Args:
         job_id: Unique identifier for the analysis job.
@@ -5215,12 +5346,7 @@ async def populate_failure_history(
             If empty, the DB default (CURRENT_TIMESTAMP) is used.
     """
     logger.debug(f"populate_failure_history: job_id={job_id}")
-    job_name = result_data.get("job_name", "")
-    build_id, build_number = _resolve_history_build_fields(result_data)
-
-    rows = _extract_failures_for_history(
-        result_data, job_id, job_name, build_number, build_id, analyzed_at=analyzed_at
-    )
+    rows = _history_rows_for_result(job_id, result_data, analyzed_at=analyzed_at)
     if not rows:
         logger.debug(
             f"populate_failure_history: job_id={job_id}, no failures to insert"
@@ -5234,30 +5360,17 @@ async def populate_failure_history(
             (job_id,),
         )
 
-        # Use analyzed_at when provided (backfill), otherwise let the DB default apply
-        if analyzed_at:
-            await db.executemany(
-                """
-                INSERT INTO failure_history
-                    (job_id, job_name, build_number, build_id, test_name, error_message,
-                     error_signature, error_signature_v2, classification, pattern,
-                     child_job_name, child_build_number, analyzed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                rows,
-            )
-        else:
-            await db.executemany(
-                """
-                INSERT INTO failure_history
-                    (job_id, job_name, build_number, build_id, test_name, error_message,
-                     error_signature, error_signature_v2, classification, pattern,
-                     child_job_name, child_build_number)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                # Strip the analyzed_at field (last element) when not backfilling
-                [row[:-1] for row in rows],
-            )
+        # Use analyzed_at when provided (backfill), otherwise let the DB default
+        # apply.  analyzed_at is last in the column list, so the sliced columns
+        # pair with row[:-1] below.
+        columns = (
+            _FAILURE_HISTORY_COLUMNS if analyzed_at else _FAILURE_HISTORY_COLUMNS[:-1]
+        )
+        await db.executemany(
+            f"INSERT INTO failure_history ({', '.join(columns)}) "
+            f"VALUES ({', '.join(['?'] * len(columns))})",
+            rows if analyzed_at else [row[:-1] for row in rows],
+        )
         await db.commit()
         logger.info(
             f"Populated failure_history with {len(rows)} rows for job_id={job_id}"

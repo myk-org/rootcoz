@@ -3035,21 +3035,40 @@ def storage_logs(caplog: pytest.LogCaptureFixture) -> Any:
         storage.logger.removeHandler(caplog.handler)
 
 
-def _one_failure_result(job_name: str) -> str:
-    """Return a valid result_json payload carrying exactly one failure."""
+def _one_failure_result(
+    job_name: str,
+    *,
+    pattern: str | None = None,
+    classification: str = "PRODUCT BUG",
+    children: list[dict[str, Any]] | None = None,
+    build_number: int = 1,
+    build_id: str = "",
+) -> str:
+    """Return a valid result_json payload carrying exactly one top-level failure.
+
+    ``pattern`` adds that key to the failure's ``analysis``, ``classification``
+    replaces the default AI value, ``children`` fills ``child_job_analyses``
+    (each child carries its own failures), and ``build_number``/``build_id``
+    replace the defaults -- ``build_id=''`` still derives the id from the build
+    number, as ``_resolve_history_build_fields`` does.
+    """
+    analysis: dict[str, Any] = {"classification": classification, "details": "..."}
+    if pattern is not None:
+        analysis["pattern"] = pattern
     return json.dumps(
         {
             "job_name": job_name,
-            "build_number": 1,
+            "build_number": build_number,
+            "build_id": build_id,
             "failures": [
                 {
                     "test_name": f"{job_name}.test_a",
                     "error": "boom",
                     "error_signature": f"sig-{job_name}",
-                    "analysis": {"classification": "PRODUCT BUG", "details": "..."},
+                    "analysis": analysis,
                 }
             ],
-            "child_job_analyses": [],
+            "child_job_analyses": children or [],
         }
     )
 
@@ -3128,6 +3147,30 @@ async def _failure_history_classifications(db_path: Path, job_id: str) -> list[s
             "SELECT classification FROM failure_history WHERE job_id = ?", (job_id,)
         )
         return [row[0] for row in await cursor.fetchall()]
+
+
+async def _failure_history_patterns(db_path: Path) -> dict[str, list[str]]:
+    """Map job_id -> the pattern of each of its failure_history rows."""
+    async with aiosqlite.connect(db_path) as db:
+        cursor = await db.execute(
+            "SELECT job_id, pattern FROM failure_history ORDER BY job_id, id"
+        )
+        rows: dict[str, list[str]] = {}
+        for job_id, pattern in await cursor.fetchall():
+            rows.setdefault(job_id, []).append(pattern)
+        return rows
+
+
+async def _set_failure_history_column(
+    db_path: Path, job_id: str, column: str, value: Any
+) -> None:
+    """Write one failure_history column directly, bypassing the writer."""
+    async with aiosqlite.connect(db_path) as db:
+        await db.execute(
+            f"UPDATE failure_history SET {column} = ? WHERE job_id = ?",
+            (value, job_id),
+        )
+        await db.commit()
 
 
 async def _migration_recorded(db_path: Path, key: str) -> bool:
@@ -3521,6 +3564,386 @@ class TestUnreadableResultJson:
             assert await _failure_history_row_ids(temp_db_path) == settled
 
         assert "Migration: 1 job(s) skipped (frame-1)" in storage_logs.text
+
+    async def test_restore_ai_migration_rewrites_an_equal_value_job_once(
+        self, temp_db_path: Path, storage_logs: Any
+    ) -> None:
+        """A job whose AI value equals its override is restored once, not every run."""
+        key = "restore_ai_classifications_v1"
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            async with aiosqlite.connect(temp_db_path) as db:
+                await db.execute(
+                    "DELETE FROM _migrations_applied WHERE key = ?", (key,)
+                )
+                await db.commit()
+            storage._undecodable_result_ids.clear()
+
+            for job_id, result in (
+                ("equal-1", _one_failure_result("equal-1")),
+                ("equal-new", _one_failure_result("equal-new", pattern="NEW")),
+            ):
+                await _insert_completed_result(temp_db_path, job_id, result)
+                # The override equals the AI value, so the candidate predicate
+                # still matches this job after it was restored.
+                await _seed_mirrored_override(
+                    temp_db_path, job_id, classification="PRODUCT BUG"
+                )
+            await _insert_completed_result(temp_db_path, "frame-1", _DAMAGED_FRAME)
+            await _seed_mirrored_override(temp_db_path, "frame-1")
+
+            before = await _failure_history_row_ids(temp_db_path)
+
+            # Run 1: the seeded rows are repaired (their ids change).
+            await storage._migrate_restore_ai_classifications()
+            after_first = await _failure_history_row_ids(temp_db_path)
+            assert after_first["equal-1"] != before["equal-1"]
+            assert after_first["equal-new"] != before["equal-new"]
+            assert await _failure_history_classifications(temp_db_path, "equal-1") == [
+                "PRODUCT BUG"
+            ]
+            assert await _failure_history_classifications(
+                temp_db_path, "equal-new"
+            ) == ["PRODUCT BUG"]
+            assert await _migration_recorded(temp_db_path, key) is False
+
+            # Run 2: nothing disagrees with the payload, so nothing is rewritten.
+            await storage._migrate_restore_ai_classifications()
+            assert await _failure_history_row_ids(temp_db_path) == after_first
+            assert await _migration_recorded(temp_db_path, key) is False
+            assert storage.undecodable_result_count() == 1
+
+            # Run 3 with the deferred row readable: it is repaired, the settled
+            # jobs are left alone and the gate key is finally recorded.
+            async with aiosqlite.connect(temp_db_path) as db:
+                await db.execute(
+                    "UPDATE results SET result_json = ? WHERE job_id = 'frame-1'",
+                    (_one_failure_result("frame-1"),),
+                )
+                await db.commit()
+            storage._undecodable_result_ids.clear()
+
+            await storage._migrate_restore_ai_classifications()
+
+            settled = await _failure_history_row_ids(temp_db_path)
+            assert settled["equal-1"] == after_first["equal-1"]
+            assert settled["equal-new"] == after_first["equal-new"]
+            assert await _failure_history_classifications(temp_db_path, "frame-1") == [
+                "PRODUCT BUG"
+            ]
+            assert await _migration_recorded(temp_db_path, key) is True
+
+        assert "Migration: 1 job(s) skipped (frame-1)" in storage_logs.text
+
+    @pytest.mark.parametrize("column", storage._HISTORY_COMPARED_COLUMNS)
+    async def test_history_disagrees_with_payload_true_when_any_compared_column_differs(
+        self, temp_db_path: Path, column: str
+    ) -> None:
+        """Every compared column can make the guard report a difference."""
+        differing: dict[str, Any] = {
+            "job_name": "other",
+            "build_number": 7,
+            "build_id": "9",
+            "test_name": "job-a.test_b",
+            "error_message": "different",
+            "error_signature": "sig-other",
+            "error_signature_v2": "sig2-other",
+            "classification": "CODE ISSUE",
+            # Never NEW: that direction is the pattern marker's (test C).
+            "pattern": "REGRESSION",
+            "child_job_name": "child",
+            "child_build_number": 7,
+        }
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            payload = json.loads(_one_failure_result("job-a"))
+            await storage.populate_failure_history("job-a", payload)
+            assert (
+                await storage._history_disagrees_with_payload("job-a", payload) is False
+            )
+
+            await _set_failure_history_column(
+                temp_db_path, "job-a", column, differing[column]
+            )
+
+            assert (
+                await storage._history_disagrees_with_payload("job-a", payload) is True
+            )
+
+    async def test_history_disagrees_with_payload_treats_the_pattern_marker_as_empty_when_classified(
+        self, temp_db_path: Path
+    ) -> None:
+        """The pattern axis' "nothing assigned yet" shapes are not differences."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+
+            # (a) stored NEW against a payload with no pattern.
+            payload = json.loads(_one_failure_result("marker-a"))
+            await storage.populate_failure_history("marker-a", payload)
+            await _set_failure_history_column(
+                temp_db_path, "marker-a", "pattern", "NEW"
+            )
+            assert (
+                await storage._history_disagrees_with_payload("marker-a", payload)
+                is False
+            )
+
+            # (b) stored '' against the engine's default payload pattern.
+            payload_new = json.loads(_one_failure_result("marker-b", pattern="NEW"))
+            await storage.populate_failure_history("marker-b", payload_new)
+            await _set_failure_history_column(temp_db_path, "marker-b", "pattern", "")
+            assert (
+                await storage._history_disagrees_with_payload("marker-b", payload_new)
+                is False
+            )
+
+            # (c) the raw TEXT round-trip keeps its value, and a payload 0 must
+            # still be reported as a difference instead of equated to it.
+            payload_text = json.loads(
+                _one_failure_result(
+                    "text-job",
+                    children=[
+                        {
+                            "job_name": "child-job",
+                            "build_number": "n/a",
+                            "failures": [
+                                {
+                                    "test_name": "text-job.child",
+                                    "error": "boom-child",
+                                    "analysis": {"classification": "CODE ISSUE"},
+                                }
+                            ],
+                        }
+                    ],
+                )
+            )
+            await storage.populate_failure_history("text-job", payload_text)
+            async with aiosqlite.connect(temp_db_path) as db:
+                cursor = await db.execute(
+                    "SELECT typeof(child_build_number) FROM failure_history "
+                    "WHERE job_id = 'text-job' AND child_job_name = 'child-job'"
+                )
+                assert (await cursor.fetchone())[0] == "text"
+            assert (
+                await storage._history_disagrees_with_payload("text-job", payload_text)
+                is False
+            )
+
+            payload_text["child_job_analyses"][0]["build_number"] = 0
+            assert (
+                await storage._history_disagrees_with_payload("text-job", payload_text)
+                is True
+            )
+
+            # (d) with both classifications empty, pattern NEW is the only
+            # difference left -- the marker is not a synonym for '' there.
+            payload_blank = json.loads(
+                _one_failure_result("blank-job", classification="")
+            )
+            await storage.populate_failure_history("blank-job", payload_blank)
+            await _set_failure_history_column(
+                temp_db_path, "blank-job", "classification", ""
+            )
+            await _set_failure_history_column(
+                temp_db_path, "blank-job", "pattern", "NEW"
+            )
+            assert (
+                await storage._history_disagrees_with_payload(
+                    "blank-job", payload_blank
+                )
+                is True
+            )
+
+            # (e) step 1 of the pattern axis copies a pattern label into
+            # pattern: that value equals the row, a different label does not.
+            payload_label = json.loads(
+                _one_failure_result("label-job", classification="REGRESSION")
+            )
+            await storage.populate_failure_history("label-job", payload_label)
+            await _set_failure_history_column(
+                temp_db_path, "label-job", "pattern", "REGRESSION"
+            )
+            assert (
+                await storage._history_disagrees_with_payload(
+                    "label-job", payload_label
+                )
+                is False
+            )
+
+            await _set_failure_history_column(
+                temp_db_path, "label-job", "pattern", "FLAKY"
+            )
+            assert (
+                await storage._history_disagrees_with_payload(
+                    "label-job", payload_label
+                )
+                is True
+            )
+
+    async def test_init_db_does_not_rewrite_a_settled_job_across_three_real_boots(
+        self, temp_db_path: Path, storage_logs: Any
+    ) -> None:
+        """Three real boots: boot 1 repairs, boots 2 and 3 leave the rows alone."""
+        ai_key = "restore_ai_classifications_v1"
+        pattern_key = "backfill_pattern_axis_v1"
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            for job_id, result in (
+                ("equal-1", _one_failure_result("equal-1")),
+                ("equal-new", _one_failure_result("equal-new", pattern="NEW")),
+            ):
+                await _insert_completed_result(temp_db_path, job_id, result)
+                # Override equals the AI value: still a candidate after repair.
+                await _seed_mirrored_override(
+                    temp_db_path, job_id, classification="PRODUCT BUG"
+                )
+            await _insert_completed_result(temp_db_path, "frame-1", _DAMAGED_FRAME)
+            # A pattern label keeps backfill_pattern_axis_v1 unapplied too.
+            await _seed_mirrored_override(
+                temp_db_path, "frame-1", classification="REGRESSION"
+            )
+            async with aiosqlite.connect(temp_db_path) as db:
+                await db.execute(
+                    "DELETE FROM _migrations_applied WHERE key IN (?, ?)",
+                    (ai_key, pattern_key),
+                )
+                await db.commit()
+            storage._undecodable_result_ids.clear()
+            ids_before = await _failure_history_row_ids(temp_db_path)
+
+            # Boot 1: both readable jobs are repaired.
+            await storage.init_db()
+            ids_1 = await _failure_history_row_ids(temp_db_path)
+            assert ids_1["equal-1"] != ids_before["equal-1"]
+            assert ids_1["equal-new"] != ids_before["equal-new"]
+            for job_id in ("equal-1", "equal-new"):
+                assert await _failure_history_classifications(temp_db_path, job_id) == [
+                    "PRODUCT BUG"
+                ]
+            assert await _migration_recorded(temp_db_path, ai_key) is False
+            assert await _migration_recorded(temp_db_path, pattern_key) is False
+            assert storage.undecodable_result_count() == 1
+            # The pattern axis supplies NEW on the row the restore wrote with the
+            # payload's empty pattern: the interaction is exercised, not assumed.
+            patterns_1 = await _failure_history_patterns(temp_db_path)
+            assert patterns_1["equal-1"] == ["NEW"]
+
+            # Boots 2 and 3: settled rows keep their ids and their pattern.
+            for _ in range(2):
+                await storage.init_db()
+                assert await _failure_history_row_ids(temp_db_path) == ids_1
+                assert await _failure_history_patterns(temp_db_path) == patterns_1
+                assert await _migration_recorded(temp_db_path, ai_key) is False
+                assert await _migration_recorded(temp_db_path, pattern_key) is False
+                assert storage.undecodable_result_count() == 1
+
+        text = storage_logs.text
+        assert "Migration: 1 job(s) skipped (frame-1)" in text
+        for job_id in ("equal-1", "equal-new"):
+            assert (
+                text.count(f"Populated failure_history with 1 rows for job_id={job_id}")
+                == 1
+            )
+
+    async def test_failure_history_row_order_matches_the_column_constant(
+        self, temp_db_path: Path
+    ) -> None:
+        """The extractor, the constant and both INSERTs agree on the row order."""
+        columns = storage._FAILURE_HISTORY_COLUMNS
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            payload = json.loads(
+                _one_failure_result(
+                    "order-job",
+                    classification="PRODUCT BUG",
+                    pattern="REGRESSION",
+                    build_number=7,
+                    build_id="9",
+                    children=[
+                        {
+                            "job_name": "child-job",
+                            "build_number": 3,
+                            "failures": [
+                                {
+                                    "test_name": "child.test_b",
+                                    "error": "err-b",
+                                    "error_signature": "sig-b",
+                                    "error_signature_v2": "sig2-b",
+                                    "analysis": {
+                                        "classification": "CODE ISSUE",
+                                        "pattern": "FLAKY",
+                                    },
+                                }
+                            ],
+                        }
+                    ],
+                )
+            )
+            expected: list[dict[str, Any]] = [
+                {
+                    "job_id": "order-job",
+                    "job_name": "order-job",
+                    "build_number": 7,
+                    "build_id": "9",
+                    "test_name": "order-job.test_a",
+                    "error_message": storage.failure_error_text(payload["failures"][0]),
+                    "error_signature": "sig-order-job",
+                    "error_signature_v2": None,
+                    "classification": "PRODUCT BUG",
+                    "pattern": "REGRESSION",
+                    "child_job_name": "",
+                    "child_build_number": 0,
+                    "analyzed_at": "",
+                },
+                {
+                    "job_id": "order-job",
+                    "job_name": "order-job",
+                    "build_number": 7,
+                    "build_id": "9",
+                    "test_name": "child.test_b",
+                    "error_message": storage.failure_error_text(
+                        payload["child_job_analyses"][0]["failures"][0]
+                    ),
+                    "error_signature": "sig-b",
+                    "error_signature_v2": "sig2-b",
+                    "classification": "CODE ISSUE",
+                    "pattern": "FLAKY",
+                    "child_job_name": "child-job",
+                    "child_build_number": 3,
+                    "analyzed_at": "",
+                },
+            ]
+            assert list(expected[0]) == list(columns)
+
+            rows = storage._history_rows_for_result("order-job", payload)
+            assert len(rows) == 2
+            assert len(rows[0]) == len(columns) == 13
+
+            # Every position, by name: zip(strict=True) only catches a length.
+            for row, want in zip(rows, expected, strict=True):
+                for name, value in want.items():
+                    assert row[columns.index(name)] == value
+
+            # The DB half: constant -> INSERT -> stored column names.
+            analyzed_at = "2026-01-01T00:00:00"
+            await storage.populate_failure_history(
+                "order-job", payload, analyzed_at=analyzed_at
+            )
+            async with aiosqlite.connect(temp_db_path) as db:
+                cursor = await db.execute(
+                    f"SELECT {', '.join(columns)} FROM failure_history "
+                    "WHERE job_id = 'order-job' ORDER BY id"
+                )
+                stored = await cursor.fetchall()
+            assert len(stored) == 2
+            for row, want in zip(stored, expected, strict=True):
+                for name, value in {**want, "analyzed_at": analyzed_at}.items():
+                    assert row[columns.index(name)] == value
+
+            # The guard compares exactly the constant minus its two exclusions.
+            assert storage._HISTORY_COMPARED_COLUMNS == tuple(
+                column for column in columns if column not in ("job_id", "analyzed_at")
+            )
 
 
 class TestStaleRetryStartsFromTheCallersPayload:
