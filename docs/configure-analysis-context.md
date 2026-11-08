@@ -55,11 +55,14 @@ This clones the tests repository plus both extra repositories into the analysis 
 
    `Additional Repositories` accepts a list of `name`, `url`, and optional `ref` entries. Each clone becomes a subdirectory of the workspace, and the AI is told the path and what is in it — for example that a repository contains VCS metadata it can browse.
 
+   Every declared repository is cloned before the analysis starts — never lazily on a first lookup miss, and never trimmed to a subset to keep a job fast. `max_concurrent_repo_clones` and the job's clone share slow the clones down, they do not drop any. A repository that fails to clone is reported in the result's `Source Warnings` on the report page, and the analysis continues with the rest.
+
    | Rule | Behaviour |
    | --- | --- |
    | `name` | Becomes the clone directory name. No slashes, no `..`, no leading dot. |
    | Reserved name | `build-artifacts` is reserved for downloaded artifacts and is rejected. |
    | Collision | A name matching the tests repository clone directory fails the job. |
+   | Duplicate name | Two repositories with the same `name` are rejected — one of them would otherwise be lost. |
    | `ref` | Branch, tag, or commit. Empty means the remote default branch. |
 
    The server-side equivalent is the `additional_repos` setting, stored as `name:url` or `name:url:ref` separated by commas. `max_concurrent_repo_clones` caps how many clones run at once.

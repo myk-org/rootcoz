@@ -121,6 +121,12 @@ async def clone_additional_repos(
 
     Clones all repos as subdirectories of the provided workspace path.
 
+    Every declared repo is attempted up front, before the first AI call: never
+    lazily on a read miss, and never filtered to a subset for speed (#402 C4).
+    One repo may run out of admission or fail to clone -- the failure is warned
+    about and the analysis continues, because a missing repo is worse than a
+    slow one.
+
     Args:
         repo_manager: Repository manager for cloning.
         additional_repos_list: List of AdditionalRepo objects.
@@ -128,7 +134,19 @@ async def clone_additional_repos(
 
     Returns:
         Tuple of (cloned repos dict mapping name to path, repo_path).
+
+    Raises:
+        ValueError: two declared repos share a name. The name is the clone
+            directory, so a second repo would overwrite the first and one of
+            them would vanish from the workspace and the prompt.
     """
+    names = [ar.name for ar in additional_repos_list]
+    dupes = sorted({n for n in names if names.count(n) > 1})
+    if dupes:
+        # Every declaration path rejects duplicates already; this is the one
+        # place a collapse into ``cloned`` could happen, so report, never drop.
+        raise ValueError(f"Duplicate additional repo names: {', '.join(dupes)}")
+
     cloned: dict[str, Path] = {}
     # This call's clones in flight; mutated under _clone_lock only.
     active_here = 0

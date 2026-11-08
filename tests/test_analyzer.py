@@ -2233,6 +2233,68 @@ class TestCloneAdditionalRepos:
         # All repos via clone_into, no manager.clone
         assert manager.clone_into.call_count == 3
 
+    @pytest.mark.asyncio
+    async def test_every_declared_repo_is_cloned_and_advertised(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Every declared repo is attempted and reaches the AI prompt (#402 C4).
+
+        Thirteen repos is prod's real fan-out: more than the clone ceiling and
+        more than one analysis' share, so a repo skipped by admission or lost in
+        the prompt's repo list shows up as a missing name here.
+        """
+        repo_path = tmp_path / "workspace"
+        repo_path.mkdir()
+        repos = [
+            AdditionalRepo(name=f"repo{i}", url=f"https://example.com/repo{i}")
+            for i in range(13)
+        ]
+        monkeypatch.setattr(
+            "rootcoz.engine.core.get_settings",
+            lambda: Settings(max_concurrent_repo_clones=2, max_concurrent_ai_calls=2),
+        )
+        manager = MagicMock(spec=RepositoryManager)
+        attempted: list[str] = []
+
+        def fake_clone_into(_url, target, **_kwargs):
+            target.mkdir(parents=True, exist_ok=True)
+            attempted.append(target.name)
+            return target
+
+        manager.clone_into.side_effect = fake_clone_into
+
+        async def fake_to_thread(fn, *args, **kwargs):
+            return fn(*args, **kwargs)
+
+        with patch("rootcoz.engine.core.asyncio.to_thread", side_effect=fake_to_thread):
+            cloned, _ = await clone_additional_repos(manager, repos, repo_path)
+
+        names = {repo.name for repo in repos}
+        assert sorted(attempted) == sorted(names)
+        assert set(cloned) == names
+        assert all((repo_path / name).is_dir() for name in names)
+        # The AI is told about the repos from the clone result, never a separate
+        # list, so a clone that happened can never be invisible to the model.
+        resources = build_resources_section(repo_path, additional_repos=cloned)
+        assert all(f"'{name}'" in resources for name in names)
+
+    @pytest.mark.asyncio
+    async def test_duplicate_repo_names_are_reported_not_collapsed(
+        self, tmp_path: Path
+    ) -> None:
+        """Same name, different URLs: report the collision, never clone one (#402 C4)."""
+        repos = [
+            AdditionalRepo(name="infra", url="https://example.com/a/infra"),
+            AdditionalRepo(name="infra", url="https://example.com/b/infra"),
+        ]
+        manager = MagicMock(spec=RepositoryManager)
+
+        with pytest.raises(ValueError, match="Duplicate additional repo names: infra"):
+            await clone_additional_repos(manager, repos, tmp_path)
+
+        # Neither repo is cloned into the shared directory: nothing is silently lost.
+        assert manager.clone_into.call_count == 0
+
 
 class TestBuildResourcesSectionAdditionalRepos:
     """Tests for build_resources_section with additional_repos."""
