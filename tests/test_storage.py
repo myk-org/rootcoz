@@ -1595,7 +1595,11 @@ class TestAnalysisWindow:
         assert failed["status"] == "failed"
         assert failed["completed_at"] is not None
         assert failed["completed_at"] != _stamp(82800), "the ingest end, not this run's"
-        assert storage.elapsed_seconds_since(failed["completed_at"]) == 0
+        # CURRENT_TIMESTAMP has second resolution and elapsed_seconds_since rounds,
+        # so an exact 0 flakes on a second boundary; "recent" is the contract here.
+        age = storage.elapsed_seconds_since(failed["completed_at"])
+        assert age is not None
+        assert age < 5, "this attempt's own end, not the ingest end hours earlier"
 
     async def test_oldest_running_analysis_started_at_is_none_without_running_rows(
         self, setup_test_db: Path
