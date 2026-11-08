@@ -9,7 +9,9 @@ import os
 import re
 import sqlite3
 import tempfile
+import threading
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import replace
@@ -303,9 +305,34 @@ _EXCLUDED_MODEL_TEMPLATE = Template(
 )
 
 
+# Sentences rootcoz built in this process, oldest first. A sidecar body can copy
+# our wording but cannot have been built here, so registration — not shape — is
+# what makes a sentence ours: any catalog id keeps its guidance, and three rounds
+# of narrowing the shape matcher cannot be forged. Shape matching survives only
+# as the fallback for a sentence reconstructed from a stored report in another
+# process (or after eviction here). Entries are one short sentence each, so the
+# count bound bounds the memory; the lock covers the eviction, which is the only
+# non-atomic step, while membership reads stay lock-free.
+_OWN_SENTENCE_REGISTRY_MAX = 256
+_own_sentences: OrderedDict[str, None] = OrderedDict()
+_own_sentences_lock = threading.Lock()
+
+
+def _register_own_sentence(sentence: str) -> str:
+    """Remember ``sentence`` as rootcoz-authored and return it."""
+    with _own_sentences_lock:
+        _own_sentences[sentence] = None
+        _own_sentences.move_to_end(sentence)
+        while len(_own_sentences) > _OWN_SENTENCE_REGISTRY_MAX:
+            _own_sentences.popitem(last=False)
+    return sentence
+
+
 def _raise_inactive_server_provider(provider: str) -> None:
     raise InactiveServerProviderError(
-        _INACTIVE_PROVIDER_TEMPLATE.substitute(provider=provider)
+        _register_own_sentence(
+            _INACTIVE_PROVIDER_TEMPLATE.substitute(provider=provider)
+        )
     )
 
 
@@ -367,7 +394,9 @@ async def require_selected_server_pair(provider: str, model: str) -> None:
         and (provider.lower(), model) not in selected_pairs
     ):
         raise ExcludedServerModelError(
-            _EXCLUDED_MODEL_TEMPLATE.substitute(model=model, provider=provider)
+            _register_own_sentence(
+                _EXCLUDED_MODEL_TEMPLATE.substitute(model=model, provider=provider)
+            )
         )
 
 
@@ -673,8 +702,10 @@ def _is_own_refusal_sentence(text: str) -> bool:
     ours.
     """
     sentence = (text or "").strip()
-    return sentence in _OWN_REFUSAL_SENTENCES or any(
-        pattern.match(sentence) for pattern in _OWN_REFUSAL_PATTERNS
+    return (
+        sentence in _OWN_REFUSAL_SENTENCES
+        or sentence in _own_sentences
+        or any(pattern.match(sentence) for pattern in _OWN_REFUSAL_PATTERNS)
     )
 
 
@@ -1795,6 +1826,14 @@ def _sidecar_failure_parts(
     return status, detail.removeprefix(f"{SESSION_REFUSAL_MARKER}: ")
 
 
+# Creation statuses that are transient: a retry may succeed, so they never
+# become a refusal sentence (which the engine treats as non-retryable). Request
+# timeout (408), too early (425) and rate limit (429) are the only three 4xx a
+# retry can fix; every other 4xx is the sidecar refusing the call as sent, so
+# mapping it to a refusal—and stopping there—is right.
+_TRANSIENT_SESSION_STATUSES = frozenset({408, 425, 429})
+
+
 def _session_refusal(status: int | None, body: str, provider: str, model: str) -> str:
     """Build the refusal sentence for a cause; the body itself is never echoed.
 
@@ -1802,15 +1841,20 @@ def _session_refusal(status: int | None, body: str, provider: str, model: str) -
     because a job's stored error is read by viewers who are not the caller.
     """
     if body in _SIDECAR_REFUSAL_LITERALS:
-        return f"{SESSION_REFUSAL_MARKER}: {body}"
-    pair = f"{provider}/{model}"
-    # The rejected credential outranks the Cursor legacy hint: a 401/403 says the
-    # key itself was refused, not that a browser login expired.
-    if status in (401, 403):
-        return _REFUSAL_TEMPLATES[0].substitute(pair=pair)
-    if is_cursor_provider(normalize_provider(provider)):
-        return f"{SESSION_REFUSAL_MARKER}: {_CURSOR_BROWSER_LOGIN_EXPIRED_HINT}"
-    return _REFUSAL_TEMPLATES[1].substitute(pair=pair, status=status)
+        sentence = f"{SESSION_REFUSAL_MARKER}: {body}"
+    elif status in (401, 403):
+        # The rejected credential outranks the Cursor legacy hint: a 401/403 says
+        # the key itself was refused, not that a browser login expired.
+        sentence = _REFUSAL_TEMPLATES[0].substitute(pair=f"{provider}/{model}")
+    elif is_cursor_provider(normalize_provider(provider)):
+        sentence = f"{SESSION_REFUSAL_MARKER}: {_CURSOR_BROWSER_LOGIN_EXPIRED_HINT}"
+    else:
+        sentence = _REFUSAL_TEMPLATES[1].substitute(
+            pair=f"{provider}/{model}", status=status
+        )
+    # Registered at the one place a refusal sentence is built, so the matcher can
+    # trust this process's own wording instead of a shape a body could copy.
+    return _register_own_sentence(sentence)
 
 
 def _session_refusal_for(
@@ -1818,11 +1862,11 @@ def _session_refusal_for(
 ) -> SessionCreationRefused | None:
     """Map a sidecar 4xx at session creation; ``None`` for any other status.
 
-    A 429 is excluded: rate limiting is transient, so the call is left
-    retryable instead of turning a temporary limit into a permanent refusal.
+    A 408, 425 or 429 is excluded: a timeout or a rate limit resolves itself, so
+    the call is left retryable instead of one becoming a permanent refusal.
     """
     status = exc.response.status_code
-    if not 400 <= status < 500 or status == 429:
+    if not 400 <= status < 500 or status in _TRANSIENT_SESSION_STATUSES:
         return None
     derived, detail = _sidecar_failure_parts(status=status, text=exc.response.text)
     return SessionCreationRefused(_session_refusal(derived, detail, provider, model))
@@ -1862,11 +1906,16 @@ _ROOTCOZ_ACTIONABLE_PATTERNS = (
 def _is_rootcoz_actionable_error(text: str) -> bool:
     """Whether a status-free failure is one of rootcoz's own recovery messages.
 
-    Only a whole sentence counts: the raised sentences are templates matched
-    with bounded slots, so a body wearing one of their prefixes matches no shape.
+    Only a whole sentence counts, and a sentence this process built is admitted
+    by the registry — a body can copy the wording but was never built here, so
+    an identifier that outgrows a bounded slot still keeps its guidance, and a
+    copied body still matches nothing. The bounded-slot patterns remain for a
+    sentence reconstructed from a stored report (another process, or evicted).
     """
-    return text in _ROOTCOZ_ACTIONABLE_ERRORS or any(
-        pattern.match(text) for pattern in _ROOTCOZ_ACTIONABLE_PATTERNS
+    return (
+        text in _ROOTCOZ_ACTIONABLE_ERRORS
+        or text in _own_sentences
+        or any(pattern.match(text) for pattern in _ROOTCOZ_ACTIONABLE_PATTERNS)
     )
 
 

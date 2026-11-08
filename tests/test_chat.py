@@ -4734,14 +4734,17 @@ def test_a_body_wearing_a_rootcoz_prefix_is_replaced():
         assert mapped == "AI call failed. Please try again.", body
 
 
-def test_a_rate_limited_session_creation_stays_retryable():
-    """A 429 at creation is transient, so it never wears the refusal marker.
-
-    The marker is the one non-retryable signal, so mapping a rate limit to a
-    refusal would turn a temporary limit into a permanent analysis failure.
-    """
+def _session_creation_error(status: int, text: str):
+    """An ``httpx.HTTPStatusError`` shaped like a sidecar creation failure."""
     import httpx
 
+    request = httpx.Request("POST", "http://127.0.0.1:9100/sessions")
+    response = httpx.Response(status, request=request, text=text)
+    return httpx.HTTPStatusError(text, request=request, response=response)
+
+
+def test_a_library_429_text_stays_retryable():
+    """A 429 shape is never admitted as a refusal, whatever text carries it."""
     from rootcoz import ai_client
     from rootcoz.engine import core
 
@@ -4760,10 +4763,94 @@ def test_a_rate_limited_session_creation_stays_retryable():
         )
         assert not mapped.startswith(ai_client.SESSION_REFUSAL_MARKER), text
 
-    request = httpx.Request("POST", "http://127.0.0.1:9100/sessions")
-    response = httpx.Response(429, request=request, text="rate limited")
-    exc = httpx.HTTPStatusError("rate limited", request=request, response=response)
+
+@pytest.mark.parametrize("status", [408, 425, 429])
+def test_a_transient_session_creation_status_stays_retryable(status):
+    """Only 408/425/429 are transient: mapping one to a refusal kills retries.
+
+    The refusal sentence carries ``SESSION_REFUSAL_MARKER``, the one
+    non-retryable signal, so a request timeout or a rate limit must stay ``None``
+    and leave the call retryable.
+    """
+    from rootcoz import ai_client
+
+    assert ai_client._TRANSIENT_SESSION_STATUSES == frozenset({408, 425, 429})
+    exc = _session_creation_error(status, "slow down")
     assert ai_client._session_refusal_for(exc, "openai", "undeclared") is None
+
+
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 409, 422])
+def test_a_non_transient_session_creation_status_is_a_refusal(status):
+    """Every other creation 4xx is the sidecar refusing; a retry cannot help."""
+    from rootcoz import ai_client
+
+    refusal = ai_client._session_refusal_for(
+        _session_creation_error(status, "sidecar says no"), "openai", "undeclared"
+    )
+    assert isinstance(refusal, ai_client.SessionCreationRefused)
+    assert str(refusal).startswith(f"{ai_client.SESSION_REFUSAL_MARKER}: ")
+
+
+def test_a_sentence_built_for_a_catalog_id_with_a_space_and_a_slash_is_ours():
+    """rootcoz registers what it builds, so no id shape can cost the guidance.
+
+    The bounded template slots are tighter than a real catalog id, so the
+    constructor registers each sentence it emits; the matcher trusts the
+    registry entry, not the shape.
+    """
+    from rootcoz import ai_client
+
+    provider, model = "my provider/inner", "the team's model/v2"
+
+    def deselected() -> str:
+        async def _selection():
+            return {provider.lower()}, set()
+
+        with (
+            patch.object(ai_client, "_load_server_pool_selection", _selection),
+            pytest.raises(ai_client.ExcludedServerModelError) as raised,
+        ):
+            asyncio.run(ai_client.require_selected_server_pair(provider, model))
+        return str(raised.value)
+
+    with pytest.raises(ai_client.InactiveServerProviderError) as raised:
+        ai_client._raise_inactive_server_provider(provider)
+
+    sentences = (
+        str(raised.value),
+        deselected(),
+        ai_client._session_refusal(401, "upstream rejected the key", provider, model),
+    )
+    for sentence in sentences:
+        assert ai_client._is_rootcoz_actionable_error(sentence) or (
+            ai_client._is_own_refusal_sentence(sentence)
+        ), sentence
+        assert ai_client.format_chat_ai_user_error(sentence) == sentence
+
+
+def test_a_body_copying_our_wording_is_never_ours():
+    """Registration is what makes a sentence ours — a copy was never built."""
+    from rootcoz import ai_client
+
+    hostile = (
+        "Server credentials for provider 'upstream said sk-live-EXAMPLE-1234 and"
+        " its whole payload' are deactivated by the administrator"
+        " (active_server_providers)"
+    )
+    assert not ai_client._is_rootcoz_actionable_error(hostile)
+    assert not ai_client._is_own_refusal_sentence(hostile)
+    mapped = ai_client.format_chat_ai_user_error(hostile, is_admin=True)
+    assert mapped == "AI call failed. Please try again."
+    assert "sk-live-EXAMPLE-1234" not in mapped
+
+
+def test_the_own_sentence_registry_stays_bounded():
+    """Every emitted sentence is remembered, so the registry must not grow."""
+    from rootcoz import ai_client
+
+    for index in range(ai_client._OWN_SENTENCE_REGISTRY_MAX + 50):
+        ai_client._session_refusal(500, "boom", f"p{index}", "m")
+    assert len(ai_client._own_sentences) == ai_client._OWN_SENTENCE_REGISTRY_MAX
 
 
 def test_cursor_401_names_the_rejected_credential_not_the_browser_login():

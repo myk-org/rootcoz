@@ -50,10 +50,12 @@ export function isAnalysisAiAvailable(providers: Record<string, AiModel[]>, stat
   if (forceServer && !canUseServer && !canUseFree) return false
   const models = usableModels(providers, provider, forceServer, status, canUseServer, canUseFree)
   if (!provider.trim() || !model.trim()) return false
-  if (allowsUnverified(status, provider, forceServer)) return true
   // A pair the sidecar would refuse to open a session for is not available:
-  // a saved or preselected pair must not enable Start just because it is listed.
-  return models.some((option) => option.id === model && option.verified !== false && option.session_supported !== false)
+  // a saved or preselected pair must not enable Start just because it is listed
+  // or because the provider's listing is unavailable.
+  if (models.some((option) => option.id === model && option.session_supported === false)) return false
+  if (allowsUnverified(status, provider, forceServer)) return true
+  return models.some((option) => option.id === model && option.verified !== false)
 }
 
 export function isAnalysisFormAiUnavailable(
