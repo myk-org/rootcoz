@@ -7658,10 +7658,14 @@ def _results_retention_candidates_sql(
     if max_rows > 0:
         # The keep-set repeats ``_RETAINABLE_WHERE`` on purpose: counting
         # submitted and in-progress rows would let them occupy every keep slot.
+        # The ``created_at IS NOT NULL`` is repeated for the same reason: an
+        # undated job is never a candidate, so holding a slot for it would delete
+        # a dated job the cap was meant to keep.
         rules.append(
             "SELECT job_id FROM results WHERE created_at IS NOT NULL"
             f" AND {_RETAINABLE_WHERE} AND job_id NOT IN ("
-            f"SELECT job_id FROM results WHERE {_RETAINABLE_WHERE}"
+            f"SELECT job_id FROM results WHERE created_at IS NOT NULL"
+            f" AND {_RETAINABLE_WHERE}"
             f" ORDER BY {_RESULTS_ACTIVITY_TS} DESC, job_id DESC LIMIT ?)"
         )
         params.extend([*ENDED_STATUSES, *ENDED_STATUSES, max_rows])

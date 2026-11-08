@@ -336,6 +336,7 @@ from rootcoz.storage import (
     update_status,
 )
 from rootcoz.temp_paths import (
+    CleanupOutcome,
     DeleteResult,
     PathStateUnknown,
     cleanup_off_loop,
@@ -2026,10 +2027,15 @@ async def _record_results_retention_audit(
         "skipped_jobs": int(stats.get("skipped") or 0),
         "cleanup_failed_jobs": len(cleanup_failed),
         "truncated": bool(stats.get("truncated")),
-        "oldest_deleted_at": stats.get("oldest_deleted_at") or "",
-        "newest_deleted_at": stats.get("newest_deleted_at") or "",
         "job_ids": list(stats.get("deleted_ids") or []),
     }
+    # Only when something went: an empty window is an absence, and a "" would
+    # read as a value an operator has to interpret.
+    oldest = str(stats.get("oldest_deleted_at") or "")
+    newest = str(stats.get("newest_deleted_at") or "")
+    if oldest and newest:
+        details["oldest_deleted_at"] = oldest
+        details["newest_deleted_at"] = newest
     if reason:
         details["reason"] = reason
     return await record_audit(
@@ -3208,8 +3214,9 @@ async def _reclaim_chat_workspaces(
             continue
         considered += 1
         await _cleanup_deleted_job_chat_workspaces(job_id)
-        # The helper returns ``None`` and logs its own failures, so the filesystem
-        # is the only thing that can say whether the tree went.
+        # The helper logs its own failures and this sweep keeps no counter for
+        # them, so the filesystem is the only thing that can say whether the
+        # tree went.
         if not os.path.lexists(path):
             reclaimed += 1
     if reclaimed:
@@ -8931,39 +8938,51 @@ async def re_analyze_failure(
         )
         _release_failure_reanalysis(parent_job_id, reanalysis_reservation)
         raise
+    except BaseException:
+        # Any other way out of the patch (a database error, a cancelled request)
+        # would leave this job in the registry, and so protected from retention,
+        # for the rest of the process. Releasing is idempotent.
+        _release_failure_reanalysis(parent_job_id, reanalysis_reservation)
+        raise
     notify_job_status_changed(parent_job_id)
 
-    # Start background task
-    task = _spawn_background(
-        _reanalyze_failure_background(
-            job_id=parent_job_id,
-            failure_uuid=failure_uuid,
-            failure_dict=failure_dict,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            ai_call_timeout=ai_call_timeout,
-            raw_prompt=raw_prompt,
-            peer_ai_configs=peer_ai_configs,
-            peer_analysis_max_rounds=peer_analysis_max_rounds,
-            tests_repo_url=tests_repo_url,
-            tests_repo_ref=tests_repo_ref,
-            tests_repo_token=tests_repo_token,
-            additional_repos_list=additional_repos_list,
-            username=request.state.username,
-            max_concurrent_ai_calls=max_concurrent_ai_calls,
-            analysis_type=decrypted_params.get("analysis_type", "jenkins"),
-            source_params={
-                **decrypted_params,
-            },
-            settings=get_settings(),
-            child_job_name=match.get("child_job_name", ""),
-            child_build_number=match.get("child_build_number", 0),
-            is_admin=bool(request.state.is_admin),
+    # Start background task. Only the handoff clears the reservation, so any
+    # failure here releases it rather than leaving the job protected from
+    # retention for the rest of the process.
+    try:
+        task = _spawn_background(
+            _reanalyze_failure_background(
+                job_id=parent_job_id,
+                failure_uuid=failure_uuid,
+                failure_dict=failure_dict,
+                ai_provider=ai_provider,
+                ai_model=ai_model,
+                ai_call_timeout=ai_call_timeout,
+                raw_prompt=raw_prompt,
+                peer_ai_configs=peer_ai_configs,
+                peer_analysis_max_rounds=peer_analysis_max_rounds,
+                tests_repo_url=tests_repo_url,
+                tests_repo_ref=tests_repo_ref,
+                tests_repo_token=tests_repo_token,
+                additional_repos_list=additional_repos_list,
+                username=request.state.username,
+                max_concurrent_ai_calls=max_concurrent_ai_calls,
+                analysis_type=decrypted_params.get("analysis_type", "jenkins"),
+                source_params={
+                    **decrypted_params,
+                },
+                settings=get_settings(),
+                child_job_name=match.get("child_job_name", ""),
+                child_build_number=match.get("child_build_number", 0),
+                is_admin=bool(request.state.is_admin),
+            )
         )
-    )
-    _background_tasks.add(task)
-    task.add_done_callback(_background_tasks.discard)
-    _track_failure_reanalysis(parent_job_id, task, reanalysis_reservation)
+        _background_tasks.add(task)
+        task.add_done_callback(_background_tasks.discard)
+        _track_failure_reanalysis(parent_job_id, task, reanalysis_reservation)
+    except BaseException:
+        _release_failure_reanalysis(parent_job_id, reanalysis_reservation)
+        raise
 
     await _audit_analysis_rerun(
         request=request,
@@ -23717,7 +23736,7 @@ async def _cleanup_deleted_job_chat_workspaces(job_id: str) -> bool:
             # Marker + per-path lock are inside the helper: this path is
             # deterministic and reused, so a queued delete must finish before the
             # next session creates into it, and a partial one must not be reused.
-            await cleanup_path_off_loop(
+            outcome = await cleanup_path_off_loop(
                 job_id,
                 get_chat_workspace(job_id),
                 partial(cleanup_chat_workspace, job_id),
@@ -23729,7 +23748,7 @@ async def _cleanup_deleted_job_chat_workspaces(job_id: str) -> bool:
         _chat_jobs_deleting.discard(job_id)
         _chat_job_tasks.pop(job_id, None)
         _discard_idle_chat_job_barrier(job_id)
-    return True
+    return outcome is CleanupOutcome.CLEAN
 
 
 # Per-job:user abort signals — set to cancel in-progress chat processing

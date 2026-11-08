@@ -18,6 +18,7 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from rootcoz import main, storage
+from rootcoz.temp_paths import CleanupOutcome
 from tests.conftest import make_app_client
 
 
@@ -288,6 +289,28 @@ async def test_row_cap_only_ignores_age(db: Path) -> None:
     # A 400-day-old job inside the newest two survives: age is off.
     assert _count_results(db, "ancient-but-newest") == 1
     assert _count_results(db, "older") == 1
+
+
+async def test_an_undated_job_never_holds_a_row_cap_slot(db: Path) -> None:
+    """The keep-set counts the same population the pass may delete.
+
+    An undated job is never a candidate, so a slot held for it deletes a dated
+    job the cap was meant to keep.
+    """
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO results (job_id, status, result_json, created_at,"
+            " analysis_started_at, analysis_state)"
+            " VALUES ('undated', 'completed', '{}', NULL, ?, 'analyzed')",
+            (_ts(0),),
+        )
+    _seed_job(db, "dated", days_ago=1)
+
+    result = await storage.prune_results(retention_days=0, max_rows=1)
+
+    assert result["deleted"] == 0
+    assert _count_results(db, "dated") == 1
+    assert _count_results(db, "undated") == 1
 
 
 async def test_row_cap_keeps_newest(db: Path) -> None:
@@ -757,6 +780,22 @@ async def test_skipped_only_pass_is_audited(db: Path) -> None:
     assert rows[0]["outcome"] == "success"
 
 
+@pytest.mark.parametrize(
+    ("outcome", "cleared"),
+    [(CleanupOutcome.CLEAN, True), (CleanupOutcome.INCOMPLETE, False)],
+)
+async def test_workspace_cleanup_reports_only_a_clean_outcome(
+    outcome: CleanupOutcome, cleared: bool
+) -> None:
+    """``INCOMPLETE`` is not a cleared workspace: retention must report and retry it."""
+
+    async def _cleanup(*_args: Any, **_kwargs: Any) -> CleanupOutcome:
+        return outcome
+
+    with patch.object(main, "cleanup_path_off_loop", _cleanup):
+        assert await main._cleanup_deleted_job_chat_workspaces("job") is cleared
+
+
 async def test_raising_prepare_is_a_deletion_failure(db: Path) -> None:
     _seed_job(db, "old", days_ago=400)
     _seed_children(db, "old")
@@ -871,6 +910,10 @@ async def test_failed_prune_writes_one_failure_row(db: Path) -> None:
     assert len(rows) == 1
     assert rows[0]["outcome"] == "failure"
     assert rows[0]["details"]["reason"] == "select_failed"
+    # A failed pass deleted nothing, so it has no window to report: an absent
+    # key says that, an empty string reads as missing data.
+    assert "oldest_deleted_at" not in rows[0]["details"]
+    assert "newest_deleted_at" not in rows[0]["details"]
     assert main._last_results_prune_at == 0.0
 
 
@@ -1073,9 +1116,18 @@ async def test_preview_disabled_reports_nothing(client) -> None:
     assert body["rows"] == {}
 
 
-def test_preview_route_is_admin_only(client) -> None:
+def test_preview_route_requires_a_token(client) -> None:
     response = client.get("/api/admin/results-retention")
     assert response.status_code in {401, 403}
+
+
+@pytest.mark.parametrize("role", ["viewer", "reviewer", "operator"])
+def test_preview_route_is_admin_only(client, temp_db_path: Path, role: str) -> None:
+    """Every real non-admin role is refused, not just a missing token."""
+    response = client.get(
+        "/api/admin/results-retention", headers=_role_headers(temp_db_path, role)
+    )
+    assert response.status_code == 403
 
 
 def test_preview_route_honours_the_guard(client, temp_db_path: Path) -> None:
@@ -1101,6 +1153,17 @@ def test_preview_route_honours_the_guard(client, temp_db_path: Path) -> None:
 def client(temp_db_path: Path):
     """TestClient whose env/DB patches stay active for the whole test body."""
     yield from make_app_client(temp_db_path)
+
+
+def _role_headers(db_path: Path, role: str) -> dict[str, str]:
+    """Bearer headers for a real non-admin account created in the test database."""
+    raw_key = storage.generate_api_key()
+    with sqlite3.connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO users (username, api_key_hash, role) VALUES (?, ?, ?)",
+            (role, storage.hash_api_key(raw_key), role),
+        )
+    return {"Authorization": f"Bearer {raw_key}"}
 
 
 _ADMIN_KEY = "test-admin-key-16chars"  # pragma: allowlist secret  # gitleaks:allow
