@@ -44,7 +44,7 @@ change_dir = "frontend"
 [env.chart]
 description = "Helm chart lint and template smoke tests"
 skip_install = true
-allowlist_externals = ["helm", "sh", "curl", "tar", "mkdir"]
+allowlist_externals = ["helm", "sh", "curl", "tar", "mkdir", "bash"]
 passenv = ["PATH", "HOME"]
 set_env.PATH = "{env:HOME}/.local/bin:{env:PATH}"
 commands_pre = [
@@ -97,7 +97,7 @@ commands = [
   [
     "sh",
     "-c",
-    "OUT=/tmp/rootcoz-production-$$.yaml && helm template rootcoz chart/ -f chart/examples/values-openshift.yaml -f chart/examples/values-production.yaml --set ai.geminiApiKey=test-key --set admin.key=test-admin-key --set encryptionKey=test-encryption-key-for-helm-template-render > $OUT && [ \"$(grep -c 'memory: 32Gi' $OUT)\" = 2 ] && [ \"$(grep -c 'cpu: \"4\"' $OUT)\" = 2 ] && [ \"$(grep -c 'ephemeral-storage: 16Gi' $OUT)\" = 2 ] && grep -q 'sizeLimit: \"16Gi\"' $OUT && [ \"$(awk '/^      containers:/,/^      volumes:/' $OUT | grep -c 'mountPath: /tmp$')\" = 1 ] && [ \"$(awk '/^      initContainers:/,/^      containers:/' $OUT | grep -c 'mountPath: /tmp$')\" = 0 ] && rm -f $OUT",  # pragma: allowlist secret
+    "OUT=/tmp/rootcoz-production-$$.yaml && helm template rootcoz chart/ -f chart/examples/values-openshift.yaml -f chart/examples/values-production.yaml --set ai.geminiApiKey=test-key --set admin.key=test-admin-key --set encryptionKey=test-encryption-key-for-helm-template-render > $OUT && [ \"$(grep -c 'memory: 32Gi' $OUT)\" = 2 ] && [ \"$(grep -c 'cpu: \"4\"' $OUT)\" = 2 ] && [ \"$(grep -c 'ephemeral-storage: 16Gi' $OUT)\" = 2 ] && grep -q 'sizeLimit: \"16Gi\"' $OUT && ! grep -q '12Gi' $OUT && [ \"$(awk '/^      containers:/,/^      volumes:/' $OUT | grep -c 'mountPath: /tmp$')\" = 1 ] && [ \"$(awk '/^      initContainers:/,/^      containers:/' $OUT | grep -c 'mountPath: /tmp$')\" = 0 ] && rm -f $OUT",  # pragma: allowlist secret
   ],
   [
     "sh",
@@ -105,16 +105,52 @@ commands = [
     "OUT=/tmp/rootcoz-production-sidecar-$$.yaml && helm template rootcoz chart/ -f chart/examples/values-openshift.yaml -f chart/examples/values-sidecar-agent-fixture.yaml -f chart/examples/values-production.yaml --set ai.geminiApiKey=test-key --set admin.key=test-admin-key --set encryptionKey=test-encryption-key-for-helm-template-render > $OUT && grep -q 'copy-sidecar-agent' $OUT && [ \"$(awk '/^      initContainers:/,/^      containers:/' $OUT | grep -c 'mountPath: /tmp$')\" = 0 ] && [ \"$(awk '/^      initContainers:/,/^      containers:/' $OUT | grep -c 'TMPDIR')\" = 0 ] && [ \"$(grep -c 'mountPath: /tmp$' $OUT)\" = 1 ] && [ \"$(grep -c 'name: TMPDIR' $OUT)\" = 1 ] && rm -f $OUT",  # pragma: allowlist secret
   ],
   # The default render (chart/ with only the required flags, no overlay) is the
-  # baseline every install starts from: assert its resource block verbatim and
-  # that no ephemeral-storage (hence no /tmp emptyDir, sizeLimit or TMPDIR) is added.
-  # It also asserts the shutdown budget (#458): the grace period is 60, and it is
-  # larger than uvicorn's ceiling plus the app's drain, read from their own files.
-  # Both, because 56-59 would satisfy the relationship alone while no longer
-  # carrying the published 60, and because the arithmetic must exist once.
+  # baseline every install starts from: assert its resource block verbatim, the
+  # /tmp emptyDir + sizeLimit + TMPDIR the defaults now carry (#402 C1), and the
+  # XDG_CONFIG_HOME value read out of values.yaml so a change there cannot strand
+  # the mount from the env var. It also asserts the shutdown budget (#458): the
+  # grace period is 60, and it is larger than uvicorn's ceiling plus the app's
+  # drain, read from their own files. Both, because 56-59 would satisfy the
+  # relationship alone while no longer carrying the published 60, and because the
+  # arithmetic must exist once.
   [
     "sh",
     "-c",
-    "T='helm template rootcoz chart/ --set ai.provider=gemini --set ai.model=gemini-2.5-pro --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render' && OUT=/tmp/rootcoz-default-render-$$.yaml && $T > $OUT && EXP=$(printf '%s\\n' 'limits:' '  cpu: \"2\"' '  memory: 8Gi' 'requests:' '  cpu: \"1\"' '  memory: 4Gi') && GOT=$(sed -n '/^      containers:/,/^      volumes:/p' $OUT | sed -n '/^          resources:/,/^          volumeMounts:/p' | sed -e '1d' -e '$d' -e 's/^            //') && { [ \"$GOT\" = \"$EXP\" ] || { printf 'default render resources changed:\\n%s\\n' \"$GOT\"; exit 1; }; } && ! grep -q 'ephemeral-storage' $OUT && ! grep -q 'sizeLimit' $OUT && ! grep -q 'mountPath: /tmp$' $OUT && ! grep -q 'name: TMPDIR' $OUT && GRACE=$(awk '/terminationGracePeriodSeconds:/ {print $2; exit}' $OUT) && GRACEFUL=$(sed -n 's/.*--timeout-graceful-shutdown \\([0-9][0-9]*\\).*/\\1/p' entrypoint.sh | head -1) && DRAIN=$(sed -n 's/^SHUTDOWN_DRAIN_SECONDS = \\([0-9][0-9]*\\)$/\\1/p' src/rootcoz/main.py) && [ -n \"$GRACE\" ] && [ -n \"$GRACEFUL\" ] && [ -n \"$DRAIN\" ] && [ \"$GRACE\" = 60 ] && [ \"$GRACE\" -gt $((GRACEFUL + DRAIN)) ] && rm -f $OUT",  # pragma: allowlist secret
+    "T='helm template rootcoz chart/ --set ai.provider=gemini --set ai.model=gemini-2.5-pro --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render' && OUT=/tmp/rootcoz-default-render-$$.yaml && $T > $OUT && EXP=$(printf '%s\\n' 'limits:' '  cpu: \"2\"' '  ephemeral-storage: 12Gi' '  memory: 8Gi' 'requests:' '  cpu: \"1\"' '  ephemeral-storage: 12Gi' '  memory: 4Gi') && GOT=$(awk '/^      containers:/,/^      volumes:/' $OUT | sed -n '/^          resources:/,/^          volumeMounts:/p' | sed -e '1d' -e '$d' -e 's/^            //') && if [ \"$GOT\" != \"$EXP\" ]; then printf 'default render resources changed:\\n%s\\n' \"$GOT\"; exit 1; fi && [ \"$(grep -c 'ephemeral-storage: 12Gi' $OUT)\" = 2 ] && grep -q 'sizeLimit: \"12Gi\"' $OUT && [ \"$(grep -c 'mountPath: /tmp$' $OUT)\" = 1 ] && [ \"$(grep -c 'name: TMPDIR' $OUT)\" = 1 ] && P=$(sed -n 's/^ *xdgConfigHome: *//p' chart/values.yaml) && [ -n \"$P\" ] && awk '/^      containers:/,/^      volumes:/' $OUT | grep -q \"value: \\\"$P\\\"\" && GRACE=$(awk '/terminationGracePeriodSeconds:/ {print $2; exit}' $OUT) && GRACEFUL=$(sed -n 's/.*--timeout-graceful-shutdown \\([0-9][0-9]*\\).*/\\1/p' entrypoint.sh | head -1) && DRAIN=$(sed -n 's/^SHUTDOWN_DRAIN_SECONDS = \\([0-9][0-9]*\\)$/\\1/p' src/rootcoz/main.py) && [ -n \"$GRACE\" ] && [ -n \"$GRACEFUL\" ] && [ -n \"$DRAIN\" ] && [ \"$GRACE\" = 60 ] && [ \"$GRACE\" -gt $((GRACEFUL + DRAIN)) ] && rm -f $OUT",  # pragma: allowlist secret
+  ],
+  # Arbitrary-UID XDG_CONFIG_HOME, asserted on the shipped entrypoint (the `--xdg-check`
+  # argv gate stops it right after the bootstrap block). A path whose parent is a
+  # regular file fails for every UID including root (ENOTDIR), so the fail-loud branch
+  # is deterministic; a creatable path must be created and writable.
+  [
+    "sh",
+    "-c",
+    "D=/tmp/rootcoz-xdg-$$ && mkdir -p $D && touch $D/afile && ! XDG_CONFIG_HOME=$D/afile/config bash entrypoint.sh --xdg-check 2>$D/err && grep -qE \"XDG_CONFIG_HOME=$D/afile/config is not writable \\(uid=[0-9]+ gid=[0-9]+\\)\" $D/err && XDG_CONFIG_HOME=$D/cfg bash entrypoint.sh --xdg-check && [ -w $D/cfg ] && [ -z \"$(ls -A $D/cfg)\" ] && : > $D/cfg/probe && rm -rf $D",  # pragma: allowlist secret
+  ],
+  # Probes are values, not template literals: 14 timing fields across three probes
+  # (startup has no initialDelaySeconds — absent renders nothing and the API defaults
+  # it to 0). Defaults are asserted for the two numbers that matter operationally
+  # (readiness 5 s, liveness 30 s x 5), then every field is proved wired by rendering
+  # a distinct number per probe per field and comparing each block verbatim — so a
+  # literal sneaking back into the template fails, and so does one probe rendering
+  # another probe's constant. Readiness successThreshold is proved the same way (25):
+  # it may be > 1. Startup/liveness successThreshold stay 1 — Kubernetes rejects
+  # anything else there, so a literal 1 and the value render identically.
+  # Targets stay literal by design (#402 B4): readiness/liveness GET /health, the
+  # startup probe is the exec /api/health sidecar wait.
+  [
+    "sh",
+    "-c",
+    "T='helm template rootcoz chart/ --set ai.provider=gemini --set ai.model=gemini-2.5-pro --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render' && OUT=/tmp/rootcoz-probes-$$.yaml && $T > $OUT && [ \"$(awk '/^          readinessProbe:/,/^          livenessProbe:/' $OUT | grep -c 'timeoutSeconds: 5$')\" = 1 ] && [ \"$(awk '/^          livenessProbe:/,/^          resources:/' $OUT | grep -cE 'timeoutSeconds: 30$|failureThreshold: 5$')\" = 2 ] && [ \"$(awk '/^          readinessProbe:/,/^          livenessProbe:/' $OUT | grep -c 'path: /health$')\" = 1 ] && [ \"$(awk '/^          livenessProbe:/,/^          resources:/' $OUT | grep -c 'path: /health$')\" = 1 ] && [ \"$(awk '/^          readinessProbe:/,/^          resources:/' $OUT | grep -c 'api/health')\" = 0 ] && [ \"$(awk '/^          startupProbe:/,/^          readinessProbe:/' $OUT | grep -c 'curl -sf http://localhost:8000/api/health')\" = 1 ] && $T --set probes.startup.periodSeconds=12 --set probes.startup.timeoutSeconds=13 --set probes.startup.failureThreshold=14 --set probes.readiness.initialDelaySeconds=21 --set probes.readiness.periodSeconds=22 --set probes.readiness.timeoutSeconds=23 --set probes.readiness.failureThreshold=24 --set probes.readiness.successThreshold=25 --set probes.liveness.initialDelaySeconds=31 --set probes.liveness.periodSeconds=32 --set probes.liveness.timeoutSeconds=33 --set probes.liveness.failureThreshold=34 > $OUT && EXP=$(printf '%s\\n' 'periodSeconds: 12' 'timeoutSeconds: 13' 'failureThreshold: 14' 'successThreshold: 1') && GOT=$(awk '/^          startupProbe:/,/^          readinessProbe:/' $OUT | grep -E '^            (initialDelaySeconds|periodSeconds|timeoutSeconds|failureThreshold|successThreshold):' | sed 's/^ *//') && if [ \"$GOT\" != \"$EXP\" ]; then printf 'startup probe does not follow probes.startup:\\n%s\\n' \"$GOT\"; exit 1; fi && EXP=$(printf '%s\\n' 'initialDelaySeconds: 21' 'periodSeconds: 22' 'timeoutSeconds: 23' 'failureThreshold: 24' 'successThreshold: 25') && GOT=$(awk '/^          readinessProbe:/,/^          livenessProbe:/' $OUT | grep -E '^            (initialDelaySeconds|periodSeconds|timeoutSeconds|failureThreshold|successThreshold):' | sed 's/^ *//') && if [ \"$GOT\" != \"$EXP\" ]; then printf 'readiness probe does not follow probes.readiness:\\n%s\\n' \"$GOT\"; exit 1; fi && EXP=$(printf '%s\\n' 'initialDelaySeconds: 31' 'periodSeconds: 32' 'timeoutSeconds: 33' 'failureThreshold: 34' 'successThreshold: 1') && GOT=$(awk '/^          livenessProbe:/,/^          resources:/' $OUT | grep -E '^            (initialDelaySeconds|periodSeconds|timeoutSeconds|failureThreshold|successThreshold):' | sed 's/^ *//') && if [ \"$GOT\" != \"$EXP\" ]; then printf 'liveness probe does not follow probes.liveness:\\n%s\\n' \"$GOT\"; exit 1; fi && rm -f $OUT",  # pragma: allowlist secret
+  ],
+  # The probes group rejects what the template cannot: a wrong type (5s), a typo'd key
+  # (readines), a successThreshold Kubernetes refuses (liveness) and a readiness
+  # successThreshold below 1. Without it all of them render silently and the API
+  # server refuses the pod mid-upgrade.
+  [
+    "sh",
+    "-c",
+    "T='helm template rootcoz chart/ --set ai.provider=gemini --set ai.model=gemini-2.5-pro --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render' && L=/tmp/rootcoz-bad-probes-$$.log && ! $T --set probes.readiness.timeoutSeconds=5s > $L 2>&1 && grep -q 'probes.readiness.timeoutSeconds: Invalid type. Expected: integer, given: string' $L && ! $T --set probes.readines.periodSeconds=3 > $L 2>&1 && grep -q 'probes: Additional property readines is not allowed' $L && ! $T --set probes.liveness.successThreshold=2 > $L 2>&1 && grep -q 'must be one of the following: 1' $L && ! $T --set probes.readiness.successThreshold=0 > $L 2>&1 && grep -q 'probes.readiness.successThreshold: Must be greater than or equal to 1' $L && rm -f $L",  # pragma: allowlist secret
   ],
   [
     "sh",

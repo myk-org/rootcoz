@@ -6,7 +6,8 @@
        resolved once and reused for both the checksum and the envFrom gate. */ -}}
 {{- $credentials := include "rootcoz.credentialsSecretData" . -}}
 {{- /* Ephemeral-storage limit doubles as the /tmp emptyDir sizeLimit: one number,
-       no second key to keep in sync. Absent → no /tmp volume, no mount, no TMPDIR. */ -}}
+       no second key to keep in sync. Default 12Gi from values.yaml; absent only
+       after an explicit opt-out → no /tmp volume, no mount, no TMPDIR. */ -}}
 {{- $ephemeralLimit := "" -}}
 {{- with .Values.resources.limits -}}
 {{- $ephemeralLimit = index . "ephemeral-storage" | default "" -}}
@@ -160,30 +161,34 @@ spec:
                 - /bin/sh
                 - -c
                 - "curl -sf http://localhost:8000/api/health"
-            periodSeconds: 2
-            timeoutSeconds: 10
-            failureThreshold: 30
-            successThreshold: 1
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+            successThreshold: {{ .Values.probes.startup.successThreshold }}
+          # Readiness and liveness stay on the trivial /health (no I/O). Never
+          # /api/health: it runs the DB, Jenkins, sidecar and Report Portal checks
+          # behind a 6 s internal timeout (monitoring.py:497), so an upstream
+          # hiccup would become a restart storm (#402 B4).
           readinessProbe:
             httpGet:
               path: /health
               port: http
               scheme: HTTP
-            initialDelaySeconds: 5
-            periodSeconds: 10
-            timeoutSeconds: 1
-            failureThreshold: 3
-            successThreshold: 1
+            initialDelaySeconds: {{ .Values.probes.readiness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+            successThreshold: {{ .Values.probes.readiness.successThreshold }}
           livenessProbe:
             httpGet:
               path: /health
               port: http
               scheme: HTTP
-            initialDelaySeconds: 15
-            periodSeconds: 30
-            timeoutSeconds: 30
-            failureThreshold: 5
-            successThreshold: 1
+            initialDelaySeconds: {{ .Values.probes.liveness.initialDelaySeconds }}
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+            successThreshold: {{ .Values.probes.liveness.successThreshold }}
           resources:
             {{- include "rootcoz.containerResources" . | nindent 12 }}
           volumeMounts:
