@@ -1,18 +1,249 @@
 import { useState, useEffect, type FormEvent } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { useAuth } from '@/lib/auth'
-import { api, ApiError } from '@/lib/api'
+import { api, ApiError, extractApiDetail } from '@/lib/api'
 import { persistTokensToServer } from '@/lib/tokens'
 import { Card, CardContent } from '@/components/ui/card'
-import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
 import { TokenField } from '@/components/shared/TokenField'
 import { TrackerTokensFields } from '@/components/shared/TrackerTokensFields'
 import { NotificationToggle } from '@/components/shared/NotificationToggle'
 import { CustomMessageBanner } from '@/components/shared/CustomMessageBanner'
+import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
+import { UsernameField } from '@/components/shared/UsernameField'
 
 type Mode = 'login' | 'register' | 'key-reveal'
 type RegistrationStatus = 'active' | 'pending'
+
+interface SsoProvider {
+  name: string
+  display_name: string
+}
+
+interface SsoTicket {
+  provider: string
+  suggested_username: string
+  email_domain: string
+}
+
+/**
+ * One sentence per code the SSO callback can redirect with. The authoritative
+ * list is `_SSO_PUBLIC_REASONS` (plus the `_SSO_DENIED` catch-all) in
+ * `src/rootcoz/main.py` — keep the two in step when a reason is added.
+ */
+const SSO_ERROR_MESSAGES: Record<string, string> = {
+  unknown_provider: 'That sign-in provider is not configured on this server.',
+  login_start_failed: 'The sign-in could not be started. Please try again.',
+  state_invalid: 'Your sign-in attempt expired. Please try again.',
+  state_mismatch: 'Your sign-in attempt expired. Please try again.',
+  missing_code: 'The provider did not finish the sign-in. Please try again.',
+  provider_error: 'The provider refused the sign-in. Please try again.',
+  exchange_failed: 'Could not complete the sign-in with the provider. Please try again.',
+  id_token_invalid: 'The provider returned an identity we could not verify. Please try again.',
+  userinfo_failed: 'Could not read your profile from the provider. Please try again.',
+  no_subject: 'The provider returned no account identity. Please try again.',
+  callback_misconfigured: 'SSO is misconfigured on this server. Contact an admin.',
+  denied: "That account can't sign in with this provider.",
+}
+const SSO_ERROR_FALLBACK = 'Sign-in with the provider did not finish. Please try again.'
+
+/** The server's own explanation when it sent one, else a local sentence. */
+function failureMessage(err: unknown, fallback: string): string {
+  return extractApiDetail(err) ?? fallback
+}
+
+/**
+ * One full-page sign-in link per configured provider.
+ *
+ * Rendered on both the login and the register form: the provider list is the
+ * deployment's, not the form's, and hiding SSO from people who happen to be
+ * registering only makes them pick a weaker credential.
+ */
+function SsoProviderButtons({ providers, returnTo }: { providers: SsoProvider[]; returnTo: string }) {
+  if (providers.length === 0) return null
+  return (
+    <div className="space-y-2 border-t border-border-muted pt-4">
+      {providers.map((provider) => (
+        <Button key={provider.name} asChild variant="outline" className="w-full">
+          <a href={`/api/auth/sso/${encodeURIComponent(provider.name)}/login?next=${encodeURIComponent(returnTo)}`}>
+            Sign in with {provider.display_name}
+          </a>
+        </Button>
+      ))}
+    </div>
+  )
+}
+
+function WarningBanner({ message, tone = 'amber' }: { message: string; tone?: 'amber' | 'red' }) {
+  if (!message) return null
+  return (
+    <div
+      // A refusal must be announced, not just coloured: red is an error the
+      // person has to act on, amber is a notice.
+      role={tone === 'red' ? 'alert' : undefined}
+      className={`rounded-md border p-3 ${tone === 'red' ? 'border-signal-red/30 bg-signal-red/10' : 'border-signal-amber/30 bg-signal-amber/10'}`}
+    >
+      <p className={`text-xs ${tone === 'red' ? 'text-signal-red' : 'text-signal-amber'}`}>{message}</p>
+    </div>
+  )
+}
+
+/**
+ * First-login screen for an identity no account holds yet.
+ *
+ * The provider already proved who the person is; the ticket (one-time, bound to
+ * this browser) is the only credential these two endpoints accept, so the panel
+ * asks *which way* to finish and nothing else.
+ */
+function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpired, onDismiss }: {
+  ticket: SsoTicket
+  ticketValue: string
+  providerLabel: string
+  nextPath: string
+  onExpired: () => void
+  onDismiss: () => void
+}) {
+  const navigate = useNavigate()
+  const { refreshAuth } = useAuth()
+  const [createName, setCreateName] = useState(ticket.suggested_username)
+  const [linking, setLinking] = useState(false)
+  const [linkName, setLinkName] = useState('')
+  const [linkKey, setLinkKey] = useState('')
+  const [showLinkKey, setShowLinkKey] = useState(false)
+  const [error, setError] = useState('')
+  const [loading, setLoading] = useState(false)
+
+  /**
+   * Complete the login by posting `body` to `path`.
+   *
+   * A 404 means the one-time ticket is gone — expired, or already spent by a
+   * second submit — so the panel switches to its expired state instead of
+   * showing an error the person cannot act on. A `pending` account goes to
+   * `/pending` because the middleware refuses it everywhere else.
+   */
+  async function finish(path: string, body: Record<string, string>) {
+    setLoading(true)
+    setError('')
+    try {
+      const result = await api.post<{ username: string; status: string; next?: string }>(path, body)
+      try {
+        await refreshAuth()
+      } catch {
+        // The session cookie is already set — navigate even if /me fails.
+      }
+      // The server decides where a login ends (pending page, or the destination
+      // sealed in the ticket); the SPA only falls back for an older response.
+      // The server sends `next`; the fallback mirrors its rule — anything not
+      // `active` is blocked (pending *or* rejected), not just pending.
+      const destination = result.next || (result.status === 'active' ? nextPath : '/pending')
+      navigate(destination, { replace: true })
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 404) {
+        onExpired()
+        return
+      }
+      setError(failureMessage(err, 'Could not finish signing in. Please try again.'))
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  return (
+    <div className="space-y-4">
+      <h2 className="font-display text-base font-semibold text-text-primary">
+        This {providerLabel} account isn't connected yet
+      </h2>
+      <WarningBanner message={error} tone="red" />
+
+      {linking ? (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            const name = linkName.trim()
+            if (name && linkKey.trim()) void finish('/api/auth/sso/link', { ticket: ticketValue, username: name, api_key: linkKey.trim() })
+          }}
+          className="space-y-4"
+        >
+          <fieldset disabled={loading} className="space-y-4">
+            <p className="text-xs text-text-tertiary">Connect this {providerLabel} sign-in to the account you already have.</p>
+
+            <UsernameField
+              id="sso-link-username"
+              value={linkName}
+              onChange={(v) => { setLinkName(v); setError('') }}
+              autoFocus
+            />
+
+            <TokenField
+              id="sso-link-apikey"
+              label="API Key"
+              value={linkKey}
+              onChange={(v) => { setLinkKey(v); setError('') }}
+              show={showLinkKey}
+              onToggleShow={() => setShowLinkKey(!showLinkKey)}
+              placeholder="Your existing API key..."
+              optionalLabel={false}
+              autoFocus={!!linkName}
+            />
+
+            <Button type="submit" className="w-full" disabled={!linkName.trim() || !linkKey.trim() || loading}>
+              {loading ? 'Connecting...' : 'Connect account'}
+            </Button>
+
+            <p className="text-center text-xs text-text-tertiary">
+              <button
+                type="button"
+                onClick={() => { setLinking(false); setError('') }}
+                className="font-medium text-signal-blue hover:underline"
+              >
+                Create a new account instead
+              </button>
+            </p>
+          </fieldset>
+        </form>
+      ) : (
+        <form
+          onSubmit={(e) => {
+            e.preventDefault()
+            const name = createName.trim()
+            if (name) void finish('/api/auth/sso/create', { ticket: ticketValue, username: name })
+          }}
+          className="space-y-4"
+        >
+          <fieldset disabled={loading} className="space-y-4">
+            <div className="space-y-1.5">
+              <UsernameField
+                id="sso-create-username"
+                value={createName}
+                onChange={(v) => { setCreateName(v); setError('') }}
+                autoFocus
+              />
+              <p className="text-xs text-text-tertiary">
+                {ticket.email_domain && `Signed in with an @${ticket.email_domain} address. `}
+                You're signed in here. Other devices can use the same provider, and an
+                admin can issue an API key for a terminal.
+              </p>
+            </div>
+
+            <Button type="submit" className="w-full" disabled={!createName.trim() || loading}>
+              {loading ? 'Creating account...' : 'Create account'}
+            </Button>
+
+            <Button variant="outline" className="w-full" disabled={loading} onClick={() => { setLinking(true); setError('') }}>
+              I already have an account
+            </Button>
+          </fieldset>
+        </form>
+      )}
+
+      <p className="text-center text-xs text-text-tertiary">
+        <button type="button" onClick={onDismiss} className="font-medium text-signal-blue hover:underline">
+          Not you? Sign in another way
+        </button>
+      </p>
+    </div>
+  )
+}
 
 function ApiKeyReveal({ apiKey, onAcknowledge }: { apiKey: string; onAcknowledge: () => void }) {
   const [copied, setCopied] = useState(false)
@@ -66,12 +297,69 @@ export function RegisterPage() {
   const [jiraSaToken, setJiraSaTokenValue] = useState('')
   const [pendingCustomMessage, setPendingCustomMessage] = useState('')
   const [loginCustomMessage, setLoginCustomMessage] = useState('')
+  // The callback redirects here as /login#sso_ticket=… — rootcoz, not the IdP.
+  // The fragment is never sent with a request, so the ticket stays out of access
+  // logs and Referer headers; the panel posts it back to /ticket, /create, /link.
+  const ssoTicketValue = new URLSearchParams(location.hash.replace(/^#/, '')).get('sso_ticket') ?? ''
+  // Read once: the code is a one-shot notice, so it must not reappear after the
+  // person dismisses the panel or switches to Register.
+  const [ssoErrorCode] = useState(
+    () => new URLSearchParams(location.search).get('sso_error') ?? '',
+  )
+  const [ssoProviders, setSsoProviders] = useState<SsoProvider[]>([])
+  const [ssoTicket, setSsoTicket] = useState<SsoTicket | null>(null)
+  const [ssoTicketExpired, setSsoTicketExpired] = useState(false)
+  // Derived, not initialised once: the hash is re-read every render, so a ticket
+  // that appears without a remount (SPA push, bfcache restore) must not leave an
+  // interactive login form on screen while its redemption is in flight.
+  const [ssoTicketSettled, setSsoTicketSettled] = useState(ssoTicketValue === '')
+  const ssoTicketPending = ssoTicketValue !== '' && !ssoTicketSettled
 
   useEffect(() => {
-    if (!authLoading && authenticated) {
+    let active = true
+    api.get<{ providers?: SsoProvider[] }>('/api/auth/sso/providers')
+      .then((data) => { if (active) setSsoProviders(data.providers ?? []) })
+      .catch(() => { /* SSO is optional — the password forms stay usable */ })
+    return () => { active = false }
+  }, [])
+
+  useEffect(() => {
+    if (!ssoTicketValue) return
+    setSsoTicketSettled(false)
+    // POST, never GET: the ticket is a live credential, so it must not travel in
+    // a URL — the same reason it arrives in the fragment. `active` keeps a late
+    // response from setting state after the panel was dismissed.
+    let active = true
+    api.post<SsoTicket>('/api/auth/sso/ticket', { ticket: ssoTicketValue })
+      .then((ticket) => {
+        if (!active) return
+        setSsoTicket(ticket)
+        // Redeemed: drop it from the address bar and the history entry, so it is
+        // not visible for the panel's lifetime (or in a shared screenshot).
+        window.history.replaceState(null, '', window.location.pathname)
+      })
+      .catch((err: unknown) => {
+        if (!active) return
+        // 404 means the one-time ticket is gone; anything else (a 5xx, a lost
+        // binding cookie, the network) is not expiry, and saying so would send
+        // the person round the provider again for nothing.
+        if (err instanceof ApiError && err.status === 404) {
+          setSsoTicketExpired(true)
+          return
+        }
+        setError(failureMessage(err, 'Could not check this sign-in. Please try again.'))
+      })
+      .finally(() => { if (active) setSsoTicketSettled(true) })
+    return () => { active = false }
+  }, [ssoTicketValue])
+
+  useEffect(() => {
+    // A live session must not swallow an SSO attempt: the person followed a
+    // provider link on purpose, so the ticket has to be redeemed first.
+    if (!authLoading && authenticated && !ssoTicketValue && !ssoTicket && !ssoTicketExpired) {
       navigate(returnTo, { replace: true })
     }
-  }, [authLoading, authenticated, navigate, returnTo])
+  }, [authLoading, authenticated, navigate, returnTo, ssoTicketValue, ssoTicket, ssoTicketExpired])
 
   async function handleRegister(e: FormEvent) {
     e.preventDefault()
@@ -175,11 +463,32 @@ export function RegisterPage() {
     setLoginCustomMessage('')
   }
 
-  const subtitle = mode === 'key-reveal'
-    ? 'Your account has been created'
-    : mode === 'register'
-      ? 'Create your account'
-      : 'Log in to continue'
+  /** Drop the SSO panel and its ticket fragment; the forms come back. */
+  function dismissSso() {
+    setSsoTicket(null)
+    setSsoTicketExpired(false)
+    setSsoTicketSettled(true)
+    setError('')
+    // Drops the fragment as well: the ticket must not survive in the URL.
+    navigate(location.pathname, { replace: true })
+  }
+
+  // `Object.hasOwn`, not a bare index: a plain object inherits `__proto__` and
+  // friends, so `SSO_ERROR_MESSAGES['__proto__']` would render an object.
+  const ssoErrorMessage = ssoErrorCode
+    ? (Object.hasOwn(SSO_ERROR_MESSAGES, ssoErrorCode) ? SSO_ERROR_MESSAGES[ssoErrorCode] : SSO_ERROR_FALLBACK)
+    : ''
+  const ssoProviderLabel = ssoTicket
+    ? ssoProviders.find((p) => p.name === ssoTicket.provider)?.display_name ?? ssoTicket.provider
+    : ''
+
+  const subtitle = ssoTicketPending || ssoTicket || ssoTicketExpired
+    ? 'Finish signing in'
+    : mode === 'key-reveal'
+      ? 'Your account has been created'
+      : mode === 'register'
+        ? 'Create your account'
+        : 'Log in to continue'
 
   return (
     <div className="relative flex min-h-screen items-center justify-center bg-surface-page overflow-hidden">
@@ -204,7 +513,28 @@ export function RegisterPage() {
         <div className="animate-slide-up [animation-delay:80ms] [animation-fill-mode:backwards]">
           <Card className="border-border-muted">
             <CardContent className="p-5">
-              {mode === 'key-reveal' ? (
+              {ssoTicketPending ? (
+                <div className="flex justify-center py-10">
+                  <LoadingSpinner />
+                </div>
+              ) : ssoTicket ? (
+                <SsoChoicePanel
+                  ticket={ssoTicket}
+                  ticketValue={ssoTicketValue}
+                  providerLabel={ssoProviderLabel}
+                  nextPath={returnTo}
+                  onExpired={() => { setSsoTicket(null); setSsoTicketExpired(true) }}
+                  onDismiss={dismissSso}
+                />
+              ) : ssoTicketExpired ? (
+                <div className="space-y-4">
+                  <h2 className="font-display text-base font-semibold text-text-primary">This sign-in link has expired</h2>
+                  <p className="text-xs text-text-tertiary">
+                    Sign-in links are single use and time limited. Start again with your username and API key.
+                  </p>
+                  <Button className="w-full" onClick={dismissSso}>Back to sign in</Button>
+                </div>
+              ) : mode === 'key-reveal' ? (
                 <>
                   <h2 className="mb-4 font-display text-base font-semibold text-text-primary">Registration Complete</h2>
                   <ApiKeyReveal apiKey={newApiKey} onAcknowledge={handleKeyAcknowledged} />
@@ -220,24 +550,14 @@ export function RegisterPage() {
               ) : mode === 'register' ? (
                 <form onSubmit={handleRegister} className="space-y-4">
                   <fieldset disabled={loading} className="space-y-4">
-                    {error && (
-                      <div className="rounded-md border border-signal-red/30 bg-signal-red/10 p-3">
-                        <p className="text-xs text-signal-red">{error}</p>
-                      </div>
-                    )}
+                    <WarningBanner message={error} tone="red" />
 
                     <div className="space-y-1.5">
-                      <label htmlFor="reg-username" className="block font-display text-xs font-medium uppercase tracking-widest text-text-secondary">
-                        Username
-                      </label>
-                      <Input
+                      <UsernameField
                         id="reg-username"
                         value={username}
-                        onChange={(e) => { setUsername(e.target.value); setError('') }}
-                        placeholder="e.g. jdoe"
+                        onChange={(v) => { setUsername(v); setError('') }}
                         autoFocus
-                        autoComplete="username"
-                        className="h-10 font-mono"
                       />
                       <p className="text-xs text-text-tertiary">Choose a username to create your account. You'll receive an API key for future logins.</p>
                     </div>
@@ -260,6 +580,8 @@ export function RegisterPage() {
                       {loading ? 'Registering...' : 'Register'}
                     </Button>
 
+                    <SsoProviderButtons providers={ssoProviders} returnTo={returnTo} />
+
                     <p className="text-center text-xs text-text-tertiary">
                       Already have an account?{' '}
                       <button type="button" onClick={() => switchMode('login')} className="text-signal-blue hover:underline font-medium">
@@ -270,55 +592,48 @@ export function RegisterPage() {
                 </form>
               ) : (
                 /* mode === 'login' */
-                <form onSubmit={handleLogin} className="space-y-4">
-                  <fieldset disabled={loading} className="space-y-4">
-                    {error && (
-                      <div className="rounded-md border border-signal-amber/30 bg-signal-amber/10 p-3">
-                        <p className="text-xs text-signal-amber">{error}</p>
-                      </div>
-                    )}
+                <div className="space-y-4">
+                  <form onSubmit={handleLogin} className="space-y-4">
+                    <fieldset disabled={loading} className="space-y-4">
+                      <WarningBanner message={ssoErrorMessage} />
+                      <WarningBanner message={error} />
 
-                    <CustomMessageBanner message={loginCustomMessage} />
+                      <CustomMessageBanner message={loginCustomMessage} />
 
-                    <div className="space-y-1.5">
-                      <label htmlFor="login-username" className="block font-display text-xs font-medium uppercase tracking-widest text-text-secondary">
-                        Username
-                      </label>
-                      <Input
+                      <UsernameField
                         id="login-username"
                         value={username}
-                        onChange={(e) => { setUsername(e.target.value); setError('') }}
-                        placeholder="e.g. jdoe"
-                        autoComplete="username"
+                        onChange={(v) => { setUsername(v); setError('') }}
                         autoFocus={!username}
-                        className="h-10 font-mono"
                       />
-                    </div>
 
-                    <TokenField
-                      id="login-apikey"
-                      label="API Key"
-                      value={apiKey}
-                      onChange={(v) => { setApiKey(v); setError('') }}
-                      show={showApiKey}
-                      onToggleShow={() => setShowApiKey(!showApiKey)}
-                      placeholder="Enter your API key..."
-                      optionalLabel={false}
-                      autoFocus={!!username}
-                    />
+                      <TokenField
+                        id="login-apikey"
+                        label="API Key"
+                        value={apiKey}
+                        onChange={(v) => { setApiKey(v); setError('') }}
+                        show={showApiKey}
+                        onToggleShow={() => setShowApiKey(!showApiKey)}
+                        placeholder="Enter your API key..."
+                        optionalLabel={false}
+                        autoFocus={!!username}
+                      />
 
-                    <Button type="submit" className="w-full" disabled={!username.trim() || !apiKey.trim() || loading}>
-                      {loading ? 'Logging in...' : 'Log in'}
-                    </Button>
+                      <Button type="submit" className="w-full" disabled={!username.trim() || !apiKey.trim() || loading}>
+                        {loading ? 'Logging in...' : 'Log in'}
+                      </Button>
 
-                    <p className="text-center text-xs text-text-tertiary">
-                      Don't have an account?{' '}
-                      <button type="button" onClick={() => switchMode('register')} className="text-signal-blue hover:underline font-medium">
-                        Register
-                      </button>
-                    </p>
-                  </fieldset>
-                </form>
+                      <p className="text-center text-xs text-text-tertiary">
+                        Don't have an account?{' '}
+                        <button type="button" onClick={() => switchMode('register')} className="text-signal-blue hover:underline font-medium">
+                          Register
+                        </button>
+                      </p>
+                    </fieldset>
+                  </form>
+
+                  <SsoProviderButtons providers={ssoProviders} returnTo={returnTo} />
+                </div>
               )}
             </CardContent>
           </Card>

@@ -538,6 +538,15 @@ def generate_api_key() -> str:
 VALID_ROLES: frozenset[str] = frozenset({"viewer", "reviewer", "operator", "admin"})
 
 
+#: The shape a username may have. One definition: the register path validates
+#: with it, and an SSO username hint is filtered by it before an account exists.
+USERNAME_PATTERN = re.compile(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{1,49}$")
+
+#: Names reserved for system identities (``re-analyze`` and friends). A provider
+#: hint that matches one is refused, never silently reassigned.
+RESERVED_USERNAMES = frozenset(_SYSTEM_TAGS)
+
+
 def _normalize_username(username: str) -> str:
     """Normalize a username to lowercase for case-insensitive uniqueness.
 
@@ -560,9 +569,29 @@ def _validate_username(username: str) -> None:
     if username in _SYSTEM_TAGS:
         msg = f"Username '{username}' conflicts with a reserved system tag"
         raise ValueError(msg)
-    if not re.match(r"^[a-zA-Z0-9][a-zA-Z0-9._-]{1,49}$", username):
+    if not USERNAME_PATTERN.match(username):
         msg = f"Invalid username: '{username}'. Must be 2-50 alphanumeric characters, dots, hyphens, underscores."
         raise ValueError(msg)
+
+
+def is_creatable_username(username: str) -> bool:
+    """Whether this name may be used for a new account.
+
+    The single answer to "would ``create_user`` accept it", so a caller holding
+    a provider-supplied name can refuse cleanly instead of catching the
+    ``ValueError`` that ``create_user`` would raise.
+
+    Args:
+        username: Candidate name (normalisation is the caller's job).
+
+    Returns:
+        True when the name is well-formed and not reserved.
+    """
+    try:
+        _validate_username(username)
+    except ValueError:
+        return False
+    return True
 
 
 def _hash_token(token: str) -> str:
@@ -1539,6 +1568,11 @@ _ROLE_PRIORITY = {"viewer": 0, "reviewer": 1, "operator": 2, "admin": 3}
 # Tables that store a ``username`` column which must be lowercased during
 # the case-insensitive migration.  ``test_classifications`` uses
 # ``created_by`` instead.
+#
+# Anything that rewrites a username must also rewrite ``sessions.username``:
+# sessions are keyed by name, so a rename that skipped this table would strand
+# live sessions on a username nobody owns any more. The SSO tables are immune —
+# ``user_identities`` and ``sso_device_codes`` key on ``users.id``.
 _USERNAME_TABLES = (
     "comments",
     "failure_reviews",
@@ -2380,6 +2414,31 @@ async def init_db() -> None:
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_sso_device_codes_expires_at"
             " ON sso_device_codes (expires_at)"
+        )
+
+        # One-time tickets for the first-login choice screen: after the IdP has
+        # authenticated someone with no link, the browser holds this instead of a
+        # session. It carries the verified identity (provider/subject/email) and a
+        # suggested name, so the person can either claim an existing account with
+        # their own credential or create one. Stored hashed; consumed once,
+        # immediately before the account is created or linked (validation runs
+        # first, so a typo does not cost the ticket). A failure *after* that point
+        # does not restore it — the person starts a new login.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS sso_link_tickets (
+                ticket_hash TEXT PRIMARY KEY,
+                provider TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                email TEXT,
+                suggested_username TEXT NOT NULL,
+                next_path TEXT NOT NULL DEFAULT '/',
+                expires_at TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sso_link_tickets_expires_at"
+            " ON sso_link_tickets (expires_at)"
         )
 
         # Job metadata table for filtering and organization
@@ -10076,68 +10135,180 @@ async def add_user_identity(
     _validate_sso_provider(provider)
     _validate_identity_subject(subject)
     username = _normalize_username(username)
-    async with _connect_db() as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            cursor = await db.execute(
-                "SELECT id FROM users WHERE username = ?", (username,)
-            )
-            user = await cursor.fetchone()
-            if user is None:
-                msg = f"User '{username}' not found"
-                raise ValueError(msg)
-            linked = await _select_identities(
-                db, "i.provider = ? AND i.subject = ?", (provider, subject)
-            )
-            if linked:
-                # The owner stays out of the message: this text can reach the
-                # caller, and naming the other account would disclose it.
-                logger.info(
-                    "Identity %s:%s already linked to '%s'",
-                    provider,
-                    subject,
-                    linked[0]["username"],
+    scrubbed_claims = _scrub_claims(raw_claims_json)
+
+    async def _attempt() -> dict[str, Any]:
+        async with _connect_db() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    "SELECT id FROM users WHERE username = ?", (username,)
                 )
+                user = await cursor.fetchone()
+                if user is None:
+                    msg = f"User '{username}' not found"
+                    raise ValueError(msg)
+                linked = await _select_identities(
+                    db, "i.provider = ? AND i.subject = ?", (provider, subject)
+                )
+                if linked:
+                    # The owner stays out of the message: this text can reach the
+                    # caller, and naming the other account would disclose it.
+                    logger.info(
+                        "Identity %s:%s already linked to '%s'",
+                        provider,
+                        subject,
+                        linked[0]["username"],
+                    )
+                    msg = f"Identity {provider}:{subject} is already linked"
+                    raise ValueError(msg)
+                cursor = await db.execute(
+                    "SELECT provider FROM user_identities"
+                    " WHERE user_id = ? AND provider = ?",
+                    (user["id"], provider),
+                )
+                if await cursor.fetchone() is not None:
+                    msg = (
+                        f"'{username}' already has a {provider} identity"
+                        " — unlink it first"
+                    )
+                    raise ValueError(msg)
+                await db.execute(
+                    "INSERT INTO user_identities"
+                    " (user_id, provider, subject, email, raw_claims_json, created_at)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        user["id"],
+                        provider,
+                        subject,
+                        email,
+                        scrubbed_claims,
+                        _now_str(),
+                    ),
+                )
+                await db.commit()
+            except sqlite3.IntegrityError as exc:
+                # A concurrent link won the race between the pre-check and the
+                # INSERT: the unique constraints are the real guard, so report it
+                # as the same conflict the pre-check would have found.
+                await db.rollback()
                 msg = f"Identity {provider}:{subject} is already linked"
-                raise ValueError(msg)
-            cursor = await db.execute(
-                "SELECT provider FROM user_identities"
-                " WHERE user_id = ? AND provider = ?",
-                (user["id"], provider),
-            )
-            if await cursor.fetchone() is not None:
-                msg = (
-                    f"'{username}' already has a {provider} identity — unlink it first"
-                )
-                raise ValueError(msg)
-            await db.execute(
-                "INSERT INTO user_identities"
-                " (user_id, provider, subject, email, raw_claims_json, created_at)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    user["id"],
-                    provider,
-                    subject,
-                    email,
-                    _scrub_claims(raw_claims_json),
-                    _now_str(),
-                ),
-            )
-            await db.commit()
-        except sqlite3.IntegrityError as exc:
-            # A concurrent link won the race between the pre-check and the
-            # INSERT: the unique constraints are the real guard, so report it as
-            # the same conflict the pre-check would have found.
-            await db.rollback()
-            msg = f"Identity {provider}:{subject} is already linked"
-            raise ValueError(msg) from exc
-        except Exception:
-            await db.rollback()
-            raise
+                raise ValueError(msg) from exc
+            except Exception:
+                await db.rollback()
+                raise
+            return {"user_id": user["id"]}
+
+    stored = await _retry_contended(_attempt)
+    async with _connect_db() as db:
         rows = await _select_identities(
-            db, "i.provider = ? AND i.subject = ?", (provider, subject)
+            db, "i.user_id = ? AND i.provider = ?", (stored["user_id"], provider)
         )
     return rows[0]
+
+
+async def create_user_with_identity(
+    username: str,
+    *,
+    provider: str,
+    subject: str,
+    email: str | None,
+    status: str,
+    role: str,
+    created_via: str,
+) -> None:
+    """Create an account **and** its SSO link in one transaction, or neither.
+
+    ``create_user`` cannot be reused here: it also answers "existing account
+    without a key" by minting one, which for an SSO "create" would hand an
+    existing — possibly someone else's — keyless account to the caller. This is
+    insert-only, and both rows land together so a failure cannot leave an account
+    with no identity behind.
+
+    Args:
+        username: Name chosen on the choice screen (already validated).
+        provider: Provider name.
+        subject: The provider's stable subject identifier.
+        email: Email the provider reported.
+        status: ``active`` or ``pending`` (approval).
+        role: Role for the new account.
+        created_via: Provenance (the provider name).
+
+    Raises:
+        ValueError: When the name is taken, or the subject is already linked.
+    """
+    username = _normalize_username(username)
+    _validate_sso_provider(provider)
+    _validate_identity_subject(subject)
+    _validate_user_status(status)
+    _validate_created_via(created_via)
+    raw_key = generate_api_key()
+    key_hash = hash_api_key(raw_key)
+
+    async def _attempt() -> None:
+        async with _connect_db() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    "SELECT 1 FROM users WHERE username = ?", (username,)
+                )
+                if await cursor.fetchone() is not None:
+                    msg = f"Username '{username}' is already taken"
+                    raise ValueError(msg)
+                cursor = await db.execute(
+                    "SELECT 1 FROM user_identities WHERE provider = ? AND subject = ?",
+                    (provider, subject),
+                )
+                if await cursor.fetchone() is not None:
+                    msg = f"Identity {provider}:{subject} is already linked"
+                    raise ValueError(msg)
+                await db.execute(
+                    "INSERT INTO users"
+                    " (username, api_key_hash, role, status, created_via)"
+                    " VALUES (?, ?, ?, ?, ?)",
+                    (username, key_hash, role, status, created_via),
+                )
+                cursor = await db.execute(
+                    "SELECT id FROM users WHERE username = ?", (username,)
+                )
+                user = await cursor.fetchone()
+                await db.execute(
+                    "INSERT INTO user_identities"
+                    " (user_id, provider, subject, email, raw_claims_json, created_at)"
+                    " VALUES (?, ?, ?, ?, NULL, ?)",
+                    (user["id"], provider, subject, email, _now_str()),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+
+    await _retry_contended(_attempt)
+
+
+async def delete_orphan_identity(provider: str, subject: str) -> bool:
+    """Delete an identity whose account no longer exists.
+
+    ``delete_user`` removes an account's identities, so an orphan is a row from
+    before that cleanup or a crashed delete. It cannot be removed by username —
+    the account is what that lookup uses — and while it exists it holds the
+    ``(provider, subject)`` slot, so the same person can never link again.
+
+    Args:
+        provider: Provider name.
+        subject: The provider's stable subject identifier.
+
+    Returns:
+        True when a row was removed.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "DELETE FROM user_identities WHERE provider = ? AND subject = ?"
+            " AND user_id NOT IN (SELECT id FROM users)",
+            (provider, subject),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
 
 
 async def delete_user_identity(username: str, provider: str) -> bool:
@@ -10178,9 +10349,10 @@ def _normalize_user_code(user_code: str) -> str:
 #: are tiny — 32^8 — but a constraint violation must never reach the caller).
 _USER_CODE_ATTEMPTS = 5
 
-#: Predicate every device-code read uses, so "live" means the same thing in all
-#: of them (and the purge uses its inverse).
-_DEVICE_CODE_LIVE = "expires_at > datetime('now')"
+#: Predicate every expiring row read uses — SSO device codes and first-login
+#: tickets — so "live" means the same thing everywhere and each purge uses its
+#: inverse.
+_LIVE_ROW = "expires_at > datetime('now')"
 
 
 def _new_user_code() -> str:
@@ -10227,28 +10399,37 @@ async def create_device_code(
     expires_at = datetime.now(UTC) + timedelta(seconds=ttl_seconds)
     expires_str = expires_at.strftime(SQL_TIMESTAMP_FORMAT)
     created_at = _now_str()
+
     # ``user_code`` is a short human code, so a collision is possible by design;
     # it must retry rather than surface a constraint violation as a 500.
+    async def _insert(user_code: str) -> None:
+        async with _connect_db() as db:
+            await db.execute(
+                "INSERT INTO sso_device_codes"
+                " (device_code_hash, user_code, provider, user_id, client_name,"
+                " expires_at, interval_seconds, created_at)"
+                " VALUES (?, ?, ?, NULL, ?, ?, ?, ?)",
+                (
+                    device_hash,
+                    user_code,
+                    provider,
+                    client_name,
+                    expires_str,
+                    interval_seconds,
+                    created_at,
+                ),
+            )
+            await db.commit()
+
     for _attempt in range(_USER_CODE_ATTEMPTS):
         user_code = _new_user_code()
+
+        async def _insert_attempt(code: str = user_code) -> None:
+            """Insert with the code generated for this attempt."""
+            await _insert(code)
+
         try:
-            async with _connect_db() as db:
-                await db.execute(
-                    "INSERT INTO sso_device_codes"
-                    " (device_code_hash, user_code, provider, user_id, client_name,"
-                    " expires_at, interval_seconds, created_at)"
-                    " VALUES (?, ?, ?, NULL, ?, ?, ?, ?)",
-                    (
-                        device_hash,
-                        user_code,
-                        provider,
-                        client_name,
-                        expires_str,
-                        interval_seconds,
-                        created_at,
-                    ),
-                )
-                await db.commit()
+            await _retry_contended(_insert_attempt)
         except sqlite3.IntegrityError as exc:
             # Only a user_code collision is retryable; anything else is a bug in
             # the statement and must surface unchanged.
@@ -10316,7 +10497,7 @@ async def get_device_code(device_code: str) -> dict[str, Any] | None:
         unknown or expired.
     """
     return await _select_device_code(
-        f"device_code_hash = ? AND {_DEVICE_CODE_LIVE}", (_hash_token(device_code),)
+        f"device_code_hash = ? AND {_LIVE_ROW}", (_hash_token(device_code),)
     )
 
 
@@ -10335,7 +10516,7 @@ async def get_device_code_by_user_code(user_code: str) -> dict[str, Any] | None:
         "interval_seconds"}``, or ``None`` when unknown or expired.
     """
     return await _select_device_code(
-        f"user_code = ? AND {_DEVICE_CODE_LIVE}", (_normalize_user_code(user_code),)
+        f"user_code = ? AND {_LIVE_ROW}", (_normalize_user_code(user_code),)
     )
 
 
@@ -10362,28 +10543,29 @@ async def authorize_device_code(
     """
     if provider is not None:
         _validate_sso_provider(provider)
-    async with _connect_db() as db:
-        cursor = await db.execute(
-            "SELECT id FROM users WHERE username = ?", (_normalize_username(username),)
-        )
-        user = await cursor.fetchone()
-        if user is None:
-            return False
-        updated = await db.execute(
-            f"UPDATE sso_device_codes SET user_id = ?,"
-            f" provider = COALESCE(provider, ?)"
-            f" WHERE user_code = ? AND user_id IS NULL AND {_DEVICE_CODE_LIVE}"
-            " AND (provider IS NULL OR ? IS NULL OR provider = ?)",
-            (
-                user["id"],
-                provider,
-                _normalize_user_code(user_code),
-                provider,
-                provider,
-            ),
-        )
-        await db.commit()
-        return updated.rowcount > 0
+    normalized = _normalize_user_code(user_code)
+
+    async def _attempt() -> bool:
+        async with _connect_db() as db:
+            cursor = await db.execute(
+                "SELECT id FROM users WHERE username = ?",
+                (_normalize_username(username),),
+            )
+            user = await cursor.fetchone()
+            if user is None:
+                return False
+            updated = await db.execute(
+                "UPDATE sso_device_codes SET user_id = ?,"
+                " provider = COALESCE(provider, ?)"
+                " WHERE user_code = ? AND user_id IS NULL"
+                f" AND {_LIVE_ROW}"
+                " AND (provider IS NULL OR ? IS NULL OR provider = ?)",
+                (user["id"], provider, normalized, provider, provider),
+            )
+            await db.commit()
+            return updated.rowcount > 0
+
+    return await _retry_contended(_attempt)
 
 
 async def redeem_device_code(device_code: str) -> dict[str, Any] | None:
@@ -10399,29 +10581,192 @@ async def redeem_device_code(device_code: str) -> dict[str, Any] | None:
         stored with the approval.
     """
     device_hash = _hash_token(device_code)
-    async with _connect_db() as db:
-        await db.execute("BEGIN IMMEDIATE")
-        try:
-            cursor = await db.execute(
-                "SELECT u.username, d.provider"
-                " FROM sso_device_codes d JOIN users u ON u.id = d.user_id"
-                f" WHERE d.device_code_hash = ? AND d.user_id IS NOT NULL"
-                f" AND d.{_DEVICE_CODE_LIVE}",
-                (device_hash,),
-            )
-            row = await cursor.fetchone()
-            if row is None:
+
+    async def _attempt() -> dict[str, Any] | None:
+        async with _connect_db() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    "SELECT u.username, d.provider"
+                    " FROM sso_device_codes d JOIN users u ON u.id = d.user_id"
+                    " WHERE d.device_code_hash = ? AND d.user_id IS NOT NULL"
+                    f" AND d.{_LIVE_ROW}",
+                    (device_hash,),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    await db.rollback()
+                    return None
+                await db.execute(
+                    "DELETE FROM sso_device_codes WHERE device_code_hash = ?",
+                    (device_hash,),
+                )
+                await db.commit()
+            except Exception:
                 await db.rollback()
-                return None
+                raise
+            return {"username": row["username"], "provider": row["provider"]}
+
+    return await _retry_contended(_attempt)
+
+
+#: How long a first-login choice ticket stays usable.
+SSO_TICKET_TTL_SECONDS = 600
+
+
+async def create_sso_ticket(
+    *,
+    provider: str,
+    subject: str,
+    email: str | None,
+    suggested_username: str,
+    next_path: str = "/",
+    ttl_seconds: int = SSO_TICKET_TTL_SECONDS,
+) -> str:
+    """Mint a one-time ticket for the first-login choice screen.
+
+    Args:
+        provider: Provider that authenticated the person.
+        subject: The provider's stable subject identifier.
+        email: Email the provider reported, if any.
+        suggested_username: Name proposed for a new account; editable by the user.
+        next_path: Destination the login started from (the deep link survives the
+            choice screen). Validated by the caller before it is passed here.
+        ttl_seconds: Lifetime of the ticket.
+
+    Returns:
+        The raw ticket. Only its hash is stored.
+    """
+    _validate_sso_provider(provider)
+    _validate_identity_subject(subject)
+    ticket = secrets.token_urlsafe(32)
+    expires_at = datetime.now(UTC) + timedelta(seconds=ttl_seconds)
+    created_at = _now_str()
+    expires_str = expires_at.strftime(SQL_TIMESTAMP_FORMAT)
+
+    async def _insert() -> None:
+        async with _connect_db() as db:
             await db.execute(
-                "DELETE FROM sso_device_codes WHERE device_code_hash = ?",
-                (device_hash,),
+                "INSERT INTO sso_link_tickets"
+                " (ticket_hash, provider, subject, email, suggested_username,"
+                " next_path, expires_at, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (
+                    _hash_token(ticket),
+                    provider,
+                    subject,
+                    email,
+                    suggested_username,
+                    next_path,
+                    expires_str,
+                    created_at,
+                ),
             )
             await db.commit()
-        except Exception:
-            await db.rollback()
-            raise
-    return {"username": row["username"], "provider": row["provider"]}
+
+    # Minted on the callback path, under exactly the load this retry exists for.
+    await _retry_contended(_insert)
+    return ticket
+
+
+def _ticket_view(row: Any) -> dict[str, Any]:
+    """Shape an ``sso_link_tickets`` row for both readers."""
+    return {
+        "provider": row["provider"],
+        "subject": row["subject"],
+        "email": row["email"],
+        "suggested_username": row["suggested_username"],
+        "next_path": row["next_path"],
+        "expires_at": row["expires_at"],
+    }
+
+
+_TICKET_SELECT = (
+    "SELECT provider, subject, email, suggested_username, next_path, expires_at"
+    " FROM sso_link_tickets"
+)
+
+
+async def peek_sso_ticket(ticket: str) -> dict[str, Any] | None:
+    """Read a live ticket without consuming it.
+
+    The choice screen needs to know which identity it is about; nothing changes
+    here, so a page reload does not burn the ticket.
+
+    Args:
+        ticket: The raw ticket from the URL.
+
+    Returns:
+        ``{"provider", "subject", "email", "suggested_username", "expires_at"}``,
+        or ``None`` when unknown or expired.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            f"{_TICKET_SELECT} WHERE ticket_hash = ? AND {_LIVE_ROW}",
+            (_hash_token(ticket),),
+        )
+        row = await cursor.fetchone()
+    return _ticket_view(row) if row else None
+
+
+async def consume_sso_ticket(ticket: str) -> dict[str, Any] | None:
+    """Consume a live ticket, exactly once.
+
+    Args:
+        ticket: The raw ticket.
+
+    Returns:
+        The same view :func:`peek_sso_ticket` returns, or ``None`` when the
+        ticket is unknown, expired, or already used.
+    """
+    ticket_hash = _hash_token(ticket)
+
+    async def _attempt() -> dict[str, Any] | None:
+        async with _connect_db() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    f"{_TICKET_SELECT} WHERE ticket_hash = ? AND {_LIVE_ROW}",
+                    (ticket_hash,),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    await db.rollback()
+                    return None
+                await db.execute(
+                    "DELETE FROM sso_link_tickets WHERE ticket_hash = ?",
+                    (ticket_hash,),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+            return _ticket_view(row)
+
+    return await _retry_contended(_attempt)
+
+
+async def _purge_expired(table: str) -> int:
+    """Delete the expired rows of one table.
+
+    Args:
+        table: Table name; only the two literals below are ever passed.
+
+    Returns:
+        How many rows were removed.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(f"DELETE FROM {table} WHERE NOT ({_LIVE_ROW})")
+        await db.commit()
+        return cursor.rowcount
+
+
+async def purge_expired_sso_tickets() -> int:
+    """Delete expired first-login tickets.
+
+    Returns:
+        How many rows were removed.
+    """
+    return await _purge_expired("sso_link_tickets")
 
 
 async def purge_expired_device_codes() -> int:
@@ -10430,12 +10775,7 @@ async def purge_expired_device_codes() -> int:
     Returns:
         How many rows were removed.
     """
-    async with _connect_db() as db:
-        cursor = await db.execute(
-            "DELETE FROM sso_device_codes WHERE NOT (" + _DEVICE_CODE_LIVE + ")"
-        )
-        await db.commit()
-        return cursor.rowcount
+    return await _purge_expired("sso_device_codes")
 
 
 def _validate_user_status(status: str) -> None:

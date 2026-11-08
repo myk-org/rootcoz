@@ -321,6 +321,27 @@ def decrypt_value_or_none(value: str) -> str | None:
         return None
 
 
+def decrypt_sealed_or_none(value: str) -> str | None:
+    """Decrypt a value that MUST have been encrypted by rootcoz.
+
+    :func:`decrypt_value_or_none` passes unprefixed values through as legacy
+    plaintext, which is right for settings that predate encryption and wrong for
+    anything using decryption as proof of authenticity — a sealed cookie, for
+    example, where an attacker could otherwise hand back their own plaintext and
+    have it accepted.
+
+    Args:
+        value: The stored value.
+
+    Returns:
+        The plaintext, or ``None`` when the value was not encrypted by us (or
+        cannot be decrypted).
+    """
+    if not value or not value.startswith(_ENCRYPTED_PREFIX):
+        return None
+    return decrypt_value_or_none(value)
+
+
 def decrypt_value(value: str) -> str:
     """Decrypt a single string value. Returns plaintext, or original value on failure."""
     decrypted = decrypt_value_or_none(value)

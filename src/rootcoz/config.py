@@ -637,6 +637,31 @@ class Settings(BaseSettings):
     # URLs only) — request Host / X-Forwarded-* headers are never trusted.
     public_base_url: str | None = None
 
+    # first-party SSO (issue #197). A provider is offered only when both its id
+    # and its secret are set; PUBLIC_BASE_URL is required to build the callback,
+    # because the redirect must never be derived from request headers.
+    sso_google_client_id: str = Field(
+        default="",
+        description=(
+            "OAuth client id from the Google Cloud Console. Google sign-in is"
+            " offered only when this and the client secret are both set."
+        ),
+    )
+    sso_google_client_secret: SecretStr | None = Field(
+        default=None,
+        description=(
+            "OAuth client secret for that client. Stored encrypted and masked;"
+            " clearing it hides the Google button."
+        ),
+    )
+
+    #: How long a login attempt's state (CSRF nonce + PKCE verifier) stays valid.
+    sso_state_ttl_seconds: int = Field(
+        default=600,
+        gt=0,
+        description="Lifetime of an SSO login attempt's state cookie, in seconds.",
+    )
+
     # GitHub (optional) -- for comment enrichment (PR status)
     github_token: SecretStr | None = None
 

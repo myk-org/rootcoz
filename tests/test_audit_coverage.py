@@ -33,6 +33,9 @@ REFUSAL_ONLY_HELPERS = frozenset(
 #: reason recorded in the issue's "Documented skips" table.
 AUDIT_EXEMPT: dict[tuple[str, str], str] = {
     ("POST", "/api/validate-token"): "validates a credential, stores nothing",
+    # A POST only because the ticket is a credential and must not travel in a
+    # query string: the route reads the ticket and returns what it stands for.
+    ("POST", "/api/auth/sso/ticket"): "reads a ticket, stores nothing",
     ("POST", "/results/{job_id}/preview-github-issue"): "read-only preview",
     ("POST", "/results/{job_id}/preview-jira-bug"): "read-only preview",
     ("POST", "/api/feedback/preview"): "read-only preview",
@@ -195,6 +198,17 @@ def test_exemptions_are_not_stale() -> None:
         "startup.workspace_reclaim",
         # A background results-retention pass (#455) has no route either.
         "storage.results_retention",
+        # §SSO first-party login (issue #197): the start, the success and every
+        # refusal of the browser flow. The routes are GETs, so the mutating-route
+        # gate never sees them — the contract list is what keeps them covered.
+        "auth.sso_login_start",
+        "auth.sso_login",
+        "auth.sso_login_blocked",
+        # First-login choice screen (Stage 6): held-open ticket, create, link.
+        "auth.sso_choice_required",
+        "auth.sso_create",
+        "auth.sso_link",
+        "auth.sso_login_failed",
     ],
 )
 def test_contract_action_is_implemented(action: str) -> None:

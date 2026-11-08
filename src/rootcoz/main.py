@@ -102,9 +102,11 @@ from rootcoz.ai_client import (
 )
 from rootcoz.attribution import AiProvenance
 from rootcoz.auth import approval as auth_approval
+from rootcoz.auth import identity as auth_identity
 from rootcoz.auth import password as auth_password
 from rootcoz.auth import proxy as auth_proxy
 from rootcoz.auth import registry as auth_registry
+from rootcoz.auth import sso as auth_sso
 from rootcoz.auth.base import (
     RENEW_SESSION_TOKEN_ATTR,
     RESERVED_ADMIN_USERNAME,
@@ -115,9 +117,11 @@ from rootcoz.auth.base import (
     clear_session_cookie,
     effective_can_view_reports,
     read_cookie,
+    role_and_admin,
     set_session_cookie,
     set_username_cookie,
 )
+from rootcoz.auth.sso import state as auth_sso_state
 from rootcoz.bug_creation import (
     create_github_issue,
     create_jira_bug,
@@ -437,6 +441,7 @@ _SENSITIVE_SETTINGS: frozenset[str] = frozenset(
         "datadog_api_key",
         "datadog_app_key",
         "admin_key",
+        "sso_google_client_secret",
         "vapid_private_key",
         "smtp_password",
         "slack_webhook_url",
@@ -620,6 +625,11 @@ _SETTING_CHOICES: dict[str, dict[str, Any]] = {
 
 # Category grouping for UI display
 _SETTINGS_CATEGORIES: dict[str, list[str]] = {
+    "SSO": [
+        "sso_google_client_id",
+        "sso_google_client_secret",
+        "sso_state_ttl_seconds",
+    ],
     "Jenkins": [
         "jenkins_url",
         "jenkins_user",
@@ -1022,6 +1032,7 @@ async def _periodic_session_cleanup() -> None:
             count = await storage.cleanup_expired_sessions()
             if count:
                 logger.info("Periodic cleanup: removed %d expired sessions", count)
+            await storage.purge_expired_sso_tickets()
             device_codes = await storage.purge_expired_device_codes()
             if device_codes:
                 logger.info(
@@ -1620,7 +1631,15 @@ _AUDIT_SAFE_DETAIL_KEYS: frozenset[str] = frozenset(
 # The only actions the volume guard throttles (#379): a brute-force run can
 # emit one per attempt, and none of them may push a real event out of the trail.
 _AUDIT_AUTH_FAILURE_ACTIONS: frozenset[str] = frozenset(
-    {"auth.login_failed", "auth.login_blocked"}
+    {
+        "auth.login_failed",
+        "auth.login_blocked",
+        # The SSO flow has the same unauthenticated-refusal surface (callback
+        # refusals, ticket failures, /link credential failures), so its rows get
+        # the same per-minute guard.
+        "auth.sso_login_failed",
+        "auth.sso_login_blocked",
+    }
 )
 
 
@@ -3969,6 +3988,14 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/api/health",
             "/api/auth/register",
             "/api/auth/login",
+            # SSO discovery is public; /login and /callback are matched by
+            # suffix in _is_public_path because they carry the provider name.
+            "/api/auth/sso/providers",
+            # First-login choice: the ticket is the credential, so these are
+            # reachable before a session exists.
+            "/api/auth/sso/ticket",
+            "/api/auth/sso/create",
+            "/api/auth/sso/link",
             "/api/auth/needs-key",
             "/api/auth/pending-status",
             "/api/releases/latest",
@@ -3990,6 +4017,22 @@ class AuthMiddleware(BaseHTTPMiddleware):
     def _is_public_path(cls, path: str) -> bool:
         """True when path (or its non-root trailing-slash form) is public."""
         if path in cls._PUBLIC_PATHS:
+            return True
+        # SSO start and callback: /api/auth/sso/{provider}/login|callback. The
+        # authenticated identity endpoints under the same prefix are NOT public.
+        # Exactly the two registered anonymous routes:
+        # /api/auth/sso/{provider}/login and .../callback. Matching the *shape*
+        # (not a bare suffix) is what keeps a future authenticated endpoint under
+        # /api/auth/sso/ private — this predicate also governs the approval gate.
+        # The provider segment is deliberately not checked against the registry:
+        # it is a path parameter on those same routes, and an unknown name must
+        # still reach the handler to answer with a clean refusal.
+        parts = path.rstrip("/").split("/")
+        if (
+            len(parts) == 6
+            and parts[1:4] == ["api", "auth", "sso"]
+            and parts[5] in ("login", "callback")
+        ):
             return True
         # Treat /docs/ and /redoc/ (etc.) as public without turning "/" into "".
         return path != "/" and path.rstrip("/") in cls._PUBLIC_PATHS
@@ -16656,6 +16699,688 @@ async def rotate_own_key_endpoint(request: Request) -> JSONResponse:
         target_id=username,
         request=request,
     )
+    return response
+
+
+# --- First-party SSO (issue #197) ------------------------------------------
+#
+# One browser flow: /providers lists what this deployment can offer, /{provider}/login
+# seals a state cookie and redirects to the IdP, /{provider}/callback verifies the
+# state, exchanges the code, resolves the local account and issues a session.
+# The account decision lives in rootcoz.auth.identity; the approval gate and the
+# role/flag resolution stay in the middleware, which this flow feeds like any
+# other login.
+
+
+def _sso_redirect_uri(settings: Settings, provider: str) -> str:
+    """The registered callback URL for a provider.
+
+    Built from ``PUBLIC_BASE_URL`` only: a redirect derived from request headers
+    could be pointed at an attacker's host.
+
+    Args:
+        settings: Application settings.
+        provider: Provider name.
+
+    Returns:
+        The absolute callback URL.
+
+    Raises:
+        HTTPException: 400 when the deployment has no public base URL, because
+            no registered redirect can then be produced.
+    """
+    base = (settings.public_base_url or "").rstrip("/")
+    if not base:
+        raise HTTPException(
+            status_code=400,
+            detail="PUBLIC_BASE_URL is required for SSO login",
+        )
+    return f"{base}/api/auth/sso/{provider}/callback"
+
+
+#: Reason codes that describe the *step* that failed and are safe to name in a
+#: URL. Everything else is an account-state refusal (reserved name, admin needs a
+#: link, identity already linked, not allow-listed, account blocked) and is
+#: collapsed to ``denied``: the browser must not learn whether an account exists,
+#: is an administrator, or already holds a subject.
+_SSO_PUBLIC_REASONS = frozenset(
+    {
+        "unknown_provider",
+        "login_start_failed",
+        "state_invalid",
+        "state_mismatch",
+        "missing_code",
+        "provider_error",
+        "exchange_failed",
+        "id_token_invalid",
+        "userinfo_failed",
+        "no_subject",
+        "callback_misconfigured",
+    }
+)
+
+#: What an account-state refusal looks like to the browser.
+_SSO_DENIED = "denied"
+
+#: Generic conflict text for the choice screen: never names the account that
+#: already holds the identity (storage's own message does, for the audit trail).
+_SSO_CONFLICT_DETAIL = "That sign-in is already connected to another account"
+
+#: Generic 400 for a rejected name; the rule that rejected it goes to the audit row.
+_SSO_NAME_DETAIL = "That name cannot be used"
+
+
+def _sso_public_reason(reason: str) -> str:
+    """Map an internal reason to the code the browser may see.
+
+    Args:
+        reason: The ``AuthError`` reason (or a route-level code).
+
+    Returns:
+        The reason itself when it describes a failure step, else ``denied``.
+    """
+    return reason if reason in _SSO_PUBLIC_REASONS else _SSO_DENIED
+
+
+def _sso_error_redirect(reason: str) -> RedirectResponse:
+    """Send the browser to the login page with a coarse failure code.
+
+    The code names the *step* that failed (``state_mismatch``,
+    ``exchange_failed``, ``unknown_provider``) — never a username or an account
+    state — so it is safe in a URL, and the login page maps any of them to one
+    message. The detailed reason also goes to the audit trail.
+
+    Args:
+        reason: Stable reason code from ``AuthError`` or the route.
+
+    Returns:
+        A redirect to the login page.
+    """
+    return RedirectResponse(
+        url=f"/login?sso_error={_urlquote(_sso_public_reason(reason), safe='')}",
+        status_code=303,
+    )
+
+
+async def _audit_sso_refusal(
+    request: Request, provider: str, reason: str, *, subject: str = ""
+) -> None:
+    """Record one refused SSO attempt.
+
+    Args:
+        request: The request that carried it.
+        provider: Provider name (or the unknown name that was asked for).
+        reason: Internal reason code; the browser only ever sees a coarse one.
+        subject: Local account the refusal was about, when one was resolved.
+    """
+    await record_audit(
+        action="auth.sso_login_failed",
+        actor=subject or "anonymous",
+        message=f"SSO login refused for provider '{provider}' ({reason})",
+        target_type="provider",
+        target_id=provider,
+        outcome="denied",
+        details={"provider": provider, "reason": reason},
+        request=request,
+    )
+
+
+@app.get("/api/auth/sso/providers", operation_id="ssoProviders")
+async def sso_providers() -> JSONResponse:
+    """List the SSO providers this deployment offers.
+
+    Returns:
+        ``{"providers": [{"name": ..., "display_name": ...}]}``; empty when none
+        are configured. The login page does not call this yet — Stage 9 wires
+        the buttons that consume it.
+    """
+    settings = get_settings()
+    return JSONResponse(
+        content={
+            "providers": [
+                {"name": provider.name, "display_name": provider.display_name}
+                for provider in auth_sso.configured_providers(settings)
+            ]
+        }
+    )
+
+
+@app.get("/api/auth/sso/{provider}/login", operation_id="ssoLogin")
+async def sso_login(provider: str, request: Request) -> RedirectResponse:
+    """Start a browser SSO login for one provider.
+
+    Args:
+        provider: Provider name from the path.
+        request: Incoming request (``next`` is read from the query string).
+
+    Returns:
+        A redirect to the provider, with the sealed attempt in a cookie.
+    """
+    settings = get_settings()
+    selected = auth_sso.get_provider(provider, settings)
+    if selected is None:
+        await _audit_sso_refusal(request, provider, "unknown_provider")
+        return _sso_error_redirect("unknown_provider")
+    try:
+        redirect_uri = _sso_redirect_uri(settings, provider)
+        attempt, sealed, challenge = auth_sso_state.new_attempt(
+            provider=provider,
+            next_path=request.query_params.get("next", ""),
+            ttl_seconds=settings.sso_state_ttl_seconds,
+        )
+        url = await selected.authorization_url(
+            redirect_uri=redirect_uri,
+            state=attempt.state,
+            code_challenge=challenge,
+            nonce=attempt.nonce,
+        )
+    except (HTTPException, auth_sso.AuthError) as exc:
+        reason = getattr(exc, "reason", "login_start_failed")
+        logger.debug("SSO login start failed for %s: %s", provider, exc)
+        await record_audit(
+            action="auth.sso_login_start",
+            actor="anonymous",
+            message=f"SSO login could not start for provider '{provider}' ({reason})",
+            target_type="provider",
+            target_id=provider,
+            outcome="failure",
+            details={"provider": provider, "reason": reason},
+            request=request,
+        )
+        return _sso_error_redirect(reason)
+
+    response = RedirectResponse(url=url, status_code=303)
+    response.set_cookie(
+        auth_sso_state.STATE_COOKIE,
+        sealed,
+        httponly=True,
+        samesite="lax",
+        secure=settings.secure_cookies,
+        max_age=settings.sso_state_ttl_seconds,
+    )
+    await record_audit(
+        action="auth.sso_login_start",
+        actor="anonymous",
+        message=f"SSO login started for provider '{provider}'",
+        target_type="provider",
+        target_id=provider,
+        details={"provider": provider},
+        request=request,
+    )
+    return response
+
+
+@app.get("/api/auth/sso/{provider}/callback", operation_id="ssoCallback")
+async def sso_callback(provider: str, request: Request) -> RedirectResponse:
+    """Finish a browser SSO login.
+
+    Args:
+        provider: Provider name from the path.
+        request: Incoming request carrying ``code``/``state``.
+
+    Verifies the sealed state (CSRF nonce, bound to this provider, unexpired),
+    exchanges the code, hands the claims to :mod:`rootcoz.auth.identity` for the
+    account decision, and — only then — issues a session stamped with the
+    provider (``auth_provider``, so logout can end the IdP session) plus the
+    display cookie. The approval gate itself stays in the middleware: a pending
+    account gets a session and is bounced to ``/pending`` like any other login.
+
+    Returns:
+        A redirect to the pending page, the destination sealed in the state, or
+        the login page with a coarse error code when the attempt is refused.
+    """
+    settings = get_settings()
+    selected = auth_sso.get_provider(provider, settings)
+    if selected is None:
+        await _audit_sso_refusal(request, provider, "unknown_provider")
+        return _sso_error_redirect("unknown_provider")
+
+    state_cookie = read_cookie(request, auth_sso_state.STATE_COOKIE)
+    error = request.query_params.get("error", "")
+    code = request.query_params.get("code", "")
+    state = request.query_params.get("state", "")
+
+    async def refuse(reason: str, username: str = "") -> RedirectResponse:
+        """Audit a refused attempt and answer it like every other refusal."""
+        logger.debug("SSO callback refused for %s: %s", provider, reason)
+        await _audit_sso_refusal(request, provider, reason, subject=username)
+        return _sso_error_redirect(reason)
+
+    if error:
+        return await refuse("provider_error")
+    if not code or not state:
+        return await refuse("missing_code")
+    try:
+        attempt = auth_sso_state.open_attempt(state_cookie, provider=provider)
+    except auth_sso_state.StateError as exc:
+        logger.debug("SSO state rejected: %s", exc)
+        return await refuse("state_invalid")
+    # Compared as bytes: compare_digest raises TypeError on a non-ASCII *str*,
+    # and the state arrives from the query string — a latin-1 value must be a
+    # refusal, not a 500.
+    if not hmac.compare_digest(attempt.state.encode(), state.encode()):
+        return await refuse("state_mismatch")
+
+    try:
+        claims = await selected.exchange(
+            code=code,
+            code_verifier=attempt.code_verifier,
+            redirect_uri=_sso_redirect_uri(settings, provider),
+            nonce=attempt.nonce,
+        )
+        outcome = await auth_identity.resolve(provider, claims, settings)
+    except auth_sso.AuthError as exc:
+        return await refuse(exc.reason, exc.subject or "")
+    except HTTPException:
+        return await refuse("callback_misconfigured")
+
+    if isinstance(outcome, auth_identity.LoginChoice):
+        # No account is linked. A name is never used to find one, so the person
+        # decides: claim an existing account with its own credential, or create
+        # one. The ticket carries the verified identity for that decision.
+        ticket = await storage.create_sso_ticket(
+            provider=outcome.provider,
+            subject=outcome.subject,
+            email=outcome.email,
+            suggested_username=outcome.suggested_username,
+            next_path=auth_sso_state.safe_next(attempt.next_path),
+        )
+        await record_audit(
+            action="auth.sso_choice_required",
+            actor="anonymous",
+            message=(
+                f"SSO identity needs a choice for provider '{provider}'"
+                f" (suggested name: {outcome.suggested_username or 'none'})"
+            ),
+            target_type="provider",
+            target_id=provider,
+            details={
+                "provider": provider,
+                "suggested_username": outcome.suggested_username,
+            },
+            request=request,
+        )
+        # The fragment is never sent to a server and never appears in an access
+        # log or a Referer, which matters for a value that is a credential for the
+        # next ten minutes. The login page reads it and POSTs it back.
+        response = RedirectResponse(
+            url=f"/login#sso_ticket={_urlquote(ticket, safe='')}", status_code=303
+        )
+        # The URL alone is not enough: this cookie ties the ticket to the browser
+        # that ran the IdP flow, so a leaked link cannot be redeemed elsewhere.
+        response.set_cookie(
+            auth_sso_state.TICKET_COOKIE,
+            auth_sso_state.ticket_binding(ticket),
+            httponly=True,
+            samesite="lax",
+            secure=settings.secure_cookies,
+            max_age=settings.sso_state_ttl_seconds,
+        )
+        response.delete_cookie(auth_sso_state.STATE_COOKIE, path="/")
+        return response
+
+    resolution = outcome
+    response = await _sso_issue_session(
+        request, resolution, provider=provider, next_path=attempt.next_path
+    )
+    response.delete_cookie(auth_sso_state.STATE_COOKIE, path="/")
+    return response
+
+
+async def _sso_issue_session(
+    request: Request,
+    resolution: auth_identity.IdentityResolution,
+    *,
+    provider: str,
+    next_path: str,
+    audit_action: str | None = None,
+    as_json: bool = False,
+) -> Response:
+    """Create the session an SSO login ends with and report where to go.
+
+    Shared by the three endpoints that can finish a login (callback, create,
+    link) so the session, its provider stamp, the blocked-account handling and
+    the audit row are written once.
+
+    Args:
+        request: The request being served.
+        resolution: The resolved account.
+        provider: Provider that authenticated the person.
+        next_path: Where to send the browser afterwards.
+        audit_action: Audit action id; defaults to the success/blocked pair.
+        as_json: Answer the SPA-facing endpoints with a JSON body instead of a
+            redirect (the browser flow needs the redirect; fetch() does not).
+
+    Returns:
+        The response, with the session and display cookies attached. The JSON
+        branch also carries ``next`` — where the flow was headed, or the pending
+        page for a blocked account — so the SPA never has to guess it.
+    """
+    settings = get_settings()
+    user = await storage.get_user_by_username(resolution.username)
+    if user is None:
+        # The account was deleted between the write and this call. A session for
+        # a row that does not exist would 401 on its first use — refuse here.
+        await _audit_sso_refusal(
+            request, provider, "account_missing", subject=resolution.username
+        )
+        if as_json:
+            raise HTTPException(status_code=401, detail="That account no longer exists")
+        return RedirectResponse(url="/login?sso_error=denied", status_code=303)
+    role, is_admin = role_and_admin(user, settings.default_user_role)
+    session_token = await storage.create_session(
+        resolution.username,
+        is_admin=is_admin,
+        role=role,
+        auth_provider=provider,
+    )
+
+    blocked = auth_approval.is_approval_blocked(resolution.status)
+    destination = "/pending" if blocked else next_path
+    if blocked and resolution.created:
+        notify_pending_count_changed()
+
+    response: Response
+    if as_json:
+        response = JSONResponse(
+            content={
+                "username": resolution.username,
+                "status": resolution.status,
+                # The client navigates where the flow was headed, not to "/".
+                "next": destination,
+            }
+        )
+    else:
+        response = RedirectResponse(url=destination, status_code=303)
+    set_session_cookie(response, session_token, secure=settings.secure_cookies)
+    set_username_cookie(response, resolution.username, secure=settings.secure_cookies)
+    if audit_action is not None:
+        action = audit_action
+    else:
+        action = "auth.sso_login_blocked" if blocked else "auth.sso_login"
+    await record_audit(
+        action=action,
+        actor=resolution.username,
+        message=(
+            f"SSO login: user='{resolution.username}' provider='{provider}'"
+            f" created={resolution.created} status={resolution.status}"
+        ),
+        actor_role=role,
+        is_admin=is_admin,
+        target_type="user",
+        target_id=resolution.username,
+        outcome="denied" if blocked else "success",
+        details={
+            "provider": provider,
+            "created": resolution.created,
+            "status": resolution.status,
+        },
+        request=request,
+    )
+    return response
+
+
+def _require_ticket_binding(request: Request, ticket: str) -> None:
+    """Refuse a ticket presented without the cookie it was issued with.
+
+    Args:
+        request: The request carrying the binding cookie.
+        ticket: The raw ticket from the body.
+
+    Raises:
+        HTTPException: 404 when the binding is absent or does not match — the
+            same answer an expired ticket gets, so a stolen link learns nothing.
+    """
+    expected = auth_sso_state.ticket_binding(ticket)
+    presented = read_cookie(request, auth_sso_state.TICKET_COOKIE)
+    if not presented or not hmac.compare_digest(presented.encode(), expected.encode()):
+        raise HTTPException(status_code=404, detail="This sign-in link has expired")
+
+
+async def _ticket_or_404(ticket: str) -> dict[str, Any]:
+    """Read a live first-login ticket, or refuse.
+
+    An unknown or expired ticket is attacker-supplied, so these 404s are
+    deliberately not audited: a row per probe would let anyone flood the trail.
+    Refusals that name a person or an account are audited.
+
+    Args:
+        ticket: The raw ticket from the request.
+
+    Returns:
+        The ticket view (provider, subject, email, suggested name, destination).
+
+    Raises:
+        HTTPException: 404 when the ticket is unknown, expired or already used.
+    """
+    record = await storage.peek_sso_ticket(ticket)
+    if record is None:
+        raise HTTPException(status_code=404, detail="This sign-in link has expired")
+    return record
+
+
+def _email_domain(email: str | None) -> str:
+    """The domain of a provider-reported address, for the choice screen.
+
+    Only the domain is returned: ``suggested_username`` is derived from the local
+    part at Google, so name + masked address would reconstruct the address a
+    leaked ticket is not supposed to reveal.
+
+    Args:
+        email: The address, or ``None``.
+
+    Returns:
+        ``example.com``, or ``""`` when there is no usable address.
+    """
+    if not email or "@" not in email:
+        return ""
+    return email.partition("@")[2]
+
+
+@app.post("/api/auth/sso/ticket", operation_id="ssoTicket")
+async def sso_ticket(request: Request) -> JSONResponse:
+    """Describe the identity a first-login ticket stands for.
+
+    The choice screen (plan Stage 6b) shows *what* it is about to connect. The
+    ticket is a bearer value in the URL, so the email is masked: enough for a
+    human to recognise their own address, not enough to harvest from a leaked
+    link.
+
+    Args:
+        request: Body ``{"ticket": ...}`` — the value the login page read from the
+            URL fragment ``/login#sso_ticket=...``.
+
+    Returns:
+        ``{"provider", "suggested_username", "email_domain", "expires_at"}``. The
+        address itself is never returned: for Google the suggestion *is* the
+        local part, so name + masked address would reconstruct it.
+
+    Raises:
+        HTTPException: 404 when the ticket is unknown, expired or already used.
+    """
+    body = await _read_json_object(request)
+    ticket = str(body.get("ticket", ""))
+    _require_ticket_binding(request, ticket)
+    record = await _ticket_or_404(ticket)
+    return JSONResponse(
+        content={
+            "provider": record["provider"],
+            "suggested_username": record["suggested_username"],
+            "email_domain": _email_domain(record["email"]),
+            "expires_at": record["expires_at"],
+        }
+    )
+
+
+@app.post("/api/auth/sso/create", operation_id="ssoCreateAccount")
+async def sso_create_account(request: Request) -> Response:
+    """Finish a first login by creating an account with the chosen name.
+
+    Args:
+        request: Body ``{"ticket": ..., "username": ...}``.
+
+    Returns:
+        ``{"username", "status"}`` with a session cookie; ``pending`` when the
+        deployment requires approval.
+
+    Raises:
+        HTTPException: 404 for a dead ticket, 400 for a rejected name.
+    """
+    body = await _read_json_object(request)
+    ticket = str(body.get("ticket", ""))
+    username = str(body.get("username", ""))
+    _require_ticket_binding(request, ticket)
+    record = await _ticket_or_404(ticket)
+    settings = get_settings()
+    # Validate before spending the ticket: a rejected name must not cost the
+    # person another trip through the IdP.
+    try:
+        auth_identity.validate_new_username(username, settings)
+    except auth_sso.AuthError as exc:
+        await _audit_sso_refusal(request, record["provider"], exc.reason)
+        raise HTTPException(status_code=400, detail=_SSO_NAME_DETAIL) from exc
+
+    try:
+        resolution = await auth_identity.create_new(
+            provider=record["provider"],
+            subject=record["subject"],
+            email=record["email"],
+            username=username,
+            settings=settings,
+        )
+    except auth_sso.AuthError as exc:
+        await _audit_sso_refusal(request, record["provider"], exc.reason)
+        # The ticket survives: the account+link write is transactional, so a
+        # failure leaves nothing behind and the person can retry the screen.
+        status_code = 409 if exc.reason == "identity_conflict" else 400
+        detail = (
+            _SSO_CONFLICT_DETAIL
+            if exc.reason == "identity_conflict"
+            else _SSO_NAME_DETAIL
+        )
+        raise HTTPException(status_code=status_code, detail=detail) from exc
+
+    # Consumed only after the rows exist, so a failed attempt never costs the
+    # person another trip through the IdP.
+    if await storage.consume_sso_ticket(ticket) is None:
+        raise HTTPException(status_code=404, detail="This sign-in link has expired")
+
+    response = await _sso_issue_session(
+        request,
+        resolution,
+        provider=record["provider"],
+        next_path=record.get("next_path") or "/",
+        audit_action="auth.sso_create",
+        as_json=True,
+    )
+    response.delete_cookie(auth_sso_state.TICKET_COOKIE, path="/")
+    return response
+
+
+@app.post("/api/auth/sso/link", operation_id="ssoLinkAccount")
+async def sso_link_account(request: Request) -> Response:
+    """Finish a first login by connecting the identity to an existing account.
+
+    The account's own credential proves ownership; the ticket proves the IdP
+    identity. Both are required, which is why a matching name is never enough.
+
+    Args:
+        request: Body ``{"ticket": ..., "username": ..., "api_key": ...}``.
+
+    Returns:
+        ``{"username", "status"}`` with a session cookie.
+
+    Raises:
+        HTTPException: 404 for a dead ticket, 401 for bad credentials, 403 when
+            the account may not act, 409 when the link conflicts.
+    """
+    body = await _read_json_object(request)
+    ticket = str(body.get("ticket", ""))
+    username = str(body.get("username", "")).strip().lower()
+    api_key = str(body.get("api_key", ""))
+    if not username or not api_key:
+        raise HTTPException(status_code=400, detail="Username and api_key are required")
+
+    _require_ticket_binding(request, ticket)
+    record = await _ticket_or_404(ticket)
+    settings = get_settings()
+    # Verify before spending the ticket: a mistyped key must not cost another
+    # IdP trip either.
+    verified = await auth_password.PasswordLogin().verify(username, api_key, settings)
+    if verified.authenticated and verified.account is None:
+        # The bootstrap admin authenticates against ADMIN_KEY and has no users
+        # row, so there is nothing to link an identity to. Say that, instead of
+        # calling a valid credential invalid.
+        await _audit_sso_refusal(
+            request, record["provider"], "bootstrap_admin_cannot_link", subject=username
+        )
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "The bootstrap admin has no account to link; sign in with a"
+                " registered admin account instead"
+            ),
+        )
+    if not verified.authenticated:
+        # Same guessing guard as the password login: this endpoint verifies the
+        # same credential, so it must not be a cheaper oracle to brute-force.
+        await _audit_sso_refusal(
+            request, record["provider"], "link_credentials_invalid", subject=username
+        )
+        await _lock_after_failed_login(username, settings, request)
+        raise HTTPException(status_code=401, detail="Invalid username or API key")
+    locked = await storage.settle_login_attempt(username)
+    if locked is not None:
+        await _audit_sso_refusal(
+            request, record["provider"], f"account_{locked}", subject=username
+        )
+        raise HTTPException(status_code=403, detail="Account cannot be used to sign in")
+    block_reason = auth_approval.account_block_reason(verified.account)
+    if block_reason is not None:
+        await _audit_sso_refusal(
+            request, record["provider"], f"account_{block_reason}", subject=username
+        )
+        raise HTTPException(status_code=403, detail="Account cannot be used to sign in")
+    allowed = settings.allowed_users_set
+    if allowed and username not in allowed:
+        # Linking writes a credential to the account, so it is a write: the same
+        # list that bounds `create` bounds this.
+        await _audit_sso_refusal(
+            request, record["provider"], "not_allowed", subject=username
+        )
+        raise HTTPException(status_code=403, detail="User not allowed")
+
+    try:
+        resolution = await auth_identity.link_existing(
+            username=username,
+            provider=record["provider"],
+            subject=record["subject"],
+            email=record["email"],
+        )
+    except auth_sso.AuthError as exc:
+        await _audit_sso_refusal(
+            request, record["provider"], exc.reason, subject=username
+        )
+        # Never echo storage's message here: it may name the account that already
+        # holds this subject.
+        if exc.reason == "account_missing":
+            raise HTTPException(
+                status_code=404, detail="That account no longer exists"
+            ) from exc
+        raise HTTPException(status_code=409, detail=_SSO_CONFLICT_DETAIL) from exc
+
+    if await storage.consume_sso_ticket(ticket) is None:
+        raise HTTPException(status_code=404, detail="This sign-in link has expired")
+
+    response = await _sso_issue_session(
+        request,
+        resolution,
+        provider=record["provider"],
+        next_path=record.get("next_path") or "/",
+        audit_action="auth.sso_link",
+        as_json=True,
+    )
+    response.delete_cookie(auth_sso_state.TICKET_COOKIE, path="/")
     return response
 
 
