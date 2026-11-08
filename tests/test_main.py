@@ -2250,6 +2250,66 @@ class TestAppLifespan:
                 )[0]
         assert written == 0, "the sweep wrote into the database it was moved to"
 
+    @pytest.mark.asyncio
+    async def test_the_startup_sweep_survives_its_database_disappearing(
+        self, mock_settings, temp_db_path: Path, monkeypatch, caplog
+    ) -> None:
+        """A database the sweep was told to sweep going away is a stop, not a traceback.
+
+        The reported teardown frame: ``no such table: results``, raised by a batch
+        connection that had re-created the file a teardown just unlinked. Driven
+        through the real lifespan, so the sweep really is the startup pass: it must
+        return, name the file once, log no error, and leave the file gone (#435).
+        """
+        from rootcoz import main
+
+        # Unrelated startup work opens the database too, and would re-create it.
+        monkeypatch.setattr(main, "_safe_preload_cursor_models", AsyncMock())
+        started = asyncio.Event()
+        release = asyncio.Event()
+        real_denorm = main.backfill_results_denorm
+
+        async def _gated_denorm() -> int:
+            """Hold the first pass at its start, when the file is still there."""
+            started.set()
+            await release.wait()
+            return await real_denorm()
+
+        monkeypatch.setattr(main, "backfill_results_denorm", _gated_denorm)
+        # Both halves of the sweep log from different modules, and neither
+        # propagates (python-simple-logger sets propagate=False).
+        storage.logger.setLevel(logging.INFO)
+        storage.logger.addHandler(caplog.handler)
+        try:
+            with (
+                capture_main_logs(caplog),
+                patch.object(storage, "DB_PATH", temp_db_path),
+            ):
+                # capture_main_logs levels caplog's handler to WARNING.
+                caplog.handler.setLevel(logging.NOTSET)
+                async with main.lifespan(main.app):
+                    await asyncio.wait_for(started.wait(), 5)
+                    temp_db_path.unlink()
+                    release.set()
+                    sweep = next(
+                        t
+                        for t in main._background_tasks
+                        if getattr(t.get_coro(), "__qualname__", "")
+                        == "_compress_stored_results"
+                    )
+                    await asyncio.wait_for(sweep, 10)
+        finally:
+            storage.logger.removeHandler(caplog.handler)
+            release.set()
+            for task in list(main._background_tasks):
+                task.cancel()
+            await asyncio.gather(*main._background_tasks, return_exceptions=True)
+            main._background_tasks.clear()
+
+        assert f"denorm backfill stopped: {temp_db_path}" in caplog.text
+        assert "no such table" not in caplog.text
+        assert not temp_db_path.exists(), "the sweep re-created the database"
+
 
 class TestBackgroundTaskDatabasePin:
     """A background task writes the database it was spawned on (#409)."""
@@ -2319,6 +2379,39 @@ class TestBackgroundTaskDatabasePin:
                 f"the grandchild wrote {path.name}, not the database its pinned "
                 "parent was spawned on"
             )
+
+
+async def test_the_db_fixture_fails_a_test_that_leaks_a_background_task() -> None:
+    """A test's database is removed only after the work that pins it has finished.
+
+    The ownership half of #409/#435: the fixture that hands out the database owns
+    the wait. Driven through the real fixture body, so this test cannot pass while
+    ``temp_db_path`` has stopped asserting.
+    """
+    from rootcoz import main
+    from tests import conftest
+
+    async def _never() -> None:
+        await asyncio.Event().wait()
+
+    gen = conftest.temp_db_path.__wrapped__()
+    path = next(gen)  # setup half
+    task = main._spawn_background(_never())  # tracked work that never finishes
+    await asyncio.sleep(0)  # cooperative yield: let it start
+    try:
+        with pytest.raises(AssertionError, match="still owned by 1 background task"):
+            next(gen)  # teardown half: must refuse
+        assert path.exists(), "a violation must leave the file behind for post-mortem"
+    finally:
+        # The refused teardown never reached its unlink: this test owns the file.
+        task.cancel()
+        await asyncio.gather(task, return_exceptions=True)
+        path.unlink(missing_ok=True)
+    gen = conftest.temp_db_path.__wrapped__()  # control half: drained work is silent
+    path = next(gen)
+    with pytest.raises(StopIteration):
+        next(gen)  # the finaliser runs and ends
+    assert not path.exists()
 
 
 class TestOpenAPISchema:

@@ -203,9 +203,9 @@ This keeps the service internal to the cluster and gives you temporary browser a
 
 ## Sizing
 
-Default resources (`1 CPU / 4Gi` request, `2 CPU / 8Gi` limit) suit evaluation clusters. For
-concurrent AI analysis work apply the shipped production profile, which is reproducible from
-`chart/examples/values-production.yaml` and validated by the chart tests:
+Default resources (`1 CPU / 4Gi / 12Gi ephemeral-storage` request, `2 CPU / 8Gi / 12Gi` limit) suit
+evaluation clusters. For concurrent AI analysis work apply the shipped production profile, which is
+reproducible from `chart/examples/values-production.yaml` and validated by the chart tests:
 
 ```bash
 helm upgrade rootcoz ./chart -n rootcoz \
@@ -214,7 +214,8 @@ helm upgrade rootcoz ./chart -n rootcoz \
   -f "$VALUES_DIR/values.secrets.yaml"
 ```
 
-It sets `4 CPU / 32Gi / 16Gi ephemeral-storage` on both `requests` and `limits`.
+It sets `4 CPU / 32Gi / 16Gi ephemeral-storage` on both `requests` and `limits`, replacing the
+chart's default `12Gi` rather than adding to it.
 
 | Resource | Value | Basis |
 |---|---|---|
@@ -228,12 +229,13 @@ that allocatable. On smaller nodes request `16Gi` memory instead — Burstable, 
 deployment uses. The live `.dev/openshift/deployment.yaml` request is therefore deliberately
 different from this profile.
 
-**Upgrading to this chart version.** The default render is byte-identical for installs that do not set
-`sidecar.agentDir`, so those do not roll. Installs that set it get **one pod restart**: the
-`copy-sidecar-agent` init container's request and limit are now equal (`10m/32Mi`) where they were
-`10m/16Mi` and `100m/128Mi`, and that equality is what keeps a Guaranteed pod Guaranteed. With one
-replica on `Recreate` and a 30 s grace period, an analysis in flight at that moment is interrupted and
-has to be re-submitted.
+**Upgrading to this chart version.** Every install rolls once: the default resources block now sets
+`ephemeral-storage: 12Gi`, which mounts the `/tmp` `emptyDir` and raises the scheduling floor by 12 Gi,
+and any pod-template change is a rollout. Installs that set `sidecar.agentDir` had a second reason to
+roll earlier — the `copy-sidecar-agent` init container's request and limit are now equal (`10m/32Mi`)
+where they were `10m/16Mi` and `100m/128Mi`, and that equality is what keeps a Guaranteed pod
+Guaranteed. With one replica on `Recreate` and a 30 s grace period, an analysis in flight at that
+moment is interrupted and has to be re-submitted.
 
 **Clearing a request does not remove the floor.** Setting `resources.requests.memory=""` drops only
 the explicit request; Kubernetes copies the matching limit into the request when no admission policy
@@ -244,13 +246,25 @@ no-floor pod, or let a namespace `LimitRange` default the request.
 PVC size is not part of the production profile, because applying it over a live release either no-ops
 or triggers a PVC resize.
 
-**Ephemeral storage and `/tmp`.** Repo clones and code-graph indexes live under `/tmp`. Setting an
-`ephemeral-storage` **limit** makes the chart mount a `/tmp` `emptyDir` with `sizeLimit` equal to that
-limit (and `TMPDIR=/tmp`), so a runaway clone fails at a known number instead of filling the node.
-Exceeding either the container limit or the `sizeLimit` is a **kubelet eviction, not a throttle**: the
-whole pod goes down mid-analysis, in-flight analyses are lost, and the pod returns through the
-`Recreate` strategy. The SQLite database survives on the PVC and recovers through WAL replay. Prefer a
-limit over no limit — an uncapped pod causes node `DiskPressure`, which evicts every pod on the node.
+**Ephemeral storage and `/tmp`.** Repo clones and code-graph indexes live under `/tmp`, and the chart
+caps it **by default**: defaults set `ephemeral-storage: 12Gi` on both `requests` and `limits`, and the
+**limit** is what mounts a `/tmp` `emptyDir` with `sizeLimit` equal to that value (plus `TMPDIR=/tmp`),
+so a runaway clone fails at a known number instead of filling the node. The production profile replaces
+that number with `16Gi`; the derivation of both is in
+[the chart README](https://github.com/myk-org/rootcoz/blob/main/chart/README.md#tmp-and-ephemeral-storage).
+The cap is removed only by clearing **both** keys — clearing the limit alone keeps the `12Gi` request
+and drops the volume. Exceeding either the container limit or the `sizeLimit` is a **kubelet eviction,
+not a throttle**: the whole pod goes down mid-analysis, in-flight analyses are lost, and the pod returns
+through the `Recreate` strategy. The SQLite database survives on the PVC and recovers through WAL
+replay. Prefer a limit over no limit — an uncapped pod causes node `DiskPressure`, which evicts every
+pod on the node.
+
+**`XDG_CONFIG_HOME` inside the capped `/tmp`.** The chart sets `env.xdgConfigHome` (`/tmp/config`) and
+`entrypoint.sh` creates that directory at start; if it cannot — a restricted SCC that owns the
+`emptyDir` root — the container exits 1 naming the path, the uid and the gid, so the pod crash-loops
+visibly instead of failing on the first config write. If that happens, set
+`env.xdgConfigHome: /data/config` (the data volume) rather than adding permissions;
+`tox -e chart` asserts both outcomes against the shipped entrypoint.
 
 **Single replica consequence.** One replica on a ReadWriteOnce PVC, `Recreate` strategy, no HA: any
 restart — eviction, upgrade, node drain — interrupts running analyses. Track them on the dashboard
@@ -383,7 +397,11 @@ migration step, no setting to turn it on.
   after the next start, so startup and `/health` are never delayed by them. The
   sweep commits one batch at a time, is safe to interrupt, and resumes where it
   stopped on the following boot; the log reports the column bytes and the
-  database file size before and after.
+  database file size before and after. A sweep whose database file has gone
+  away, or no longer has a `results` table, stops after the batches it already
+  committed and logs that once — the log still reports the column bytes it
+  compressed, but not the database file size after, because the file it started
+  on is no longer there.
 - The database **file** only shrinks after a rewrite plus `VACUUM`, which takes
   the write lock and needs free space roughly equal to the file size. That is an
   operator step, deliberately not automated on a live single-replica deployment.
