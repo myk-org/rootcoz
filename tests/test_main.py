@@ -8915,7 +8915,7 @@ class TestStartupWorkspaceReclaim:
         assert fresh.exists()
 
     async def test_an_unresolvable_chat_root_deletes_no_extract(
-        self, _no_host_temp_root, tmp_path, initialized_db, monkeypatch, caplog
+        self, _no_host_temp_root, initialized_db, monkeypatch, caplog
     ) -> None:
         """No chat root means no ``kept`` set, and no extract may be deleted.
 
