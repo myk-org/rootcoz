@@ -127,6 +127,17 @@ def reaper_idle() -> bool:
     return not _reaper_inflight
 
 
+async def wait_for_reaper(poll: float = 0.05) -> None:
+    """Block until the reaper has no delete queued and none running.
+
+    Polled, not awaited on the futures: a wrapped future cancelled by a shutdown
+    deadline would propagate into ``concurrent.futures`` and could drop a delete
+    that had not started yet.
+    """
+    while _reaper_inflight:
+        await asyncio.sleep(poll)
+
+
 #: Locks for *reusable* workspaces only (``chat-{job}/{user}`` and the admin chat
 #: workspace), where a queued delete can race the next create of the same path.
 #: Keyed by ``realpath``; uuid workspaces are unique per use and need nothing.

@@ -2353,6 +2353,60 @@ class TestAppLifespan:
         assert exited == [0], "the reaper's thread must not outlive the shutdown"
 
     @pytest.mark.asyncio
+    async def test_shutdown_lets_the_reaper_finish_inside_the_budget(
+        self, mock_settings, temp_db_path: Path, monkeypatch
+    ) -> None:
+        """The escape is for work the budget ran out on, not for work still in it.
+
+        The delete a cancelled task shielded is still in flight when the drain
+        ends, so keying the escape on ``reaper_idle()`` alone killed a delete that
+        had seconds left and left its tree for the next boot to reclaim. It gets
+        the rest of the budget first.
+        """
+        from rootcoz import main, temp_paths
+
+        started = threading.Event()
+        deleted = threading.Event()
+        slow = threading.Event()
+
+        def _slow_delete() -> None:
+            started.set()
+            slow.wait(0.2)
+            deleted.set()
+
+        async def _reaper_waiter() -> None:
+            await temp_paths.cleanup_off_loop("job-slow-reap", _slow_delete)
+
+        async def _nothing() -> None:
+            return None
+
+        exited: list[int] = []
+        monkeypatch.setattr(main, "SHUTDOWN_DRAIN_SECONDS", 5)
+        monkeypatch.setattr(main.os, "_exit", exited.append)
+        shed = asyncio.create_task(_reaper_waiter())
+        try:
+            with (
+                patch.object(main, "_compress_stored_results", _nothing),
+                patch.object(storage, "DB_PATH", temp_db_path),
+            ):
+                async with main.lifespan(main.app):
+                    await storage.save_result("job-slow-reap", "http://j/1", "running")
+                    main._register_job_task("job-slow-reap", shed)
+                    # On the reaper thread, so the shutdown sees it in flight.
+                    await asyncio.wait_for(asyncio.to_thread(started.wait, 5), 5)
+        finally:
+            for task in [shed, *main._background_tasks]:
+                task.cancel()
+            await asyncio.gather(
+                *[shed, *main._background_tasks], return_exceptions=True
+            )
+            main._background_tasks.clear()
+            main._job_tasks.clear()
+
+        assert deleted.is_set(), "the budget had room for the delete"
+        assert exited == [], "nothing outlived the budget, so nothing to abandon"
+
+    @pytest.mark.asyncio
     async def test_a_backfill_writes_the_database_it_started_on(
         self, mock_settings, tmp_path: Path, monkeypatch
     ) -> None:

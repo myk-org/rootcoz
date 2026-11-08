@@ -328,6 +328,7 @@ from rootcoz.temp_paths import (
     cleanup_path_off_loop,
     delete_tree,
     reaper_idle,
+    wait_for_reaper,
 )
 from rootcoz.token_tracking import (
     build_token_usage_summary,
@@ -2979,6 +2980,12 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                     for task in done:
                         if not task.cancelled():
                             task.exception()  # retrieved: there is no caller to raise to
+                # Then the reaper, with whatever the budget has left: it inherits
+                # the deletes of the tasks cancelled above (a shielded future that
+                # is ``done()`` while its thread still deletes), and exiting here
+                # would cut a delete that had time to finish and leave its tree
+                # behind for the next boot's reclaim.
+                await wait_for_reaper()
         unfinished = [task for task in pending if not task.done()]
         # The escape is the ceiling, and it fires for every way work can outlive
         # this lifespan: a tracked task that is not ``done()`` (a cancelled task
