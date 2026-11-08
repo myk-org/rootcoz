@@ -225,7 +225,7 @@ Send `source="ai"` to attribute the classification to the reserved `rootcoz-ai` 
 | POST | `/api/chat/{job_id}/abort` | reviewer | Cancel the in-flight answer |
 | POST | `/api/chat/{job_id}/close` | reviewer | Close the AI session |
 | DELETE | `/api/chat/{job_id}` | reviewer | Clear chat history |
-| GET | `/api/chat/{job_id}/stream` | viewer | SSE stream of new messages |
+| GET | `/api/chat/{job_id}/stream` | viewer | SSE stream of new messages **and the answer as it is written** (`chat-delta` frames) |
 
 An answer can become a tracker issue: the chat model files it through `POST /api/chat-issue` (see [Trackers, issues, and exporters](#trackers-issues-and-exporters)) when the user asks it to, via its `create_github_issue` / `create_jira_issue` tools. Admin chat (`/api/admin/chat/*`) has no tracker credential of its own; the endpoint uses the caller's account tokens in both chats, so an issue is always filed under the person who asked.
 
@@ -238,13 +238,16 @@ An answer can become a tracker issue: the chat model files it through `POST /api
 | `/api/dashboard/stream` | viewer | Job list changes |
 | `/api/results/{job_id}/stream` | viewer | Per-job status changes |
 | `/api/results/{job_id}/comments/stream` | viewer | Per-job comment changes |
-| `/api/chat/{job_id}/stream` | viewer | Per-job chat messages |
+| `/api/chat/{job_id}/stream` | viewer | One turn's chat messages: `chat-delta` frames carrying the answer as it is written, alongside the unchanged `chat-changed` notice |
+| `/api/admin/chat/stream` | admin | The same two frames for admin chat |
 | `/api/admin/token-usage/stream` | admin | Token usage changes. Enforced by middleware before the handler runs |
 | `/api/admin/logs/stream` | admin | Live server log tail; `lines` and `level` query parameters |
 | `/api/admin/audit/stream` | admin | New audit events as they are recorded, one `audit:event` SSE event per row with the same JSON shape as the list endpoint |
 | `/api/admin/settings/stream` | admin | Server setting changes |
 
 Use `/api/stream` when you want one connection instead of six. It accepts up to 50 comma-separated topics; `token-usage` and `settings` are delivered only to admins.
+
+The two chat streams carry the answer itself. `event: chat-delta` with `data: {"id": <assistant message id>, "delta": "<fragment>"}` is one fragment of the reply as the model writes it: provisional, display only, and **never stored** — the saved reply is the turn's final text, so a reload shows it whole. `event: chat-changed` keeps its meaning on the same connection and carries two payloads there: `data: refresh` (the unchanged completion notice) and `data: {"dropped": N}` (a subscriber that fell behind lost N payloads; both mean "refetch `GET /api/chat/{job_id}`", so a client that treats any `chat-changed` as a refetch needs no change). `chat-delta` is delivered **only** by `/api/chat/{job_id}/stream` and `/api/admin/chat/stream`: `/api/stream?topics=chat:JOB_ID` is a shared notification bus for up to 50 topics, fanned out to every subscriber and relayed to other tabs, not a per-turn payload channel. A fragment reaches only a stream that is open when it is emitted and is **never replayed**, so a stream that joins mid-turn (a second tab, a reconnect) receives only later fragments. Both artifacts come from `>= 4.20.1` of `@myk-org/pi-sidecar` and `pi-sidecar-client` — one floor, the pair this release pins. A deployment whose sidecar cannot serve the feed still gets the whole answer, just without fragments: streaming is best-effort by design.
 
 ### Reports and analytics
 
@@ -332,7 +335,7 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | POST | `/api/admin/chat` | Send an admin chat message; returns `202` |
 | POST | `/api/admin/chat/init`, `/close`, `/abort` | Admin chat session control; `/init` answers the same `422 AI session refused: …` as job chat |
 | DELETE | `/api/admin/chat` | Clear admin chat history |
-| GET | `/api/admin/chat/stream` | Admin chat SSE |
+| GET | `/api/admin/chat/stream` | Admin chat SSE: new messages **and the answer as it is written** (`chat-delta` frames) |
 | POST | `/api/admin-chat/artifacts` | Save a generated HTML report artifact |
 | GET | `/api/admin-chat/artifacts/{artifact_id}` | Download that artifact |
 
@@ -369,7 +372,7 @@ Time bounds are timezone-correct. A bare `YYYY-MM-DD` means a UTC day, so `since
 
 `GET /api/admin/audit/export` streams every event the same filters match — `format=json` (a JSON array) or `format=csv`, with columns `id, created_at, actor, actor_role, is_admin, action, target_type, target_id, outcome, request_ip, details, hash_version, prev_hash, entry_hash, hash_payload`. Both hash columns are included so an export verifies on its own after the server has pruned the originals. Each JSON event also carries `details_raw` (the exact stored `details` text) and `hash_payload` — the exact canonical JSON that was hashed. Verification is therefore one line on either format: `sha256(hash_payload + prev_hash) == entry_hash`. `hash_version` says which field list the payload covers: version `1` is the original field set (every row written before the rescue counter existed), version `2` adds `throttle_rescue`, so the rescue budget itself is tamper-evident. A trail can mix both versions and verifies row by row; nothing is rewritten when the field list grows. Re-mapping fields yourself will not work, because the API renders `is_admin` as a boolean while the stored row hashed `1`; `hash_payload` carries the stored form. A row written before the chain existed, or one whose stored bytes would expose a credential that read-time redaction removes, ships without `hash_payload` — treat a missing payload as "not verifiable", never as verified. Responses are streamed in batches, and the batches page by row id rather than by offset, so events written mid-export can only join the tail — a row is never repeated and never skipped. This is the supported way to retain audit evidence before retention pruning or the row cap deletes it. CSV text cells that start with `=`, `+`, `-`, `@`, a tab or a carriage return are prefixed with `'` so a spreadsheet cannot execute them as formulas; a cell that already starts with `'` is prefixed too (`'abc` exports as `''abc`), which makes the escaping reversible. To recompute a hash from an exported CSV, remove exactly one leading apostrophe from each text cell — the unescaped value is byte-identical to the stored column. Numbers and ids are never escaped.
 
-All audit read endpoints require `admin` and return `403 Admin access required` otherwise. `GET /api/admin/audit/stream` pushes each new event as it is written, so an audit page can stay live without polling. Events pass through the same redaction as the list endpoint. A subscriber that cannot keep up is never silently starved: when its queue overflows the stream emits an `audit-gap` event with `{"dropped": N}` before the next normal event, so a client can tell the administrator that events were missed instead of showing a broken view as live.
+All audit read endpoints require `admin` and return `403 Admin access required` otherwise. `GET /api/admin/audit/stream` pushes each new event as it is written, so an audit page can stay live without polling. Events pass through the same redaction as the list endpoint. A subscriber that cannot keep up is never silently starved: when its queue overflows the stream emits an `audit-gap` event with `{"dropped": N}` at the next event **or** at the next keepalive, whichever comes first — so a burst dropped into an emptying queue is reported within one keepalive window rather than waiting for an event that may never come. A client can then tell the administrator that events were missed instead of showing a broken view as live. The event name and the count are unchanged.
 
 
 ## Advanced Usage

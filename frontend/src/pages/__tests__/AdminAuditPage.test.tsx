@@ -8,6 +8,7 @@ import { presetSince } from '@/lib/auditFilters'
 import { ApiError } from '@/lib/api'
 import { clearTokens, clearUsername, getGithubToken, getUsername, setGithubToken, setUsername } from '@/lib/cookies'
 import { formatTimestamp } from '@/lib/utils'
+import { MockEventSource } from '@/test/MockEventSource'
 
 const apiGet = vi.fn()
 vi.mock('@/lib/api', async (importOriginal) => {
@@ -44,42 +45,6 @@ function event(overrides: Record<string, unknown> = {}) {
     details: { key: 'ai_call_timeout', changed: true },
     request_ip: '10.0.0.7',
     ...overrides,
-  }
-}
-
-class MockEventSource {
-  static instances: MockEventSource[] = []
-  url: string
-  closed = false
-  onopen: (() => void) | null = null
-  onerror: (() => void) | null = null
-  private listeners = new Map<string, Array<(e: MessageEvent) => void>>()
-
-  constructor(url: string) {
-    this.url = url
-    MockEventSource.instances.push(this)
-  }
-
-  addEventListener(name: string, handler: (e: MessageEvent) => void) {
-    const current = this.listeners.get(name) ?? []
-    this.listeners.set(name, [...current, handler])
-  }
-
-  removeEventListener(name: string, handler: (e: MessageEvent) => void) {
-    this.listeners.set(
-      name,
-      (this.listeners.get(name) ?? []).filter((h) => h !== handler),
-    )
-  }
-
-  close() {
-    this.closed = true
-  }
-
-  emit(name: string, data: unknown) {
-    for (const handler of this.listeners.get(name) ?? []) {
-      handler(new MessageEvent(name, { data: JSON.stringify(data) }))
-    }
   }
 }
 

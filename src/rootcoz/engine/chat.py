@@ -1943,6 +1943,7 @@ async def _chat_with_ai_impl(
     request_id: str = "",
     call_type: str = "chat",
     install_mcp: bool = True,
+    on_delta: Callable[[str], None] | None = None,
 ) -> tuple[bool, str, str | None]:
     """Shared AI chat implementation used by both job and admin chat."""
     logger.info(
@@ -1976,6 +1977,9 @@ async def _chat_with_ai_impl(
     }
     if custom_tools:
         call_kwargs["custom_tools"] = custom_tools
+    if on_delta is not None and session_id:
+        # Display only: the stored reply is still the whole text this call returns.
+        call_kwargs["on_delta"] = on_delta
     if not session_id and restrict_tools:
         call_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
     if install_mcp:
@@ -2011,6 +2015,8 @@ async def _chat_with_ai_impl(
             "cwd": str(repo_path) if repo_path else None,
             "ai_call_timeout": ai_call_timeout,
             "session_id": None,
+            # The rebuilt session is created inside this call, so there is no feed id
+            # to subscribe to yet: this retry never streams (`on_delta` is not passed).
         }
         if custom_tools:
             retry_kwargs["custom_tools"] = custom_tools
@@ -2055,6 +2061,7 @@ async def chat_with_ai(
     install_mcp: bool = True,
     tracker_unavailable: dict[str, str] | None = None,
     issue_repos: tuple[str, ...] = (),
+    on_delta: Callable[[str], None] | None = None,
 ) -> tuple[bool, str, str | None]:
     """Send a chat message and get an AI response via the sidecar."""
 
@@ -2085,6 +2092,7 @@ async def chat_with_ai(
         request_id=job_id,
         call_type="chat",
         install_mcp=install_mcp,
+        on_delta=on_delta,
     )
 
 
@@ -2099,6 +2107,7 @@ async def admin_chat_with_ai(
     session_id: str | None = None,
     custom_tools: list[dict[str, Any]] | None = None,
     tracker_unavailable: dict[str, str] | None = None,
+    on_delta: Callable[[str], None] | None = None,
 ) -> tuple[bool, str, str | None]:
     """Send an admin chat message and get an AI response."""
 
@@ -2121,4 +2130,5 @@ async def admin_chat_with_ai(
         log_prefix="Admin chat",
         request_id="__admin_chat__",
         call_type="admin_chat",
+        on_delta=on_delta,
     )
