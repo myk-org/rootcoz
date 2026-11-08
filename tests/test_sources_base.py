@@ -20,6 +20,16 @@ from rootcoz.sources.jenkins_source import JenkinsSource
 from rootcoz.sources.prow_source import ProwSource
 
 
+@pytest.fixture(autouse=True)
+def _caplog_reaches_module_logger(monkeypatch):
+    """get_child_logger sets propagate=False and simple_logger adds a
+    session-persistent DuplicateFilter; caplog needs both lifted here."""
+    from rootcoz.sources import base as base_module
+
+    monkeypatch.setattr(base_module.logger, "propagate", True)
+    monkeypatch.setattr(base_module.logger, "filters", [])
+
+
 @pytest.mark.asyncio
 async def test_workspace_clone_reports_test_repo_start_and_end(tmp_path: Path) -> None:
     from rootcoz.sources.base import setup_analysis_workspace

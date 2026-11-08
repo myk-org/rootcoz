@@ -18,6 +18,7 @@ RESULT_FIELD_PATHS: frozenset[str] = frozenset(
         "jenkins_url",
         "status",
         "error",
+        "failure_reason",
         "created_at",
         "completed_at",
         "analysis_started_at",

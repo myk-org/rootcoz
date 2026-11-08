@@ -231,11 +231,14 @@ different from this profile.
 
 **Upgrading to this chart version.** Every install rolls once: the default resources block now sets
 `ephemeral-storage: 12Gi`, which mounts the `/tmp` `emptyDir` and raises the scheduling floor by 12 Gi,
-and any pod-template change is a rollout. Installs that set `sidecar.agentDir` had a second reason to
-roll earlier — the `copy-sidecar-agent` init container's request and limit are now equal (`10m/32Mi`)
-where they were `10m/16Mi` and `100m/128Mi`, and that equality is what keeps a Guaranteed pod
-Guaranteed. With one replica on `Recreate` and a 30 s grace period, an analysis in flight at that
-moment is interrupted and has to be re-submitted.
+and `terminationGracePeriodSeconds` went from `30` to `60` — any pod-template change is a rollout. The
+60 is the shutdown budget: 15 s for uvicorn to close connections, 40 s for cancelled tasks to unwind,
+5 s to exit. With one replica on `Recreate`, an analysis in flight when the pod goes is marked failed
+for a server restart before the process exits (`GET /results/{job_id}` returns
+`failure_reason: "server_restart"`); it still has to be re-submitted, because the analysis itself is
+gone. Installs that set `sidecar.agentDir` had a second reason to roll earlier — the
+`copy-sidecar-agent` init container's request and limit are now equal (`10m/32Mi`) where they were
+`10m/16Mi` and `100m/128Mi`, and that equality is what keeps a Guaranteed pod Guaranteed.
 
 **Clearing a request does not remove the floor.** Setting `resources.requests.memory=""` drops only
 the explicit request; Kubernetes copies the matching limit into the request when no admission policy
@@ -425,6 +428,13 @@ kubectl exec -n rootcoz deploy/rootcoz -- python -c \
   backup taken before the upgrade instead. Upgrade all replicas together.
 
 ## Troubleshooting
+
+- `File logging disabled: …/logs (…)` at startup, and `/admin/logs` has no history
+  The `<data dir>/logs` directory is not writable by the container's UID/GID, so the application
+  log file is off. Records still reach the console and the admin `Logs` page's live stream keeps
+  working, but the page's initial tail is read from the file, so it is empty and nothing survives a
+  reload. Make `<data dir>/logs` writable by the user the container runs as; bounding the file's
+  size and setting its permissions explicitly are tracked separately.
 
 - `route.enabled and ingress.enabled are mutually exclusive`
   The chart refuses to render with both on. Set the one you are not using to `false`.

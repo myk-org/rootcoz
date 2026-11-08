@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import socket
+import threading
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -2172,6 +2173,238 @@ class TestAppLifespan:
                 task.cancel()
             await asyncio.gather(*main._background_tasks, return_exceptions=True)
             main._background_tasks.clear()
+
+    async def _boot_with_a_job(self, status: str) -> dict[str, Any]:
+        """Start the lifespan, park one job at *status*, and shut it down.
+
+        Event-driven, no sleeps: the ``asyncio.Event`` proves the analysis task
+        started, and leaving the context is the shutdown signal.
+        """
+        from rootcoz import main
+
+        started = asyncio.Event()
+
+        async def _running_analysis() -> None:
+            started.set()
+            await asyncio.Event().wait()
+
+        async def _nothing() -> None:
+            return None
+
+        try:
+            with patch.object(main, "_compress_stored_results", _nothing):
+                async with main.lifespan(main.app):
+                    await storage.save_result("job-restart", "http://j/1", status)
+                    main._register_job_task(
+                        "job-restart", asyncio.create_task(_running_analysis())
+                    )
+                    await asyncio.wait_for(started.wait(), 5)
+            return await storage.get_result("job-restart")
+        finally:
+            for task in list(main._background_tasks):
+                task.cancel()
+            await asyncio.gather(*main._background_tasks, return_exceptions=True)
+            main._background_tasks.clear()
+            main._job_tasks.clear()
+
+    @pytest.mark.asyncio
+    async def test_shutdown_marks_the_in_flight_job_as_a_server_restart(
+        self, mock_settings, temp_db_path: Path
+    ) -> None:
+        """The job running when the app stops is failed for a restart, here (#458).
+
+        Driven through the lifespan directly: TestClient ends its loop on exit,
+        which hides whether the shutdown itself wrote the row.
+        """
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            stored = await self._boot_with_a_job("running")
+
+        assert stored["status"] == "failed"
+        assert stored["error"] == storage.RESTART_ERROR_MSG
+        assert stored["failure_reason"] == storage.SERVER_RESTART_FAILURE_REASON
+        assert stored["completed_at"] is not None
+
+    @pytest.mark.asyncio
+    async def test_shutdown_leaves_a_waiting_job_to_be_resumed(
+        self, mock_settings, temp_db_path: Path
+    ) -> None:
+        """A ``waiting`` job is resumed by the next boot, so shutdown keeps it."""
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            stored = await self._boot_with_a_job("waiting")
+
+        assert stored["status"] == "waiting"
+        assert stored["failure_reason"] == ""
+        assert stored["completed_at"] is None
+
+    @pytest.mark.asyncio
+    async def test_shutdown_does_not_wait_for_a_task_that_ignores_cancellation(
+        self, mock_settings, temp_db_path: Path, monkeypatch
+    ) -> None:
+        """The budget bounds the drain even when a child keeps going.
+
+        The clone-thread wait deliberately keeps waiting through repeated
+        cancellation (#458), and ``asyncio.gather``'s future only completes once
+        every child has -- so the budget has to abandon it, and the mark has to
+        have landed before that. Abandoning is not enough on its own: returning
+        from the lifespan leaves the task for ``asyncio.run()``'s unbounded
+        cancel-and-gather, so the shutdown has to end the process instead.
+        """
+        from rootcoz import main
+
+        started = asyncio.Event()
+        stop = asyncio.Event()
+
+        async def _stubborn() -> None:
+            started.set()
+            while not stop.is_set():
+                try:
+                    await asyncio.sleep(0.05)
+                except asyncio.CancelledError:
+                    continue
+
+        async def _nothing() -> None:
+            return None
+
+        exited: list[int] = []
+        monkeypatch.setattr(main, "SHUTDOWN_DRAIN_SECONDS", 0.2)
+        monkeypatch.setattr(main.os, "_exit", exited.append)
+        shed = asyncio.create_task(_stubborn())
+        try:
+            with (
+                patch.object(main, "_compress_stored_results", _nothing),
+                patch.object(storage, "DB_PATH", temp_db_path),
+            ):
+                async with main.lifespan(main.app):
+                    await storage.save_result("job-stuck", "http://j/1", "running")
+                    main._register_job_task("job-stuck", shed)
+                    await asyncio.wait_for(started.wait(), 5)
+                stored = await storage.get_result("job-stuck")
+        finally:
+            stop.set()
+            for task in [shed, *main._background_tasks]:
+                task.cancel()
+            await asyncio.gather(
+                *[shed, *main._background_tasks], return_exceptions=True
+            )
+            main._background_tasks.clear()
+            main._job_tasks.clear()
+
+        assert stored["failure_reason"] == storage.SERVER_RESTART_FAILURE_REASON
+        assert exited == [0], "the shutdown must end the process, not return"
+
+    @pytest.mark.asyncio
+    async def test_shutdown_escapes_when_a_cancelled_task_leaves_reaper_work_running(
+        self, mock_settings, temp_db_path: Path, monkeypatch
+    ) -> None:
+        """A shielded reaper delete outlives the task that awaited it (#458).
+
+        ``cleanup_off_loop`` shields ``run_in_executor(_CLEANUP_POOL, ...)``, so the
+        drain reaps the task at once -- it is ``done()`` -- while the worker thread
+        keeps deleting. An escape keyed on unfinished tasks therefore skipped, the
+        lifespan returned, and interpreter/loop shutdown joined that thread past the
+        grace period. The reaper's own backlog is what has to decide.
+        """
+        from rootcoz import main, temp_paths
+
+        deleting = threading.Event()
+        release = threading.Event()
+
+        def _blocked_delete() -> None:
+            deleting.set()
+            release.wait(30)
+
+        async def _reaper_waiter() -> None:
+            await temp_paths.cleanup_off_loop("job-reap", _blocked_delete)
+
+        async def _nothing() -> None:
+            return None
+
+        exited: list[int] = []
+        monkeypatch.setattr(main, "SHUTDOWN_DRAIN_SECONDS", 0.2)
+        monkeypatch.setattr(main.os, "_exit", exited.append)
+        shed = asyncio.create_task(_reaper_waiter())
+        try:
+            with (
+                patch.object(main, "_compress_stored_results", _nothing),
+                patch.object(storage, "DB_PATH", temp_db_path),
+            ):
+                async with main.lifespan(main.app):
+                    await storage.save_result("job-reap", "http://j/1", "running")
+                    main._register_job_task("job-reap", shed)
+                    # The delete is on the reaper thread before the shutdown starts.
+                    await asyncio.wait_for(asyncio.to_thread(deleting.wait, 5), 5)
+                stored = await storage.get_result("job-reap")
+        finally:
+            release.set()
+            for task in [shed, *main._background_tasks]:
+                task.cancel()
+            await asyncio.gather(
+                *[shed, *main._background_tasks], return_exceptions=True
+            )
+            main._background_tasks.clear()
+            main._job_tasks.clear()
+            # Leave the single reaper worker idle for whatever runs next.
+            for _ in range(500):
+                if temp_paths.reaper_idle():
+                    break
+                await asyncio.sleep(0.01)
+
+        assert stored["failure_reason"] == storage.SERVER_RESTART_FAILURE_REASON
+        assert exited == [0], "the reaper's thread must not outlive the shutdown"
+
+    @pytest.mark.asyncio
+    async def test_shutdown_lets_the_reaper_finish_inside_the_budget(
+        self, mock_settings, temp_db_path: Path, monkeypatch
+    ) -> None:
+        """The escape is for work the budget ran out on, not for work still in it.
+
+        The delete a cancelled task shielded is still in flight when the drain
+        ends, so keying the escape on ``reaper_idle()`` alone killed a delete that
+        had seconds left and left its tree for the next boot to reclaim. It gets
+        the rest of the budget first.
+        """
+        from rootcoz import main, temp_paths
+
+        started = threading.Event()
+        deleted = threading.Event()
+        slow = threading.Event()
+
+        def _slow_delete() -> None:
+            started.set()
+            slow.wait(0.2)
+            deleted.set()
+
+        async def _reaper_waiter() -> None:
+            await temp_paths.cleanup_off_loop("job-slow-reap", _slow_delete)
+
+        async def _nothing() -> None:
+            return None
+
+        exited: list[int] = []
+        monkeypatch.setattr(main, "SHUTDOWN_DRAIN_SECONDS", 5)
+        monkeypatch.setattr(main.os, "_exit", exited.append)
+        shed = asyncio.create_task(_reaper_waiter())
+        try:
+            with (
+                patch.object(main, "_compress_stored_results", _nothing),
+                patch.object(storage, "DB_PATH", temp_db_path),
+            ):
+                async with main.lifespan(main.app):
+                    await storage.save_result("job-slow-reap", "http://j/1", "running")
+                    main._register_job_task("job-slow-reap", shed)
+                    # On the reaper thread, so the shutdown sees it in flight.
+                    await asyncio.wait_for(asyncio.to_thread(started.wait, 5), 5)
+        finally:
+            for task in [shed, *main._background_tasks]:
+                task.cancel()
+            await asyncio.gather(
+                *[shed, *main._background_tasks], return_exceptions=True
+            )
+            main._background_tasks.clear()
+            main._job_tasks.clear()
+
+        assert deleted.is_set(), "the budget had room for the delete"
+        assert exited == [], "nothing outlived the budget, so nothing to abandon"
 
     @pytest.mark.asyncio
     async def test_a_backfill_writes_the_database_it_started_on(
@@ -17916,6 +18149,23 @@ class TestAnalysisReaperIsOneCopy:
         # repo_manager:` copy would at best drift again, at worst skip the reaper.
         assert kwargs["repo_manager"] is manager.return_value
         assert kwargs["repo_path"] == tmp_path / "workspace"
+
+
+def test_the_entrypoint_outlives_the_app_shutdown() -> None:
+    """The restart mark is only written if the shell waits for uvicorn.
+
+    A TERM trap makes ``wait`` return 128+signum while uvicorn is still in the
+    lifespan shutdown, so a bare ``wait`` under errexit ended the script -- and
+    PID 1 with it -- before the mark committed (#458).
+    """
+    entrypoint = (Path(__file__).resolve().parents[1] / "entrypoint.sh").read_text()
+
+    assert '_supervise_app "$APP_PID" || status=$?' in entrypoint
+    assert 'wait "$app_pid" || status=$?' in entrypoint
+    assert 'kill -0 "$app_pid" 2>/dev/null || break' in entrypoint
+    # Reset per iteration: the interrupted wait's 143 must not survive the wait
+    # that sees the app exit cleanly. `tox -e chart` runs this loop for real.
+    assert "status=0\n        wait" in entrypoint
 
 
 # -- A refused analysis keeps its sentence (#423) --------------------------

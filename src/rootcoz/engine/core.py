@@ -21,8 +21,8 @@ from typing import Any
 
 from git.exc import GitCommandError
 from pi_sidecar_client import run_parallel_with_limit
-from simple_logger.logger import get_logger
 
+from rootcoz import get_child_logger
 from rootcoz.ai_client import (
     ANALYSIS_BUILTIN_TOOLS,
     RESOURCE_REPO_BROWSE_HINT,
@@ -35,7 +35,6 @@ from rootcoz.config import Settings, get_settings, parse_additional_repos
 from rootcoz.engine.chat import analysis_http_tools
 from rootcoz.engine.session_tools import build_session_tools
 from rootcoz.feedback import scrub_sensitive_data
-from rootcoz.logging_context import get_log_file
 from rootcoz.models import (
     ANALYSIS_PLACEHOLDER,
     AdditionalRepo,
@@ -57,13 +56,7 @@ from rootcoz.storage import (
 )
 from rootcoz.token_tracking import failure_group_usage
 
-_log_file = get_log_file()
-
-logger = get_logger(
-    name=__name__,
-    level=logging.NOTSET,  # level authority: the rootcoz parent logger (#347)
-    **({"filename": _log_file} if _log_file else {}),
-)
+logger = get_child_logger(__name__)
 
 
 def require_workspace(repo_path: Path | None) -> Path:

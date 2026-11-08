@@ -1438,6 +1438,168 @@ async def test_fail_job_without_result_write_keeps_a_newer_terminal_status(
     assert failed["completed_at"]
 
 
+class TestMarkJobsFailedForRestart:
+    """The mark the shutdown writes before it drains (#458)."""
+
+    async def test_a_restart_marked_job_is_not_recovered_as_an_orphan(
+        self, setup_test_db: Path
+    ) -> None:
+        """The next boot does not report it: it is failed, not an orphan."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result("job-x", "", "running")
+            assert await storage.mark_jobs_failed_for_restart(["job-x"]) == ["job-x"]
+
+            waiting, recovered = await storage.mark_stale_results_failed()
+            assert waiting == []
+            assert recovered == []
+            row = await storage.get_result("job-x")
+
+        assert row["status"] == "failed"
+        assert row["error"] == storage.RESTART_ERROR_MSG
+        assert row["failure_reason"] == "server_restart"
+        assert row["completed_at"] is not None
+
+    async def test_the_restart_mark_keeps_a_job_that_already_ended(
+        self, setup_test_db: Path
+    ) -> None:
+        """A job that finished inside the shutdown window keeps its own status."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result("job-done", "", "running")
+            await storage.update_status("job-done", "completed")
+            assert await storage.mark_jobs_failed_for_restart(["job-done"]) == []
+            row = await storage.get_result("job-done")
+
+        assert row["status"] == "completed"
+        assert row["failure_reason"] == ""
+
+    async def test_a_waiting_row_is_refused_by_the_storage_guard(
+        self, setup_test_db: Path
+    ) -> None:
+        """``waiting`` is resumed by the next boot, so the write must refuse it."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result("job-w", "", "waiting")
+            landed = await storage.fail_job_without_result_write(
+                "job-w",
+                storage.RESTART_ERROR_MSG,
+                failure_reason=storage.SERVER_RESTART_FAILURE_REASON,
+                only_statuses=storage.ORPHAN_STATUSES,
+            )
+            row = await storage.get_result("job-w")
+
+        assert landed is False
+        assert row["status"] == "waiting"
+        assert row["failure_reason"] == ""
+
+    async def test_an_in_place_analyze_clears_the_restart_marker(
+        self, setup_test_db: Path
+    ) -> None:
+        """The reused row must not keep a marker from the run it replaces.
+
+        ``POST /results/{job_id}/analyze`` claims this row in place, so a marker
+        written by the shutdown would survive into the new run and be reported
+        beside its ``completed`` status (#458).
+        """
+        from rootcoz.storage import ANALYSIS_STATE_SUBMITTED
+
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                "job-sub",
+                "",
+                "running",
+                {"analysis_state": ANALYSIS_STATE_SUBMITTED, "job_name": "raw"},
+            )
+            await storage.mark_jobs_failed_for_restart(["job-sub"])
+            claim = await storage.claim_submitted_job_for_analyze("job-sub")
+            row = await storage.get_result("job-sub")
+
+        # The claim reports what it overwrote, so a release can put it back.
+        assert claim == ("failed", storage.SERVER_RESTART_FAILURE_REASON)
+        assert row["status"] == "pending"
+        assert row["failure_reason"] == ""
+
+    @pytest.mark.parametrize(
+        ("restart_marked", "status", "reason"),
+        [
+            (False, "completed", ""),
+            (True, "failed", storage.SERVER_RESTART_FAILURE_REASON),
+        ],
+    )
+    async def test_a_released_claim_restores_the_status_and_the_reason(
+        self, setup_test_db: Path, restart_marked: bool, status: str, reason: str
+    ) -> None:
+        """Claim -> release puts back **both** columns the claim cleared (#458).
+
+        A release that restores only the status leaves a ``failed`` row whose
+        reason is empty -- the combination the docs read as a crash -- even though
+        the claim cleared a reason that was there.
+        """
+        from rootcoz.storage import ANALYSIS_STATE_SUBMITTED
+
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                "job-release",
+                "",
+                "running",
+                {"analysis_state": ANALYSIS_STATE_SUBMITTED, "job_name": "raw"},
+            )
+            if restart_marked:
+                await storage.mark_jobs_failed_for_restart(["job-release"])
+            else:
+                await storage.update_status("job-release", "completed")
+            claim = await storage.claim_submitted_job_for_analyze("job-release")
+            assert claim is not None
+            assert claim == (status, reason)
+            await storage.release_submitted_job_analyze_claim("job-release", *claim)
+            row = await storage.get_result("job-release")
+
+        assert row["status"] == status
+        assert row["failure_reason"] == reason
+
+    async def test_a_budget_cut_mark_logs_how_far_it_got(
+        self, setup_test_db: Path, storage_logs: Any
+    ) -> None:
+        """A cancelled mark must say why only some jobs carry the marker (#458).
+
+        ``asyncio.timeout`` cancels the await inside the mark; CancelledError is a
+        ``BaseException``, so the per-row ``except Exception`` cannot record it and
+        this warning is the only trace an operator gets. The cancellation itself
+        must still propagate.
+        """
+        real = storage.fail_job_without_result_write
+        seen: list[str] = []
+
+        async def _one_then_the_budget_ends(job_id: str, *args: Any, **kwargs: Any):
+            seen.append(job_id)
+            if len(seen) > 1:
+                raise asyncio.CancelledError
+            return await real(job_id, *args, **kwargs)
+
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch.object(
+                storage, "fail_job_without_result_write", _one_then_the_budget_ends
+            ),
+        ):
+            for job_id in ("job-marked", "job-unmarked"):
+                await storage.save_result(job_id, "", "running")
+            with pytest.raises(asyncio.CancelledError):
+                await storage.mark_jobs_failed_for_restart(
+                    ["job-marked", "job-unmarked"]
+                )
+            marked = await storage.get_result("job-marked")
+            unmarked = await storage.get_result("job-unmarked")
+
+        assert marked["failure_reason"] == storage.SERVER_RESTART_FAILURE_REASON
+        assert unmarked["failure_reason"] == ""
+        warnings = [
+            record.getMessage()
+            for record in storage_logs.records
+            if record.levelno == logging.WARNING
+        ]
+        assert any("1 of 2 in-flight job(s)" in line for line in warnings), warnings
+        assert any("job-marked" in line for line in warnings), warnings
+
+
 @pytest.mark.asyncio
 async def test_list_distinct_job_names(setup_test_db: Path):
     """list_distinct_job_names returns unique non-empty job names."""

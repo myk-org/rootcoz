@@ -413,10 +413,19 @@ Anything the container image ships — Node.js, `acpx`, `@trailhq/trail-code` (`
 
 ### Logging
 
-Uses `python-simple-logger`:
+Uses `python-simple-logger`, through one factory: `get_child_logger(__name__)`. It sets `NOTSET`
+so the `rootcoz` parent logger is the single level authority (#347), and `propagate=False` exactly
+as `simple_logger` builds it.
 - INFO: Milestones (job started, AI calls, completed)
 - DEBUG: Detailed operations (response lengths, extracted data)
-- Configured via `LOG_LEVEL` environment variable
+- Configured via `LOG_LEVEL`, overridable by the `log_level` Server Setting.
+
+The server enables **one** shared file handler (`logging_context.enable_log_file()`, called once
+from `rootcoz.main`'s module body); every module logger receives that same instance, so a module's
+records reach both the console (stderr) and `<data dir>/logs/rootcoz.log`, with identical text and
+the `[job_id=…]` prefix. Never pass `filename=` to a module logger, never create a second handler,
+and never install a second formatter — the file is not a parallel logging pipeline. The CLI and the
+test suite never enable it. Hardening the file's size bound and permissions is #481.
 
 ## API Design
 

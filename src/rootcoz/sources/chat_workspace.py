@@ -7,14 +7,14 @@ CI-agnostic. All CI types go through ``SOURCE_REGISTRY`` →
 
 from __future__ import annotations
 
-import logging
 from pathlib import Path
 from typing import Any
 
+from rootcoz import get_child_logger
 from rootcoz.sources.base import CISource
 from rootcoz.sources.registry import SOURCE_REGISTRY, get_source_class
 
-logger = logging.getLogger(__name__)
+logger = get_child_logger(__name__)
 
 
 def reconstruct_source(
