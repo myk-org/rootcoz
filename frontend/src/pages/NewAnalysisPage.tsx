@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { api, ApiError, extractApiDetail } from '@/lib/api'
+import { api, ApiError, apiDetailMessages, extractApiDetail } from '@/lib/api'
 import { toIntInRange, PROW_JOB_NAME_RE, PROW_BUILD_ID_RE } from '@/lib/utils'
 import { Section } from '@/components/shared/Section'
 import { Toggle } from '@/components/shared/Toggle'
@@ -27,15 +27,7 @@ const DUPLICATE_PREFIX = 'Duplicate additional repo names: '
  * validator message joined into the same detail cannot leak into the copy.
  */
 function duplicateNames(err: unknown): string | null {
-  if (!(err instanceof ApiError)) return null
-  const detail = (err.body as { detail?: unknown } | null)?.detail
-  const messages = (typeof detail === 'string'
-    ? [detail]
-    : Array.isArray(detail)
-      ? detail.map((e) => (typeof e?.msg === 'string' ? e.msg : ''))
-      : []
-  ).map((m) => m.replace(/^Value error, /, ''))
-  const hit = messages.find((m) => m.startsWith(DUPLICATE_PREFIX))
+  const hit = apiDetailMessages(err).find((m) => m.startsWith(DUPLICATE_PREFIX))
   return hit ? hit.slice(DUPLICATE_PREFIX.length) : null
 }
 
