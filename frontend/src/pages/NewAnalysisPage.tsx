@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { api } from '@/lib/api'
+import { api, ApiError, extractApiDetail } from '@/lib/api'
 import { toIntInRange, PROW_JOB_NAME_RE, PROW_BUILD_ID_RE } from '@/lib/utils'
 import { Section } from '@/components/shared/Section'
 import { Toggle } from '@/components/shared/Toggle'
@@ -260,7 +260,9 @@ export function NewAnalysisPage() {
       }
     } catch (err) {
       console.error('Failed to submit analysis', err)
-      setError('Failed to submit analysis. Please try again.')
+      // A client error's detail names what to fix; a 5xx detail is server internals, so keep the generic copy.
+      const detail = err instanceof ApiError && err.status < 500 ? extractApiDetail(err) : null
+      setError(detail ?? 'Failed to submit analysis. Please try again.')
     } finally {
       setSubmitting(false)
     }
