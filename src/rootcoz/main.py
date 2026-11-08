@@ -327,6 +327,7 @@ from rootcoz.temp_paths import (
     cleanup_off_loop,
     cleanup_path_off_loop,
     delete_tree,
+    reaper_idle,
 )
 from rootcoz.token_tracking import (
     build_token_usage_summary,
@@ -2978,11 +2979,20 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
                     for task in done:
                         if not task.cancelled():
                             task.exception()  # retrieved: there is no caller to raise to
-        abandoned = [task for task in pending if not task.done()]
-        if abandoned:
+        unfinished = [task for task in pending if not task.done()]
+        # The escape is the ceiling, and it fires for every way work can outlive
+        # this lifespan: a tracked task that is not ``done()`` (a cancelled task
+        # that has not finished is still running), and the reaper still holding a
+        # delete whose asyncio task is already done -- the shielded run_in_executor
+        # in cleanup_off_loop leaves the thread behind, and interpreter exit joins
+        # it past the grace period. When everything finished inside the budget
+        # this is skipped and the fast path below runs.
+        reaper_busy = not reaper_idle()
+        if unfinished or reaper_busy:
             logger.warning(
-                f"Shutdown budget ({SHUTDOWN_DRAIN_SECONDS}s) expired: abandoning "
-                f"{len(abandoned)} in-flight task(s)"
+                f"Shutdown budget ({SHUTDOWN_DRAIN_SECONDS}s) expired or work is "
+                f"still running: abandoning {len(unfinished)} in-flight task(s)"
+                + (" and a running reaper delete" if reaper_busy else "")
             )
             # Returning would hand the pod back to the grace deadline: uvicorn's
             # asyncio.run() cancels every task still on the loop and gathers it
@@ -6829,13 +6839,13 @@ async def analyze_submitted_job(
         or result_data.get("job_name")
         or source_cls.default_display_name(unified_body)
     )
-    previous_status = str(stored.get("status") or "completed")
-    claimed = await claim_submitted_job_for_analyze(job_id)
-    if not claimed:
+    claim = await claim_submitted_job_for_analyze(job_id)
+    if claim is None:
         raise HTTPException(
             status_code=409,
             detail="Job is already being analyzed or is no longer submitted.",
         )
+    previous_status, previous_failure_reason = claim
     rerun = {
         "request": request,
         "job_id": job_id,
@@ -6858,7 +6868,9 @@ async def analyze_submitted_job(
             existing_job_id=job_id,
         )
     except Exception:
-        await release_submitted_job_analyze_claim(job_id, previous_status)
+        await release_submitted_job_analyze_claim(
+            job_id, previous_status, previous_failure_reason
+        )
         await _audit_analysis_rerun(**rerun, outcome="failure")
         raise
     await _audit_analysis_rerun(**rerun, outcome="success")

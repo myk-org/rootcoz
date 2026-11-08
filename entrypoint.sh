@@ -29,6 +29,38 @@ if [ "${1:-}" = "--xdg-check" ]; then
     exit 0
 fi
 
+# Wait for a background app without letting our own signal traps end this script
+# early: a TERM/INT trap makes `wait` return 128+signum the moment it fires, while
+# the app is still shutting down (the lifespan shutdown that records an in-flight
+# job as a server restart, #458, happens *during* it). Loop until the pid is really
+# gone, and report the status of the `wait` that saw it exit -- the interruption's
+# 143 is not the app's status, so a clean stop must not exit 143.
+_supervise_app() {
+    local app_pid="$1" status
+    while :; do
+        status=0
+        wait "$app_pid" || status=$?
+        kill -0 "$app_pid" 2>/dev/null || break
+    done
+    return "$status"
+}
+
+# Self-check hook for the `tox -e chart` env, argv-gated like --xdg-check: it runs
+# the real supervision function above against a child that ignores TERM until
+# <release> exists, then exits <code>. The child touches <ready> once its trap is
+# in place, so the harness cannot signal it in the startup window and read a 143
+# that is the child's own, not the interruption's.
+if [ "${1:-}" = "--wait-check" ]; then
+    _check_release="$2"
+    _check_code="$3"
+    bash -c "trap '' TERM; : > \"$4\"; while [ ! -f \"$_check_release\" ]; do sleep 0.01; done; exit $_check_code" &
+    _check_pid=$!
+    trap 'kill -TERM $_check_pid 2>/dev/null || true' TERM
+    status=0
+    _supervise_app "$_check_pid" || status=$?
+    exit "$status"
+fi
+
 # Cursor auth: create config dir (owned by runtime UID so chmod works)
 # and symlink auth.json to the PVC mount for persistence
 if [ -d /home/appuser/.cursor-auth ]; then
@@ -168,13 +200,10 @@ if [ "$SIDECAR_RUNNING" = true ]; then
     # job as a server restart (#458) happens *during* that shutdown. A bare `wait`
     # under errexit therefore exited this script, and as PID 1 it took the
     # container (and uvicorn, mid-write) with it: SIGTERM looked like a crash on
-    # the next boot. Keep waiting until the pid is really gone, then report the
-    # app's own status.
+    # the next boot. `_supervise_app` keeps waiting until the pid is really gone
+    # and reports the app's own status, never the interruption's.
     status=0
-    while :; do
-        wait "$APP_PID" || status=$?
-        kill -0 "$APP_PID" 2>/dev/null || break
-    done
+    _supervise_app "$APP_PID" || status=$?
     exit "$status"
 else
     if [ -n "$extra_args" ]; then

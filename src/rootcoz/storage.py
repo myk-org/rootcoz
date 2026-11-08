@@ -3985,6 +3985,20 @@ async def mark_jobs_failed_for_restart(job_ids: Sequence[str]) -> list[str]:
                 only_statuses=ORPHAN_STATUSES,
             ):
                 marked.append(job_id)
+        except asyncio.CancelledError:
+            # The shutdown budget expired mid-mark. ``asyncio.timeout`` cancels
+            # this await, and CancelledError is a BaseException, so the handler
+            # below cannot see it: without this line an operator has no record of
+            # why only some in-flight jobs carry the restart marker (#458).
+            logger.warning(
+                "Shutdown budget expired mid-mark: %d of %d in-flight job(s) were "
+                "recorded as a server restart before the deadline%s; the rest stay "
+                "for next-boot orphan recovery",
+                len(marked),
+                len(job_ids),
+                f" ({', '.join(marked)})" if marked else "",
+            )
+            raise
         except Exception:
             logger.exception(
                 f"job_id={job_id}: could not record it as a server-restart failure"
@@ -3998,10 +4012,13 @@ async def mark_jobs_failed_for_restart(job_ids: Sequence[str]) -> list[str]:
     return marked
 
 
-async def claim_submitted_job_for_analyze(job_id: str) -> bool:
+async def claim_submitted_job_for_analyze(job_id: str) -> tuple[str, str] | None:
     """Atomically claim a completed submitted job for in-place analyze.
 
-    Returns True only for the caller that flipped ``status`` to ``pending``.
+    Returns ``(previous_status, previous_failure_reason)`` only for the caller
+    that flipped ``status`` to ``pending``, and ``None`` for everyone else. The
+    snapshot travels with the claim so :func:`release_submitted_job_analyze_claim`
+    can put the row back exactly, reason included.
 
     The claim also clears ``failure_reason``: this row is about to be analyzed
     again, and a restart marker left on it (#458) would still be reported beside
@@ -4009,6 +4026,16 @@ async def claim_submitted_job_for_analyze(job_id: str) -> bool:
     """
     placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
     async with _connect_db() as db:
+        # One write transaction, so the snapshot is the row this claim takes: read
+        # outside it and a rival write between the two statements would be
+        # restored as if it never happened.
+        await db.execute("BEGIN IMMEDIATE")
+        row = await (
+            await db.execute(
+                "SELECT status, failure_reason FROM results WHERE job_id = ?",
+                (job_id,),
+            )
+        ).fetchone()
         cursor = await db.execute(
             f"""
             UPDATE results
@@ -4020,15 +4047,20 @@ async def claim_submitted_job_for_analyze(job_id: str) -> bool:
             (job_id, ANALYSIS_STATE_SUBMITTED, *ACTIVE_STATUSES),
         )
         await db.commit()
-        return cursor.rowcount == 1
+        if cursor.rowcount != 1 or row is None:
+            return None
+        return (str(row["status"] or "completed"), str(row["failure_reason"] or ""))
 
 
 async def release_submitted_job_analyze_claim(
-    job_id: str, previous_status: str
+    job_id: str, previous_status: str, previous_failure_reason: str
 ) -> None:
     """Restore a submitted job if analyze enqueue failed after claiming.
 
-    Uses the status from before the claim so a failed ingest stays ``failed``.
+    Restores the status *and* the reason the claim cleared, in one statement: a
+    row put back to ``failed`` with an empty reason no longer says why it failed,
+    which the docs read as a crash (#458). Uses the status from before the claim
+    so a failed ingest stays ``failed``.
     """
     restore_status = previous_status
     if not restore_status or restore_status in ACTIVE_STATUSES:
@@ -4037,12 +4069,17 @@ async def release_submitted_job_analyze_claim(
         await db.execute(
             """
             UPDATE results
-            SET status = ?
+            SET status = ?, failure_reason = ?
             WHERE job_id = ?
               AND status = 'pending'
               AND COALESCE(analysis_state, 'analyzed') = ?
             """,
-            (restore_status, job_id, ANALYSIS_STATE_SUBMITTED),
+            (
+                restore_status,
+                previous_failure_reason,
+                job_id,
+                ANALYSIS_STATE_SUBMITTED,
+            ),
         )
         await db.commit()
 

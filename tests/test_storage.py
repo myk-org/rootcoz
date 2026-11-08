@@ -1509,12 +1509,95 @@ class TestMarkJobsFailedForRestart:
                 {"analysis_state": ANALYSIS_STATE_SUBMITTED, "job_name": "raw"},
             )
             await storage.mark_jobs_failed_for_restart(["job-sub"])
-            claimed = await storage.claim_submitted_job_for_analyze("job-sub")
+            claim = await storage.claim_submitted_job_for_analyze("job-sub")
             row = await storage.get_result("job-sub")
 
-        assert claimed is True
+        # The claim reports what it overwrote, so a release can put it back.
+        assert claim == ("failed", storage.SERVER_RESTART_FAILURE_REASON)
         assert row["status"] == "pending"
         assert row["failure_reason"] == ""
+
+    @pytest.mark.parametrize(
+        ("restart_marked", "status", "reason"),
+        [
+            (False, "completed", ""),
+            (True, "failed", storage.SERVER_RESTART_FAILURE_REASON),
+        ],
+    )
+    async def test_a_released_claim_restores_the_status_and_the_reason(
+        self, setup_test_db: Path, restart_marked: bool, status: str, reason: str
+    ) -> None:
+        """Claim -> release puts back **both** columns the claim cleared (#458).
+
+        A release that restores only the status leaves a ``failed`` row whose
+        reason is empty -- the combination the docs read as a crash -- even though
+        the claim cleared a reason that was there.
+        """
+        from rootcoz.storage import ANALYSIS_STATE_SUBMITTED
+
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                "job-release",
+                "",
+                "running",
+                {"analysis_state": ANALYSIS_STATE_SUBMITTED, "job_name": "raw"},
+            )
+            if restart_marked:
+                await storage.mark_jobs_failed_for_restart(["job-release"])
+            else:
+                await storage.update_status("job-release", "completed")
+            claim = await storage.claim_submitted_job_for_analyze("job-release")
+            assert claim is not None
+            assert claim == (status, reason)
+            await storage.release_submitted_job_analyze_claim("job-release", *claim)
+            row = await storage.get_result("job-release")
+
+        assert row["status"] == status
+        assert row["failure_reason"] == reason
+
+    async def test_a_budget_cut_mark_logs_how_far_it_got(
+        self, setup_test_db: Path, storage_logs: Any
+    ) -> None:
+        """A cancelled mark must say why only some jobs carry the marker (#458).
+
+        ``asyncio.timeout`` cancels the await inside the mark; CancelledError is a
+        ``BaseException``, so the per-row ``except Exception`` cannot record it and
+        this warning is the only trace an operator gets. The cancellation itself
+        must still propagate.
+        """
+        real = storage.fail_job_without_result_write
+        seen: list[str] = []
+
+        async def _one_then_the_budget_ends(job_id: str, *args: Any, **kwargs: Any):
+            seen.append(job_id)
+            if len(seen) > 1:
+                raise asyncio.CancelledError
+            return await real(job_id, *args, **kwargs)
+
+        with (
+            patch.object(storage, "DB_PATH", setup_test_db),
+            patch.object(
+                storage, "fail_job_without_result_write", _one_then_the_budget_ends
+            ),
+        ):
+            for job_id in ("job-marked", "job-unmarked"):
+                await storage.save_result(job_id, "", "running")
+            with pytest.raises(asyncio.CancelledError):
+                await storage.mark_jobs_failed_for_restart(
+                    ["job-marked", "job-unmarked"]
+                )
+            marked = await storage.get_result("job-marked")
+            unmarked = await storage.get_result("job-unmarked")
+
+        assert marked["failure_reason"] == storage.SERVER_RESTART_FAILURE_REASON
+        assert unmarked["failure_reason"] == ""
+        warnings = [
+            record.getMessage()
+            for record in storage_logs.records
+            if record.levelno == logging.WARNING
+        ]
+        assert any("1 of 2 in-flight job(s)" in line for line in warnings), warnings
+        assert any("job-marked" in line for line in warnings), warnings
 
 
 @pytest.mark.asyncio

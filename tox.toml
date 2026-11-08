@@ -127,6 +127,43 @@ commands = [
     "-c",
     "D=/tmp/rootcoz-xdg-$$ && mkdir -p $D && touch $D/afile && ! XDG_CONFIG_HOME=$D/afile/config bash entrypoint.sh --xdg-check 2>$D/err && grep -qE \"XDG_CONFIG_HOME=$D/afile/config is not writable \\(uid=[0-9]+ gid=[0-9]+\\)\" $D/err && XDG_CONFIG_HOME=$D/cfg bash entrypoint.sh --xdg-check && [ -w $D/cfg ] && [ -z \"$(ls -A $D/cfg)\" ] && : > $D/cfg/probe && rm -rf $D",  # pragma: allowlist secret
   ],
+  # The wait loop's exit status (#458), driven through the shipped script: the
+  # `--wait-check` argv gate runs the real `_supervise_app` against a child that
+  # ignores TERM until <release> exists, then exits <code>. A TERM arriving while
+  # `wait` is interrupted must not become the exit code -- 0 for a clean stop (it
+  # used to report the interruption's 143) -- while a real death must still
+  # propagate as 7. The child touches <ready> itself, after ignoring TERM, so the
+  # signal cannot land in the child's startup window.
+  [
+    "sh",
+    "-c",
+    '''
+D=/tmp/rootcoz-wait-$$
+mkdir -p $D
+bash entrypoint.sh --wait-check $D/release-clean 0 $D/ready-clean &
+P=$!
+i=0
+while [ ! -f $D/ready-clean ] && [ $i -lt 1000 ]; do i=$((i+1)); sleep 0.01; done
+if [ ! -f $D/ready-clean ]; then echo "wait-check clean never entered the wait loop"; exit 1; fi
+kill -TERM $P
+: > $D/release-clean
+wait $P
+S=$?
+if [ $S -ne 0 ]; then echo "wait-check clean expected 0, got $S"; exit 1; fi
+bash entrypoint.sh --wait-check $D/release-crash 7 $D/ready-crash &
+P=$!
+i=0
+while [ ! -f $D/ready-crash ] && [ $i -lt 1000 ]; do i=$((i+1)); sleep 0.01; done
+if [ ! -f $D/ready-crash ]; then echo "wait-check crash never entered the wait loop"; exit 1; fi
+kill -TERM $P
+: > $D/release-crash
+wait $P
+S=$?
+if [ $S -ne 7 ]; then echo "wait-check crash expected 7, got $S"; exit 1; fi
+echo "wait-check clean=0 crash=7"
+rm -rf $D
+''',
+  ],
   # Probes are values, not template literals: 14 timing fields across three probes
   # (startup has no initialDelaySeconds — absent renders nothing and the API defaults
   # it to 0). Defaults are asserted for the two numbers that matter operationally

@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import socket
+import threading
 from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from types import SimpleNamespace
@@ -2290,6 +2291,66 @@ class TestAppLifespan:
 
         assert stored["failure_reason"] == storage.SERVER_RESTART_FAILURE_REASON
         assert exited == [0], "the shutdown must end the process, not return"
+
+    @pytest.mark.asyncio
+    async def test_shutdown_escapes_when_a_cancelled_task_leaves_reaper_work_running(
+        self, mock_settings, temp_db_path: Path, monkeypatch
+    ) -> None:
+        """A shielded reaper delete outlives the task that awaited it (#458).
+
+        ``cleanup_off_loop`` shields ``run_in_executor(_CLEANUP_POOL, ...)``, so the
+        drain reaps the task at once -- it is ``done()`` -- while the worker thread
+        keeps deleting. An escape keyed on unfinished tasks therefore skipped, the
+        lifespan returned, and interpreter/loop shutdown joined that thread past the
+        grace period. The reaper's own backlog is what has to decide.
+        """
+        from rootcoz import main, temp_paths
+
+        deleting = threading.Event()
+        release = threading.Event()
+
+        def _blocked_delete() -> None:
+            deleting.set()
+            release.wait(30)
+
+        async def _reaper_waiter() -> None:
+            await temp_paths.cleanup_off_loop("job-reap", _blocked_delete)
+
+        async def _nothing() -> None:
+            return None
+
+        exited: list[int] = []
+        monkeypatch.setattr(main, "SHUTDOWN_DRAIN_SECONDS", 0.2)
+        monkeypatch.setattr(main.os, "_exit", exited.append)
+        shed = asyncio.create_task(_reaper_waiter())
+        try:
+            with (
+                patch.object(main, "_compress_stored_results", _nothing),
+                patch.object(storage, "DB_PATH", temp_db_path),
+            ):
+                async with main.lifespan(main.app):
+                    await storage.save_result("job-reap", "http://j/1", "running")
+                    main._register_job_task("job-reap", shed)
+                    # The delete is on the reaper thread before the shutdown starts.
+                    await asyncio.wait_for(asyncio.to_thread(deleting.wait, 5), 5)
+                stored = await storage.get_result("job-reap")
+        finally:
+            release.set()
+            for task in [shed, *main._background_tasks]:
+                task.cancel()
+            await asyncio.gather(
+                *[shed, *main._background_tasks], return_exceptions=True
+            )
+            main._background_tasks.clear()
+            main._job_tasks.clear()
+            # Leave the single reaper worker idle for whatever runs next.
+            for _ in range(500):
+                if temp_paths.reaper_idle():
+                    break
+                await asyncio.sleep(0.01)
+
+        assert stored["failure_reason"] == storage.SERVER_RESTART_FAILURE_REASON
+        assert exited == [0], "the reaper's thread must not outlive the shutdown"
 
     @pytest.mark.asyncio
     async def test_a_backfill_writes_the_database_it_started_on(
@@ -18045,5 +18106,9 @@ def test_the_entrypoint_outlives_the_app_shutdown() -> None:
     """
     entrypoint = (Path(__file__).resolve().parents[1] / "entrypoint.sh").read_text()
 
-    assert 'wait "$APP_PID" || status=$?' in entrypoint
-    assert 'kill -0 "$APP_PID" 2>/dev/null || break' in entrypoint
+    assert '_supervise_app "$APP_PID" || status=$?' in entrypoint
+    assert 'wait "$app_pid" || status=$?' in entrypoint
+    assert 'kill -0 "$app_pid" 2>/dev/null || break' in entrypoint
+    # Reset per iteration: the interrupted wait's 143 must not survive the wait
+    # that sees the app exit cleanly. `tox -e chart` runs this loop for real.
+    assert "status=0\n        wait" in entrypoint
