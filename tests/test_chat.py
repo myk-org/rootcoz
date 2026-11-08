@@ -4637,6 +4637,16 @@ def test_a_sidecar_body_wearing_the_marker_is_never_forwarded():
         " whole upstream payload"
     )
     assert not ai_client._is_own_refusal_sentence(body)
+    # Wearing our exact wording is not enough either: the variable slots hold a
+    # pair and a status, so free text parked in one is still a body.
+    dressed = (
+        ai_client._REFUSAL_TEMPLATES[1]
+        .template.replace(
+            "$pair", "the key sk-live-EXAMPLE-1234 from the upstream payload"
+        )
+        .replace("$status", "500")
+    )
+    assert not ai_client._is_own_refusal_sentence(dressed)
 
     mapped = ai_client.format_chat_ai_user_error(
         body, is_admin=True, ai_provider="openai", ai_model="undeclared"
@@ -4654,6 +4664,10 @@ def test_a_sidecar_body_wearing_the_marker_is_never_forwarded():
     )
     assert "sk-live-EXAMPLE-1234" not in result.text
     assert result.text.startswith(ai_client.SESSION_REFUSAL_MARKER)
+
+    assert "sk-live-EXAMPLE-1234" not in ai_client.format_chat_ai_user_error(
+        dressed, is_admin=True, ai_provider="openai", ai_model="undeclared"
+    )
 
 
 @pytest.mark.parametrize(

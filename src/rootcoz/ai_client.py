@@ -625,14 +625,28 @@ _OWN_REFUSAL_SENTENCES = (
     f"{SESSION_REFUSAL_MARKER}: {_CURSOR_BROWSER_LOGIN_EXPIRED_HINT}",
     SESSION_UNSUPPORTED_REASON,
 )
-_OWN_REFUSAL_PATTERNS = tuple(
-    re.compile(
-        "^"
-        + ".+?".join(re.escape(part) for part in re.split(r"\$\w+", t.template))
-        + "$"
+# Each variable bounded to the shape ``_session_refusal`` can put there, so a
+# body cannot park free text in a variable slot and pass as our sentence.
+# ``$status`` renders ``None`` when the body carried no status.
+# shortcut: ``$pair`` is bounded to no-whitespace, upgrade only if a catalog
+# provider or model id ever contains a space.
+_REFUSAL_VARIABLES: dict[str, str] = {
+    "pair": r"\S+/\S*",
+    "status": r"(?:None|\d{3})",
+}
+
+
+def _refusal_pattern(template: Template) -> re.Pattern[str]:
+    """Compile a refusal template, bounding every variable to its real shape."""
+    parts = re.split(r"\$(\w+)", template.template)
+    pattern = "".join(
+        _REFUSAL_VARIABLES[part] if index % 2 else re.escape(part)
+        for index, part in enumerate(parts)
     )
-    for t in _REFUSAL_TEMPLATES
-)
+    return re.compile(f"^{pattern}$")
+
+
+_OWN_REFUSAL_PATTERNS = tuple(_refusal_pattern(t) for t in _REFUSAL_TEMPLATES)
 
 
 def _is_own_refusal_sentence(text: str) -> bool:
