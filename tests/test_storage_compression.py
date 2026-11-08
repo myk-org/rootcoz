@@ -684,9 +684,10 @@ async def test_a_batch_never_follows_the_path_to_a_replacement(
     """The reported shape: a pass given 1 row, its path swapped for a 5-row file.
 
     The swap lands between the read and the write of the first batch. A batch
-    that reconnects by path is handed the replacement and reports ``5 == 1``; the
-    pass holds the connection it opened, so it compresses the one row of the file
-    it was given and leaves all five rows of the replacement as they were.
+    that reconnects by path is handed the replacement and reports ``5 == 1``; this
+    pass holds the connection it opened *and* re-stats the path before committing,
+    so it rolls the batch back and stops instead of addressing its journal frames
+    to the replacement.
     """
     db_path = _storage
     await _insert_legacy("job-ours", _payload(failure_count=20))
@@ -708,15 +709,100 @@ async def test_a_batch_never_follows_the_path_to_a_replacement(
     with patch.object(storage, "_compress_result_rows", swap_on_the_first_batch):
         stats = await storage.backfill_result_json_compression(batch_size=1)
 
-    assert calls == 1, "the pass must have compressed the one row it opened"
-    assert stats["rows"] == 1, "the pass compressed the replacement's five rows"
+    assert calls == 1, "the pass must stop at the batch whose path moved"
+    assert stats["rows"] == 0, "the pass committed a batch into the replacement"
     assert db_path.read_bytes() == replacement_bytes, (
         "the sweep wrote into the database that replaced it"
     )
     assert _result_kinds(db_path) == ["text"] * 5
     assert [
         r.getMessage() for r in storage_logs.records if _STOPPED in r.getMessage()
-    ] == []
+    ] == [
+        (
+            f"result_json compression stopped: {db_path} is no longer the database"
+            " it started on"
+        )
+    ]
+
+
+async def test_a_swap_mid_pass_leaves_no_journal_beside_the_replacement(
+    tmp_path: Path, storage_logs
+) -> None:
+    """A swap mid-pass stops the pass where no journal can reach the replacement.
+
+    The connection is pinned to an inode, its ``-wal``/``-shm`` are named after the
+    path: a commit after a swap sends this pass's frames to the replacement, and
+    the next connection that opens it replays them into it. The bytes of the
+    replacement staying put is not the whole proof -- the journal beside it is,
+    because that is what its next opener would replay.
+    """
+    directory = tmp_path / "live"
+    directory.mkdir()
+    db_path = directory / "results.db"
+    replacement = tmp_path / "replacement.db"
+    with patch.object(storage, "DB_PATH", db_path):
+        await storage.init_db()
+        await _insert_legacy("job-live-1", _payload(failure_count=20))
+        await _insert_legacy("job-live-2", _payload(failure_count=20))
+        await storage.backfill_results_denorm()
+        replacement_bytes = await _detached_database(db_path, replacement, rows=3)
+
+        compress = storage._compress_result_rows
+        calls = 0
+
+        def swap_on_the_first_batch(rows: list, **kwargs: Any) -> list:
+            nonlocal calls
+            calls += 1
+            if calls == 1:  # the read is done, the commit has not gone out yet
+                replacement.replace(db_path)
+            return compress(rows, **kwargs)
+
+        with patch.object(storage, "_compress_result_rows", swap_on_the_first_batch):
+            stats = await storage.backfill_result_json_compression(batch_size=1)
+
+    assert calls == 1, "the pass must stop at the batch whose path moved"
+    assert stats["rows"] == 0, "the pass counted a batch it never committed"
+    assert db_path.read_bytes() == replacement_bytes, (
+        "the sweep wrote into the database that replaced it"
+    )
+    assert sorted(p.name for p in directory.iterdir()) == ["results.db"], (
+        "a -wal/-shm named after the path is a journal the replacement replays"
+    )
+    assert _result_kinds(db_path) == ["text"] * 3
+    assert "is no longer the database it started on" in storage_logs.text
+
+
+async def test_a_stopped_pass_reports_the_rows_it_kept_not_done(
+    _storage, storage_logs, tmp_path: Path
+) -> None:
+    """A pass that stops at a moved path reports its rows, never "done" (#473)."""
+    db_path = _storage
+    for index in range(3):
+        await _insert_legacy(f"job-stop-log-{index}", _payload(failure_count=20))
+    await storage.backfill_results_denorm()
+    replacement = tmp_path / "replacement.db"
+    await _detached_database(db_path, replacement, rows=4)
+
+    compress = storage._compress_result_rows
+    calls = 0
+
+    def swap_on_the_third_batch(rows: list, **kwargs: Any) -> list:
+        nonlocal calls
+        calls += 1
+        if calls == 3:
+            replacement.replace(db_path)
+        return compress(rows, **kwargs)
+
+    with patch.object(storage, "_compress_result_rows", swap_on_the_third_batch):
+        stats = await storage.backfill_result_json_compression(batch_size=1)
+
+    assert calls == 3
+    assert stats["rows"] == 2, "the two committed batches must still be counted"
+    assert "result_json compression: done" not in storage_logs.text
+    assert "result_json compression: stopped after 2 row(s) compressed" in (
+        storage_logs.text
+    )
+    assert "is no longer the database it started on" in storage_logs.text
 
 
 async def test_the_file_report_describes_the_connection_not_the_path(
@@ -735,12 +821,12 @@ async def test_the_file_report_describes_the_connection_not_the_path(
         conn.close()
     bigger_size = bigger.stat().st_size
 
-    async with storage._open_sweep_db(db_path, "report") as db:
-        assert db is not None
-        before = await storage._db_storage_report(db)
+    async with storage._open_sweep_db(db_path, "report") as sweep:
+        assert sweep is not None
+        before = await storage._db_storage_report(sweep.db)
         assert str(bigger_size) not in before  # sanity: the two sizes differ
         bigger.replace(db_path)
-        assert await storage._db_storage_report(db) == before
+        assert await storage._db_storage_report(sweep.db) == before
 
 
 @pytest.mark.parametrize("damage", ["unlink", "replace"])
@@ -750,9 +836,10 @@ async def test_a_database_damaged_between_batches_cannot_reach_the_pass(
     """A damaged path is not a new database: the pass keeps the one it holds.
 
     A per-batch reconnect either re-created the file a teardown unlinked or mined
-    the foreign one that took its place. This pass owns its descriptor, so both
-    rows of the file it opened are compressed, and the path it no longer resolves
-    is left exactly as the teardown made it.
+    the foreign one that took its place. The pass owns its descriptor, so the
+    batches it has committed stay in the file it opened -- and the batch whose
+    path now names a *file* is rolled back rather than committed into it, because
+    its journal is named after the path the foreign file now sits at.
     """
     db_path = _storage
     await _insert_legacy("job-stop-1", _payload(failure_count=20))
@@ -780,16 +867,18 @@ async def test_a_database_damaged_between_batches_cannot_reach_the_pass(
         stats = await storage.backfill_result_json_compression(batch_size=1)
 
     assert calls == 2, "the pass must have reached the second batch"
-    assert stats["rows"] == 2, "the pass must finish on the file it opened"
     if damage == "unlink":
+        assert stats["rows"] == 2, "the pass must finish on the file it opened"
         assert not db_path.exists(), "the sweep re-created the database that was gone"
         # The rows it committed are gone with the file: not a completed sweep.
         assert "stopped after 2 row(s) compressed" in storage_logs.text
         assert f"no file report: {db_path} is gone" in storage_logs.text
     else:
+        assert stats["rows"] == 1, "the pass committed a batch after the swap"
         assert db_path.read_bytes() == foreign_bytes, (
             "the sweep wrote to a foreign file"
         )
+        assert len([r for r in storage_logs.records if _STOPPED in r.getMessage()]) == 1
 
 
 async def test_a_sweep_refuses_a_database_swapped_while_it_opens(

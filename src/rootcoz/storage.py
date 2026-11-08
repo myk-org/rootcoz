@@ -246,10 +246,42 @@ def _sweep_stopped(name: str, path: Path) -> None:
     logger.info("%s stopped: %s is no longer the database it started on", name, path)
 
 
+@dataclass(slots=True)
+class _SweepDb:
+    """The file a sweep pass pinned, and whether it is still reachable by path."""
+
+    path: Path
+    db: aiosqlite.Connection
+    pinned: tuple[int, int]
+    # Set by a pass that stopped at a path which no longer names ``pinned``.
+    moved: bool = False
+
+
+def _sweep_path_still_pinned(sweep: _SweepDb) -> bool:
+    """Whether *sweep*'s path still names the file its connection holds.
+
+    A ``stat`` and never a reconnect: resolving the connection again would hand
+    the pass whatever file the path names now, which is the bug #473 removed.
+
+    SQLite names a connection's ``-wal``/``-shm`` after its *path*, while the
+    connection itself is pinned to an inode, so a commit after a swap addresses
+    this pass's journal frames to the replacement -- and the next process to open
+    that file replays them into it. Called before every batch commit, so a moved
+    path is a stop before anything is addressed to it.
+
+    A path that is *gone* counts as pinned: `_open_sweep_db` refuses to re-create
+    or re-open it, so the pass keeps writing to the file it holds and reports the
+    loss when it finishes. Only a file sitting at the path can be handed frames.
+    """
+    try:
+        st = sweep.path.stat()
+    except OSError:  # absent or unreadable: no other file to address frames to
+        return True
+    return (st.st_dev, st.st_ino) == sweep.pinned
+
+
 @asynccontextmanager
-async def _open_sweep_db(
-    db_path: Path, name: str
-) -> AsyncIterator[aiosqlite.Connection | None]:
+async def _open_sweep_db(db_path: Path, name: str) -> AsyncIterator[_SweepDb | None]:
     """The one connection a sweep pass runs every batch on.
 
     A pass that reconnected per batch resolved its database from the *path* each
@@ -262,6 +294,11 @@ async def _open_sweep_db(
     Only the open itself has a window, and it is checked on both sides of it
     against the path stat taken just before, so a swap landing inside the await
     is a stop rather than the file this connection is assumed to hold.
+
+    Yields that connection with the ``(st_dev, st_ino)`` it was opened for: the
+    batches run on the connection, but the *journal* is still named after the
+    path, so a pass that keeps committing across a swap hands its frames to the
+    replacement. The pin is what lets a batch tell the two apart.
 
     Yields ``None`` after the one-shot stop log when the file is not the
     database the pass was given: missing (``mode=rw`` cannot create it),
@@ -311,6 +348,7 @@ async def _open_sweep_db(
         await db.close()
         yield None
         return
+    sweep = _SweepDb(path=db_path, db=db, pinned=(before.st_dev, before.st_ino))
     try:
         await _configure_connection(db)
     except BaseException:
@@ -319,14 +357,17 @@ async def _open_sweep_db(
         await db.close()
         raise
     try:
-        yield db
+        yield sweep
     finally:
         # Fold this pass's frames back into the file the descriptor holds before
         # releasing it. A swap that landed during the pass leaves the ``-wal``
         # next to the replacement, and an uncheckpointed one would replay this
-        # pass's rows into that file on the next open.
-        with suppress(sqlite3.Error):
-            await (await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")).fetchall()
+        # pass's rows into that file on the next open. Skipped once the pass saw
+        # its path move: the ``-wal`` it would truncate is named after the path,
+        # so it may already be the replacement's journal, not this pass's.
+        if not sweep.moved:
+            with suppress(sqlite3.Error):
+                await (await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")).fetchall()
         await db.close()
 
 
@@ -1039,7 +1080,7 @@ def _denorm_row_params(
 
 
 async def _derive_denorm_pages(
-    db: aiosqlite.Connection,
+    sweep: _SweepDb,
     where: str,
     where_params: Sequence[Any],
     batch_size: int,
@@ -1047,7 +1088,8 @@ async def _derive_denorm_pages(
     """Derive one pending set, keyset-paged, one transaction per page.
 
     Every page runs on the pass's own connection, so a page can never be
-    resolved to a file the pass did not open.
+    resolved to a file the pass did not open. The file is re-stated before each
+    page commits, and a page whose path moved is rolled back rather than counted.
 
     Returns:
         Rows whose columns this pass actually rewrote.
@@ -1055,7 +1097,7 @@ async def _derive_denorm_pages(
     rowid = 0
     done = 0
     while True:
-        cursor = await db.execute(
+        cursor = await sweep.db.execute(
             "SELECT rowid AS rid, job_id, result_json FROM results"
             f" WHERE rowid > ? AND {where} ORDER BY rowid LIMIT ?",
             (rowid, *where_params, batch_size),
@@ -1065,10 +1107,16 @@ async def _derive_denorm_pages(
             return done
         rowid = rows[-1]["rid"]
         # Parsing a multi-MB payload must not stall /health (#402).
+        derived = 0
         for params in await asyncio.to_thread(_denorm_row_params, rows):
-            cursor = await db.execute(_RESULTS_DENORM_UPDATE_SQL, params)
-            done += cursor.rowcount
-        await db.commit()
+            cursor = await sweep.db.execute(_RESULTS_DENORM_UPDATE_SQL, params)
+            derived += cursor.rowcount
+        if not _sweep_path_still_pinned(sweep):
+            await sweep.db.rollback()
+            sweep.moved = True
+            return done
+        await sweep.db.commit()
+        done += derived
         logger.debug(
             "Migration: %d result(s) derived so far, cursor rowid=%d",
             done,
@@ -1105,9 +1153,10 @@ async def backfill_results_denorm(batch_size: int = 200) -> int:
     # One path and one connection for the whole pass: a DB_PATH rebind or a file
     # swapped in mid-sweep must not send the next page to another database.
     db_path = current_db_path()
-    async with _open_sweep_db(db_path, "denorm backfill") as db:
-        if db is None:
+    async with _open_sweep_db(db_path, "denorm backfill") as sweep:
+        if sweep is None:
             return 0
+        db = sweep.db
         cursor = await db.execute(
             "SELECT COUNT(*) FROM results WHERE"
             f" ({_DENORM_PENDING_BELOW}) OR ({_DENORM_PENDING_UNPROVEN})",
@@ -1120,12 +1169,21 @@ async def backfill_results_denorm(batch_size: int = 200) -> int:
             "Migration: deriving denormalized columns for %d results row(s)", pending
         )
         done = await _derive_denorm_pages(
-            db, _DENORM_PENDING_UNPROVEN, (_RESULTS_DENORM_VERSION,), batch_size
+            sweep, _DENORM_PENDING_UNPROVEN, (_RESULTS_DENORM_VERSION,), batch_size
         )
         # Second: rows an older build inserted and never derived at all.
-        done += await _derive_denorm_pages(
-            db, _DENORM_PENDING_BELOW, (_RESULTS_DENORM_VERSION,), batch_size
+        if not sweep.moved:
+            done += await _derive_denorm_pages(
+                sweep, _DENORM_PENDING_BELOW, (_RESULTS_DENORM_VERSION,), batch_size
+            )
+    if sweep.moved:
+        _sweep_stopped("denorm backfill", db_path)
+        logger.info(
+            "Migration: stopped after deriving %d results row(s); the last page was"
+            " rolled back, not committed",
+            done,
         )
+        return done
     logger.info("Migration: derived denormalized columns for %d results row(s)", done)
     return done
 
@@ -1208,9 +1266,10 @@ async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, i
     # DB_PATH, and a batch must read, write and report on the file this pass
     # opened rather than on whatever sits at the path when the batch runs.
     db_path = current_db_path()
-    async with _open_sweep_db(db_path, "result_json compression") as db:
-        if db is None:
+    async with _open_sweep_db(db_path, "result_json compression") as sweep:
+        if sweep is None:
             return stats
+        db = sweep.db
         if not await _migration_applied(db, _RESULTS_DENORM_KEY):
             logger.warning(
                 "result_json compression skipped: denormalized columns not derived"
@@ -1240,6 +1299,8 @@ async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, i
             if not params_page:
                 continue
             await db.execute("BEGIN IMMEDIATE")
+            page_rows = 0
+            page_bytes = 0
             for params in params_page:
                 # Compare-and-swap on the payload, not just on its type: a
                 # concurrent patch -- or a write from a pre-compression replica --
@@ -1247,18 +1308,42 @@ async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, i
                 # this statement writes are the ones derived from that text.
                 cursor = await db.execute(_RESULTS_DENORM_UPDATE_SQL, params)
                 if cursor.rowcount and params["frame"] is not None:
-                    stats["rows"] += 1
-                    stats["bytes_after"] += len(params["frame"]) - len(
-                        params["payload"].encode()
-                    )
+                    page_rows += 1
+                    page_bytes += len(params["frame"]) - len(params["payload"].encode())
+            # A stat, not a reconnect (#473): this connection's ``-wal`` is named
+            # after the path, so a COMMIT after a swap would address this batch's
+            # frames to the replacement, where the next opener replays them into
+            # it. Residual window, documented and not closed: the path can still
+            # move between this stat and the COMMIT below, so the guarantee is
+            # "the pass stops at the first batch whose path moved", never "a swap
+            # cannot land inside a batch".
+            if not _sweep_path_still_pinned(sweep):
+                await db.rollback()  # its rows were addressed to another file
+                sweep.moved = True
+                break
             await db.commit()
+            stats["rows"] += page_rows
+            stats["bytes_after"] += page_bytes
             logger.debug(
                 "result_json compression: %d row(s) so far, cursor rowid=%d",
                 stats["rows"],
                 rowid,
             )
-        on_disk_after = await _db_storage_report(db)
-        if db_path.exists():
+        if sweep.moved:
+            # Not "done": the batch that saw the swap was rolled back and the path
+            # names another database, so there is no file of ours to report.
+            _sweep_stopped("result_json compression", db_path)
+            logger.info(
+                "result_json compression: stopped after %d row(s) compressed,"
+                " %d -> %d bytes (the batch that found the path moved was rolled"
+                " back, no file report: %s names another database)",
+                stats["rows"],
+                stats["bytes_before"],
+                stats["bytes_after"],
+                db_path,
+            )
+        elif db_path.exists():
+            on_disk_after = await _db_storage_report(db)
             logger.info(
                 "result_json compression: done, %d row(s) compressed, %d -> %d bytes,"
                 " database %s -> %s",
