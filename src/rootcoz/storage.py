@@ -366,9 +366,30 @@ async def _open_sweep_db(db_path: Path, name: str) -> AsyncIterator[_SweepDb | N
         # truncating it folds those frames into the *descriptor's* inode instead
         # and leaves 0 B beside the path. So the truncation is what makes a swap
         # safe, and skipping it is the hazard.
-        with suppress(sqlite3.Error):
-            await (await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")).fetchall()
-        await db.close()
+        try:
+            with suppress(sqlite3.Error):
+                rows = await (
+                    await db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+                ).fetchall()
+                # (busy, frames in the journal, frames folded back). A checkpoint
+                # another connection holds busy leaves frames beside the path --
+                # the very journal the replacement replays -- so a pass that could
+                # not truncate must not read as a clean one.
+                if rows and (rows[0][0] or rows[0][1] != rows[0][2]):
+                    logger.warning(
+                        "%s: %s kept %s of %s journal frame(s) (checkpoint busy=%s);"
+                        " the next opener of that path may replay them",
+                        name,
+                        db_path,
+                        rows[0][1] - max(rows[0][2], 0),
+                        rows[0][1],
+                        rows[0][0],
+                    )
+        finally:
+            # Shutdown cancels the background sweep, so a cancel can land in the
+            # checkpoint above: a close it skipped would strand the connection's
+            # worker thread for the life of the process.
+            await db.close()
 
 
 # Primary (override) classifications — derived from the OverrideClassificationLiteral

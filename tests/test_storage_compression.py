@@ -780,6 +780,56 @@ async def test_a_swap_mid_pass_leaves_no_journal_beside_the_replacement(
     assert "is no longer the database it started on" in storage_logs.text
 
 
+async def test_a_cancelled_checkpoint_still_closes_the_connection(_storage) -> None:
+    """A shutdown cancel landing in the checkpoint must not skip the close (#473)."""
+    closed: list[bool] = []
+    real_close = storage.aiosqlite.Connection.close
+    real_execute = storage.aiosqlite.Connection.execute
+
+    async def close(self: Any) -> None:
+        closed.append(True)
+        await real_close(self)
+
+    async def execute(self: Any, sql: str, *args: Any, **kwargs: Any) -> Any:
+        if "wal_checkpoint" in sql:
+            raise asyncio.CancelledError  # the cancel that lands at shutdown
+        return await real_execute(self, sql, *args, **kwargs)
+
+    with (
+        patch.object(storage.aiosqlite.Connection, "close", close),
+        patch.object(storage.aiosqlite.Connection, "execute", execute),
+        pytest.raises(asyncio.CancelledError),
+    ):
+        async with storage._open_sweep_db(_storage, "cancelled"):
+            pass
+
+    assert closed == [True], "the cancelled pass left its connection open"
+
+
+async def test_a_busy_checkpoint_is_not_reported_as_a_clean_pass(
+    _storage, storage_logs
+) -> None:
+    """Frames a busy checkpoint could not fold back are logged, not swallowed."""
+    real_execute = storage.aiosqlite.Connection.execute
+
+    class _BusyCheckpoint:
+        async def fetchall(self) -> list[tuple[int, int, int]]:
+            return [(1, 4152, -1)]  # busy, 4152 frames in the journal, none folded
+
+    async def execute(self: Any, sql: str, *args: Any, **kwargs: Any) -> Any:
+        if "wal_checkpoint" in sql:
+            return _BusyCheckpoint()
+        return await real_execute(self, sql, *args, **kwargs)
+
+    with patch.object(storage.aiosqlite.Connection, "execute", execute):
+        async with storage._open_sweep_db(_storage, "busy") as sweep:
+            assert sweep is not None
+
+    assert "kept 4152 of 4152 journal frame(s) (checkpoint busy=1)" in (
+        storage_logs.text
+    ), "a pass that could not truncate its journal reported nothing"
+
+
 async def test_a_stopped_pass_reports_the_rows_it_kept_not_done(
     _storage, storage_logs, tmp_path: Path
 ) -> None:
