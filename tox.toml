@@ -44,7 +44,7 @@ change_dir = "frontend"
 [env.chart]
 description = "Helm chart lint and template smoke tests"
 skip_install = true
-allowlist_externals = ["helm", "sh", "curl", "tar", "mkdir"]
+allowlist_externals = ["helm", "sh", "curl", "tar", "mkdir", "bash"]
 passenv = ["PATH", "HOME"]
 set_env.PATH = "{env:HOME}/.local/bin:{env:PATH}"
 commands_pre = [
@@ -97,7 +97,7 @@ commands = [
   [
     "sh",
     "-c",
-    "OUT=/tmp/rootcoz-production-$$.yaml && helm template rootcoz chart/ -f chart/examples/values-openshift.yaml -f chart/examples/values-production.yaml --set ai.geminiApiKey=test-key --set admin.key=test-admin-key --set encryptionKey=test-encryption-key-for-helm-template-render > $OUT && [ \"$(grep -c 'memory: 32Gi' $OUT)\" = 2 ] && [ \"$(grep -c 'cpu: \"4\"' $OUT)\" = 2 ] && [ \"$(grep -c 'ephemeral-storage: 16Gi' $OUT)\" = 2 ] && grep -q 'sizeLimit: \"16Gi\"' $OUT && [ \"$(awk '/^      containers:/,/^      volumes:/' $OUT | grep -c 'mountPath: /tmp$')\" = 1 ] && [ \"$(awk '/^      initContainers:/,/^      containers:/' $OUT | grep -c 'mountPath: /tmp$')\" = 0 ] && rm -f $OUT",  # pragma: allowlist secret
+    "OUT=/tmp/rootcoz-production-$$.yaml && helm template rootcoz chart/ -f chart/examples/values-openshift.yaml -f chart/examples/values-production.yaml --set ai.geminiApiKey=test-key --set admin.key=test-admin-key --set encryptionKey=test-encryption-key-for-helm-template-render > $OUT && [ \"$(grep -c 'memory: 32Gi' $OUT)\" = 2 ] && [ \"$(grep -c 'cpu: \"4\"' $OUT)\" = 2 ] && [ \"$(grep -c 'ephemeral-storage: 16Gi' $OUT)\" = 2 ] && grep -q 'sizeLimit: \"16Gi\"' $OUT && ! grep -q '12Gi' $OUT && [ \"$(awk '/^      containers:/,/^      volumes:/' $OUT | grep -c 'mountPath: /tmp$')\" = 1 ] && [ \"$(awk '/^      initContainers:/,/^      containers:/' $OUT | grep -c 'mountPath: /tmp$')\" = 0 ] && rm -f $OUT",  # pragma: allowlist secret
   ],
   [
     "sh",
@@ -105,12 +105,23 @@ commands = [
     "OUT=/tmp/rootcoz-production-sidecar-$$.yaml && helm template rootcoz chart/ -f chart/examples/values-openshift.yaml -f chart/examples/values-sidecar-agent-fixture.yaml -f chart/examples/values-production.yaml --set ai.geminiApiKey=test-key --set admin.key=test-admin-key --set encryptionKey=test-encryption-key-for-helm-template-render > $OUT && grep -q 'copy-sidecar-agent' $OUT && [ \"$(awk '/^      initContainers:/,/^      containers:/' $OUT | grep -c 'mountPath: /tmp$')\" = 0 ] && [ \"$(awk '/^      initContainers:/,/^      containers:/' $OUT | grep -c 'TMPDIR')\" = 0 ] && [ \"$(grep -c 'mountPath: /tmp$' $OUT)\" = 1 ] && [ \"$(grep -c 'name: TMPDIR' $OUT)\" = 1 ] && rm -f $OUT",  # pragma: allowlist secret
   ],
   # The default render (chart/ with only the required flags, no overlay) is the
-  # baseline every install starts from: assert its resource block verbatim and
-  # that no ephemeral-storage (hence no /tmp emptyDir, sizeLimit or TMPDIR) is added.
+  # baseline every install starts from: assert its resource block verbatim, the
+  # /tmp emptyDir + sizeLimit + TMPDIR the defaults now carry (#402 C1), and the
+  # XDG_CONFIG_HOME value read out of values.yaml so a change there cannot strand
+  # the mount from the env var.
   [
     "sh",
     "-c",
-    "T='helm template rootcoz chart/ --set ai.provider=gemini --set ai.model=gemini-2.5-pro --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render' && OUT=/tmp/rootcoz-default-render-$$.yaml && $T > $OUT && EXP=$(printf '%s\\n' 'limits:' '  cpu: \"2\"' '  memory: 8Gi' 'requests:' '  cpu: \"1\"' '  memory: 4Gi') && GOT=$(sed -n '/^      containers:/,/^      volumes:/p' $OUT | sed -n '/^          resources:/,/^          volumeMounts:/p' | sed -e '1d' -e '$d' -e 's/^            //') && { [ \"$GOT\" = \"$EXP\" ] || { printf 'default render resources changed:\\n%s\\n' \"$GOT\"; exit 1; }; } && ! grep -q 'ephemeral-storage' $OUT && ! grep -q 'sizeLimit' $OUT && ! grep -q 'mountPath: /tmp$' $OUT && ! grep -q 'name: TMPDIR' $OUT && rm -f $OUT",  # pragma: allowlist secret
+    "T='helm template rootcoz chart/ --set ai.provider=gemini --set ai.model=gemini-2.5-pro --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render' && OUT=/tmp/rootcoz-default-render-$$.yaml && $T > $OUT && EXP=$(printf '%s\\n' 'limits:' '  cpu: \"2\"' '  ephemeral-storage: 12Gi' '  memory: 8Gi' 'requests:' '  cpu: \"1\"' '  ephemeral-storage: 12Gi' '  memory: 4Gi') && GOT=$(awk '/^      containers:/,/^      volumes:/' $OUT | sed -n '/^          resources:/,/^          volumeMounts:/p' | sed -e '1d' -e '$d' -e 's/^            //') && if [ \"$GOT\" != \"$EXP\" ]; then printf 'default render resources changed:\\n%s\\n' \"$GOT\"; exit 1; fi && [ \"$(grep -c 'ephemeral-storage: 12Gi' $OUT)\" = 2 ] && grep -q 'sizeLimit: \"12Gi\"' $OUT && [ \"$(grep -c 'mountPath: /tmp$' $OUT)\" = 1 ] && [ \"$(grep -c 'name: TMPDIR' $OUT)\" = 1 ] && P=$(sed -n 's/^ *xdgConfigHome: *//p' chart/values.yaml) && [ -n \"$P\" ] && awk '/^      containers:/,/^      volumes:/' $OUT | grep -q \"value: \\\"$P\\\"\" && rm -f $OUT",  # pragma: allowlist secret
+  ],
+  # Arbitrary-UID XDG_CONFIG_HOME, asserted on the shipped entrypoint (the `--xdg-check`
+  # argv gate stops it right after the bootstrap block). A path whose parent is a
+  # regular file fails for every UID including root (ENOTDIR), so the fail-loud branch
+  # is deterministic; a creatable path must be created and writable.
+  [
+    "sh",
+    "-c",
+    "D=/tmp/rootcoz-xdg-$$ && mkdir -p $D && touch $D/afile && ! XDG_CONFIG_HOME=$D/afile/config bash entrypoint.sh --xdg-check 2>$D/err && grep -qE \"XDG_CONFIG_HOME=$D/afile/config is not writable \\(uid=[0-9]+ gid=[0-9]+\\)\" $D/err && XDG_CONFIG_HOME=$D/cfg bash entrypoint.sh --xdg-check && [ -w $D/cfg ] && [ -z \"$(ls -A $D/cfg)\" ] && : > $D/cfg/probe && rm -rf $D",  # pragma: allowlist secret
   ],
   # Probes are values, not template literals: 14 timing fields across three probes
   # (startup has no initialDelaySeconds — absent renders nothing and the API defaults

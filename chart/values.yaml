@@ -111,12 +111,20 @@ persistence:
 resources:
   # Modest defaults for dev/evaluation clusters. For production AI workloads apply
   # chart/examples/values-production.yaml (4 CPU / 32Gi / 16Gi ephemeral-storage);
-  # sizing basis in chart/README.md. ephemeral-storage is optional and goes on both
-  # requests and limits — the limit also becomes the /tmp emptyDir sizeLimit
-  # (setting it mounts /tmp and rolls the pod once). "" drops a key, but a cleared
-  # request is not "no floor": Kubernetes copies the limit into the request, so
-  # requests.memory: "" still schedules for limits.memory. Clear both for a real
-  # no-floor pod (a LimitRange default also supplies the request).
+  # sizing basis in chart/README.md. ephemeral-storage defaults to 12Gi here and
+  # goes on both requests and limits — the limit is what caps /tmp: it becomes the
+  # /tmp emptyDir sizeLimit and adds TMPDIR=/tmp (so it mounts /tmp and rolls the
+  # pod once). 12Gi is a judgement from the configured ceilings (~3 GiB graph
+  # indexes + ~5.5 GiB concurrent clones + ~0.6 GiB artifacts + ~1 GiB writable
+  # layer ≈ 10 GiB, rounded up), not a measurement — the arithmetic is in
+  # chart/README.md. It is deliberately below the production profile's 16Gi so the
+  # overlay still means something and a default pod still schedules on a
+  # CRC-sized node. #402 C1 requires this cap by default.
+  # "" drops a key, but a cleared request is not "no floor": Kubernetes copies the
+  # limit into the request, so requests.memory: "" still schedules for
+  # limits.memory. Clear both for a real no-floor pod (a LimitRange default also
+  # supplies the request) — and clear both ephemeral-storage keys to drop the /tmp
+  # cap, since the limit alone mounts the volume.
   # Ownership: this chart owns the /tmp sizeLimit and derives it from
   # limits.ephemeral-storage — there is no separate workspace.sizeLimit key. #402 C1
   # puts the same emptyDir cap on the live deployment, so both must carry the same
@@ -124,9 +132,11 @@ resources:
   requests:
     cpu: "1"
     memory: 4Gi
+    ephemeral-storage: 12Gi
   limits:
     cpu: "2"
     memory: 8Gi
+    ephemeral-storage: 12Gi
 
 probes:
   # The probe timing fields the template renders come from here; the probe

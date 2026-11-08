@@ -6,7 +6,8 @@
        resolved once and reused for both the checksum and the envFrom gate. */ -}}
 {{- $credentials := include "rootcoz.credentialsSecretData" . -}}
 {{- /* Ephemeral-storage limit doubles as the /tmp emptyDir sizeLimit: one number,
-       no second key to keep in sync. Absent → no /tmp volume, no mount, no TMPDIR. */ -}}
+       no second key to keep in sync. Default 12Gi from values.yaml; absent only
+       after an explicit opt-out → no /tmp volume, no mount, no TMPDIR. */ -}}
 {{- $ephemeralLimit := "" -}}
 {{- with .Values.resources.limits -}}
 {{- $ephemeralLimit = index . "ephemeral-storage" | default "" -}}
