@@ -1,4 +1,5 @@
 import '@testing-library/jest-dom'
+import { MockEventSource } from './MockEventSource'
 
 // Node >= 22 ships experimental Web Storage globals that are inert unless the
 // process is started with --localstorage-file. Vitest's global sync copies
@@ -52,3 +53,7 @@ function ensureWebStorage(key: 'localStorage' | 'sessionStorage') {
 
 ensureWebStorage('localStorage')
 ensureWebStorage('sessionStorage')
+
+// jsdom has no EventSource and the chat/SSE components construct one, so every
+// suite gets this default. `??=` so a test that installs its own stub still wins.
+;(globalThis as unknown as { EventSource?: unknown }).EventSource ??= MockEventSource
