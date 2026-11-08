@@ -71,7 +71,7 @@ it('shows the duplicate repo names a 422 validation detail carries', async () =>
       ctx: { error: {} },
     }],
   }))
-  expect(await screen.findByText(/shared-infra/)).toBeInTheDocument()
+  expect(await screen.findByText('Two additional repos are named `shared-infra` — rename one.')).toBeInTheDocument()
   expect(screen.queryByText(GENERIC)).not.toBeInTheDocument()
 })
 

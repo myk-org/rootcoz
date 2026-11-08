@@ -20,6 +20,15 @@ import type { DefaultServerSettings } from '@/types'
 import { normalizeProvider } from '@/lib/aiProviders'
 import { useAuth } from '@/lib/auth'
 
+/** Submit-failure copy the user can act on; `null` when the API named nothing useful. */
+function submitErrorMessage(err: unknown): string | null {
+  // A 5xx detail is server internals, never something the user can fix.
+  if (!(err instanceof ApiError) || err.status >= 500) return null
+  const detail = extractApiDetail(err)
+  const duplicates = detail?.match(/^Duplicate additional repo names: (.+)$/)?.[1]
+  return duplicates ? `Two additional repos are named \`${duplicates}\` — rename one.` : detail
+}
+
 export function NewAnalysisPage() {
   const navigate = useNavigate()
   const { canUseServerProviders, canUseFreeProviders } = useAuth()
@@ -260,9 +269,7 @@ export function NewAnalysisPage() {
       }
     } catch (err) {
       console.error('Failed to submit analysis', err)
-      // A client error's detail names what to fix; a 5xx detail is server internals, so keep the generic copy.
-      const detail = err instanceof ApiError && err.status < 500 ? extractApiDetail(err) : null
-      setError(detail ?? 'Failed to submit analysis. Please try again.')
+      setError(submitErrorMessage(err) ?? 'Failed to submit analysis. Please try again.')
     } finally {
       setSubmitting(false)
     }
