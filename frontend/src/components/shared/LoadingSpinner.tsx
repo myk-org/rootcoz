@@ -14,6 +14,8 @@ const SIZES = {
 export function LoadingSpinner({ size = 'md', className }: LoadingSpinnerProps) {
   return (
     <div
+      role="status"
+      aria-label="Loading"
       className={cn(
         'animate-spin rounded-full border-signal-blue border-t-transparent',
         SIZES[size],

@@ -37,6 +37,19 @@ APPROVAL_STATUS_DETAILS: dict[str, str] = {
 }
 
 
+def is_approval_blocked(user_status: str | None) -> bool:
+    """Whether a users-row status blocks access until an admin acts.
+
+    Args:
+        user_status: The ``users.status`` value.
+
+    Returns:
+        True for ``pending`` and ``rejected`` — the states a session may exist
+        for but every gate refuses.
+    """
+    return (user_status or "") in APPROVAL_STATUS_DETAILS
+
+
 def account_block_reason(user: dict[str, Any] | None) -> str | None:
     """``"disabled"`` / ``"locked"`` for a row that must not log in (#379).
 
