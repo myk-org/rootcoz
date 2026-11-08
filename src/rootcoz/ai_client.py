@@ -13,6 +13,7 @@ import threading
 import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Mapping
+from contextlib import AsyncExitStack, suppress
 from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
@@ -22,9 +23,11 @@ from urllib.parse import quote
 
 import httpx
 from pi_sidecar_client import (
+    _STREAM_TERMINAL_EVENTS,
     AIResult,
     AITokenUsage,
     SidecarClient,
+    _iter_sse_events,
     _validate_api_key,
     get_sidecar_client,
     set_usage_recorder,
@@ -35,6 +38,14 @@ from pi_sidecar_client import list_models as _list_models_raw
 from rootcoz import get_child_logger
 
 logger = get_child_logger(__name__)
+
+# Below this length a key cannot be safely replaced inside model output, so a
+# fragment could leak it: such a turn never streams (see `_redact_key_echo`).
+_MIN_SAFE_REDACT_KEY = 8
+# How long to keep reading the events feed after the prompt answered. The feed's
+# keepalives reset httpx's per-read timeout, so without this bound a lost
+# `turn_end` frame would park the turn — and the per-user chat lock — forever.
+_STREAM_TERMINAL_GRACE_SECONDS = 5.0
 
 # Only explicitly initiated AI tasks set this; unrelated request tasks never inherit credentials.
 ai_username: ContextVar[str] = ContextVar("ai_username", default="")
@@ -2001,12 +2012,12 @@ def _is_lost_session_error(lower_detail: str) -> bool:
     )
 
 
-def _redact_key_echo(text: str | None, key: str) -> str | None:
+def _redact_key_echo(text: str | None, key: str | None) -> str | None:
     """Remove predictable renderings of a key from successful AI output."""
     if text is None or not key:
         return text
     # Legacy short keys are not safe for global replacement; never expose their output.
-    if len(key) < 8:
+    if len(key) < _MIN_SAFE_REDACT_KEY:
         return "[REDACTED]"
     encoded = key.encode()
     variants = {
@@ -2244,14 +2255,29 @@ async def delete_ai_session(client: SidecarClient, session_id: str) -> None:
 
 
 async def _prompt_safely(
-    client: SidecarClient, session_id: str, message: str, timeout: float | None
+    client: SidecarClient,
+    session_id: str,
+    message: str,
+    timeout: float | None,
+    on_delta: Callable[[str], None] | None = None,
+    redact_key: str | None = None,
 ) -> AIResult:
-    """Mirror the sidecar prompt result without logging untrusted response fields."""
+    """Mirror the sidecar prompt result without logging untrusted response fields.
+
+    The single prompt entry point: with ``on_delta`` it streams the turn through
+    ``_stream_prompt_safely`` (which falls back here for the blocking prompt), without
+    it the call is exactly today's POST.
+    """
+    if on_delta is not None:
+        return await _stream_prompt_safely(
+            client, session_id, message, timeout, on_delta, redact_key
+        )
     response = await client._client.post(
         f"/sessions/{session_id}/prompt",
         json={"message": message},
         timeout=timeout or client._client.timeout,
     )
+    status_code = response.status_code
     if response.status_code != 200:
         try:
             payload = response.json()
@@ -2262,7 +2288,7 @@ async def _prompt_safely(
             )
         except ValueError:
             error = response.text or f"HTTP {response.status_code}"
-        return AIResult(success=False, text=error, error=error)
+        return AIResult(success=False, text=error, error=error, status_code=status_code)
     data = response.json()
     usage_data = data.get("usage", {})
     usage = AITokenUsage(
@@ -2279,9 +2305,167 @@ async def _prompt_safely(
     error = data.get("error")
     if error:
         return AIResult(
-            success=False, text=data.get("text") or error, usage=usage, error=error
+            success=False,
+            text=data.get("text") or error,
+            usage=usage,
+            error=error,
+            status_code=status_code,
         )
-    return AIResult(success=True, text=data.get("text", ""), usage=usage)
+    return AIResult(
+        success=True, text=data.get("text", ""), usage=usage, status_code=status_code
+    )
+
+
+async def _stream_prompt_safely(
+    client: SidecarClient,
+    session_id: str,
+    message: str,
+    timeout: float | None,
+    on_delta: Callable[[str], None],
+    redact_key: str | None,
+) -> AIResult:
+    """Answer one turn, forwarding `text_delta` frames to ``on_delta``.
+
+    The prompt result is authoritative: usage, `status_code` and the redacted text
+    come from it, and only ``turn_end.text`` overrides the text. A feed that is
+    refused, breaks or ends early therefore costs fragments, never the answer.
+
+    Frames are correlated by `turnId`: turns on one session are serialized by the
+    caller's chat lock, but the *previous* turn's terminal can still be on the wire
+    when this turn opens the feed, so an earlier frame is dropped.
+    """
+    if redact_key and len(redact_key) < _MIN_SAFE_REDACT_KEY:
+        # Every fragment would be "[REDACTED]": do not stream this turn at all.
+        return await _prompt_safely(client, session_id, message, timeout)
+    async with AsyncExitStack() as stack:
+        try:
+            response = await stack.enter_async_context(
+                client._client.stream(
+                    "GET",
+                    f"/sessions/{session_id}/events",
+                    timeout=timeout or client._client.timeout,
+                )
+            )
+            response.raise_for_status()
+        except (httpx.HTTPError, httpx.StreamError, OSError) as exc:
+            # Milestone, and the fixed phrase E9 greps: type only — never the URL,
+            # a session body or a credential.
+            logger.info(
+                "Chat: sidecar events feed refused (%s), answering without fragments",
+                type(exc).__name__,
+            )
+            return await _prompt_safely(client, session_id, message, timeout)
+        prompt_task = asyncio.ensure_future(
+            _prompt_safely(client, session_id, message, timeout)
+        )
+        frames = _iter_sse_events(response).__aiter__()
+        # ONE frame future in flight; it is replaced only after its frame is consumed.
+        next_frame = asyncio.ensure_future(anext(frames))
+        loop = asyncio.get_running_loop()
+        terminal: dict[str, Any] | None = None
+        deadline: float | None = None
+        turn_id: Any = None
+        result: AIResult | None = None
+        try:  # one owner for the prompt task, from here to the end
+            while True:
+                # A finished prompt leaves the wait set, or the loop would spin.
+                waiters = (
+                    {next_frame} if prompt_task.done() else {next_frame, prompt_task}
+                )
+                wait_timeout = (
+                    None if deadline is None else max(0.0, deadline - loop.time())
+                )
+                done, _ = await asyncio.wait(
+                    waiters, timeout=wait_timeout, return_when=asyncio.FIRST_COMPLETED
+                )
+                if prompt_task in done:
+                    if prompt_task.cancelled() or prompt_task.exception() is not None:
+                        raise prompt_task.exception() or asyncio.CancelledError()
+                    verdict = prompt_task.result()
+                    if verdict.status_code not in (None, 200):
+                        # No turn of ours started: it emits no frame, so waiting on the
+                        # feed would only burn keepalives.
+                        next_frame.cancel()
+                        break
+                    # The answer is in hand; read only briefly for the terminal frame,
+                    # which is what tells an aborted turn from a finished one.
+                    deadline = deadline or loop.time() + _STREAM_TERMINAL_GRACE_SECONDS
+                if not done or (deadline is not None and loop.time() >= deadline):
+                    break  # grace spent: the prompt result is the reply
+                if next_frame not in done:
+                    continue  # prompt answered first: wait for the frame
+                try:
+                    frame = next_frame.result()
+                except StopAsyncIteration:
+                    break  # feed ended: the prompt result is the reply
+                except httpx.HTTPError, httpx.StreamError, OSError:
+                    break  # feed broke: the prompt result is the reply
+                next_frame = asyncio.ensure_future(anext(frames))
+                event_type = frame.get("type")
+                if event_type == "turn_start":
+                    turn_id = frame.get("turnId")  # latch: this turn, not a stale one
+                    continue
+                if frame.get("turnId") != turn_id:
+                    continue  # a previous turn's frame
+                if event_type == "text_delta":
+                    on_delta(_redact_key_echo(frame.get("delta"), redact_key) or "")
+                elif event_type in _STREAM_TERMINAL_EVENTS:
+                    if not prompt_task.done():
+                        # Pre-verdict terminal: hold it for our prompt and drop it when
+                        # our prompt never ran — then it belongs to another turn.
+                        await asyncio.wait({prompt_task})
+                        if (
+                            prompt_task.cancelled()
+                            or prompt_task.exception() is not None
+                        ):
+                            raise prompt_task.exception() or asyncio.CancelledError()
+                        if prompt_task.result().status_code not in (None, 200):
+                            break
+                    terminal = frame
+                    break
+            # Normal exits only: a prompt that already answered is never cancelled here
+            # (`turn_end` is written before the prompt answers), so its usage survives.
+            result = await prompt_task
+        except BaseException:
+            # Every other exit — a raising prompt, our own cancellation (job deletion,
+            # shutdown), an unexpected error — leaves without an AIResult while the
+            # sidecar's turn is still in flight. Stop it: no billing without a usage
+            # row, no "session is busy" on the next message.
+            if not prompt_task.done():
+                prompt_task.cancel()
+            await asyncio.gather(prompt_task, return_exceptions=True)
+            logger.info(
+                "Chat: aborted the sidecar turn after stream teardown, session=%s",
+                session_id,
+            )
+            with suppress(Exception):
+                await client.abort(session_id)
+            raise
+        finally:
+            if not next_frame.done():
+                next_frame.cancel()
+                await asyncio.gather(next_frame, return_exceptions=True)
+    if terminal is None:
+        return result
+    if terminal.get("type") == "error":
+        detail = str(terminal.get("message") or "AI call failed")
+        return AIResult(
+            success=False,
+            text=detail,
+            usage=result.usage,
+            error=detail,
+            status_code=result.status_code,
+        )
+    if terminal.get("aborted"):
+        return AIResult(
+            success=False,
+            text="Aborted by user.",
+            usage=result.usage,
+            error="Aborted by user.",
+            status_code=result.status_code,
+        )
+    result.text = str(terminal.get("text") or result.text)
+    return result
 
 
 async def _call_user_session(
@@ -2292,9 +2476,16 @@ async def _call_user_session(
     api_key: str | None = None,
     session_id: str | None = None,
     once: bool = False,
+    on_delta: Callable[[str], None] | None = None,
+    stream_redact_key: str | None = None,
     **kwargs: Any,
 ) -> AIResult:
-    """Avoid the sidecar convenience wrapper, which logs raw resumed-session errors."""
+    """Avoid the sidecar convenience wrapper, which logs raw resumed-session errors.
+
+    Also owns the delta seam: ``on_delta``/``stream_redact_key`` go to the one prompt
+    path, and every exit below keeps the correlation ids and the failure contract the
+    non-streaming call already had.
+    """
     client = get_sidecar_client()
     created = False
     try:
@@ -2316,7 +2507,12 @@ async def _call_user_session(
             raise ValueError("Missing AI session ID")
         timeout = kwargs.get("ai_call_timeout")
         result = await _prompt_safely(
-            client, session_id, prompt, timeout * 60.0 if timeout else None
+            client,
+            session_id,
+            prompt,
+            timeout * 60.0 if timeout else None,
+            on_delta=on_delta,
+            redact_key=stream_redact_key,
         )
         result.session_id = session_id
         # Correlation handle for recorded transcripts (#328): the JSONL
@@ -2361,6 +2557,7 @@ async def call_ai(
     *args: Any, ai_provider: str = "", ai_model: str = "", **kwargs: Any
 ) -> AIResult:
     """Call Pi-sidecar with a validated, unchanged catalog pair."""
+    on_delta: Callable[[str], None] | None = kwargs.pop("on_delta", None)
     provider, model = await resolve_catalog_pair(ai_provider, ai_model)
     # user key drives the credential source; a server key (#347) only
     # replaces the deployment's env/ambient credentials inside the session.
@@ -2449,10 +2646,23 @@ async def call_ai(
         server_key = await server_provider_key(provider)
         if key is None:
             key = server_key
+    # Computed once, here, where `key` is final (it is re-fetched for a resumed
+    # session above): the same local feeds the fragment seam and the finished text,
+    # so a fragment can never be redacted with a different key than the reply.
+    redact_key = key if key is not None else "" if session_id and username else None
+    if session_id and on_delta is not None:
+        # One prompt path for a resumed turn, whatever the credential source: the
+        # library `_call_ai` IS this POST for an existing session, and
+        # `_call_user_session` additionally owns the delta seam. Never resets
+        # `sidecar_call` for a turn without `on_delta` — a resumed user session must
+        # not fall back to the library wrapper `_call_user_session` exists to avoid.
+        sidecar_call = _call_user_session
+        kwargs["on_delta"] = on_delta
+        kwargs["stream_redact_key"] = redact_key
     result = await _call_with_safe_error(
         sidecar_call,
         *args,
-        redact_key=key if key is not None else "" if session_id and username else None,
+        redact_key=redact_key,
         ai_provider=provider,
         ai_model=model,
         **kwargs,

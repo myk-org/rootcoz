@@ -2,6 +2,7 @@ import { act, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { SSEProvider } from '@/lib/SSEProvider'
 import { useSSE } from '@/lib/useSSE'
+import { MockEventSource } from '@/test/MockEventSource'
 
 vi.mock('@/lib/auth', () => ({ useAuth: () => ({ authenticated: auth.authenticated }) }))
 
@@ -16,41 +17,6 @@ const EXPIRED_TEXT = /session expired/i
 
 /** Auth state the mocked useAuth reports — toggled to log out and back in. */
 const auth = vi.hoisted(() => ({ authenticated: true }))
-
-class MockEventSource {
-  static instances: MockEventSource[] = []
-  url: string
-  closed = false
-  onopen: (() => void) | null = null
-  onerror: (() => void) | null = null
-  /** Handlers still registered per event name — a removed one is gone for good. */
-  listeners = new Map<string, Set<(e: Event) => void>>()
-  constructor(url: string) {
-    this.url = url
-    MockEventSource.instances.push(this)
-  }
-  addEventListener(name: string, handler: (e: Event) => void) {
-    const handlers = this.listeners.get(name) ?? new Set()
-    handlers.add(handler)
-    this.listeners.set(name, handlers)
-  }
-  removeEventListener(name: string, handler: (e: Event) => void) {
-    this.listeners.get(name)?.delete(handler)
-  }
-  close() {
-    this.closed = true
-  }
-  /** Deliver an event the way a live stream would. */
-  emit(name: string, data: string) {
-    for (const handler of this.listeners.get(name) ?? []) handler({ data } as MessageEvent)
-  }
-  open() {
-    this.onopen?.()
-  }
-  fail() {
-    this.onerror?.()
-  }
-}
 
 /** The manager only opens a stream once something subscribes. */
 function Subscriber() {
