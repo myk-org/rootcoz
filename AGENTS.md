@@ -117,6 +117,18 @@ src/rootcoz/
   exporters/                # Exporter plugins (push results to external systems)
     base.py                 # Exporter ABC, ExportContext, ExporterResult
     reportportal.py         # Report Portal exporter: ReportPortalClient
+  auth/                     # Authentication strategies (request → identity)
+    base.py                 # AuthStrategy ABC, AuthContext, AuthIdentity, cookie names +
+                            # read/set/clear helpers, reserved admin username,
+                            # bootstrap-admin check, role/admin and session→identity mapping
+    registry.py             # AUTH_CHAIN, build_chain, resolve_identity, may_replace (the
+                            # only place the override policy is stated)
+    session.py              # rootcoz_session cookie + sliding-window renewal
+    api_key.py              # Authorization: Bearer (ADMIN_KEY, user key, session token)
+    proxy.py                # X-Forwarded-User under TRUST_PROXY_HEADERS + /login redirect
+    password.py             # POST /api/auth/login credential verification (not in the chain)
+    approval.py             # status-gate decisions: pending/rejected body, account-block
+                            # reason; the refusal itself is applied by main
   prow_validation.py        # Canonical Prow validators (+ URL helper re-exports for compatibility)
   url_utils.py              # Cross-cutting HTTP(S) URL sanitization (strip userinfo, href)
   main.py                   # FastAPI app, unified POST /analyze endpoint, background tasks
@@ -139,7 +151,7 @@ src/rootcoz/
   ...                       # Other modules (jira, github_issues, monitoring, etc.)
 ```
 
-**Dependency direction:** `main` → `sources/` + `engine/` + `exporters/`. `sources/` → `engine/`. `engine/` does NOT import `sources/` or `exporters/`. `engine/core.py` has a lazy import of `peer_analysis` (only when `peer_ai_configs` is set). Adding a new CI plugin means adding a file under `sources/` and registering it in `sources/registry.py`. Adding a new exporter means adding a file under `exporters/` and updating `_create_exporter()` in `main.py`. `engine/core.py` stays untouched.
+**Dependency direction:** `main` → `sources/` + `engine/` + `exporters/` + `auth/`. `sources/` → `engine/`. `auth/` → `storage` + `config` + `fastapi` + package logging only, and does **not** import `main` (main imports it). `engine/` does NOT import `sources/` or `exporters/`. `engine/core.py` has a lazy import of `peer_analysis` (only when `peer_ai_configs` is set). Adding a new CI plugin means adding a file under `sources/` and registering it in `sources/registry.py`. Adding a new exporter means adding a file under `exporters/` and updating `_create_exporter()` in `main.py`. Adding a new auth mechanism means adding a strategy module under `auth/` and registering it in `auth/registry.AUTH_CHAIN` — the approval gate stays in `auth/approval.py`, never in a strategy. `engine/core.py` stays untouched.
 
 ### Frontend Patterns
 
