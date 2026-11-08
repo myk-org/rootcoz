@@ -1562,6 +1562,41 @@ class TestAnalysisWindow:
         assert restored["status"] == "completed"
         assert restored["failure_reason"] == ""
 
+    async def test_a_failed_analyze_attempt_stamps_its_own_end(
+        self, setup_test_db: Path
+    ) -> None:
+        """The claim clears both stamps, so the failed attempt writes its own end.
+
+        Otherwise the row keeps neither the ingest window nor the new attempt's,
+        and everything reading ``_stored_analysis_timestamp`` falls back to the
+        job's creation time — the ingest submission, hours earlier.
+        """
+        from rootcoz.storage import ANALYSIS_STATE_SUBMITTED
+
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                "job-fails",
+                "",
+                "completed",
+                {"analysis_state": ANALYSIS_STATE_SUBMITTED, "job_name": "raw"},
+            )
+            async with aiosqlite.connect(setup_test_db) as db:
+                await db.execute(
+                    "UPDATE results SET analysis_started_at = ?, completed_at = ? "
+                    "WHERE job_id = 'job-fails'",
+                    (_stamp(86400), _stamp(82800)),
+                )
+                await db.commit()
+
+            assert await storage.claim_submitted_job_for_analyze("job-fails")
+            await storage.update_status("job-fails", "failed")
+            failed = await storage.get_result("job-fails")
+
+        assert failed["status"] == "failed"
+        assert failed["completed_at"] is not None
+        assert failed["completed_at"] != _stamp(82800), "the ingest end, not this run's"
+        assert storage.elapsed_seconds_since(failed["completed_at"]) == 0
+
     async def test_oldest_running_analysis_started_at_is_none_without_running_rows(
         self, setup_test_db: Path
     ) -> None:

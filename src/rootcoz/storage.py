@@ -3559,7 +3559,10 @@ def _build_status_update_clause(status: str) -> tuple[list[str], list[Any]]:
         set_parts.append(
             "analysis_started_at = COALESCE(analysis_started_at, CURRENT_TIMESTAMP)"
         )
-    if status == "completed":
+    if status in {"completed", "failed"}:
+        # A failed attempt ended too: without this stamp, an ingest-then-analyze
+        # job that fails before reaching ``running`` has no end time at all and
+        # its report falls back to the creation time (#464).
         set_parts.append("completed_at = COALESCE(completed_at, CURRENT_TIMESTAMP)")
 
     return set_parts, params

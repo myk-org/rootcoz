@@ -173,6 +173,17 @@ def test_recovery_is_announced_once_with_its_duration(
     assert _fresh_monitor.evaluate(_sample(480.0), THRESHOLDS) == []
 
 
+def test_a_recovery_does_not_share_the_alert_subject(
+    _fresh_monitor: HealthMonitor,
+) -> None:
+    """The subject alone tells an outage from its recovery, without opening it."""
+    _fresh_monitor.evaluate(_sample(0.0, health_up=0), THRESHOLDS)
+    firing = _fresh_monitor.evaluate(_sample(300.0, health_up=0), THRESHOLDS)
+    recovery = _fresh_monitor.evaluate(_sample(420.0), THRESHOLDS)
+    assert firing[0].subject == "[rootcoz Alert] health_down"
+    assert recovery[0].subject == "[rootcoz Recovery] health_down"
+
+
 def test_a_condition_that_clears_before_the_duration_never_fires(
     _fresh_monitor: HealthMonitor,
 ) -> None:
@@ -299,8 +310,9 @@ def test_error_rate_needs_the_minimum_request_volume_and_names_its_threshold(
         "✅ rootcoz server error rate back below the 10% threshold after 12m"
     )
 
-    # The window edge: 9 requests at 100 % cannot judge, an empty window cannot
-    # either, and 9 requests at 0 % is the one reading that clears.
+    # The window edge: below the floor no share judges either way, so neither a
+    # 100 % share nor one lone success moves the state -- a single request must
+    # not clear the alert the full window raised.
     monitor = HealthMonitor()
     for now in range(0, 601, 60):
         monitor.evaluate(_sample(float(now), rate=0.14, requests=10), THRESHOLDS)
@@ -309,7 +321,9 @@ def test_error_rate_needs_the_minimum_request_volume_and_names_its_threshold(
     assert monitor.state("error_rate").firing
     assert monitor.evaluate(_sample(720.0, rate=0.0, requests=0), THRESHOLDS) == []
     assert monitor.state("error_rate").firing
-    cleared = monitor.evaluate(_sample(780.0, rate=0.0, requests=9), THRESHOLDS)
+    assert monitor.evaluate(_sample(780.0, rate=0.0, requests=1), THRESHOLDS) == []
+    assert monitor.state("error_rate").firing
+    cleared = monitor.evaluate(_sample(840.0, rate=0.0, requests=10), THRESHOLDS)
     assert [(event.key, event.firing) for event in cleared] == [("error_rate", False)]
 
     # An unjudgeable stretch neither starts, accrues nor clears a hold.
@@ -467,7 +481,10 @@ async def test_a_raising_sample_does_not_kill_the_loop(
     assert len(calls) > 1, "the loop kept running after the failing tick"
     assert _fresh_monitor.last_sample is not None
     assert dispatched.await_count == 1
-    assert dispatched.await_args.kwargs == {"bypass_throttle": True}
+    assert dispatched.await_args.kwargs == {
+        "subject": "[rootcoz Alert] health_down",
+        "bypass_throttle": True,
+    }
 
     # Second case: the settings read itself raises for one slice.
     _fresh_monitor.reset()
@@ -538,7 +555,10 @@ async def test_run_loop_dispatches_transitions_and_stops_on_cancel(
     assert sampled[:6] == [0.0, 60.0, 120.0, 180.0, 240.0, 300.0]
     assert dispatched.await_count == 1
     assert dispatched.await_args.args[0] == "health_monitor_health_down"
-    assert dispatched.await_args.kwargs == {"bypass_throttle": True}
+    assert dispatched.await_args.kwargs == {
+        "subject": "[rootcoz Alert] health_down",
+        "bypass_throttle": True,
+    }
     assert "unhealthy" in dispatched.await_args.args[1]
 
     after = dispatched.await_count
@@ -574,6 +594,45 @@ async def test_the_sampling_cadence_is_the_interval_not_the_slice(
 
     assert fake.slices >= 37
     assert calls == [0.0, 60.0, 120.0, 180.0], "t=180 was reached, and sampled once"
+
+
+async def test_shortening_the_interval_samples_at_the_new_one(
+    monkeypatch: pytest.MonkeyPatch, _fresh_monitor: HealthMonitor
+) -> None:
+    """A 3600 s interval cut to 5 s must not still wait out the hour.
+
+    The deadline is anchored to the previous sample plus the *old* interval, so
+    re-reading the interval alone would report the new one and keep the old wait.
+    """
+    settings = _settings(
+        enable_health_monitor=True, health_monitor_interval_seconds=3600
+    )
+    monkeypatch.setattr(hm, "get_settings", lambda: settings)
+    monkeypatch.setattr(hm, "dispatch_alert", AsyncMock())
+
+    fake = _FakeTime(5.0)
+    calls: list[float] = []
+    done = asyncio.Event()
+
+    async def _sampler() -> HealthSample:
+        calls.append(fake.now())
+        return _sample(fake.now())
+
+    async def _sleep(seconds: float) -> None:
+        await fake.sleep(seconds)
+        if fake.slices == 2:
+            settings.health_monitor_interval_seconds = 5
+        if fake.slices >= 6:
+            done.set()
+
+    task = asyncio.create_task(
+        hm.run_health_monitor(sampler=_sampler, sleep=_sleep, clock=fake.now)
+    )
+    await _stop(task, done)
+
+    assert calls[:2] == [0.0, 15.0], (
+        "sampled again one new-interval later, not at the old hour deadline"
+    )
 
 
 # ---------------------------------------------------------------------------

@@ -110,6 +110,11 @@ class HealthEvent:
         """The throttle/email subject key for this condition."""
         return f"health_monitor_{self.key}"
 
+    @property
+    def subject(self) -> str:
+        """The email subject — a recovery must not read like the alert it clears."""
+        return f"[rootcoz {'Alert' if self.firing else 'Recovery'}] {self.key}"
+
     def message(self) -> str:
         """The notification text, built from this event and its thresholds only."""
         held = _format_duration(self.held_seconds)
@@ -234,17 +239,12 @@ class HealthMonitor:
         if key == "health_down":
             return sample.health_up == 0
         if key == "error_rate":
-            if sample.requests_in_window == 0:
-                # An empty window measures nothing — and an idle or a down server
-                # produces exactly one.
-                return None
-            if sample.server_error_rate <= thresholds.error_rate:
-                return False
             if sample.requests_in_window < ERROR_RATE_MIN_REQUESTS:
-                # Nobody can judge nine requests; a draining storm is not a
-                # recovery, so this is neither true nor false.
+                # Below the floor the window measures nothing either way: an idle
+                # or a down server produces a handful of requests, so one lone
+                # success must not clear the alert the full window raised.
                 return None
-            return True
+            return sample.server_error_rate > thresholds.error_rate
         if not sample.age_known:
             return None
         age = sample.running_analysis_age_seconds
@@ -383,12 +383,14 @@ async def run_health_monitor(
     A disabled monitor samples nothing and resets its state on every slice, so a
     toggle never announces a recovery for an alert it dropped. An observed
     disabled→enabled transition re-arms ``next_due``, so a fresh enable samples on
-    its first slice instead of waiting out a deadline left from a previous interval.
+    its first slice instead of waiting out a deadline left from a previous interval,
+    and a changed interval re-anchors it for the same reason.
 
     Cancelling the task is the shutdown: ``CancelledError`` is re-raised before the
     per-tick handler, and one bad sample never ends the loop.
     """
     was_enabled: bool | None = None
+    last_interval: float | None = None
     next_due = clock()
     logger.debug(
         "Health monitor loop running (settings poll every %.0fs)",
@@ -409,6 +411,11 @@ async def run_health_monitor(
                     next_due = clock()
                     logger.info("Health monitor enabled (interval %ds)", int(interval))
                 was_enabled = True
+                if interval != last_interval:
+                    # A changed interval re-anchors the deadline: left from a 1 h
+                    # interval, a shortened one would still wait out the hour.
+                    next_due = min(next_due, clock() + interval)
+                    last_interval = interval
                 if clock() >= next_due:
                     sample = await sampler()
                     thresholds = Thresholds.from_settings(settings)
@@ -422,7 +429,10 @@ async def run_health_monitor(
                         # bypass_throttle: the state machine is the dedup, and a
                         # cooldown on top of it can drop a recovery.
                         await dispatch_alert(
-                            event.event_type, event.message(), bypass_throttle=True
+                            event.event_type,
+                            event.message(),
+                            subject=event.subject,
+                            bypass_throttle=True,
                         )
                     next_due = sample.now + interval
             await sleep(min(interval, _SETTINGS_POLL_SECONDS))
