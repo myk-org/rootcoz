@@ -752,6 +752,37 @@ class Settings(BaseSettings):
         ),
     )
 
+    # Application log file bound and free-space floor (#481). ``0`` means
+    # "derive it from the filesystem holding the data directory" in all three:
+    # one documented sentinel that keeps the field an int. Applied at runtime.
+    log_max_bytes: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Bytes per application log file before rotation. 0 derives it from "
+            "the filesystem holding the data directory (1% of its capacity, "
+            "never above 104857600)."
+        ),
+    )
+    log_backup_count: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Rotated application log files kept. 0 derives it (4-20), from the "
+            "filesystem holding the data directory."
+        ),
+    )
+    log_min_free_bytes: int = Field(
+        default=0,
+        ge=0,
+        description=(
+            "Free bytes below which the application log file stops accepting "
+            "records, on the filesystem holding the data directory. 0 derives "
+            "it (5% of capacity, 33554432-536870912). Console logging is "
+            "unaffected."
+        ),
+    )
+
     # --- Sidecar settings (#347) ---
     # The sidecar starts once at container boot; these DB overrides reach it
     # through the /data/pi-sidecar/env bridge the entrypoint sources. Empty

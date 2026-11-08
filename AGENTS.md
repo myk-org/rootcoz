@@ -425,7 +425,17 @@ from `rootcoz.main`'s module body); every module logger receives that same insta
 records reach both the console (stderr) and `<data dir>/logs/rootcoz.log`, with identical text and
 the `[job_id=…]` prefix. Never pass `filename=` to a module logger, never create a second handler,
 and never install a second formatter — the file is not a parallel logging pipeline. The CLI and the
-test suite never enable it. Hardening the file's size bound and permissions is #481.
+test suite never enable it.
+
+The file is bounded, permission-hardened and floor-guarded on whichever filesystem holds the data
+directory (#481). The budget is **1 %** of that filesystem's capacity split over a derived backup
+count, capped at the historical 100 MiB per file x 21 files, and derived from capacity rather than
+free space so filling the disk cannot rotate away the evidence. Free space below 5 % (clamped to
+32 MiB…512 MiB) pauses file logging with one root-level WARNING and one INFO on recovery — the
+console keeps flowing, and a failing probe fails open. `logs/` is created `0770` and the file
+`0660` on **every** open (rollovers re-create it), because group-write is what survives a restart
+under a different UID. `log_max_bytes`, `log_backup_count` and `log_min_free_bytes` tune the three
+numbers, `0` means "derive", and `main._apply_log_file_settings()` rebuilds the handler at runtime.
 
 ## API Design
 
