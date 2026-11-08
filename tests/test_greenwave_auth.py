@@ -15,7 +15,11 @@ import httpx
 import pytest
 from pydantic import SecretStr
 
-from rootcoz.config import Settings
+from rootcoz.config import (
+    Settings,
+    greenwave_token_shape_error,
+    is_sendable_bearer_value,
+)
 from rootcoz.exporters.base import ExporterPrerequisiteError
 from rootcoz.exporters.greenwave_auth import (
     GreenwaveAuthError,
@@ -301,6 +305,30 @@ class TestOidcMode:
             pytest.raises(GreenwaveAuthError, match="HTTP 500"),
         ):
             await _get_with(strategy.auth, handler)
+
+    async def test_token_with_a_control_character_never_reaches_a_header(self):
+        """An access token a header cannot carry is refused before it is used."""
+        strategy = build_greenwave_auth(_oidc_settings())
+        sent: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/token"):
+                return httpx.Response(
+                    200,
+                    json={"access_token": "leak-me\ntoken", "expires_in": 3600},
+                )
+            sent.append(request.headers.get("Authorization", ""))
+            return httpx.Response(200, json={})
+
+        with (
+            _patched_token_client(handler),
+            pytest.raises(GreenwaveAuthError) as excinfo,
+        ):
+            await _get_with(strategy.auth, handler)
+        assert "unusable" in str(excinfo.value)
+        # Neither the token nor a mangled attempt reached the wire or the text.
+        assert "leak-me" not in str(excinfo.value)
+        assert sent == []
 
     async def test_error_messages_never_contain_the_secret(self):
         strategy = build_greenwave_auth(_oidc_settings())
@@ -619,6 +647,27 @@ class TestKerberosMode:
             strategy = build_greenwave_auth(_kerberos_settings())
             await _get_with(strategy.auth, handler)
 
+    async def test_malformed_negotiate_challenge_is_an_auth_error(self):
+        """A challenge this client cannot decode fails as auth, not as a crash.
+
+        The decode used to sit outside the block that converts failures into
+        GreenwaveAuthError, so the connection test reported an unexpected
+        exception with no auth-specific diagnostic.
+        """
+        record = fresh_spnego_record()
+        fake = fake_spnego_module(record)
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            # 5 base64 characters cannot be decoded: the padding is impossible.
+            return httpx.Response(401, headers={"WWW-Authenticate": "Negotiate abcde"})
+
+        with (
+            patch.dict(sys.modules, {"spnego": fake}),
+            pytest.raises(GreenwaveAuthError, match="malformed Negotiate challenge"),
+        ):
+            strategy = build_greenwave_auth(_kerberos_settings())
+            await _get_with(strategy.auth, handler)
+
     async def test_missing_pyspnego_is_a_configuration_error(self):
         # sys.modules["spnego"] = None makes `import spnego` raise ImportError.
         with (
@@ -629,6 +678,29 @@ class TestKerberosMode:
 
 
 class TestBuildErrors:
+    @pytest.mark.parametrize(
+        ("value", "sendable"),
+        [
+            ("", False),
+            ("abc123", True),
+            # A JWT: dots, dashes, underscores and base64 padding.
+            ("eyJhbGciOi.eyJzdWIi-a_b==", True),
+            # Space, DEL, control char and non-ASCII are all unusable.
+            ("two words", False),
+            ("del\x7fchar", False),
+            ("line\nbreak", False),
+            ("tök", False),
+        ],
+    )
+    def test_sendable_bearer_value_boundaries(self, value: str, sendable: bool):
+        """Pin the header-value rule at its edges, not only at one input.
+
+        A future loosening of the range must fail a test: the accepted side
+        covers the two shapes real IdPs emit (opaque and JWT), the rejected
+        side covers what a header cannot carry and what would be mangled.
+        """
+        assert is_sendable_bearer_value(value) is sendable
+
     def test_unset_mode_rejected(self):
         with pytest.raises(ExporterPrerequisiteError, match="No Greenwave auth method"):
             build_greenwave_auth(_settings(greenwave_url=RESULTSDB_URL))
@@ -659,6 +731,98 @@ class TestBuildErrors:
             build_greenwave_auth(settings)
         for name in missing:
             assert name in str(excinfo.value)
+
+    @pytest.mark.parametrize(
+        ("token", "setting"),
+        [
+            # A control character inside the value: `Settings` strips the
+            # surrounding blanks, not an embedded one, so this is the shape
+            # that would reach HTTPX and be quoted back in an exception.
+            ("tok\nen-value", "GREENWAVE_API_TOKEN"),
+            # Whitespace cannot appear in a bearer credential at all.
+            ("two words", "GREENWAVE_API_TOKEN"),
+        ],
+    )
+    def test_bearer_token_that_cannot_be_a_header_is_refused(
+        self, token: str, setting: str
+    ):
+        """The configured bearer token is held to the header rule too.
+
+        The OIDC fetch validates a remote token; an admin-supplied one goes
+        into the same kind of header, so it gets the same rule.
+        """
+        settings = _settings(
+            greenwave_url=RESULTSDB_URL,
+            greenwave_auth_mode="bearer",
+            greenwave_api_token=SecretStr(token),
+        )
+        with pytest.raises(ExporterPrerequisiteError) as excinfo:
+            build_greenwave_auth(settings)
+        assert setting in str(excinfo.value)
+        assert token not in str(excinfo.value)
+
+    def test_waiver_bearer_token_that_cannot_be_a_header_is_refused(self):
+        """WaiverDB's own token is validated on the path that uses it."""
+        settings = _settings(
+            greenwave_url=RESULTSDB_URL,
+            greenwave_waiver_url="https://waiverdb.example.com",
+            greenwave_auth_mode="bearer",
+            greenwave_api_token=SecretStr("rdb-token"),  # pragma: allowlist secret
+            greenwave_waiver_token=SecretStr(
+                "waiver\ntoken"
+            ),  # pragma: allowlist secret
+        )
+        with pytest.raises(ExporterPrerequisiteError) as excinfo:
+            build_greenwave_waiver_auth(settings)
+        assert "GREENWAVE_WAIVER_TOKEN" in str(excinfo.value)
+        assert "waiver\ntoken" not in str(excinfo.value)
+
+
+class TestReadinessMatchesConstruction:
+    """``greenwave_enabled`` must agree with what construction accepts.
+
+    The scheme rule is consulted there for exactly this reason: advertising an
+    exporter as available while every push is guaranteed to refuse is a lie to
+    the UI. The bearer-token shape rule joins it, so a token the HTTP/1.1
+    transport cannot carry disables the exporter instead of letting it be
+    advertised and then rejected on every push.
+    """
+
+    def test_malformed_bearer_token_disables_the_exporter(self):
+        settings = _settings(
+            greenwave_url=RESULTSDB_URL,
+            greenwave_auth_mode="bearer",
+            greenwave_api_token=SecretStr("tok\nen"),
+        )
+        assert settings.greenwave_enabled is False
+        assert "GREENWAVE_API_TOKEN" in (
+            greenwave_token_shape_error(settings, "bearer") or ""
+        )
+        with pytest.raises(ExporterPrerequisiteError, match="GREENWAVE_API_TOKEN"):
+            build_greenwave_auth(settings)
+
+    def test_valid_bearer_token_keeps_the_exporter_enabled(self):
+        settings = _bearer_settings()
+        assert settings.greenwave_enabled is True
+        assert build_greenwave_auth(settings).mode == "bearer"
+
+    def test_malformed_waiver_token_disables_the_exporter_when_waivers_are_on(
+        self,
+    ):
+        settings = _settings(
+            greenwave_url=RESULTSDB_URL,
+            greenwave_waiver_url="https://waiverdb.example.com",
+            greenwave_auth_mode="bearer",
+            greenwave_api_token=SecretStr("rdb-token"),  # pragma: allowlist secret
+            greenwave_waiver_token=SecretStr(
+                "waiver\ntoken"
+            ),  # pragma: allowlist secret
+            greenwave_push_waivers=True,
+        )
+        assert settings.greenwave_enabled is False
+        assert "GREENWAVE_WAIVER_TOKEN" in (
+            greenwave_token_shape_error(settings, "bearer") or ""
+        )
 
 
 class TestHttpSchemeRefusedAtBuild:

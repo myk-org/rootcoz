@@ -16231,8 +16231,21 @@ class TestIntegrationConnectionEndpoints:
         assert "did not request Negotiate" in data["message"]
         assert "keytab was not exercised" in data["message"]
 
-    def test_greenwave_connection_failure(self, test_client) -> None:
-        """A ResultsDB failure yields ok:false with the mode reported."""
+    @pytest.mark.parametrize(
+        ("failure", "message_fragment"),
+        [
+            # An HTTP refusal from ResultsDB itself.
+            ("http-403", "ResultsDB connection failed: HTTP 403"),
+            # A transport outage: the shared transport turns every
+            # httpx.HTTPError into _IntegrationTestError, which is the branch
+            # that used to be unreachable and let the failure read as a crash.
+            ("connect-error", "ConnectError"),
+        ],
+    )
+    def test_greenwave_connection_failure(
+        self, test_client, failure: str, message_fragment: str
+    ) -> None:
+        """A failed ResultsDB exchange yields ok:false with the mode reported."""
         settings = Settings(
             greenwave_url="https://resultsdb.example.com",
             greenwave_api_token=SecretStr("not-a-real-token"),
@@ -16240,6 +16253,8 @@ class TestIntegrationConnectionEndpoints:
         )
 
         def handler(request: httpx.Request) -> httpx.Response:
+            if failure == "connect-error":
+                raise httpx.ConnectError("nodename nor servname provided")
             return httpx.Response(403, json={"error": "forbidden"})
 
         with (
@@ -16250,8 +16265,46 @@ class TestIntegrationConnectionEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["ok"] is False
-        assert "ResultsDB connection failed" in data["message"]
+        assert data["message"].startswith("ResultsDB connection failed: ")
+        assert message_fragment in data["message"]
         assert data["details"]["auth_mode"] == "bearer"
+        # Neither shape is reported as an unexpected crash.
+        assert "unexpected" not in data["message"]
+
+    def test_greenwave_malformed_waiver_token_is_not_reported_satisfied(
+        self, test_client
+    ) -> None:
+        """A token the transport would refuse is not "prerequisites satisfied".
+
+        The waiver prerequisite check is presence-only and the ResultsDB
+        strategy never reads the waiver token, so without building the waiver
+        strategy too, this config answered ok:true while every push was
+        guaranteed to refuse.
+        """
+        settings = Settings(
+            greenwave_url="https://resultsdb.example.com",
+            greenwave_api_token=SecretStr("not-a-real-token"),
+            greenwave_auth_mode="bearer",
+            greenwave_push_waivers=True,
+            greenwave_waiver_url="https://waiverdb.example.com",
+            greenwave_waiver_token=SecretStr("waiver\ntoken"),
+            greenwave_product_version="1.0",
+        )
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(200, json={"results": []})
+
+        with (
+            patch("rootcoz.main.get_settings", return_value=settings),
+            self._greenwave_transport_client(handler),
+        ):
+            response = test_client.post("/api/admin/settings/test/greenwave")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "GREENWAVE_WAIVER_TOKEN" in data["message"]
+        # The claim the old code made lives in `details`, not in the message.
+        assert "satisfied" not in json.dumps(data.get("details", {}))
 
     @pytest.mark.parametrize("push_waivers", [True, False])
     def test_capabilities_include_greenwave_waivers(self, push_waivers: bool) -> None:

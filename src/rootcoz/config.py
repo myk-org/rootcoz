@@ -36,6 +36,14 @@ GREENWAVE_AUTH_MODES = ("bearer", "oidc", "kerberos", "mtls", "basic", "none")
 # Roles a new registration may default to (``admin`` is granted, never default).
 DEFAULT_USER_ROLES = ("viewer", "reviewer", "operator")
 
+# Settings that live only in the DB store: no environment variable ever maps to
+# them, so a stray env var (or dotenv entry) of the same name is ignored,
+# matching the pydantic-settings source hook that drops them. Their writes stay
+# on the PUT/import paths, the ones that record the mode-switch audit detail —
+# the persist endpoint records its own action instead, and refuses a DB-only key
+# outright because there is no env value to promote.
+DB_ONLY_SETTINGS = frozenset({"jira_auth_mode", "greenwave_auth_mode"})
+
 #: Valid ResultsDB result outcomes for ``GREENWAVE_OUTCOME_MAP`` validation.
 GREENWAVE_VALID_OUTCOMES = frozenset({"PASSED", "FAILED", "INFO", "NEEDS_INSPECTION"})
 
@@ -194,6 +202,25 @@ def validate_greenwave_url(
         )
 
 
+def is_sendable_bearer_value(value: str) -> bool:
+    """True when *value* can be sent as a ``Bearer`` credential.
+
+    Non-empty printable ASCII with no whitespace, for two different reasons.
+    Whitespace is legal in an HTTP field value but would silently split the
+    scheme from the credential (``Authorization: Bearer a b`` is accepted by
+    h11 and mangled), so it is refused. A control character is worse: HTTPX
+    itself does not validate a header value, but the HTTP/1.1 transport under
+    it (h11) rejects one with ``Illegal header value b'...'`` — a message that
+    quotes the token — which the push error path would then carry into a
+    result message and a warning log. Non-ASCII fails at the ascii encoding of
+    the header.
+
+    Punctuation is left unconstrained on purpose: an opaque token or a JWT is
+    not this client's to police.
+    """
+    return bool(value) and all(33 <= ord(char) <= 126 for char in value)
+
+
 def greenwave_scheme_error(settings: Settings, mode: str) -> str | None:
     """Why the configured targets cannot carry this mode's credentials, if so.
 
@@ -222,6 +249,65 @@ def greenwave_scheme_error(settings: Settings, mode: str) -> str | None:
             validate_greenwave_url(value, env_name, allow_http=http_ok)
         except ValueError as exc:
             return str(exc)
+    return None
+
+
+def greenwave_token_shape_error(
+    settings: Settings, mode: str, *, keys: frozenset[str] | None = None
+) -> str | None:
+    """Why a configured bearer token cannot be sent, or ``None`` when it can.
+
+    The same section of :func:`greenwave_scheme_error`'s contract: the single
+    predicate behind both the push boundary
+    (:func:`rootcoz.exporters.greenwave_auth.build_greenwave_auth`, which
+    refuses at build time) and :attr:`Settings.greenwave_enabled` (which must
+    not advertise an exporter whose every push is guaranteed to fail), so the
+    two can never disagree.
+
+    Only ``bearer`` puts a configured secret straight into a header. ``basic``
+    encodes its credentials, ``kerberos``/``mtls`` do not send the secret as a
+    header value, and ``oidc``'s token comes from the IdP at request time —
+    that one is checked when it is fetched.
+
+    Args:
+        settings: Effective settings.
+        mode: Normalised auth mode (an unset mode is inert — no error).
+        keys: Restrict the check to these setting keys — the tokens a save is
+            WRITING. ``None`` (readiness, the push boundary) checks every
+            configured token, because there every token is about to be used.
+
+    Returns:
+        A human-readable reason naming the setting, or ``None`` when every
+        checked bearer token can be sent.
+    """
+    if mode != "bearer":
+        return None
+    checks = [
+        (
+            "greenwave_api_token",
+            "GREENWAVE_API_TOKEN",
+            settings.greenwave_api_token,
+        )
+    ]
+    if settings.greenwave_push_waivers:
+        # The waiver write authenticates WaiverDB with its own token.
+        checks.append(
+            (
+                "greenwave_waiver_token",
+                "GREENWAVE_WAIVER_TOKEN",
+                settings.greenwave_waiver_token,
+            )
+        )
+    for key, env_name, secret in checks:
+        if keys is not None and key not in keys:
+            continue
+        if secret is None:
+            continue
+        if not is_sendable_bearer_value(secret.get_secret_value()):
+            return (
+                f"{env_name} cannot be sent in an HTTP header — it contains "
+                "whitespace or a character a header cannot carry"
+            )
     return None
 
 
@@ -665,8 +751,8 @@ class Settings(BaseSettings):
         ) -> PydanticBaseSettingsSource:
             def _load() -> dict[str, Any]:
                 data = source()
-                data.pop("jira_auth_mode", None)
-                data.pop("greenwave_auth_mode", None)
+                for db_only in DB_ONLY_SETTINGS:
+                    data.pop(db_only, None)
 
                 def _alias_value(alias: str) -> str | None:
                     # Aliases resolve from os.environ (the env source) AND
@@ -1649,6 +1735,11 @@ class Settings(BaseSettings):
         if scheme_error:
             if self.enable_greenwave is True:
                 logger.warning("enable_greenwave is True but %s", scheme_error)
+            return False
+        token_error = greenwave_token_shape_error(self, mode)
+        if token_error:
+            if self.enable_greenwave is True:
+                logger.warning("enable_greenwave is True but %s", token_error)
             return False
         return True
 

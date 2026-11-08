@@ -473,6 +473,278 @@ def test_persist_rejections(client, monkeypatch):
     assert server_only.status_code == 400
 
 
+# --- DB-only settings are never promoted from the environment (#346, #183) ---
+
+
+def test_greenwave_auth_mode_is_never_promoted_from_env(client, monkeypatch):
+    """A stray GREENWAVE_AUTH_MODE is ignored: the mode is DB-only."""
+    monkeypatch.setenv("GREENWAVE_AUTH_MODE", "bearer")
+    get_settings.cache_clear()
+    try:
+        response = client.post(
+            "/api/admin/settings/greenwave_auth_mode/persist",
+            headers=_admin_headers(),
+        )
+        assert response.status_code == 400
+        assert "no env value" in response.json()["detail"]
+        # The env var never became the effective mode either.
+        assert get_settings().greenwave_auth_mode != "bearer"
+    finally:
+        monkeypatch.delenv("GREENWAVE_AUTH_MODE")
+        get_settings.cache_clear()
+
+
+def test_persist_applies_the_same_cross_field_rules_as_put(client, monkeypatch):
+    """An env value the PUT path would refuse is not promoted either.
+
+    A waiver write gates releases, so its endpoint stays HTTPS-only in every
+    auth mode — an http:// value must not slip in through the env door.
+    """
+    monkeypatch.setenv("GREENWAVE_WAIVER_URL", "http://waiverdb.example.com")
+    get_settings.cache_clear()
+    try:
+        response = client.post(
+            "/api/admin/settings/greenwave_waiver_url/persist",
+            headers=_admin_headers(),
+        )
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert "Invalid env value for 'greenwave_waiver_url'" in detail
+        assert "GREENWAVE_WAIVER_URL" in detail
+    finally:
+        monkeypatch.delenv("GREENWAVE_WAIVER_URL")
+        get_settings.cache_clear()
+
+
+def test_db_only_settings_are_not_advertised_as_persistable(client):
+    """Metadata states the same rule the persist endpoint enforces.
+
+    A DB-only setting has no env value to promote, so `persistable: true`
+    would promise a "Save to DB" action the endpoint answers with 400.
+    """
+    items = {
+        item["key"]: item
+        for item in client.get("/api/admin/settings", headers=_admin_headers()).json()
+    }
+    for key in ("jira_auth_mode", "greenwave_auth_mode"):
+        assert items[key]["env_var"] == ""
+        assert items[key]["persistable"] is False
+
+
+def test_persist_judges_a_key_on_its_own_effective_pair(client, monkeypatch):
+    """Cross-field rules apply, and a valid value is still promoted.
+
+    The persist endpoint now runs the same validator as PUT, so a greenwave URL
+    is judged against the mode currently in effect — an https URL persists, an
+    http one is refused for a credential-bearing mode.
+    """
+    put = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={
+            "settings": {
+                "greenwave_auth_mode": "bearer",
+                "greenwave_api_token": "not-a-real-token",  # pragma: allowlist secret
+            }
+        },
+    )
+    assert put.status_code == 200, put.text
+    try:
+        monkeypatch.setenv("GREENWAVE_URL", "https://resultsdb.example.com")
+        get_settings.cache_clear()
+        promoted = client.post(
+            "/api/admin/settings/greenwave_url/persist", headers=_admin_headers()
+        )
+        assert promoted.status_code == 200, promoted.text
+        assert promoted.json() == {"key": "greenwave_url", "source": "db"}
+        # The override survives losing the env var — that is the point of the
+        # env→DB promotion, and the cross-field rule must not stand in its way.
+        monkeypatch.delenv("GREENWAVE_URL")
+        get_settings.cache_clear()
+        assert get_settings().greenwave_url == "https://resultsdb.example.com"
+
+        monkeypatch.setenv("GREENWAVE_URL", "http://resultsdb.example.com")
+        get_settings.cache_clear()
+        refused = client.post(
+            "/api/admin/settings/greenwave_url/persist", headers=_admin_headers()
+        )
+        assert refused.status_code == 400
+        assert "GREENWAVE_URL" in refused.json()["detail"]
+    finally:
+        monkeypatch.delenv("GREENWAVE_URL", raising=False)
+        get_settings.cache_clear()
+
+
+def test_persist_names_the_setting_a_cross_field_refusal_came_from(client, monkeypatch):
+    """A refusal caused by another setting says so, and names it.
+
+    The cross-field rules judge the merged effective configuration, so
+    persisting one key can be blocked by a value the admin did not touch (an
+    http GREENWAVE_URL in the environment while the DB mode is bearer). The
+    message has to attribute that to the configuration — not to the value being
+    promoted — or a one-key env→DB migration looks like the wrong field failed.
+    """
+    put = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"greenwave_auth_mode": "bearer"}},
+    )
+    assert put.status_code == 200, put.text
+    try:
+        monkeypatch.setenv("GREENWAVE_URL", "http://resultsdb.example.com")
+        monkeypatch.setenv("GREENWAVE_WAIVER_URL", "https://waiverdb.example.com")
+        get_settings.cache_clear()
+        refused = client.post(
+            "/api/admin/settings/greenwave_waiver_url/persist",
+            headers=_admin_headers(),
+        )
+        assert refused.status_code == 400
+        detail = refused.json()["detail"]
+        # The offending setting is still named, and the blame is attributed.
+        assert "GREENWAVE_URL" in detail
+        assert "rejected by the current effective configuration" in detail
+    finally:
+        monkeypatch.delenv("GREENWAVE_URL", raising=False)
+        monkeypatch.delenv("GREENWAVE_WAIVER_URL", raising=False)
+        get_settings.cache_clear()
+
+
+def test_write_paths_refuse_a_token_the_transport_cannot_send(client, monkeypatch):
+    """A bearer token that cannot be a header is refused on every write path.
+
+    The scheme rule is enforced at save time so a stored configuration can
+    never guarantee a refusal on every push; the token-shape rule joins it
+    (PUT here, the env→DB promotion below).
+    """
+    put = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={
+            "settings": {
+                "greenwave_auth_mode": "bearer",
+                "greenwave_api_token": "tok\nen",
+            }
+        },
+    )
+    assert put.status_code == 400, put.text
+    assert "GREENWAVE_API_TOKEN" in put.json()["detail"]
+
+    # The mode has to exist before the promotion is judged: with no mode the
+    # exporter is disabled and the token is inert (the same reason an
+    # incomplete mode is storable at all).
+    mode = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"greenwave_auth_mode": "bearer"}},
+    )
+    assert mode.status_code == 200, mode.text
+    monkeypatch.setenv("GREENWAVE_API_TOKEN", "tok\nen")
+    get_settings.cache_clear()
+    try:
+        promoted = client.post(
+            "/api/admin/settings/greenwave_api_token/persist",
+            headers=_admin_headers(),
+        )
+    finally:
+        monkeypatch.delenv("GREENWAVE_API_TOKEN", raising=False)
+        get_settings.cache_clear()
+    assert promoted.status_code == 400, promoted.text
+    assert "GREENWAVE_API_TOKEN" in promoted.json()["detail"]
+
+
+def test_a_mode_switch_stays_savable_with_an_unusable_token_in_place(
+    client, monkeypatch
+):
+    """A mode switch must not be blocked by a token it does not write.
+
+    The UI renders a mode's fields only once that mode is saved, so refusing
+    the switch would lock the admin out of the very field that fixes the token.
+    The exporter stays disabled meanwhile (`greenwave_enabled`), and the
+    connection test names the setting.
+    """
+    monkeypatch.setenv("GREENWAVE_API_TOKEN", "tok\nen")
+    monkeypatch.setenv("GREENWAVE_URL", "https://resultsdb.example.com")
+    get_settings.cache_clear()
+    try:
+        response = client.put(
+            "/api/admin/settings",
+            headers=_admin_headers(),
+            json={"settings": {"greenwave_auth_mode": "bearer"}},
+        )
+        assert response.status_code == 200, response.text
+        # Stored and inert: not advertised as a usable exporter.
+        assert get_settings().greenwave_auth_mode == "bearer"
+        assert get_settings().greenwave_enabled is False
+    finally:
+        monkeypatch.delenv("GREENWAVE_API_TOKEN", raising=False)
+        monkeypatch.delenv("GREENWAVE_URL", raising=False)
+        get_settings.cache_clear()
+
+
+def test_persist_refuses_a_waiver_token_the_transport_cannot_send(client, monkeypatch):
+    """WaiverDB's token is a written bearer token too, so the same rule applies."""
+    put = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={
+            "settings": {
+                "greenwave_auth_mode": "bearer",
+                "greenwave_push_waivers": True,
+            }
+        },
+    )
+    assert put.status_code == 200, put.text
+    monkeypatch.setenv("GREENWAVE_WAIVER_TOKEN", "waiver\ntok")
+    get_settings.cache_clear()
+    try:
+        promoted = client.post(
+            "/api/admin/settings/greenwave_waiver_token/persist",
+            headers=_admin_headers(),
+        )
+    finally:
+        monkeypatch.delenv("GREENWAVE_WAIVER_TOKEN", raising=False)
+        get_settings.cache_clear()
+    assert promoted.status_code == 400, promoted.text
+    assert "GREENWAVE_WAIVER_TOKEN" in promoted.json()["detail"]
+
+
+def test_writing_one_token_is_not_refused_over_an_inherited_bad_one(
+    client, monkeypatch
+):
+    """The shape rule judges the tokens THIS save writes, not the others.
+
+    A save that writes one token must not be vetoed by the other, merely
+    inherited one: that token is inert until someone replaces it, and the
+    exporter is disabled meanwhile. Otherwise a half-broken pair leaves the
+    admin unable to save the half that is fine.
+    """
+    put = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={
+            "settings": {
+                "greenwave_auth_mode": "bearer",
+                "greenwave_push_waivers": True,
+            }
+        },
+    )
+    assert put.status_code == 200, put.text
+    monkeypatch.setenv("GREENWAVE_WAIVER_TOKEN", "waiver tok en")
+    get_settings.cache_clear()
+    try:
+        # Writes only the ResultsDB token: the inherited WaiverDB token is not
+        # this save's business.
+        saved = client.put(
+            "/api/admin/settings",
+            headers=_admin_headers(),
+            json={"settings": {"greenwave_api_token": "brand-new-good-token"}},
+        )
+        assert saved.status_code == 200, saved.text
+    finally:
+        monkeypatch.delenv("GREENWAVE_WAIVER_TOKEN", raising=False)
+        get_settings.cache_clear()
+
+
 # --- ADMIN_KEY stays a server-only bootstrap secret (#347 review) ---
 
 

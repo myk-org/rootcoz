@@ -27,6 +27,7 @@ import httpx
 from rootcoz.config import (
     Settings,
     greenwave_method_missing_fields,
+    is_sendable_bearer_value,
     normalize_greenwave_auth_mode,
     validate_greenwave_url,
 )
@@ -53,6 +54,23 @@ _FILE_PATH_SETTINGS: tuple[tuple[str, str], ...] = (
     ("greenwave_client_key", "<client-key>"),
     ("greenwave_ca_bundle", "<ca-bundle>"),
 )
+
+
+def _require_header_token(value: str, env_name: str) -> str:
+    """Return *value* if it can be a bearer credential, else refuse it.
+
+    A configured token goes straight into an ``Authorization`` header, so the
+    same rule the OIDC fetch applies to a remote token applies to an
+    admin-supplied one. Refused at BUILD time with a message naming the
+    setting and quoting nothing — the value must never reach a log or a push
+    error through a header-encoding exception.
+    """
+    if not is_sendable_bearer_value(value):
+        raise ExporterPrerequisiteError(
+            f"{env_name} is not a usable bearer token — it contains "
+            "whitespace or a character a header cannot carry"
+        )
+    return value
 
 
 class GreenwaveAuthError(Exception):
@@ -206,6 +224,12 @@ class _OidcAuth(httpx.Auth):
             raise GreenwaveAuthError(
                 "Greenwave OIDC token response missing 'access_token'"
             )
+        if not is_sendable_bearer_value(token):
+            # Refused here so the error names what happened without echoing the
+            # token — see the helper.
+            raise GreenwaveAuthError(
+                "Greenwave OIDC token response carried an unusable 'access_token'"
+            )
         expires_in = payload.get("expires_in")
         lifetime = expires_in if isinstance(expires_in, (int, float)) else 0
         # Cache until ~60s before expiry; a missing/short expiry means the
@@ -302,7 +326,17 @@ class _KerberosAuth(httpx.Auth):
         except Exception as exc:
             raise self._gssapi_error(exc) from exc
         for _ in range(_MAX_NEGOTIATE_EXCHANGES):
-            in_token = base64.b64decode(token) if token else None
+            try:
+                in_token = base64.b64decode(token) if token else None
+            except ValueError as exc:
+                # A malformed challenge is an authentication failure, not a
+                # crash: this decode used to sit OUTSIDE the guarded block, so
+                # the connection test reported an unexpected exception with no
+                # auth-specific diagnostic instead of "authentication failed".
+                raise GreenwaveAuthError(
+                    "Greenwave kerberos authentication failed: server sent a "
+                    "malformed Negotiate challenge"
+                ) from exc
             try:
                 out_token = await asyncio.to_thread(context.step, in_token)
             except Exception as exc:
@@ -464,7 +498,13 @@ def build_greenwave_auth(
         assert token is not None  # guaranteed by the missing-fields check
         return GreenwaveAuth(
             mode,
-            _HeaderAuth("Authorization", f"Bearer {token.get_secret_value()}"),
+            _HeaderAuth(
+                "Authorization",
+                "Bearer "
+                + _require_header_token(
+                    token.get_secret_value(), "GREENWAVE_API_TOKEN"
+                ),
+            ),
             {"verify": verify},
         )
     if mode == "basic":
@@ -564,6 +604,10 @@ def build_greenwave_waiver_auth(settings: Settings) -> GreenwaveAuth:
         )
     return GreenwaveAuth(
         "bearer",
-        _HeaderAuth("Authorization", f"Bearer {token.get_secret_value()}"),
+        _HeaderAuth(
+            "Authorization",
+            "Bearer "
+            + _require_header_token(token.get_secret_value(), "GREENWAVE_WAIVER_TOKEN"),
+        ),
         {"verify": settings.greenwave_verify_ssl},
     )

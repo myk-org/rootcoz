@@ -109,6 +109,7 @@ from rootcoz.comment_enrichment import (
     fetch_jira_ticket_status,
 )
 from rootcoz.config import (
+    DB_ONLY_SETTINGS,
     DEFAULT_USER_ROLES,
     GREENWAVE_AUTH_MODES,
     JIRA_AUTH_MODES,
@@ -116,6 +117,7 @@ from rootcoz.config import (
     atlassian_cloud_id_error,
     get_settings,
     greenwave_method_missing_fields,
+    greenwave_token_shape_error,
     jira_method_missing_fields,
     normalize_greenwave_auth_mode,
     normalize_jira_auth_mode,
@@ -169,6 +171,7 @@ from rootcoz.exporters.datadog import (
 from rootcoz.exporters.greenwave_auth import (
     GreenwaveAuthError,
     build_greenwave_auth,
+    build_greenwave_waiver_auth,
 )
 from rootcoz.exporters.greenwave_exporter import GreenwaveExporter
 from rootcoz.exporters.reportportal import (
@@ -917,11 +920,9 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
             {
                 "key": field_name,
                 "label": _setting_label(field_name),
-                # jira_auth_mode / greenwave_auth_mode are DB-only
-                # (Server Settings) — no env var
-                "env_var": ""
-                if field_name in ("jira_auth_mode", "greenwave_auth_mode")
-                else field_name.upper(),
+                # A DB-only setting has no env var — the picker in Server
+                # Settings is its only source.
+                "env_var": "" if field_name in DB_ONLY_SETTINGS else field_name.upper(),
                 "value": display_value,
                 "is_set": is_set,
                 "default": default_str,
@@ -939,13 +940,15 @@ def _get_settings_metadata() -> list[dict[str, Any]]:
                 "allow_custom": bool(choices.get("allow_custom", False)),
                 # Persistability contract (#347): server-only settings are
                 # env bootstrap the persist/reset/PUT paths always reject,
-                # and derived settings must not be pinned (see
-                # _DERIVED_SETTINGS) — the UI hides "Save to DB" for both.
+                # DB-only settings have no env value to promote, and derived
+                # settings must not be pinned (see _DERIVED_SETTINGS) — the UI
+                # hides "Save to DB" for all three.
                 "server_only": field_name in _SERVER_ONLY_SETTINGS,
                 "derived": field_name in _DERIVED_SETTINGS,
                 "persistable": (
                     field_name not in _SERVER_ONLY_SETTINGS
                     and field_name not in _DERIVED_SETTINGS
+                    and field_name not in DB_ONLY_SETTINGS
                 ),
             }
         )
@@ -19612,10 +19615,9 @@ def _settings_env_value(key: str, dotenv: dict[str, str] | None = None) -> str |
     own value.
     """
     env_var = key.upper()
-    if key == "jira_auth_mode":
-        # DB-only setting (#346): no env var ever maps to it — a stray
-        # JIRA_AUTH_MODE in the environment is ignored, matching the
-        # pydantic-settings source that drops it.
+    if key in DB_ONLY_SETTINGS:
+        # DB-only (#346/#183): no env var maps to it, so persist must report
+        # no-env-value rather than promote one.
         return None
     if os.environ.get(env_var) is not None:
         return os.environ[env_var]
@@ -19879,6 +19881,16 @@ _GREENWAVE_AUTH_SETTING_KEYS: frozenset[str] = frozenset(
         "greenwave_client_key",
         "greenwave_basic_user",
         "greenwave_basic_password",
+        "greenwave_waiver_token",
+    }
+)
+
+# The bearer tokens a save WRITES, as opposed to the ones it inherits: the shape
+# rule applies only to these (see the cross-field block below).
+_GREENWAVE_TOKEN_SETTING_KEYS: frozenset[str] = frozenset(
+    {
+        "greenwave_api_token",
+        "greenwave_waiver_token",
     }
 )
 
@@ -20115,6 +20127,28 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
                 )
             except ValueError as exc:
                 errors.append(str(exc))
+            # The token-shape rule, applied to a bearer token THIS update
+            # writes — and deliberately NOT to one it merely inherits. An
+            # unusable token already in place is inert-until-replaced: the
+            # exporter is disabled (`greenwave_enabled`), the connection test
+            # names the setting, and the same rule as the mode block below
+            # applies — a mode switch must stay storable, because the UI renders
+            # a mode's fields only once that mode is saved. Blocking the switch
+            # would lock the admin out of the field that fixes the token.
+            if not _GREENWAVE_TOKEN_SETTING_KEYS.isdisjoint(settings_updates):
+                # ``keys`` narrows the PREDICATE as well as the trigger: a save
+                # that writes one token must not be refused over the other,
+                # merely inherited one (that token is inert until replaced —
+                # `greenwave_enabled` disables the exporter meanwhile).
+                token_error = greenwave_token_shape_error(
+                    proposed,
+                    normalize_greenwave_auth_mode(proposed.greenwave_auth_mode) or "",
+                    keys=frozenset(
+                        _GREENWAVE_TOKEN_SETTING_KEYS & set(settings_updates)
+                    ),
+                )
+                if token_error:
+                    errors.append(token_error)
         # A save is NOT rejected for an incomplete mode. The mode has to be
         # storable first: the Server Settings UI renders a mode's fields only
         # once that mode is persisted, so rejecting the switch would leave the
@@ -20673,8 +20707,28 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
     save their current env values once, then drop the envs — the setting no
     longer reverts to its default on restart. Runs server-side because the
     UI never sees decrypted sensitive env values.
+
+    A REFUSED promotion leaves an audit row like any other attempt: declining
+    to store an env value is a security-relevant decision (the value may be one
+    the PUT path forbids), not a no-op.
     """
     _require_admin(request)
+    try:
+        return await _persist_env_setting(request, key)
+    except HTTPException as exc:
+        await _record_refused_attempt(
+            action="admin.setting_persist",
+            request=request,
+            message=f"Persisting setting '{key}' from the environment was refused",
+            target_type="setting",
+            target_id=key,
+            exc=exc,
+        )
+        raise
+
+
+async def _persist_env_setting(request: Request, key: str) -> JSONResponse:
+    """The persist body: validate, save, and record the successful attempt."""
     if key not in Settings.model_fields:
         raise HTTPException(status_code=400, detail=f"Unknown setting: {key}")
     if key in _SERVER_ONLY_SETTINGS:
@@ -20698,23 +20752,38 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
             status_code=400,
             detail=f"Setting '{key}' has no env value set",
         )
-    # Enumerated settings get the shared canonicalisation and validation
-    # (#379) so persist-from-env cannot store a value the PUT/import paths
-    # would reject — or a spelling the picker does not offer. A no-op for
-    # every other key.
-    env_value, enum_error = await _normalize_enumerated_value(key, env_value)
-    if enum_error:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Invalid env value for '{key}': {enum_error}",
-        )
-    # Same validation the PUT path applies to admin-typed values
+    # ONE validator for every write path: enumerated canonicalisation, per-field
+    # Pydantic validation, integer bounds and the cross-field combination rules
+    # that PUT and import apply, so an env value cannot be promoted into a
+    # state those paths would refuse (a URL scheme the selected auth mode does
+    # not allow, an unusable waiver endpoint, …). It normalizes in place, so the
+    # value saved is the canonical one it approved.
+    updates = {key: env_value}
     try:
-        Settings.model_validate({key: env_value})
-    except ValidationError as exc:
+        validation_errors = await _validate_settings_updates(updates)
+    except HTTPException as exc:
+        # The shared validator RAISES (rather than returning) for one shape — an
+        # account-ID-shaped cloud id, which PUT answers with a 422. A promotion
+        # has no such legacy contract, so report it in the same 400 shape as
+        # every other invalid env value, which also keeps one reason code
+        # (`invalid_request`) for this class of refusal in the audit trail.
         raise HTTPException(
-            status_code=400, detail=f"Invalid env value for '{key}'"
+            status_code=400, detail=f"Invalid env value for '{key}': {exc.detail}"
         ) from exc
+    if validation_errors:
+        detail = "; ".join(validation_errors)
+        if key not in detail and key.upper() not in detail:
+            # A cross-field rule can refuse this save over a setting the admin
+            # did not touch — the effective URL/mode pair, say. Attribute that
+            # to the configuration instead of to the value being promoted, so
+            # a one-key env→DB migration is not blamed for the wrong field.
+            detail += (
+                " (rejected by the current effective configuration, not by this value)"
+            )
+        raise HTTPException(
+            status_code=400, detail=f"Invalid env value for '{key}': {detail}"
+        )
+    env_value = str(updates[key] or "")
 
     username = request.state.username or "admin"
     await _save_settings_to_db({key: env_value}, username)
@@ -20761,6 +20830,11 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
             status_code=400, detail=f"Server-only setting (env var only): {key}"
         )
 
+    # A reset removes the override, which for this DB-only setting IS the new
+    # effective value (unset). Captured BEFORE the delete, so the audit row
+    # names the transition instead of recording the already-reset state — the
+    # same old/new detail PUT and import record for a mode change.
+    mode_change = _greenwave_auth_mode_audit_detail({key: None})
     deleted = await storage.delete_server_setting(
         key, deleted_by=request.state.username or "admin"
     )
@@ -20797,7 +20871,7 @@ async def reset_admin_setting(request: Request, key: str) -> JSONResponse:
         message=f"Admin setting reset: key={key}, by={request.state.username}",
         target_type="setting",
         target_id=key,
-        details=_audit_setting_details(key),
+        details={**_audit_setting_details(key), **mode_change},
         request=request,
     )
 
@@ -21233,6 +21307,14 @@ async def _test_greenwave_connection(settings: Settings) -> dict[str, Any]:
         # (mode fields + waiver settings) already cover what constructing the
         # exporter would have re-checked.
         auth = build_greenwave_auth(settings)
+        if settings.greenwave_push_waivers:
+            # In bearer mode a waiver writes to WaiverDB with its OWN token,
+            # which build_greenwave_auth never reads, and the presence-only
+            # check above cannot see a token the HTTP transport would refuse.
+            # Building it here is what makes the "prerequisites are satisfied"
+            # line below true: it raises the same ExporterPrerequisiteError the
+            # exporter's constructor does, naming the offending setting.
+            build_greenwave_waiver_auth(settings)
     except ExporterPrerequisiteError as exc:
         return _test_result(False, str(exc))
     url = str(settings.greenwave_url).rstrip("/")
@@ -21255,12 +21337,14 @@ async def _test_greenwave_connection(settings: Settings) -> dict[str, Any]:
         return _test_result(
             False, f"ResultsDB connection failed: {exc}", auth_mode=mode
         )
-    except httpx.HTTPError as exc:
+    except _IntegrationTestError as exc:
+        # The shared transport converts every httpx.HTTPError into this error,
+        # so a timeout, DNS, TLS or connect failure arrives HERE. Catching
+        # httpx.HTTPError instead left this path unreachable and let the outage
+        # escape into the endpoint's catch-all, reported as an unexpected crash
+        # with no auth mode and no "ResultsDB connection failed" message.
         return _test_result(
-            False,
-            "ResultsDB connection failed: "
-            f"{redact_urls_in_text(f'connection failed ({type(exc).__name__}): {exc}')}",
-            auth_mode=mode,
+            False, f"ResultsDB connection failed: {exc}", auth_mode=mode
         )
     # Report the mode from the built strategy — the single source of truth
     # for what was actually exercised — rather than the value re-derived
