@@ -10421,6 +10421,69 @@ _CONFIRM_SCAN_MESSAGES = 50
 _ISSUE_CONSENT_ROLE = "system"
 
 
+async def _post_server_notice(*, conversation: str, username: str, content: str) -> int:
+    """Write a server-authored ``system`` row into a chat and return its id.
+
+    The only way this server posts a notice: the model never writes this role,
+    so a row in it is text the model cannot author.
+    """
+    return await storage.add_chat_message(
+        conversation, role=_ISSUE_CONSENT_ROLE, content=content, username=username
+    )
+
+
+async def _post_issue_blocked_notice(
+    *,
+    conversation: str,
+    username: str,
+    message: str,
+    tracker_unavailable: dict[str, str],
+) -> bool:
+    """Post why the issue this message asks for cannot be filed; True when posted.
+
+    The narrow trigger: the message itself asks to file an issue in a named
+    tracker (:func:`asked_issue_tracker`), that tracker is enabled for this
+    server but absent from the tool list for a CREDENTIAL reason — so the cause
+    and the fix are the account's, and naming them here is the answer. Anything
+    else (no request, a disabled tracker, no repository, a usable token) posts
+    nothing.
+
+    A failed write must not fail the chat turn: the answer still comes from the
+    model, this row is the server's own copy of it.
+    """
+    from rootcoz.engine.chat import (
+        asked_issue_tracker,
+        credential_blocked_issue_notice,
+    )
+
+    tracker = asked_issue_tracker(message)
+    content = credential_blocked_issue_notice(
+        tracker, tracker_unavailable.get(tracker, "")
+    )
+    if not content:
+        return False
+    try:
+        posted = await _post_server_notice(
+            conversation=conversation, username=username, content=content
+        )
+    except Exception:
+        logger.warning(
+            "Chat: could not post the no-credential issue notice for %s in %s",
+            username,
+            conversation,
+            exc_info=True,
+        )
+        return False
+    if not posted:
+        return False
+    logger.info(
+        "Chat: posted the no-credential issue notice for %s in %s",
+        username,
+        conversation,
+    )
+    return True
+
+
 async def _post_issue_consent_request(
     *,
     conversation: str,
@@ -10443,9 +10506,9 @@ async def _post_issue_consent_request(
     as consent. The proposal id is in the message too, so a rebuilt AI session —
     which keeps only stored chat text — can still file exactly what was approved.
     """
-    message_id = await storage.add_chat_message(
-        conversation,
-        role=_ISSUE_CONSENT_ROLE,
+    message_id = await _post_server_notice(
+        conversation=conversation,
+        username=username,
         content=(
             f"Proposed {kind} issue — nothing has been filed yet.\n\n"
             f"{shown}\n\n"
@@ -10454,7 +10517,6 @@ async def _post_issue_consent_request(
             "reply arrives, and only a reply from you can confirm it.\n\n"
             f"Proposal id: {confirmation_id}"
         ),
-        username=username,
     )
     if not message_id:
         raise HTTPException(
@@ -23074,6 +23136,16 @@ async def _process_chat_message(
                             has_profile=await _account_has_profile(username),
                             job_chat=True,
                         )
+                        # The user's own words decide: a request to file an issue
+                        # in a tracker this account has no credential for is
+                        # answered by the server itself, so the fix is stated
+                        # even if the model improvises around the prompt.
+                        await _post_issue_blocked_notice(
+                            conversation=job_id,
+                            username=username,
+                            message=message,
+                            tracker_unavailable=tracker_unavailable,
+                        )
                         # A resumed session keeps its creation-time tools, so a
                         # token saved or a tracker toggled mid-chat only reaches
                         # the model through a fresh session.
@@ -23916,6 +23988,14 @@ async def _process_admin_chat_message(
                 await storage.get_user_tokens(username),
                 github_repo_available=_settings_github_repo_available(settings),
                 has_profile=await _account_has_profile(username),
+            )
+            # Same trigger as the job chat: the user asked for an issue this
+            # account has no credential to file, so the server says why.
+            await _post_issue_blocked_notice(
+                conversation=ADMIN_CHAT_JOB_ID,
+                username=username,
+                message=message,
+                tracker_unavailable=tracker_unavailable,
             )
             # A resumed session keeps its creation-time tools (see
             # _enable_tools_for_session): rebuild when this user's set changed.

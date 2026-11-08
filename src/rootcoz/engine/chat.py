@@ -5,6 +5,7 @@ Builds job-scoped system prompts and manages AI CLI conversations.
 
 import asyncio
 import base64
+import re
 import tempfile
 from collections.abc import AsyncIterator, Callable
 from contextlib import ExitStack, asynccontextmanager
@@ -1332,6 +1333,11 @@ def build_welcome_message(
 _COMMON_RULES = """- Do NOT modify any data — read-only. The one exception is a tracker issue tool in your tool list (`propose_tracker_issue` plus `create_github_issue` / `create_jira_issue`), and only once the user has approved the draft you proposed
 - Do NOT run arbitrary curl commands — use the provided tools"""
 
+#: Where a user adds a tracker token. The prompt reason below and the notice
+#: the server posts itself (:func:`credential_blocked_issue_notice`) read it, so
+#: the page they name cannot drift apart.
+_TRACKER_TOKEN_FIX = "Profile Settings → add the {kind} token."
+
 #: What to tell the user for each reason a tracker tool is missing from the list.
 #: `{kind}` is the tracker name. Only the missing-token case is fixed in Profile
 #: Settings — a disabled tracker or a missing repository is not, and an account
@@ -1353,7 +1359,7 @@ _TRACKER_UNAVAILABLE_REASONS = {
     ),
     "no_token": (
         "this account has no {kind} token saved. Tell the user the fix: "
-        "Profile Settings → add the {kind} token."
+        + _TRACKER_TOKEN_FIX
     ),
     "no_token_no_profile": (
         "this account has no {kind} token saved and no profile to store one in, "
@@ -1366,6 +1372,88 @@ _TRACKER_UNAVAILABLE_REASONS = {
         "user the fix: Profile Settings → re-save the {kind} credential."
     ),
 }
+
+#: The reasons a tracker is missing because THIS account never set it up — the
+#: only ones a token in Profile Settings can fix. A disabled tracker or a
+#: missing repository is not one of them, so no token advice is posted for it.
+_CREDENTIAL_UNAVAILABLE_REASONS = ("no_token", "no_token_no_profile")
+
+#: A filing request: a filing verb and an issue noun in the same sentence, so
+#: "open the console log" is not one.
+_ASKS_TO_FILE_ISSUE = re.compile(
+    r"\b(?:open|file|create|submit|raise|report|log)\b[^\n.!?]{0,40}?\b(?:issue|ticket)\b",
+    re.IGNORECASE,
+)
+
+#: The trackers a message can name. A filing request that names none posts no
+#: notice: there is no single tracker it could be about.
+_NAMED_TRACKERS = (
+    ("github", re.compile(r"\bgithub\b", re.IGNORECASE)),
+    ("jira", re.compile(r"\bjira\b", re.IGNORECASE)),
+)
+
+
+def asked_issue_tracker(message: str) -> str:
+    """The tracker *message* asks to file an issue in, ``""`` when it asks nothing.
+
+    The trigger half of the server's own no-credential answer: it fires only when
+    the user's own words are a request to file an issue AND name the tracker, so
+    an unrelated question never gets a credential notice. The other half — is
+    that tracker missing a credential this account can add? — is the caller's,
+    read from :func:`credential_blocked_issue_notice`'s ``reason``.
+
+    When a message names both trackers, the one it mentions first wins.
+
+    shortcut: only a tracker-named request is detected ("open an issue" alone
+    posts nothing, the system prompt still covers it); upgrade if users commonly
+    ask tracker-agnostically.
+    """
+    if not message or not _ASKS_TO_FILE_ISSUE.search(message):
+        return ""
+    named = [
+        (match.start(), tracker)
+        for tracker, pattern in _NAMED_TRACKERS
+        if (match := pattern.search(message))
+    ]
+    return min(named)[1] if named else ""
+
+
+def credential_blocked_issue_notice(tracker: str, reason: str) -> str:
+    """The server's own answer when this account cannot file the asked-for issue.
+
+    Posted as a ``system`` chat row (the role the model never writes), so the
+    cause and the fix reach the user even when the model improvises around the
+    system prompt's instruction — it claimed it would file, then blamed a
+    "session-level tooling gap" instead of the account (issue #446).
+
+    Only :data:`_CREDENTIAL_UNAVAILABLE_REASONS` produce text: a tracker an
+    administrator disabled, a server with no repository or an unusable saved
+    credential is not fixed in Profile Settings by adding a token. Returns ``""``
+    for those, and for a caller whose tool list already has the tracker.
+
+    Args:
+        tracker: ``"github"`` or ``"jira"`` — the one the user asked for.
+        reason: Its code from the chat tracker state.
+    """
+    if (
+        tracker not in {"github", "jira"}
+        or reason not in _CREDENTIAL_UNAVAILABLE_REASONS
+    ):
+        return ""
+    kind = "GitHub" if tracker == "github" else "Jira"
+    if reason == "no_token":
+        return (
+            f"No {kind} issue can be filed from this chat. This account has no "
+            f"{kind} token saved; the fix is {_TRACKER_TOKEN_FIX.format(kind=kind)}"
+        )
+    if reason == "no_token_no_profile":
+        # The bootstrap ``admin`` has no ``users`` row, so ``PUT /api/user/tokens``
+        # answers 404 for it: the fix is signing in as an account that has one.
+        return (
+            f"No {kind} issue can be filed from this chat. "
+            + tracker_credential_message(kind, has_profile=False)
+        )
+    return ""
 
 
 def _issue_repo_param(issue_repos: tuple[str, ...]) -> dict[str, Any]:

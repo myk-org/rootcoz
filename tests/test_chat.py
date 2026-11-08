@@ -1353,6 +1353,122 @@ class TestChatIssueTools:
         assert "this account has no GitHub token saved" not in prompt
 
 
+class TestAskedIssueTracker:
+    """The trigger half: only a filing request that names a tracker fires."""
+
+    @pytest.mark.parametrize(
+        ("message", "expected"),
+        [
+            ("can you open a GitHub issue for this failure?", "github"),
+            ("file a jira ticket about this", "jira"),
+            ("Could you create an issue in GitHub?", "github"),
+            ("submit a bug report as a Jira ticket", "jira"),
+            # Both named: the first one mentioned wins.
+            ("open a Jira ticket or a GitHub issue", "jira"),
+            # Not a filing request.
+            ("why did this test fail?", ""),
+            ("open the console log", ""),
+            # A filing request that names no tracker has no single tracker to name.
+            ("open an issue about this", ""),
+            ("", ""),
+        ],
+    )
+    def test_it_reads_a_filing_request_that_names_a_tracker(self, message, expected):
+        from rootcoz.engine.chat import asked_issue_tracker
+
+        assert asked_issue_tracker(message) == expected
+
+
+class TestCredentialBlockedIssueNotice:
+    """The text the server posts: the cause and the fix, never "tooling"."""
+
+    def test_it_names_the_token_and_the_page_that_adds_it(self):
+        from rootcoz.engine.chat import credential_blocked_issue_notice
+
+        assert credential_blocked_issue_notice("jira", "no_token") == (
+            "No Jira issue can be filed from this chat. This account has no Jira "
+            "token saved; the fix is Profile Settings → add the Jira token."
+        )
+
+    def test_only_a_credential_reason_posts(self):
+        """A disabled tracker or a missing repo is not fixed by adding a token."""
+        from rootcoz.engine.chat import credential_blocked_issue_notice
+
+        for reason in (
+            "",
+            "server_disabled",
+            "no_repository",
+            "no_run_repository",
+            "unusable_credential",
+        ):
+            assert credential_blocked_issue_notice("github", reason) == ""
+        # An unknown tracker has no kind to name.
+        assert credential_blocked_issue_notice("", "no_token") == ""
+
+
+class TestTheServerPostsTheNoCredentialAnswer:
+    """Issue #446: the model ignored the prompt, so the server states the cause.
+
+    The row the server writes is a ``system`` chat row — the role the model
+    never writes — so the fix is present even when the model improvises.
+    """
+
+    async def _posted(self, message: str, unavailable: dict[str, str]) -> dict:
+        """The ``system`` row posted for this turn, ``{}`` when none is."""
+        from rootcoz.main import _post_issue_blocked_notice
+
+        with patch(
+            "rootcoz.storage.add_chat_message", AsyncMock(return_value=7)
+        ) as add:
+            posted = await _post_issue_blocked_notice(
+                conversation="j1",
+                username="alice",
+                message=message,
+                tracker_unavailable=unavailable,
+            )
+        if not posted:
+            assert add.await_count == 0
+            return {}
+        assert add.await_count == 1
+        assert add.call_args.args[0] == "j1"
+        return add.call_args.kwargs
+
+    async def test_a_github_request_with_no_token_names_profile_settings(self):
+        kwargs = await self._posted(
+            "can you open a GitHub issue for this failure?", {"github": "no_token"}
+        )
+        assert kwargs["role"] == "system"
+        assert kwargs["username"] == "alice"
+        assert "Profile Settings → add the GitHub token" in kwargs["content"]
+        assert "No GitHub issue can be filed" in kwargs["content"]
+        # The cause is the account, so nothing may blame the tools.
+        assert "tooling" not in kwargs["content"].lower()
+
+    async def test_a_saved_token_posts_nothing(self):
+        assert await self._posted("open a GitHub issue", {}) == {}
+        # A token for the OTHER tracker is not a credential for this one.
+        assert await self._posted("open a GitHub issue", {"jira": "no_token"}) == {}
+
+    async def test_an_unrelated_message_posts_nothing(self):
+        assert await self._posted("why did this fail?", {"github": "no_token"}) == {}
+        assert await self._posted("open the console log", {"github": "no_token"}) == {}
+
+    async def test_a_tracker_the_server_disabled_posts_no_token_advice(self):
+        assert (
+            await self._posted("open a GitHub issue", {"github": "server_disabled"})
+            == {}
+        )
+
+    async def test_the_bootstrap_admin_is_told_to_sign_in(self):
+        """No ``users`` row means ``PUT /api/user/tokens`` answers 404 for it."""
+        kwargs = await self._posted(
+            "please file a GitHub issue for this", {"github": "no_token_no_profile"}
+        )
+        assert "Sign in with your own account" in kwargs["content"]
+        assert "Profile Settings → add" not in kwargs["content"]
+        assert "tooling" not in kwargs["content"].lower()
+
+
 class TestBuildSystemPrompt:
     """Tests for build_system_prompt with custom_tools."""
 
