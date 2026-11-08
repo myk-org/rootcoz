@@ -164,6 +164,42 @@ echo "wait-check clean=0 crash=7"
 rm -rf $D
 ''',
   ],
+  # The status Docker actually gets (#458). `--wait-check` above exercises supervision in
+  # isolation, so it stayed green while every clean stop exited 143: the sidecar's EXIT
+  # trap ran `wait` on the pid it had just TERMed, errexit aborted the trap there, and its
+  # 143 replaced the status `_run_app` computed. This row drives the shipped script end to
+  # end (`--exit-check`): a live sidecar behind that same EXIT trap, the signal traps and
+  # the supervision. A clean stop -- TERM while the app is still shutting down -- must be
+  # 0, and an app that dies on its own must still report its own 7, never the trap's 143.
+  [
+    "sh",
+    "-c",
+    '''
+D=/tmp/rootcoz-exit-$$
+mkdir -p $D
+bash entrypoint.sh --exit-check $D/release-clean 0 $D/ready-clean &
+P=$!
+i=0
+while [ ! -f $D/ready-clean ] && [ $i -lt 1000 ]; do i=$((i+1)); sleep 0.01; done
+if [ ! -f $D/ready-clean ]; then echo "exit-check clean never started the app"; exit 1; fi
+kill -TERM $P
+: > $D/release-clean
+wait $P
+S=$?
+if [ $S -ne 0 ]; then echo "exit-check clean expected 0, got $S"; exit 1; fi
+bash entrypoint.sh --exit-check $D/release-crash 7 $D/ready-crash &
+P=$!
+i=0
+while [ ! -f $D/ready-crash ] && [ $i -lt 1000 ]; do i=$((i+1)); sleep 0.01; done
+if [ ! -f $D/ready-crash ]; then echo "exit-check crash never started the app"; exit 1; fi
+: > $D/release-crash
+wait $P
+S=$?
+if [ $S -ne 7 ]; then echo "exit-check crash expected 7, got $S"; exit 1; fi
+echo "exit-check clean=0 crash=7"
+rm -rf $D
+''',
+  ],
   # Probes are values, not template literals: 14 timing fields across three probes
   # (startup has no initialDelaySeconds — absent renders nothing and the API defaults
   # it to 0). Defaults are asserted for the two numbers that matter operationally

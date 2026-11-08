@@ -45,6 +45,44 @@ _supervise_app() {
     return "$status"
 }
 
+# Kill the sidecar when the app is gone. Every command here is tolerant on purpose:
+# the `wait` returns the 143 the sidecar died with from the SIGTERM the line above
+# just sent, and errexit would abort the EXIT trap there and hand 143 to Docker
+# instead of the status `_run_app` computed (#458). A trap may clean up; it must
+# never choose the exit status.
+_cleanup_sidecar() {
+    kill "$SIDECAR_PID" 2>/dev/null || true
+    wait "$SIDECAR_PID" 2>/dev/null || true
+}
+
+# Run the app in the background so the sidecar's EXIT trap fires, forward the
+# container's signals to it, and exit with the app's own status. The shipped path and
+# the `--exit-check` harness below both come through here, so the harness asserts the
+# status Docker really gets.
+_run_app() {
+    if [ -n "${extra_args:-}" ]; then
+        "$@" $extra_args &
+    else
+        "$@" &
+    fi
+    APP_PID=$!
+
+    # Forward signals to the app (|| true guards against errexit when PID gone)
+    trap 'kill -TERM $APP_PID 2>/dev/null || true' TERM
+    trap 'kill -INT $APP_PID 2>/dev/null || true' INT
+
+    # `wait` returns 128+signum the moment that TERM trap fires, while uvicorn is
+    # still shutting down -- and the lifespan shutdown that records an in-flight
+    # job as a server restart (#458) happens *during* that shutdown. A bare `wait`
+    # under errexit therefore exited this script, and as PID 1 it took the
+    # container (and uvicorn, mid-write) with it: SIGTERM looked like a crash on
+    # the next boot. `_supervise_app` keeps waiting until the pid is really gone
+    # and reports the app's own status, never the interruption's.
+    status=0
+    _supervise_app "$APP_PID" || status=$?
+    exit "$status"
+}
+
 # Self-check hook for the `tox -e chart` env, argv-gated like --xdg-check: it runs
 # the real supervision function above against a child that ignores TERM until
 # <release> exists, then exits <code>. The child touches <ready> once its trap is
@@ -59,6 +97,28 @@ if [ "${1:-}" = "--wait-check" ]; then
     status=0
     _supervise_app "$_check_pid" || status=$?
     exit "$status"
+fi
+
+# Self-check hook for the `tox -e chart` env, argv-gated like the two above: it runs
+# the *whole* shipped exit path -- a live sidecar reaped by the EXIT trap, the signal
+# traps and `_run_app`'s supervision -- against a fake sidecar and a fake app, then
+# reports what Docker would see. `--wait-check` covers supervision alone, which is why
+# it stayed green while every clean stop exited 143 (#458).
+if [ "${1:-}" = "--exit-check" ]; then
+    _check_release="$2"
+    _check_code="$3"
+    # Armed before the app exists, so a TERM landing between the fork inside `_run_app`
+    # and its own trap cannot kill this shell with 143 and be read as the defect under
+    # test. `_run_app` replaces it microseconds later.
+    trap 'kill -TERM ${APP_PID:-} 2>/dev/null || true' TERM
+    # A sidecar that outlives the script, so the EXIT trap really kills and reaps it --
+    # the shape that turned a clean exit into 143. The app mirrors --wait-check's child:
+    # it ignores TERM until <release> exists, then exits <code>, and touches <ready>
+    # once its trap is in place.
+    sleep 60 &
+    SIDECAR_PID=$!
+    trap _cleanup_sidecar EXIT
+    _run_app bash -c "trap '' TERM; : > \"$4\"; while [ ! -f \"$_check_release\" ]; do sleep 0.01; done; exit $_check_code"
 fi
 
 # Cursor auth: create config dir (owned by runtime UID so chmod works)
@@ -133,7 +193,7 @@ if [ -f /app/sidecar-helper/dist/server.js ]; then
     echo "[sidecar] Started Pi SDK sidecar (PID $SIDECAR_PID) on port $SIDECAR_PORT"
 
     # Kill sidecar when main process exits
-    trap 'kill $SIDECAR_PID 2>/dev/null; wait $SIDECAR_PID 2>/dev/null' EXIT
+    trap _cleanup_sidecar EXIT
 
     # Monitor sidecar — if it dies, kill the main process too
     (trap 'exit 0' TERM
@@ -184,27 +244,7 @@ fi
 # When sidecar is running, run app in background + wait so EXIT trap fires
 # for sidecar cleanup and signals are forwarded properly.
 if [ "$SIDECAR_RUNNING" = true ]; then
-    if [ -n "$extra_args" ]; then
-        "$@" $extra_args &
-    else
-        "$@" &
-    fi
-    APP_PID=$!
-
-    # Forward signals to the app (|| true guards against errexit when PID gone)
-    trap 'kill -TERM $APP_PID 2>/dev/null || true' TERM
-    trap 'kill -INT $APP_PID 2>/dev/null || true' INT
-
-    # `wait` returns 128+signum the moment that TERM trap fires, while uvicorn is
-    # still shutting down -- and the lifespan shutdown that records an in-flight
-    # job as a server restart (#458) happens *during* that shutdown. A bare `wait`
-    # under errexit therefore exited this script, and as PID 1 it took the
-    # container (and uvicorn, mid-write) with it: SIGTERM looked like a crash on
-    # the next boot. `_supervise_app` keeps waiting until the pid is really gone
-    # and reports the app's own status, never the interruption's.
-    status=0
-    _supervise_app "$APP_PID" || status=$?
-    exit "$status"
+    _run_app "$@"
 else
     if [ -n "$extra_args" ]; then
         exec "$@" $extra_args
