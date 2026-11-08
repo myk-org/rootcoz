@@ -153,4 +153,7 @@ def enrich_junit_xml(session: Any) -> None:
         xml_path.write_text(enriched_xml)
         logger.info("JUnit XML enriched with AI analysis: %s", xml_path)
     else:
-        logger.info("No enriched XML returned (no failures or analysis failed)")
+        logger.info(
+            "No enriched XML returned (no failures, analysis failed, or the "
+            "document exceeded the server's inline limit)"
+        )

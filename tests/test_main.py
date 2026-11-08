@@ -18478,3 +18478,34 @@ class TestAnalyzeRefusalReachesTheStoredError:
         )
         for word in ("your", "re-enter", "rotate", "the server's"):
             assert word not in sentence
+
+
+# --- the enriched_xml omission audit (#456) ---------------------------------
+
+
+async def test_the_enriched_xml_omission_sink_is_registered(temp_db_path: Path) -> None:
+    """Import wires the sink, and one omission writes exactly one audit row.
+
+    Without this the guard would drop documents silently: the registration is the
+    only thing standing between ``storage``'s verdict and the audit trail.
+    """
+    from rootcoz import main
+
+    assert storage._enriched_xml_omission_sink is main._audit_enriched_xml_omission
+
+    with patch.object(storage, "DB_PATH", temp_db_path):
+        await storage.init_db()
+        await storage._audit_enriched_xml_omission(
+            "job-omitted", {"characters": 4_000_000, "limit": 1_048_576}
+        )
+        events = (
+            await storage.list_audit_events(action="result.enriched_xml_omitted")
+        )["events"]
+
+    assert len(events) == 1
+    event = events[0]
+    assert event["actor"] == "rootcoz"
+    assert event["actor_role"] == "system"
+    assert event["target_type"] == "job"
+    assert event["target_id"] == "job-omitted"
+    assert event["details"] == {"characters": 4_000_000, "limit": 1_048_576}

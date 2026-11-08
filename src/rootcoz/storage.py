@@ -535,6 +535,13 @@ def _hash_session_token(token: str) -> str:
 _RESULT_ZSTD_MIN_BYTES = 1024  # below this a frame is never smaller
 _RESULT_ZSTD_LEVEL = 3  # 9.1x at 0.21 ms/row; level 9 buys 8% for 3x the CPU
 
+# ``enriched_xml`` is a whole enriched JUnit document, and the row is read back
+# whole, so a full-size one makes the row full-size. A report-sized document stays
+# inline; this is 13.9x the largest one a real deployment stores (75,388 chars
+# over 233 rows) and the guard below is the single point every write passes.
+# Counted in ``len(str)`` characters, which is 1 MiB of ASCII XML.
+_ENRICHED_XML_INLINE_MAX_CHARS = 1024 * 1024
+
 # Every ``result_json`` write for a job holds that job's lock from the read to the
 # commit, so no write of this process can move the row between the two. The lock is
 # per job: a slow encode delays only that job's writers, and the SQLite write lock is
@@ -652,9 +659,93 @@ def _encode_result_text(raw: str) -> bytes | str:
     return frame if len(frame) < len(data) else raw
 
 
-def _dump_result_json(result: dict[str, Any] | None) -> bytes | str | None:
-    """Serialise *result* for the ``result_json`` column (compressed when smaller)."""
-    return None if result is None else _encode_result_text(json.dumps(result))
+def _drop_oversized_enriched_xml(
+    payload: dict[str, Any], job_id: str
+) -> dict[str, Any] | None:
+    """Keep a full-size enriched JUnit document out of ``result_json``.
+
+    Mutates *payload*: the field becomes ``None`` and ``enriched_xml_omitted``
+    records what was dropped and against which limit, so a reader can tell "too
+    large to store" from "no enriched document was produced". Never raises --
+    refusing the field must not lose the analysis the same write carries.
+
+    Returns the omission this call made, or ``None`` when it made none. The caller
+    reports that value (see :func:`_audit_enriched_xml_omission`): the record says
+    *this encode dropped a document*, which the stored marker cannot, because a row
+    can be written twice with two same-sized documents and the marker would look
+    unchanged.
+
+    A stored document and an omission notice cannot both be true, so a payload that
+    carries a document that fits loses the marker a previous write left behind. A
+    payload with no document at all is left as it is: a patch that round-trips the
+    stored payload must keep the notice that belongs to the row.
+    """
+    xml = payload.get("enriched_xml")
+    if not isinstance(xml, str):
+        return None
+    if len(xml) <= _ENRICHED_XML_INLINE_MAX_CHARS:
+        payload.pop("enriched_xml_omitted", None)
+        return None
+    logger.warning(
+        f"job_id={job_id}: enriched_xml is {len(xml)} chars, above the "
+        f"{_ENRICHED_XML_INLINE_MAX_CHARS}-char inline limit, so it is not stored "
+        "in result_json; the analysis it belongs to was saved and the row reports "
+        "enriched_xml_omitted"
+    )
+    payload["enriched_xml"] = None
+    payload["enriched_xml_omitted"] = {
+        "characters": len(xml),
+        "limit": _ENRICHED_XML_INLINE_MAX_CHARS,
+    }
+    return payload["enriched_xml_omitted"]
+
+
+def _dump_result_json(
+    result: dict[str, Any] | None, *, job_id: str
+) -> tuple[bytes | str | None, dict[str, Any] | None]:
+    """Serialise *result* and report the ``enriched_xml`` it had to drop.
+
+    The one place every payload write is encoded, so it is also the one place a
+    full-size ``enriched_xml`` is kept out of the row: see
+    :func:`_drop_oversized_enriched_xml`. The second element is that guard's
+    verdict -- ``None`` unless this encode dropped a document -- and it exists so
+    the writer can audit a drop it actually made instead of guessing one from the
+    payload afterwards.
+    """
+    if result is None:
+        return None, None
+    omitted = _drop_oversized_enriched_xml(result, job_id)
+    return _encode_result_text(json.dumps(result)), omitted
+
+
+#: The app's audit sink for a document this encoder refused to store (#456).
+_enriched_xml_omission_sink: Callable[[str, dict[str, Any]], Awaitable[None]] | None = (
+    None
+)
+
+
+def set_enriched_xml_omission_sink(
+    sink: Callable[[str, dict[str, Any]], Awaitable[None]] | None,
+) -> None:
+    """Register the sink an omitted ``enriched_xml`` document is reported to."""
+    global _enriched_xml_omission_sink
+    _enriched_xml_omission_sink = sink
+
+
+async def _audit_enriched_xml_omission(
+    job_id: str, omitted: dict[str, Any] | None
+) -> None:
+    """Report the document this write dropped to the app's audit sink."""
+    if not omitted:
+        return
+    sink = _enriched_xml_omission_sink
+    if sink is None:
+        logger.warning(
+            f"job_id={job_id}: no enriched_xml omission audit sink is registered, so "
+            "the dropped document was not audited (the row still records the omission)"
+        )
+        return
+    await sink(job_id, omitted)
 
 
 _ZSTD_FRAME_MAGIC = b"\x28\xb5\x2f\xfd"
@@ -3686,6 +3777,7 @@ async def save_result(
     async def attempt() -> _WriteOutcome:
         nonlocal written
         result_json: bytes | str | None = None
+        omitted: dict[str, Any] | None = None
         payload = _payload_for_attempt(result)
         async with _connect_db() as db:
             expect = await _read_write_state(db, job_id)
@@ -3698,7 +3790,9 @@ async def save_result(
                 except UnsupportedResultEncoding as exc:
                     # No transaction is open, so nothing to roll back.
                     _refuse_write(job_id, exc)
-                result_json = await asyncio.to_thread(_dump_result_json, payload)
+                result_json, omitted = await asyncio.to_thread(
+                    _dump_result_json, payload, job_id=job_id
+                )
         async with _connect_db() as db:
             if not await _begin_guarded_write(db, job_id, expect):
                 return "stale"
@@ -3706,6 +3800,7 @@ async def save_result(
                 db, job_id, build_url, status, payload, result_json
             )
             await db.commit()
+        await _audit_enriched_xml_omission(job_id, omitted)
         written = payload
         return "landed"
 
@@ -3893,6 +3988,7 @@ async def update_status(
     async def attempt() -> _WriteOutcome:
         nonlocal written
         result_json: bytes | str | None = None
+        omitted: dict[str, Any] | None = None
         payload = _payload_for_attempt(result)
         async with _connect_db() as db:
             expect = await _read_write_state(db, job_id)
@@ -3909,7 +4005,9 @@ async def update_status(
                 except UnsupportedResultEncoding as exc:
                     # No transaction is open, so nothing to roll back.
                     _refuse_write(job_id, exc, log_level=refusal_log_level)
-                result_json = await asyncio.to_thread(_dump_result_json, payload)
+                result_json, omitted = await asyncio.to_thread(
+                    _dump_result_json, payload, job_id=job_id
+                )
         async with _connect_db() as db:
             if not await _begin_guarded_write(db, job_id, expect):
                 return "stale"
@@ -3932,6 +4030,7 @@ async def update_status(
                     payload_params,
                 )
             await db.commit()
+        await _audit_enriched_xml_omission(job_id, omitted)
         written = payload
         return "landed"
 
@@ -4469,7 +4568,8 @@ async def patch_result_json(
         # Unlike save_result/update_status this encode stays on the loop: a patch
         # runs from request handlers that already hold the payload, and a thread
         # hop here would appear in every caller that stubs ``asyncio.to_thread``.
-        params: list[Any] = [_dump_result_json(result_data)]
+        result_json, omitted = _dump_result_json(result_data, job_id=job_id)
+        params: list[Any] = [result_json]
         _append_denormalized_set_parts(result_data, set_parts, params)
         params.append(job_id)
         async with _connect_db() as db:
@@ -4483,6 +4583,7 @@ async def patch_result_json(
                 params,
             )
             await db.commit()
+        await _audit_enriched_xml_omission(job_id, omitted)
         return "landed"
 
     await _write_result(job_id, "patch_result_json", attempt)
@@ -4581,7 +4682,10 @@ async def _backfill_failure_uuids(
         if not payload or not _assign_missing_uuids(payload):
             return "refused"
         set_parts = ["result_json = ?"]
-        params: list[Any] = [await asyncio.to_thread(_dump_result_json, payload)]
+        result_json, omitted = await asyncio.to_thread(
+            _dump_result_json, payload, job_id=job_id
+        )
+        params: list[Any] = [result_json]
         # The payload itself changed, so its derived columns move with it.
         _append_denormalized_set_parts(payload, set_parts, params)
         params.append(job_id)
@@ -4593,6 +4697,7 @@ async def _backfill_failure_uuids(
                 params,
             )
             await db.commit()
+        await _audit_enriched_xml_omission(job_id, omitted)
         stored = payload
         return "landed"
 

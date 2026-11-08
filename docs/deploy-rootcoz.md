@@ -426,6 +426,20 @@ kubectl exec -n rootcoz deploy/rootcoz -- python -c \
   surface as errors until you upgrade again — but it never destroys one. Do not
   roll back once the background sweep has run: restore the database from a
   backup taken before the upgrade instead. Upgrade all replicas together.
+- A full-size `enriched_xml` is not stored. That field is a whole enriched JUnit
+  document, so above **1,048,576 characters** the payload is written with
+  `enriched_xml: null` plus `enriched_xml_omitted: {"characters": <N>,
+  "limit": 1048576}` and one WARNING names the job. The limit is measured on the
+  document's characters, not on the stored zstd frame; below it nothing changes,
+  and the analysis the same write carries is always saved.
+- That guard is **write-time only**: there is no retroactive pass. A row already
+  over the limit from an older build keeps its document until that job's next
+  payload write drops it — any patch of the result is enough, because a patch
+  re-encodes the whole payload — and the background sweeps only re-frame those
+  bytes, never strip the field. Do not read the guard as "rows are bounded now":
+  the same row still stores the submitted document inline in
+  `result.request_params.raw_xml`, bounded only by that request field's own
+  50,000,000-character cap. Bounding that is separate work.
 
 ## Troubleshooting
 

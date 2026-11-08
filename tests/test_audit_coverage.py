@@ -177,6 +177,8 @@ def test_exemptions_are_not_stale() -> None:
         "provider.models_refresh",
         "admin.settings_export",
         "audit.export",
+        # The server reporting a document it did not store (#456).
+        "result.enriched_xml_omitted",
         # §I account lockout, disable and unlock.
         "auth.account_locked",
         "admin.user_unlock",

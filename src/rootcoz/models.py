@@ -1003,7 +1003,12 @@ class FailureAnalysisResult(BaseModel):
     )
     enriched_xml: str | None = Field(
         default=None,
-        description="Enriched JUnit XML with analysis results (only when raw_xml was provided in request)",
+        description=(
+            "Enriched JUnit XML with analysis results (only when raw_xml was "
+            "provided in request); a document above the 1,048,576-character "
+            "inline limit is not stored, and GET /results/{job_id} reports "
+            "enriched_xml: null with enriched_xml_omitted (characters, limit)."
+        ),
     )
     token_usage: TokenUsageSummary | None = Field(
         default=None, description="Token usage summary for this analysis"

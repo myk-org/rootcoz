@@ -1851,12 +1851,12 @@ async def test_a_status_write_waits_for_the_payload_write_it_raced(
     encoding = threading.Event()
     encodes: list[int] = []
 
-    def slow_first_dump(result: dict[str, Any]) -> Any:
+    def slow_first_dump(result: dict[str, Any], *, job_id: str) -> Any:
         encodes.append(len(encodes))
         if len(encodes) == 1:
             encoding.set()
             time.sleep(0.4)  # the status-only writer has to wait this out
-        return real_dump(result)
+        return real_dump(result, job_id=job_id)
 
     monkeypatch.setattr(storage, "_dump_result_json", slow_first_dump)
     failing = asyncio.create_task(
@@ -1953,12 +1953,12 @@ async def test_usage_recorded_after_the_snapshot_is_merged_by_the_next_write(
     encoding = threading.Event()
     encodes: list[int] = []
 
-    def slow_first_dump(result: dict[str, Any]) -> Any:
+    def slow_first_dump(result: dict[str, Any], *, job_id: str) -> Any:
         encodes.append(len(encodes))
         if len(encodes) == 1:
             encoding.set()
             time.sleep(0.4)  # the usage row lands inside this window
-        return real_dump(result)
+        return real_dump(result, job_id=job_id)
 
     monkeypatch.setattr(storage, "_dump_result_json", slow_first_dump)
     finishing = asyncio.create_task(
@@ -2154,3 +2154,307 @@ async def test_two_processes_editing_one_job_keep_both_edits(
     assert stored["second"] is True, (
         "the second worker's edit was silently overwritten by the first"
     )
+
+
+# --- the inline limit for enriched_xml (#456) -------------------------------
+
+
+def _xml(total: int) -> str:
+    """A document whose total length is exactly *total* characters."""
+    body = "<testsuite>" + "x" * (total - 23) + "</testsuite>"
+    assert len(body) == total
+    return body
+
+
+def _decoded(row: Any, job_id: str) -> tuple[dict[str, Any], str]:
+    """The stored payload and the decoded JSON text, for "absent from the row"."""
+    text = (
+        zstd.decompress(row["result_json"])
+        if row["kind"] == "blob"
+        else row["result_json"]
+    )
+    if isinstance(text, bytes):
+        text = text.decode()
+    return json.loads(text), text
+
+
+@pytest.fixture
+def _omission_sink():
+    """Record what each write reports, and restore the app's sink afterwards."""
+    calls: list[tuple[str, dict[str, Any]]] = []
+
+    async def record(job_id: str, omitted: dict[str, Any]) -> None:
+        calls.append((job_id, dict(omitted)))
+
+    previous = storage._enriched_xml_omission_sink
+    storage.set_enriched_xml_omission_sink(record)
+    try:
+        yield calls
+    finally:
+        storage.set_enriched_xml_omission_sink(previous)
+
+
+async def test_a_report_sized_enriched_xml_stays_inline(_storage) -> None:
+    """The regression pin: a document a real deployment stores is stored as it is."""
+    xml = _xml(50_000)
+    payload = _payload(failure_count=3) | {"enriched_xml": xml}
+    await storage.save_result("job-small-xml", "http://ci", "completed", payload)
+
+    stored = await storage.get_result("job-small-xml")
+    assert stored["result"]["enriched_xml"] == xml
+    assert "enriched_xml_omitted" not in stored["result"]
+
+
+async def test_a_document_one_char_over_the_limit_is_not_stored(_storage) -> None:
+    """Above the limit the field is null, the marker explains it, the bytes are gone."""
+    xml = _xml(storage._ENRICHED_XML_INLINE_MAX_CHARS + 1)
+    payload = _payload(failure_count=3) | {"enriched_xml": xml}
+    await storage.save_result("job-huge-xml", "http://ci", "completed", payload)
+
+    row = await _stored(_storage, "job-huge-xml")
+    stored, text = _decoded(row, "job-huge-xml")
+    assert stored["enriched_xml"] is None
+    assert stored["enriched_xml_omitted"] == {
+        "characters": len(xml),
+        "limit": storage._ENRICHED_XML_INLINE_MAX_CHARS,
+    }
+    assert xml[:4096] not in text, "the document reached the column anyway"
+    # The analysis the same write carried is intact.
+    assert stored["summary"] == "many failures"
+    assert len(stored["failures"]) == 3
+
+
+async def test_the_limit_is_inclusive(_storage) -> None:
+    """Exactly at the limit is still inline; one character more is not."""
+    limit = storage._ENRICHED_XML_INLINE_MAX_CHARS
+    at = _xml(limit)
+    over = _xml(limit + 1)
+    await storage.save_result(
+        "job-at-limit",
+        "http://ci",
+        "completed",
+        _payload(failure_count=2) | {"enriched_xml": at},
+    )
+    await storage.save_result(
+        "job-over-limit",
+        "http://ci",
+        "completed",
+        _payload(failure_count=2) | {"enriched_xml": over},
+    )
+
+    kept = await storage.get_result("job-at-limit")
+    assert kept["result"]["enriched_xml"] == at
+    assert "enriched_xml_omitted" not in kept["result"]
+
+    dropped = await storage.get_result("job-over-limit")
+    assert dropped["result"]["enriched_xml"] is None
+    assert dropped["result"]["enriched_xml_omitted"]["characters"] == limit + 1
+
+
+async def test_update_status_never_stores_a_full_size_enriched_xml(_storage) -> None:
+    """The second writer obeys the same limit as the first."""
+    await storage.save_result(
+        "job-status-xml", "", "running", _payload(failure_count=2)
+    )
+    xml = _xml(storage._ENRICHED_XML_INLINE_MAX_CHARS + 1)
+    assert await storage.update_status(
+        "job-status-xml", "completed", _payload(failure_count=2) | {"enriched_xml": xml}
+    )
+
+    stored = await storage.get_result("job-status-xml")
+    assert stored["result"]["enriched_xml"] is None
+    assert stored["result"]["enriched_xml_omitted"] == {
+        "characters": len(xml),
+        "limit": storage._ENRICHED_XML_INLINE_MAX_CHARS,
+    }
+
+
+async def test_patch_result_json_obeys_the_limit_both_ways(_storage) -> None:
+    """A patch neither re-inlines a dropped document nor keeps a stale notice."""
+    limit = storage._ENRICHED_XML_INLINE_MAX_CHARS
+    huge = _xml(limit + 1)
+    await storage.save_result(
+        "job-patched-xml",
+        "",
+        "completed",
+        _payload(failure_count=2) | {"enriched_xml": huge},
+    )
+    await storage.save_result(
+        "job-patched-small", "", "completed", _payload(failure_count=2)
+    )
+
+    # (a) a harmless patch keeps the omission and never re-inlines the document.
+    await storage.patch_result_json(
+        "job-patched-xml", lambda data: data.update({"patched": True})
+    )
+    stored = (await storage.get_result("job-patched-xml"))["result"]
+    assert stored["enriched_xml"] is None
+    assert stored["enriched_xml_omitted"]["characters"] == len(huge)
+    assert stored["patched"] is True
+
+    # (b) a document that fits replaces the notice: both cannot be true at once.
+    small = _xml(50_000)
+    await storage.patch_result_json(
+        "job-patched-xml", lambda data: data.update({"enriched_xml": small})
+    )
+    stored = (await storage.get_result("job-patched-xml"))["result"]
+    assert stored["enriched_xml"] == small
+    assert "enriched_xml_omitted" not in stored
+
+    # (c) a small row patched with an oversized document comes out omitted.
+    await storage.patch_result_json(
+        "job-patched-small", lambda data: data.update({"enriched_xml": huge})
+    )
+    stored = (await storage.get_result("job-patched-small"))["result"]
+    assert stored["enriched_xml"] is None
+    assert stored["enriched_xml_omitted"]["characters"] == len(huge)
+
+
+async def test_the_failure_id_backfill_does_not_re_inline_a_full_size_enriched_xml(
+    _storage,
+) -> None:
+    """The legacy-id write re-encodes the payload, so it must obey the limit too."""
+    xml = _xml(storage._ENRICHED_XML_INLINE_MAX_CHARS + 1)
+    payload = _payload(failure_count=2) | {"enriched_xml": xml}
+    for failure in payload["failures"]:
+        failure.pop("id")
+    await _insert_legacy("job-legacy-xml", payload)
+
+    await storage.get_result("job-legacy-xml")  # triggers the id backfill
+
+    row = await _stored(_storage, "job-legacy-xml")
+    stored, text = _decoded(row, "job-legacy-xml")
+    assert stored["enriched_xml"] is None
+    assert stored["enriched_xml_omitted"]["characters"] == len(xml)
+    assert xml[:4096] not in text
+    assert all(failure["id"] for failure in stored["failures"])
+
+
+async def test_the_sweeps_leave_a_guarded_row_guarded(_storage) -> None:
+    """Both background sweeps re-frame bytes, so they cannot re-add the field."""
+    marker = {"characters": 4_000_000, "limit": storage._ENRICHED_XML_INLINE_MAX_CHARS}
+    payload = _payload(failure_count=30) | {
+        "enriched_xml": None,
+        "enriched_xml_omitted": marker,
+    }
+    await _insert_legacy("job-swept", payload)
+
+    # The sweep really ran: without this the test would pass on an untouched row.
+    assert await storage.backfill_results_denorm() == 1
+    assert (await storage.backfill_result_json_compression())["rows"] == 1
+    row = await _stored(_storage, "job-swept")
+    assert row["kind"] == "blob", "the compression sweep did not process the row"
+
+    stored, _ = _decoded(row, "job-swept")
+    assert stored["enriched_xml"] is None
+    assert stored["enriched_xml_omitted"] == marker
+    assert len(stored["failures"]) == 30
+
+
+async def test_every_writer_reports_exactly_the_documents_it_dropped(
+    _storage, _omission_sink, storage_logs
+) -> None:
+    """The audit row follows the encode that dropped a document, and nothing else."""
+    limit = storage._ENRICHED_XML_INLINE_MAX_CHARS
+    huge = _xml(limit + 1)
+    expected = {"characters": len(huge), "limit": limit}
+
+    # (a) each of the four writers reports once, with the job and the size.
+    await storage.save_result(
+        "job-report-save",
+        "",
+        "completed",
+        _payload(failure_count=2) | {"enriched_xml": huge},
+    )
+    assert _omission_sink == [("job-report-save", expected)]
+
+    _omission_sink.clear()
+    await storage.save_result(
+        "job-report-status", "", "running", _payload(failure_count=2)
+    )
+    assert await storage.update_status(
+        "job-report-status",
+        "completed",
+        _payload(failure_count=2) | {"enriched_xml": huge},
+    )
+    assert _omission_sink == [("job-report-status", expected)]
+
+    _omission_sink.clear()
+    await storage.save_result(
+        "job-report-patch", "", "completed", _payload(failure_count=2)
+    )
+    await storage.patch_result_json(
+        "job-report-patch", lambda data: data.update({"enriched_xml": huge})
+    )
+    assert _omission_sink == [("job-report-patch", expected)]
+
+    _omission_sink.clear()
+    legacy = _payload(failure_count=2) | {"enriched_xml": huge}
+    for failure in legacy["failures"]:
+        failure.pop("id")
+    await _insert_legacy("job-report-backfill", legacy)
+    await storage.get_result("job-report-backfill")
+    assert _omission_sink == [("job-report-backfill", expected)]
+
+    # (b) a second, same-sized document is a second drop: a marker compare misses it.
+    _omission_sink.clear()
+    await storage.patch_result_json(
+        "job-report-save", lambda data: data.update({"enriched_xml": _xml(limit + 1)})
+    )
+    assert _omission_sink == [("job-report-save", expected)]
+
+    # (c) a patch that only round-trips the omitted row reports nothing.
+    _omission_sink.clear()
+    await storage.patch_result_json(
+        "job-report-save", lambda data: data.update({"patched": True})
+    )
+    assert _omission_sink == []
+
+    # (d) a document that fits reports nothing and clears the notice.
+    _omission_sink.clear()
+    small = _xml(1_000)
+    await storage.patch_result_json(
+        "job-report-save", lambda data: data.update({"enriched_xml": small})
+    )
+    assert _omission_sink == []
+    stored = (await storage.get_result("job-report-save"))["result"]
+    assert stored["enriched_xml"] == small
+    assert "enriched_xml_omitted" not in stored
+
+    # (e) a refused write reports nothing: nothing of it landed.
+    _omission_sink.clear()
+    await _insert_newer_encoding("job-report-refused", b"\xff\xfe\x00newer payload")
+    with pytest.raises(storage.UnsupportedResultEncoding):
+        await storage.save_result(
+            "job-report-refused",
+            "",
+            "completed",
+            _payload(failure_count=2) | {"enriched_xml": huge},
+        )
+    assert _omission_sink == []
+
+    # (f) status-only writes pay no encode, so they have no verdict to report.
+    _omission_sink.clear()
+    await storage.save_result("job-report-status", "", "running")
+    assert await storage.update_status("job-report-status", "completed") is True
+    assert _omission_sink == []
+
+    # (g) an unregistered sink is logged and never fails the landed write.
+    storage.set_enriched_xml_omission_sink(None)
+    await storage.save_result(
+        "job-report-unsunk",
+        "",
+        "completed",
+        _payload(failure_count=2) | {"enriched_xml": huge},
+    )
+    stored = (await storage.get_result("job-report-unsunk"))["result"]
+    assert stored["enriched_xml"] is None
+    assert stored["enriched_xml_omitted"] == expected
+    warnings = [
+        record.getMessage()
+        for record in storage_logs.records
+        if record.levelno >= logging.WARNING
+        and "job-report-unsunk" in record.getMessage()
+        and "sink" in record.getMessage()
+    ]
+    assert len(warnings) == 1, warnings

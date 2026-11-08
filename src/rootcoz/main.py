@@ -329,6 +329,7 @@ from rootcoz.storage import (
     release_submitted_job_analyze_claim,
     replace_job_test_entries,
     save_result,
+    set_enriched_xml_omission_sink,
     stamp_build_url,
     update_status,
 )
@@ -1096,6 +1097,28 @@ def notify_job_status_changed(job_id: str) -> None:
 # notifications without importing from main.py.
 set_progress_callback(notify_job_status_changed)
 set_usage_callback(notify_job_status_changed)
+
+
+async def _audit_enriched_xml_omission(job_id: str, omitted: dict[str, Any]) -> None:
+    """Audit a full-size ``enriched_xml`` document that was not stored (#456)."""
+    await record_audit(
+        action="result.enriched_xml_omitted",
+        actor="rootcoz",  # the server itself: this event has no user behind it
+        actor_role="system",
+        message=(
+            f"enriched_xml for job {job_id} was not stored: "
+            f"{omitted.get('characters')} characters, limit {omitted.get('limit')}"
+        ),
+        target_type="job",
+        target_id=job_id,
+        details={
+            "characters": omitted.get("characters"),
+            "limit": omitted.get("limit"),
+        },
+    )
+
+
+set_enriched_xml_omission_sink(_audit_enriched_xml_omission)
 
 
 def notify_comments_changed(job_id: str) -> None:
