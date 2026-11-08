@@ -171,6 +171,11 @@ rm -rf $D
   # end (`--exit-check`): a live sidecar behind that same EXIT trap, the signal traps and
   # the supervision. A clean stop -- TERM while the app is still shutting down -- must be
   # 0, and an app that dies on its own must still report its own 7, never the trap's 143.
+  # The third case is the sidecar dying under a running app (#468 review): the app still
+  # exits 0 on its way out, and a 0 would hide the crash from every supervisor -- no
+  # CrashLoopBackOff, no restart alert. It must exit 70, and the row waits for the
+  # watcher's own "Sidecar died" line (its poll is up to 5 s) before releasing the app,
+  # so the death is recorded before the exit status is decided.
   [
     "sh",
     "-c",
@@ -197,6 +202,21 @@ wait $P
 S=$?
 if [ $S -ne 7 ]; then echo "exit-check crash expected 7, got $S"; exit 1; fi
 echo "exit-check clean=0 crash=7"
+bash entrypoint.sh --exit-check $D/release-died 0 $D/ready-died $D/sidecar-stop > $D/out 2>&1 &
+P=$!
+i=0
+while [ ! -f $D/ready-died ] && [ $i -lt 1000 ]; do i=$((i+1)); sleep 0.01; done
+if [ ! -f $D/ready-died ]; then echo "exit-check sidecar-died never started the app"; exit 1; fi
+: > $D/sidecar-stop
+i=0
+while ! grep -q 'Sidecar died, shutting down container' $D/out && [ $i -lt 1000 ]; do i=$((i+1)); sleep 0.01; done
+if ! grep -q 'Sidecar died, shutting down container' $D/out; then echo "exit-check sidecar death was never noticed"; exit 1; fi
+sleep 0.5
+: > $D/release-died
+wait $P
+S=$?
+if [ $S -ne 70 ]; then echo "exit-check sidecar-died expected 70, got $S"; exit 1; fi
+echo "exit-check sidecar-died=70"
 rm -rf $D
 ''',
   ],

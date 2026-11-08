@@ -55,6 +55,21 @@ _cleanup_sidecar() {
     wait "$SIDECAR_PID" 2>/dev/null || true
 }
 
+# Watch the sidecar and remember a death nobody asked for. The watcher runs in a
+# subshell, so it cannot set a variable the parent's exit path reads: it signals this
+# shell instead (`$$` is this shell even inside a subshell) and the USR1 trap records
+# the crash in the parent's own context. Arming the trap before the watcher starts also
+# keeps USR1's default action -- kill this shell -- unreachable. The signal traps further
+# down clear the record, so a requested stop is never reported as a crash.
+_monitor_sidecar() {
+    SIDECAR_DIED=false
+    trap 'SIDECAR_DIED=true; kill -TERM "${APP_PID:-}" 2>/dev/null || true' USR1
+    (trap 'exit 0' TERM
+     while kill -0 "$SIDECAR_PID" 2>/dev/null; do sleep 5; done
+     echo "[sidecar] Sidecar died, shutting down container"
+     kill -USR1 $$ 2>/dev/null) &
+}
+
 # Run the app in the background so the sidecar's EXIT trap fires, forward the
 # container's signals to it, and exit with the app's own status. The shipped path and
 # the `--exit-check` harness below both come through here, so the harness asserts the
@@ -67,9 +82,11 @@ _run_app() {
     fi
     APP_PID=$!
 
-    # Forward signals to the app (|| true guards against errexit when PID gone)
-    trap 'kill -TERM $APP_PID 2>/dev/null || true' TERM
-    trap 'kill -INT $APP_PID 2>/dev/null || true' INT
+    # Forward signals to the app (|| true guards against errexit when PID gone). Both
+    # also clear the sidecar-crash record: a stop we asked for is not a crash, and the
+    # sidecar only dies here from `_cleanup_sidecar`, after the status is decided.
+    trap 'SIDECAR_DIED=false; kill -TERM $APP_PID 2>/dev/null || true' TERM
+    trap 'SIDECAR_DIED=false; kill -INT $APP_PID 2>/dev/null || true' INT
 
     # `wait` returns 128+signum the moment that TERM trap fires, while uvicorn is
     # still shutting down -- and the lifespan shutdown that records an in-flight
@@ -80,6 +97,14 @@ _run_app() {
     # and reports the app's own status, never the interruption's.
     status=0
     _supervise_app "$APP_PID" || status=$?
+    # A sidecar that died on its own takes the app down with it, and the app can well
+    # exit 0 on the way out -- a 0 would report that as a clean stop, so no supervisor
+    # ever sees a crash: no CrashLoopBackOff, no restart alert. Report 70 instead. A stop
+    # we asked for cleared SIDECAR_DIED in the traps above, so `docker stop` still exits 0.
+    if [ "$status" -eq 0 ] && [ "${SIDECAR_DIED:-false}" = true ]; then
+        echo "[sidecar] ERROR: sidecar died while the app was running — exiting 70" >&2
+        status=70
+    fi
     exit "$status"
 }
 
@@ -110,14 +135,16 @@ if [ "${1:-}" = "--exit-check" ]; then
     # Armed before the app exists, so a TERM landing between the fork inside `_run_app`
     # and its own trap cannot kill this shell with 143 and be read as the defect under
     # test. `_run_app` replaces it microseconds later.
-    trap 'kill -TERM ${APP_PID:-} 2>/dev/null || true' TERM
+    trap 'SIDECAR_DIED=false; kill -TERM ${APP_PID:-} 2>/dev/null || true' TERM
     # A sidecar that outlives the script, so the EXIT trap really kills and reaps it --
-    # the shape that turned a clean exit into 143. The app mirrors --wait-check's child:
-    # it ignores TERM until <release> exists, then exits <code>, and touches <ready>
-    # once its trap is in place.
-    sleep 60 &
+    # the shape that turned a clean exit into 143. It dies when argv 5 exists (never, if
+    # unset), which is how the harness crashes it mid-run. The app mirrors --wait-check's
+    # child: it ignores TERM until <release> exists, then exits <code>, and touches
+    # <ready> once its trap is in place.
+    bash -c "while [ ! -f \"${5:-/nonexistent}\" ]; do sleep 0.01; done" &
     SIDECAR_PID=$!
     trap _cleanup_sidecar EXIT
+    _monitor_sidecar
     _run_app bash -c "trap '' TERM; : > \"$4\"; while [ ! -f \"$_check_release\" ]; do sleep 0.01; done; exit $_check_code"
 fi
 
@@ -196,10 +223,7 @@ if [ -f /app/sidecar-helper/dist/server.js ]; then
     trap _cleanup_sidecar EXIT
 
     # Monitor sidecar — if it dies, kill the main process too
-    (trap 'exit 0' TERM
-     while kill -0 $SIDECAR_PID 2>/dev/null; do sleep 5; done
-     echo "[sidecar] Sidecar died, shutting down container"
-     kill 1 2>/dev/null) &
+    _monitor_sidecar
 
     # Wait for sidecar to be healthy
     echo "[sidecar] Waiting for sidecar to be ready..."
