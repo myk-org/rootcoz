@@ -1155,15 +1155,20 @@ async def _eligible_result_bytes(db: aiosqlite.Connection) -> int:
     return (await cursor.fetchone())[0]
 
 
-async def _db_storage_report(db: aiosqlite.Connection, db_path: Path) -> str:
-    """File size plus free pages — the space a VACUUM could return."""
+async def _db_storage_report(db: aiosqlite.Connection) -> str:
+    """Database size plus free pages — the space a VACUUM could return.
+
+    Both figures come from this connection, never from a ``stat`` of the path: a
+    file that took the pass's path mid-pass must not lend its own size to a report
+    about the database this pass read and wrote.
+    """
     cursor = await db.execute("PRAGMA freelist_count")
     free_pages = (await cursor.fetchone())[0]
+    cursor = await db.execute("PRAGMA page_count")
+    pages = (await cursor.fetchone())[0]
     cursor = await db.execute("PRAGMA page_size")
     page_size = (await cursor.fetchone())[0]
-    return (
-        f"{db_path.stat().st_size} bytes on disk, {free_pages * page_size} bytes free"
-    )
+    return f"{pages * page_size} bytes in {pages} pages, {free_pages * page_size} bytes free"
 
 
 def _compress_result_rows(
@@ -1203,7 +1208,6 @@ async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, i
     # DB_PATH, and a batch must read, write and report on the file this pass
     # opened rather than on whatever sits at the path when the batch runs.
     db_path = current_db_path()
-    on_disk_before = "unknown"
     async with _open_sweep_db(db_path, "result_json compression") as db:
         if db is None:
             return stats
@@ -1213,8 +1217,7 @@ async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, i
             )
             return stats
         stats["bytes_before"] = await _eligible_result_bytes(db)
-        with suppress(FileNotFoundError):
-            on_disk_before = await _db_storage_report(db, db_path)
+        on_disk_before = await _db_storage_report(db)
         stats["bytes_after"] = stats["bytes_before"]
         logger.info(
             "result_json compression: starting (%d bytes of legacy results, database %s)",
@@ -1254,19 +1257,8 @@ async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, i
                 stats["rows"],
                 rowid,
             )
-        on_disk_after: str | None = None
-        with suppress(FileNotFoundError):
-            on_disk_after = await _db_storage_report(db, db_path)
-        if on_disk_after is None:
-            logger.info(
-                "result_json compression: done, %d row(s) compressed,"
-                " %d -> %d bytes (no file report: %s is gone)",
-                stats["rows"],
-                stats["bytes_before"],
-                stats["bytes_after"],
-                db_path,
-            )
-        else:
+        on_disk_after = await _db_storage_report(db)
+        if db_path.exists():
             logger.info(
                 "result_json compression: done, %d row(s) compressed, %d -> %d bytes,"
                 " database %s -> %s",
@@ -1275,6 +1267,18 @@ async def backfill_result_json_compression(batch_size: int = 100) -> dict[str, i
                 stats["bytes_after"],
                 on_disk_before,
                 on_disk_after,
+            )
+        else:
+            # The pass holds its descriptor, so it finished the batches it had --
+            # but the file it committed them to is no longer at the path, so there
+            # is no file size to report and this is not a completed sweep.
+            logger.info(
+                "result_json compression: stopped after %d row(s) compressed,"
+                " %d -> %d bytes (no file report: %s is gone)",
+                stats["rows"],
+                stats["bytes_before"],
+                stats["bytes_after"],
+                db_path,
             )
     return stats
 

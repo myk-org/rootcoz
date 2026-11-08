@@ -719,9 +719,33 @@ async def test_a_batch_never_follows_the_path_to_a_replacement(
     ] == []
 
 
+async def test_the_file_report_describes_the_connection_not_the_path(
+    _storage, tmp_path: Path
+) -> None:
+    """A replacement at the path cannot lend its size to the pass's report (#473)."""
+    db_path = _storage
+    await _insert_legacy("job-report", _payload(failure_count=20))
+    bigger = tmp_path / "bigger.db"
+    conn = sqlite3.connect(bigger)
+    try:
+        conn.execute("CREATE TABLE filler (b BLOB)")
+        conn.executemany("INSERT INTO filler VALUES (?)", [(b"x" * 1024,)] * 400)
+        conn.commit()
+    finally:
+        conn.close()
+    bigger_size = bigger.stat().st_size
+
+    async with storage._open_sweep_db(db_path, "report") as db:
+        assert db is not None
+        before = await storage._db_storage_report(db)
+        assert str(bigger_size) not in before  # sanity: the two sizes differ
+        bigger.replace(db_path)
+        assert await storage._db_storage_report(db) == before
+
+
 @pytest.mark.parametrize("damage", ["unlink", "replace"])
 async def test_a_database_damaged_between_batches_cannot_reach_the_pass(
-    _storage, tmp_path: Path, damage: str
+    _storage, storage_logs, tmp_path: Path, damage: str
 ) -> None:
     """A damaged path is not a new database: the pass keeps the one it holds.
 
@@ -759,6 +783,9 @@ async def test_a_database_damaged_between_batches_cannot_reach_the_pass(
     assert stats["rows"] == 2, "the pass must finish on the file it opened"
     if damage == "unlink":
         assert not db_path.exists(), "the sweep re-created the database that was gone"
+        # The rows it committed are gone with the file: not a completed sweep.
+        assert "stopped after 2 row(s) compressed" in storage_logs.text
+        assert f"no file report: {db_path} is gone" in storage_logs.text
     else:
         assert db_path.read_bytes() == foreign_bytes, (
             "the sweep wrote to a foreign file"
