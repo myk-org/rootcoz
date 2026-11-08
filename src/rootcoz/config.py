@@ -136,6 +136,16 @@ def parse_additional_repos(raw: str) -> list[dict[str, Any]]:
     return result
 
 
+def duplicate_additional_repo_names(raw: str) -> list[str]:
+    """Names declared more than once in an ``additional_repos`` string.
+
+    The name is the clone directory, so a repeat loses one of the repos. Checked
+    without the full parse, so a malformed entry cannot hide the collision.
+    """
+    names = [entry.split(":", 1)[0].strip() for entry in raw.split(",") if ":" in entry]
+    return sorted({name for name in names if names.count(name) > 1})
+
+
 def _extract_token_from_url_spec(url_spec: str) -> str:
     """Extract a token from a URL spec like 'https://host/repo@token'.
 

@@ -8499,6 +8499,72 @@ class TestResumeWaitingJobs:
             assert result["status"] == "failed"
             assert "no request_params" in result["result"]["error"]
 
+    async def test_a_legacy_duplicate_setting_fails_only_that_job(
+        self, mock_settings, monkeypatch, temp_db_path: Path
+    ) -> None:
+        """#402: a resume inherits the stored setting, so the duplicate refuses.
+
+        There is no client to answer on startup, so the refusal the analysis
+        path turns into a 422 is the job's failure — and the next waiting job
+        still resumes, instead of the raise ending the whole resume loop.
+        """
+        monkeypatch.setattr(
+            storage, "can_user_use_server_providers", AsyncMock(return_value=True)
+        )
+        from rootcoz.config import get_settings, update_db_settings_cache
+        from rootcoz.main import _resume_waiting_jobs
+        from rootcoz.models import AnalyzeRequest
+
+        body = AnalyzeRequest(
+            job_name="my-job", build_number=1, ai_provider="gemini", ai_model="m"
+        )
+        params = _build_jenkins_request_params(body, get_settings(), "gemini", "m")
+        params["submitted_by"] = "admin"
+        inherited = dict(params, additional_repos=None)
+        explicit = dict(params, additional_repos=[])
+        jobs = [
+            {
+                "job_id": job_id,
+                "result_data": {
+                    "job_name": "my-job",
+                    "build_number": 1,
+                    "request_params": request_params,
+                },
+            }
+            for job_id, request_params in (
+                ("dup", inherited),
+                ("next", explicit),
+            )
+        ]
+        update_db_settings_cache(
+            {
+                "additional_repos": (
+                    "shared-infra:https://example.com/a/shared-infra,"
+                    "shared-infra:https://example.com/b/shared-infra"
+                )
+            }
+        )
+        with (
+            patch.object(storage, "DB_PATH", temp_db_path),
+            patch(
+                "rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock
+            ) as process,
+        ):
+            await storage.init_db()
+            for job in jobs:
+                await storage.save_result(
+                    job["job_id"], "http://j/1", "waiting", job["result_data"]
+                )
+            await _resume_waiting_jobs(jobs)
+            await asyncio.sleep(0)
+            failed = await storage.get_result("dup")
+            assert failed["status"] == "failed"
+            assert (
+                "Duplicate additional repo names: shared-infra"
+                in failed["result"]["error"]
+            )
+            assert process.call_args.kwargs["job_id"] == "next"
+
 
 class TestLifespanResumesWaitingJobs:
     """Tests for waiting job resumption during lifespan startup."""
@@ -14069,6 +14135,79 @@ _STATIC_ENUM_ACCEPTED_VALUES = [
 ]
 
 
+class TestAdditionalReposDuplicateNames:
+    """#402: a repeated repo name is refused wherever it enters the system."""
+
+    _DUP = (
+        "shared-infra:https://example.com/a/shared-infra,"
+        "shared-infra:https://example.com/b/shared-infra"
+    )
+    _MESSAGE = "Duplicate additional repo names: shared-infra"
+
+    def test_put_settings_refuses_a_duplicate_name(self, test_client) -> None:
+        """Save-time: the bad string is refused, not stored to break analysis later."""
+        response = test_client.put(
+            "/api/admin/settings", json={"settings": {"additional_repos": self._DUP}}
+        )
+        assert response.status_code == 400, response.json()
+        assert self._MESSAGE in response.json()["detail"]
+        # Nothing persisted: the setting is still unset.
+        assert _settings_item(test_client, "additional_repos")["value"] == ""
+
+    def test_analysis_refuses_a_duplicate_inherited_from_a_stored_setting(
+        self, test_client
+    ) -> None:
+        """A legacy row (written before PUT validated) is a 422, never a 500."""
+        from rootcoz.config import update_db_settings_cache
+
+        update_db_settings_cache({"additional_repos": self._DUP})
+        with patch("rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock):
+            response = test_client.post(
+                "/analyze",
+                json={
+                    "type": "raw",
+                    "failures": [
+                        {
+                            "test_name": "test_a",
+                            "error_message": "assert False",
+                            "stack_trace": "l1",
+                        }
+                    ],
+                    "ai_provider": "claude",
+                    "ai_model": "test-model",
+                },
+            )
+        assert response.status_code == 422, response.json()
+        assert self._MESSAGE in response.json()["detail"]
+
+    def test_analysis_refuses_a_duplicate_in_the_request_body(
+        self, test_client
+    ) -> None:
+        """The request path keeps its own 422 for a duplicate in the body."""
+        with patch("rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock):
+            response = test_client.post(
+                "/analyze",
+                json={
+                    "type": "raw",
+                    "failures": [
+                        {
+                            "test_name": "test_a",
+                            "error_message": "assert False",
+                            "stack_trace": "l1",
+                        }
+                    ],
+                    "ai_provider": "claude",
+                    "ai_model": "test-model",
+                    "additional_repos": [
+                        {"name": "shared-infra", "url": "https://example.com/a"},
+                        {"name": "shared-infra", "url": "https://example.com/b"},
+                    ],
+                },
+            )
+        assert response.status_code == 422, response.json()
+        assert self._MESSAGE in str(response.json()["detail"])
+
+
 class TestEnumeratedSettings:
     """#379: enumerated settings publish their choices and enforce them."""
 
@@ -18104,11 +18243,6 @@ class TestAnalysisReaperIsOneCopy:
                 "rootcoz.main._create_ai_auth_header",
                 new_callable=AsyncMock,
                 return_value="",
-            ),
-            patch(
-                "rootcoz.main._resolve_settings_json_before_analysis",
-                new_callable=AsyncMock,
-                return_value=None,
             ),
             patch(
                 "rootcoz.main._reap_analysis_workspace", new_callable=AsyncMock
