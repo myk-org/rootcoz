@@ -14,6 +14,12 @@ from rootcoz.vapid import (
 )
 
 
+@pytest.fixture(autouse=True)
+def _without_pinned_db_path(monkeypatch):
+    """conftest pins DB_PATH; vapid prefers its parent over XDG_DATA_HOME."""
+    monkeypatch.delenv("DB_PATH", raising=False)
+
+
 class TestGenerateVapidKeys:
     """Tests for _generate_vapid_keys()."""
 

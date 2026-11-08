@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Any
 
 from git.exc import GitCommandError
 
+from rootcoz import get_child_logger
 from rootcoz.engine.core import get_failure_signature, get_legacy_signature
 from rootcoz.models import (
     AdditionalRepo,
@@ -38,7 +39,7 @@ INGEST_COMPLETE_SUMMARY = (
 if TYPE_CHECKING:
     from rootcoz.repository import RepositoryManager
 
-logger = logging.getLogger(__name__)
+logger = get_child_logger(__name__)
 
 
 def cleanup_extract_dir(

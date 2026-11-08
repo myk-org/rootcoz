@@ -426,6 +426,13 @@ kubectl exec -n rootcoz deploy/rootcoz -- python -c \
 
 ## Troubleshooting
 
+- `File logging disabled: …/logs (…)` at startup, and `/admin/logs` has no history
+  The `<data dir>/logs` directory is not writable by the container's UID/GID, so the application
+  log file is off. Records still reach the console and the admin `Logs` page's live stream keeps
+  working, but the page's initial tail is read from the file, so it is empty and nothing survives a
+  reload. Make `<data dir>/logs` writable by the user the container runs as; bounding the file's
+  size and setting its permissions explicitly are tracked separately.
+
 - `route.enabled and ingress.enabled are mutually exclusive`
   The chart refuses to render with both on. Set the one you are not using to `false`.
 
