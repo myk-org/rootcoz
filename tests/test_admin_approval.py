@@ -426,7 +426,7 @@ class TestAdminWaitApproveMsg:
     def test_blocked_user_response_includes_custom_message_for_pending(
         self, client_with_custom_msg
     ):
-        """A pending user gets 403 with custom_message from _blocked_user_status_response."""
+        """A pending user gets 403 with custom_message from the approval gate."""
         # Register a user (becomes pending because REQUIRE_APPROVAL=true)
         reg = client_with_custom_msg.post(
             "/api/auth/register", json={"username": "custmsguser"}
@@ -434,7 +434,7 @@ class TestAdminWaitApproveMsg:
         assert reg.status_code == 200
         api_key = reg.json()["api_key"]
 
-        # Try to access a protected endpoint — should trigger _blocked_user_status_response
+        # Try to access a protected endpoint — should trigger the approval gate
         resp = client_with_custom_msg.get(
             "/api/dashboard",
             headers={"Authorization": f"Bearer {api_key}"},

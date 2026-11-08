@@ -470,6 +470,13 @@ def _parse_session_ttl() -> int:
 SESSION_TTL_HOURS = _parse_session_ttl()
 SESSION_TTL_SECONDS = SESSION_TTL_HOURS * 3600
 
+#: The timestamp shape SQLite's ``CURRENT_TIMESTAMP``/``datetime('now')`` produce,
+#: used for every TEXT column compared against them: session expiry (parsed by
+#: :mod:`rootcoz.auth.session` to decide on a sliding-window renewal) and the SSO
+#: identity/device-code timestamps. One definition so writer and readers cannot
+#: drift apart.
+SQL_TIMESTAMP_FORMAT = "%Y-%m-%d %H:%M:%S"
+
 
 def current_session_ttl_hours() -> int:
     """Effective session TTL (#347): Settings (DB override) over the env boot default."""
@@ -485,6 +492,17 @@ def current_session_ttl_seconds() -> int:
 
 MIN_KEY_LENGTH = 16
 VALID_USER_STATUSES = ("active", "pending", "rejected")
+
+#: SSO providers that can own a ``user_identities`` row. The single list —
+#: ``rootcoz.auth.registry`` re-exports it rather than declaring its own.
+SSO_PROVIDERS = ("google", "github", "openshift", "redhat")
+
+#: Provenance recorded when the caller names none.
+DEFAULT_CREATED_VIA = "internal"
+
+#: How a users row came to exist. Reference data only — no authentication path
+#: reads it, and it is written once at creation (a later link never changes it).
+VALID_CREATED_VIA = ("internal", "admin", "proxy", *SSO_PROVIDERS)
 AI_SYSTEM_USERNAME = "rootcoz-ai"
 
 
@@ -547,8 +565,8 @@ def _validate_username(username: str) -> None:
         raise ValueError(msg)
 
 
-def _hash_session_token(token: str) -> str:
-    """Hash a session token for storage."""
+def _hash_token(token: str) -> str:
+    """Hash an opaque bearer secret (session token, SSO device code) for storage."""
     return hashlib.sha256(token.encode()).hexdigest()
 
 
@@ -1632,7 +1650,9 @@ async def _migrate_lowercase_usernames(db: aiosqlite.Connection) -> None:
                     f"UPDATE {table} SET {col} = ? WHERE {col} = ?",
                     (lname, old_name),
                 )
-            # Delete the duplicate user row.
+            # Delete the duplicate user row, and the rows keyed by its id: an
+            # identity would otherwise keep its (provider, subject) slot forever.
+            await _delete_user_dependants(db, dup["id"])
             await db.execute("DELETE FROM users WHERE id = ?", (dup["id"],))
         # Rename the survivor to lowercase.
         if survivor["username"] != lname:
@@ -2261,6 +2281,13 @@ async def init_db() -> None:
             db, "users", "can_view_reports", "INTEGER NOT NULL DEFAULT 0"
         )
 
+        # Migration: how the account was created. Reference data only (admin chat,
+        # reports, SQL filters) — set once at creation and never read by any
+        # authentication decision.
+        await _migrate_add_column(
+            db, "users", "created_via", f"TEXT NOT NULL DEFAULT '{DEFAULT_CREATED_VIA}'"
+        )
+
         # Migration: account lockout and disable state (#379 §I). ``status``
         # keeps its approval meaning; these three are separate security state.
         await _migrate_add_column(
@@ -2305,11 +2332,54 @@ async def init_db() -> None:
             )
         """)
 
+        # Migration: which authentication provider issued the session, so logout
+        # knows which IdP to end (NULL = username/API-key login).
+        await _migrate_add_column(db, "sessions", "auth_provider", "TEXT")
+
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_username ON sessions (username)"
         )
         await db.execute(
             "CREATE INDEX IF NOT EXISTS idx_sessions_expires_at ON sessions (expires_at)"
+        )
+
+        # Linked external identities (SSO). One row per (provider, subject):
+        # `subject` is the IdP's stable id, so a rename at the IdP keeps the link.
+        # The REFERENCES clause below documents intent only — SQLite runs with
+        # foreign_keys off, so rows are deleted explicitly by
+        # `_delete_user_dependants`.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_identities (
+                id INTEGER PRIMARY KEY,
+                user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+                provider TEXT NOT NULL,
+                subject TEXT NOT NULL,
+                email TEXT,
+                raw_claims_json TEXT,
+                created_at TEXT NOT NULL,
+                UNIQUE(provider, subject),
+                UNIQUE(user_id, provider)
+            )
+        """)
+        # Device codes for CLI SSO. Only the device code is stored (hashed): it
+        # is the bearer credential the CLI polls with. Approval records *which
+        # account* was approved, never a session token — redemption mints a fresh
+        # session, so no usable credential sits in this table.
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS sso_device_codes (
+                device_code_hash TEXT PRIMARY KEY,
+                user_code TEXT UNIQUE NOT NULL,
+                provider TEXT,
+                user_id INTEGER,
+                client_name TEXT,
+                expires_at TEXT NOT NULL,
+                interval_seconds INTEGER NOT NULL,
+                created_at TEXT NOT NULL
+            )
+        """)
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_sso_device_codes_expires_at"
+            " ON sso_device_codes (expires_at)"
         )
 
         # Job metadata table for filtering and organization
@@ -8738,6 +8808,7 @@ async def create_admin_user(
     *,
     can_view_reports: bool = False,
     can_use_server_providers: bool = False,
+    created_via: str = "admin",
 ) -> tuple[str, str]:
     """Create an admin user and return (username, raw_api_key).
 
@@ -8752,21 +8823,26 @@ async def create_admin_user(
             value; keeping it false avoids an accidental grant on demotion.
         can_use_server_providers: Explicit stored grant; false by default even
             though admins have effective access through their role.
+        created_via: Provenance. Defaults to ``admin`` — this function only ever
+            creates accounts on an administrator's behalf.
     """
     username = _normalize_username(username)
     _validate_username(username)
+    _validate_created_via(created_via)
     raw_key = generate_api_key()
     key_hash = hash_api_key(raw_key)
     async with _connect_db() as db:
         try:
             await db.execute(
-                "INSERT INTO users (username, api_key_hash, role, can_view_reports, can_use_server_providers)"
-                " VALUES (?, ?, 'admin', ?, ?)",
+                "INSERT INTO users (username, api_key_hash, role, can_view_reports,"
+                " can_use_server_providers, created_via)"
+                " VALUES (?, ?, 'admin', ?, ?, ?)",
                 (
                     username,
                     key_hash,
                     1 if can_view_reports else 0,
                     int(can_use_server_providers),
+                    created_via,
                 ),
             )
             await db.commit()
@@ -8838,6 +8914,23 @@ async def get_user_audit_snapshot(username: str) -> dict[str, Any] | None:
     return data
 
 
+async def _delete_user_dependants(db: aiosqlite.Connection, user_id: int) -> None:
+    """Delete the rows keyed by ``users.id`` for an account that is going away.
+
+    SQLite runs with ``PRAGMA foreign_keys`` off (``_configure_connection`` never
+    sets it), so the declared ``ON DELETE CASCADE`` never fires. Left behind, an
+    identity holds its ``(provider, subject)`` unique slot forever and blocks that
+    person from ever linking again, and a device code keeps an approval that can
+    never be redeemed.
+
+    Args:
+        db: Open connection taking part in the deleting transaction.
+        user_id: ``users.id`` of the account being removed.
+    """
+    await db.execute("DELETE FROM user_identities WHERE user_id = ?", (user_id,))
+    await db.execute("DELETE FROM sso_device_codes WHERE user_id = ?", (user_id,))
+
+
 async def delete_user(username: str) -> bool:
     """Delete a user and their sessions. Returns True if deleted."""
     username = _normalize_username(username)
@@ -8867,6 +8960,12 @@ async def delete_user(username: str) -> bool:
             "UPDATE chat_messages SET session_id = '' WHERE username = ? AND session_id != ''",
             (username,),
         )
+        cursor = await db.execute(
+            "SELECT id FROM users WHERE username = ?", (username,)
+        )
+        row = await cursor.fetchone()
+        if row is not None:
+            await _delete_user_dependants(db, row["id"])
         cursor = await db.execute("DELETE FROM users WHERE username = ?", (username,))
         if cursor.rowcount > 0:
             await db.execute("DELETE FROM sessions WHERE username = ?", (username,))
@@ -9712,21 +9811,40 @@ async def create_session(
     is_admin: bool = False,
     ttl_hours: int | None = None,
     role: str = "reviewer",
+    auth_provider: str | None = None,
 ) -> str:
-    """Create an opaque session token. Returns raw token."""
+    """Create an opaque session token. Returns raw token.
+
+    Args:
+        username: Owner of the session.
+        is_admin: Whether the session carries administrator rights.
+        ttl_hours: Lifetime; ``None`` uses the configured session TTL.
+        role: Role recorded on the session.
+        auth_provider: Authentication provider that issued the session
+            (``google`` / ``github`` / ...). ``None`` means a username and API
+            key login; a provider name lets logout end the IdP session too.
+    """
     if ttl_hours is None:
         ttl_hours = current_session_ttl_hours()
     token = secrets.token_urlsafe(32)
-    token_hash = _hash_session_token(token)
+    token_hash = _hash_token(token)
     expires_at = datetime.now(UTC) + timedelta(hours=ttl_hours)
-    expires_str = expires_at.strftime("%Y-%m-%d %H:%M:%S")
+    expires_str = expires_at.strftime(SQL_TIMESTAMP_FORMAT)
 
     async def _insert() -> None:
         async with _connect_db() as db:
             await db.execute(
-                "INSERT INTO sessions (token, username, is_admin, expires_at, role)"
-                " VALUES (?, ?, ?, ?, ?)",
-                (token_hash, username, 1 if is_admin else 0, expires_str, role),
+                "INSERT INTO sessions"
+                " (token, username, is_admin, expires_at, role, auth_provider)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    token_hash,
+                    username,
+                    1 if is_admin else 0,
+                    expires_str,
+                    role,
+                    auth_provider,
+                ),
             )
             await db.commit()
 
@@ -9739,10 +9857,10 @@ async def create_session(
 
 async def get_session(token: str) -> dict[str, Any] | None:
     """Look up a session. Returns None if expired or not found."""
-    token_hash = _hash_session_token(token)
+    token_hash = _hash_token(token)
     async with _connect_db() as db:
         cursor = await db.execute(
-            "SELECT username, is_admin, role, created_at, expires_at"
+            "SELECT username, is_admin, role, created_at, expires_at, auth_provider"
             " FROM sessions"
             " WHERE token = ? AND expires_at > datetime('now')",
             (token_hash,),
@@ -9758,9 +9876,9 @@ async def renew_session(token: str) -> bool:
 
     Returns True if the session was found and renewed, False otherwise.
     """
-    token_hash = _hash_session_token(token)
+    token_hash = _hash_token(token)
     new_expires = datetime.now(UTC) + timedelta(hours=current_session_ttl_hours())
-    expires_str = new_expires.strftime("%Y-%m-%d %H:%M:%S")
+    expires_str = new_expires.strftime(SQL_TIMESTAMP_FORMAT)
     async with _connect_db() as db:
         cursor = await db.execute(
             "UPDATE sessions SET expires_at = ? "
@@ -9773,16 +9891,580 @@ async def renew_session(token: str) -> bool:
 
 async def delete_session(token: str) -> None:
     """Delete a session (logout)."""
-    token_hash = _hash_session_token(token)
+    token_hash = _hash_token(token)
     async with _connect_db() as db:
         await db.execute("DELETE FROM sessions WHERE token = ?", (token_hash,))
         await db.commit()
+
+
+# --- SSO identities and CLI device codes -----------------------------------
+#
+# An identity is the link between a local account and an external subject:
+# ``(provider, subject)`` is the stable key, and one user may hold at most one
+# identity per provider. Nothing here decides whether the account may act —
+# approval lives in rootcoz.auth.approval — and nothing here reads
+# ``users.created_via``.
+
+
+def _now_str() -> str:
+    """UTC timestamp for the TEXT ``created_at`` columns of the SSO tables."""
+    return datetime.now(UTC).strftime(SQL_TIMESTAMP_FORMAT)
+
+
+def _identity_row(row: Any) -> dict[str, Any]:
+    """Shape a ``user_identities`` row for callers."""
+    return {
+        "id": row["id"],
+        "username": row["username"],
+        "provider": row["provider"],
+        "subject": row["subject"],
+        "email": row["email"],
+        "raw_claims_json": row["raw_claims_json"],
+        "created_at": row["created_at"],
+    }
+
+
+_IDENTITY_SELECT = (
+    "SELECT i.id, u.username, i.provider, i.subject, i.email, i.raw_claims_json,"
+    " i.created_at FROM user_identities i JOIN users u ON u.id = i.user_id"
+)
+
+
+async def _select_identities(
+    db: aiosqlite.Connection, where: str, params: tuple[Any, ...], *, order: str = ""
+) -> list[dict[str, Any]]:
+    """Run the one identity projection, so its columns are defined once.
+
+    Args:
+        db: Open connection to run on.
+        where: SQL predicate appended after ``WHERE``.
+        params: Values for the predicate.
+        order: Optional ``ORDER BY`` clause (already validated SQL text).
+
+    Returns:
+        Matching identities, in the requested order.
+    """
+    cursor = await db.execute(
+        f"{_IDENTITY_SELECT} WHERE {where} {order}".rstrip(), params
+    )
+    return [_identity_row(row) for row in await cursor.fetchall()]
+
+
+async def get_user_identity(provider: str, subject: str) -> dict[str, Any] | None:
+    """Return the identity linking ``(provider, subject)`` to a local account.
+
+    Args:
+        provider: SSO provider name.
+        subject: The provider's stable subject identifier.
+
+    Returns:
+        The identity (including the owning username), or ``None`` when unlinked.
+    """
+    _validate_sso_provider(provider)
+    async with _connect_db() as db:
+        rows = await _select_identities(
+            db, "i.provider = ? AND i.subject = ?", (provider, subject)
+        )
+        return rows[0] if rows else None
+
+
+async def list_user_identities(username: str) -> list[dict[str, Any]]:
+    """List the identities linked to one account.
+
+    Args:
+        username: The account to list identities for.
+
+    Returns:
+        The identities, ordered by provider; empty when the account has none.
+    """
+    username = _normalize_username(username)
+    async with _connect_db() as db:
+        return await _select_identities(
+            db, "u.username = ?", (username,), order="ORDER BY i.provider"
+        )
+
+
+#: Claim-name fragments that mark a credential rather than identity data. An
+#: OIDC claim set routinely carries ``access_token`` / ``id_token`` / an
+#: authorization ``code``, and the audit column must never become a secret store.
+_SECRET_CLAIM_KEY_PARTS = (
+    "token",
+    "secret",
+    "password",
+    "passwd",
+    "credential",
+    "authorization",
+    "cookie",
+    "assertion",
+)
+
+
+def _scrub_claims(raw_claims_json: str | None) -> str | None:
+    """Remove credential-shaped keys from a claim set before it is stored.
+
+    Scrubbing happens here, not at the call site: this is the last point before
+    persistence, so no provider implementation can forget it.
+
+    Args:
+        raw_claims_json: Serialized IdP claims, or ``None``.
+
+    Returns:
+        The claims with credential keys removed, or ``None`` when nothing was
+        supplied.
+
+    Raises:
+        ValueError: When the value is not valid JSON or not a JSON object.
+    """
+    if raw_claims_json is None:
+        return None
+    try:
+        claims = json.loads(raw_claims_json)
+    except json.JSONDecodeError as exc:
+        msg = f"raw_claims_json is not valid JSON: {exc.msg}"
+        raise ValueError(msg) from exc
+    if not isinstance(claims, dict):
+        # ValueError, not TypeError: the value is caller-supplied JSON text, and
+        # every other bad input at this boundary raises ValueError so one
+        # except-clause covers it (ruff's TRY004 assumes a Python type error).
+        msg = "raw_claims_json must be a JSON object"
+        raise ValueError(msg)  # noqa: TRY004
+
+    def scrub(value: Any) -> Any:
+        if isinstance(value, dict):
+            return {
+                key: scrub(item)
+                for key, item in value.items()
+                if not any(part in str(key).lower() for part in _SECRET_CLAIM_KEY_PARTS)
+                and str(key).lower() != "code"
+            }
+        if isinstance(value, list):
+            return [scrub(item) for item in value]
+        return value
+
+    return json.dumps(scrub(claims), sort_keys=True)
+
+
+async def add_user_identity(
+    username: str,
+    provider: str,
+    subject: str,
+    *,
+    email: str | None = None,
+    raw_claims_json: str | None = None,
+) -> dict[str, Any]:
+    """Link an external identity to a local account.
+
+    ``created_via`` on the account is left untouched: linking is not creation.
+
+    Args:
+        username: The account to link to.
+        provider: SSO provider name.
+        subject: The provider's stable subject identifier.
+        email: Email the provider reports, for display and admin search.
+        raw_claims_json: Serialized IdP claims for audit. Credential-shaped
+            keys (tokens, secrets, passwords, authorization codes) are removed
+            before storage.
+
+    Returns:
+        The stored identity.
+
+    Raises:
+        ValueError: When the provider is unknown, the account does not exist,
+            the subject is already linked to another account, or the account
+            already has an identity for this provider.
+    """
+    _validate_sso_provider(provider)
+    _validate_identity_subject(subject)
+    username = _normalize_username(username)
+    async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await db.execute(
+                "SELECT id FROM users WHERE username = ?", (username,)
+            )
+            user = await cursor.fetchone()
+            if user is None:
+                msg = f"User '{username}' not found"
+                raise ValueError(msg)
+            linked = await _select_identities(
+                db, "i.provider = ? AND i.subject = ?", (provider, subject)
+            )
+            if linked:
+                # The owner stays out of the message: this text can reach the
+                # caller, and naming the other account would disclose it.
+                logger.info(
+                    "Identity %s:%s already linked to '%s'",
+                    provider,
+                    subject,
+                    linked[0]["username"],
+                )
+                msg = f"Identity {provider}:{subject} is already linked"
+                raise ValueError(msg)
+            cursor = await db.execute(
+                "SELECT provider FROM user_identities"
+                " WHERE user_id = ? AND provider = ?",
+                (user["id"], provider),
+            )
+            if await cursor.fetchone() is not None:
+                msg = (
+                    f"'{username}' already has a {provider} identity — unlink it first"
+                )
+                raise ValueError(msg)
+            await db.execute(
+                "INSERT INTO user_identities"
+                " (user_id, provider, subject, email, raw_claims_json, created_at)"
+                " VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    user["id"],
+                    provider,
+                    subject,
+                    email,
+                    _scrub_claims(raw_claims_json),
+                    _now_str(),
+                ),
+            )
+            await db.commit()
+        except sqlite3.IntegrityError as exc:
+            # A concurrent link won the race between the pre-check and the
+            # INSERT: the unique constraints are the real guard, so report it as
+            # the same conflict the pre-check would have found.
+            await db.rollback()
+            msg = f"Identity {provider}:{subject} is already linked"
+            raise ValueError(msg) from exc
+        except Exception:
+            await db.rollback()
+            raise
+        rows = await _select_identities(
+            db, "i.provider = ? AND i.subject = ?", (provider, subject)
+        )
+    return rows[0]
+
+
+async def delete_user_identity(username: str, provider: str) -> bool:
+    """Unlink a provider from an account.
+
+    Args:
+        username: The account to unlink from.
+        provider: SSO provider name.
+
+    Returns:
+        True when an identity was removed, False when there was none.
+    """
+    _validate_sso_provider(provider)
+    username = _normalize_username(username)
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "DELETE FROM user_identities WHERE provider = ? AND user_id ="
+            " (SELECT id FROM users WHERE username = ?)",
+            (provider, username),
+        )
+        await db.commit()
+        return cursor.rowcount > 0
+
+
+def _normalize_user_code(user_code: str) -> str:
+    """Normalise a human-typed user code for lookup.
+
+    Args:
+        user_code: The code as typed (any case, stray whitespace).
+
+    Returns:
+        The stored form: upper case, no surrounding whitespace.
+    """
+    return user_code.strip().upper()
+
+
+#: How many ``user_code`` allocations to try before giving up (collision odds
+#: are tiny — 32^8 — but a constraint violation must never reach the caller).
+_USER_CODE_ATTEMPTS = 5
+
+#: Predicate every device-code read uses, so "live" means the same thing in all
+#: of them (and the purge uses its inverse).
+_DEVICE_CODE_LIVE = "expires_at > datetime('now')"
+
+
+def _new_user_code() -> str:
+    """A short code a human types into the device-approval page.
+
+    Uses an unambiguous alphabet (no ``0/O``, ``1/I``) in ``XXXX-XXXX`` shape.
+    """
+    # A user-code alphabet, not a credential: detect-secrets flags it by shape.
+    alphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"  # pragma: allowlist secret
+    chars = "".join(secrets.choice(alphabet) for _ in range(8))
+    return f"{chars[:4]}-{chars[4:]}"
+
+
+async def create_device_code(
+    *,
+    ttl_seconds: int,
+    interval_seconds: int,
+    provider: str | None = None,
+    client_name: str | None = None,
+) -> dict[str, Any]:
+    """Start a CLI device-authorization flow.
+
+    Args:
+        ttl_seconds: How long the code stays redeemable.
+        interval_seconds: Minimum poll interval the CLI must honour.
+        provider: Provider chosen up front, when the caller named one.
+        client_name: What the client calls itself (hostname, tool name). Shown
+            on the approval page so a human never approves a code they cannot
+            recognise — the first half of the defence against device-code
+            phishing.
+
+    Returns:
+        The raw ``device_code`` (shown once), the ``user_code`` a human types,
+        and the ``expires_at`` timestamp. Only hashes are stored.
+
+    Raises:
+        ValueError: When ``provider`` is not one of :data:`SSO_PROVIDERS`, or
+            when no free ``user_code`` could be allocated.
+    """
+    if provider is not None:
+        _validate_sso_provider(provider)
+    device_code = secrets.token_urlsafe(32)
+    device_hash = _hash_token(device_code)
+    expires_at = datetime.now(UTC) + timedelta(seconds=ttl_seconds)
+    expires_str = expires_at.strftime(SQL_TIMESTAMP_FORMAT)
+    created_at = _now_str()
+    # ``user_code`` is a short human code, so a collision is possible by design;
+    # it must retry rather than surface a constraint violation as a 500.
+    for _attempt in range(_USER_CODE_ATTEMPTS):
+        user_code = _new_user_code()
+        try:
+            async with _connect_db() as db:
+                await db.execute(
+                    "INSERT INTO sso_device_codes"
+                    " (device_code_hash, user_code, provider, user_id, client_name,"
+                    " expires_at, interval_seconds, created_at)"
+                    " VALUES (?, ?, ?, NULL, ?, ?, ?, ?)",
+                    (
+                        device_hash,
+                        user_code,
+                        provider,
+                        client_name,
+                        expires_str,
+                        interval_seconds,
+                        created_at,
+                    ),
+                )
+                await db.commit()
+        except sqlite3.IntegrityError as exc:
+            # Only a user_code collision is retryable; anything else is a bug in
+            # the statement and must surface unchanged.
+            if "user_code" not in str(exc):
+                raise
+            continue
+        break
+    else:
+        msg = "Could not allocate a unique device user code"
+        raise ValueError(msg)
+    return {
+        "device_code": device_code,
+        "user_code": user_code,
+        "client_name": client_name,
+        "expires_at": expires_str,
+        "interval_seconds": interval_seconds,
+    }
+
+
+def _device_code_row(row: Any) -> dict[str, Any]:
+    """Shape a ``sso_device_codes`` row for both the poll and approval views."""
+    return {
+        "user_code": row["user_code"],
+        "provider": row["provider"],
+        "client_name": row["client_name"],
+        "authorized": row["user_id"] is not None,
+        "expires_at": row["expires_at"],
+        "interval_seconds": row["interval_seconds"],
+    }
+
+
+_DEVICE_CODE_SELECT = (
+    "SELECT user_code, provider, user_id, client_name, expires_at,"
+    " interval_seconds FROM sso_device_codes"
+)
+
+
+async def _select_device_code(
+    where: str, params: tuple[Any, ...]
+) -> dict[str, Any] | None:
+    """Run the one device-code projection.
+
+    Args:
+        where: SQL predicate appended after ``WHERE``, using the live predicate.
+        params: Values for the predicate.
+
+    Returns:
+        The device-code view, or ``None`` when there is no live match.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(f"{_DEVICE_CODE_SELECT} WHERE {where}", params)
+        row = await cursor.fetchone()
+    return _device_code_row(row) if row else None
+
+
+async def get_device_code(device_code: str) -> dict[str, Any] | None:
+    """Look up a device code by its raw value.
+
+    Args:
+        device_code: The raw device code the CLI holds.
+
+    Returns:
+        The row (``provider``, ``user_code``, ``expires_at``,
+        ``interval_seconds``, and whether it was authorized), or ``None`` when
+        unknown or expired.
+    """
+    return await _select_device_code(
+        f"device_code_hash = ? AND {_DEVICE_CODE_LIVE}", (_hash_token(device_code),)
+    )
+
+
+async def get_device_code_by_user_code(user_code: str) -> dict[str, Any] | None:
+    """Look up a pending device code by the code a human typed.
+
+    This is what the approval page reads: it must be able to say "this code is
+    valid, for this provider" before the visitor signs in, and "already used"
+    afterwards.
+
+    Args:
+        user_code: The code as typed on the approval page.
+
+    Returns:
+        ``{"user_code", "provider", "authorized", "expires_at",
+        "interval_seconds"}``, or ``None`` when unknown or expired.
+    """
+    return await _select_device_code(
+        f"user_code = ? AND {_DEVICE_CODE_LIVE}", (_normalize_user_code(user_code),)
+    )
+
+
+async def authorize_device_code(
+    user_code: str, *, username: str, provider: str | None = None
+) -> bool:
+    """Approve a pending device code for an account.
+
+    Approval records the account only — no credential is stored. The CLI
+    redeems the code once (:func:`redeem_device_code`) and the API layer mints a
+    session for that account then, so a stale approval can never hand out a
+    session that was issued for somebody else's login.
+
+    Args:
+        user_code: The code the human typed on the approval page.
+        username: The account being authorized.
+        provider: Provider the approval was made with, when the flow did not fix
+            one at creation. Recorded so the redeemed session can name its
+            issuer; a value contradicting the one fixed at creation is refused.
+
+    Returns:
+        True when a pending, unexpired code was approved; False otherwise
+        (unknown, expired, or already authorized).
+    """
+    if provider is not None:
+        _validate_sso_provider(provider)
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT id FROM users WHERE username = ?", (_normalize_username(username),)
+        )
+        user = await cursor.fetchone()
+        if user is None:
+            return False
+        updated = await db.execute(
+            f"UPDATE sso_device_codes SET user_id = ?,"
+            f" provider = COALESCE(provider, ?)"
+            f" WHERE user_code = ? AND user_id IS NULL AND {_DEVICE_CODE_LIVE}"
+            " AND (provider IS NULL OR ? IS NULL OR provider = ?)",
+            (
+                user["id"],
+                provider,
+                _normalize_user_code(user_code),
+                provider,
+                provider,
+            ),
+        )
+        await db.commit()
+        return updated.rowcount > 0
+
+
+async def redeem_device_code(device_code: str) -> dict[str, Any] | None:
+    """Consume an authorized device code and name the account it approved.
+
+    Args:
+        device_code: The raw device code the CLI holds.
+
+    Returns:
+        ``{"username": ..., "provider": ...}`` when the code was authorized and
+        is now consumed, or ``None`` (unknown, expired, not yet approved, or
+        already redeemed). The caller mints the session — no credential is
+        stored with the approval.
+    """
+    device_hash = _hash_token(device_code)
+    async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        try:
+            cursor = await db.execute(
+                "SELECT u.username, d.provider"
+                " FROM sso_device_codes d JOIN users u ON u.id = d.user_id"
+                f" WHERE d.device_code_hash = ? AND d.user_id IS NOT NULL"
+                f" AND d.{_DEVICE_CODE_LIVE}",
+                (device_hash,),
+            )
+            row = await cursor.fetchone()
+            if row is None:
+                await db.rollback()
+                return None
+            await db.execute(
+                "DELETE FROM sso_device_codes WHERE device_code_hash = ?",
+                (device_hash,),
+            )
+            await db.commit()
+        except Exception:
+            await db.rollback()
+            raise
+    return {"username": row["username"], "provider": row["provider"]}
+
+
+async def purge_expired_device_codes() -> int:
+    """Delete device codes that can no longer be used.
+
+    Returns:
+        How many rows were removed.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "DELETE FROM sso_device_codes WHERE NOT (" + _DEVICE_CODE_LIVE + ")"
+        )
+        await db.commit()
+        return cursor.rowcount
 
 
 def _validate_user_status(status: str) -> None:
     """Validate that status is one of the allowed user statuses."""
     if status not in VALID_USER_STATUSES:
         msg = f"Invalid status: '{status}'. Must be one of {VALID_USER_STATUSES}."
+        raise ValueError(msg)
+
+
+def _validate_created_via(created_via: str) -> None:
+    """Validate that ``created_via`` is a known provenance value."""
+    if created_via not in VALID_CREATED_VIA:
+        msg = (
+            f"Invalid created_via: '{created_via}'. Must be one of {VALID_CREATED_VIA}."
+        )
+        raise ValueError(msg)
+
+
+def _validate_identity_subject(subject: str) -> None:
+    """Validate that an IdP subject is a non-empty stable identifier."""
+    if not subject.strip():
+        msg = "An SSO identity needs a non-empty subject"
+        raise ValueError(msg)
+
+
+def _validate_sso_provider(provider: str) -> None:
+    """Validate that ``provider`` names a supported SSO provider."""
+    if provider not in SSO_PROVIDERS:
+        msg = f"Invalid SSO provider: '{provider}'. Must be one of {SSO_PROVIDERS}."
         raise ValueError(msg)
 
 
@@ -9793,6 +10475,7 @@ async def create_user(
     role: str = "",
     can_view_reports: bool = False,
     can_use_server_providers: bool | None = None,
+    created_via: str = DEFAULT_CREATED_VIA,
 ) -> tuple[str, str]:
     """Create a new user or generate an API key for an existing user without one.
 
@@ -9805,6 +10488,9 @@ async def create_user(
         role: Role to assign. Empty string uses DEFAULT_USER_ROLE from settings.
         can_view_reports: Whether the user may access /api/reports/* (admins
             always can, regardless of this flag).
+        created_via: How the account came to exist (``internal`` / ``admin`` /
+            a provider name). Recorded once at creation, never updated, and
+            never read by an authentication decision.
 
     Uses BEGIN IMMEDIATE to prevent TOCTOU races between the
     existence check and the INSERT.
@@ -9812,6 +10498,7 @@ async def create_user(
     username = _normalize_username(username)
     _validate_username(username)
     _validate_user_status(status)
+    _validate_created_via(created_via)
 
     if not role:
         from rootcoz.config import get_settings
@@ -9857,14 +10544,16 @@ async def create_user(
             else:
                 await db.execute(
                     "INSERT INTO users"
-                    " (username, api_key_hash, role, status, can_view_reports, can_use_server_providers)"
-                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    " (username, api_key_hash, role, status, can_view_reports,"
+                    " created_via, can_use_server_providers)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?)",
                     (
                         username,
                         key_hash,
                         role,
                         status,
                         reports_flag,
+                        created_via,
                         int(bool(can_use_server_providers)),
                     ),
                 )

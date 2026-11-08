@@ -1032,7 +1032,7 @@ class Settings(BaseSettings):
     # Consecutive failed logins before the account is locked (#379 §I.1).
     # There is no automatic expiry: "it unlocked itself after 15 minutes" is
     # exactly what an attacker waits for, so a lock needs an admin unlock.
-    # A lock blocks new logins only — see _account_block_reason.
+    # A lock blocks new logins only — see rootcoz.auth.approval.account_block_reason.
     login_lockout_threshold: int = Field(
         default=5,
         ge=0,
