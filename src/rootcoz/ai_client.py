@@ -1062,7 +1062,11 @@ def _entry_limits(entry: Mapping[str, Any]) -> tuple[int, int] | None:
 
 
 def _mark_session_support(
-    provider: str, entry: dict[str, Any], declared: Mapping[str, set[str]]
+    provider: str,
+    entry: dict[str, Any],
+    declared: Mapping[str, set[str]],
+    *,
+    mark_on: dict[str, Any] | None = None,
 ) -> None:
     """Mark one key-scoped listing entry session-capable, or say why not.
 
@@ -1070,15 +1074,21 @@ def _mark_session_support(
     manifest ``models[]`` (it is then on the runtime and resolves before the
     limits check), or the captured row carries both limits. A provider with no
     declared ids and an unflagged provider are left exactly as they are.
+
+    ``mark_on`` writes the mark on another row: a user's discovery entry holds
+    the ``capabilities``, the merged pair row is what the API answers with.
     """
     allowed = declared.get(provider.lower())
     if allowed is None:
         return
+    target = entry if mark_on is None else mark_on
     if entry.get("id") in allowed or _entry_limits(entry) is not None:
-        entry["session_supported"] = True
+        target["session_supported"] = True
+        # A re-mark replaces the verdict, reason included.
+        target.pop("session_unsupported_reason", None)
     else:
-        entry["session_supported"] = False
-        entry["session_unsupported_reason"] = SESSION_UNSUPPORTED_REASON
+        target["session_supported"] = False
+        target["session_unsupported_reason"] = SESSION_UNSUPPORTED_REASON
 
 
 def deployment_provider_credentials() -> dict[str, str] | None:
@@ -1386,9 +1396,12 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
                     target = pairs[pair]
                 if listing:
                     # The user's own listing ranks first, so its mark replaces
-                    # the server capture's for this pair. Snapshot suggestions
-                    # keep the manually-enterable path unmarked.
-                    _mark_session_support(provider, target, declared_session_models)
+                    # the server capture's for this pair — and its entry is the
+                    # one that carries the limits. Snapshot suggestions keep the
+                    # manually-enterable path unmarked.
+                    _mark_session_support(
+                        provider, entry, declared_session_models, mark_on=target
+                    )
                 usable.add(pair)
             # Report what the key actually yielded, so a key that stored fine but
             # surfaced no usable model is visible instead of silently looking ready.
@@ -1701,15 +1714,17 @@ def _session_refusal(status: int | None, body: str, provider: str, model: str) -
     """
     if body in _SIDECAR_REFUSAL_LITERALS:
         return f"{SESSION_REFUSAL_MARKER}: {body}"
-    if is_cursor_provider(normalize_provider(provider)):
-        return f"{SESSION_REFUSAL_MARKER}: {_CURSOR_BROWSER_LOGIN_EXPIRED_HINT}"
     pair = f"{provider}/{model}"
+    # The rejected credential outranks the Cursor legacy hint: a 401/403 says the
+    # key itself was refused, not that a browser login expired.
     if status in (401, 403):
         return (
             f"{SESSION_REFUSAL_MARKER}: the provider rejected the AI credential for"
             f" {pair}. Check that the credential is valid for that provider, or ask an"
             " administrator to verify the provider key on the server."
         )
+    if is_cursor_provider(normalize_provider(provider)):
+        return f"{SESSION_REFUSAL_MARKER}: {_CURSOR_BROWSER_LOGIN_EXPIRED_HINT}"
     return (
         f"{SESSION_REFUSAL_MARKER}: the session could not be created for {pair}"
         f" (sidecar HTTP {status}). Ask an administrator to check the server log for the"
@@ -1740,6 +1755,29 @@ async def _create_with_refusal_mapping(
             raise
     # Built inside the except, raised outside it: __context__ would keep the body.
     raise refusal
+
+
+# Status-free failures rootcoz writes itself. Each sentence *is* the recovery
+# step, so the chat mapper forwards it verbatim; anything else without a status
+# is a provider/library text and is replaced instead of echoed.
+_ROOTCOZ_ACTIONABLE_ERRORS = (
+    "AI session unavailable",
+    "Chat credential unavailable; Start a new chat",
+    "Server provider access requires an administrator grant",
+)
+_ROOTCOZ_ACTIONABLE_PREFIXES = (
+    # InactiveServerProviderError: "Server credentials for provider 'x' are deactivated"
+    "Server credentials for provider '",
+    # ExcludedServerModelError: "Model 'm' is excluded from server credentials for ..."
+    "Model '",
+)
+
+
+def _is_rootcoz_actionable_error(text: str) -> bool:
+    """Whether a status-free failure is one of rootcoz's own recovery messages."""
+    return text in _ROOTCOZ_ACTIONABLE_ERRORS or text.startswith(
+        _ROOTCOZ_ACTIONABLE_PREFIXES
+    )
 
 
 def format_chat_ai_user_error(
@@ -1797,11 +1835,21 @@ def format_chat_ai_user_error(
     if _is_lost_session_error(lower):
         return "AI session expired. Please try sending your message again."
 
-    # A creation refusal: the admitted text selects a cause and is dropped, so
-    # no path here can hand back the body it was given.
+    # A sentence rootcoz already built is final: re-deriving its cause would
+    # lose the status a 401 sentence no longer carries. Never the body — only a
+    # marker sentence, which this module constructed.
+    if text.startswith(SESSION_REFUSAL_MARKER):
+        return text
+    # A creation refusal: the admitted text selects a cause and is dropped, and
+    # the admission is the one predicate, so a mid-chat prompt 4xx, a health or
+    # a discovery 4xx is not dressed up as "the session could not be created".
     status, detail = _sidecar_failure_parts(text=text)
-    if detail in _SIDECAR_REFUSAL_LITERALS or status is not None:
+    if detail in _SIDECAR_REFUSAL_LITERALS or _is_refusal_text(text):
         return _session_refusal(status, detail, ai_provider, ai_model)
+    # A status-free failure rootcoz wrote itself carries the fix — start a new
+    # chat, ask for a grant — so it must not be replaced by "please try again".
+    if _is_rootcoz_actionable_error(text):
+        return text
     return "AI call failed. Please try again."
 
 
@@ -1843,6 +1891,13 @@ async def _call_with_safe_error(
     """Keep sidecar credential-bearing errors out of caller logs and tracebacks."""
     try:
         result = await sidecar_call(*args, **kwargs)
+        # Already our sentence (a refusal raised inside the call): re-deriving its
+        # cause here would drop the status a 401 sentence no longer carries and
+        # answer "sidecar HTTP None".
+        if not result.success and (result.text or "").strip().startswith(
+            SESSION_REFUSAL_MARKER
+        ):
+            return result
         # A session refusal keeps its sentence: checked before the ``redact_key is
         # None`` early return, which would otherwise leave the library's text and
         # before the keyed branch, which would blank it to "AI call failed".

@@ -4592,6 +4592,80 @@ def test_prompt_4xx_keeps_its_own_wording_and_stays_retryable():
     assert result.text == prompt_text
 
 
+def test_a_built_sentence_keeps_its_cause_through_both_mappers():
+    """Re-mapping our own sentence must not answer ``sidecar HTTP None``.
+
+    A 401 sentence carries no status any more, so both the send mapper and the
+    safe-error wrapper have to treat a marker sentence as final.
+    """
+    from rootcoz import ai_client
+
+    sentence = ai_client._session_refusal(
+        401, "upstream rejected the key", "openai", "undeclared"
+    )
+    assert "rejected the AI credential for openai/undeclared" in sentence
+    assert (
+        ai_client.format_chat_ai_user_error(
+            sentence, ai_provider="openai", ai_model="undeclared"
+        )
+        == sentence
+    )
+
+    async def _failing_call(**_kwargs):
+        return AIResult(success=False, text=sentence, error=sentence)
+
+    result = asyncio.run(
+        ai_client._call_with_safe_error(
+            _failing_call, ai_provider="openai", ai_model="undeclared"
+        )
+    )
+    assert result.text == sentence
+    assert "HTTP None" not in result.text
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        "AI session unavailable",
+        "Chat credential unavailable; Start a new chat",
+        "Server provider access requires an administrator grant",
+        (
+            "Server credentials for provider 'openai' are deactivated by the"
+            " administrator (active_server_providers)"
+        ),
+        (
+            "Model 'gpt-5' is excluded from server credentials for provider"
+            " 'openai' by the administrator's model selection"
+        ),
+    ],
+)
+def test_rootcoz_own_recovery_message_is_never_replaced_by_retry(message):
+    """A status-free sentence rootcoz wrote carries the fix, not "try again"."""
+    from rootcoz import ai_client
+
+    assert (
+        ai_client.format_chat_ai_user_error(
+            message, ai_provider="openai", ai_model="gpt-5"
+        )
+        == message
+    )
+
+
+def test_cursor_401_names_the_rejected_credential_not_the_browser_login():
+    """A refused key is the cause; the browser-login hint is only a bare 4xx."""
+    from rootcoz import ai_client
+
+    sentence = ai_client._session_refusal(
+        401, "upstream rejected the key", "cursor", "composer"
+    )
+    assert "agent login" not in sentence
+    assert "rejected the AI credential for cursor/composer" in sentence
+    # The bare-4xx Cursor failure keeps its remediation.
+    assert "agent login" in ai_client._session_refusal(
+        400, "upstream said no", "cursor", "composer"
+    )
+
+
 @pytest.mark.asyncio
 async def test_token_limits_substring_is_not_the_limits_cause():
     """Only the exact sidecar literal is the limits cause — never the topic.
@@ -4651,10 +4725,10 @@ async def test_token_limits_substring_is_not_the_limits_cause():
 async def test_text_admitted_by_no_shape_is_never_echoed():
     """A text no shape admits is answered with a constructed sentence.
 
-    (a) a derivable status gets the generic "any other ``4xx``" sentence,
-    (b) no status gets the generic AI-error sentence, and (c) shape 2 is a
-    substring: a mid-string creation phrase *is* admitted, yet the cause is not
-    claimed, so the wrapper text never survives.
+    (a) a status no creation shape carries stays retryable instead of claiming
+    "the session could not be created", (b) no status gets the generic AI-error
+    sentence, and (c) shape 2 is a substring: a mid-string creation phrase *is*
+    admitted, yet the cause is not claimed, so the wrapper text never survives.
     """
     from rootcoz import ai_client
 
@@ -4663,7 +4737,7 @@ async def test_text_admitted_by_no_shape_is_never_echoed():
     answer = ai_client.format_chat_ai_user_error(
         unmapped, ai_provider="openai", ai_model="undeclared"
     )
-    assert answer == _generic_sentence(429)
+    assert answer == "AI call failed. Please try again."
     assert "Upstream gateway" not in answer
     assert "try later" not in answer
 

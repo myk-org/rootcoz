@@ -174,6 +174,20 @@ export function ModelCombobox({
     }
   }, [highlightIndex])
 
+  // A typed id of a refused row must not slip past the list's lock: the input is
+  // the value the caller sends, so the lock applies to the keystroke too.
+  const refusedValue = useCallback(
+    (id: string) => {
+      const option = options.find((m) => m.id === id)
+      return option ? isLocked(option, disableUnsessionable) : false
+    },
+    [options, disableUnsessionable],
+  )
+
+  const commitTyped = useCallback(() => {
+    if (!refusedValue(committedValueRef.current)) onCommit?.(committedValueRef.current)
+  }, [refusedValue, onCommit])
+
   const selectModel = useCallback(
     (id: string) => {
       committedValueRef.current = id
@@ -209,7 +223,7 @@ export function ModelCombobox({
           } else {
             setOpen(false)
             // Enter on a free-typed id commits it, same as blur.
-            onCommit?.(committedValueRef.current)
+            commitTyped()
           }
           break
         case 'Escape':
@@ -221,7 +235,7 @@ export function ModelCombobox({
           break
       }
     },
-    [open, filtered, highlightIndex, selectModel, setHighlightIndex, onCommit, disableUnsessionable],
+    [open, filtered, highlightIndex, selectModel, setHighlightIndex, commitTyped, disableUnsessionable],
   )
 
   const dropdown =
@@ -336,11 +350,14 @@ export function ModelCombobox({
           aria-describedby={hasDeniedServer ? `${listboxId}-server-help` : undefined}
           disabled={disabled}
           onChange={(e) => {
+            // The ref still records the attempt, so a blur or Enter cannot
+            // commit it either.
             committedValueRef.current = e.target.value
+            if (refusedValue(e.target.value)) return
             onChange(e.target.value)
             if (!open) setOpen(true)
           }}
-          onBlur={() => onCommit?.(committedValueRef.current)}
+          onBlur={commitTyped}
           onFocus={() => setOpen(true)}
           onClick={() => setOpen(true)}
           onKeyDown={handleKeyDown}

@@ -747,6 +747,47 @@ async def test_mark_reaches_user_key_discovered_pairs_and_casing(monkeypatch, tm
 
 
 @pytest.mark.asyncio
+async def test_user_listing_limits_keep_an_undeclared_pair_supported(
+    monkeypatch, tmp_path
+):
+    """The mark reads its limits from the user's listing entry, not the pair row.
+
+    A listed-but-undeclared id carrying both limits in the user's own key-scoped
+    listing can create a session, so the picker must not disable it. The merged
+    pair row carries no ``capabilities`` of its own — only the listing entry
+    does — so a mark that reads the pair row answers ``None`` and blocks it. The
+    server capture marks the pair unsupported first, so the re-mark must also
+    drop that stale reason.
+    """
+    _use_agent_manifest(monkeypatch, tmp_path, _flagged_manifest([{"id": DECLARED}]))
+    _capture_server_listing(monkeypatch, [(FLAGGED, UNDECLARED, None)])
+    _mock_key_discovery(
+        monkeypatch,
+        FLAGGED.lower(),
+        {
+            "modelListingSupported": True,
+            "models": [
+                {"provider": FLAGGED.lower(), "id": DECLARED},
+                {
+                    "provider": FLAGGED.lower(),
+                    "id": UNDECLARED,
+                    "capabilities": dict(LIMITS),
+                },
+            ],
+        },
+    )
+    token = ai_client.ai_username.set("alice")
+    try:
+        scoped = await ai_client.scoped_models()
+        by_id = {entry["id"]: entry for entry in scoped[FLAGGED.lower()]}
+        assert by_id[UNDECLARED]["session_supported"] is True
+        assert "session_unsupported_reason" not in by_id[UNDECLARED]
+        assert by_id[DECLARED]["session_supported"] is True
+    finally:
+        ai_client.ai_username.reset(token)
+
+
+@pytest.mark.asyncio
 async def test_manual_only_sentinel_pair_is_never_marked(monkeypatch, tmp_path):
     """A flagged provider with no listing keeps its manual-entry sentinel pair."""
     _use_agent_manifest(monkeypatch, tmp_path, _flagged_manifest([{"id": DECLARED}]))

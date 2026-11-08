@@ -244,6 +244,24 @@ describe('countProviderFailures', () => {
     expect(countUnclassifiedFailures(failures, [], {})).toBe(2)
   })
 
+  it('counts a refused session as a failed provider call, not an empty answer', () => {
+    // A refusal carries its own sentence instead of the placeholder, so the
+    // banner must not say the model returned nothing classifiable.
+    const refused: FailureAnalysis = {
+      ...makeFailure('test-r', ''),
+      analysis: {
+        classification: '',
+        pattern: '',
+        affected_tests: [],
+        details: 'AI session refused: the session could not be created for enmaas/glm',
+        artifacts_evidence: '',
+      },
+    }
+    const failures = [refused, makeProviderFailure('test-a'), makeFailure('test-b', '')]
+    expect(countProviderFailures(failures, [], {})).toBe(2)
+    expect(countUnclassifiedFailures(failures, [], {})).toBe(3)
+  })
+
   it('lets a live reviewer override clear a provider placeholder', () => {
     const failures = [makeProviderFailure('test-a')]
     expect(countProviderFailures(failures, [], { 'test-a': 'PRODUCT BUG' })).toBe(0)

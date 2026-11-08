@@ -378,8 +378,11 @@ async def test_new_session_replaces_stale_welcome_but_keeps_replies(
 
 
 def _start_request(admin: bool):
+    """The request the route reads: ``admin`` must reach the caller's identity."""
     return SimpleNamespace(
-        state=SimpleNamespace(username="alice", is_admin=True, role="admin")
+        state=SimpleNamespace(
+            username="alice", is_admin=admin, role="admin" if admin else "reviewer"
+        )
     )
 
 

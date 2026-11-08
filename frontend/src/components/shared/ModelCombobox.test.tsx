@@ -151,6 +151,30 @@ it('refuses to select a model without session support', async () => {
   expect(input).toHaveValue('')
 })
 
+// #423: the lock covers the text input too — a typed id of a NO SESSION row is
+// the same pair the list refuses, so it must not reach the caller's value.
+it('refuses a typed id that matches a session-refused row', async () => {
+  const user = userEvent.setup()
+  const committed = vi.fn()
+  const locked = {
+    id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro',
+    session_supported: false, session_unsupported_reason: REASON,
+  }
+  function Harness() {
+    const [value, setValue] = useState('')
+    return <ModelCombobox value={value} onChange={setValue} onCommit={committed} disableUnsessionable options={[locked]} />
+  }
+  render(<Harness />)
+  const input = screen.getByRole('combobox')
+  await user.type(input, 'gemini-3.1-pro-preview')
+  // The keystroke that completes the refused id never lands, so a blur or Enter
+  // cannot commit it and the pair can never be started.
+  expect(input).toHaveValue('gemini-3.1-pro-previe')
+  await user.keyboard('{Enter}')
+  await user.tab()
+  expect(committed).not.toHaveBeenCalled()
+})
+
 // #423: the flag is opt-in at the call site (AnalysisModelSelect passes it), so
 // the admin key-verification pickers keep offering a listed-but-undeclared id —
 // they exist to verify such a key. Defaulting it on here would fail this.
