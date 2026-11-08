@@ -688,9 +688,9 @@ def _drop_oversized_enriched_xml(
         return None
     logger.warning(
         f"job_id={job_id}: enriched_xml is {len(xml)} chars, above the "
-        f"{_ENRICHED_XML_INLINE_MAX_CHARS}-char inline limit, so it is not stored "
-        "in result_json; the analysis it belongs to was saved and the row reports "
-        "enriched_xml_omitted"
+        f"{_ENRICHED_XML_INLINE_MAX_CHARS}-char inline limit, so it is left out of "
+        "result_json; the payload being committed records enriched_xml_omitted "
+        "instead"
     )
     payload["enriched_xml"] = None
     payload["enriched_xml_omitted"] = {

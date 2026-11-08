@@ -2166,7 +2166,7 @@ def _xml(total: int) -> str:
     return body
 
 
-def _decoded(row: Any, job_id: str) -> tuple[dict[str, Any], str]:
+def _decoded(row: Any) -> tuple[dict[str, Any], str]:
     """The stored payload and the decoded JSON text, for "absent from the row"."""
     text = (
         zstd.decompress(row["result_json"])
@@ -2212,7 +2212,7 @@ async def test_a_document_one_char_over_the_limit_is_not_stored(_storage) -> Non
     await storage.save_result("job-huge-xml", "http://ci", "completed", payload)
 
     row = await _stored(_storage, "job-huge-xml")
-    stored, text = _decoded(row, "job-huge-xml")
+    stored, text = _decoded(row)
     assert stored["enriched_xml"] is None
     assert stored["enriched_xml_omitted"] == {
         "characters": len(xml),
@@ -2323,7 +2323,7 @@ async def test_the_failure_id_backfill_does_not_re_inline_a_full_size_enriched_x
     await storage.get_result("job-legacy-xml")  # triggers the id backfill
 
     row = await _stored(_storage, "job-legacy-xml")
-    stored, text = _decoded(row, "job-legacy-xml")
+    stored, text = _decoded(row)
     assert stored["enriched_xml"] is None
     assert stored["enriched_xml_omitted"]["characters"] == len(xml)
     assert xml[:4096] not in text
@@ -2345,7 +2345,7 @@ async def test_the_sweeps_leave_a_guarded_row_guarded(_storage) -> None:
     row = await _stored(_storage, "job-swept")
     assert row["kind"] == "blob", "the compression sweep did not process the row"
 
-    stored, _ = _decoded(row, "job-swept")
+    stored, _ = _decoded(row)
     assert stored["enriched_xml"] is None
     assert stored["enriched_xml_omitted"] == marker
     assert len(stored["failures"]) == 30
