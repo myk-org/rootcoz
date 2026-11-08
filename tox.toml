@@ -107,10 +107,12 @@ commands = [
   # The default render (chart/ with only the required flags, no overlay) is the
   # baseline every install starts from: assert its resource block verbatim and
   # that no ephemeral-storage (hence no /tmp emptyDir, sizeLimit or TMPDIR) is added.
+  # Never put a colon inside the shell brace group below: tox's own `{...}` replacer
+  # reads it as a `{key:value}` delimiter and truncates the command (4.67.4; fine on 4.67.13).
   [
     "sh",
     "-c",
-    "T='helm template rootcoz chart/ --set ai.provider=gemini --set ai.model=gemini-2.5-pro --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render' && OUT=/tmp/rootcoz-default-render-$$.yaml && $T > $OUT && EXP=$(printf '%s\\n' 'limits:' '  cpu: \"2\"' '  memory: 8Gi' 'requests:' '  cpu: \"1\"' '  memory: 4Gi') && GOT=$(sed -n '/^      containers:/,/^      volumes:/p' $OUT | sed -n '/^          resources:/,/^          volumeMounts:/p' | sed -e '1d' -e '$d' -e 's/^            //') && { [ \"$GOT\" = \"$EXP\" ] || { printf 'default render resources changed:\\n%s\\n' \"$GOT\"; exit 1; }; } && ! grep -q 'ephemeral-storage' $OUT && ! grep -q 'sizeLimit' $OUT && ! grep -q 'mountPath: /tmp$' $OUT && ! grep -q 'name: TMPDIR' $OUT && rm -f $OUT",  # pragma: allowlist secret
+    "T='helm template rootcoz chart/ --set ai.provider=gemini --set ai.model=gemini-2.5-pro --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render' && OUT=/tmp/rootcoz-default-render-$$.yaml && $T > $OUT && EXP=$(printf '%s\\n' 'limits:' '  cpu: \"2\"' '  memory: 8Gi' 'requests:' '  cpu: \"1\"' '  memory: 4Gi') && GOT=$(sed -n '/^      containers:/,/^      volumes:/p' $OUT | sed -n '/^          resources:/,/^          volumeMounts:/p' | sed -e '1d' -e '$d' -e 's/^            //') && { [ \"$GOT\" = \"$EXP\" ] || { printf 'default render resources changed\\n%s\\n' \"$GOT\"; exit 1; }; } && ! grep -q 'ephemeral-storage' $OUT && ! grep -q 'sizeLimit' $OUT && ! grep -q 'mountPath: /tmp$' $OUT && ! grep -q 'name: TMPDIR' $OUT && rm -f $OUT",  # pragma: allowlist secret
   ],
   [
     "sh",
