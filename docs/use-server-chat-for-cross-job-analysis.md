@@ -51,7 +51,7 @@ This confirms the CLI is using an admin identity, then asks a server-wide questi
 
 3. Ask a cross-job question and follow the reply.
 
-   In the web UI, type your question and press `Enter` to send it. Use `Shift+Enter` when you want a newline instead. While RootCoz is working, the thread shows `Thinking...` with the elapsed time; the reply arrives as one message when the turn ends and stays in the same conversation.
+   In the web UI, type your question and press `Enter` to send it. Use `Shift+Enter` when you want a newline instead. While RootCoz is working, the answer streams into the bubble as it is written and the thread keeps `Thinking...` with the elapsed time plus a `Stop` button; the stored reply is the final text (a reload shows it whole) and it stays in the same conversation.
 
    In the CLI, send the question directly:
 

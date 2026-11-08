@@ -1076,12 +1076,14 @@ def _sse_client_count() -> int:
     """Live SSE connections, one per stream.
 
     A multiplexed connection counts once however many topics it subscribed to;
-    the log and audit broadcasts each hold one listener per connection.
+    the log and audit broadcasts each hold one listener per connection, and so
+    does every chat fragment channel (those streams bypass `_make_sse_stream`).
     """
     return (
         _sse_connections
         + _log_broadcast.listener_count
         + _audit_broadcast.listener_count
+        + sum(channel.listener_count for channel in _chat_deltas.values())
     )
 
 
@@ -1125,15 +1127,32 @@ def notify_token_usage_changed() -> None:
         event.set()
 
 
+def _chat_channel_key(job_id: str, username: str) -> str:
+    """The one key both chat channels use: listeners (notifications) and fragments.
+
+    This is the *SSE channel* key only. The per-user work serialization sites
+    (`_hold_chat_lock`, `_chat_prep_phases`, `_get_chat_abort_signal`,
+    `_cleanup_chat_state`) are a different namespace and keep their unconditional
+    `f"{job_id}:{username}"`. The empty-username fallback exists for the historical
+    notification form, never for content: no fragment channel is created without a
+    username (`_chat_delta_channel` is called only after `_require_authenticated`).
+    """
+    return f"{job_id}:{username}" if username else job_id
+
+
 def notify_chat_changed(job_id: str, username: str = "") -> None:
     """Signal SSE listeners for a specific job+user that chat messages changed."""
-    key = f"{job_id}:{username}" if username else job_id
+    key = _chat_channel_key(job_id, username)
     for event in _chat_listeners.get(key, set()).copy():
         event.set()
+    # The dedicated chat streams carry the same notice on their payload channel, so
+    # a tab that lost a fragment burst still learns the reply is stored.
+    publish_chat_delta(key, {"type": "refresh"})
 
 
 # Payload-carrying SSE broadcast: the notification *is* the payload (audit
-# events, log lines), so each listener owns a queue instead of an Event.
+# events, log lines, and chat change/delta frames), so each listener owns a queue
+# instead of an Event.
 # Listeners are (owning_loop, subscription) so a write from a non-asyncio thread
 # can wake the correct loop via call_soon_threadsafe.
 _SSE_QUEUE_MAXSIZE = 1000
@@ -1215,6 +1234,67 @@ class _PayloadBroadcast:
 _log_broadcast = _PayloadBroadcast()
 _audit_broadcast = _PayloadBroadcast()
 
+# One channel per authenticated (job_id, username) — never per job: model output
+# must not be shared between users. In-process only, like `_chat_listeners` and
+# `_hold_chat_lock`'s refcount, so no lock is needed (all touched from the loop).
+_chat_deltas: dict[str, _PayloadBroadcast] = {}
+# The turn in flight per channel: its assistant row id and the text published so
+# far. A stream that subscribes a tick after the turn started is caught up with
+# one `snapshot` frame — replaying the deltas would double the text when the
+# browser's EventSource reconnects. Display only: `turn_end.text` is the reply.
+_chat_partials: dict[str, tuple[int, str]] = {}
+
+
+def _chat_delta_channel(job_id: str, username: str) -> _PayloadBroadcast:
+    """The fragment channel for one authenticated user's turn.
+
+    Claimed by the turn's publisher and by the stream generator, both after their
+    own gate, so `username` is always non-empty.
+    """
+    return _chat_deltas.setdefault(
+        _chat_channel_key(job_id, username), _PayloadBroadcast()
+    )
+
+
+def publish_chat_delta(key: str, frame: dict[str, Any]) -> None:
+    """Push one chat frame to that channel's streams; no channel means no delivery.
+
+    The running turn's text is kept whether or not a stream is attached, so a tab
+    that lost its connection mid-turn is caught up when it comes back.
+    """
+    message_id = frame.get("id")
+    if isinstance(message_id, int) and isinstance(frame.get("delta"), str):
+        held_id, held = _chat_partials.get(key, (message_id, ""))
+        _chat_partials[key] = (
+            message_id,
+            held + frame["delta"] if held_id == message_id else frame["delta"],
+        )
+    else:
+        _chat_partials.pop(key, None)  # a change notice: the turn is over
+    channel = _chat_deltas.get(key)
+    if channel is not None:
+        channel.publish(frame)
+
+
+def _render_chat_frame(frame: Any) -> str | None:
+    """One connection carries both frames: a change notice, or a fragment."""
+    if isinstance(frame, dict) and frame.get("type") == "refresh":
+        return "event: chat-changed\ndata: refresh\n\n"
+    return f"event: chat-delta\ndata: {json.dumps(frame)}\n\n"
+
+
+def _chat_delta_publisher(
+    job_id: str, username: str, message_id: int
+) -> Callable[[str], None]:
+    """The `on_delta` callable for one turn: fragments tagged with their row id."""
+    key = _chat_channel_key(job_id, username)
+    # Claim the channel before the first fragment, so a browser stream that
+    # subscribes after the turn started still has something to catch up from, and
+    # drop the previous turn's text: this turn's buffer starts empty.
+    _chat_delta_channel(job_id, username)
+    _chat_partials.pop(key, None)
+    return lambda delta: publish_chat_delta(key, {"id": message_id, "delta": delta})
+
 
 def notify_audit_event(event: dict[str, Any]) -> None:
     """Broadcast one stored audit event to /api/admin/audit/stream listeners."""
@@ -1231,23 +1311,28 @@ async def _queue_sse_events(
 
     ``render`` returns the wire chunk, or ``None`` to drop a payload the
     subscription does not want. A quiet queue yields a keepalive comment. When
-    payloads were dropped for a slow subscriber, a ``gap_event`` chunk reports
-    the count before the next payload; an empty ``gap_event`` stays silent.
+    payloads were dropped for a slow subscriber, a ``gap_event`` chunk reports the
+    count at the next payload **or** at the next keepalive — a burst dropped into
+    an emptying queue is reported within one keepalive window, not "eventually, if
+    something else follows". An empty ``gap_event`` stays silent.
     """
     # Flush a comment immediately: the browser fires EventSource.onopen on the
     # first bytes, so without this the client shows "connecting" until the first
     # event or the keepalive window elapses.
     yield ": connected\n\n"
     while not await request.is_disconnected():
+        timed_out = False
         try:
             payload = await asyncio.wait_for(
                 subscription.queue.get(), timeout=_SSE_KEEPALIVE_SECONDS
             )
         except TimeoutError:
-            yield ": keepalive\n\n"
-            continue
+            timed_out = True
         if gap_event and (dropped := subscription.take_dropped()):
             yield f"event: {gap_event}\ndata: {json.dumps({'dropped': dropped})}\n\n"
+        if timed_out:
+            yield ": keepalive\n\n"
+            continue
         if (chunk := render(payload)) is not None:
             yield chunk
 
@@ -13596,7 +13681,7 @@ async def stream_multiplexed(
             job_id = topic[len("chat:") :]
             if not job_id or not _VALID_JOB_ID_RE.match(job_id):
                 continue
-            listener_key = f"{job_id}:{username}" if username else job_id
+            listener_key = _chat_channel_key(job_id, username)
             ev = asyncio.Event()
             registrations.append(
                 (f"chat:{job_id}", ev, None, _chat_listeners, listener_key)
@@ -13614,9 +13699,7 @@ async def stream_multiplexed(
         elif topic == "admin-chat":
             if not is_admin:
                 continue
-            listener_key = (
-                f"{ADMIN_CHAT_JOB_ID}:{username}" if username else ADMIN_CHAT_JOB_ID
-            )
+            listener_key = _chat_channel_key(ADMIN_CHAT_JOB_ID, username)
             ev = asyncio.Event()
             registrations.append(
                 ("admin-chat", ev, None, _chat_listeners, listener_key)
@@ -22793,57 +22876,68 @@ async def close_chat(job_id: str, request: Request) -> dict[str, Any]:
     return {"status": "ok"}
 
 
+async def _abort_chat_turn(job_id: str, username: str, *, admin: bool = False) -> int:
+    """Abort one user's live turn — the whole Stop body, for both chats.
+
+    The session is resolved from `get_latest_chat_session`, the same source the
+    turn itself uses: the pending placeholder is inserted with an empty
+    `session_id`, and the old ten-row scan misses once a few failed or aborted
+    turns fill the window — which left the sidecar turn running, billing without a
+    usage row, and answering the next message `409 "Session … is busy"`.
+    """
+    _get_chat_abort_signal(f"{job_id}:{username}").set()
+
+    pending = await storage.get_pending_chat_messages(job_id, username=username)
+    for msg in pending:
+        await _fail_chat_assistant_placeholder(
+            msg["id"], job_id, username, "Aborted by user."
+        )
+
+    target_session_id = None
+    for msg in pending:
+        if msg.get("session_id"):
+            target_session_id = msg["session_id"]
+            break
+    if not target_session_id:
+        active = await storage.get_latest_chat_session(job_id, username)
+        if active:
+            target_session_id = active["session_id"]
+    if not target_session_id:
+        # Fallback: the most recent session-bearing assistant row.
+        total = await storage.count_chat_messages(job_id, username=username)
+        if total > 0:
+            tail_offset = max(total - 10, 0)
+            recent = await storage.get_chat_messages(
+                job_id, username=username, limit=10, offset=tail_offset
+            )
+            for msg in reversed(recent):
+                if msg.get("role") == "assistant" and msg.get("session_id"):
+                    target_session_id = msg["session_id"]
+                    break
+
+    if target_session_id:
+        try:
+            from pi_sidecar_client import get_sidecar_client
+
+            client = get_sidecar_client()
+            await client.abort(target_session_id)
+            if admin:
+                logger.debug("Admin chat: aborted sidecar session")
+            else:
+                logger.debug("Chat: aborted sidecar session for job %s", job_id)
+        except Exception:
+            logger.debug("Chat: sidecar abort best-effort failed", exc_info=True)
+    return len(pending)
+
+
 @app.post("/api/chat/{job_id}/abort", operation_id="abortChat")
 async def abort_chat(job_id: str, request: Request) -> dict[str, Any]:
     """Abort the currently processing chat message for this user."""
     _check_allow_list(request)
     _require_reviewer(request)
     username = request.state.username
-    key = f"{job_id}:{username}"
-    signal = _get_chat_abort_signal(key)
-    signal.set()
-
-    # Also mark any pending messages as failed
-    pending = await storage.get_pending_chat_messages(job_id, username=username)
-    for msg in pending:
-        await storage.update_chat_message_content(msg["id"], "Aborted by user.")
-        await storage.update_chat_message_status(msg["id"], "failed")
-
-    if pending:
-        notify_chat_changed(job_id, username=username)
-
-    # Abort the sidecar session to interrupt the AI call
-    try:
-        # Find session_id: check pending messages first, then last assistant message
-        target_session_id = None
-        for msg in pending:
-            if msg.get("session_id"):
-                target_session_id = msg["session_id"]
-                break
-        if not target_session_id:
-            # Fetch the tail of history to find the most recent session_id
-            total = await storage.count_chat_messages(job_id, username=username)
-            if total > 0:
-                tail_offset = max(total - 10, 0)
-                recent = await storage.get_chat_messages(
-                    job_id, username=username, limit=10, offset=tail_offset
-                )
-                for msg in reversed(recent):
-                    if msg.get("role") == "assistant" and msg.get("session_id"):
-                        target_session_id = msg["session_id"]
-                        break
-
-        if target_session_id:
-            from pi_sidecar_client import get_sidecar_client
-
-            client = get_sidecar_client()
-            await client.abort(target_session_id)
-            logger.debug("Chat: aborted sidecar session for job %s", job_id)
-    except Exception:
-        logger.debug("Chat: sidecar abort best-effort failed", exc_info=True)
-
     logger.info("Chat: user %s aborted chat for job %s", username, job_id)
-    return {"aborted": len(pending)}
+    return {"aborted": await _abort_chat_turn(job_id, username)}
 
 
 # Per-job chat processing locks — ensures sequential message processing
@@ -23009,6 +23103,12 @@ def _cleanup_chat_state(key: str) -> None:
     hits zero, so waiters keep the same lock object.
     """
     _chat_abort_signals.pop(key, None)
+    # The turn is over: nothing is left for a late stream to catch up from, and a
+    # channel this turn claimed is dropped unless a stream is still reading it.
+    _chat_partials.pop(key, None)
+    channel = _chat_deltas.get(key)
+    if channel is not None and not channel.has_listeners:
+        _chat_deltas.pop(key, None)
 
 
 async def _normalize_and_validate_ai_params(
@@ -23088,19 +23188,58 @@ def _resolve_chat_ai_config(
     return provider, model
 
 
+def _chat_sse_response(
+    request: Request, username: str, job_id: str
+) -> StreamingResponse:
+    """The one chat stream: claimed, subscribed, rendered and released in one place.
+
+    Sending still goes through `_require_reviewer`/`_require_admin`; this only
+    carries frames to a caller that already passed the route's own gate (the gate
+    stays in the handler body, because `StreamingResponse` sends the response
+    start before the first `anext`, so a raise here could never be a 401).
+    """
+    key = _chat_channel_key(job_id, username)
+
+    async def event_generator() -> AsyncIterator[str]:
+        # First statement, and no `await` between the claim and the subscribe:
+        # `_chat_delta_channel` is sync and `subscribe()`'s `__aenter__` runs to its
+        # yield without awaiting, so no sibling stream's `finally` can observe this
+        # channel as listener-less and evict it between the two statements.
+        channel = _chat_delta_channel(job_id, username)
+        try:
+            async with channel.subscribe() as subscription:
+                held = _chat_partials.get(key)
+                if held and held[1]:
+                    # One frame, not the deltas: a reconnect must not double the text.
+                    subscription.queue.put_nowait({"id": held[0], "snapshot": held[1]})
+                async for chunk in _queue_sse_events(
+                    request,
+                    subscription,
+                    _render_chat_frame,
+                    gap_event="chat-changed",
+                ):
+                    yield chunk
+        finally:
+            # The broadcast owns its own listener count: drop the channel only when
+            # the last subscriber has gone, and nothing awaits in between. The text
+            # so far stays: a reconnect mid-turn catches up from it instead of
+            # losing the fragments published while nobody was listening.
+            if not channel.has_listeners and _chat_deltas.get(key) is channel:
+                _chat_deltas.pop(key, None)
+
+    return StreamingResponse(
+        event_generator(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
 @app.get("/api/chat/{job_id}/stream", operation_id="chatStream")
 async def chat_stream(job_id: str, request: Request) -> StreamingResponse:
     """SSE stream for real-time chat message updates."""
     _check_allow_list(request)
-    username = getattr(request.state, "username", "")
-    listener_key = f"{job_id}:{username}" if username else job_id
-    return _make_sse_stream(
-        request,
-        set(),
-        "chat-changed",
-        per_key_listeners=_chat_listeners,
-        listener_key=listener_key,
-    )
+    _require_authenticated(request)
+    return _chat_sse_response(request, request.state.username, job_id)
 
 
 @app.post("/api/chat/{job_id}", status_code=202, operation_id="sendChatMessage")
@@ -23454,6 +23593,10 @@ async def _process_chat_message(
                         install_mcp=False,
                         tracker_unavailable=tracker_unavailable,
                         issue_repos=tuple(sorted(issue_repos)),
+                        # Display only: the stored reply is still the whole text.
+                        on_delta=_chat_delta_publisher(
+                            job_id, username, assistant_msg_id
+                        ),
                     )
 
                     if abort_signal.is_set():
@@ -23981,66 +24124,16 @@ async def abort_admin_chat(request: Request) -> dict[str, Any]:
     """Abort the currently processing admin chat message for this user."""
     _require_admin(request)
     username = request.state.username
-    key = f"{ADMIN_CHAT_JOB_ID}:{username}"
-    signal = _get_chat_abort_signal(key)
-    signal.set()
-
-    pending = await storage.get_pending_chat_messages(
-        ADMIN_CHAT_JOB_ID, username=username
-    )
-    for msg in pending:
-        await storage.update_chat_message_content(msg["id"], "Aborted by user.")
-        await storage.update_chat_message_status(msg["id"], "failed")
-
-    if pending:
-        notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
-
-    try:
-        target_session_id = None
-        for msg in pending:
-            if msg.get("session_id"):
-                target_session_id = msg["session_id"]
-                break
-        if not target_session_id:
-            total = await storage.count_chat_messages(
-                ADMIN_CHAT_JOB_ID, username=username
-            )
-            if total > 0:
-                tail_offset = max(total - 10, 0)
-                recent = await storage.get_chat_messages(
-                    ADMIN_CHAT_JOB_ID, username=username, limit=10, offset=tail_offset
-                )
-                for msg in reversed(recent):
-                    if msg.get("role") == "assistant" and msg.get("session_id"):
-                        target_session_id = msg["session_id"]
-                        break
-
-        if target_session_id:
-            from pi_sidecar_client import get_sidecar_client
-
-            client = get_sidecar_client()
-            await client.abort(target_session_id)
-            logger.debug("Admin chat: aborted sidecar session")
-    except Exception:
-        logger.debug("Admin chat: sidecar abort best-effort failed", exc_info=True)
-
     logger.info("Admin chat: user %s aborted admin chat", username)
-    return {"aborted": len(pending)}
+    return {"aborted": await _abort_chat_turn(ADMIN_CHAT_JOB_ID, username, admin=True)}
 
 
 @app.get("/api/admin/chat/stream", operation_id="adminChatStream")
 async def admin_chat_stream(request: Request) -> StreamingResponse:
     """SSE stream for real-time admin chat message updates."""
     _require_admin(request)
-    username = getattr(request.state, "username", "")
-    listener_key = f"{ADMIN_CHAT_JOB_ID}:{username}" if username else ADMIN_CHAT_JOB_ID
-    return _make_sse_stream(
-        request,
-        set(),
-        "chat-changed",
-        per_key_listeners=_chat_listeners,
-        listener_key=listener_key,
-    )
+    _require_authenticated(request)
+    return _chat_sse_response(request, request.state.username, ADMIN_CHAT_JOB_ID)
 
 
 @app.post("/api/admin/chat", status_code=202, operation_id="sendAdminChatMessage")
@@ -24263,6 +24356,9 @@ async def _process_admin_chat_message(
                 session_id=last_session_id,
                 custom_tools=custom_tools,
                 tracker_unavailable=tracker_unavailable,
+                on_delta=_chat_delta_publisher(
+                    ADMIN_CHAT_JOB_ID, username, assistant_msg_id
+                ),
             )
 
             if abort_signal.is_set():
