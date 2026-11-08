@@ -65,3 +65,26 @@ def test_sidecar_requirements_are_ranges_not_exact_pins() -> None:
         assert ">=" in requirement or "^" in requirement, (
             f"pi-sidecar requirement {requirement!r} in {source} is not a range."
         )
+
+
+def _floor(requirement: str) -> tuple[int, ...]:
+    """The ``>=`` floor of a requirement, as a comparable version tuple."""
+    match = re.search(r">=\s*(\d+(?:\.\d+)*)", requirement)
+    assert match, f"no >= floor in sidecar requirement {requirement!r}"
+    return tuple(int(part) for part in match.group(1).split("."))
+
+
+def test_sidecar_requirement_floor_has_the_events_route() -> None:
+    """Both manifests must require at least the release that serves `/events`.
+
+    ``GET /sessions/:id/events`` is what streamed chat turns subscribe to; a
+    downgrade below it silently turns streaming off, with nothing failing.
+    """
+    for requirement, source in (
+        (_npm_requirement(), "sidecar-helper/package.json"),
+        (_pypi_requirement(), "pyproject.toml"),
+    ):
+        assert _floor(requirement) >= (4, 20, 1), (
+            f"{source} requires {requirement!r}, below the 4.20.1 floor that ships "
+            "GET /sessions/:id/events"
+        )
