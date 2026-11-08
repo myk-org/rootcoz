@@ -257,12 +257,15 @@ def greenwave_token_shape_error(
 ) -> str | None:
     """Why a configured bearer token cannot be sent, or ``None`` when it can.
 
-    The same section of :func:`greenwave_scheme_error`'s contract: the single
-    predicate behind both the push boundary
-    (:func:`rootcoz.exporters.greenwave_auth.build_greenwave_auth`, which
-    refuses at build time) and :attr:`Settings.greenwave_enabled` (which must
-    not advertise an exporter whose every push is guaranteed to fail), so the
-    two can never disagree.
+    The config-level aggregate of the rule, consulted wherever the WHOLE
+    configuration is judged :attr:`Settings.greenwave_enabled` (which must not
+    advertise an exporter whose every push is guaranteed to fail) and the
+    settings write path. The push boundary itself applies the same rule one
+    token at a time, through the shared
+    :func:`is_sendable_bearer_value` predicate in
+    :func:`rootcoz.exporters.greenwave_auth.build_greenwave_auth` and
+    ``build_greenwave_waiver_auth``, so the two cannot disagree — the boundary
+    is stricter, because it refuses the token it is about to put in a header.
 
     Only ``bearer`` puts a configured secret straight into a header. ``basic``
     encodes its credentials, ``kerberos``/``mtls`` do not send the secret as a
