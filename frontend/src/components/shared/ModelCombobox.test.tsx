@@ -151,9 +151,9 @@ it('refuses to select a model without session support', async () => {
   expect(input).toHaveValue('')
 })
 
-// #423: the lock covers the text input too — a typed id of a NO SESSION row is
-// the same pair the list refuses, so it must not reach the caller's value.
-it('refuses a typed id that matches a session-refused row', async () => {
+// #423: the lock covers the commit points too — a typed id of a NO SESSION row
+// is the same pair the list refuses, so it must not become the committed value.
+it('refuses to commit a typed id that matches a session-refused row', async () => {
   const user = userEvent.setup()
   const committed = vi.fn()
   const locked = {
@@ -167,12 +167,33 @@ it('refuses a typed id that matches a session-refused row', async () => {
   render(<Harness />)
   const input = screen.getByRole('combobox')
   await user.type(input, 'gemini-3.1-pro-preview')
-  // The keystroke that completes the refused id never lands, so a blur or Enter
-  // cannot commit it and the pair can never be started.
-  expect(input).toHaveValue('gemini-3.1-pro-previe')
+  // The draft is typeable — a refused id may be the prefix of a usable one — but
+  // a blur or Enter cannot commit it, so the pair can never be started.
+  expect(input).toHaveValue('gemini-3.1-pro-preview')
   await user.keyboard('{Enter}')
   await user.tab()
   expect(committed).not.toHaveBeenCalled()
+})
+
+// #423: a refused id that prefixes a usable one must not lock the keystrokes of
+// the usable one — the lock lives on the commit, not on the draft.
+it('lets a usable id that extends a refused id be typed and committed', async () => {
+  const user = userEvent.setup()
+  const committed = vi.fn()
+  const options = [
+    { id: 'gpt-5', name: 'GPT-5', session_supported: false, session_unsupported_reason: REASON },
+    { id: 'gpt-5-mini', name: 'GPT-5 mini' },
+  ]
+  function Harness() {
+    const [value, setValue] = useState('')
+    return <ModelCombobox value={value} onChange={setValue} onCommit={committed} disableUnsessionable options={options} />
+  }
+  render(<Harness />)
+  const input = screen.getByRole('combobox')
+  await user.type(input, 'gpt-5-mini')
+  expect(input).toHaveValue('gpt-5-mini')
+  await user.keyboard('{Enter}')
+  expect(committed).toHaveBeenLastCalledWith('gpt-5-mini')
 })
 
 // #423: the flag is opt-in at the call site (AnalysisModelSelect passes it), so

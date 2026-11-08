@@ -290,10 +290,22 @@ def is_server_provider_active(provider: str) -> bool:
     return query.lower() in {entry.lower() for entry in entries}
 
 
+# The two variable sentences rootcoz raises for a deactivated provider and a
+# deselected model, as templates: the chat mapper matches them whole (see
+# ``_is_rootcoz_actionable_error``), so the wording has exactly one source.
+_INACTIVE_PROVIDER_TEMPLATE = Template(
+    "Server credentials for provider '$provider' are deactivated "
+    "by the administrator (active_server_providers)"
+)
+_EXCLUDED_MODEL_TEMPLATE = Template(
+    "Model '$model' is excluded from server credentials for "
+    "provider '$provider' by the administrator's model selection"
+)
+
+
 def _raise_inactive_server_provider(provider: str) -> None:
     raise InactiveServerProviderError(
-        f"Server credentials for provider '{provider}' are deactivated "
-        "by the administrator (active_server_providers)"
+        _INACTIVE_PROVIDER_TEMPLATE.substitute(provider=provider)
     )
 
 
@@ -355,8 +367,7 @@ async def require_selected_server_pair(provider: str, model: str) -> None:
         and (provider.lower(), model) not in selected_pairs
     ):
         raise ExcludedServerModelError(
-            f"Model '{model}' is excluded from server credentials for "
-            f"provider '{provider}' by the administrator's model selection"
+            _EXCLUDED_MODEL_TEMPLATE.substitute(model=model, provider=provider)
         )
 
 
@@ -633,6 +644,10 @@ _OWN_REFUSAL_SENTENCES = (
 _REFUSAL_VARIABLES: dict[str, str] = {
     "pair": r"\S+/\S*",
     "status": r"(?:None|\d{3})",
+    # A provider or model id: no whitespace, no quote — the delimiters the
+    # templates wrap them in. Free text cannot fit the slot.
+    "provider": r"[^'\s]+",
+    "model": r"[^'\s]+",
 }
 
 
@@ -1724,6 +1739,16 @@ def _is_sessions_creation_failure(text: str) -> bool:
     )
 
 
+def _is_rate_limited(text: str) -> bool:
+    """Whether a failure is a 429, the one transient status a refusal never is.
+
+    Rate limiting resolves itself, so it must keep the retry classifier
+    retrying (``engine.core._NON_RETRYABLE_AI_ERRORS``): it is never admitted as
+    a refusal, whatever shape it arrives in.
+    """
+    return bool(re.search(r"(?:Client error '|HTTP )429\b", text))
+
+
 def _is_refusal_text(text: str) -> bool:
     """The one admission predicate: the three shapes a refusal can take.
 
@@ -1731,8 +1756,11 @@ def _is_refusal_text(text: str) -> bool:
     (never the bare ``(HTTP 4`` form, which health, model-discovery and prompt
     bodies carry too), or the keyless httpx shape. Shared by the analysis
     matcher and the chat-send mapper so the two cannot classify differently.
+    A 429 is excluded: a transient limit is not a refusal.
     """
     text = text or ""
+    if _is_rate_limited(text):
+        return False
     return (
         text.lstrip().startswith(SESSION_REFUSAL_MARKER)
         or "Sidecar session creation failed (HTTP 4" in text
@@ -1788,9 +1816,13 @@ def _session_refusal(status: int | None, body: str, provider: str, model: str) -
 def _session_refusal_for(
     exc: httpx.HTTPStatusError, provider: str, model: str
 ) -> SessionCreationRefused | None:
-    """Map a sidecar 4xx at session creation; ``None`` for any other status."""
+    """Map a sidecar 4xx at session creation; ``None`` for any other status.
+
+    A 429 is excluded: rate limiting is transient, so the call is left
+    retryable instead of turning a temporary limit into a permanent refusal.
+    """
     status = exc.response.status_code
-    if not 400 <= status < 500:
+    if not 400 <= status < 500 or status == 429:
         return None
     derived, detail = _sidecar_failure_parts(status=status, text=exc.response.text)
     return SessionCreationRefused(_session_refusal(derived, detail, provider, model))
@@ -1818,18 +1850,23 @@ _ROOTCOZ_ACTIONABLE_ERRORS = (
     "Chat credential unavailable; Start a new chat",
     "Server provider access requires an administrator grant",
 )
-_ROOTCOZ_ACTIONABLE_PREFIXES = (
-    # InactiveServerProviderError: "Server credentials for provider 'x' are deactivated"
-    "Server credentials for provider '",
-    # ExcludedServerModelError: "Model 'm' is excluded from server credentials for ..."
-    "Model '",
+# The two variable sentences, matched whole with every slot bounded: a sidecar
+# body that merely *starts* like one of them is not ours, so it is replaced
+# instead of being forwarded to a chat user.
+_ROOTCOZ_ACTIONABLE_PATTERNS = (
+    _refusal_pattern(_INACTIVE_PROVIDER_TEMPLATE),
+    _refusal_pattern(_EXCLUDED_MODEL_TEMPLATE),
 )
 
 
 def _is_rootcoz_actionable_error(text: str) -> bool:
-    """Whether a status-free failure is one of rootcoz's own recovery messages."""
-    return text in _ROOTCOZ_ACTIONABLE_ERRORS or text.startswith(
-        _ROOTCOZ_ACTIONABLE_PREFIXES
+    """Whether a status-free failure is one of rootcoz's own recovery messages.
+
+    Only a whole sentence counts: the raised sentences are templates matched
+    with bounded slots, so a body wearing one of their prefixes matches no shape.
+    """
+    return text in _ROOTCOZ_ACTIONABLE_ERRORS or any(
+        pattern.match(text) for pattern in _ROOTCOZ_ACTIONABLE_PATTERNS
     )
 
 

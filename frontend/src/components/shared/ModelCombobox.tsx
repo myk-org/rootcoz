@@ -350,10 +350,11 @@ export function ModelCombobox({
           aria-describedby={hasDeniedServer ? `${listboxId}-server-help` : undefined}
           disabled={disabled}
           onChange={(e) => {
-            // The ref still records the attempt, so a blur or Enter cannot
-            // commit it either.
+            // Every keystroke lands, even one that spells a refused id: the lock
+            // is on the commit points (blur, Enter, list pick), because a refused
+            // id may be the prefix of a usable one ("gpt-5" / "gpt-5-mini").
+            // Submitted value stays gated by isAnalysisAiAvailable.
             committedValueRef.current = e.target.value
-            if (refusedValue(e.target.value)) return
             onChange(e.target.value)
             if (!open) setOpen(true)
           }}

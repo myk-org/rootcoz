@@ -4698,6 +4698,74 @@ def test_rootcoz_own_recovery_message_is_never_replaced_by_retry(message):
     )
 
 
+def test_a_body_wearing_a_rootcoz_prefix_is_replaced():
+    """Only the whole sentence rootcoz raised is forwarded, never the prefix.
+
+    ``_is_rootcoz_actionable_error`` used to accept any text *starting* with
+    ``Model '`` or ``Server credentials for provider '``, so a sidecar body
+    wearing that prefix was returned verbatim to a chat user.
+    """
+    from rootcoz import ai_client
+
+    deactivated = (
+        "Server credentials for provider 'openai' are deactivated by the"
+        " administrator (active_server_providers)"
+    )
+    deselected = (
+        "Model 'gpt-5' is excluded from server credentials for provider 'openai'"
+        " by the administrator's model selection"
+    )
+    bodies = (
+        f"{deactivated} — upstream payload: sk-live-EXAMPLE-1234",
+        f"{deselected}; see /srv/agent/models.json with key sk-live-EXAMPLE-1234",
+        # The slot is a provider/model id: free text parked in it is a body.
+        (
+            "Server credentials for provider 'the key sk-live-EXAMPLE-1234 from the"
+            " upstream payload' are deactivated by the administrator"
+            " (active_server_providers)"
+        ),
+    )
+    for body in bodies:
+        assert not ai_client._is_rootcoz_actionable_error(body), body
+        mapped = ai_client.format_chat_ai_user_error(
+            body, is_admin=True, ai_provider="openai", ai_model="gpt-5"
+        )
+        assert "sk-live-EXAMPLE-1234" not in mapped, body
+        assert mapped == "AI call failed. Please try again.", body
+
+
+def test_a_rate_limited_session_creation_stays_retryable():
+    """A 429 at creation is transient, so it never wears the refusal marker.
+
+    The marker is the one non-retryable signal, so mapping a rate limit to a
+    refusal would turn a temporary limit into a permanent analysis failure.
+    """
+    import httpx
+
+    from rootcoz import ai_client
+    from rootcoz.engine import core
+
+    library_text = (
+        "Client error '429 Too Many Requests' for url"
+        " 'http://127.0.0.1:9100/sessions'\nFor more information check:"
+        " https://developer.mozilla.org/en-US/docs/Web/HTTP/Status/429"
+    )
+    for text in (library_text, "Sidecar session creation failed (HTTP 429): slow down"):
+        assert ai_client._is_refusal_text(text) is False, text
+        assert not any(
+            marker in text.casefold() for marker in core._NON_RETRYABLE_AI_ERRORS
+        ), text
+        mapped = ai_client.format_chat_ai_user_error(
+            text, ai_provider="openai", ai_model="undeclared"
+        )
+        assert not mapped.startswith(ai_client.SESSION_REFUSAL_MARKER), text
+
+    request = httpx.Request("POST", "http://127.0.0.1:9100/sessions")
+    response = httpx.Response(429, request=request, text="rate limited")
+    exc = httpx.HTTPStatusError("rate limited", request=request, response=response)
+    assert ai_client._session_refusal_for(exc, "openai", "undeclared") is None
+
+
 def test_cursor_401_names_the_rejected_credential_not_the_browser_login():
     """A refused key is the cause; the browser-login hint is only a bare 4xx."""
     from rootcoz import ai_client
