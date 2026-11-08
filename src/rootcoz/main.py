@@ -8924,19 +8924,25 @@ async def re_analyze_failure(
         # failure, unreadable params, already running) still says who tried.
         # The row names the same target as the success row — the parent job —
         # so a filter by job shows both; the failure uuid goes in the details.
-        await _record_refused_attempt(
-            action="analysis.rerun",
-            request=request,
-            message=(
-                f"User '{request.state.username}' re-ran the analysis of"
-                f" failure {failure_uuid}"
-            ),
-            target_type="job",
-            target_id=parent_job_id,
-            exc=exc,
-            details={"trigger": "failure", "failure_uuid": failure_uuid},
-        )
-        _release_failure_reanalysis(parent_job_id, reanalysis_reservation)
+        #
+        # The release is in ``finally``: a cancellation during that audit write
+        # would otherwise skip it and protect the job from retention for the
+        # rest of the process. Releasing is idempotent.
+        try:
+            await _record_refused_attempt(
+                action="analysis.rerun",
+                request=request,
+                message=(
+                    f"User '{request.state.username}' re-ran the analysis of"
+                    f" failure {failure_uuid}"
+                ),
+                target_type="job",
+                target_id=parent_job_id,
+                exc=exc,
+                details={"trigger": "failure", "failure_uuid": failure_uuid},
+            )
+        finally:
+            _release_failure_reanalysis(parent_job_id, reanalysis_reservation)
         raise
     except BaseException:
         # Any other way out of the patch (a database error, a cancelled request)

@@ -1168,3 +1168,61 @@ def _role_headers(db_path: Path, role: str) -> dict[str, str]:
 
 _ADMIN_KEY = "test-admin-key-16chars"  # pragma: allowlist secret  # gitleaks:allow
 _ADMIN_HEADERS = {"Authorization": f"Bearer {_ADMIN_KEY}"}
+
+
+def test_a_cancelled_refusal_still_releases_the_reanalysis_reservation(
+    client, temp_db_path: Path
+) -> None:
+    """The refusal's audit write must not be able to strand the reservation.
+
+    A re-analyze that stops at a guard releases its reservation; if the process
+    cancels it inside that audit write instead, the job would stay protected from
+    retention for the rest of the process.
+    """
+    failure_uuid = "fa-cancelled"
+    result = {
+        "job_id": "leaky",
+        "summary": "s",
+        "failures": [
+            {
+                "id": failure_uuid,
+                "test_name": "t",
+                "error": "e",
+                "reanalysis_status": "running",
+            }
+        ],
+        "request_params": {
+            "analysis_type": "raw",
+            "ai_provider": "claude",
+            "ai_model": "test-model",
+        },
+    }
+    _seed_job(
+        temp_db_path,
+        "leaky",
+        request_params=result["request_params"],
+    )
+    with sqlite3.connect(temp_db_path) as conn:
+        conn.execute(
+            "UPDATE results SET result_json = ? WHERE job_id = 'leaky'",
+            (json.dumps(result),),
+        )
+    with (
+        patch.object(
+            main,
+            "_resolve_ai_config_allow_defer",
+            AsyncMock(return_value=("claude", "test-model")),
+        ),
+        patch.object(
+            main,
+            "_record_refused_attempt",
+            AsyncMock(side_effect=asyncio.CancelledError()),
+        ) as refused,
+        # The cancellation propagates wrapped in the client's task group; the
+        # release is what this test is about.
+        contextlib.suppress(BaseException),
+    ):
+        client.post(f"/api/failures/{failure_uuid}/re-analyze", headers=_ADMIN_HEADERS)
+
+    refused.assert_awaited_once()
+    assert not main._failure_reanalysis_jobs.get("leaky")
