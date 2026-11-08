@@ -21,6 +21,7 @@ import contextvars
 import logging
 import os
 import shutil
+import threading
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
@@ -50,7 +51,6 @@ _LOG_MAX_BYTES_CAP = 104_857_600  # simple_logger's per-file default
 _LOG_BACKUP_COUNT_CAP = 20  # simple_logger's default
 _LOG_BACKUP_COUNT_MIN = 4
 _LOG_FILE_TARGET_BYTES = 8_388_608  # aim the split at 8 MiB files
-_LOG_MAX_BYTES_MIN = 262_144  # a tiny filesystem still rotates
 
 # The free-space floor stops the file before the filesystem fails SQLite writes
 # on the shared data directory; the clamps keep a small filesystem's floor
@@ -118,8 +118,13 @@ def _open_mode(path: Path, mode: int) -> int:
     == 0640), so the ``fchmod`` is what actually lands the mode. A file owned
     by another identity cannot be chmod-ed — it was writable enough to open,
     so that stays a DEBUG line, never a reason to lose logging.
+
+    ``O_NOFOLLOW``: the log directory is group-writable, so anyone who can
+    write it could point the log path at a file they do not own and have us
+    append to it and widen it to 0660. A symlinked log path is refused instead
+    (``ELOOP``), which ``get_log_file()`` reports as "file logging disabled".
     """
-    fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY, mode)
+    fd = os.open(path, os.O_APPEND | os.O_CREAT | os.O_WRONLY | os.O_NOFOLLOW, mode)
     try:
         os.fchmod(fd, mode)
     except OSError:
@@ -145,10 +150,26 @@ def _derive_log_budget(capacity: int) -> tuple[int, int]:
         _LOG_BACKUP_COUNT_MIN,
         min(_LOG_BACKUP_COUNT_CAP, budget // _LOG_FILE_TARGET_BYTES),
     )
-    max_bytes = max(
-        _LOG_MAX_BYTES_MIN, min(_LOG_MAX_BYTES_CAP, budget // (backups + 1))
-    )
+    # The whole tree, not the per-file size, is the bound: a filesystem too
+    # small for a 256 KiB file gets smaller files rather than a bigger tree.
+    max_bytes = max(1, min(_LOG_MAX_BYTES_CAP, budget // (backups + 1)))
     return max_bytes, backups
+
+
+def _prune_backups(path: Path, backups: int) -> None:
+    """Delete rotated files the effective backup count no longer manages.
+
+    A lower budget takes effect on a tree that was written under a higher one:
+    without this the leftovers stay forever, because rotation only ever touches
+    the first ``backupCount`` suffixes.
+    """
+    for stale in path.parent.glob(f"{path.name}.*"):
+        suffix = stale.name[len(path.name) + 1 :]
+        if suffix.isdigit() and int(suffix) > backups:
+            try:
+                stale.unlink()
+            except OSError:
+                _debug("Cannot remove stale log backup %s", stale)
 
 
 def _derive_min_free_bytes(capacity: int) -> int:
@@ -205,71 +226,95 @@ def _resolve_log_file_limits(
 class _FreeSpaceFilter(logging.Filter):
     """Drop file records while the data filesystem is below its floor.
 
-    Not on the console handler: the pause WARNING and the resume INFO go to the
-    root logger so they survive both the drop and a ``LOG_LEVEL=ERROR`` tree,
-    and console records keep flowing throughout. A probe that cannot stat the
-    filesystem fails open — a metric that fails must never silence logging.
+    Only on the file handler, never on the console one, so console records keep
+    flowing throughout. The pause WARNING and the resume INFO go through the
+    ``rootcoz`` tree — the one place that owns a console handler — because the
+    root logger has none: after ``_install_sse_log_handler()`` attaches there,
+    ``lastResort`` stops and a root-level line reaches the live stream only.
+
+    Thread-safe: handler filters run outside the handler's own lock, so two
+    threads could otherwise announce the same crossing. ``RLock`` because the
+    announcement itself is emitted while this filter is running.
+
+    A probe that cannot stat the filesystem fails open — a metric that fails
+    must never silence logging.
     """
 
     def __init__(
         self,
-        log_dir: Path,
+        data_dir: Path,
         min_free_bytes: int,
         *,
         probe_interval: float = _FREE_SPACE_PROBE_SECONDS,
     ) -> None:
         super().__init__()
-        self.log_dir = log_dir
+        self.data_dir = data_dir
         self.min_free_bytes = min_free_bytes
         self.probe_interval = probe_interval
         self._free: int | None = None
         self._probe_after: float | None = None
         self._blocked = False
+        self._lock = threading.RLock()
 
     def _free_bytes(self) -> int | None:
-        """Cached free bytes on the filesystem holding the log directory."""
+        """Cached free bytes on the filesystem holding the data directory.
+
+        The same filesystem the budget and the floor are derived from, so a
+        ``logs/`` on its own mount cannot be measured against another one's
+        capacity.
+        """
         now = time.monotonic()
         if self._probe_after is not None and now < self._probe_after:
             return self._free
         self._probe_after = now + self.probe_interval
         try:
-            self._free = shutil.disk_usage(self.log_dir).free
+            self._free = shutil.disk_usage(self.data_dir).free
         except OSError:
             self._free = None
         return self._free
 
+    def _announce(self, level: int, message: str, *args: object) -> None:
+        """Emit on the console-carrying tree, not the handler-less root logger."""
+        from rootcoz import get_child_logger
+
+        get_child_logger(__name__).log(level, message, *args)
+
     def check(self) -> bool:
         """Whether the file may accept a record, announcing each crossing once."""
-        free = self._free_bytes()
-        if free is None:
-            # Fail open, and say nothing about free space we do not have.
-            if self._blocked:
-                self._blocked = False
-                _debug(
-                    "Free-space probe failed for %s; file logging resumed", self.log_dir
-                )
-            return True
-        if free >= self.min_free_bytes:
-            if self._blocked:
-                self._blocked = False
-                logging.getLogger().info(
-                    "File logging resumed: %s has %s bytes free, back above the "
-                    "%d-byte floor (log_min_free_bytes)",
-                    self.log_dir,
+        with self._lock:
+            free = self._free_bytes()
+            if free is None:
+                # Fail open, and say nothing about free space we do not have.
+                if self._blocked:
+                    self._blocked = False
+                    _debug(
+                        "Free-space probe failed for %s; file logging resumed",
+                        self.data_dir,
+                    )
+                return True
+            if free >= self.min_free_bytes:
+                if self._blocked:
+                    self._blocked = False
+                    self._announce(
+                        logging.INFO,
+                        "File logging resumed: %s has %d bytes free, back above "
+                        "the %d-byte floor (log_min_free_bytes)",
+                        self.data_dir,
+                        free,
+                        self.min_free_bytes,
+                    )
+                return True
+            if not self._blocked:
+                self._blocked = True
+                self._announce(
+                    logging.WARNING,
+                    "File logging paused: %s has %d bytes free, below the %d-byte "
+                    "floor (log_min_free_bytes); console logging continues",
+                    self.data_dir,
                     free,
                     self.min_free_bytes,
                 )
-            return True
-        if not self._blocked:
-            self._blocked = True
-            logging.getLogger().warning(
-                "File logging paused: %s has %d bytes free, below the %d-byte "
-                "floor (log_min_free_bytes); console logging continues",
-                self.log_dir,
-                free,
-                self.min_free_bytes,
-            )
-        return False
+            return False
 
     def filter(self, record: logging.LogRecord) -> bool:
         return self.check()
@@ -403,14 +448,22 @@ def enable_log_file(*, reconfigure: bool = False) -> logging.Handler | None:
         _warn_file_logging_disabled(log_dir, str(exc))
         return None
 
-    handler = _GroupWritableRotatingFileHandler(
-        path,
-        maxBytes=max_bytes,
-        backupCount=backups,
-        encoding=built.encoding,
-    )
+    try:
+        handler = _GroupWritableRotatingFileHandler(
+            path,
+            maxBytes=max_bytes,
+            backupCount=backups,
+            encoding=built.encoding,
+        )
+    except OSError as exc:
+        # The file passed get_log_file()'s probe and then stopped being
+        # writable. A settings save must not fail on that; the old handler is
+        # already detached, so this ends as console-only with one WARNING.
+        _warn_file_logging_disabled(log_dir, str(exc))
+        return None
+
     handler.setFormatter(built.formatter)
-    floor = _FreeSpaceFilter(log_dir, min_free)
+    floor = _FreeSpaceFilter(log_dir.parent, min_free)
     handler.addFilter(floor)
     # Say so now, not at the first record: a deployment that boots on a nearly
     # full filesystem should learn it while someone is watching.
@@ -429,6 +482,9 @@ def enable_log_file(*, reconfigure: bool = False) -> logging.Handler | None:
 
     _ENABLED_LOG_FILE = path
     _FILE_HANDLER = handler
+    # After the handler exists: a lower budget must not leave the tree that was
+    # written under a higher one on disk.
+    _prune_backups(Path(path), backups)
     # Through the rootcoz tree, not the root logger: root has no handler here,
     # so an INFO there would be dropped.
     _log_file_budget(path, max_bytes, backups, min_free, explicit)

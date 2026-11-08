@@ -1730,17 +1730,17 @@ async def wait_for_jenkins_completion(
         await asyncio.to_thread(client.get_whoami)
     except _JENKINS_FETCH_EXCEPTIONS as e:
         if is_jenkins_connectivity_error(e):
-            logger.exception(
-                "Cannot reach Jenkins at %s", redact_urls_in_text(jenkins_url)
-            )
+            # No traceback on either branch: python-jenkins renders its
+            # tokenized constructor URL into the exception text.
+            logger.error("Cannot reach Jenkins at %s", redact_urls_in_text(jenkins_url))
             return False, (
                 "Jenkins connectivity error: unable to reach Jenkins; "
                 "please verify the Jenkins URL and network connectivity"
             )
         else:
-            logger.exception(
+            logger.error(
                 "Jenkins preflight failed at %s (%s)",
-                jenkins_url,
+                redact_urls_in_text(jenkins_url),
                 type(e).__name__,
             )
             err_str = str(e).lower()
@@ -1808,10 +1808,10 @@ async def wait_for_jenkins_completion(
                 "Transient error checking Jenkins status (%d/%d): %s",
                 consecutive_failures,
                 max_consecutive_failures,
-                e,
+                redact_urls_in_text(str(e)),
             )
             if consecutive_failures >= max_consecutive_failures:
-                logger.exception(
+                logger.error(
                     "Cannot reach Jenkins at %s after %d consecutive failures",
                     redact_urls_in_text(jenkins_url),
                     consecutive_failures,

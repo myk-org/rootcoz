@@ -586,10 +586,15 @@ class TestLogBudget:
         """100 GiB still derives 1 % — it is not the cap."""
         assert logging_context._derive_log_budget(100 << 30) == (51_130_563, 20)
 
-    def test_a_tiny_filesystem_still_rotates(self) -> None:
-        """A 50 MiB filesystem keeps a rotatable per-file size."""
-        max_bytes, _backups = logging_context._derive_log_budget(50 << 20)
-        assert max_bytes == 262_144
+    def test_a_tiny_filesystem_still_rotates_within_the_whole_tree_bound(
+        self,
+    ) -> None:
+        """The whole tree, not the per-file size, is the bound that never breaks."""
+        capacity = 50 << 20
+        max_bytes, backups = logging_context._derive_log_budget(capacity)
+        assert max_bytes == 104_857
+        assert max_bytes > 0
+        assert max_bytes * (backups + 1) <= capacity * 0.01
 
     def test_the_floor_is_a_clamped_fraction(self) -> None:
         """The floor is 5 % of capacity, clamped to [32 MiB, 512 MiB]."""
@@ -645,32 +650,28 @@ class TestFreeSpaceFloor:
         assert marker not in _file_text()
         assert marker in buffer.getvalue()
 
-    def test_the_floor_warns_once_per_crossing(
-        self, file_logging: Path, caplog
-    ) -> None:
+    def test_the_floor_warns_once_per_crossing(self, file_logging: Path) -> None:
         """One WARNING per crossing and one INFO on recovery, never per record."""
         floor_filter = logging_context._FreeSpaceFilter(
             file_logging, 1 << 62, probe_interval=0.0
         )
-        with caplog.at_level(logging.INFO):
+        # The announcements go through the rootcoz tree (console-carrying,
+        # propagate=False), so they are read from that logger — not caplog.
+        with _CaughtRecords("rootcoz.logging_context") as sink:
             assert [floor_filter.check() for _ in range(3)] == [False, False, False]
             warnings = [
-                record
-                for record in caplog.records
-                if record.levelno == logging.WARNING and record.name == "root"
+                record for record in sink.records if record.levelno == logging.WARNING
             ]
             assert len(warnings) == 1
             assert "File logging paused" in warnings[0].getMessage()
             assert "log_min_free_bytes" in warnings[0].getMessage()
             floor_filter.min_free_bytes = 1
             assert floor_filter.check() is True
-        infos = [
-            record
-            for record in caplog.records
-            if record.levelno == logging.INFO and record.name == "root"
-        ]
-        assert len(infos) == 1
-        assert "resumed" in infos[0].getMessage()
+            infos = [
+                record for record in sink.records if record.levelno == logging.INFO
+            ]
+            assert len(infos) == 1
+            assert "resumed" in infos[0].getMessage()
 
     def test_a_failing_probe_keeps_logging(
         self, file_logging: Path, monkeypatch
@@ -708,6 +709,19 @@ class TestLogFilePermissions:
         log_file = Path(path).stat().st_mode & 0o777
         assert log_dir == 0o770
         assert log_file == 0o660
+
+    def test_a_symlinked_log_path_is_refused(self, tmp_path: Path, monkeypatch) -> None:
+        """A planted symlink must not make us append to, and widen, a private file."""
+        victim = tmp_path / "victim"
+        victim.write_text("secret\n")
+        victim.chmod(0o600)
+        log_dir = tmp_path / "logs"
+        log_dir.mkdir()
+        (log_dir / "rootcoz.log").symlink_to(victim)
+        monkeypatch.setenv("DB_PATH", str(tmp_path / "results.db"))
+        assert get_log_file() is None
+        assert victim.read_text() == "secret\n"
+        assert victim.stat().st_mode & 0o777 == 0o600
 
     def test_the_rotated_file_keeps_the_mode(
         self, file_logging: Path, monkeypatch
@@ -759,6 +773,34 @@ class TestLogFileReconfigure:
             if isinstance(held, logging.handlers.RotatingFileHandler)
         ]
         assert {id(held) for held in holders} == {id(after)}
+
+    def test_a_lower_budget_prunes_the_leftovers_of_a_higher_one(
+        self, file_logging: Path, monkeypatch
+    ) -> None:
+        """Rotation only manages the first N suffixes — the rest must go."""
+        log_dir = file_logging / "logs"
+        log_dir.mkdir(exist_ok=True)
+        for suffix in (1, 2, 9, 21):
+            (log_dir / f"rootcoz.log.{suffix}").write_text("old\n")
+        _set_log_settings(monkeypatch, log_backup_count=2)
+        assert _enable() is not None
+        assert sorted(p.name for p in log_dir.glob("rootcoz.log.*")) == [
+            "rootcoz.log.1",
+            "rootcoz.log.2",
+        ]
+
+    def test_a_handler_that_cannot_open_does_not_raise(
+        self, file_logging: Path, monkeypatch
+    ) -> None:
+        """A settings save must survive the file becoming unwritable mid-flight."""
+        _enable()
+
+        def _boom(*_args: object, **_kwargs: object) -> None:
+            raise OSError("disk went away")
+
+        monkeypatch.setattr(logging_context, "_GroupWritableRotatingFileHandler", _boom)
+        assert logging_context.enable_log_file(reconfigure=True) is None
+        assert logging_context.get_log_file_handler() is None
 
     def test_the_job_id_prefix_survives_a_reconfigure(self, file_logging: Path) -> None:
         """The rebuilt handler still carries JobIdFilter."""
