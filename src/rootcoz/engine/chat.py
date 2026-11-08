@@ -1433,13 +1433,25 @@ def asked_issue_tracker(message: str) -> Literal["", "github", "jira"]:
     "GitHub is irrelevant. Please file a GitHub issue, not a Jira issue" answers
     about GitHub. A tie goes to the earlier mention.
 
+    A refused phrase does not swallow the message: "I already filed a GitHub
+    issue. Please create a Jira issue" answers about Jira — the first request
+    that is not negated is the one read.
+
     shortcut: only a tracker-named request is detected ("open an issue" alone
     posts nothing, the system prompt still covers it), and only a negation
     pinned to the verb is read, so "a GitHub issue I already filed" still
     fires. Upgrade if users commonly ask this way.
     """
-    request = _ASKS_TO_FILE_ISSUE.search(message or "")
-    if request is None or _NOT_A_REQUEST.search(message[: request.start()]):
+    text = message or ""
+    request = next(
+        (
+            match
+            for match in _ASKS_TO_FILE_ISSUE.finditer(text)
+            if not _NOT_A_REQUEST.search(text[: match.start()])
+        ),
+        None,
+    )
+    if request is None:
         return ""
     named = []
     for tracker, pattern in _NAMED_TRACKERS:

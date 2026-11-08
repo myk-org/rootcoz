@@ -1389,6 +1389,12 @@ class TestAskedIssueTracker:
             ("I already filed a GitHub issue about this", ""),
             # The negation is read only where it touches the verb.
             ("I don't have a Jira token, please open a Jira issue", "jira"),
+            # A refused phrase does not swallow the request after it.
+            (
+                "I already filed a GitHub issue. Please create a Jira issue.",
+                "jira",
+            ),
+            ("Don't open a GitHub issue. Open a Jira ticket.", "jira"),
             # Not a filing request.
             ("why did this test fail?", ""),
             ("open the console log", ""),
