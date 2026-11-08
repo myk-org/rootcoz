@@ -1395,6 +1395,15 @@ _ASKS_TO_FILE_ISSUE = re.compile(
     re.IGNORECASE,
 )
 
+#: A refusal or a report of an action already taken is not a request: the words
+#: pinned to the verb negate it ("don't open a GitHub issue") or say it happened
+#: ("I already filed a GitHub issue"). Only what touches the verb counts, so
+#: "I don't have a Jira token, open a Jira issue" still asks for one.
+_NOT_A_REQUEST = re.compile(
+    r"\b(?:don'?t|do not|never|no need to|not|already)\b[^\n.!?,]{0,8}$",
+    re.IGNORECASE,
+)
+
 #: The trackers a message can name. A filing request that names none posts no
 #: notice: there is no single tracker it could be about.
 _NAMED_TRACKERS: tuple[tuple[Literal["github", "jira"], re.Pattern[str]], ...] = (
@@ -1420,21 +1429,27 @@ def asked_issue_tracker(message: str) -> Literal["", "github", "jira"]:
     The tracker nearest the filing request wins — inside it when the request
     carries the name ("file a Jira issue"), else the closest mention — so
     "GitHub is blocked for me, file a Jira issue" answers about Jira and not
-    about the first tracker in the string. A tie goes to the earlier mention.
+    about the first tracker in the string. Every occurrence counts, so
+    "GitHub is irrelevant. Please file a GitHub issue, not a Jira issue" answers
+    about GitHub. A tie goes to the earlier mention.
 
     shortcut: only a tracker-named request is detected ("open an issue" alone
-    posts nothing, the system prompt still covers it); a tracker mentioned far
-    from the request still wins when nothing is nearer. Upgrade if users
-    commonly mix a tracker into an unrelated sentence.
+    posts nothing, the system prompt still covers it), and only a negation
+    pinned to the verb is read, so "a GitHub issue I already filed" still
+    fires. Upgrade if users commonly ask this way.
     """
     request = _ASKS_TO_FILE_ISSUE.search(message or "")
-    if request is None:
+    if request is None or _NOT_A_REQUEST.search(message[: request.start()]):
         return ""
-    named = [
-        (_mention_gap(request.span(), match.span()), match.start(), tracker)
-        for tracker, pattern in _NAMED_TRACKERS
-        if (match := pattern.search(message))
-    ]
+    named = []
+    for tracker, pattern in _NAMED_TRACKERS:
+        mentions = [
+            (_mention_gap(request.span(), mention.span()), mention.start())
+            for mention in pattern.finditer(message)
+        ]
+        if mentions:
+            gap, start = min(mentions)
+            named.append((gap, start, tracker))
     return min(named)[2] if named else ""
 
 

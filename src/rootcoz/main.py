@@ -9979,14 +9979,17 @@ def _chat_tracker_gate(
 
 #: Placeholder credentials the gate accepts, per tracker: the probe below asks
 #: the gate "would a real one file?" without ever reading the caller's. Jira
-#: lists every shape a token can be saved in — bare (a PAT) and with an email
-#: (Cloud basic auth) — because which one files is the deployment's, not a
-#: choice the probe may make for it.
+#: lists every shape a token can be saved in — bare (a PAT), with an email
+#: (Cloud basic auth), and the service-account field either way (an ATOA OAuth
+#: 2.0 client secret or an ATST scoped token) — because which one files is the
+#: deployment's, not a choice the probe may make for it.
 _PROBE_TOKENS: dict[str, tuple[dict[str, str], ...]] = {
     "github": ({"github_token": "probe"},),
     "jira": (
         {"jira_token": "probe"},
         {"jira_token": "probe", "jira_email": "probe@example.com"},
+        {"jira_sa_token": "ATOAprobe"},
+        {"jira_sa_token": "ATSTprobe"},
     ),
 }
 

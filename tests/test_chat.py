@@ -1377,6 +1377,18 @@ class TestAskedIssueTracker:
             ("Jira is blocked for me, file a GitHub issue", "github"),
             # The noun-first order people also write.
             ("I need a GitHub issue filed for this failure", "github"),
+            # Every mention counts, so the name inside the request is the one
+            # bound to it even when the tracker is named again afterwards.
+            (
+                "GitHub is irrelevant. Please file a GitHub issue, not a Jira issue.",
+                "github",
+            ),
+            # A refusal or a report of an action already taken is not a request.
+            ("Don't open a GitHub issue about this", ""),
+            ("do not open a jira ticket", ""),
+            ("I already filed a GitHub issue about this", ""),
+            # The negation is read only where it touches the verb.
+            ("I don't have a Jira token, please open a Jira issue", "jira"),
             # Not a filing request.
             ("why did this test fail?", ""),
             ("open the console log", ""),
@@ -1536,6 +1548,44 @@ class TestTheServerWritesTheNoCredentialAnswer:
                 message="please create a Jira issue for this failure",
                 username="alice",
                 settings=settings,
+                github_repo_available=True,
+            )
+        assert "Profile Settings → add the Jira token" in notice
+
+    @pytest.mark.parametrize(
+        "settings_kwargs",
+        [
+            # ATST scoped token only: no PAT and no basic auth can file there.
+            {
+                "jira_auth_mode": "atst",
+                "atlassian_oauth_cloud_id": "cloud-1",
+            },
+            # OAuth 2.0 credential only.
+            {
+                "jira_auth_mode": "oauth",
+                "atlassian_oauth_cloud_id": "cloud-1",
+                "atlassian_oauth_client_id": "client-1",
+            },
+        ],
+    )
+    async def test_a_service_account_deployment_still_promises_the_token(
+        self, settings_kwargs
+    ):
+        """The probe asks the same gate with every shape a Jira credential can
+        be saved in, so a deployment that files only with a service-account
+        credential (ATOA client secret, ATST scoped token) still names the fix
+        for an account that has none."""
+        from rootcoz.config import Settings
+        from rootcoz.main import _issue_blocked_notice
+
+        with (
+            patch("rootcoz.storage.get_user_tokens", AsyncMock(return_value={})),
+            patch("rootcoz.main._account_has_profile", AsyncMock(return_value=True)),
+        ):
+            notice = await _issue_blocked_notice(
+                message="please create a Jira issue for this failure",
+                username="alice",
+                settings=Settings(**settings_kwargs),
                 github_repo_available=True,
             )
         assert "Profile Settings → add the Jira token" in notice
