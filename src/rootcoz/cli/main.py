@@ -2538,15 +2538,33 @@ def jira_security_levels_cmd(
 
 
 def _print_ai_model_rows(models: list[dict[str, Any]]) -> None:
-    """Render an id/name table for AI model rows."""
+    """Render an id/name/session table for AI model rows.
+
+    ``print_output`` has no derived columns, so the session cell is mapped onto
+    each row here: an unsessionable id must not read as runnable.
+    """
+    rows = [
+        {
+            **m,
+            "session": (
+                "unknown"
+                if "session_supported" not in m
+                else "yes"
+                if m["session_supported"]
+                else "no"
+            ),
+        }
+        for m in models
+    ]
     print_output(
-        models,
-        columns=["id", "name", "verified", "credential_sources"],
+        rows,
+        columns=["id", "name", "verified", "credential_sources", "session"],
         labels={
             "id": "MODEL ID",
             "name": "DISPLAY NAME",
             "verified": "VERIFIED",
             "credential_sources": "CREDENTIALS",
+            "session": "SESSION",
         },
         as_json=False,
     )

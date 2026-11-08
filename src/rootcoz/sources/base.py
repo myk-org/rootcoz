@@ -821,10 +821,21 @@ async def run_console_only_analysis(
             type(exc).__name__,
             safe_exception_frames(exc),
         )
+        # A refusal names its cause and its fix; the child note stores it as-is.
+        from rootcoz.ai_client import SESSION_REFUSAL_MARKER
+
+        error_text = str(exc).strip()
+        refusal = error_text.startswith(SESSION_REFUSAL_MARKER)
         return (
             False,
-            [],
-            "AI analysis failed. Check provider credentials and try again.",
+            _failed_group_analyses(
+                get_failure_signature(synthetic_failure),
+                [synthetic_failure],
+                error_text=error_text,
+            ),
+            error_text
+            if refusal
+            else "AI analysis failed. Check provider credentials and try again.",
         )
 
 

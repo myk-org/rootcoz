@@ -82,6 +82,11 @@ export function countUnclassifiedFailures(
 /** The placeholder a group carries when the provider call itself failed. */
 export const PROVIDER_FAILURE_DETAILS = 'Analysis failed; check server logs for details'
 
+/** The prefix of a refusal sentence (server `SESSION_REFUSAL_MARKER`). A group
+ *  whose session was refused carries that sentence instead of the placeholder:
+ *  the provider call failed, the model never answered. */
+export const SESSION_REFUSAL_PREFIX = 'AI session refused'
+
 /** Recursively count failures whose missing analysis is still attributed to a
  *  failed AI call. Mirrors `countUnclassifiedFailures`: a reviewer override
  *  classifies a provider placeholder, so it must drop out of this total too —
@@ -104,7 +109,10 @@ export function countProviderFailures(
     children,
     classifications,
     analysisState,
-    (f) => f.analysis?.details === PROVIDER_FAILURE_DETAILS && !f.analysis_error,
+    (f) =>
+      (f.analysis?.details === PROVIDER_FAILURE_DETAILS ||
+        f.analysis?.details?.startsWith(SESSION_REFUSAL_PREFIX)) &&
+      !f.analysis_error,
   )
 }
 

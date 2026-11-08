@@ -9,12 +9,15 @@ import os
 import re
 import sqlite3
 import tempfile
+import threading
 import time
-from collections.abc import Mapping
+from collections import OrderedDict
+from collections.abc import Awaitable, Callable, Mapping
 from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from string import Template
+from typing import Any, cast
 from urllib.parse import quote
 
 import httpx
@@ -289,10 +292,47 @@ def is_server_provider_active(provider: str) -> bool:
     return query.lower() in {entry.lower() for entry in entries}
 
 
+# The two variable sentences rootcoz raises for a deactivated provider and a
+# deselected model, as templates: the chat mapper matches them whole (see
+# ``_is_rootcoz_actionable_error``), so the wording has exactly one source.
+_INACTIVE_PROVIDER_TEMPLATE = Template(
+    "Server credentials for provider '$provider' are deactivated "
+    "by the administrator (active_server_providers)"
+)
+_EXCLUDED_MODEL_TEMPLATE = Template(
+    "Model '$model' is excluded from server credentials for "
+    "provider '$provider' by the administrator's model selection"
+)
+
+
+# Sentences rootcoz built in this process, oldest first. A sidecar body can copy
+# our wording but cannot have been built here, so registration — not shape — is
+# what makes a sentence ours: any catalog id keeps its guidance, and three rounds
+# of narrowing the shape matcher cannot be forged. Shape matching survives only
+# as the fallback for a sentence reconstructed from a stored report in another
+# process (or after eviction here). Entries are one short sentence each, so the
+# count bound bounds the memory; the lock covers the eviction, which is the only
+# non-atomic step, while membership reads stay lock-free.
+_OWN_SENTENCE_REGISTRY_MAX = 256
+_own_sentences: OrderedDict[str, None] = OrderedDict()
+_own_sentences_lock = threading.Lock()
+
+
+def _register_own_sentence(sentence: str) -> str:
+    """Remember ``sentence`` as rootcoz-authored and return it."""
+    with _own_sentences_lock:
+        _own_sentences[sentence] = None
+        _own_sentences.move_to_end(sentence)
+        while len(_own_sentences) > _OWN_SENTENCE_REGISTRY_MAX:
+            _own_sentences.popitem(last=False)
+    return sentence
+
+
 def _raise_inactive_server_provider(provider: str) -> None:
     raise InactiveServerProviderError(
-        f"Server credentials for provider '{provider}' are deactivated "
-        "by the administrator (active_server_providers)"
+        _register_own_sentence(
+            _INACTIVE_PROVIDER_TEMPLATE.substitute(provider=provider)
+        )
     )
 
 
@@ -354,8 +394,9 @@ async def require_selected_server_pair(provider: str, model: str) -> None:
         and (provider.lower(), model) not in selected_pairs
     ):
         raise ExcludedServerModelError(
-            f"Model '{model}' is excluded from server credentials for "
-            f"provider '{provider}' by the administrator's model selection"
+            _register_own_sentence(
+                _EXCLUDED_MODEL_TEMPLATE.substitute(model=model, provider=provider)
+            )
         )
 
 
@@ -575,6 +616,98 @@ _CURSOR_KEY_SET_BUT_UNAVAILABLE_HINT = (
     "unavailable. Check the key is visible to the sidecar process, restart "
     "the sidecar, and verify network to Cursor APIs."
 )
+
+# Every refusal sentence starts with this marker: it is the one non-retryable
+# signal (engine/core.py), the prefix the send-time mapper recognises and the
+# string a log grep finds.
+SESSION_REFUSAL_MARKER = "AI session refused"
+# The sidecar's own limits refusal, byte for byte (sessions.js:1764-1766), the
+# third whitelisted literal — forwarded verbatim because it names the fix.
+_SIDECAR_LIMITS_REFUSAL = (
+    "Model metadata missing reliable input/output token limits for unknown model. "
+    "Declare the model in the agent-dir models.json with contextWindow and maxTokens "
+    "to use it with a session API key."
+)
+# Static, key-free sidecar refusal literals; matched by exact string (a
+# whitelist) and forwarded verbatim. Anything else stays in the server log.
+_SIDECAR_REFUSAL_LITERALS = (
+    "Invalid model for session API key: [REDACTED]",
+    "Selected provider does not support session API key authentication",
+    _SIDECAR_LIMITS_REFUSAL,
+)
+# Picker reason only — the 422 forwards the sidecar's literal instead.
+SESSION_UNSUPPORTED_REASON = (
+    "AI session refused: this model is listed by the provider but is not declared in that"
+    " provider's models[] and the listing reports no token limits. Declare it in the"
+    " agent-dir models.json models[] — limits are optional there, pi's defaults apply —"
+    " or pick a model that is declared or lists both limits."
+)
+
+# The two variable sentences ``_session_refusal`` builds, as templates. They are
+# the only source of the wording: the validator below turns each into a pattern,
+# so a sidecar body that merely starts with the marker can never pass as ours.
+_REFUSAL_TEMPLATES = (
+    Template(
+        f"{SESSION_REFUSAL_MARKER}: the provider rejected the AI credential for"
+        " $pair. Check that the credential is valid for that provider, or ask an"
+        " administrator to verify the provider key on the server."
+    ),
+    Template(
+        f"{SESSION_REFUSAL_MARKER}: the session could not be created for $pair"
+        " (sidecar HTTP $status). Ask an administrator to check the server log for"
+        " the sidecar's reason."
+    ),
+)
+# Fixed sentences rootcoz builds whole: the whitelisted sidecar literals, the
+# Cursor legacy hint, and the picker reason.
+_OWN_REFUSAL_SENTENCES = (
+    *(f"{SESSION_REFUSAL_MARKER}: {literal}" for literal in _SIDECAR_REFUSAL_LITERALS),
+    f"{SESSION_REFUSAL_MARKER}: {_CURSOR_BROWSER_LOGIN_EXPIRED_HINT}",
+    SESSION_UNSUPPORTED_REASON,
+)
+# Each variable bounded to the shape ``_session_refusal`` can put there, so a
+# body cannot park free text in a variable slot and pass as our sentence.
+# ``$status`` renders ``None`` when the body carried no status.
+# shortcut: ``$pair`` is bounded to no-whitespace, upgrade only if a catalog
+# provider or model id ever contains a space.
+_REFUSAL_VARIABLES: dict[str, str] = {
+    "pair": r"\S+/\S*",
+    "status": r"(?:None|\d{3})",
+    # A provider or model id: no whitespace, no quote — the delimiters the
+    # templates wrap them in. Free text cannot fit the slot.
+    "provider": r"[^'\s]+",
+    "model": r"[^'\s]+",
+}
+
+
+def _refusal_pattern(template: Template) -> re.Pattern[str]:
+    """Compile a refusal template, bounding every variable to its real shape."""
+    parts = re.split(r"\$(\w+)", template.template)
+    pattern = "".join(
+        _REFUSAL_VARIABLES[part] if index % 2 else re.escape(part)
+        for index, part in enumerate(parts)
+    )
+    return re.compile(f"^{pattern}$")
+
+
+_OWN_REFUSAL_PATTERNS = tuple(_refusal_pattern(t) for t in _REFUSAL_TEMPLATES)
+
+
+def _is_own_refusal_sentence(text: str) -> bool:
+    """Whether ``text`` is a sentence rootcoz built, not a raw sidecar body.
+
+    The prefix alone is not evidence: a non-200 body lands in ``AIResult.text``
+    verbatim, so a body beginning with the marker must not be forwarded to a
+    user or skip keyed redaction. Matching the whole sentence is what makes it
+    ours.
+    """
+    sentence = (text or "").strip()
+    return (
+        sentence in _OWN_REFUSAL_SENTENCES
+        or sentence in _own_sentences
+        or any(pattern.match(sentence) for pattern in _OWN_REFUSAL_PATTERNS)
+    )
+
 
 # Builtin tools for AI sessions — no bash access (MANDATORY per project rules)
 # Separate constants to allow independent evolution: analysis may gain tools
@@ -963,6 +1096,108 @@ def _cached_catalog_provider_ids() -> list[str]:
     )
 
 
+def _agent_manifest() -> dict[str, Any] | None:
+    """The agent-dir ``models.json`` ``providers`` mapping, or ``None``.
+
+    One read and one failure behaviour for every consumer: a configured agent
+    dir whose manifest is missing, unreadable or unparseable is *unknown*
+    (``None``), never "nothing declared". An unset ``PI_SIDECAR_AGENT_DIR``
+    also answers ``None`` — there is no manifest to read.
+    """
+    agent_dir = _sidecar_agent_dir()
+    if agent_dir is None:
+        return None
+    try:
+        manifest = json.loads((agent_dir / "models.json").read_text())
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "Deployment provider manifest unreadable (%s); keeping captured"
+            " key-scoped listings",
+            exc,
+            exc_info=True,
+        )
+        return None
+    providers = manifest.get("providers") if isinstance(manifest, dict) else None
+    return providers if isinstance(providers, dict) else {}
+
+
+def _is_key_scoped_provider(config: object) -> bool:
+    """The one ``trustKeyScopedListing`` read."""
+    return isinstance(config, dict) and config.get("trustKeyScopedListing") is True
+
+
+def _manifest_session_models() -> dict[str, set[str]]:
+    """Declared model ids per flagged provider: ``{lowercase provider: {ids}}``.
+
+    Membership-only input: the value is the set of ids, so no manifest entry
+    (its ``apiKey``, ``baseUrl`` or limits) ever leaves this function, and
+    nothing here is logged. A flagged provider declaring no ``models[]``
+    contributes no map at all — with no declared id there is nothing to
+    discriminate, and one flag is never a blanket block.
+    """
+    declared: dict[str, set[str]] = {}
+    for provider, config in (_agent_manifest() or {}).items():
+        if not isinstance(provider, str) or not _is_key_scoped_provider(config):
+            continue
+        models = config.get("models")
+        ids = {
+            entry["id"]
+            for entry in (models if isinstance(models, list) else ())
+            if isinstance(entry, dict)
+            and isinstance(entry.get("id"), str)
+            and entry["id"]
+        }
+        if ids:
+            declared[provider.lower()] = ids
+    return declared
+
+
+def _entry_limits(entry: Mapping[str, Any]) -> tuple[int, int] | None:
+    """The entry's captured ``(input, output)`` token limits, when both are usable.
+
+    ``None`` for absent, partial, non-integer or out-of-range limits. The one
+    limits predicate: the pool filter and the picker mark share it and differ
+    only in how they treat *absence*.
+    """
+    capabilities = entry.get("capabilities")
+    if not isinstance(capabilities, Mapping):
+        return None
+    limits = (capabilities.get("inputTokenLimit"), capabilities.get("outputTokenLimit"))
+    if any(type(value) is not int or not 0 < value <= 2**53 - 1 for value in limits):
+        return None
+    return cast(tuple[int, int], limits)
+
+
+def _mark_session_support(
+    provider: str,
+    entry: dict[str, Any],
+    declared: Mapping[str, set[str]],
+    *,
+    mark_on: dict[str, Any] | None = None,
+) -> None:
+    """Mark one key-scoped listing entry session-capable, or say why not.
+
+    The sidecar's own two clauses: the id is declared in the provider's
+    manifest ``models[]`` (it is then on the runtime and resolves before the
+    limits check), or the captured row carries both limits. A provider with no
+    declared ids and an unflagged provider are left exactly as they are.
+
+    ``mark_on`` writes the mark on another row: a user's discovery entry holds
+    the ``capabilities``, the merged pair row is what the API answers with.
+    """
+    allowed = declared.get(provider.lower())
+    if allowed is None:
+        return
+    target = entry if mark_on is None else mark_on
+    if entry.get("id") in allowed or _entry_limits(entry) is not None:
+        target["session_supported"] = True
+        # A re-mark replaces the verdict, reason included.
+        target.pop("session_unsupported_reason", None)
+    else:
+        target["session_supported"] = False
+        target["session_unsupported_reason"] = SESSION_UNSUPPORTED_REASON
+
+
 def deployment_provider_credentials() -> dict[str, str] | None:
     """Deployment-env keys of the providers the server can list models with.
 
@@ -1013,30 +1248,20 @@ def deployment_provider_credentials() -> dict[str, str] | None:
     declared: set[str] = set()
     agent_dir = _sidecar_agent_dir()
     if agent_dir is not None:
-        try:
-            manifest = json.loads((agent_dir / "models.json").read_text())
-        except (OSError, ValueError) as exc:
+        providers = _agent_manifest()
+        if providers is None:
             # A configured agent dir without a readable manifest is unknown,
             # not "no eligible providers" (#376): the caller would sweep every
             # captured deployment listing away over a transient blip.
-            logger.warning(
-                "Deployment provider manifest unreadable (%s); keeping captured"
-                " key-scoped listings",
-                exc,
-                exc_info=True,
-            )
             return None
-        providers = manifest.get("providers") if isinstance(manifest, dict) else None
-        for provider, config in (
-            providers.items() if isinstance(providers, dict) else ()
-        ):
+        for provider, config in providers.items():
             if not isinstance(provider, str) or not isinstance(config, dict):
                 continue
             # Only an entry that supplies a key owns it; a key-less entry
             # (``modelOverrides`` only) leaves the key to the ambient env.
             if config.get("apiKey"):
                 declared.add(provider.lower())
-            if config.get("trustKeyScopedListing") is not True:
+            if not _is_key_scoped_provider(config):
                 continue
             var = _env_reference_var(config.get("apiKey"))
             key = os.environ.get(var, "").strip() if var else ""
@@ -1077,19 +1302,14 @@ def _listing_entry_usable(entry: dict[str, Any]) -> bool:
     must stay usable. A limit that is declared but partial, non-integer, or
     beyond the safe range breaks token math and must not reach the pool.
     """
-    limits = entry.get("capabilities") or {}
+    limits = entry.get("capabilities")
+    limits = limits if isinstance(limits, Mapping) else {}
     declared = [limits.get(field) for field in ("inputTokenLimit", "outputTokenLimit")]
-    present = [value for value in declared if value is not None]
-    return not (
-        bool(present)
-        and (
-            len(present) != 2
-            or any(
-                type(value) is not int or not 0 < value <= 2**53 - 1
-                for value in present
-            )
-        )
-    )
+    if all(value is None for value in declared):
+        return True
+    # Any declared limit must be a complete, valid pair — the same bounds
+    # _entry_limits applies (absence is the only thing they disagree on).
+    return _entry_limits(entry) is not None
 
 
 async def scoped_models() -> dict[str, list[dict[str, Any]]]:
@@ -1130,6 +1350,9 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
     # pi-config looks up session providers by their exact id, so emitting
     # ``mygateway`` for a stored ``MyGateway`` breaks session creation.
     key_scoped_ids: dict[str, str] = {}
+    # Declared ids per flagged provider: the picker mark's manifest half (§#423).
+    # Computed once per call, and empty when the manifest is not readable.
+    declared_session_models = _manifest_session_models()
     try:
         from rootcoz.storage import list_server_provider_key_models
 
@@ -1150,7 +1373,7 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
         catalog. Entries with declared-but-broken capability limits are
         skipped, the same rule the user-key path applies.
         """
-        return [
+        entries = [
             {
                 "id": model,
                 "name": row.get("name") or model,
@@ -1161,6 +1384,9 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
             for model, row in sorted(scoped_rows.items())
             if model and _listing_entry_usable(row)
         ]
+        for entry in entries:
+            _mark_session_support(provider, entry, declared_session_models)
+        return entries
 
     seen_catalog_providers: set[str] = set()
     for provider, entries in build_friendly_catalog(catalog).items():
@@ -1261,6 +1487,7 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
                 if pair in pairs:
                     pairs[pair]["credential_sources"].insert(0, "user")
                     pairs[pair]["verified"] = True
+                    target = pairs[pair]
                 else:
                     pairs[pair] = {
                         "provider": provider,
@@ -1273,6 +1500,15 @@ async def scoped_models() -> dict[str, list[dict[str, Any]]]:
                         "can_use_server_providers": allowed,
                         "verified": listing,
                     }
+                    target = pairs[pair]
+                if listing:
+                    # The user's own listing ranks first, so its mark replaces
+                    # the server capture's for this pair — and its entry is the
+                    # one that carries the limits. Snapshot suggestions keep the
+                    # manually-enterable path unmarked.
+                    _mark_session_support(
+                        provider, entry, declared_session_models, mark_on=target
+                    )
                 usable.add(pair)
             # Report what the key actually yielded, so a key that stored fine but
             # surfaced no usable model is visible instead of silently looking ready.
@@ -1518,8 +1754,177 @@ def clear_cursor_auth_cache() -> None:
     _cursor_auth_cache = None
 
 
+class SessionCreationRefused(RuntimeError):
+    """A sidecar 4xx refusal at session creation, carrying its mapped sentence."""
+
+
+def _is_sessions_creation_failure(text: str) -> bool:
+    """Match httpx's keyless ``Client error '4xx …' for url '…/sessions'`` text.
+
+    The URL is matched inside the message — ``str(httpx.HTTPStatusError)`` is two
+    lines — and ``[^']*`` cannot cross the closing quote, so a 4xx on
+    ``/sessions/<id>/prompt`` is never a creation failure.
+    """
+    return "client error '4" in text.casefold() and bool(
+        re.search(r"for url '[^']*/sessions'", text)
+    )
+
+
+def _is_rate_limited(text: str) -> bool:
+    """Whether a failure is a 429, the one transient status a refusal never is.
+
+    Rate limiting resolves itself, so it must keep the retry classifier
+    retrying (``engine.core._NON_RETRYABLE_AI_ERRORS``): it is never admitted as
+    a refusal, whatever shape it arrives in.
+    """
+    return bool(re.search(r"(?:Client error '|HTTP )429\b", text))
+
+
+def _is_refusal_text(text: str) -> bool:
+    """The one admission predicate: the three shapes a refusal can take.
+
+    The marker (our own sentence), the library's **whole** creation prefix
+    (never the bare ``(HTTP 4`` form, which health, model-discovery and prompt
+    bodies carry too), or the keyless httpx shape. Shared by the analysis
+    matcher and the chat-send mapper so the two cannot classify differently.
+    A 429 is excluded: a transient limit is not a refusal.
+    """
+    text = text or ""
+    if _is_rate_limited(text):
+        return False
+    return (
+        text.lstrip().startswith(SESSION_REFUSAL_MARKER)
+        or "Sidecar session creation failed (HTTP 4" in text
+        or _is_sessions_creation_failure(text)
+    )
+
+
+def _sidecar_failure_parts(
+    *, status: int | None = None, text: str = ""
+) -> tuple[int | None, str]:
+    """Split a sidecar failure into ``(status, detail)``.
+
+    ``detail`` is internal-only: every caller compares it against
+    ``_SIDECAR_REFUSAL_LITERALS`` and then drops it — the raw-text fallback can
+    hold a whole response body, so it is never logged, stored or returned.
+    """
+    text = (text or "").strip()
+    if status is None:
+        found = re.search(r"Client error '(\d{3})", text) or re.search(
+            r"HTTP (\d{3})\)", text
+        )
+        status = int(found.group(1)) if found else None
+    try:
+        parsed = json.loads(text)
+    except ValueError, TypeError:
+        parsed = None
+    if isinstance(parsed, dict) and isinstance(parsed.get("error"), str):
+        return status, parsed["error"]
+    detail = text.removeprefix(f"Sidecar session creation failed (HTTP {status}): ")
+    # A sentence rootcoz already built is re-derived from its own cause text, so
+    # mapping one twice stays byte-identical instead of double-prefixing it.
+    return status, detail.removeprefix(f"{SESSION_REFUSAL_MARKER}: ")
+
+
+# Creation statuses that are transient: a retry may succeed, so they never
+# become a refusal sentence (which the engine treats as non-retryable). Request
+# timeout (408), too early (425) and rate limit (429) are the only three 4xx a
+# retry can fix; every other 4xx is the sidecar refusing the call as sent, so
+# mapping it to a refusal—and stopping there—is right.
+_TRANSIENT_SESSION_STATUSES = frozenset({408, 425, 429})
+
+
+def _session_refusal(status: int | None, body: str, provider: str, model: str) -> str:
+    """Build the refusal sentence for a cause; the body itself is never echoed.
+
+    One sentence, one audience: nothing here depends on whose credential failed,
+    because a job's stored error is read by viewers who are not the caller.
+    """
+    if body in _SIDECAR_REFUSAL_LITERALS:
+        sentence = f"{SESSION_REFUSAL_MARKER}: {body}"
+    elif status in (401, 403):
+        # The rejected credential outranks the Cursor legacy hint: a 401/403 says
+        # the key itself was refused, not that a browser login expired.
+        sentence = _REFUSAL_TEMPLATES[0].substitute(pair=f"{provider}/{model}")
+    elif is_cursor_provider(normalize_provider(provider)):
+        sentence = f"{SESSION_REFUSAL_MARKER}: {_CURSOR_BROWSER_LOGIN_EXPIRED_HINT}"
+    else:
+        sentence = _REFUSAL_TEMPLATES[1].substitute(
+            pair=f"{provider}/{model}", status=status
+        )
+    # Registered at the one place a refusal sentence is built, so the matcher can
+    # trust this process's own wording instead of a shape a body could copy.
+    return _register_own_sentence(sentence)
+
+
+def _session_refusal_for(
+    exc: httpx.HTTPStatusError, provider: str, model: str
+) -> SessionCreationRefused | None:
+    """Map a sidecar 4xx at session creation; ``None`` for any other status.
+
+    A 408, 425 or 429 is excluded: a timeout or a rate limit resolves itself, so
+    the call is left retryable instead of one becoming a permanent refusal.
+    """
+    status = exc.response.status_code
+    if not 400 <= status < 500 or status in _TRANSIENT_SESSION_STATUSES:
+        return None
+    derived, detail = _sidecar_failure_parts(status=status, text=exc.response.text)
+    return SessionCreationRefused(_session_refusal(derived, detail, provider, model))
+
+
+async def _create_with_refusal_mapping(
+    create: Callable[[], Awaitable[str]], provider: str, model: str
+) -> str:
+    """Create a session, mapping a sidecar 4xx to a user-actionable refusal."""
+    try:
+        return await create()
+    except httpx.HTTPStatusError as exc:
+        refusal = _session_refusal_for(exc, provider, model)
+        if refusal is None:
+            raise
+    # Built inside the except, raised outside it: __context__ would keep the body.
+    raise refusal
+
+
+# Status-free failures rootcoz writes itself. Each sentence *is* the recovery
+# step, so the chat mapper forwards it verbatim; anything else without a status
+# is a provider/library text and is replaced instead of echoed.
+_ROOTCOZ_ACTIONABLE_ERRORS = (
+    "AI session unavailable",
+    "Chat credential unavailable; Start a new chat",
+    "Server provider access requires an administrator grant",
+)
+# The two variable sentences, matched whole with every slot bounded: a sidecar
+# body that merely *starts* like one of them is not ours, so it is replaced
+# instead of being forwarded to a chat user.
+_ROOTCOZ_ACTIONABLE_PATTERNS = (
+    _refusal_pattern(_INACTIVE_PROVIDER_TEMPLATE),
+    _refusal_pattern(_EXCLUDED_MODEL_TEMPLATE),
+)
+
+
+def _is_rootcoz_actionable_error(text: str) -> bool:
+    """Whether a status-free failure is one of rootcoz's own recovery messages.
+
+    Only a whole sentence counts, and a sentence this process built is admitted
+    by the registry — a body can copy the wording but was never built here, so
+    an identifier that outgrows a bounded slot still keeps its guidance, and a
+    copied body still matches nothing. The bounded-slot patterns remain for a
+    sentence reconstructed from a stored report (another process, or evicted).
+    """
+    return (
+        text in _ROOTCOZ_ACTIONABLE_ERRORS
+        or text in _own_sentences
+        or any(pattern.match(text) for pattern in _ROOTCOZ_ACTIONABLE_PATTERNS)
+    )
+
+
 def format_chat_ai_user_error(
-    response_text: str, *, is_admin: bool = False, ai_provider: str = ""
+    response_text: str,
+    *,
+    is_admin: bool = False,
+    ai_provider: str = "",
+    ai_model: str = "",
 ) -> str:
     """Map raw sidecar/AI errors to user-friendly chat messages.
 
@@ -1527,11 +1932,21 @@ def format_chat_ai_user_error(
     Cursor-specific remediation applies only to Cursor sidecar providers
     (or Cursor-only markers like ``agent login`` / ``cursor_api_key`` appear).
     Credential-state hints (whether ``CURSOR_API_KEY`` is set) are admin-only.
+
+    A session refusal is delegated to :func:`_session_refusal`, so the
+    start-time ``422`` and this send-time message carry byte-identical
+    sentences. Output is always a sentence rootcoz constructs: the text this
+    was handed selects a cause and is then dropped, never echoed.
     """
     text = (response_text or "").strip()
-    lower = text.lower()
     if not text:
         return "AI call failed. Please try again."
+    # Our own sentence is final and outranks every marker check below:
+    # re-deriving its cause would lose the status a 401 sentence no longer
+    # carries, and a Cursor refusal already names its own hint.
+    if _is_own_refusal_sentence(text):
+        return text
+    lower = text.lower()
 
     friendly = normalize_provider(ai_provider)
     cursor_only_markers = ("agent login", "cursor_api_key")
@@ -1560,34 +1975,21 @@ def format_chat_ai_user_error(
             "Server Settings → AI."
         )
 
-    if "400" in lower and "/sessions" in lower:
-        if is_cursor_provider(friendly):
-            if not is_admin:
-                return (
-                    "Failed to create AI session. Select a valid provider and model, "
-                    "or contact an administrator if Cursor stays unavailable."
-                )
-            return (
-                "Failed to create AI session (bad provider/model or Cursor auth). "
-                "Select a valid provider and model. If using Cursor without "
-                "CURSOR_API_KEY, browser `agent login` may have expired — set "
-                "CURSOR_API_KEY (does not expire) or re-login and restart sidecar."
-            )
-        if not is_admin:
-            return (
-                "Failed to create AI session. Select a valid provider and model, "
-                "or contact an administrator."
-            )
-        return (
-            "Failed to create AI session (bad provider/model or credentials). "
-            "Select a valid provider and model in Server Settings → AI."
-        )
-
     # True lost-session cases from sidecar ("Session <id> not found"), not URL paths
     if _is_lost_session_error(lower):
         return "AI session expired. Please try sending your message again."
 
-    return text
+    # A creation refusal: the admitted text selects a cause and is dropped, and
+    # the admission is the one predicate, so a mid-chat prompt 4xx, a health or
+    # a discovery 4xx is not dressed up as "the session could not be created".
+    status, detail = _sidecar_failure_parts(text=text)
+    if detail in _SIDECAR_REFUSAL_LITERALS or _is_refusal_text(text):
+        return _session_refusal(status, detail, ai_provider, ai_model)
+    # A status-free failure rootcoz wrote itself carries the fix — start a new
+    # chat, ask for a grant — so it must not be replaced by "please try again".
+    if _is_rootcoz_actionable_error(text):
+        return text
+    return "AI call failed. Please try again."
 
 
 def _is_lost_session_error(lower_detail: str) -> bool:
@@ -1628,11 +2030,33 @@ async def _call_with_safe_error(
     """Keep sidecar credential-bearing errors out of caller logs and tracebacks."""
     try:
         result = await sidecar_call(*args, **kwargs)
-        if redact_key is None:
+        # Already our sentence (a refusal raised inside the call): re-deriving its
+        # cause here would drop the status a 401 sentence no longer carries and
+        # answer "sidecar HTTP None".
+        if not result.success and _is_own_refusal_sentence(result.text or ""):
             return result
         # dataclasses.replace() drops non-field attributes — keep the
-        # transcript correlation id across the copy.
+        # transcript correlation id across every copy.
         transcript_session_id = getattr(result, "transcript_session_id", None)
+        # A session refusal keeps its sentence: checked before the ``redact_key is
+        # None`` early return, which would otherwise leave the library's text and
+        # before the keyed branch, which would blank it to "AI call failed".
+        if not result.success and _is_refusal_text(
+            f"{result.text or ''} {result.error or ''}"
+        ):
+            status, detail = _sidecar_failure_parts(text=result.text or "")
+            sentence = _session_refusal(
+                status,
+                detail,
+                str(kwargs.get("ai_provider") or ""),
+                str(kwargs.get("ai_model") or ""),
+            )
+            result = replace(result, text=sentence, error=sentence)
+            if transcript_session_id is not None:
+                result.transcript_session_id = transcript_session_id
+            return result
+        if redact_key is None:
+            return result
         if result.success:
             result = replace(
                 result,
@@ -1713,7 +2137,9 @@ async def create_session_safely(client: SidecarClient, **kwargs: Any) -> str:
             return response.json()["session_id"]
 
         return await create_ai_session_with_source(
-            create_server_keyed,
+            lambda: _create_with_refusal_mapping(
+                create_server_keyed, kwargs["provider"], kwargs["model"]
+            ),
             ai_username.get(),
             kwargs["provider"],
             "server",
@@ -1723,7 +2149,11 @@ async def create_session_safely(client: SidecarClient, **kwargs: Any) -> str:
         from rootcoz.storage import create_ai_session_with_source
 
         return await create_ai_session_with_source(
-            lambda: client.create_session(**kwargs),
+            lambda: _create_with_refusal_mapping(
+                lambda: client.create_session(**kwargs),
+                kwargs["provider"],
+                kwargs["model"],
+            ),
             ai_username.get(),
             kwargs["provider"],
             "server",
@@ -1767,7 +2197,12 @@ async def create_session_safely(client: SidecarClient, **kwargs: Any) -> str:
         return response.json()["session_id"]
 
     return await create_ai_session_with_source(
-        create, username, provider, "user", client.delete_session, generation
+        lambda: _create_with_refusal_mapping(create, provider, model),
+        username,
+        provider,
+        "user",
+        client.delete_session,
+        generation,
     )
 
 

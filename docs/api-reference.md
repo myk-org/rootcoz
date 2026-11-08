@@ -221,7 +221,7 @@ Send `source="ai"` to attribute the classification to the reserved `rootcoz-ai` 
 | --- | --- | --- | --- |
 | GET | `/api/chat/{job_id}` | viewer | `limit` (1–500), `offset` |
 | POST | `/api/chat/{job_id}` | reviewer | `message` plus optional AI overrides; returns `202`, answer arrives over SSE |
-| POST | `/api/chat/{job_id}/init` | reviewer | Explicit `ai_provider`, `ai_model` |
+| POST | `/api/chat/{job_id}/init` | reviewer | Explicit `ai_provider`, `ai_model`; `422` with an `AI session refused: …` detail when the sidecar will not open a session for that pair |
 | POST | `/api/chat/{job_id}/abort` | reviewer | Cancel the in-flight answer |
 | POST | `/api/chat/{job_id}/close` | reviewer | Close the AI session |
 | DELETE | `/api/chat/{job_id}` | reviewer | Clear chat history |
@@ -275,7 +275,7 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | GET | `/api/notifications/vapid-public-key` | viewer | Web Push public key |
 | POST | `/api/notifications/subscribe` | viewer | `endpoint`, `p256dh_key`, `auth_key` |
 | POST | `/api/notifications/unsubscribe` | viewer | Removes a subscription |
-| GET | `/api/ai-models` | viewer | `provider`; lists models for `claude`, `gemini`, `cursor` |
+| GET | `/api/ai-models` | viewer | `provider`; lists models for `claude`, `gemini`, `cursor`. Each model may carry `session_supported` (boolean) and, when it is `false`, `session_unsupported_reason`; both are **absent** for providers that are not key-scoped (`trustKeyScopedListing`) |
 | GET | `/api/capabilities` | viewer | Feature toggles and whether server credentials exist |
 | GET | `/api/default-server-settings` | viewer | Non-sensitive settings and defaults only |
 | POST | `/api/feedback/preview` | viewer | AI-drafted feedback issue |
@@ -330,7 +330,7 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | POST | `/api/admin/db/query` | Read-only SQL for the admin chat |
 | GET | `/api/admin/chat` | Admin chat history |
 | POST | `/api/admin/chat` | Send an admin chat message; returns `202` |
-| POST | `/api/admin/chat/init`, `/close`, `/abort` | Admin chat session control |
+| POST | `/api/admin/chat/init`, `/close`, `/abort` | Admin chat session control; `/init` answers the same `422 AI session refused: …` as job chat |
 | DELETE | `/api/admin/chat` | Clear admin chat history |
 | GET | `/api/admin/chat/stream` | Admin chat SSE |
 | POST | `/api/admin-chat/artifacts` | Save a generated HTML report artifact |

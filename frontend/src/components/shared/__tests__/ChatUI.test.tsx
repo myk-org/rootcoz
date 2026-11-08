@@ -784,3 +784,19 @@ it('ignores a history fetch that started before the send so the reply stays pend
   expect(await screen.findByText('answer')).toBeInTheDocument()
   await waitFor(() => expect(composer).toBeEnabled())
 })
+
+// #423: a refused session is a 422 whose `detail` names the cause. The error
+// line used to read "API error 422: Unprocessable Entity", which tells the user
+// nothing they can act on.
+it('shows the refusal detail from a 422', async () => {
+  setup()
+  const detail =
+    'AI session refused: Model metadata missing reliable input/output token limits for unknown model. Declare the model in the agent-dir models.json with contextWindow and maxTokens to use it with a session API key.'
+  post.mockRejectedValueOnce(new ApiError(422, 'Unprocessable Entity', { detail }))
+  const user = userEvent.setup()
+  render(page('claude', 'sonnet'))
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled())
+  await user.click(screen.getByRole('button', { name: 'Start Chat' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('Declare the model in the agent-dir models.json')
+  expect(screen.getByRole('alert')).not.toHaveTextContent('API error 422')
+})

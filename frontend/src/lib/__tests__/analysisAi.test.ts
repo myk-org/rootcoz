@@ -61,3 +61,30 @@ describe('free provider grants', () => {
     expect(isAnalysisAiAvailable(providers, {}, 'enmaas', 'glm-5-3', true, false, false)).toBe(false)
   })
 })
+
+describe('session support', () => {
+  const providers: Record<string, AiModel[]> = {
+    enmaas: [
+      { id: 'listed-only', name: 'Listed only', provider: 'EnMaaS', credential_sources: ['server'], verified: true, session_supported: false },
+      { id: 'usable', name: 'Usable', provider: 'EnMaaS', credential_sources: ['server'], verified: true, session_supported: true },
+    ],
+  }
+
+  it('a pair the sidecar would refuse is not available even when it is listed', () => {
+    // A saved or preselected NO SESSION pair must not leave Start enabled.
+    expect(isAnalysisAiAvailable(providers, {}, 'enmaas', 'listed-only', false)).toBe(false)
+    expect(isAnalysisAiAvailable(providers, {}, 'enmaas', 'usable', false)).toBe(true)
+  })
+
+  it('the unverified-model bypass does not admit a refused listed row', () => {
+    // A user key without a model listing allows free typing, but a listed row
+    // the sidecar refuses still must not leave Start enabled.
+    const status = { enmaas: { has_api_key: true, modelListingSupported: false } }
+    expect(isAnalysisAiAvailable(providers, status, 'enmaas', 'listed-only', false)).toBe(false)
+    expect(isAnalysisAiAvailable(providers, status, 'enmaas', 'typed-by-hand', false)).toBe(true)
+  })
+
+  it('a model without the flag is unaffected', () => {
+    expect(isAnalysisAiAvailable({ enmaas: [{ id: 'plain', name: 'Plain', provider: 'EnMaaS', credential_sources: ['server'] }] }, {}, 'enmaas', 'plain', false)).toBe(true)
+  })
+})

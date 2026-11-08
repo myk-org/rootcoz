@@ -545,7 +545,7 @@ An end-to-end walkthrough for registering a custom provider behind an OpenAI-com
 }
 ```
 
-`id` must be prefixed with the provider id (`mygateway/...`). `contextWindow` and `maxTokens` are optional and surface as the model's input/output token limits in the pickers.
+`id` must be prefixed with the provider id (`mygateway/...`). `contextWindow` and `maxTokens` are optional and surface as the model's input/output token limits in the pickers. They are optional for a model declared here — pi's defaults (`128000`/`16384`) apply, so declaring it is enough to start a session. A model your gateway **lists** but this file does not declare needs both limits from one of two places — the gateway's own listing capabilities, or an entry here — or the session is refused.
 
 **2a. Docker Compose wiring.** Mount the agent dir into the container, point the sidecar at it, and export the referenced key in `.env`:
 

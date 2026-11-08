@@ -4,6 +4,7 @@ import { cn } from '@/lib/utils'
 import { CONTROL_CLASS } from '@/lib/controlStyles'
 import { credentialLabel } from '@/lib/analysisAi'
 import { CredentialSourceLabel, ServerAccessHint, ServerAccessTooltip } from '@/components/shared/CredentialSourceLabel'
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { ChevronDown } from 'lucide-react'
 
 export interface ModelOption {
@@ -16,7 +17,17 @@ export interface ModelOption {
   serverLocked?: boolean
   /** Admin-declared free pair (see AiModel.free). */
   free?: boolean
+  /** False when the sidecar will refuse to open a session for this pair
+   *  (see AiModel.session_supported). */
+  session_supported?: boolean
+  /** Why a session cannot start — shown on the row, never as a native title. */
+  session_unsupported_reason?: string
 }
+
+/** A model the sidecar would refuse a session for: not selectable, and the row
+ *  carries the reason instead of failing at Start. Opt-in via the prop. */
+const sessionLocked = (model: ModelOption, disableUnsessionable: boolean) => disableUnsessionable && model.session_supported === false
+const isLocked = (model: ModelOption, disableUnsessionable: boolean) => Boolean(model.serverLocked) || sessionLocked(model, disableUnsessionable)
 
 interface ModelComboboxProps {
   value: string
@@ -32,6 +43,10 @@ interface ModelComboboxProps {
   canUseServer?: boolean
   /** Free-granted users may use admin-declared free server models. */
   canUseFree?: boolean
+  /** Refuse a model the sidecar would not open a session with. Absent means
+   *  today's behaviour: opt-in here, never defaulted on, so the key-verification
+   *  pickers keep offering a listed-but-undeclared id. */
+  disableUnsessionable?: boolean
 }
 
 interface DropdownCoords {
@@ -52,6 +67,7 @@ export function ModelCombobox({
   forceServer = false,
   canUseServer = true,
   canUseFree = false,
+  disableUnsessionable = false,
 }: ModelComboboxProps) {
   const [open, setOpen] = useState(false)
   const [highlight, setHighlight] = useState<{ key: string; index: number }>({ key: '', index: -1 })
@@ -67,7 +83,6 @@ export function ModelCombobox({
     committedValueRef.current = value
   }, [value])
   const hasDeniedServer = !canUseServer && options.some((model) => model.credential_sources?.includes('server') && !(canUseFree && model.free))
-
   // Fuzzy filter: case-insensitive substring match on id or name. When the
   // current value matches nothing (a stale stored model, or the user typing a
   // new id), fall back to the full list — otherwise the dropdown is empty and
@@ -159,6 +174,21 @@ export function ModelCombobox({
     }
   }, [highlightIndex])
 
+  // A typed id of a refused row must not slip past the list's lock, but only at the
+  // commit points (blur, Enter): refusing every keystroke made a usable id that
+  // extends a refused one ("gpt-5-mini" behind "gpt-5") impossible to type.
+  const refusedValue = useCallback(
+    (id: string) => {
+      const option = options.find((m) => m.id === id)
+      return option ? isLocked(option, disableUnsessionable) : false
+    },
+    [options, disableUnsessionable],
+  )
+
+  const commitTyped = useCallback(() => {
+    if (!refusedValue(committedValueRef.current)) onCommit?.(committedValueRef.current)
+  }, [refusedValue, onCommit])
+
   const selectModel = useCallback(
     (id: string) => {
       committedValueRef.current = id
@@ -189,12 +219,12 @@ export function ModelCombobox({
           break
         case 'Enter':
           e.preventDefault()
-          if (highlightIndex >= 0 && highlightIndex < filtered.length && !filtered[highlightIndex].serverLocked) {
+          if (highlightIndex >= 0 && highlightIndex < filtered.length && !isLocked(filtered[highlightIndex], disableUnsessionable)) {
             selectModel(filtered[highlightIndex].id)
           } else {
             setOpen(false)
             // Enter on a free-typed id commits it, same as blur.
-            onCommit?.(committedValueRef.current)
+            commitTyped()
           }
           break
         case 'Escape':
@@ -206,7 +236,7 @@ export function ModelCombobox({
           break
       }
     },
-    [open, filtered, highlightIndex, selectModel, setHighlightIndex, onCommit],
+    [open, filtered, highlightIndex, selectModel, setHighlightIndex, commitTyped, disableUnsessionable],
   )
 
   const dropdown =
@@ -230,8 +260,9 @@ export function ModelCombobox({
             // Portaled so it does not stretch the dialog / create a page scrollbar.
             className="z-[200] max-h-56 w-max max-w-[min(90vw,48rem)] overflow-y-auto overflow-x-hidden rounded-xl border border-border-default bg-surface-card shadow-lg backdrop-blur-sm animate-fade-in"
           >
-            {filtered.map((model, i) => (
-              <ServerAccessTooltip key={model.id} show={!canUseServer && !(canUseFree && model.free) && !!model.credential_sources?.includes('server')}>
+            {filtered.map((model, i) => {
+              const locked = isLocked(model, disableUnsessionable)
+              const row = (
               <li
                 id={`${listboxId}-opt-${i}`}
                 role="option"
@@ -242,17 +273,22 @@ export function ModelCombobox({
                     ? 'bg-surface-hover text-text-primary'
                     : 'text-text-primary hover:bg-surface-hover',
                   model.id === value && 'font-medium',
-                  model.serverLocked && 'cursor-not-allowed',
+                  locked && 'cursor-not-allowed opacity-60',
                 )}
                 onMouseEnter={() => setHighlightIndex(i)}
-                aria-disabled={model.serverLocked || undefined}
+                aria-disabled={locked || undefined}
                 onMouseDown={(e) => {
                   e.preventDefault() // prevent input blur
-                  if (!model.serverLocked) selectModel(model.id)
+                  if (!locked) selectModel(model.id)
                 }}
               >
                 <span>{model.id}</span>
                 <span className="flex shrink-0 items-center gap-2">
+                  {sessionLocked(model, disableUnsessionable) && (
+                    <span className="rounded border border-border-default px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-text-tertiary">
+                      NO SESSION
+                    </span>
+                  )}
                   {model.verified === false && <span className="text-xs text-signal-amber">UNVERIFIED</span>}
                   {model.free === true && (
                     <span className="rounded border border-signal-green px-1.5 py-0.5 text-[10px] uppercase tracking-wide text-signal-green" title="Admin-declared free model">
@@ -274,8 +310,25 @@ export function ModelCombobox({
                   )}
                 </span>
               </li>
-              </ServerAccessTooltip>
-            ))}
+              )
+              if (sessionLocked(model, disableUnsessionable)) {
+                // The reason is the row's whole point, so it replaces the
+                // server-access tooltip rather than nesting inside it.
+                return (
+                  <TooltipProvider key={model.id} delayDuration={200}>
+                    <Tooltip>
+                      <TooltipTrigger asChild>{row}</TooltipTrigger>
+                      <TooltipContent>{model.session_unsupported_reason}</TooltipContent>
+                    </Tooltip>
+                  </TooltipProvider>
+                )
+              }
+              return (
+                <ServerAccessTooltip key={model.id} show={!canUseServer && !(canUseFree && model.free) && !!model.credential_sources?.includes('server')}>
+                  {row}
+                </ServerAccessTooltip>
+              )
+            })}
           </ul>,
           document.body,
         )
@@ -298,11 +351,15 @@ export function ModelCombobox({
           aria-describedby={hasDeniedServer ? `${listboxId}-server-help` : undefined}
           disabled={disabled}
           onChange={(e) => {
+            // Every keystroke lands, even one that spells a refused id: the lock
+            // is on the commit points (blur, Enter, list pick), because a refused
+            // id may be the prefix of a usable one ("gpt-5" / "gpt-5-mini").
+            // Submitted value stays gated by isAnalysisAiAvailable.
             committedValueRef.current = e.target.value
             onChange(e.target.value)
             if (!open) setOpen(true)
           }}
-          onBlur={() => onCommit?.(committedValueRef.current)}
+          onBlur={commitTyped}
           onFocus={() => setOpen(true)}
           onClick={() => setOpen(true)}
           onKeyDown={handleKeyDown}
