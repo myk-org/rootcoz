@@ -838,6 +838,24 @@ it('renders each fragment inside the pending bubble and keeps the timer and Stop
   expect(await screen.findByText('Hello')).toBeInTheDocument()
 })
 
+it('replaces the provisional text with a catch-up frame instead of appending it', async () => {
+  MockEventSource.reset()
+  setup({ messages: [pendingRow(new Date().toISOString())], total: 1, active_session: ACTIVE })
+  render(page())
+  const source = await openDeltaStream()
+  act(() => source.emit('chat-delta', JSON.stringify({ id: 3, delta: 'Hel' })))
+  expect(await screen.findByText('Hel')).toBeInTheDocument()
+
+  // A stream that subscribes mid-turn (or reconnects) receives the turn so far as
+  // ONE snapshot frame; appending it would render the same text twice.
+  act(() => source.emit('chat-delta', JSON.stringify({ id: 3, snapshot: 'Hello wor' })))
+  expect(await screen.findByText('Hello wor')).toBeInTheDocument()
+  expect(screen.queryByText('HelHello wor')).not.toBeInTheDocument()
+
+  act(() => source.emit('chat-delta', JSON.stringify({ id: 3, delta: 'ld' })))
+  expect(await screen.findByText('Hello world')).toBeInTheDocument()
+})
+
 it('replaces the provisional text with the stored reply and closes the stream', async () => {
   MockEventSource.reset()
   const pending = pendingRow(new Date().toISOString())

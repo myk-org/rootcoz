@@ -220,13 +220,23 @@ export function ChatUI({
     }
     const source = new EventSource(`${apiBasePath}/stream`)
     const onDelta = (event: MessageEvent) => {
-      let frameData: { id?: number; delta?: string }
+      let frameData: { id?: number; delta?: string; snapshot?: string }
       try {
         frameData = JSON.parse(String(event.data))
       } catch {
         return
       }
-      if (typeof frameData.id !== 'number' || typeof frameData.delta !== 'string') return
+      if (typeof frameData.id !== 'number') return
+      if (typeof frameData.snapshot === 'string') {
+        // Catch-up frame for a stream that subscribed mid-turn: it replaces the
+        // fragments, so a reconnect can never render the same text twice.
+        const id = frameData.id
+        const snapshot = frameData.snapshot
+        buffer.delete(id)
+        setStreamTexts(prev => ({ ...prev, [id]: snapshot }))
+        return
+      }
+      if (typeof frameData.delta !== 'string') return
       buffer.set(frameData.id, (buffer.get(frameData.id) ?? '') + frameData.delta)
       if (!frame) frame = requestAnimationFrame(flush)
     }

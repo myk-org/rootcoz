@@ -792,24 +792,64 @@ def _subscription(dropped: int = 0) -> Any:
     return subscription
 
 
-def _chunks(response: Any, count: int) -> list[str]:
-    async def collect() -> list[str]:
-        iterator = response.body_iterator
-        return [chunk async for chunk in _take(iterator, count)]
-
-    return asyncio.run(collect())
-
-
-async def _take(iterator: AsyncIterator[str], count: int) -> AsyncIterator[str]:
-    for _ in range(count):
-        yield await anext(iterator)
-
-
 @pytest.fixture(autouse=True)
-def _clean_chat_channels() -> Iterator[None]:
-    main._chat_deltas.clear()
+def _clean_chat_globals() -> Iterator[None]:
+    """Nothing left in these dicts may reach another module's test.
+
+    `abort_admin_chat` leaves its abort signal set for "alice", and a later
+    admin-chat test with the same user returns before its AI call.
+    """
+    tables = (main._chat_deltas, main._chat_partials, main._chat_abort_signals)
+
+    def clear() -> None:
+        for table in tables:
+            table.clear()
+
+    clear()
     yield
-    main._chat_deltas.clear()
+    clear()
+
+
+@pytest.mark.asyncio
+async def test_a_stream_that_joins_mid_turn_is_caught_up_in_one_frame() -> None:
+    # The turn claims the channel before its first fragment, so a browser stream
+    # that subscribes a tick later shows the whole answer, not just its tail.
+    on_delta = main._chat_delta_publisher("job5", "bob", 9)
+    on_delta("Hel")
+    on_delta("lo")
+
+    response = await main.chat_stream("job5", FakeRequest(username="bob"))  # type: ignore[arg-type]
+    iterator = response.body_iterator
+    assert await anext(iterator) == ": connected\n\n"
+    assert await anext(iterator) == (
+        'event: chat-delta\ndata: {"id": 9, "snapshot": "Hello"}\n\n'
+    )
+    await iterator.aclose()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_the_catch_up_text_belongs_to_the_turn_in_flight() -> None:
+    main._chat_delta_publisher("job6", "bob", 9)("old answer")
+    main._chat_delta_publisher("job6", "bob", 10)("new")
+
+    response = await main.chat_stream("job6", FakeRequest(username="bob"))  # type: ignore[arg-type]
+    iterator = response.body_iterator
+    assert await anext(iterator) == ": connected\n\n"
+    assert await anext(iterator) == (
+        'event: chat-delta\ndata: {"id": 10, "snapshot": "new"}\n\n'
+    )
+    await iterator.aclose()  # type: ignore[attr-defined]
+
+
+@pytest.mark.asyncio
+async def test_a_finished_turn_leaves_nothing_to_catch_up_with() -> None:
+    main._chat_delta_publisher("job7", "bob", 11)("done")
+    main.publish_chat_delta("job7:bob", {"type": "refresh"})
+    assert main._chat_partials == {}
+
+    # The turn opened the channel; with no stream reading it, its end drops it.
+    main._cleanup_chat_state("job7:bob")
+    assert "job7:bob" not in main._chat_deltas
 
 
 @pytest.mark.asyncio

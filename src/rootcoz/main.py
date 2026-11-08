@@ -1226,13 +1226,18 @@ _audit_broadcast = _PayloadBroadcast()
 # must not be shared between users. In-process only, like `_chat_listeners` and
 # `_hold_chat_lock`'s refcount, so no lock is needed (all touched from the loop).
 _chat_deltas: dict[str, _PayloadBroadcast] = {}
+# The turn in flight per channel: its assistant row id and the text published so
+# far. A stream that subscribes a tick after the turn started is caught up with
+# one `snapshot` frame — replaying the deltas would double the text when the
+# browser's EventSource reconnects. Display only: `turn_end.text` is the reply.
+_chat_partials: dict[str, tuple[int, str]] = {}
 
 
 def _chat_delta_channel(job_id: str, username: str) -> _PayloadBroadcast:
     """The fragment channel for one authenticated user's turn.
 
-    Claimed inside the stream generator, only after `_require_authenticated`, so
-    `username` is always non-empty.
+    Claimed by the turn's publisher and by the stream generator, both after their
+    own gate, so `username` is always non-empty.
     """
     return _chat_deltas.setdefault(
         _chat_channel_key(job_id, username), _PayloadBroadcast()
@@ -1244,6 +1249,15 @@ def publish_chat_delta(key: str, frame: dict[str, Any]) -> None:
     channel = _chat_deltas.get(key)
     if channel is None:
         return
+    message_id = frame.get("id")
+    if isinstance(message_id, int) and isinstance(frame.get("delta"), str):
+        held_id, held = _chat_partials.get(key, (message_id, ""))
+        _chat_partials[key] = (
+            message_id,
+            held + frame["delta"] if held_id == message_id else frame["delta"],
+        )
+    else:
+        _chat_partials.pop(key, None)  # a change notice: the turn is over
     channel.publish(frame)
 
 
@@ -1259,6 +1273,9 @@ def _chat_delta_publisher(
 ) -> Callable[[str], None]:
     """The `on_delta` callable for one turn: fragments tagged with their row id."""
     key = _chat_channel_key(job_id, username)
+    # Claim the channel before the first fragment, so a browser stream that
+    # subscribes after the turn started still has something to catch up from.
+    _chat_delta_channel(job_id, username)
     return lambda delta: publish_chat_delta(key, {"id": message_id, "delta": delta})
 
 
@@ -23053,6 +23070,12 @@ def _cleanup_chat_state(key: str) -> None:
     hits zero, so waiters keep the same lock object.
     """
     _chat_abort_signals.pop(key, None)
+    # The turn is over: nothing is left for a late stream to catch up from, and a
+    # channel this turn claimed is dropped unless a stream is still reading it.
+    _chat_partials.pop(key, None)
+    channel = _chat_deltas.get(key)
+    if channel is not None and not channel.has_listeners:
+        _chat_deltas.pop(key, None)
 
 
 async def _normalize_and_validate_ai_params(
@@ -23152,6 +23175,10 @@ def _chat_sse_response(
         channel = _chat_delta_channel(job_id, username)
         try:
             async with channel.subscribe() as subscription:
+                held = _chat_partials.get(key)
+                if held and held[1]:
+                    # One frame, not the deltas: a reconnect must not double the text.
+                    subscription.queue.put_nowait({"id": held[0], "snapshot": held[1]})
                 async for chunk in _queue_sse_events(
                     request,
                     subscription,
@@ -23164,6 +23191,7 @@ def _chat_sse_response(
             # the last subscriber has gone, and nothing awaits in between.
             if not channel.has_listeners and _chat_deltas.get(key) is channel:
                 _chat_deltas.pop(key, None)
+                _chat_partials.pop(key, None)
 
     return StreamingResponse(
         event_generator(),
