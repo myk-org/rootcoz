@@ -181,6 +181,7 @@ from rootcoz.jenkins import JenkinsClient
 from rootcoz.jira import (
     JiraClient,
     JiraConnection,
+    JiraDeploymentCredentialRefused,
     JiraOAuthMintError,
     classify_jira_secret,
     complete_jira_connection,
@@ -12054,8 +12055,10 @@ async def _create_issue_from_text(
             result = await create_jira_bug(
                 title=title,
                 body=issue_body,
-                settings=effective_jira_settings,
-                project_key=jira_project_key,
+                connection=resolve_jira_connection(effective_jira_settings),
+                project_key=jira_project_key
+                or effective_jira_settings.jira_project_key
+                or "",
                 security_level=jira_security_level,
                 issue_type=jira_issue_type,
             )
@@ -12158,23 +12161,39 @@ async def create_jira_bug_endpoint(
     jira_token = user_tokens.get("jira_token", "") or ""
     jira_sa_token = user_tokens.get("jira_sa_token", "") or ""
     _debug_credential_source("jira", bool(jira_token or jira_sa_token))
-    result = await _create_issue_from_text(
-        "jira",
-        body.title,
-        body.body,
-        username=username,
-        settings=settings,
-        jira_token=jira_token,
-        jira_email=user_tokens.get("jira_email", "") or "",
-        jira_sa_token=jira_sa_token,
-        jira_project_key=body.jira_project_key,
-        jira_security_level=body.jira_security_level,
-        jira_issue_type=body.jira_issue_type,
-        # Reject an unknown test name before an issue is filed for it.
-        pre_check=lambda: _load_effective_failure(
-            job_id, body.test_name, body.child_job_name, body.child_build_number
-        ),
-    )
+    try:
+        result = await _create_issue_from_text(
+            "jira",
+            body.title,
+            body.body,
+            username=username,
+            settings=settings,
+            jira_token=jira_token,
+            jira_email=user_tokens.get("jira_email", "") or "",
+            jira_sa_token=jira_sa_token,
+            jira_project_key=body.jira_project_key,
+            jira_security_level=body.jira_security_level,
+            jira_issue_type=body.jira_issue_type,
+            # Reject an unknown test name before an issue is filed for it.
+            pre_check=lambda: _load_effective_failure(
+                job_id, body.test_name, body.child_job_name, body.child_build_number
+            ),
+        )
+    except HTTPException as exc:
+        # A credential-policy denial is a security event, so unlike a tracker
+        # refusal it leaves a row — naming the job and the reason, never the
+        # submitted title or body (nothing reached the tracker).
+        if isinstance(exc.__cause__, JiraDeploymentCredentialRefused):
+            await _record_refused_attempt(
+                action="issue.create",
+                request=request,
+                denied=True,
+                exc=exc,
+                message=f"User '{username}' was refused a Jira issue for job {job_id}",
+                target_type="job",
+                target_id=job_id,
+            )
+        raise
     issue_url = result["url"]
 
     comment_id = await _add_tracker_comment(

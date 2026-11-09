@@ -15,9 +15,10 @@ from rootcoz.attribution import AiProvenance, apply_ai_attribution, build_ai_att
 from rootcoz.config import Settings
 from rootcoz.jira import (
     JiraClient,
+    JiraConnection,
     complete_jira_connection,
     jira_missing_api_base_error,
-    resolve_jira_connection,
+    require_caller_connection,
 )
 from rootcoz.models import (
     AnalysisDetail,
@@ -872,22 +873,30 @@ def _text_to_adf(text: str) -> dict[str, Any]:
 async def create_jira_bug(
     title: str,
     body: str,
-    settings: Settings,
+    connection: JiraConnection,
+    *,
+    project_key: str,
     priority: str = "",
-    project_key: str = "",
     security_level: str = "",
     issue_type: str = "Bug",
 ) -> dict[str, Any]:
     """Create a Jira Bug issue via the REST API.
 
-    Resolves the connection through :func:`resolve_jira_connection` — the
-    shared single source of truth for all Jira call sites (service account,
-    ATST scoped token, Cloud basic auth, or Server/DC Bearer).
+    ``connection`` is the CALLER's resolved credential:
+    :func:`require_caller_connection` runs first and refuses the deployment's
+    own secret before a single byte goes out. This helper takes no
+    ``Settings``, so it has nothing to resolve a credential from — the same
+    structural property ``create_github_issue`` gets from its required token
+    parameter.
+
     Returns dict with key, url, and title keys.
 
-    Raises httpx.HTTPStatusError on failure.
+    Raises:
+        JiraDeploymentCredentialRefused: the connection is the deployment's.
+        httpx.HTTPStatusError: the tracker refused the create.
     """
-    connection = await complete_jira_connection(resolve_jira_connection(settings))
+    require_caller_connection(connection)
+    connection = await complete_jira_connection(connection)
     if not connection.api_base:
         # Mode-aware message: basic/pat connections also have an empty base
         # when their method URL is unset — they must not surface the SA
@@ -898,7 +907,6 @@ async def create_jira_bug(
             "Jira service account mode cannot build issue links: JIRA_SITE_URL "
             "is required for browse links"
         )
-    effective_project_key = project_key or settings.jira_project_key or ""
 
     headers: dict[str, str] = {"Content-Type": "application/json", **connection.headers}
     # Issue creation: existing modes keep REST v2; gateway connections
@@ -918,7 +926,7 @@ async def create_jira_bug(
 
     payload: dict[str, Any] = {
         "fields": {
-            "project": {"key": effective_project_key},
+            "project": {"key": project_key},
             "summary": title,
             # REST v3 requires an Atlassian Document Format document for the
             # description; v2 (Cloud basic auth, Server/DC) keeps the plain
