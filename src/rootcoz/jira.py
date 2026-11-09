@@ -382,6 +382,22 @@ def _identity_secret(connection: JiraConnection) -> str:
     return ""
 
 
+def _deployment_secrets(settings: Settings) -> set[str]:
+    """Every PERSONAL secret the deployment holds, whichever method is active.
+
+    A method switch saves only ``jira_auth_mode`` (Server Settings), so the
+    previous method's field keeps a live token: the deployment's credentials are
+    not the active mode's alone.
+    """
+    secrets: set[str] = set()
+    for secret in (settings.jira_api_token, settings.jira_pat):
+        if secret:
+            value = secret.get_secret_value().removeprefix("Bearer ").strip()
+            if value:
+                secrets.add(value)
+    return secrets
+
+
 def require_caller_connection(connection: JiraConnection) -> None:
     """Refuse a write whose connection carries the DEPLOYMENT's own secret.
 
@@ -390,12 +406,15 @@ def require_caller_connection(connection: JiraConnection) -> None:
     and every one of them runs this guard first: a caller that builds the
     connection carelessly must not file as the deployment.
 
-    The reference is ``resolve_jira_connection(get_settings())`` — the
-    deployment accessor the server already uses — so a caller cannot weaken the
-    check by passing a smaller ``Settings``. The comparison is on the SECRET,
-    never the whole connection: ``auth=("their_email", <deployment token>)``
-    differs from the deployment's connection in the e-mail alone, and the
-    reverse (a deployment ``basic`` credential sent as a bare bearer PAT)
+    The reference is ``get_settings()``, read HERE — the deployment accessor the
+    server already uses — so a caller cannot weaken the check by passing a
+    smaller ``Settings``, and it is every personal secret the deployment holds
+    (:func:`_deployment_secrets`), not the selected method's alone: a switch
+    leaves the previous method's field populated, so comparing only the active
+    one let the retained token file as the deployment. The comparison is on the
+    SECRET, never the whole connection: ``auth=("their_email", <deployment
+    token>)`` differs from the deployment's connection in the e-mail alone, and
+    the reverse (a deployment ``basic`` credential sent as a bare bearer PAT)
     differs only in field placement — hence the ``Bearer `` prefix is stripped
     on both sides. Gateway modes are out of scope; see
     :data:`_PERSONAL_JIRA_MODES`.
@@ -404,13 +423,12 @@ def require_caller_connection(connection: JiraConnection) -> None:
         JiraDeploymentCredentialRefused: the connection's secret is the
             deployment's own, in a mode where the user could supply another.
     """
-    deployment_secret = _identity_secret(resolve_jira_connection(get_settings()))
-    if not deployment_secret or connection.mode not in _PERSONAL_JIRA_MODES:
+    if connection.mode not in _PERSONAL_JIRA_MODES:
         return
-    # shortcut: only the secret is compared, so a deployment that somehow
-    # exposed a second valid personal secret of its own would not be caught.
-    # Upgrade if per-user credentials ever become server-minted.
-    if _identity_secret(connection) == deployment_secret:
+    # shortcut: personal-mode secrets only, so the deployment's gateway
+    # credential (oauth/atst) presented as a personal token is not caught.
+    # Upgrade if a refusal there becomes actionable for the user.
+    if _identity_secret(connection) in _deployment_secrets(get_settings()):
         logger.warning(
             "Refusing to file a Jira issue with the deployment credential (mode=%s)",
             connection.mode,

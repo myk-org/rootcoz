@@ -635,6 +635,51 @@ class TestCreateJiraBugRefusesTheDeploymentCredential:
             )
         AsyncClient.assert_not_called()
 
+    async def test_a_secret_retained_by_a_previous_mode_is_refused(self):
+        """Switching methods does not clear the old field, so the deployment
+        still holds that secret — comparing only the ACTIVE mode's secret let
+        the retained one file as the deployment."""
+        from rootcoz.bug_creation import create_jira_bug
+        from rootcoz.config import get_settings, update_db_settings_cache
+        from rootcoz.jira import (
+            JiraDeploymentCredentialRefused,
+            resolve_jira_connection,
+        )
+        from rootcoz.main import _build_effective_jira_settings
+
+        # Server Settings saves jira_auth_mode alone, so the basic-mode token
+        # survives the switch to pat.
+        update_db_settings_cache(
+            {
+                "jira_auth_mode": "pat",
+                "jira_server_url": "https://jira-server.example.com",
+                "jira_cloud_url": "https://myorg.atlassian.net",
+                "jira_pat": self._DEPLOYMENT_PAT,
+                "jira_api_token": "retained-deployment-token",  # pragma: allowlist secret
+            }
+        )
+        connection = resolve_jira_connection(
+            _build_effective_jira_settings(
+                get_settings(),
+                "retained-deployment-token",  # pragma: allowlist secret
+                "me@example.com",
+            )
+        )
+        assert connection.mode == "cloud"
+        assert connection.auth == (
+            "me@example.com",
+            "retained-deployment-token",  # pragma: allowlist secret
+        )
+
+        with (
+            patch("rootcoz.bug_creation.httpx.AsyncClient") as AsyncClient,
+            pytest.raises(JiraDeploymentCredentialRefused),
+        ):
+            await create_jira_bug(
+                title="t", body="b", connection=connection, project_key="PROJ"
+            )
+        AsyncClient.assert_not_called()
+
     async def test_a_caller_connection_still_files(self):
         """A personal credential that is not the deployment's files as before."""
         from rootcoz.bug_creation import create_jira_bug
