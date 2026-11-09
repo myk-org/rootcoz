@@ -13,6 +13,7 @@ import pytest
 from rootcoz import monitoring
 from rootcoz.encryption import strip_sensitive_from_response
 from rootcoz.monitoring import (
+    ERROR_RATE_MIN_REQUESTS,
     AlertThrottler,
     ErrorRateTracker,
     _RollingCounter,
@@ -22,10 +23,12 @@ from rootcoz.monitoring import (
     check_jenkins,
     check_reportportal,
     dispatch_alert,
+    health_up_from_status,
     read_data_usage,
     render_prometheus_metrics,
     send_email_alert,
     send_slack_alert,
+    server_error_share,
     validate_startup_config,
 )
 from tests.conftest import host_env
@@ -693,6 +696,69 @@ class TestDispatchAlert:
         finally:
             monitoring.alert_throttler.reset()
 
+    async def test_dispatch_alert_bypassing_the_throttle(self, monkeypatch):
+        """The monitor's state machine is its dedup; a cooldown would drop recoveries."""
+        from rootcoz import monitoring
+
+        monitoring.alert_throttler.reset()
+        monkeypatch.setattr(monitoring.alert_throttler, "cooldown_seconds", 9999.0)
+        mock_slack = AsyncMock()
+        monkeypatch.setattr(monitoring, "send_slack_alert", mock_slack)
+        monkeypatch.setattr(monitoring, "send_email_alert_async", AsyncMock())
+        try:
+            await dispatch_alert(
+                "health_monitor_health_down", "firing", bypass_throttle=True
+            )
+            await dispatch_alert(
+                "health_monitor_health_down", "recovered", bypass_throttle=True
+            )
+            assert mock_slack.call_count == 2
+
+            # The default path inside the same cooldown still sends once.
+            await dispatch_alert("high_error_rate", "first")
+            await dispatch_alert("high_error_rate", "second")
+            assert mock_slack.call_count == 3
+        finally:
+            monitoring.alert_throttler.reset()
+
+
+class TestServerErrorShare:
+    """One definition of "the server is erroring" (#464)."""
+
+    def test_server_error_share(self):
+        def snapshot(**counts: int) -> dict:
+            total = sum(counts.values())
+            return {
+                "window_seconds": 300.0,
+                "total_requests": total,
+                "error_counts": {k: v for k, v in counts.items() if v},
+                "total_errors": total,
+                "error_rate": total / total if total else 0.0,
+            }
+
+        # 4xx is not a server fault: the share is 0 and the counts say so.
+        assert server_error_share(
+            {"total_requests": 20, "error_counts": {"4xx": 20}}
+        ) == (
+            0.0,
+            0,
+            20,
+        )
+        assert server_error_share(
+            {"total_requests": 20, "error_counts": {"5xx": 4}}
+        ) == (
+            pytest.approx(0.2),
+            4,
+            20,
+        )
+        # An idle window has no share, and no ZeroDivisionError.
+        assert server_error_share({"total_requests": 0, "error_counts": {}}) == (
+            0.0,
+            0,
+            0,
+        )
+        assert ERROR_RATE_MIN_REQUESTS == 10
+
 
 # ---------------------------------------------------------------------------
 # Prometheus metrics
@@ -736,6 +802,15 @@ class TestPrometheusMetrics:
         assert "rootcoz_data_used_bytes 10" in text
         assert "rootcoz_data_capacity_bytes 0" in text
         assert "rootcoz_data_used_ratio" not in text
+
+    def test_the_age_gauge_renders_and_omits(self):
+        """The age of the longest-running analysis: one number, never a 0."""
+        text = render_prometheus_metrics(oldest_analysis_age_seconds=7500)
+        assert "\nrootcoz_oldest_analysis_age_seconds 7500\n" in text
+        assert "rootcoz_oldest_analysis_age_seconds" in text.split("\n", 1)[1]
+
+        without = render_prometheus_metrics(oldest_analysis_age_seconds=None)
+        assert "rootcoz_oldest_analysis_age_seconds" not in without
 
     def test_missing_data_values_omit_every_data_gauge(self):
         text = render_prometheus_metrics(
@@ -843,11 +918,51 @@ class TestHealthEndpointIntegration:
         assert response.status_code == 200
         assert response.json()["status"] == "healthy"
 
+    def test_degraded_health_is_up(self, test_client) -> None:
+        """Only ``unhealthy`` is down: ``degraded`` keeps /metrics and /api/health up."""
+        from rootcoz import main as main_module
+
+        assert health_up_from_status("degraded") == 1
+        assert health_up_from_status("healthy") == 1
+        assert health_up_from_status("unhealthy") == 0
+
+        async def _unhealthy(_settings, _db_path):
+            return {"status": "unhealthy", "checks": {}, "error_rates": {}}
+
+        async def _degraded(_settings, _db_path):
+            return {"status": "degraded", "checks": {}, "error_rates": {}}
+
+        with patch.object(main_module, "build_health_response", _unhealthy):
+            metrics = test_client.get("/metrics")
+            health = test_client.get("/api/health")
+        assert "\nrootcoz_health_up 0\n" in metrics.text
+        assert health.status_code == 503
+
+        with patch.object(main_module, "build_health_response", _degraded):
+            metrics = test_client.get("/metrics")
+            health = test_client.get("/api/health")
+        assert "\nrootcoz_health_up 1\n" in metrics.text
+        assert health.status_code == 200
+
     def test_metrics_endpoint(self, test_client):
         response = test_client.get("/metrics")
         assert response.status_code == 200
         assert "rootcoz_requests_total" in response.text
         assert "text/plain" in response.headers["content-type"]
+
+    def test_a_raising_age_read_drops_only_the_age_family(self, test_client):
+        """A failed age read must never read as "health down"."""
+
+        async def _boom() -> str:
+            raise OSError("database went away")
+
+        with patch("rootcoz.storage.oldest_running_analysis_started_at", _boom):
+            response = test_client.get("/metrics")
+
+        assert response.status_code == 200
+        assert "rootcoz_oldest_analysis_age_seconds" not in response.text
+        assert "rootcoz_health_up 1" in response.text
+        assert "rootcoz_active_analyses" in response.text
 
     def test_metrics_probe_failure_keeps_the_scrape_healthy(self, test_client):
         def raising_probe(db_path):
@@ -1120,3 +1235,50 @@ def test_compute_component_versions_handles_non_object_manifests(tmp_path, monke
 
     assert versions["pi_sidecar"] is None
     assert versions["pi"] == "1.2.3"
+
+
+async def test_the_instantaneous_trigger_is_untouched(monkeypatch) -> None:
+    """The 50 %-instant 5xx trigger is not part of the monitor's ownership (#464).
+
+    Nothing yields to the monitor: a 50 % burst in one window is a signal the
+    10 %/10 min condition does not carry, so the trigger keeps dispatching while
+    the monitor is enabled, with its own ``(5xx/total)`` wording.
+    """
+    from rootcoz import main as main_module
+
+    async def _noop_app(
+        scope, receive, send
+    ) -> None:  # pragma: no cover - never called
+        return None
+
+    tracker = ErrorRateTracker(window_seconds=300.0)
+    for _ in range(6):
+        tracker.record_request(200)
+    for _ in range(18):
+        tracker.record_request(500)
+    monkeypatch.setattr(main_module, "error_tracker", tracker)
+    dispatched = AsyncMock()
+    monkeypatch.setattr(main_module, "dispatch_alert", dispatched)
+
+    env = {
+        "ENABLE_HEALTH_MONITOR": "true",
+        "JENKINS_USER": "u",
+        "JENKINS_PASSWORD": "p",
+    }
+    with patch.dict(os.environ, env, clear=True):
+        from rootcoz.config import get_settings
+
+        get_settings.cache_clear()
+        try:
+            assert get_settings().enable_health_monitor is True
+            middleware = main_module.ErrorTrackingMiddleware(_noop_app)
+            middleware._schedule_high_error_rate_alert()
+            await asyncio.gather(*list(main_module._background_tasks))
+        finally:
+            get_settings.cache_clear()
+
+    dispatched.assert_awaited_once()
+    event_type, message = dispatched.await_args.args
+    assert event_type == "high_error_rate"
+    assert "75%" in message
+    assert "(18/24 requests" in message, "the trigger's own 5xx/total wording survives"

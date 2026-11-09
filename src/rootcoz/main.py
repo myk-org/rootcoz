@@ -176,6 +176,7 @@ from rootcoz.feedback import (
     scrub_sensitive_data,
 )
 from rootcoz.github_issues import enrich_with_tests_repo_matches
+from rootcoz.health_monitor import run_health_monitor
 from rootcoz.jenkins import JenkinsClient
 from rootcoz.jira import (
     JiraClient,
@@ -255,16 +256,19 @@ from rootcoz.models import (
     is_failed_analysis,
 )
 from rootcoz.monitoring import (
+    ERROR_RATE_MIN_REQUESTS,
     _get_app_version,
     audit_health_check,
     build_health_response,
     dispatch_alert,
     error_tracker,
     get_component_versions,
+    health_up_from_status,
     read_data_usage,
     record_audit_auth_suppression,
     record_audit_write_failure,
     render_prometheus_metrics,
+    server_error_share,
     validate_startup_config,
 )
 from rootcoz.notifications import send_mention_notifications
@@ -459,6 +463,12 @@ _DEFAULTS_HIDDEN_SETTINGS: frozenset[str] = frozenset(
         "smtp_from",
         "slack_webhook_url",
         "alert_email_to",
+        "enable_health_monitor",
+        "health_monitor_interval_seconds",
+        "health_alert_unhealthy_seconds",
+        "health_alert_error_rate_percent",
+        "health_alert_error_rate_seconds",
+        "health_alert_stuck_analysis_seconds",
         "session_ttl_hours",
         "sidecar_host",
         "sidecar_port",
@@ -689,6 +699,13 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "smtp_from",
         "alert_email_to",
         "slack_webhook_url",
+        # The built-in health monitor (#464): server behaviour, runtime applied.
+        "enable_health_monitor",
+        "health_monitor_interval_seconds",
+        "health_alert_unhealthy_seconds",
+        "health_alert_error_rate_percent",
+        "health_alert_error_rate_seconds",
+        "health_alert_stuck_analysis_seconds",
     ],
     # Restart-required: the sidecar starts once at container boot and reads
     # these from the /data/pi-sidecar/env bridge the entrypoint sources.
@@ -3601,6 +3618,17 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
 
         # Retroactively assign metadata to jobs that don't have it yet
         settings = get_settings()
+        # The in-process health monitor (#464). Spawned unconditionally: the loop
+        # idles on a 5 s settings poll while disabled, so enabling it at runtime
+        # needs no restart, and the existing shutdown drain cancels it like any
+        # other background task.
+        logger.info(
+            "[startup] Health monitor %s",
+            f"enabled (interval {settings.health_monitor_interval_seconds}s)"
+            if settings.enable_health_monitor
+            else "disabled",
+        )
+        _spawn_background(run_health_monitor())
         if settings.admin_wait_approve_msg:
             logger.info("[startup] ADMIN_WAIT_APPROVE_MSG configured")
         if settings.metadata_rules:
@@ -3719,10 +3747,8 @@ class ErrorTrackingMiddleware(BaseHTTPMiddleware):
         """Check 5xx error rate and schedule an alert if it exceeds the threshold."""
         try:
             snap = error_tracker.snapshot()
-            total_requests = snap["total_requests"]
-            server_errors = snap.get("error_counts", {}).get("5xx", 0)
-            server_error_rate = server_errors / total_requests if total_requests else 0
-            if server_error_rate > 0.5 and total_requests >= 10:
+            server_error_rate, server_errors, total_requests = server_error_share(snap)
+            if server_error_rate > 0.5 and total_requests >= ERROR_RATE_MIN_REQUESTS:
                 _spawn_background(
                     dispatch_alert(
                         "high_error_rate",
@@ -7523,7 +7549,12 @@ async def analyze_submitted_job(
             status_code=409,
             detail="Job is already being analyzed or is no longer submitted.",
         )
-    previous_status, previous_failure_reason = claim
+    (
+        previous_status,
+        previous_failure_reason,
+        previous_analysis_started_at,
+        previous_completed_at,
+    ) = claim
     rerun = {
         "request": request,
         "job_id": job_id,
@@ -7547,7 +7578,11 @@ async def analyze_submitted_job(
         )
     except Exception:
         await release_submitted_job_analyze_claim(
-            job_id, previous_status, previous_failure_reason
+            job_id,
+            previous_status,
+            previous_failure_reason,
+            previous_analysis_started_at,
+            previous_completed_at,
         )
         await _audit_analysis_rerun(**rerun, outcome="failure")
         raise
@@ -15358,7 +15393,7 @@ async def health_check_detailed() -> Response:
     settings = get_settings()
     db_path = str(storage.DB_PATH)
     result = await build_health_response(settings, db_path)
-    status_code = 503 if result["status"] == "unhealthy" else 200
+    status_code = 200 if health_up_from_status(result["status"]) else 503
     return JSONResponse(content=result, status_code=status_code)
 
 
@@ -15435,20 +15470,21 @@ async def prometheus_metrics() -> Response:
     db_path = str(storage.DB_PATH)
     try:
         health = await build_health_response(settings, db_path)
-        health_up = 0 if health["status"] == "unhealthy" else 1
+        health_up = health_up_from_status(health["status"])
     except Exception:
         logger.debug("Failed to compute health status for metrics", exc_info=True)
         health_up = 0
 
-    # Count active analyses
+    # Count active analyses, and the age of the longest-running one. Both here, in
+    # this try: the health handler above sets health_up = 0, so a failed age read
+    # there would publish a false rootcoz_health_up 0 and a false health_down.
     active_analyses: int | None = None
+    oldest_analysis_age_seconds: int | None = None
     try:
-        async with aiosqlite.connect(db_path) as db:
-            cursor = await db.execute(
-                "SELECT COUNT(*) FROM results WHERE status IN ('pending', 'running', 'waiting')"
-            )
-            row = await cursor.fetchone()
-            active_analyses = row[0] if row else 0
+        active_analyses = await storage.count_active_analyses()
+        oldest_analysis_age_seconds = storage.elapsed_seconds_since(
+            await storage.oldest_running_analysis_started_at()
+        )
     except Exception:
         logger.debug("Failed to compute active analyses for metrics", exc_info=True)
 
@@ -15487,6 +15523,7 @@ async def prometheus_metrics() -> Response:
         content=render_prometheus_metrics(
             health_up=health_up,
             active_analyses=active_analyses,
+            oldest_analysis_age_seconds=oldest_analysis_age_seconds,
             audit_write_failures=audit_health_check()["write_failures"],
             data_used_bytes=data_used_bytes,
             data_capacity_bytes=data_capacity_bytes,

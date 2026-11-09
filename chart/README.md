@@ -429,6 +429,8 @@ When enabled, the deployment pulls from the internal registry ImageStream instea
 
 An optional CronJob scrapes `/metrics` on a schedule and posts one Slack message listing every failing check: unhealthy (`rootcoz_health_up`), error rate above the threshold, and `/data` usage above the warning or critical threshold. The script lives in `chart/files/health-alert.sh` and is mounted from a ConfigMap, so the tested file is the deployed file.
 
+It is the alternative for deployments that do not enable rootcoz's own in-process health monitor (`ENABLE_HEALTH_MONITOR`, under `Notifications` in Server Settings). The job reads `/metrics` from outside the application and cannot see its settings, so nothing coordinates the two: **leave `alerts.enabled` at `false` when the in-app monitor is on**, otherwise both report the same condition.
+
 ```yaml
 alerts:
   enabled: true

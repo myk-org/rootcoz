@@ -1,12 +1,13 @@
 # Managing Your Account and Notifications
 
-This page covers everything you control about your own RootCoz identity: registering, the API key you log in with, the personal tracker tokens and AI keys stored against your account, and how you get told when someone mentions you in a comment.
+This page covers everything you control about your own RootCoz identity: registering, the API key you log in with, the personal tracker tokens and AI keys stored against your account, and how you get told when someone mentions you in a comment. Its last section covers the server-wide alert delivery an administrator configures, because that is the other half of "how you get told".
 
 ## Prerequisites
 
 - A running RootCoz server. See [Quickstart](quickstart.html) or [Deploying RootCoz](deploy-rootcoz.html) for details.
 - For the tracker tokens, a GitHub personal access token with the `repo` scope, or a Jira Cloud API token (plus your Atlassian account email) or a Jira Server/Data Center personal access token. Optionally, an Atlassian service-account credential in the service-account field — an ATOA-prefixed OAuth 2.0 client secret (exchanged for short-lived access tokens automatically; the server must have the credential's client ID configured as `atlassian_oauth_client_id`) or an ATST-prefixed scoped token (sent as Bearer directly against the scoped Atlassian gateway, no exchange). Either takes precedence over the regular Jira credentials; both are created by an admin in Atlassian Administration → Directory → Service accounts.
 - For browser push notifications, a browser that supports Web Push (Chrome, Edge, Firefox, or Safari on a supported platform) and permission to show notifications.
+- For the built-in health monitor (server-wide, admin only), at least one alert channel configured on the server: `SLACK_WEBHOOK_URL`, or `SMTP_HOST` + `ALERT_EMAIL_TO`. See [Configuration Reference](configuration-reference.html).
 
 ## Quick Example
 
@@ -111,6 +112,39 @@ The registration key is the only credential that signs you in; the tracker token
    Enabling push notifications asks the browser for permission and registers the device with the server. Delivery is best effort: a subscription the push service reports as gone is deleted automatically, and at most 10 subscriptions are kept per user.
 
    > **Note:** Push notifications need VAPID keys. RootCoz generates a key pair automatically when none are configured, so the toggle normally works out of the box. An administrator can also set them under `Web Push` in Server Settings. See [Managing Users and Server Settings](manage-users-and-server-settings.html) for details.
+
+## Built-in health monitor
+
+RootCoz can watch its own health in process and tell you when something starts — or stops — being wrong. It is off by default and an administrator turns it on under `Notifications` in Server Settings with `enable_health_monitor`.
+
+| Condition | Fires when | Needs |
+| --- | --- | --- |
+| Health down | the server has been `unhealthy` for the configured duration (default 5 min) | nothing beyond the server |
+| Error rate | the 5xx share of the 5-minute window has been above the threshold (default 10 %) for the configured duration (default 10 min) | at least 10 requests in that window |
+| Analysis stuck | an analysis has been **running** longer than the threshold (default 2 h) | a `running` analysis |
+
+What it deliberately does not do:
+
+- A `degraded` server (a failing Jenkins, ReportPortal or audit probe, or an undecodable row) never fires Health down — only `unhealthy` does, matching `rootcoz_health_up`.
+- Error rate counts **server errors (5xx)** only, so a client sending 404s cannot make it fire. With fewer than 10 requests in the window, or with an empty window, the reading is unjudgeable: it neither fires, clears, nor accrues hold time.
+- Analysis stuck measures a `running` analysis from its analysis start. A job `waiting` on its Jenkins build is not stuck: those builds legitimately take hours.
+
+Notifications are sent **only on a transition** — one message when a condition starts (`🔴 rootcoz health has been unhealthy for 5m (checks: database)`, `🔴 rootcoz server error rate 14% above the 10% threshold for 10m`, `🔴 an analysis has been running for 2h 1m (threshold 2h)`) and one when it recovers (`✅ rootcoz health recovered after 7m`, `✅ rootcoz server error rate back below the 10% threshold after 12m`, `✅ no analysis has been running longer than the 2h threshold any more`). Nothing repeats while a condition stays true.
+
+Where to see it:
+
+- **Server Status page** — the `Health monitor` card shows `Enabled` or `Disabled`, the interval, how long ago it last sampled, and each condition as `OK` or `Firing` with its held time (the age, for the stuck condition) against its threshold.
+- **`rootcoz admin server-status`** — the same state on the command line.
+
+How to enable it:
+
+1. Configure at least one channel (`SLACK_WEBHOOK_URL`, or `SMTP_HOST` + `ALERT_EMAIL_TO`). Without a channel the monitor samples and every notification is silently a no-op.
+2. Open Server Settings → `Notifications`, set `Enable health monitor` on, and save. It applies within about 5 seconds — no restart.
+3. **Confirm the channel actually delivers.** Nothing in the product reports delivery (`dispatch_alert` discards each sender's result), so the only proof is a real message: set a short interval and a short duration, make the condition true, and look for one message in Slack or the mailbox. `last sample …s ago` on the card proves the monitor is *sampling* — never that a POST succeeded.
+
+Enabling, disabling and a changed interval take effect without a restart; a new interval applies after the next sampling deadline. State is in memory, so a restart re-arms every duration, and toggling the monitor off and on never announces a recovery for an alert it dropped.
+
+The instantaneous in-process 5xx trigger (a >50 % 5xx share in one window) and the chart's `alerts.enabled` CronJob both keep working alongside the monitor. If you enable the in-app monitor, leave `alerts.enabled` at `false`: the two cannot see each other, so running both means hearing about the same condition twice.
 
 ## Advanced Usage
 

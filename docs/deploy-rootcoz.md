@@ -339,7 +339,7 @@ The server keeps serving everything else. `/api/health` reports `{"status": "deg
 
 ## Watch disk usage and alert on a filling volume
 
-RootCoz ships no alerting stack — the rule below is yours to install. What it does ship is the metric: `/metrics` exposes three unlabelled gauges for the filesystem that holds the data directory. The probe is a `statvfs` on that directory, so it is storage-agnostic — the same gauges work for an OpenShift PVC, a Docker Compose volume, a bind mount or a plain directory, because they measure whichever filesystem backs the data dir. On a shared node filesystem the numbers can include other tenants' usage: read them as free/used space on that filesystem, not as a per-volume quota.
+RootCoz ships no **metrics-to-alertmanager pipeline** — the rules below are yours to install. What it does ship is the metric: `/metrics` exposes three unlabelled gauges for the filesystem that holds the data directory. The probe is a `statvfs` on that directory, so it is storage-agnostic — the same gauges work for an OpenShift PVC, a Docker Compose volume, a bind mount or a plain directory, because they measure whichever filesystem backs the data dir. On a shared node filesystem the numbers can include other tenants' usage: read them as free/used space on that filesystem, not as a per-volume quota.
 
 | Metric | Meaning |
 | --- | --- |
@@ -380,6 +380,10 @@ spec:
 
 If you also want to be told when the probe itself breaks, add one line: `absent_over_time(rootcoz_data_used_ratio[15m])` — a scrape target that has been up but has no ratio for 15 minutes has a probe that is failing every time.
 
+### Built-in health monitor (no cluster, no Prometheus)
+
+RootCoz also watches its own health **in process** and notifies the configured Slack/email channels on state transitions only: `Health down` (unhealthy for 5 min), `Error rate` (5xx share above 10 % for 10 min) and `Analysis stuck` (an analysis running longer than 2 h). It is opt-in — set `ENABLE_HEALTH_MONITOR=true` (or turn it on under `Notifications` in Server Settings, applied without a restart) **and** configure a channel (`SLACK_WEBHOOK_URL`, or `SMTP_HOST` + `ALERT_EMAIL_TO`). It works on Compose, bind-mount and plain-directory deployments, where no CronJob exists. Its live state is the `Health monitor` card on the Server Status page and the `rootcoz admin server-status` line. See [Configuration Reference](configuration-reference.html) and [Managing Your Account and Notifications](manage-account-and-notifications.html) for the conditions and their defaults.
+
 ### Bounding the application log file
 
 The application log file lives at `<data dir>/logs/rootcoz.log` on the same filesystem as the database, so a log file that grows without a bound is a `results.db` failure waiting to happen. Three things keep it in its place, and none of them need a deployment value — they all measure the filesystem that holds the data directory.
@@ -408,7 +412,7 @@ rootcoz admin settings reset log_max_bytes   # back to the derived value
 
 ### The chart health-alert CronJob (the alternative for deployments without Prometheus)
 
-For clusters that scrape nothing, the chart can run its own check: a CronJob that curls `/metrics` on a schedule and posts one Slack message listing every failing check (unhealthy, error rate above the threshold, the data directory's filesystem above the warning or critical threshold with absolute sizes such as `5.4G / 6.0G (90%)`).
+For clusters that scrape nothing **and do not enable the in-app monitor above**, the chart can run its own check: a CronJob that curls `/metrics` on a schedule and posts one Slack message listing every failing check (unhealthy, error rate above the threshold, the data directory's filesystem above the warning or critical threshold with absolute sizes such as `5.4G / 6.0G (90%)`).
 
 ```yaml
 alerts:
@@ -438,6 +442,8 @@ kubectl -n rootcoz annotate cronjob rootcoz-prod-health-alerts \
 - Left empty, the chart creates `<fullname>-<hash>-health-alerts`, which sits next to a cluster-only CronJob rather than replacing it. Both names are bounded (CronJob 52 characters, script ConfigMap 63) and carry an 8-character hash of the fullname, so a long release name cannot produce an object the API server rejects and two releases sharing a long prefix cannot collide.
 - Pin `alerts.image` by digest for production. The default `curlimages/curl:8.12.1` is a tag, and the job runs with `automountServiceAccountToken: false` because it only needs to reach the application Service. The pod pulls the image with the release's `imagePullSecrets`, the same ones the application Deployment uses.
 - Deploy the alert before or after the image that carries the data-directory gauges: when the ratio line is absent the disk check is skipped silently, and the health and error-rate checks keep working.
+
+The in-app monitor and this CronJob cannot see each other: the job reads `/metrics` from outside and cannot read the application's settings, so nothing coordinates them. Running both is a choice, not a supported combination — a deployment that enables `ENABLE_HEALTH_MONITOR` should leave `alerts.enabled` at `false`, and a deployment that relies on this CronJob should leave the monitor off.
 
 ## Database size and compaction
 

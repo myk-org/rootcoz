@@ -19086,6 +19086,68 @@ class TestAnalyzeRefusalReachesTheStoredError:
             assert word not in sentence
 
 
+class TestAnalyzeSubmittedJobClaim:
+    """The claim's restore half, through the endpoint that calls it (#464)."""
+
+    async def test_a_failed_analyze_enqueue_restores_the_claimed_row(
+        self, test_client, temp_db_path: Path
+    ) -> None:
+        """A failed enqueue must put the ingest window back, not just the status.
+
+        The call site unpacks the claim's four fields and passes all four to the
+        release; a signature mismatch there would be a ``TypeError`` on this path
+        instead of a restore, and the row would stay ``pending`` (active) forever.
+        """
+        from rootcoz import main as main_module
+
+        ingest_start = "2026-01-01 10:00:00"
+        ingest_end = "2026-01-01 11:00:00"
+        with patch.object(storage, "DB_PATH", temp_db_path):
+            await storage.init_db()
+            await storage.save_result(
+                "job-claim",
+                "http://jenkins",
+                "completed",
+                {
+                    "job_name": "nightly",
+                    "build_number": 7,
+                    "analysis_state": "submitted",
+                    "request_params": {
+                        "analysis_type": "jenkins",
+                        "job_name": "nightly",
+                        "build_number": 7,
+                    },
+                },
+            )
+            async with aiosqlite.connect(temp_db_path) as db:
+                await db.execute(
+                    "UPDATE results SET analysis_started_at = ?, completed_at = ? "
+                    "WHERE job_id = 'job-claim'",
+                    (ingest_start, ingest_end),
+                )
+                await db.commit()
+
+            async def _enqueue_boom(**_kwargs: Any) -> dict:
+                raise RuntimeError("enqueue failed")
+
+            # The body carries an AI pair: without one the endpoint fails the
+            # config check before it ever claims the row.
+            with (
+                patch.object(main_module, "_enqueue_ci_source_analysis", _enqueue_boom),
+                pytest.raises(RuntimeError, match="enqueue failed"),
+            ):
+                test_client.post(
+                    "/results/job-claim/analyze",
+                    json={"ai_provider": "claude", "ai_model": "test-model"},
+                )
+
+            stored = await storage.get_result("job-claim")
+
+        assert stored["status"] == "completed"
+        assert stored["analysis_started_at"] == ingest_start
+        assert stored["completed_at"] == ingest_end
+
+
 # --- the enriched_xml omission audit (#456) ---------------------------------
 
 

@@ -590,6 +590,7 @@ class TestCollectServerStatus:
             "database",
             "sidecar",
             "activity",
+            "health_monitor",
             "warnings",
         }
         assert status["disk"]["used_ratio"] == 0.25
@@ -606,6 +607,72 @@ class TestCollectServerStatus:
         dumped = json.dumps(status).lower()
         for needle in ("api_key", "token", "password", "secret"):
             assert needle not in dumped
+
+    def test_health_monitor_block_reports_state_and_labels(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """The card reads the monitor's own state, labels included (#464)."""
+        from types import SimpleNamespace
+
+        from rootcoz import health_monitor as hm
+
+        monitor = hm.HealthMonitor()
+        monitor.evaluate(
+            hm.HealthSample(
+                now=time.monotonic(),
+                health_up=1,
+                failing_checks=(),
+                server_error_rate=0.0,
+                requests_in_window=0,
+                running_analysis_age_seconds=7500,
+            ),
+            hm.Thresholds(
+                health_down_seconds=300,
+                error_rate=0.1,
+                error_rate_seconds=600,
+                stuck_analysis_seconds=7200,
+            ),
+        )
+        monkeypatch.setattr(hm, "health_monitor", monitor)
+        monkeypatch.setattr(
+            hm,
+            "get_settings",
+            lambda: SimpleNamespace(
+                enable_health_monitor=True,
+                health_monitor_interval_seconds=60,
+                health_alert_unhealthy_seconds=300,
+                health_alert_error_rate_percent=10,
+                health_alert_error_rate_seconds=600,
+                health_alert_stuck_analysis_seconds=7200,
+            ),
+        )
+        monkeypatch.setattr(server_status, "read_sidecar", _sidecar_up)
+        cgroup, proc = _fake_roots(tmp_path)
+
+        status = self._status(tmp_path, cgroup_root=cgroup, proc_self=proc)
+        block = status["health_monitor"]
+        assert block["enabled"] is True
+        assert block["interval_seconds"] == 60
+        assert block["last_sample_ago_seconds"] is not None
+        rows = {row["key"]: row for row in block["conditions"]}
+        assert rows["stuck_analysis"]["state"] == "firing"
+        assert rows["stuck_analysis"]["age_seconds"] == 7500
+        assert rows["stuck_analysis"]["age_known"] is True
+        assert rows["health_down"]["state"] == "ok"
+        assert rows["health_down"]["label"] == "Health down"
+        assert rows["error_rate"]["label"] == "Error rate"
+        assert rows["stuck_analysis"]["label"] == "Analysis stuck"
+
+        # A monitor read that crashes degrades that one card, not the snapshot.
+        async def _boom():
+            raise RuntimeError("settings store is locked")
+
+        monkeypatch.setattr(server_status, "monitor_block", _boom)
+        failed = self._status(tmp_path, cgroup_root=cgroup, proc_self=proc)
+        assert failed["health_monitor"]["available"] is False
+        # `_guarded` keeps the block's own fallback keys and names the failure.
+        assert "settings store is locked" in failed["health_monitor"]["reason"]
+        assert failed["disk"]["available"] is True
 
     def test_a_crashed_sidecar_probe_still_raises_the_warning(
         self, tmp_path, monkeypatch

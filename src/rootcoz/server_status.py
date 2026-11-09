@@ -19,12 +19,12 @@ import os
 import pathlib
 import time
 from collections.abc import Coroutine
-from datetime import UTC, datetime
 from typing import Any
 
 import aiosqlite
 
 from rootcoz import get_child_logger, storage
+from rootcoz.health_monitor import monitor_block
 from rootcoz.monitoring import _check_http_service, _get_app_version, read_data_usage
 
 logger = get_child_logger(__name__)
@@ -706,7 +706,7 @@ async def _running_analyses() -> list[dict[str, Any]]:
             "job_name": row.get("job_name", ""),
             "build_number": row.get("build_number", 0),
             "status": row.get("status", ""),
-            "elapsed_seconds": _elapsed_seconds(
+            "elapsed_seconds": storage.elapsed_seconds_since(
                 row.get("analysis_started_at") or row.get("created_at")
             ),
         }
@@ -734,19 +734,6 @@ async def _activity_block(
     except aiosqlite.Error, OSError:
         logger.debug("Server status: activity read failed", exc_info=True)
     return activity
-
-
-def _elapsed_seconds(since: str | None) -> int | None:
-    """Seconds since an SQLite ``CURRENT_TIMESTAMP`` value; None when unusable."""
-    if not since:
-        return None
-    try:
-        started = datetime.fromisoformat(since)
-    except ValueError:
-        return None
-    if started.tzinfo is None:
-        started = started.replace(tzinfo=UTC)
-    return max(0, round((datetime.now(UTC) - started).total_seconds()))
 
 
 async def collect_server_status(
@@ -786,10 +773,19 @@ async def collect_server_status(
 
     # Guarded like every other probe: the activity queries share the same
     # deadline, so a stalled database read cannot hold the request open.
-    activity = await _guarded(
-        "activity",
-        _activity_block(chat_turns=chat_turns, sse_clients=sse_clients),
-        {},
+    activity, health_monitor = await asyncio.gather(
+        _guarded(
+            "activity",
+            _activity_block(chat_turns=chat_turns, sse_clients=sse_clients),
+            {},
+        ),
+        # Guarded like every other probe: a settings read failure degrades this one
+        # card instead of failing the admin page.
+        _guarded(
+            "health_monitor",
+            monitor_block(),
+            _unavailable("monitor state unavailable"),
+        ),
     )
 
     status: dict[str, Any] = {
@@ -800,6 +796,7 @@ async def collect_server_status(
         "database": database,
         "sidecar": sidecar,
         "activity": activity,
+        "health_monitor": health_monitor,
     }
     status["warnings"] = build_warnings(
         disk=disk, memory=memory, process=status["process"], sidecar=sidecar

@@ -159,6 +159,30 @@ class ErrorRateTracker:
 # Singleton tracker used by the middleware
 error_tracker = ErrorRateTracker()
 
+#: Fewer requests than this in the window cannot measure a rate: the rolling window
+#: evicts one request at a time, so a 100 % share on the last nine requests is a
+#: draining storm, not a recovery (nor a condition). The in-process 5xx trigger and
+#: the health monitor's ``error_rate`` condition both use this floor.
+ERROR_RATE_MIN_REQUESTS = 10
+
+
+def server_error_share(snapshot: dict[str, Any]) -> tuple[float, int, int]:
+    """The 5xx share of a rolling-window snapshot, with its counts.
+
+    One definition of "the server is erroring": read by the instantaneous 5xx
+    trigger and by the health monitor's ``error_rate`` condition. The counts come
+    back too because the trigger's message prints ``(5xx/total)``.
+
+    Returns:
+        ``(share, server_errors, total_requests)``; the share is ``0.0`` for an
+        empty window rather than a ``ZeroDivisionError``.
+    """
+    total_requests = int(snapshot.get("total_requests") or 0)
+    server_errors = int((snapshot.get("error_counts") or {}).get("5xx") or 0)
+    if total_requests <= 0:
+        return 0.0, server_errors, total_requests
+    return server_errors / total_requests, server_errors, total_requests
+
 
 # ---------------------------------------------------------------------------
 # Health checks
@@ -883,6 +907,7 @@ async def dispatch_alert(
     message: str,
     *,
     subject: str | None = None,
+    bypass_throttle: bool = False,
 ) -> None:
     """Send alert via all configured channels, respecting throttling.
 
@@ -890,10 +915,14 @@ async def dispatch_alert(
         event_type: Event type key for throttling (e.g. "high_error_rate").
         message: Alert message body.
         subject: Email subject line (defaults to event_type).
+        bypass_throttle: Skip the per-event-type cooldown. The health monitor's
+            state machine is its own dedup (it notifies on transitions only), and
+            a time cooldown laid on top of it can drop a *recovery* — the very
+            notice this is for.
 
     Never raises — all alerting failures are swallowed.
     """
-    if not alert_throttler.should_alert(event_type):
+    if not bypass_throttle and not alert_throttler.should_alert(event_type):
         logger.debug("Alert throttled for event_type=%s", event_type)
         return
     try:
@@ -912,10 +941,21 @@ async def dispatch_alert(
 # ---------------------------------------------------------------------------
 
 
+def health_up_from_status(status: str) -> int:
+    """Map a health status to the ``rootcoz_health_up`` gauge: only ``unhealthy`` is 0.
+
+    ``degraded`` is up: a non-liveness probe failed (Jenkins, ReportPortal, the
+    audit log or an undecodable row), and treating that as down would fire the
+    health alert on every such degradation.
+    """
+    return 0 if status == "unhealthy" else 1
+
+
 def render_prometheus_metrics(
     *,
     health_up: int | None = None,
     active_analyses: int | None = None,
+    oldest_analysis_age_seconds: int | None = None,
     audit_write_failures: int | None = None,
     data_used_bytes: int | None = None,
     data_capacity_bytes: int | None = None,
@@ -927,6 +967,9 @@ def render_prometheus_metrics(
             metric is omitted.
         active_analyses: Number of currently active (pending/running/waiting)
             analyses. When None the metric is omitted.
+        oldest_analysis_age_seconds: Age of the longest-running analysis, from its
+            analysis start. When None (nothing running, or the age could not be
+            read) the metric is omitted — never a ``0`` that reads as "just started".
         audit_write_failures: Audit rows that could not be written since
             process start. When None the metric is omitted.
         data_used_bytes: Bytes used on the filesystem holding the data
@@ -971,6 +1014,16 @@ def render_prometheus_metrics(
         )
         lines.append("# TYPE rootcoz_active_analyses gauge")
         lines.append(f"rootcoz_active_analyses {active_analyses}")
+
+    if oldest_analysis_age_seconds is not None:
+        lines.append(
+            "# HELP rootcoz_oldest_analysis_age_seconds Age of the longest-running "
+            "analysis, measured from its analysis start."
+        )
+        lines.append("# TYPE rootcoz_oldest_analysis_age_seconds gauge")
+        lines.append(
+            f"rootcoz_oldest_analysis_age_seconds {oldest_analysis_age_seconds}"
+        )
 
     if audit_write_failures is not None:
         lines.append(

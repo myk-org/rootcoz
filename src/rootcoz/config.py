@@ -895,6 +895,56 @@ class Settings(BaseSettings):
         default="", description="Recipient address for email alerts."
     )
 
+    # --- Built-in health monitor (#464) ---
+    # Opt-in, like the chart's alerts.enabled: a loop that emails/Slacks must be
+    # asked for. Applied at runtime by the monitor's own settings poll.
+    enable_health_monitor: bool = Field(
+        default=False,
+        description=(
+            "Watch three health conditions in process and alert on their "
+            "transitions. Applied without a restart."
+        ),
+    )
+    health_monitor_interval_seconds: int = Field(
+        default=60,
+        ge=5,
+        le=3600,
+        description=(
+            "How often the health monitor samples. Each tick runs the same probes "
+            "/api/health runs."
+        ),
+    )
+    health_alert_unhealthy_seconds: int = Field(
+        default=300,
+        ge=1,
+        le=604800,
+        description="How long the server must be unhealthy before Health down fires.",
+    )
+    health_alert_error_rate_percent: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description=(
+            "5xx share of the rolling window, in percent, that the Error rate "
+            "condition watches."
+        ),
+    )
+    health_alert_error_rate_seconds: int = Field(
+        default=600,
+        ge=1,
+        le=604800,
+        description="How long the 5xx share must stay above the threshold before Error rate fires.",
+    )
+    health_alert_stuck_analysis_seconds: int = Field(
+        default=7200,
+        ge=1,
+        le=604800,
+        description=(
+            "How long a running analysis may run before Analysis stuck fires. "
+            "The age is the duration: no hold is added on top of it."
+        ),
+    )
+
     # --- Auth (#347) ---
     # Upper bound keeps datetime arithmetic in create_session/renew_session
     # well inside datetime.max even for the longest-lived deployment
