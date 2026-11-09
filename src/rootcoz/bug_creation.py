@@ -559,14 +559,18 @@ Do not wrap in code blocks or JSON. Just the summary on the first line, then the
 def parse_github_repo_url(repo_url: str) -> tuple[str, str]:
     """Extract owner and repo from a GitHub repository URL.
 
-    Supports https://github.com/owner/repo and
-    https://github.com/owner/repo.git formats.
+    Supports https://github.com/owner/repo, https://github.com/owner/repo.git
+    and the ``git://`` clone form ``_validate_repo_url`` also accepts. The host
+    is matched case-insensitively (``GitHub.com``); the path is not lowercased,
+    since owner and repo names are case-sensitive.
 
     Returns (owner, repo) tuple.
 
     Raises ValueError if the URL cannot be parsed.
     """
-    match = re.match(r"https?://github\.com/([^/]+)/([^/]+?)(?:\.git)?/?$", repo_url)
+    match = re.match(
+        r"(?:https?|git)://(?i:github\.com)/([^/]+)/([^/]+?)(?:\.git)?/?$", repo_url
+    )
     if not match:
         raise ValueError(f"Cannot parse GitHub repo URL: {repo_url}")
     return match.group(1), match.group(2)

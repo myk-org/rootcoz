@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, PropertyMock, patch
 
 import pytest
 
-from rootcoz import storage
+from rootcoz import issue_matching, storage
 from rootcoz.config import Settings
 from rootcoz.models import (
     AdditionalRepo,
@@ -194,7 +194,9 @@ async def test_all_direct_groups_fail_preserves_child_report(
             "rootcoz.main._auto_review_matching_failures", new_callable=AsyncMock
         ) as review,
         patch(
-            "rootcoz.main._enrich_result_with_jira", new_callable=AsyncMock
+            "rootcoz.main._enrich_result_with_jira",
+            new_callable=AsyncMock,
+            return_value=issue_matching.tracker_search(),
         ) as enrich,
         patch(
             "rootcoz.main.populate_failure_history", new_callable=AsyncMock
@@ -579,7 +581,11 @@ async def test_fully_failed_analysis_still_persists_test_entries_and_counts(
             side_effect=RuntimeError("group failed"),
         ),
         patch("rootcoz.main._auto_review_matching_failures", new_callable=AsyncMock),
-        patch("rootcoz.main._enrich_result_with_jira", new_callable=AsyncMock),
+        patch(
+            "rootcoz.main._enrich_result_with_jira",
+            new_callable=AsyncMock,
+            return_value=issue_matching.tracker_search(),
+        ),
         patch("rootcoz.main.populate_failure_history", new_callable=AsyncMock),
         patch("rootcoz.main._auto_assign_metadata", new_callable=AsyncMock),
         patch(
@@ -701,7 +707,11 @@ async def test_fully_failed_analysis_caches_no_counts_when_persist_fails(
         ),
         patch("rootcoz.main.replace_job_test_entries", new=flaky_write),
         patch("rootcoz.main._auto_review_matching_failures", new_callable=AsyncMock),
-        patch("rootcoz.main._enrich_result_with_jira", new_callable=AsyncMock),
+        patch(
+            "rootcoz.main._enrich_result_with_jira",
+            new_callable=AsyncMock,
+            return_value=issue_matching.tracker_search(),
+        ),
         patch("rootcoz.main.populate_failure_history", new_callable=AsyncMock),
         patch("rootcoz.main._auto_assign_metadata", new_callable=AsyncMock),
         patch(
@@ -950,3 +960,119 @@ async def test_additional_repos_are_all_cloned_before_the_first_ai_call(
     assert events[-1] == "ai"
     assert sorted(events[:-1]) == sorted(f"clone:{repo.name}" for repo in repos)
     assert all((tmp_path / repo.name).is_dir() for repo in repos)
+
+
+@pytest.mark.asyncio
+async def test_github_duplicate_search_has_its_own_phase(
+    temp_db_path: Path,
+    tmp_path: Path,
+) -> None:
+    """A search the user can see is a phase, not a silent gap (D10, T21)."""
+    from rootcoz.main import _process_ci_source_analysis
+
+    body = UnifiedAnalyzeRequest(
+        type="raw",
+        failures=[FailedTest(test_name="test", error_message="err")],
+        ai_provider="claude",
+        ai_model="model",
+    )
+    analysis = FailureAnalysis(
+        test_name="test",
+        error="err",
+        analysis=AnalysisDetail(
+            details="done",
+            product_bug_report=ProductBugReport(
+                jira_search_keywords=["bug"],
+            ),
+        ),
+    )
+    source_result = CISourceResult(
+        failures=body.failures,
+        passed_tests=[BaseTestEntry(test_name="passed", status="passed")],
+    )
+    deployment = Settings(
+        tests_repo_url="https://github.com/org/product",
+        github_token="deployment-token",  # pragma: allowlist secret
+    )
+    merged = Settings(tests_repo_url="https://github.com/org/product")
+
+    async def jira(*_args, **_kwargs):
+        return issue_matching.tracker_search(searched=True, scope=["PROJ"])
+
+    with (
+        patch.object(storage, "DB_PATH", temp_db_path),
+        patch("rootcoz.main.get_settings", return_value=deployment),
+        patch("rootcoz.main.create_source_from_request") as source,
+        patch(
+            "rootcoz.main.setup_analysis_workspace",
+            new_callable=AsyncMock,
+            return_value=(WorkspaceSetupResult(tmp_path), ""),
+        ),
+        patch(
+            "rootcoz.main._preflight_sidecar_check",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "rootcoz.main._validate_catalog_pair",
+            new_callable=AsyncMock,
+            return_value=("claude", "model"),
+        ),
+        patch(
+            "rootcoz.main._create_ai_auth_header",
+            new_callable=AsyncMock,
+            return_value="",
+        ),
+        patch(
+            "rootcoz.main.run_orchestrated_analysis",
+            new_callable=AsyncMock,
+            return_value=([analysis], []),
+        ),
+        patch("rootcoz.main.enrich_with_jira_matches", side_effect=jira),
+        patch("rootcoz.main.populate_failure_history", new_callable=AsyncMock),
+        patch("rootcoz.main._auto_review_matching_failures", new_callable=AsyncMock),
+        patch("rootcoz.main._auto_assign_metadata", new_callable=AsyncMock),
+        patch(
+            "rootcoz.main.storage.make_classifications_visible", new_callable=AsyncMock
+        ),
+        patch(
+            "rootcoz.github_issues.search_github_issues",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+        patch.object(
+            Settings, "jira_enabled", new_callable=PropertyMock, return_value=True
+        ),
+    ):
+        source.return_value.raw_xml = None
+        source.return_value.requires_pre_fetch.return_value = False
+        source.return_value.prepare_workspace = AsyncMock(return_value=[])
+        source.return_value.fetch = AsyncMock(return_value=source_result)
+        source.return_value.persist_fetch_metadata = AsyncMock()
+        await storage.init_db()
+        await storage.save_result("dup-phase", "", "pending", {})
+        await _process_ci_source_analysis(
+            job_id="dup-phase",
+            body=body,
+            merged=merged,
+            display_name="test",
+            ai_provider="claude",
+            ai_model="model",
+            peer_ai_configs=None,
+            tests_repo_url="",
+            tests_repo_ref="",
+            resolved_tests_repo_token="",
+            additional_repos_list=[],
+            base_url="",
+        )
+        row = await storage.get_result("dup-phase")
+
+    phases = [entry["phase"] for entry in row["result"]["progress_log"]]
+    assert phases == [
+        "fetching",
+        "analyzing",
+        "enriching_jira",
+        "enriching_github_search",
+        "saving",
+    ]
+    assert row["result"]["tracker_search"]["github"]["searched"] is True

@@ -80,9 +80,11 @@ This clones the tests repository plus both extra repositories into the analysis 
 
    > **Tip:** Peer models need credentials. Either they use your own stored key or the server's, depending on the `Use server credentials` permission you were granted.
 
-5. **Turn on Jira search for duplicate bugs.**
+5. **Turn on duplicate search for existing tickets.**
 
    Enable `Enable Jira search` in the `Jira Integration` section, select an auth method in Server Settings, and supply `Project Key`. While analyzing, RootCoz asks the model for three to five short `jira_search_keywords` for each `PRODUCT BUG` instead of generic words, and uses them to find existing bugs before creating a new one. The same pattern produces `tests_repo_search_keywords` for matching GitHub issues.
+
+   **One set of keywords, two trackers.** The terms are tracker-neutral, so the same `jira_search_keywords` also drive a GitHub duplicate search: RootCoz searches the run's own repositories — the effective `TESTS_REPO_URL` plus every additional repository, GitHub URLs only — for an issue that has already been filed for this bug. That search is read-only and uses the deployment's `GITHUB_TOKEN`; no user credential is read, and an explicit `ENABLE_GITHUB_ISSUES=false` turns it off. Matches land in `product_bug_report.github_matches` and are rendered under **Matching GitHub Issues** in the `Bug Report` section. They are deliberately not the same field as `code_fix.tests_repo_matches`, which answers a different question: whether there is test-side code to change. Filing is unchanged and still uses your own credential.
 
    | Server setting | What it controls |
    | --- | --- |
@@ -95,6 +97,19 @@ This clones the tests repository plus both extra repositories into the analysis 
    | `enable_jira_issues` | Whether new Jira bugs can be created, independently of search |
 
    Search is enrichment only. Creating issues still requires working credentials, and a per-user `Jira Email` and `Jira Token` lets created issues land under your name. See [Managing Your Account and Notifications](manage-account-and-notifications.html) for details.
+
+   **Why a tracker was not searched.** Every result carries `result.tracker_search` with one record per tracker — `tracker_search.jira` and `tracker_search.github` — each with the full shape:
+
+   | Field | Meaning |
+   | --- | --- |
+   | `searched` | `true` only when at least one search request actually succeeded |
+   | `reason` | Why it did not search, why it searched only partially, or `""` |
+   | `scope` | What was searched: GitHub repository URLs, or `[jira_project_key]` |
+   | `keyword_sets` | Distinct keyword sets searched |
+   | `candidates` | Raw candidates the tracker returned |
+   | `matches` | Candidates that survived relevance filtering and were attached |
+
+   `searched: true` with `candidates: 0` means *looked and found nothing*; `searched: false` with a `reason` means *could not look* — no token, no repository in scope, the tracker disabled, or every search failing. A missing `tracker_search` key means "not recorded" (a result written before this field existed, or an analysis that failed before enrichment), never "nothing found".
 
 6. **Collect build artifacts when text output is not enough.**
 

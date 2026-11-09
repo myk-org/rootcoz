@@ -64,7 +64,7 @@ from pydantic import BaseModel, Field, SecretStr, ValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
-from rootcoz import get_child_logger, server_status, storage
+from rootcoz import get_child_logger, issue_matching, server_status, storage
 from rootcoz import transcripts as sidecar_transcripts
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
@@ -119,6 +119,7 @@ from rootcoz.config import (
     duplicate_additional_repo_names,
     get_settings,
     jira_method_missing_fields,
+    jira_unavailable_reason,
     normalize_jira_auth_mode,
     parse_additional_repos,
     parse_peer_configs,
@@ -175,8 +176,14 @@ from rootcoz.feedback import (
     generate_feedback_preview,
     scrub_sensitive_data,
 )
-from rootcoz.github_issues import enrich_with_tests_repo_matches
+from rootcoz.github_issues import (
+    duplicate_search_blocker,
+    enrich_with_github_duplicate_matches,
+    enrich_with_tests_repo_matches,
+    run_repo_urls,
+)
 from rootcoz.health_monitor import run_health_monitor
+from rootcoz.issue_matching import TrackerSearch
 from rootcoz.jenkins import JenkinsClient
 from rootcoz.jira import (
     JiraClient,
@@ -5140,7 +5147,10 @@ async def _enrich_result_with_jira(
     ai_provider: str = "",
     ai_model: str = "",
     job_id: str = "",
-) -> None:
+    *,
+    requested_enable_jira: bool | None = None,
+    deployment: Settings,
+) -> TrackerSearch:
     """Enrich PRODUCT BUG failures with Jira matches.
 
     Collects all FailureAnalysis objects from the provided list,
@@ -5149,13 +5159,39 @@ async def _enrich_result_with_jira(
 
     Args:
         failures: Mixed list of FailureAnalysis and ChildJobAnalysis objects.
-        settings: Application settings with Jira configuration.
+        settings: The request's effective settings (may carry per-request
+            overrides such as ``jira_project_key``).
         ai_provider: AI provider for Jira relevance filtering.
         ai_model: AI model for Jira relevance filtering.
         job_id: Job identifier for token usage tracking.
+        requested_enable_jira: The request's own ``enable_jira`` flag, ``None``
+            when the request did not mention it.
+        deployment: The deployment settings, used only to word the reason a
+            search did not run.
+
+    Returns:
+        The per-tracker record to stamp on the result; never raises.
     """
-    if not settings.jira_enabled:
-        return
+    if not (settings.jira_enabled and requested_enable_jira is not False):
+        # Word the refusal truthfully, in this order: the request refused (on a
+        # deployment that is fine), the deployment is unconfigured, or the run's
+        # own settings lack a field the request did not supply.
+        if requested_enable_jira is False and not jira_unavailable_reason(deployment):
+            reason = (
+                "Jira search is disabled by this analysis request (enable_jira=false)"
+            )
+        elif not deployment.jira_enabled:
+            reason = jira_unavailable_reason(deployment) or "Jira search is disabled"
+        else:
+            reason = (
+                jira_unavailable_reason(settings)
+                or "Jira search is disabled by this analysis request"
+            )
+        logger.info("Jira search not run for job=%s: %s", job_id, reason)
+        return issue_matching.tracker_search(
+            reason=reason,
+            scope=[settings.jira_project_key] if settings.jira_project_key else [],
+        )
 
     all_failures = _collect_all_failures(failures)
     if not any(
@@ -5163,19 +5199,93 @@ async def _enrich_result_with_jira(
         and failure.analysis.product_bug_report.jira_search_keywords
         for failure in all_failures
     ):
-        logger.debug(
-            "Skipping Jira enrichment without product bug keywords for job=%s", job_id
+        reason = "no PRODUCT BUG failure carried search keywords"
+        logger.info("Jira search not run for job=%s: %s", job_id, reason)
+        return issue_matching.tracker_search(
+            reason=reason,
+            scope=[settings.jira_project_key] if settings.jira_project_key else [],
         )
-        return
     await safe_update_progress(job_id, "enriching_jira")
     logger.info("Enriching failures with Jira for job=%s", job_id)
-    await enrich_with_jira_matches(
+    return await enrich_with_jira_matches(
         all_failures,
         settings,
         ai_provider,
         ai_model,
         job_id=job_id,
     )
+
+
+async def _enrich_result_with_github_duplicates(
+    failures: Sequence[FailureAnalysis | ChildJobAnalysis],
+    settings: Settings,
+    deployment: Settings,
+    ai_provider: str = "",
+    ai_model: str = "",
+    job_id: str = "",
+    tests_repo_url: str = "",
+    additional_repos: Sequence[Any] = (),
+) -> TrackerSearch:
+    """Enrich PRODUCT BUG failures with already-filed GitHub issues.
+
+    Searches the run's own repositories — the existing-issue question, kept
+    distinct from the tests-repo code-fix search. Uses the deployment
+    credential only: no user or session credential is read.
+
+    Args:
+        failures: Mixed list of FailureAnalysis and ChildJobAnalysis objects.
+        settings: Settings the AI call is configured from.
+        deployment: Deployment settings (the token and the on/off gate).
+        ai_provider: AI provider for relevance filtering.
+        ai_model: AI model for relevance filtering.
+        job_id: Job identifier for token usage tracking.
+        tests_repo_url: The run's effective tests repo URL.
+        additional_repos: The run's additional repositories.
+
+    Returns:
+        The per-tracker record to stamp on the result; never raises.
+    """
+    repo_urls, skipped_repos = run_repo_urls(tests_repo_url, additional_repos)
+    github_token = (
+        deployment.github_token.get_secret_value() if deployment.github_token else ""
+    )
+    blocker = duplicate_search_blocker(
+        deployment, github_token, repo_urls, skipped_repos=skipped_repos
+    )
+    if blocker:
+        logger.info("GitHub duplicate search not run for job=%s: %s", job_id, blocker)
+        return issue_matching.tracker_search(reason=blocker, scope=repo_urls)
+
+    all_failures = _collect_all_failures(failures)
+    if not any(
+        isinstance(failure.analysis.product_bug_report, ProductBugReport)
+        and failure.analysis.product_bug_report.jira_search_keywords
+        for failure in all_failures
+    ):
+        reason = "no PRODUCT BUG failure carried search keywords"
+        logger.info("GitHub duplicate search not run for job=%s: %s", job_id, reason)
+        return issue_matching.tracker_search(reason=reason, scope=repo_urls)
+
+    await safe_update_progress(job_id, "enriching_github_search")
+    logger.info("Enriching failures with GitHub duplicate matches for job=%s", job_id)
+    return await enrich_with_github_duplicate_matches(
+        all_failures,
+        settings,
+        github_token,
+        ai_provider,
+        ai_model,
+        job_id=job_id,
+        repo_urls=repo_urls,
+    )
+
+
+def _stamp_tracker_search(
+    data: dict[str, Any],
+    jira_record: TrackerSearch,
+    github_record: TrackerSearch,
+) -> None:
+    """Attach the per-tracker search record to the stored result."""
+    data["tracker_search"] = {"jira": jira_record, "github": github_record}
 
 
 async def _enrich_result_with_tests_repo_matches(
@@ -6866,14 +6976,16 @@ async def _process_ci_source_analysis(
                     )
 
                 # Enrich child failures before saving
-                if _resolve_enable_jira(body, merged) and merged.jira_enabled:
-                    await _enrich_result_with_jira(
-                        child_job_analyses,
-                        merged,
-                        ai_provider,
-                        ai_model,
-                        job_id=job_id,
-                    )
+                deployment = get_settings()
+                jira_record = await _enrich_result_with_jira(
+                    child_job_analyses,
+                    merged,
+                    ai_provider,
+                    ai_model,
+                    job_id=job_id,
+                    requested_enable_jira=body.enable_jira,
+                    deployment=deployment,
+                )
                 if merged.tests_repo_url or tests_repo_url:
                     await _enrich_result_with_tests_repo_matches(
                         child_job_analyses,
@@ -6883,6 +6995,16 @@ async def _process_ci_source_analysis(
                         job_id=job_id,
                         tests_repo_url=tests_repo_url,
                     )
+                github_record = await _enrich_result_with_github_duplicates(
+                    child_job_analyses,
+                    merged,
+                    deployment,
+                    ai_provider,
+                    ai_model,
+                    job_id=job_id,
+                    tests_repo_url=resolve_tests_repo_url(body, merged),
+                    additional_repos=additional_repos_list,
+                )
 
                 analysis_result = FailureAnalysisResult(
                     job_id=job_id,
@@ -6900,6 +7022,7 @@ async def _process_ci_source_analysis(
                 result_data["failed_analysis_groups"] = _count_failed_child_groups(
                     child_job_analyses
                 )
+                _stamp_tracker_search(result_data, jira_record, github_record)
                 if result_data["failed_analysis_groups"]:
                     logger.warning(
                         "Analysis job %s: %d child group(s) failed",
@@ -7018,10 +7141,16 @@ async def _process_ci_source_analysis(
         logger.debug(
             f"Enriching with Jira matches (enable_jira={_resolve_enable_jira(body, merged)})"
         )
-        if _resolve_enable_jira(body, merged) and merged.jira_enabled:
-            await _enrich_result_with_jira(
-                enrich_targets, merged, ai_provider, ai_model, job_id=job_id
-            )
+        deployment = get_settings()
+        jira_record = await _enrich_result_with_jira(
+            enrich_targets,
+            merged,
+            ai_provider,
+            ai_model,
+            job_id=job_id,
+            requested_enable_jira=body.enable_jira,
+            deployment=deployment,
+        )
 
         # Enrich with tests repo matches
         logger.debug(
@@ -7036,6 +7165,18 @@ async def _process_ci_source_analysis(
                 job_id=job_id,
                 tests_repo_url=tests_repo_url,
             )
+
+        # Enrich with already-filed GitHub issues over the run's repositories
+        github_record = await _enrich_result_with_github_duplicates(
+            enrich_targets,
+            merged,
+            deployment,
+            ai_provider,
+            ai_model,
+            job_id=job_id,
+            tests_repo_url=resolve_tests_repo_url(body, merged),
+            additional_repos=additional_repos_list,
+        )
 
         # Build enriched XML if applicable (FileSource exposes raw_xml)
         enriched_xml = None
@@ -7071,6 +7212,7 @@ async def _process_ci_source_analysis(
             result_data["child_job_analyses"] = [
                 c.model_dump(mode="json") for c in child_job_analyses
             ]
+        _stamp_tracker_search(result_data, jira_record, github_record)
         _stamp_result_metadata(result_data, source_result)
         logger.info(f"Analysis completed for job_id={job_id}: {summary}")
         await _preserve_request_params(job_id, result_data)
@@ -10296,13 +10438,25 @@ async def preview_jira_bug(
                         )
                     finally:
                         ai_username.reset(token)
-                    # Merge AI score into original candidate data to preserve all fields
-                    candidate_by_key = {c["key"]: c for c in candidates}
-                    similar = [
-                        {**candidate_by_key[m.key], "score": m.score}
-                        for m in matches
-                        if m.key in candidate_by_key
-                    ]
+                    if matches is None:
+                        # The filter could not judge — not the same as judging
+                        # every candidate irrelevant.
+                        logger.warning(
+                            "Jira relevance filter returned no verdict for %d "
+                            "candidate(s) for job_id=%s, returning unfiltered "
+                            "candidates",
+                            len(candidates),
+                            job_id,
+                        )
+                        similar = candidates
+                    else:
+                        # Merge AI score into original candidate data to preserve all fields
+                        candidate_by_key = {c["key"]: c for c in candidates}
+                        similar = [
+                            {**candidate_by_key[m.key], "score": m.score}
+                            for m in matches
+                            if m.key in candidate_by_key
+                        ]
                 except Exception:
                     logger.warning(
                         "AI relevance filtering failed for job_id=%s, "

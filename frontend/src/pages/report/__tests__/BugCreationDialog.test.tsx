@@ -447,6 +447,25 @@ describe('BugCreationDialog submit retry', () => {
   })
 })
 
+describe('BugCreationDialog similar issues', () => {
+  it('lists similar issues through the shared match list', async () => {
+    const user = userEvent.setup()
+    post.mockResolvedValue({
+      title: 'Issue title',
+      body: 'Issue body',
+      similar_issues: [
+        { number: 42, key: '', title: 'Login 500', url: 'https://github.com/org/repo/issues/42', status: 'open' },
+      ],
+    })
+    await openGeneratedPreview(user)
+
+    expect(screen.getByText('1 similar issue found')).toBeInTheDocument()
+    const link = screen.getByText('#42: Login 500').closest('a')
+    expect(link).toHaveAttribute('href', 'https://github.com/org/repo/issues/42')
+    expect(screen.getByText('open')).toBeInTheDocument()
+  })
+})
+
 describe('BugCreationDialog tracker credential', () => {
   const CREDENTIAL_KEYS = ['github_token', 'jira_token', 'jira_email', 'jira_sa_token']
 

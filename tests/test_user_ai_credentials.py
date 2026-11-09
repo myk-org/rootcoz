@@ -991,7 +991,7 @@ async def test_failed_issue_filter_result_does_not_log_key(monkeypatch):
             await issue_matching.filter_issue_matches_with_ai(
                 "bug", "description", [{"key": "TEST-1"}], "p", "m"
             )
-            == []
+            is None
         )
         assert secret not in str(warnings)
         assert "AI call failed" in str(warnings)

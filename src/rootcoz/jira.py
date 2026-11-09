@@ -17,11 +17,23 @@ from urllib.parse import urlparse
 import httpx
 
 from rootcoz import get_child_logger
-from rootcoz.config import Settings, get_settings, normalize_jira_auth_mode
+from rootcoz.config import (
+    Settings,
+    get_settings,
+    jira_unavailable_reason,
+    normalize_jira_auth_mode,
+)
 from rootcoz.error_messages import deployment_credential_message
-from rootcoz.issue_matching import filter_issue_matches_with_ai
+from rootcoz.issue_matching import (
+    MAX_FILTER_PROMPT_CHARS,
+    TrackerSearch,
+    build_filter_prompt,
+    collect_product_bug_reports,
+    filter_issue_matches_with_ai,
+    search_failure_reason,
+    tracker_search,
+)
 from rootcoz.models import (
-    AnalysisDetail,
     FailureAnalysis,
     JiraMatch,
     ProductBugReport,
@@ -916,7 +928,7 @@ async def filter_matches_with_ai(
     ai_model: str,
     ai_call_timeout: int | None = None,
     job_id: str = "",
-) -> list[JiraMatch]:
+) -> list[JiraMatch] | None:
     """Use AI to determine which Jira candidates are relevant to the bug.
 
     Delegates to the shared :func:`filter_issue_matches_with_ai` and
@@ -932,7 +944,9 @@ async def filter_matches_with_ai(
         job_id: Job identifier for token usage tracking.
 
     Returns:
-        List of JiraMatch objects for relevant candidates only.
+        List of JiraMatch objects for relevant candidates only, or ``None``
+        when the filter could not judge at all (see
+        :func:`filter_issue_matches_with_ai`).
     """
     # Ensure candidates have a consistent 'key' field for the shared filter
     evaluations = await filter_issue_matches_with_ai(
@@ -945,6 +959,8 @@ async def filter_matches_with_ai(
         job_id=job_id,
         call_type="jira_filter",
     )
+    if evaluations is None:
+        return None
 
     # Convert evaluations to JiraMatch objects
     candidate_by_key = {c["key"]: c for c in candidates}
@@ -967,32 +983,13 @@ async def filter_matches_with_ai(
     return relevant_matches
 
 
-def _collect_product_bug_reports(
-    failures: Sequence[FailureAnalysis],
-) -> list[ProductBugReport]:
-    """Collect all ProductBugReport instances from a list of failures.
-
-    Args:
-        failures: List of failure analyses to scan.
-
-    Returns:
-        List of ProductBugReport objects found.
-    """
-    reports: list[ProductBugReport] = []
-    for failure in failures:
-        detail: AnalysisDetail = failure.analysis
-        if isinstance(detail.product_bug_report, ProductBugReport):
-            reports.append(detail.product_bug_report)
-    return reports
-
-
 async def enrich_with_jira_matches(
     failures: Sequence[FailureAnalysis],
     settings: Settings,
     ai_provider: str = "",
     ai_model: str = "",
     job_id: str = "",
-) -> None:
+) -> TrackerSearch:
     """Search Jira for matching issues and attach results in-place.
 
     Collects PRODUCT BUG failures, deduplicates by keyword set,
@@ -1000,7 +997,9 @@ async def enrich_with_jira_matches(
     and attaches results to each ``ProductBugReport.jira_matches``.
 
     This function never raises — all errors are logged and swallowed
-    so the analysis pipeline is never interrupted.
+    so the analysis pipeline is never interrupted — and returns a
+    :class:`~rootcoz.issue_matching.TrackerSearch` recording whether the
+    search ran, what it searched and why it could not.
 
     Args:
         failures: Failure analyses to enrich (modified in-place).
@@ -1009,13 +1008,14 @@ async def enrich_with_jira_matches(
         ai_model: AI model for relevance filtering.
         job_id: Job identifier for token usage tracking.
     """
+    # No project key means nothing is in scope — not one blank project.
+    scope = [settings.jira_project_key] if settings.jira_project_key else []
     if not settings.jira_enabled:
-        return
+        reason = jira_unavailable_reason(settings) or "Jira search is disabled"
+        logger.info("Jira search not run for job=%s: %s", job_id, reason)
+        return tracker_search(reason=reason, scope=scope)
 
-    reports = _collect_product_bug_reports(failures)
-    if not reports:
-        return
-
+    reports = collect_product_bug_reports(failures)
     # Deduplicate by keyword set — same keywords = one Jira search
     keyword_to_reports: dict[tuple[str, ...], list[ProductBugReport]] = {}
     for report in reports:
@@ -1025,10 +1025,9 @@ async def enrich_with_jira_matches(
         keyword_to_reports.setdefault(key, []).append(report)
 
     if not keyword_to_reports:
-        logger.debug(
-            "No PRODUCT BUG failures with jira_search_keywords, skipping Jira lookup"
-        )
-        return
+        reason = "no PRODUCT BUG failure carried search keywords"
+        logger.info("Jira search not run for job=%s: %s", job_id, reason)
+        return tracker_search(reason=reason, scope=scope)
 
     logger.info(
         "Searching Jira for %d unique keyword set(s) across %d PRODUCT BUG failure(s)",
@@ -1036,16 +1035,24 @@ async def enrich_with_jira_matches(
         len(reports),
     )
 
+    total_searches = len(keyword_to_reports)
+    failed_searches = 0
+    filter_failures = 0
+    oversized_filters = 0
+    total_candidates = 0
     total_matches = 0
     try:
         async with JiraClient(settings) as client:
             # Search Jira for each unique keyword set in parallel
-            async def _search_safe(keywords: list[str]) -> list[dict[str, Any]]:
+            async def _search_safe(
+                keywords: list[str],
+            ) -> list[dict[str, Any]] | None:
+                """One search; ``None`` marks a failure (distinct from empty)."""
                 try:
                     return await client.search(keywords)
                 except Exception:
                     logger.exception("Jira search failed for keywords: %s", keywords)
-                    return []
+                    return None
 
             tasks = [_search_safe(list(kw_tuple)) for kw_tuple in keyword_to_reports]
             search_results = await asyncio.gather(*tasks)
@@ -1054,6 +1061,10 @@ async def enrich_with_jira_matches(
             for kw_tuple, candidates in zip(
                 keyword_to_reports, search_results, strict=False
             ):
+                if candidates is None:
+                    failed_searches += 1
+                    continue
+                total_candidates += len(candidates)
                 if not candidates:
                     continue
 
@@ -1061,15 +1072,58 @@ async def enrich_with_jira_matches(
                 representative = keyword_to_reports[kw_tuple][0]
 
                 if ai_provider and ai_model:
-                    matches = await filter_matches_with_ai(
-                        bug_title=representative.title,
-                        bug_description=representative.description,
-                        candidates=candidates,
-                        ai_provider=ai_provider,
-                        ai_model=ai_model,
-                        ai_call_timeout=settings.ai_call_timeout,
-                        job_id=job_id,
+                    prompt_chars = len(
+                        build_filter_prompt(
+                            representative.title,
+                            representative.description,
+                            candidates,
+                        )
                     )
+                    if prompt_chars > MAX_FILTER_PROMPT_CHARS:
+                        # Not run: the overflow would come back as "no verdict"
+                        # and be recorded as a failed filter call instead.
+                        logger.warning(
+                            "Jira relevance filter not run for %d candidate(s) "
+                            "for job=%s: prompt is %d chars, over the %d char limit",
+                            len(candidates),
+                            job_id,
+                            prompt_chars,
+                            MAX_FILTER_PROMPT_CHARS,
+                        )
+                        oversized_filters += 1
+                        continue
+                    try:
+                        matches = await filter_matches_with_ai(
+                            bug_title=representative.title,
+                            bug_description=representative.description,
+                            candidates=candidates,
+                            ai_provider=ai_provider,
+                            ai_model=ai_model,
+                            ai_call_timeout=settings.ai_call_timeout,
+                            job_id=job_id,
+                        )
+                    except Exception:
+                        # A failed filter is not a failed search: keep the record
+                        # truthful and let the other keyword sets run.
+                        logger.exception(
+                            "Jira relevance filtering failed for %d candidate(s) "
+                            "for job=%s",
+                            len(candidates),
+                            job_id,
+                        )
+                        filter_failures += 1
+                        continue
+                    if matches is None:
+                        # The filter could not judge — not the same as judging
+                        # every candidate irrelevant.
+                        logger.warning(
+                            "Jira relevance filter returned no verdict for %d "
+                            "candidate(s) for job=%s",
+                            len(candidates),
+                            job_id,
+                        )
+                        filter_failures += 1
+                        continue
                 else:
                     # No AI config — fall back to returning all candidates as matches
                     logger.debug(
@@ -1092,8 +1146,30 @@ async def enrich_with_jira_matches(
                     report.jira_matches = matches
 
                 total_matches += len(matches)
-            logger.info(
-                "Jira search complete: %d relevant match(es) found", total_matches
-            )
     except Exception:
         logger.exception("Jira enrichment failed unexpectedly")
+        return tracker_search(reason="Jira search failed unexpectedly", scope=scope)
+
+    reason = search_failure_reason(
+        search_label="Jira search(es)",
+        filter_label="Jira relevance filter",
+        failed_searches=failed_searches,
+        total_searches=total_searches,
+        filter_failures=filter_failures,
+        prompt_overflows=oversized_filters,
+    )
+    if reason:
+        logger.warning("Jira search: %s for job=%s", reason, job_id)
+    logger.info(
+        "Jira search complete: %d relevant match(es) found for job=%s",
+        total_matches,
+        job_id,
+    )
+    return tracker_search(
+        searched=failed_searches < total_searches,
+        reason=reason,
+        scope=scope,
+        keyword_sets=total_searches,
+        candidates=total_candidates,
+        matches=total_matches,
+    )

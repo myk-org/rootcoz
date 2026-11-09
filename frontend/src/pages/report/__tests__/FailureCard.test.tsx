@@ -167,3 +167,50 @@ describe('FailureCard review controls', () => {
     expect(screen.getByRole('button', { name: /Review All \(0\/3\)/ })).toBeInTheDocument()
   })
 })
+
+describe('FailureCard duplicate matches', () => {
+  beforeEach(() => { sessionStorage.clear(); auth.role = 'reviewer' })
+
+  function showBugReport(extra: Record<string, unknown>) {
+    showGroup([{
+      id: 'id-0', test_name: 'test-0', error: 'boom', error_signature: 'shared',
+      analysis: {
+        classification: 'PRODUCT BUG', pattern: '', affected_tests: [], details: '', artifacts_evidence: '',
+        product_bug_report: {
+          title: 'Login fails', severity: 'high', component: 'auth', description: 'broken',
+          evidence: '', jira_search_keywords: [], jira_matches: [], github_matches: [],
+          ...extra,
+        },
+      },
+    }])
+  }
+
+  it('renders GitHub duplicate matches beside the Jira matches', () => {
+    // Same transport, different question: two headings, two destinations.
+    showBugReport({
+      jira_matches: [
+        { key: 'PROJ-1', summary: 'Login fails', status: 'Open', priority: 'High', url: 'https://jira.example.com/browse/PROJ-1', score: 0.9 },
+      ],
+      github_matches: [
+        { number: 42, key: '', title: 'Login 500', url: 'https://github.com/org/repo/issues/42', status: 'open' },
+      ],
+    })
+
+    expect(screen.getByText('Matching Jira Issues')).toBeInTheDocument()
+    expect(screen.getByText('Matching GitHub Issues')).toBeInTheDocument()
+    expect(screen.getByText('PROJ-1: Login fails').closest('a')).toHaveAttribute(
+      'href', 'https://jira.example.com/browse/PROJ-1',
+    )
+    expect(screen.getByText('#42: Login 500').closest('a')).toHaveAttribute(
+      'href', 'https://github.com/org/repo/issues/42',
+    )
+    expect(screen.getByText('open')).toBeInTheDocument()
+  })
+
+  it('renders no heading when there are no duplicates in either tracker', () => {
+    // A result written before #501 carries no github_matches at all.
+    showBugReport({ jira_matches: [], github_matches: undefined })
+    expect(screen.queryByText('Matching Jira Issues')).toBeNull()
+    expect(screen.queryByText('Matching GitHub Issues')).toBeNull()
+  })
+})

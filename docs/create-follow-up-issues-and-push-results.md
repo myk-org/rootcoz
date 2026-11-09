@@ -108,16 +108,18 @@ rootcoz create-chat-issue --target github --job-id JOB_ID \
 
    Creators can remove their own links; admins can remove any link.
 
-6. Review what Jira search already found during analysis.
+6. Review what the duplicate searches already found during analysis.
 
-   When Jira is configured, analysis for a `PRODUCT BUG` already searched for related tickets before you opened the report:
+   Analysis for a `PRODUCT BUG` searches for related tickets in every tracker the deployment can reach before you open the report:
 
    1. The AI generates search keywords as part of the failure analysis.
-   2. Identical keyword sets are deduplicated into one Jira search, and the searches run in parallel.
+   2. Identical keyword sets are deduplicated into one search per tracker, and the searches run in parallel.
    3. Each candidate is scored for relevance by the AI.
-   4. Only relevant matches are attached to the result, under `Matching Jira Issues` in the `Bug Report` section, with their status.
+   4. Only relevant matches are attached to the result, under `Matching Jira Issues` (project matches) or `Matching GitHub Issues` (the run's own repositories) in the `Bug Report` section, with their status.
 
-   Jira problems never break an analysis. Search failures are logged and swallowed, so a result without matching tickets usually means the lookup failed or found nothing relevant — not that the analysis is wrong.
+   The GitHub search is read-only and uses the deployment's `GITHUB_TOKEN` over the run's repositories — the effective `TESTS_REPO_URL` plus the additional repositories. It is separate from the tests-repo code-fix matches on a `CODE ISSUE`.
+
+   Tracker problems never break an analysis. Search failures are logged and swallowed, so a result without matching tickets does not by itself mean the analysis is wrong — and it no longer leaves you guessing: `GET /results/{job_id}` carries `result.tracker_search` with `jira` and `github` records, each with `searched`, `reason`, `scope`, `keyword_sets`, `candidates` and `matches`. `searched: true` with `candidates: 0` means the lookup ran and found nothing; `searched: false` means it could not run and the `reason` names the setting to fix.
 
 7. Push reviewed classifications to Report Portal.
 
@@ -220,8 +222,8 @@ For raw endpoints, see [API Endpoint Reference](api-reference.html) for details.
 - The preview has no `Include links` effect.  
   The server has no public base URL configured. Set `PUBLIC_BASE_URL` so report links can be absolute.
 
-- No `Matching Jira Issues` appear on a product bug.  
-  The search may have found nothing, or the lookup failed. Failures are logged and ignored, so the analysis result is still valid.
+- No `Matching Jira Issues` or `Matching GitHub Issues` appear on a product bug.  
+  Read `result.tracker_search.<tracker>.searched` and `.reason` in `GET /results/{job_id}` to tell the two cases apart. `searched: true` with `candidates: 0` means the lookup ran and found nothing; `searched: false` with a reason means it could not run — no credential, no repository or project in scope, the tracker disabled, or every search failing. Failures are logged and ignored, so the analysis result itself is still valid.
 
 - `Exporters` shows Report Portal as disabled.  
   Run `rootcoz exporters` and check the reason: the integration is off, all three `RP_PUSH_*` toggles are off, or `PUBLIC_BASE_URL` is missing while `RP_PUSH_ROOTCOZ_URL` is on.
