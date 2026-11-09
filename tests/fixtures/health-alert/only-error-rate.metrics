@@ -1,0 +1,3 @@
+# Every series except the identity sample is absent: the body cannot fall between
+# the D7 conditions (it must trip condition 1).
+rootcoz_error_rate 0.1

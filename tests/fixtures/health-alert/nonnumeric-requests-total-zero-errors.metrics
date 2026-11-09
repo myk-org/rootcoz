@@ -1,0 +1,6 @@
+# A denominator that is present but unreadable ("n/a") is not an empty window:
+# with zero errors it used to leave the job silent, hiding the broken series.
+rootcoz_requests_total n/a
+rootcoz_errors_total 0
+rootcoz_error_rate 0
+rootcoz_health_up 1

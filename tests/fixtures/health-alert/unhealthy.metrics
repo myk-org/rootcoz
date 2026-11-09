@@ -1,5 +1,10 @@
 rootcoz_health_up 0
-rootcoz_error_rate 0.06
+rootcoz_requests_total 20
+rootcoz_errors_total 2
+rootcoz_error_rate 0.1
+# HELP rootcoz_errors_by_class Errors by HTTP status class in the rolling window.
+# TYPE rootcoz_errors_by_class gauge
+rootcoz_errors_by_class{status_class="5xx"} 2
 rootcoz_data_used_bytes 5798205850
 rootcoz_data_capacity_bytes 6442450944
 rootcoz_data_used_ratio 0.9000

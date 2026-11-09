@@ -283,7 +283,24 @@
         "image": { "type": "string" },
         "slackSecretName": { "type": "string" },
         "slackSecretKey": { "type": "string" },
-        "errorRatePercent": { "type": "integer" },
+        "errorRatePercent": {
+          "type": ["integer", "null"],
+          "description": "Deprecated: honoured as serverErrorPercent while that is unset. Use serverErrorPercent. Kept as loose as it shipped, so an out-of-range legacy value still deploys."
+        },
+        "serverErrorPercent": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 100
+        },
+        "clientErrorPercent": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 100
+        },
+        "clientErrorMinRequests": {
+          "type": "integer",
+          "minimum": 1
+        },
         "diskWarnPercent": { "type": "integer" },
         "diskCritPercent": { "type": "integer" }
       }

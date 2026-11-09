@@ -1,4 +1,16 @@
 Thank you for installing {{ .Chart.Name }}!
+{{- /* Null tests, never truthiness: Go templates treat 0 as false and a legacy
+       errorRatePercent: 0 is exactly the value worth warning about. */}}
+{{- if and (not (kindIs "invalid" .Values.alerts.errorRatePercent)) (kindIs "invalid" .Values.alerts.serverErrorPercent) }}
+
+DEPRECATION: alerts.errorRatePercent is honoured as alerts.serverErrorPercent, and now
+gates server errors (5xx) only — it used to be the blended 4xx+5xx rate. If you raised it
+to damp noise, re-check it. Set alerts.clientErrorPercent explicitly if you do not want the
+new 4xx storm threshold.
+{{- else if and (not (kindIs "invalid" .Values.alerts.errorRatePercent)) (not (kindIs "invalid" .Values.alerts.serverErrorPercent)) }}
+
+DEPRECATION: alerts.serverErrorPercent wins; the deprecated alerts.errorRatePercent is ignored.
+{{- end }}
 
 Rootcoz is a single-replica deployment (SQLite on a ReadWriteOnce PVC). Do not scale replicas above 1.
 
