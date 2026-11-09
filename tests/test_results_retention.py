@@ -366,7 +366,9 @@ async def test_never_deletes_a_submitted_job(db: Path) -> None:
 
 async def test_never_deletes_an_undated_job(db: Path) -> None:
     _seed_job(db, "undated", days_ago=None)
-    _seed_job(db, "dated", days_ago=1)
+    # Off the boundary on purpose: the seed and the prune read the clock at
+    # different moments, so days_ago=1 would age out under load.
+    _seed_job(db, "dated", days_ago=0.5)
     assert (await storage.prune_results(retention_days=1))["deleted"] == 0
     assert (await storage.prune_results(retention_days=0, max_rows=1))["deleted"] == 0
     assert _count_results(db, "undated") == 1
