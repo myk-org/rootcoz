@@ -10,8 +10,9 @@ and :func:`enable_log_file`, which creates the one shared file handler the
 whole application writes through (see ``rootcoz.get_child_logger``).
 
 The module is stdlib-only at import time except for ``DuplicateFilter``: it
-is imported at module level so :class:`RootcozDuplicateFilter` can subclass it
-and inherit its behaviour instead of copying it. That import only runs
+is imported at module level so :class:`RootcozDuplicateFilter` keeps that class
+as its parent, which is what ``install_dedup_exempt_filter``'s
+``isinstance`` sweep finds and replaces. That import only runs
 ``logging.setLoggerClass(SimpleLogger)``, which cannot reach the ``rootcoz``
 level-authority parent — ``rootcoz/__init__`` creates it, and has to run,
 before this module can be imported.
@@ -91,20 +92,54 @@ class JobIdFilter(logging.Filter):
 
 
 class RootcozDuplicateFilter(DuplicateFilter):
-    """simple_logger's duplicate filter, minus hiding audit records.
+    """simple_logger's duplicate filter, keyed on the rendered message.
 
-    ``DuplicateFilter`` keys on ``(module, levelno, msg)`` — the *unformatted*
-    template, arguments ignored — and drops every consecutive repeat. For
-    chatter that is the point; for the audit trail it destroys evidence: two
-    identical consecutive attempts, or two warnings off one ``%s`` template,
-    are distinct records. A record marked ``dedup_exempt`` passes untouched,
-    and leaves the remember-state alone so it cannot mask a following repeat.
+    ``DuplicateFilter`` keys on ``record.msg`` — the unformatted template,
+    arguments ignored — so two records off one ``%s`` template are one line and
+    the second detail is lost (#495). This keeps its contract, its public state
+    names and its install path, and changes what a duplicate *is*: the rendered
+    text, per job, so two jobs' identical lines are two records. A record marked
+    ``dedup_exempt`` passes untouched and leaves the remember-state alone, so it
+    cannot consume a repeat or mask one (#489).
     """
+
+    last_log: tuple[str, int, str, str] | None = None
+    repeated_number = 0
 
     def filter(self, record: logging.LogRecord) -> bool:
         if getattr(record, "dedup_exempt", False):
             return True
-        return super().filter(record)
+        try:
+            rendered = record.getMessage()
+        except Exception:  # noqa: BLE001 - a filter runs outside every Handler.emit try
+            # A render can raise (a stray '%', a mapping arg with a missing key).
+            # Anything escaping here reaches the code that logged; record_audit
+            # logs before it writes its row, so that would lose an audit row. A
+            # record we cannot render is not a duplicate.
+            return True
+        current = (record.module, record.levelno, job_id_var.get(""), rendered)
+        previous = getattr(self, "last_log", None)
+        repeated = getattr(self, "repeated_number", 0)
+        if current == previous:
+            self.repeated_number = repeated + 1
+            return False
+        # The note is only ever quoted inside one originating context: the same
+        # module, level and job. A run ended by a job or level change says
+        # nothing on a record that belongs to another job — quoting it would move
+        # one job's rendered arguments onto another's line (today only the bare
+        # template moves), and a DEBUG run's text onto a WARNING.
+        if repeated > 1 and previous is not None and previous[:3] == current[:3]:
+            # ``record.args = None``: the note is appended to the *rendered* text,
+            # so there is nothing left to format and no '%' to escape (the parent
+            # escapes a template it is about to format again).
+            record.msg = (
+                f"{rendered} --- [DuplicateFilter: Last log "
+                f"`{previous[-1]}` repeated {repeated} times]"
+            )
+            record.args = None
+        self.last_log = current
+        self.repeated_number = 0
+        return True
 
 
 def install_dedup_exempt_filter(logger: logging.Logger) -> None:
@@ -151,8 +186,8 @@ class _GroupWritableRotatingFileHandler(RotatingFileHandler):
         # Attached here, before the notice below: ``doRollover()`` opens with
         # ``stream`` still None, and a record emitted from inside ``_open()``
         # makes ``shouldRollover()`` open again — one descriptor per pass. Only
-        # the identical message meeting ``DuplicateFilter`` stops that today;
-        # the notice must not depend on it.
+        # the dedup filter's collapse of the identical message stops that; the
+        # notice must not depend on it.
         self.stream = stream
         if mode_error is not None:
             _debug("Cannot set mode %o on %s", _LOG_FILE_MODE, self.baseFilename)

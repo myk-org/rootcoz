@@ -319,9 +319,9 @@ async def test_an_abandoned_step_keeps_the_unrelated_always_steps() -> None:
 async def test_two_steps_do_not_swallow_each_other_in_the_log(caplog) -> None:
     """Per-step results must be formatted before logging.
 
-    simple_logger's ``DuplicateFilter`` keys on ``(module, level, msg)`` — the
-    format string — so two steps logged through one template are one line, and a
-    silent delete looks like a delete that never ran.
+    A duplicate is a repeated *rendered* line now: the filter keys on the rendered
+    text, so an f-string per step puts each step's own figures on its own line. A
+    silent delete must not look like a delete that never ran.
     """
     from simple_logger.logger import DuplicateFilter
 
@@ -622,9 +622,8 @@ def test_two_distinct_errnos_are_one_aggregated_warning(
 ) -> None:
     """EACCES then ENOTEMPTY in one walk: one line naming both, not one each.
 
-    A line per errno goes through one format string, so simple_logger's
-    ``DuplicateFilter`` (keyed on the message template) drops every errno after the
-    first — the second then only shows up as ``repeated N times`` elsewhere (#402).
+    One line per tree is the contract: the summary carries every errno of the walk
+    with its distinct-path count, rather than one record per errno (#402).
     """
     root = tmp_path / "tree"
     (root / "good").mkdir(parents=True)

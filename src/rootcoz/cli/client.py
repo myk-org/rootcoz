@@ -1218,6 +1218,16 @@ class RootCozClient:
             accept_statuses=(200, 202),
         )
 
+    def get_full_results(self, job_ids: list[str]) -> dict[str, Any]:
+        """Get the /full summary for several jobs in one call.
+
+        GET /api/results/full — the envelope is ``{jobs, missing, forbidden}``;
+        each item is the single-job ``/full`` payload minus ``tests``. Unknown
+        ids are reported in ``missing`` (still 200), never as an error. Ids go
+        on the wire as repeated ``job_ids`` parameters, never comma-joined.
+        """
+        return self._request("GET", "/api/results/full", params={"job_ids": job_ids})
+
     # -- Review ---------------------------------------------------------------
 
     def get_review_status(self, job_id: str) -> dict[str, Any]:

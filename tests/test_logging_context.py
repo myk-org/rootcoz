@@ -4,6 +4,7 @@ import asyncio
 import io
 import logging
 import os
+from collections.abc import Iterator
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -199,16 +200,65 @@ class TestJobIdFilter:
             test_logger.removeHandler(handler)
 
 
+def _forget_duplicate_history(logger: logging.Logger) -> None:
+    """Clear the session-wide state the duplicate filter keeps per instance.
+
+    The state outlives a test (one filter instance per logger and per handler,
+    for the whole session), so a later test's identical line would be dropped.
+    """
+    for target in (logger, *logger.handlers):
+        for log_filter in target.filters:
+            vars(log_filter).pop("last_log", None)
+            vars(log_filter).pop("repeated_number", None)
+
+
+class _RecordingHandler(logging.Handler):
+    """Collect the rendered text of every record that reaches a handler.
+
+    Guards its own ``getMessage()``: a misformatted record raises there too, and
+    that must be recorded rather than escape into the test.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.messages: list[str] = []
+
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            self.messages.append(record.getMessage())
+        except Exception as exc:  # noqa: BLE001 - the render is what is under test
+            self.messages.append(f"<unrenderable {type(exc).__name__}>")
+
+
+@pytest.fixture
+def dedup_logger(
+    request: pytest.FixtureRequest,
+) -> Iterator[tuple[logging.Logger, _RecordingHandler]]:
+    """A ``get_child_logger`` logger that records rendered lines, in a clean context."""
+    from rootcoz import get_child_logger
+
+    # One logger per test: the filter state is per logger instance and per name.
+    logger = get_child_logger(f"rootcoz.tests_dedup_rendered.{request.node.name}")
+    handler = _RecordingHandler()
+    # As in the app: the job id is prefixed by handlers, i.e. after the dedup
+    # decision the logger already made.
+    handler.addFilter(JobIdFilter())
+    logger.addHandler(handler)
+    original_level = logger.level
+    logger.setLevel(logging.DEBUG)
+    job_id_var.set("")
+    _forget_duplicate_history(logger)
+    try:
+        yield logger, handler
+    finally:
+        logger.removeHandler(handler)
+        logger.setLevel(original_level)
+        # A leaked job id would make the job-id test pass vacuously.
+        job_id_var.set("")
+
+
 class TestDuplicateFilterExemption:
     """An audit record is never deduped; an ordinary repeat still is."""
-
-    @staticmethod
-    def _forget_duplicate_history(logger: logging.Logger) -> None:
-        """Clear the session-wide state simple_logger's filter keeps per instance."""
-        for target in (logger, *logger.handlers):
-            for log_filter in target.filters:
-                vars(log_filter).pop("last_log", None)
-                vars(log_filter).pop("repeated_number", None)
 
     def test_audit_lines_survive_repeats_that_collapse_ordinary_lines(self) -> None:
         from simple_logger.logger import DuplicateFilter
@@ -232,7 +282,7 @@ class TestDuplicateFilterExemption:
         stream = io.StringIO()
         handler = logging.StreamHandler(stream)
         logger.addHandler(handler)
-        self._forget_duplicate_history(logger)
+        _forget_duplicate_history(logger)
         original_level = logger.level
         logger.setLevel(logging.INFO)
         try:
@@ -247,6 +297,137 @@ class TestDuplicateFilterExemption:
         lines = stream.getvalue().splitlines()
         assert lines.count("same ordinary line") == 1
         assert lines.count("[AUDIT] same audit line") == 2
+
+
+class TestRenderedMessageDedup:
+    """A duplicate is a repeated *rendered* line in one context, not a template (#495)."""
+
+    def test_two_records_that_differ_only_in_their_args_are_both_logged(
+        self, dedup_logger: tuple[logging.Logger, _RecordingHandler]
+    ) -> None:
+        """The issue's reproducer: two 422 payloads off one template are two lines."""
+        logger, handler = dedup_logger
+
+        logger.warning(
+            "RequestValidationError on %s %s: errors=%s",
+            "POST",
+            "/api/chat/issue",
+            ["shared-infra"],
+        )
+        logger.warning(
+            "RequestValidationError on %s %s: errors=%s",
+            "POST",
+            "/api/chat/issue",
+            ["monitoring, shared-infra"],
+        )
+
+        assert len(handler.messages) == 2
+        assert "errors=['shared-infra']" in handler.messages[0]
+        assert "errors=['monitoring, shared-infra']" in handler.messages[1]
+
+    def test_an_identical_rendered_message_is_still_collapsed(
+        self, dedup_logger: tuple[logging.Logger, _RecordingHandler]
+    ) -> None:
+        """Identical renderings still collapse, and the note quotes them verbatim."""
+        logger, handler = dedup_logger
+
+        for _ in range(3):
+            logger.warning("cache hit %s", "90%")
+        logger.warning("something new")
+
+        assert handler.messages.count("cache hit 90%") == 1
+        assert len(handler.messages) == 2
+        # The rendered text, not the template, and no `%%` escape in it.
+        assert "Last log `cache hit 90%` repeated 2 times" in handler.messages[1]
+
+    def test_the_job_id_is_part_of_the_key(
+        self, dedup_logger: tuple[logging.Logger, _RecordingHandler]
+    ) -> None:
+        """Two jobs' identical lines are two records; twice in one job is one."""
+        logger, handler = dedup_logger
+
+        job_id_var.set("A")
+        logger.warning("same text")
+        logger.warning("same text")
+        job_id_var.set("B")
+        logger.warning("same text")
+
+        assert len(handler.messages) == 2
+        assert all(m.startswith("[job_id=") for m in handler.messages)
+        assert handler.messages[0].startswith("[job_id=A] same text")
+        assert handler.messages[1].startswith("[job_id=B] same text")
+
+    def test_a_misformatted_call_does_not_raise_from_the_filter(
+        self, dedup_logger: tuple[logging.Logger, _RecordingHandler]
+    ) -> None:
+        """A render that raises is delivered, not raised out of a filter."""
+        logger, handler = dedup_logger
+
+        # Both raise inside ``getMessage()``: that is what is under test.
+        logger.warning("50% of %s", "tests")  # noqa: PLE1206 - deliberately bad args
+        logger.warning("%(missing)s", {"present": 1})
+        logger.warning("after bad")
+
+        assert handler.messages == [
+            "<unrenderable TypeError>",
+            "<unrenderable KeyError>",
+            "after bad",
+        ]
+
+    def test_a_repeat_get_child_logger_call_keeps_the_collapse(
+        self, dedup_logger: tuple[logging.Logger, _RecordingHandler]
+    ) -> None:
+        """A second install of the filter must not reset the remembered line."""
+        from rootcoz import get_child_logger
+
+        logger, handler = dedup_logger
+
+        logger.warning("one line")
+        get_child_logger(logger.name)
+        logger.warning("one line")
+
+        assert handler.messages == ["one line"]
+
+    def test_an_exempt_record_neither_consumes_nor_masks_a_repeat(
+        self, dedup_logger: tuple[logging.Logger, _RecordingHandler]
+    ) -> None:
+        """#493: the exempt record passes and leaves the remember-state alone."""
+        logger, handler = dedup_logger
+
+        for _ in range(3):
+            logger.warning("cache hit %s", "90%")
+        logger.warning("[AUDIT] exempt line", extra={"dedup_exempt": True})
+        logger.warning("something new")
+
+        assert handler.messages.count("cache hit 90%") == 1
+        assert "[AUDIT] exempt line" in handler.messages
+        assert "Last log `cache hit 90%` repeated 2 times" in handler.messages[-1]
+
+    def test_the_repeat_note_does_not_cross_a_job_or_level_boundary(
+        self, dedup_logger: tuple[logging.Logger, _RecordingHandler]
+    ) -> None:
+        """A run ended by a job or level change is reset silently (Evidence 6)."""
+        logger, handler = dedup_logger
+
+        job_id_var.set("A")
+        for _ in range(3):
+            logger.warning("result=%s", "A-only-secret")
+        job_id_var.set("B")
+        logger.warning("working")
+
+        job_line = handler.messages[-1]
+        assert "repeated" not in job_line
+        assert "A-only-secret" not in job_line
+
+        job_id_var.set("")
+        for _ in range(3):
+            logger.debug("dbg %s", "secret")
+        logger.info("distinct info line")
+
+        level_line = handler.messages[-1]
+        assert level_line.startswith("distinct info line")
+        assert "repeated" not in level_line
+        assert "dbg secret" not in level_line
 
 
 class TestGetLogFile:
