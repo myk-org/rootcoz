@@ -427,7 +427,21 @@ When enabled, the deployment pulls from the internal registry ImageStream instea
 
 ### Health alert CronJob
 
-An optional CronJob scrapes `/metrics` on a schedule and posts one Slack message listing every failing check: unhealthy (`rootcoz_health_up`), error rate above the threshold, and `/data` usage above the warning or critical threshold. The script lives in `chart/files/health-alert.sh` and is mounted from a ConfigMap, so the tested file is the deployed file.
+An optional CronJob scrapes `/metrics` on a schedule and posts one Slack message combining every failing check: unhealthy (`rootcoz_health_up`), the share of **server errors (5xx)** above the threshold, a **client-error (4xx) storm** above its own higher threshold, and `/data` usage above the warning or critical threshold. The script lives in `chart/files/health-alert.sh` and is mounted from a ConfigMap, so the tested file is the deployed file.
+
+Server errors and client errors are judged from two different series, both already exported by `/metrics` over the same rolling window: `rootcoz_errors_by_class{status_class="5xx"}` and `{status_class="4xx"}`, over `rootcoz_requests_total`. A class with no sample in the window counts as zero. Client errors never page on their own — an unauthenticated client must not be able to pace the notification channel with 404s.
+
+| Condition | Pages? | Line |
+| --- | --- | --- |
+| `rootcoz_health_up` is `0` | yes, 🔴 | `health: unhealthy` |
+| 5xx share above `serverErrorPercent`, window non-empty | yes, 🔴 | `server errors 5xx 3/20 (15.00%) above 5% threshold` |
+| 4xx share above `clientErrorPercent` with at least `clientErrorMinRequests` requests | yes, ⚠️ | `client error storm 4xx 30/40 (75.00%) above 25% threshold — client errors, not an outage` |
+| 4xx present but at or below the storm threshold | no | `ℹ️ client errors 4xx 2/20 (10.00%) at or below the 25% storm threshold`, only alongside another reason to page |
+| 4xx in a window below `clientErrorMinRequests` | no — the share is unjudgeable, so nothing is claimed about it | — |
+| disk ratio at or above `diskWarnPercent` / `diskCritPercent` | yes, 🔴 | `disk 5.4G / 6.0G (90%)` |
+| the body cannot answer "share of requests" | yes, 🔴 configuration line; health and disk keep working | `… has no rootcoz_errors_total …`, `… rootcoz_errors_by_class does not add up to rootcoz_errors_total …`, or `… has no usable rootcoz_requests_total …` |
+
+The 5xx check has no request floor: one failed request is an incident, and the job samples once per schedule instead of holding a condition. The 4xx storm does have one, because a share of five requests is meaningless — one mistyped login is 20 % of five requests, and 100 % of one.
 
 It is the alternative for deployments that do not enable rootcoz's own in-process health monitor (`ENABLE_HEALTH_MONITOR`, under `Notifications` in Server Settings). The job reads `/metrics` from outside the application and cannot see its settings, so nothing coordinates the two: **leave `alerts.enabled` at `false` when the in-app monitor is on**, otherwise both report the same condition.
 
@@ -437,7 +451,9 @@ alerts:
   name: rootcoz-prod-health-alerts  # reuse the existing name you adopt (see Naming)
   envLabel: prod
   schedule: "*/5 * * * *"
-  errorRatePercent: 5
+  serverErrorPercent: 5
+  clientErrorPercent: 25
+  clientErrorMinRequests: 10
   diskWarnPercent: 75
   diskCritPercent: 90
 ```
@@ -452,7 +468,10 @@ alerts:
 | `alerts.image` | `curlimages/curl:8.12.1` | Must provide `sh`, `awk` and `curl`; pin by digest for production |
 | `alerts.slackSecretName` | `""` | Secret holding the webhook; empty means the release credentials Secret |
 | `alerts.slackSecretKey` | `SLACK_WEBHOOK_URL` | Key inside that Secret |
-| `alerts.errorRatePercent` | `5` | Alert above this rolling-window error rate |
+| `alerts.serverErrorPercent` | `5` | Page above this share of **server errors (5xx)** in the rolling window; empty means `5` |
+| `alerts.clientErrorPercent` | `25` | A 4xx share above this is a storm (⚠️, `not an outage`); `100` turns the storm off |
+| `alerts.clientErrorMinRequests` | `10` | A 4xx share is judged only from this many requests in the window |
+| `alerts.errorRatePercent` | `null` | **Deprecated**: honoured as `serverErrorPercent` while that is unset. Use `serverErrorPercent` |
 | `alerts.diskWarnPercent` | `75` | `/data` warning threshold |
 | `alerts.diskCritPercent` | `90` | `/data` critical threshold |
 
@@ -470,7 +489,8 @@ Things to know before turning it on:
   Both names are bounded — CronJob 52 characters (the Job controller appends an 11-character suffix), script ConfigMap 63 — and carry an 8-character hash of the fullname, so a long release name cannot produce an object the API server rejects and two releases sharing a long prefix cannot collide.
 - **The image is pulled with `imagePullSecrets`.** The CronJob pod uses the same `imagePullSecrets` as the application Deployment, so a mirrored alert image in a private registry pulls with the credentials already configured for the app.
 - **A wrong URL fails loudly.** A non-empty response that is not rootcoz metrics (a login page, a proxy error page) is reported as `metrics endpoint returned no rootcoz metrics` instead of silencing every check.
-- **The disk check is the newest part.** When `/metrics` has no `rootcoz_data_used_ratio` (an image older than the gauges, or a failing filesystem probe) the disk check is skipped silently and the health and error-rate checks still run. The gauges measure the filesystem holding the data directory, so they work unchanged for a PVC, a Docker volume, a bind mount or a plain directory.
+- **`errorRatePercent` is deprecated, not ignored.** It is honoured as `serverErrorPercent` while that is unset, and `helm install`/`upgrade` prints a warning in NOTES. A carried-over value is re-interpreted: it used to be the blended 4xx+5xx rate and now gates server errors only, so **if you raised it to damp noise, re-check it** — and set `clientErrorPercent` explicitly if you do not want the new 4xx storm threshold. When both keys are set, `serverErrorPercent` wins.
+- **The disk check is the newest part.** When `/metrics` has no `rootcoz_data_used_ratio` (a failing filesystem probe) the disk check is skipped silently and the health and error checks still run. The gauges measure the filesystem holding the data directory, so they work unchanged for a PVC, a Docker volume, a bind mount or a plain directory. A body whose **class counts** cannot be read (a fork, or a renamed series) is different: it gets a 🔴 configuration line naming the series at fault, and the health and disk checks keep working — the job never exits early.
 - The job needs no cluster permissions: the pod sets `automountServiceAccountToken: false` and only curls the application Service.
 
 ## Validation

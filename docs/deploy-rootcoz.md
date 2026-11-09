@@ -412,7 +412,21 @@ rootcoz admin settings reset log_max_bytes   # back to the derived value
 
 ### The chart health-alert CronJob (the alternative for deployments without Prometheus)
 
-For clusters that scrape nothing **and do not enable the in-app monitor above**, the chart can run its own check: a CronJob that curls `/metrics` on a schedule and posts one Slack message listing every failing check (unhealthy, error rate above the threshold, the data directory's filesystem above the warning or critical threshold with absolute sizes such as `5.4G / 6.0G (90%)`).
+For clusters that scrape nothing **and do not enable the in-app monitor above**, the chart can run its own check: a CronJob that curls `/metrics` on a schedule and posts one Slack message combining every failing check — unhealthy, the share of **server errors (5xx)** above the threshold, a **client-error (4xx) storm** above its own higher threshold, and the data directory's filesystem above the warning or critical threshold with absolute sizes such as `5.4G / 6.0G (90%)`.
+
+Server errors and client errors come from the two series `/metrics` already exports over the same rolling window, `rootcoz_errors_by_class{status_class="5xx"}` and `{status_class="4xx"}`, over `rootcoz_requests_total`; a class with no sample in the window counts as zero. Client errors never page on their own — an unauthenticated client must not be able to pace the notification channel with 404s.
+
+| Condition | Pages? | Line |
+| --- | --- | --- |
+| `rootcoz_health_up` is `0` | yes, 🔴 | `health: unhealthy` |
+| 5xx share above `serverErrorPercent`, window non-empty | yes, 🔴 | `server errors 5xx 3/20 (15.00%) above 5% threshold` |
+| 4xx share above `clientErrorPercent` with at least `clientErrorMinRequests` requests | yes, ⚠️ | `client error storm 4xx 30/40 (75.00%) above 25% threshold — client errors, not an outage` |
+| 4xx present but at or below the storm threshold | no | `ℹ️ client errors 4xx 2/20 (10.00%) at or below the 25% storm threshold`, only alongside another reason to page |
+| 4xx in a window below `clientErrorMinRequests` | no — the share is unjudgeable, so nothing is claimed about it | — |
+| disk ratio at or above `diskWarnPercent` / `diskCritPercent` | yes, 🔴 | `disk 5.4G / 6.0G (90%)` |
+| the body cannot answer "share of requests" | yes, 🔴 configuration line; health and disk keep working | `… has no rootcoz_errors_total …`, `… rootcoz_errors_by_class does not add up to rootcoz_errors_total …`, or `… has no usable rootcoz_requests_total …` |
+
+The 5xx check has no request floor (one failed request is an incident, and the job samples once per schedule rather than holding a condition); the 4xx storm does, because one mistyped login is 20 % of five requests and 100 % of one.
 
 ```yaml
 alerts:
@@ -421,7 +435,9 @@ alerts:
   name: rootcoz-prod-health-alerts
   envLabel: prod
   schedule: "*/5 * * * *"
-  errorRatePercent: 5
+  serverErrorPercent: 5
+  clientErrorPercent: 25
+  clientErrorMinRequests: 10
   diskWarnPercent: 75
   diskCritPercent: 90
 ```
@@ -441,7 +457,8 @@ kubectl -n rootcoz annotate cronjob rootcoz-prod-health-alerts \
 
 - Left empty, the chart creates `<fullname>-<hash>-health-alerts`, which sits next to a cluster-only CronJob rather than replacing it. Both names are bounded (CronJob 52 characters, script ConfigMap 63) and carry an 8-character hash of the fullname, so a long release name cannot produce an object the API server rejects and two releases sharing a long prefix cannot collide.
 - Pin `alerts.image` by digest for production. The default `curlimages/curl:8.12.1` is a tag, and the job runs with `automountServiceAccountToken: false` because it only needs to reach the application Service. The pod pulls the image with the release's `imagePullSecrets`, the same ones the application Deployment uses.
-- Deploy the alert before or after the image that carries the data-directory gauges: when the ratio line is absent the disk check is skipped silently, and the health and error-rate checks keep working.
+- `alerts.errorRatePercent` is **deprecated**: it is honoured as `serverErrorPercent` while that is unset, and NOTES warns on install/upgrade. It used to be the blended 4xx+5xx rate and now gates server errors only, so **if you raised it to damp noise, re-check it**, and set `clientErrorPercent` explicitly if you do not want the new 4xx storm threshold. When both keys are set, `serverErrorPercent` wins.
+- Deploy the alert before or after the image: when the ratio line is absent the disk check is skipped silently, and the health and error checks keep working. A body whose **class counts** cannot be read (a fork, or a family renamed in the exposition) gets a 🔴 configuration line naming the series at fault instead of a silent `0`, and health and disk keep alerting in the same message. Every released 4.x image exports `rootcoz_errors_by_class`, so this is not an "older image" path.
 
 The in-app monitor and this CronJob cannot see each other: the job reads `/metrics` from outside and cannot read the application's settings, so nothing coordinates them. Running both is a choice, not a supported combination — a deployment that enables `ENABLE_HEALTH_MONITOR` should leave `alerts.enabled` at `false`, and a deployment that relies on this CronJob should leave the monitor off.
 
