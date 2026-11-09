@@ -11,7 +11,7 @@ const ARTIFACT_URL_PATTERN = '/api/admin-chat/artifacts/'
 
 export function ChatMarkdown({ content }: ChatMarkdownProps) {
   return (
-    <div className="prose prose-sm prose-invert max-w-none break-words
+    <div className="prose prose-sm max-w-none break-words
       prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0.5
       prose-headings:my-2 prose-headings:text-text-primary
       prose-a:text-text-link prose-a:hover:underline
