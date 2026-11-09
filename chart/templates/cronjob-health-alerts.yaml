@@ -1,5 +1,18 @@
 {{- include "rootcoz.validate" . -}}
 {{- if .Values.alerts.enabled -}}
+{{- $alerts := .Values.alerts -}}
+{{- /* Null tests, not `default`: a legacy errorRatePercent: 0 means "page on any
+       server error" and `default` would silently widen it to 5. */ -}}
+{{- $serverPercent := 5 -}}
+{{- if not (kindIs "invalid" $alerts.serverErrorPercent) -}}
+{{- $serverPercent = $alerts.serverErrorPercent -}}
+{{- else if not (kindIs "invalid" $alerts.errorRatePercent) -}}
+{{- $serverPercent = $alerts.errorRatePercent -}}
+{{- end -}}
+{{- /* `default` is safe on these two: the schema enforces minimum 1, so 0 cannot
+       arrive here and be widened. */ -}}
+{{- $clientPercent := $alerts.clientErrorPercent | default 25 -}}
+{{- $clientMinRequests := $alerts.clientErrorMinRequests | default 10 -}}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -62,8 +75,12 @@ spec:
                   value: {{ .Values.alerts.metricsUrl | default (printf "http://%s:8000/metrics" (include "rootcoz.fullname" .)) | quote }}
                 - name: ENV_LABEL
                   value: {{ .Values.alerts.envLabel | default (include "rootcoz.fullname" .) | quote }}
-                - name: ERROR_RATE_PERCENT
-                  value: {{ .Values.alerts.errorRatePercent | quote }}
+                - name: SERVER_ERROR_PERCENT
+                  value: {{ $serverPercent | quote }}
+                - name: CLIENT_ERROR_PERCENT
+                  value: {{ $clientPercent | quote }}
+                - name: CLIENT_ERROR_MIN_REQUESTS
+                  value: {{ $clientMinRequests | quote }}
                 - name: DISK_WARN_PERCENT
                   value: {{ .Values.alerts.diskWarnPercent | quote }}
                 - name: DISK_CRIT_PERCENT

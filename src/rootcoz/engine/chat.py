@@ -1392,6 +1392,12 @@ _TRACKER_UNAVAILABLE_REASONS = {
         "so it cannot save a token at all. Tell the user the fix in these words: "
         + tracker_credential_message("{kind}", has_profile=False)
     ),
+    "server_unconfigured": (
+        "this server has no usable {kind} auth method configured (no site/cloud "
+        "URL or no method selected in Server Settings), so no saved credential "
+        "can file. Tell the user an administrator has to configure it in Server "
+        "Settings, and that re-saving the {kind} credential will not help"
+    ),
     "unusable_credential": (
         "this account's saved {kind} credential cannot be used with the "
         "server's {kind} settings, so no issue can be filed with it. Tell the "
@@ -1400,8 +1406,9 @@ _TRACKER_UNAVAILABLE_REASONS = {
 }
 
 #: The reasons a tracker is missing because THIS account never set it up — the
-#: only ones a token in Profile Settings can fix. A disabled tracker or a
-#: missing repository is not one of them, so no token advice is posted for it.
+#: only ones a token in Profile Settings can fix. A disabled tracker, a missing
+#: repository, a deployment with no auth method configured or an unusable saved
+#: credential is not one of them, so no token advice is posted for it.
 _CREDENTIAL_UNAVAILABLE_REASONS = ("no_token", "no_token_no_profile")
 
 #: The forms people write "file an issue" in: a filing verb (any tense)
@@ -1503,9 +1510,10 @@ def credential_blocked_issue_notice(
     the account (issue #446).
 
     Only :data:`_CREDENTIAL_UNAVAILABLE_REASONS` produce text: a tracker an
-    administrator disabled, a server with no repository or an unusable saved
-    credential is not fixed in Profile Settings by adding a token. Returns ``""``
-    for those, and for a caller whose tool list already has the tracker.
+    administrator disabled, a server with no repository, a deployment with no
+    usable tracker auth method or an unusable saved credential is not fixed in
+    Profile Settings by adding a token. Returns ``""`` for those, and for a
+    caller whose tool list already has the tracker.
 
     Args:
         tracker: ``"github"`` or ``"jira"`` — the one the user asked for.

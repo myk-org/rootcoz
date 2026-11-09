@@ -1,0 +1,8 @@
+# A class sample whose field 2 has no numeric prefix ("n/a") coerces to 0, which would
+# silently read as "no 5xx" while the counts still add up.
+rootcoz_requests_total 20
+rootcoz_errors_total 3
+rootcoz_error_rate 0.15
+rootcoz_errors_by_class{status_class="4xx"} 3
+rootcoz_errors_by_class{status_class="5xx"} n/a
+rootcoz_health_up 1

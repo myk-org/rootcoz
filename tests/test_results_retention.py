@@ -693,7 +693,13 @@ async def test_cutoff_is_utc_space_format(db: Path, monkeypatch) -> None:
 
     preview = await storage.preview_results_retention(30, 0)
     assert preview["jobs"] == 1
-    assert preview["oldest_created_at"] == _ts(30 + 1 / 24)
+    # Compare against the value actually written: _ts() reads the clock again,
+    # so under load the seed and the assertion land in different seconds.
+    with sqlite3.connect(db) as conn:
+        expected = conn.execute(
+            "SELECT created_at FROM results WHERE job_id = 'outside'"
+        ).fetchone()[0]
+    assert preview["oldest_created_at"] == expected
 
     result = await storage.prune_results(retention_days=30)
     assert result["deleted_ids"] == ["outside"]

@@ -723,9 +723,9 @@ def test_reap_graph_abandons_the_delete_while_a_builder_holds_the_lock(
     workspace, root = graft_tree
     monkeypatch.setattr(graft, "GRAPH_LOCK_SECONDS", 0.05)
     monkeypatch.setattr(graft.logger, "propagate", True)
-    # simple_logger's DuplicateFilter keys on the format string and keeps its
-    # state for the whole session, so an earlier test's timeout line would
-    # swallow this one when the files run in one process.
+    # The duplicate filter keeps its remembered line for the whole session, so an
+    # earlier test's identical line would swallow this one when the files run in
+    # one process.
     monkeypatch.setattr(graft.logger, "filters", [])
     deleted: list[Path] = []
 

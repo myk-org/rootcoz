@@ -1,0 +1,5 @@
+# A negative request count can never answer "share of requests": it is loud too.
+rootcoz_requests_total -5
+rootcoz_errors_total 0
+rootcoz_error_rate 0
+rootcoz_health_up 1
