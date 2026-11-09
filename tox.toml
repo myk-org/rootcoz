@@ -397,7 +397,27 @@ rm -rf $D
   [
     "sh",
     "-c",
-    "OUT=/tmp/rootcoz-alerts-test-$$.yaml; helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render --set alerts.enabled=true --set alerts.diskWarnPercent=80 --set alerts.schedule='*/2 * * * *' --set 'imagePullSecrets[0].name=regcred' > $OUT 2>&1 && [ \"$(grep -c 'kind: CronJob' $OUT)\" = \"1\" ] && grep -qF 'schedule: \"*/2 * * * *\"' $OUT && grep -A1 'name: DISK_WARN_PERCENT' $OUT | grep -q '\"80\"' && grep -q 'secretKeyRef' $OUT && grep -q 'health-alert.sh' $OUT && sed -n '/kind: CronJob/,$p' $OUT | grep -q 'automountServiceAccountToken: false' && sed -n '/kind: CronJob/,$p' $OUT | grep -A1 'imagePullSecrets:' | grep -q 'name: regcred' && sed -n '/kind: CronJob/,$p' $OUT | grep -A8 'resources:' | grep -q 'cpu: 10m' && sed -n '/kind: CronJob/,$p' $OUT | grep -A8 'resources:' | grep -q 'memory: 16Mi' && rm -f $OUT",  # pragma: allowlist secret
+    "OUT=/tmp/rootcoz-alerts-test-$$.yaml; helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render --set alerts.enabled=true --set alerts.diskWarnPercent=80 --set alerts.schedule='*/2 * * * *' --set 'imagePullSecrets[0].name=regcred' > $OUT 2>&1 && [ \"$(grep -c 'kind: CronJob' $OUT)\" = \"1\" ] && grep -qF 'schedule: \"*/2 * * * *\"' $OUT && grep -A1 'name: DISK_WARN_PERCENT' $OUT | grep -q '\"80\"' && grep -A1 'name: SERVER_ERROR_PERCENT' $OUT | grep -q '\"5\"' && grep -A1 'name: CLIENT_ERROR_PERCENT' $OUT | grep -q '\"25\"' && grep -A1 'name: CLIENT_ERROR_MIN_REQUESTS' $OUT | grep -q '\"10\"' && [ \"$(grep -c 'ERROR_RATE_PERCENT' $OUT)\" = \"0\" ] && grep -q 'secretKeyRef' $OUT && grep -q 'health-alert.sh' $OUT && sed -n '/kind: CronJob/,$p' $OUT | grep -q 'automountServiceAccountToken: false' && sed -n '/kind: CronJob/,$p' $OUT | grep -A1 'imagePullSecrets:' | grep -q 'name: regcred' && sed -n '/kind: CronJob/,$p' $OUT | grep -A8 'resources:' | grep -q 'cpu: 10m' && sed -n '/kind: CronJob/,$p' $OUT | grep -A8 'resources:' | grep -q 'memory: 16Mi' && rm -f $OUT",  # pragma: allowlist secret
+  ],
+  # The deprecated alerts.errorRatePercent alias (#494): honoured as serverErrorPercent
+  # while that is unset. A legacy `0` must stay `0` (a `default` chain would raise it to
+  # 5), and the new key wins when both are set.
+  [
+    "sh",
+    "-c",
+    "T='helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render --set alerts.enabled=true'; OUT=/tmp/rootcoz-alerts-migration-$$.yaml && $T --set alerts.errorRatePercent=7 > $OUT && grep -A1 'name: SERVER_ERROR_PERCENT' $OUT | grep -q '\"7\"' && $T --set alerts.errorRatePercent=0 > $OUT && grep -A1 'name: SERVER_ERROR_PERCENT' $OUT | grep -q '\"0\"' && $T --set alerts.serverErrorPercent=9 --set alerts.errorRatePercent=7 > $OUT && grep -A1 'name: SERVER_ERROR_PERCENT' $OUT | grep -q '\"9\"' && rm -f $OUT",  # pragma: allowlist secret
+  ],
+  # The new keys are bounded by the schema, not by Helm's `default`: 0 must fail on
+  # serverErrorPercent while the deprecated key stays unbounded, so an out-of-range
+  # legacy value still deploys instead of breaking an upgrade. The NOTES warning is
+  # guarded by grepping its SOURCE, not a render: `helm template` never emits NOTES.txt
+  # and `helm install --dry-run=client` talks to the cluster. Both the sentence and the
+  # kindIs "invalid" null test are asserted, because a truthiness gate would silently skip
+  # the legacy 0 case this row's migration render preserves.
+  [
+    "sh",
+    "-c",
+    "T='helm template rootcoz chart/ -f chart/examples/values-openshift.yaml --set ai.geminiApiKey=k --set admin.key=a --set encryptionKey=test-encryption-key-for-helm-template-render --set alerts.enabled=true'; L=/tmp/rootcoz-alerts-schema-$$.log; OUT=/tmp/rootcoz-alerts-legacy-$$.yaml && ! $T --set alerts.serverErrorPercent=0 > $L 2>&1 && grep -q 'alerts.serverErrorPercent: Must be greater than or equal to 1' $L && $T --set alerts.errorRatePercent=150 > $OUT && grep -A1 'name: SERVER_ERROR_PERCENT' $OUT | grep -q '\"150\"' && grep -q 'honoured as alerts.serverErrorPercent' chart/templates/NOTES.txt && grep -q 'kindIs \"invalid\"' chart/templates/NOTES.txt && rm -f $L $OUT",  # pragma: allowlist secret
   ],
   [
     "sh",

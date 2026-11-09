@@ -636,11 +636,12 @@ def log_index_outcomes(outcomes: dict[str, Any], *, job_id: str = "") -> str | N
     """Log only safe repository scope and known result categories, never paths or output.
 
     One aggregated line per run, carrying the job id. Two reasons, both learned
-    the hard way: per-repo lines share one format string, so simple_logger's
-    duplicate filter collapses them into a single "repeated N times" entry; and
-    this runs inside the indexing thread pool, where the ``[job_id=…]`` context
-    is not propagated, so without the id the outcome cannot be attributed to a
-    run at all. The id also makes each line distinct, which defeats the filter.
+    the hard way: per-repo lines once shared one format string, so simple_logger's
+    duplicate filter collapsed them into a single "repeated N times" entry (the
+    filter keys on the rendered text now, so that is history; one line per run is
+    still what an operator reads); and this runs inside the indexing thread pool,
+    where the ``[job_id=…]`` context is not propagated, so without the id the
+    outcome cannot be attributed to a run at all.
     """
     parts: list[str] = []
     for name, result in outcomes.items():

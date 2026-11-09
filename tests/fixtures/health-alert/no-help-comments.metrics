@@ -1,0 +1,6 @@
+rootcoz_health_up 1
+rootcoz_requests_total 20
+rootcoz_errors_total 3
+rootcoz_error_rate 0.15
+rootcoz_errors_by_class{status_class="4xx"} 0
+rootcoz_errors_by_class{status_class="5xx"} 3

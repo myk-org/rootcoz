@@ -1,0 +1,5 @@
+# This body has no rootcoz_errors_total and no rootcoz_errors_by_class family: it
+# cannot answer "share of requests" (D7 condition 1).
+rootcoz_health_up 1
+rootcoz_requests_total 20
+rootcoz_error_rate 0.1

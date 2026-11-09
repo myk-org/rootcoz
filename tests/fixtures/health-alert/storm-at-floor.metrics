@@ -1,0 +1,13 @@
+# HELP rootcoz_requests_total Total requests in the rolling window.
+# TYPE rootcoz_requests_total gauge
+rootcoz_requests_total 10
+# HELP rootcoz_errors_total Total errors in the rolling window.
+# TYPE rootcoz_errors_total gauge
+rootcoz_errors_total 3
+# HELP rootcoz_error_rate Error rate in the rolling window (0-1).
+# TYPE rootcoz_error_rate gauge
+rootcoz_error_rate 0.3
+# HELP rootcoz_errors_by_class Errors by HTTP status class in the rolling window.
+# TYPE rootcoz_errors_by_class gauge
+rootcoz_errors_by_class{status_class="4xx"} 3
+rootcoz_health_up 1

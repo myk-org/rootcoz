@@ -8,6 +8,15 @@ describe('ChatMarkdown', () => {
     expect(screen.getByText('Hello world')).toBeDefined()
   })
 
+  it('does not force an inverted palette onto the bubble', () => {
+    // prose-invert is light-on-dark; with no dark: variant in this build it
+    // lands on the white bubble in the light theme. theme.css owns the palette.
+    const { container } = render(<ChatMarkdown content="Hello world" />)
+    const markdown = container.firstElementChild as HTMLElement
+    expect(markdown.className).toContain('prose')
+    expect(markdown.className).not.toContain('prose-invert')
+  })
+
   it('renders regular links with target _blank', () => {
     render(<ChatMarkdown content="See [docs](https://example.com) for details" />)
     const link = screen.getByRole('link')

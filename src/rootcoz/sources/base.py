@@ -58,8 +58,8 @@ def cleanup_extract_dir(
         return
     logger.info("Cleaning up %s: %s", label, extract_path)
     nbytes, entries, failed = delete_tree(extract_path)
-    # Formatted inline for the reason ``delete_tree`` gives: a template-keyed
-    # dedupe filter would drop the second extract dir of one submission.
+    # Formatted inline because the values belong in the line; ``delete_tree``
+    # gives the same reason for its summary.
     logger.log(
         logging.WARNING if failed else logging.INFO,
         f"Cleanup {'incomplete' if failed else 'complete'}: {extract_path} "

@@ -285,10 +285,12 @@ def delete_tree(path: Path) -> DeleteResult:
     the walk runs on the single reaper worker, so an O(n²) summary over thousands
     of siblings would slow every cleanup queued behind it (#424). A directory that
     could not be opened hides an unknown number of entries, so it is reported as not
-    descended alongside the count. One line per errno is not enough: simple_logger's ``DuplicateFilter``
-    keys on ``(module, level, msg)`` — the *format string* — so a second errno logged
-    through the same template was dropped and only surfaced as ``repeated N times``
-    on the next record (#402).
+    descended alongside the count. One line per errno was what #402 started as, and
+    it was not enough: the dedup filter then keyed on ``(module, level, msg)`` — the
+    *format string* — so every errno after the first was dropped from one walk and
+    only surfaced as ``repeated N times`` on the next record. The key is the
+    rendered text now, so that is history; one line per tree stays because that is
+    what a caller of a reaper wants to read.
 
     Failures are *reported*, never raised: a partial delete still returns, so the
     return value is the only thing that can tell a caller the tree is gone —
@@ -373,8 +375,8 @@ def delete_tree(path: Path) -> DeleteResult:
     remove(top, None, top)
     failed = 0
     if failures:
-        # Formatted inline, not %-args: the content must be in ``record.msg`` or a
-        # template-keyed dedupe filter swallows the whole line.
+        # Formatted inline, not %-args: the values belong in the line an operator
+        # greps, and a template with them as args reads worse.
         parts: list[str] = []
         for code, (paths, reason) in sorted(failures.items()):
             # Only ENOTEMPTY nests: an ancestor above a surviving entry repeats it.
@@ -454,9 +456,8 @@ def _run_cleanup(
             elapsed = int((time.monotonic() - started) * 1000)
             # Type, errno and the failing call site only: the message can carry
             # a repo URL before ``_scrub_credentials`` has run, and this log is
-            # not a place to leak it. Formatted inline: the step name is data, and
-            # a template-keyed dedupe filter would swallow the second failing step
-            # of one submission.
+            # not a place to leak it. Formatted inline: the step name is data, so
+            # it belongs in the line a failing step is read from.
             logger.warning(
                 f"cleanup_failed what={what} step={name} "
                 f"error={type(exc).__name__} errno={getattr(exc, 'errno', None)} "
@@ -473,8 +474,8 @@ def _run_cleanup(
                 # The step reported paths it could not delete, so it did not
                 # establish that the tree is gone: this is not a clean delete.
                 clean = False
-            # Inline for the same reason: two steps reclaiming bytes through one
-            # template would log once and hide the other's figure.
+            # Formatted inline for the same reason: the step's own figures belong
+            # in its line, not behind one shared template for every step.
             logger.log(
                 logging.INFO if nbytes else logging.DEBUG,
                 f"cleanup what={what} step={name} reclaimed={nbytes} "

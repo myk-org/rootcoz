@@ -952,15 +952,55 @@ class TestChatTrackerTargets:
         assert targets == ()
         assert unavailable["jira"] == "unusable_credential"
 
-        # The same order of checks as the endpoint: with no method configured
-        # there is nothing to file through either.
-        no_method = self._settings(jira_server_url="")
+    def test_a_deployment_with_no_jira_method_names_the_admin_setting(self):
+        """Issue #499: no saved credential can file where the deployment itself
+        configures no Jira auth method, so "re-save your credential" sends the
+        user to Profile Settings to fix nothing."""
+        from rootcoz.engine.chat import _issue_create_rules
+        from rootcoz.main import _chat_tracker_gate, _chat_tracker_state
+
+        # No auth method selected and no URL/ids for any of them.
+        unconfigured = self._settings(
+            jira_server_url="",
+            jira_cloud_url="",
+            atlassian_oauth_client_id="",
+            atlassian_oauth_cloud_id="",
+        )
+        reason, refusal = _chat_tracker_gate(
+            "jira", unconfigured, {"jira_token": "pat"}
+        )
+        assert reason == "server_unconfigured"
+        assert refusal is not None and refusal.status_code == 400
+        assert "Server Settings" in refusal.detail
         assert (
             _chat_tracker_state(
-                no_method, {"jira_token": "pat"}, github_repo_available=True
+                unconfigured, {"jira_token": "pat"}, github_repo_available=True
             )[1]["jira"]
-            == "unusable_credential"
+            == "server_unconfigured"
         )
+        prompt = _issue_create_rules({"jira": "server_unconfigured"})
+        assert "re-saving the Jira credential will not help" in prompt
+        assert "Server Settings" in prompt
+
+    def test_a_credential_the_configured_server_cannot_serve_says_resave(self):
+        """The other half of #499: the server has a method, the saved credential
+        pins one it cannot serve — re-saving the credential IS the fix."""
+        from rootcoz.engine.chat import _issue_create_rules
+        from rootcoz.main import _chat_tracker_gate
+
+        # Cloud-only basic auth configured; a bare token pins ``pat``, which
+        # needs ``jira_server_url``.
+        cloud = self._settings(
+            jira_auth_mode="basic",
+            jira_cloud_url="https://example.atlassian.net",
+            jira_server_url="",
+        )
+        reason, refusal = _chat_tracker_gate("jira", cloud, {"jira_token": "pat"})
+        assert reason == "unusable_credential"
+        assert refusal is not None and refusal.status_code == 400
+        prompt = _issue_create_rules({"jira": "unusable_credential"})
+        assert "re-save the Jira credential" in prompt
+        assert "Server Settings" not in prompt
 
     def test_jira_flag_off_offers_nothing(self):
         assert (
@@ -1462,6 +1502,7 @@ class TestCredentialBlockedIssueNotice:
             "server_disabled",
             "no_repository",
             "no_run_repository",
+            "server_unconfigured",
             "unusable_credential",
         ):
             assert (
