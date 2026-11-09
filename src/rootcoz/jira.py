@@ -25,7 +25,9 @@ from rootcoz.config import (
 )
 from rootcoz.error_messages import deployment_credential_message
 from rootcoz.issue_matching import (
+    MAX_FILTER_PROMPT_CHARS,
     TrackerSearch,
+    build_filter_prompt,
     collect_product_bug_reports,
     filter_issue_matches_with_ai,
     search_failure_reason,
@@ -1036,6 +1038,7 @@ async def enrich_with_jira_matches(
     total_searches = len(keyword_to_reports)
     failed_searches = 0
     filter_failures = 0
+    oversized_filters = 0
     total_candidates = 0
     total_matches = 0
     try:
@@ -1069,6 +1072,26 @@ async def enrich_with_jira_matches(
                 representative = keyword_to_reports[kw_tuple][0]
 
                 if ai_provider and ai_model:
+                    prompt_chars = len(
+                        build_filter_prompt(
+                            representative.title,
+                            representative.description,
+                            candidates,
+                        )
+                    )
+                    if prompt_chars > MAX_FILTER_PROMPT_CHARS:
+                        # Not run: the overflow would come back as "no verdict"
+                        # and be recorded as a failed filter call instead.
+                        logger.warning(
+                            "Jira relevance filter not run for %d candidate(s) "
+                            "for job=%s: prompt is %d chars, over the %d char limit",
+                            len(candidates),
+                            job_id,
+                            prompt_chars,
+                            MAX_FILTER_PROMPT_CHARS,
+                        )
+                        oversized_filters += 1
+                        continue
                     try:
                         matches = await filter_matches_with_ai(
                             bug_title=representative.title,
@@ -1133,6 +1156,7 @@ async def enrich_with_jira_matches(
         failed_searches=failed_searches,
         total_searches=total_searches,
         filter_failures=filter_failures,
+        prompt_overflows=oversized_filters,
     )
     if reason:
         logger.warning("Jira search: %s for job=%s", reason, job_id)

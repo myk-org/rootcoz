@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach } from 'vitest'
-import { getUsername, setUsername, isLoggedIn, getGithubToken, setGithubToken, getJiraToken, setJiraToken, getJiraEmail, setJiraEmail, clearTokens, looksUrlEncoded } from '../cookies'
+import { describe, it, expect, beforeEach, vi } from 'vitest'
+import { getUsername, setUsername, isLoggedIn, clearTokens, looksUrlEncoded, getIsAdmin, getRole } from '../cookies'
 
 describe('cookies', () => {
   beforeEach(() => {
@@ -80,41 +80,42 @@ describe('cookies', () => {
     expect(isLoggedIn()).toBe(true)
   })
 
-  // --- Token helpers ---
+  // --- No tracker token survives in web storage ---
 
-  describe.each([
-    { label: 'GitHub token', get: getGithubToken, set: setGithubToken, value: 'ghp_abc123' },
-    { label: 'Jira token', get: getJiraToken, set: setJiraToken, value: 'jira_token_xyz' },
-    { label: 'Jira email', get: getJiraEmail, set: setJiraEmail, value: 'user@example.com' },
-  ])('$label helper', ({ get, set, value }) => {
-    it('returns empty when unset', () => {
-      expect(get()).toBe('')
-    })
+  const TRACKER_KEYS = [
+    'rootcoz_github_token',
+    'rootcoz_jira_token',
+    'rootcoz_jira_email',
+    'rootcoz_jira_sa_token',
+    'jji_github_token',
+    'jji_jira_token',
+    'jji_jira_email',
+  ]
 
-    it('stores and retrieves value', () => {
-      set(value)
-      expect(get()).toBe(value)
-    })
+  it('test_load_scrubs_every_stored_tracker_token', async () => {
+    // A browser that upgraded still carries the copy, current and legacy keys.
+    for (const key of TRACKER_KEYS) localStorage.setItem(key, 'secret')
+    localStorage.setItem('jji_is_admin', 'true')
+    localStorage.setItem('jji_role', 'admin')
 
-    it('removes value when set to empty string', () => {
-      set(value)
-      set('')
-      expect(get()).toBe('')
-    })
+    // Module load runs the migration + scrub.
+    vi.resetModules()
+    await import('../cookies')
 
-    it('trims whitespace before storing', () => {
-      set(`  ${value}  `)
-      expect(get()).toBe(value)
-    })
+    for (const key of TRACKER_KEYS) expect(localStorage.getItem(key)).toBeNull()
+    // The display hints are still migrated
+    expect(getIsAdmin()).toBe(true)
+    expect(getRole()).toBe('admin')
   })
 
-  it('clearTokens removes all tokens and email', () => {
-    setGithubToken('ghp_abc')
-    setJiraToken('jira_xyz')
-    setJiraEmail('user@example.com')
+  it('clearTokens also removes stored tracker tokens', () => {
+    // A sign-out on a browser that still holds a legacy key must drop it too.
+    for (const key of TRACKER_KEYS) localStorage.setItem(key, 'secret')
+    localStorage.setItem('rootcoz_is_admin', 'true')
+
     clearTokens()
-    expect(getGithubToken()).toBe('')
-    expect(getJiraToken()).toBe('')
-    expect(getJiraEmail()).toBe('')
+
+    for (const key of TRACKER_KEYS) expect(localStorage.getItem(key)).toBeNull()
+    expect(localStorage.getItem('rootcoz_is_admin')).toBeNull()
   })
 })

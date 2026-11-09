@@ -38,8 +38,6 @@ ai_provider = "claude"
 ai_model = "opus-4"
 ai_call_timeout = 15
 max_concurrent_ai_calls = 7
-jira_email = "dev@example.com"
-jira_token = "jira-token-dev"
 jira_project_key = "DEV"
 jira_max_results = 30
 enable_jira = true
@@ -241,8 +239,6 @@ class TestGetServerConfig:
         assert cfg.ai_model == "opus-4"
         assert cfg.ai_call_timeout == 15
         assert cfg.max_concurrent_ai_calls == 7
-        assert cfg.jira_email == "dev@example.com"
-        assert cfg.jira_token == "jira-token-dev"
         assert cfg.jira_project_key == "DEV"
         assert cfg.jira_max_results == 30
         assert cfg.enable_jira is True
@@ -264,7 +260,6 @@ class TestGetServerConfig:
         assert cfg.jira_max_results == 0
         assert cfg.enable_jira is None
         assert cfg.github_token == ""
-        assert cfg.jira_token == ""
         assert cfg.wait_for_completion is None
         assert cfg.poll_interval_minutes == 0
         assert cfg.max_wait_minutes == 0

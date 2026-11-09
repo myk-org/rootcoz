@@ -14,6 +14,10 @@ from tests.conftest import (
     make_test_client as _make_client,
 )
 
+#: The tracker-credential keys no CLI request body may carry: the server reads
+#: the caller's account token itself.
+_CREDENTIAL_KEYS = {"github_token", "jira_token", "jira_email", "jira_sa_token"}
+
 
 class TestRootCozError:
     def test_error_stores_status_and_detail(self):
@@ -987,105 +991,84 @@ class TestRootCozClientPreviewWithAiConfig:
 
 
 class TestRootCozClientIssueTokens:
-    def test_preview_github_issue_with_tokens(self):
+    """Tracker commands send choices only — never a tracker credential.
+
+    The credential is the caller's account token saved in Profile Settings,
+    which the server reads itself, so no request body can carry one.
+    """
+
+    def test_tracker_bodies_carry_no_credentials(self):
+        bodies: list[dict] = []
+
         def handler(request):
-            assert request.method == "POST"
-            assert "/results/job-1/preview-github-issue" in str(request.url)
-            body = json.loads(request.content)
-            assert body["github_token"] == "ghp_test123"
-            assert "jira_token" not in body
-            assert "jira_email" not in body
+            bodies.append(json.loads(request.content))
+            path = str(request.url)
+            if "jira-projects" in path or "jira-security-levels" in path:
+                return httpx.Response(200, json=[])
+            if "create-github-issue" in path:
+                return httpx.Response(
+                    201,
+                    json={
+                        "url": "https://github.com/org/repo/issues/1",
+                        "key": "",
+                        "title": "Bug",
+                        "comment_id": 1,
+                    },
+                )
+            if "create-jira-bug" in path:
+                return httpx.Response(
+                    201,
+                    json={
+                        "url": "https://jira.example.com/browse/PROJ-1",
+                        "key": "PROJ-1",
+                        "title": "Bug",
+                        "comment_id": 1,
+                    },
+                )
             return httpx.Response(
-                200,
-                json={"title": "Fix", "body": "Body", "similar_issues": []},
+                200, json={"title": "Fix", "body": "Body", "similar_issues": []}
             )
 
         client = _make_client(handler)
-        result = client.preview_github_issue(
+        client.preview_github_issue(
             job_id="job-1",
             test_name="tests.TestA.test_one",
-            github_token="ghp_test123",
+            github_repo_url="https://github.com/org/repo",
         )
-        assert result["title"] == "Fix"
-
-    def test_create_github_issue_with_tokens(self):
-        def handler(request):
-            assert request.method == "POST"
-            assert "/results/job-1/create-github-issue" in str(request.url)
-            body = json.loads(request.content)
-            assert body["github_token"] == "ghp_test123"
-            assert "jira_token" not in body
-            assert "jira_email" not in body
-            return httpx.Response(
-                201,
-                json={
-                    "url": "https://github.com/org/repo/issues/99",
-                    "key": "",
-                    "title": "Bug",
-                    "comment_id": 1,
-                },
-            )
-
-        client = _make_client(handler)
-        result = client.create_github_issue(
-            job_id="job-1",
-            test_name="tests.TestA.test_one",
-            title="Bug",
-            body="Details",
-            github_token="ghp_test123",
-        )
-        assert result["url"] == "https://github.com/org/repo/issues/99"
-
-    def test_preview_jira_bug_with_tokens(self):
-        def handler(request):
-            assert request.method == "POST"
-            assert "/results/job-1/preview-jira-bug" in str(request.url)
-            body = json.loads(request.content)
-            assert "github_token" not in body
-            assert body["jira_token"] == "jira-tok-test"
-            assert body["jira_email"] == "test@example.com"
-            return httpx.Response(
-                200,
-                json={"title": "Bug", "body": "Desc", "similar_issues": []},
-            )
-
-        client = _make_client(handler)
-        result = client.preview_jira_bug(
-            job_id="job-1",
-            test_name="tests.TestA.test_one",
-            jira_token="jira-tok-test",
-            jira_email="test@example.com",
-        )
-        assert result["title"] == "Bug"
-
-    def test_create_jira_bug_with_tokens(self):
-        def handler(request):
-            assert request.method == "POST"
-            assert "/results/job-1/create-jira-bug" in str(request.url)
-            body = json.loads(request.content)
-            assert "github_token" not in body
-            assert body["jira_token"] == "jira-tok-test"
-            assert body["jira_email"] == "test@example.com"
-            return httpx.Response(
-                201,
-                json={
-                    "url": "https://jira.example.com/browse/PROJ-1",
-                    "key": "PROJ-1",
-                    "title": "Bug",
-                    "comment_id": 1,
-                },
-            )
-
-        client = _make_client(handler)
-        result = client.create_jira_bug(
+        client.create_github_issue(
             job_id="job-1",
             test_name="tests.TestA.test_one",
             title="Bug",
             body="Details",
-            jira_token="jira-tok-test",
-            jira_email="test@example.com",
+            github_repo_url="https://github.com/org/repo",
         )
-        assert result["key"] == "PROJ-1"
+        client.preview_jira_bug(
+            job_id="job-1",
+            test_name="tests.TestA.test_one",
+            jira_project_key="PROJ",
+            jira_security_level="Restricted",
+        )
+        client.create_jira_bug(
+            job_id="job-1",
+            test_name="tests.TestA.test_one",
+            title="Bug",
+            body="Details",
+            jira_project_key="PROJ",
+            jira_security_level="Restricted",
+        )
+        client.jira_projects(query="PRO")
+        client.jira_security_levels(project_key="PROJ")
+
+        assert len(bodies) == 6
+        for body in bodies:
+            assert not _CREDENTIAL_KEYS & set(body), body
+        # The destination choices are still sent
+        assert bodies[0]["github_repo_url"] == "https://github.com/org/repo"
+        assert bodies[1]["github_repo_url"] == "https://github.com/org/repo"
+        assert bodies[2]["jira_project_key"] == "PROJ"
+        assert bodies[3]["jira_security_level"] == "Restricted"
+        assert bodies[4]["query"] == "PRO"
+        assert bodies[5]["project_key"] == "PROJ"
 
     def test_get_issue_prompt(self):
         def handler(request):
@@ -1129,25 +1112,6 @@ class TestRootCozClientIssueTokens:
         )
         assert result["title"] == "T"
 
-    def test_preview_github_issue_without_tokens_omits_fields(self):
-        def handler(request):
-            assert request.method == "POST"
-            assert "/results/job-1/preview-github-issue" in str(request.url)
-            body = json.loads(request.content)
-            assert "github_token" not in body
-            assert "jira_token" not in body
-            assert "jira_email" not in body
-            return httpx.Response(
-                200,
-                json={"title": "Fix", "body": "Body", "similar_issues": []},
-            )
-
-        client = _make_client(handler)
-        client.preview_github_issue(
-            job_id="job-1",
-            test_name="tests.TestA.test_one",
-        )
-
     def test_create_jira_bug_includes_jira_security_level(self):
         def handler(request):
             assert request.method == "POST"
@@ -1170,109 +1134,9 @@ class TestRootCozClientIssueTokens:
             test_name="tests.TestA.test_one",
             title="Bug",
             body="Details",
-            jira_token="jira-tok-test",
-            jira_email="test@example.com",
             jira_security_level="Restricted",
         )
         assert result["key"] == "PROJ-2"
-
-
-class TestRootCozClientCrossCredentialLeakage:
-    """Verify that GitHub methods never include Jira credentials and vice versa."""
-
-    def test_preview_github_issue_excludes_jira_credentials(self):
-        def handler(request):
-            body = json.loads(request.content)
-            assert "jira_token" not in body, (
-                "jira_token leaked into GitHub preview payload"
-            )
-            assert "jira_email" not in body, (
-                "jira_email leaked into GitHub preview payload"
-            )
-            assert body["github_token"] == "ghp_test"
-            return httpx.Response(
-                200,
-                json={"title": "Fix", "body": "Body", "similar_issues": []},
-            )
-
-        client = _make_client(handler)
-        client.preview_github_issue(
-            job_id="job-1",
-            test_name="tests.TestA.test_one",
-            github_token="ghp_test",
-        )
-
-    def test_create_github_issue_excludes_jira_credentials(self):
-        def handler(request):
-            body = json.loads(request.content)
-            assert "jira_token" not in body, (
-                "jira_token leaked into GitHub create payload"
-            )
-            assert "jira_email" not in body, (
-                "jira_email leaked into GitHub create payload"
-            )
-            return httpx.Response(
-                201,
-                json={
-                    "url": "https://github.com/org/repo/issues/1",
-                    "key": "",
-                    "title": "Bug",
-                    "comment_id": 1,
-                },
-            )
-
-        client = _make_client(handler)
-        client.create_github_issue(
-            job_id="job-1",
-            test_name="tests.TestA.test_one",
-            title="Bug",
-            body="Details",
-            github_token="ghp_test",
-        )
-
-    def test_preview_jira_bug_excludes_github_credentials(self):
-        def handler(request):
-            body = json.loads(request.content)
-            assert "github_token" not in body, (
-                "github_token leaked into Jira preview payload"
-            )
-            assert body["jira_token"] == "jira-tok"
-            return httpx.Response(
-                200,
-                json={"title": "Bug", "body": "Desc", "similar_issues": []},
-            )
-
-        client = _make_client(handler)
-        client.preview_jira_bug(
-            job_id="job-1",
-            test_name="tests.TestA.test_one",
-            jira_token="jira-tok",
-        )
-
-    def test_create_jira_bug_excludes_github_credentials(self):
-        def handler(request):
-            body = json.loads(request.content)
-            assert "github_token" not in body, (
-                "github_token leaked into Jira create payload"
-            )
-            return httpx.Response(
-                201,
-                json={
-                    "url": "https://jira.example.com/browse/PROJ-1",
-                    "key": "PROJ-1",
-                    "title": "Bug",
-                    "comment_id": 1,
-                },
-            )
-
-        client = _make_client(handler)
-        client.create_jira_bug(
-            job_id="job-1",
-            test_name="tests.TestA.test_one",
-            title="Bug",
-            body="Details",
-            jira_token="jira-tok",
-        )
 
 
 class TestRootCozClientReview:
@@ -1725,40 +1589,14 @@ class TestRootCozClientJiraProjects:
         def handler(request):
             assert request.method == "POST"
             assert "/api/jira-projects" in str(request.url)
+            body = json.loads(request.content)
+            assert not _CREDENTIAL_KEYS & set(body)
             return httpx.Response(200, json=[{"key": "PROJ", "name": "My Project"}])
 
         client = _make_client(handler)
         result = client.jira_projects()
         assert len(result) == 1
         assert result[0]["key"] == "PROJ"
-
-    def test_jira_projects_sa_token_sent(self):
-        captured = {}
-
-        def handler(request):
-            captured["payload"] = json.loads(request.content)
-            return httpx.Response(200, json=[])
-
-        client = _make_client(handler)
-        client.jira_projects(
-            jira_token="tok", jira_email="a@b.com", jira_sa_token="ATST-x"
-        )
-        assert captured["payload"]["jira_sa_token"] == "ATST-x"
-        assert captured["payload"]["jira_token"] == "tok"
-
-    def test_create_jira_bug_sa_token_sent(self):
-        captured = {}
-
-        def handler(request):
-            captured["payload"] = json.loads(request.content)
-            return httpx.Response(201, json={"key": "PROJ-1"})
-
-        client = _make_client(handler)
-        client.create_jira_bug(
-            "job-1", "test_a", "T", "B", jira_token="", jira_sa_token="ATST-x"
-        )
-        assert captured["payload"]["jira_sa_token"] == "ATST-x"
-        assert "jira_token" not in captured["payload"]
 
 
 class TestRootCozClientJiraSecurityLevels:
@@ -1768,6 +1606,7 @@ class TestRootCozClientJiraSecurityLevels:
             assert "/api/jira-security-levels" in str(request.url)
             body = json.loads(request.content)
             assert body["project_key"] == "PROJ"
+            assert not _CREDENTIAL_KEYS & set(body)
             return httpx.Response(
                 200,
                 json=[{"id": "10", "name": "Internal", "description": "Internal only"}],
@@ -1777,21 +1616,6 @@ class TestRootCozClientJiraSecurityLevels:
         result = client.jira_security_levels("PROJ")
         assert len(result) == 1
         assert result[0]["name"] == "Internal"
-
-    def test_jira_security_levels_with_token(self):
-        def handler(request):
-            body = json.loads(request.content)
-            assert body["jira_token"] == "tok"
-            assert body["jira_email"] == "u@e.com"
-            return httpx.Response(200, json=[])
-
-        client = _make_client(handler)
-        result = client.jira_security_levels(
-            "PROJ",
-            jira_token="tok",
-            jira_email="u@e.com",
-        )
-        assert result == []
 
 
 class TestRootCozClientReAnalyze:

@@ -10219,6 +10219,26 @@ async def get_issue_prompt(
         return {"prompt": ""}
 
 
+async def _read_user_tokens_for_preview(username: str, job_id: str) -> dict[str, str]:
+    """The caller's row for a preview, or an empty row if it cannot be read.
+
+    A preview drafts content and searches duplicates best-effort: a failed read
+    must not abort the draft, and it must never fall back to a server
+    credential — so it reads as an empty row, which skips the duplicate search
+    and leaves the create endpoint's own refusal as the authority.
+    """
+    try:
+        return await storage.get_user_tokens(username)
+    except Exception:
+        logger.warning(
+            "Could not read stored tracker tokens for job_id=%s — "
+            "previewing without duplicate detection",
+            job_id,
+            exc_info=True,
+        )
+        return {}
+
+
 # NOTE: Preview/create bug endpoints intentionally bypass _merge_settings().
 # These are server-level operations (GITHUB_TOKEN, TESTS_REPO_URL, Jira config)
 # that act on behalf of the server, not per-request analysis overrides. The
@@ -10278,10 +10298,12 @@ async def preview_github_issue(
         ai_username.reset(token)
 
     # Duplicate detection (best-effort: failures must not break preview)
-    # Uses only user-provided token — no server token fallback.
-    # If no user token, skip duplicate detection (preview still works).
+    # Uses the caller's stored token — no body token, no server token.
+    # If no stored token, skip duplicate detection (preview still works).
     tests_repo_url = _resolve_github_repo_url(settings)
-    github_token = (body.github_token or "").strip()
+    user_tokens = await _read_user_tokens_for_preview(request.state.username, job_id)
+    github_token = (user_tokens.get("github_token", "") or "").strip()
+    _debug_credential_source("github", bool(github_token))
     similar: list[dict[str, Any]] = []
     if tests_repo_url and github_token:
         try:
@@ -10323,17 +10345,21 @@ async def preview_jira_bug(
         )
     # A legacy (non-ATOA) service-account secret must be rejected, not
     # silently dropped (which would fall back to the server credentials).
-    _require_usable_jira_sa_token(body.jira_token, body.jira_sa_token)
-    # Effective settings first (Finding 9): the user's credential pins the
+    user_tokens = await _read_user_tokens_for_preview(request.state.username, job_id)
+    user_jira_token = (user_tokens.get("jira_token", "") or "").strip()
+    user_jira_sa_token = (user_tokens.get("jira_sa_token", "") or "").strip()
+    _debug_credential_source("jira", bool(user_jira_token or user_jira_sa_token))
+    _require_usable_jira_sa_token(user_jira_token, user_jira_sa_token)
+    # Effective settings first (Finding 9): the caller's credential pins the
     # auth method, so the method-configured check must run against the
-    # EFFECTIVE settings — a user-supplied credential can satisfy a method
+    # EFFECTIVE settings — a stored credential can satisfy a method
     # the server's own secret cannot.
     effective_jira_settings = _build_effective_jira_settings(
         settings,
-        body.jira_token,
-        body.jira_email,
+        user_jira_token,
+        user_tokens.get("jira_email", "") or "",
         body.jira_project_key,
-        user_jira_sa_token=body.jira_sa_token,
+        user_jira_sa_token=user_jira_sa_token,
     )
     _require_jira_method_configured(effective_jira_settings)
     failure, result_data, matched_child = await _load_effective_failure(
@@ -10372,11 +10398,9 @@ async def preview_jira_bug(
         ai_username.reset(token)
 
     # Duplicate detection (best-effort: failures must not break preview)
-    # Uses only user-provided token — no server token fallback.
-    # If no user token, skip duplicate detection (preview still works).
+    # Uses the caller's stored credential — no body token, no server token.
+    # If no stored credential, skip duplicate detection (preview still works).
     similar: list[dict[str, Any]] = []
-    user_jira_token = (body.jira_token or "").strip()
-    user_jira_sa_token = (body.jira_sa_token or "").strip()
     if (
         (user_jira_token or user_jira_sa_token)
         and _has_jira_credentials(effective_jira_settings)
@@ -10858,6 +10882,15 @@ async def _account_has_profile(username: str) -> bool:
     """Whether this caller has a ``users`` row — false only for the bootstrap
     ``admin``, which has nowhere to save a token."""
     return bool(username) and await storage.get_user_by_username(username) is not None
+
+
+def _debug_credential_source(target: str, present: bool) -> None:
+    """Name where a create/preview credential came from — never its value."""
+    logger.debug(
+        "issuing %s create with the caller's stored token (present=%s)",
+        target,
+        present,
+    )
 
 
 async def _require_user_tracker_credential(username: str, kind: str) -> str:
@@ -12070,8 +12103,9 @@ async def _create_issue_from_text(
     gate, target resolution, the create call with attribution and the refusal
     mapping live here, so the report endpoints and chat cannot drift apart.
 
-    Every credential is the caller's — this function never reads a deployment
-    credential.
+    Every credential is the caller's account token, resolved by the caller and
+    passed in; this function never reads a deployment credential and the request
+    body never carries one.
 
     Args:
         target: Which tracker to write to.
@@ -12098,13 +12132,13 @@ async def _create_issue_from_text(
         if not (github_token or "").strip():
             raise HTTPException(
                 status_code=400,
-                detail=tracker_credential_message(label),
+                detail=await _require_user_tracker_credential(username, label),
             )
     else:
         if not (jira_token or "").strip() and not (jira_sa_token or "").strip():
             raise HTTPException(
                 status_code=400,
-                detail=tracker_credential_message(label),
+                detail=await _require_user_tracker_credential(username, label),
             )
         # A legacy (non-ATOA) service-account secret must be rejected, not
         # silently dropped (which would file the bug under the SERVER's Jira
@@ -12225,13 +12259,16 @@ async def create_github_issue_endpoint(
         f"POST /results/{job_id}/create-github-issue: test_name={body.test_name}"
     )
     username = request.state.username
+    user_tokens = await storage.get_user_tokens(username)
+    github_token = user_tokens.get("github_token", "") or ""
+    _debug_credential_source("github", bool(github_token))
     result = await _create_issue_from_text(
         "github",
         body.title,
         body.body,
         username=username,
         settings=settings,
-        github_token=body.github_token or "",
+        github_token=github_token,
         # Reject an unknown test name before an issue is filed for it.
         pre_check=lambda: _load_effective_failure(
             job_id, body.test_name, body.child_job_name, body.child_build_number
@@ -12274,6 +12311,10 @@ async def create_jira_bug_endpoint(
     logger.debug(f"POST /results/{job_id}/create-jira-bug: test_name={body.test_name}")
 
     username = request.state.username
+    user_tokens = await storage.get_user_tokens(username)
+    jira_token = user_tokens.get("jira_token", "") or ""
+    jira_sa_token = user_tokens.get("jira_sa_token", "") or ""
+    _debug_credential_source("jira", bool(jira_token or jira_sa_token))
     try:
         result = await _create_issue_from_text(
             "jira",
@@ -12281,9 +12322,9 @@ async def create_jira_bug_endpoint(
             body.body,
             username=username,
             settings=settings,
-            jira_token=body.jira_token or "",
-            jira_email=body.jira_email or "",
-            jira_sa_token=body.jira_sa_token or "",
+            jira_token=jira_token,
+            jira_email=user_tokens.get("jira_email", "") or "",
+            jira_sa_token=jira_sa_token,
             jira_project_key=body.jira_project_key,
             jira_security_level=body.jira_security_level,
             jira_issue_type=body.jira_issue_type,
@@ -14959,29 +15000,23 @@ async def get_default_server_settings(
 
 
 class JiraProjectsRequest(BaseModel):
-    """Request body for listing Jira projects with user credentials."""
+    """Request body for listing Jira projects with the caller's stored credentials."""
 
-    jira_token: str = Field(default="", description="User's Jira token")
-    jira_email: str = Field(default="", description="User's Jira email for Cloud auth")
-    jira_sa_token: str = Field(
-        default="",
-        description=("User's Atlassian OAuth 2.0 credential client secret (ATOA)"),
-    )
     query: str = Field(default="", description="Search query to filter projects")
 
 
 def _jira_client_from_body(
     settings: Settings, jira_token: str, jira_email: str, jira_sa_token: str = ""
 ) -> tuple[Settings, str] | None:
-    """Normalize user Jira credentials and return effective settings.
+    """Normalize the caller's stored Jira credentials and return effective settings.
 
-    Returns ``(effective_settings, stripped_token)`` when the user supplied a
+    Returns ``(effective_settings, stripped_token)`` when the caller's row holds a
     non-empty token (regular or service account), or *None* when no usable
     token is present.
 
     Raises:
         HTTPException: 400 when a service-account secret with an
-            unrecognized prefix is supplied — it must be rejected, not
+            unrecognized prefix is stored — it must be rejected, not
             silently dropped in favor of another credential.
     """
     _require_usable_jira_sa_token(jira_token, jira_sa_token)
@@ -14998,15 +15033,20 @@ def _jira_client_from_body(
 @app.post("/api/jira-projects", operation_id="listJiraProjects")
 async def list_jira_projects(
     body: JiraProjectsRequest,
+    request: Request,
     settings: Settings = _SETTINGS_DEP,
 ) -> list[dict[str, Any]]:
-    """List Jira projects accessible to the user.
+    """List Jira projects accessible to the caller.
 
-    Uses the user's Jira token to list projects they can see.
+    Uses the caller's stored Jira credential to list projects they can see.
     Always includes the server's configured project key.
     """
+    user_tokens = await storage.get_user_tokens(request.state.username)
     result = _jira_client_from_body(
-        settings, body.jira_token, body.jira_email, body.jira_sa_token
+        settings,
+        user_tokens.get("jira_token", ""),
+        user_tokens.get("jira_email", ""),
+        user_tokens.get("jira_sa_token", ""),
     )
     # Effective settings first: the user's credential pins the auth method,
     # so the method-URL gate must check the EFFECTIVE method's URL — the
@@ -15040,26 +15080,27 @@ async def list_jira_projects(
 
 
 class JiraSecurityLevelsRequest(BaseModel):
-    jira_token: str = Field(default="", description="User's Jira token")
-    jira_email: str = Field(default="", description="User's Jira email")
-    jira_sa_token: str = Field(
-        default="",
-        description=("User's Atlassian OAuth 2.0 credential client secret (ATOA)"),
-    )
+    """Request body for listing a project's levels with stored credentials."""
+
     project_key: str = Field(description="Jira project key")
 
 
 @app.post("/api/jira-security-levels", operation_id="listJiraSecurityLevels")
 async def list_jira_security_levels(
     body: JiraSecurityLevelsRequest,
+    request: Request,
     settings: Settings = _SETTINGS_DEP,
 ) -> list[dict[str, Any]]:
     """List available security levels for a Jira project."""
     if not body.project_key:
         return []
 
+    user_tokens = await storage.get_user_tokens(request.state.username)
     result = _jira_client_from_body(
-        settings, body.jira_token, body.jira_email, body.jira_sa_token
+        settings,
+        user_tokens.get("jira_token", ""),
+        user_tokens.get("jira_email", ""),
+        user_tokens.get("jira_sa_token", ""),
     )
     if result is None:
         return []
@@ -15721,8 +15762,18 @@ async def health_check() -> dict[str, Any]:
 
 @app.get("/api/version", operation_id="getVersion")
 async def get_version() -> dict[str, Any]:
-    """Return the application version (lightweight, no dependency checks)."""
-    return {"version": _get_app_version()}
+    """Return the application version (lightweight, no dependency checks).
+
+    ``build`` appears only when the image was built with its identity args, so
+    the UI can tell "unknown" from an actual ref and a plain ``version``
+    consumer keeps seeing exactly what it saw before #520.
+    """
+    payload: dict[str, Any] = {"version": _get_app_version()}
+    build = server_status.read_build_info()
+    if build:
+        payload["build"] = build
+    logger.debug("Reported version %s build %s", payload["version"], build)
+    return payload
 
 
 @app.get("/api/health", operation_id="healthCheckDetailed")

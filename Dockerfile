@@ -58,11 +58,6 @@ FROM ghcr.io/astral-sh/uv:python3.14-bookworm-slim
 
 WORKDIR /app
 
-# Commit the image was built from, read by the admin Server Status page
-# (GET /api/admin/server-status) and by `rootcoz admin server-status`.
-ARG GIT_SHA=""
-ENV GIT_SHA=${GIT_SHA}
-
 # Install bash, git (runtime for gitpython), curl (for Cursor CLI + NodeSource setup)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     bash \
@@ -178,6 +173,24 @@ EXPOSE 8000
 # few seconds (dependency probes run with internal timeouts), hence 10s.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
     CMD curl -f http://localhost:${PORT:-8000}/api/health || exit 1
+
+# Which build this image is — commit, ref (the tag it is published under) and
+# build time — reported by GET /api/version, the sidebar footer and `rootcoz
+# version`. All three default empty: a plain local build carries no identity and
+# the API omits the `build` block. Declared here, after the last RUN, because a
+# build arg mid-stage invalidates every layer below it — these are read at
+# runtime only (`server_status.read_build_info`).
+#
+# The arg names are the CI contract (`container.build-args`: `GIT_COMMIT={revision}`,
+# `GIT_REF={tag}`, `BUILT_AT={created}`), not a free choice: a --build-arg whose
+# name the Dockerfile does not declare is silently dropped and the image would
+# carry no identity at all.
+ARG GIT_COMMIT=""
+ARG GIT_REF=""
+ARG BUILT_AT=""
+ENV ROOTCOZ_BUILD_COMMIT=${GIT_COMMIT} \
+    ROOTCOZ_BUILD_REF=${GIT_REF} \
+    ROOTCOZ_BUILD_BUILT_AT=${BUILT_AT}
 
 # Use uv run for uvicorn
 # --no-sync prevents uv from attempting to modify the venv at runtime.

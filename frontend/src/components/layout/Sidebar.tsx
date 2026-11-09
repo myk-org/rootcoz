@@ -108,21 +108,29 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
 
   // ─── Server version ─────────────────────────────────────────────
   const [version, setVersion] = useState('')
+  const [buildLabel, setBuildLabel] = useState('')
   // While auth is still resolving the version is meaningless; derive it instead
   // of clearing it from an effect so no stale value is ever rendered.
   const showVersion = !loading && authenticated
   const shownVersion = showVersion ? version : ''
+  const shownLabel = showVersion ? buildLabel : ''
 
   useEffect(() => {
     if (!showVersion) return
 
-    const controller = new AbortController()
+    // One controller per request, the previous aborted: a deployment can swap the
+    // build under an open page, and a slow answer for the old one must not win.
+    let controller: AbortController | null = null
 
     async function fetchVersion() {
+      controller?.abort()
+      controller = new AbortController()
+      const { signal } = controller
       try {
-        const data = await api.get<{ version: string }>('/api/version', { signal: controller.signal })
+        const data = await api.get<{ version: string; build?: { label?: string } }>('/api/version', { signal })
         if (!data.version) return
         setVersion(data.version)
+        setBuildLabel(data.build?.label ?? '')
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') return
         console.debug('Failed to fetch server version:', err)
@@ -130,7 +138,14 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
     }
 
     fetchVersion()
-    return () => { controller.abort() }
+    // #520: the build changes on every deploy while the version rarely does, so
+    // re-read the identity when the tab regains focus instead of naming the build
+    // the page loaded against.
+    window.addEventListener('focus', fetchVersion)
+    return () => {
+      window.removeEventListener('focus', fetchVersion)
+      controller?.abort()
+    }
   }, [showVersion])
 
   // ─── Drag resize ────────────────────────────────────────────────
@@ -252,6 +267,11 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
     ? `https://github.com/myk-org/rootcoz/releases/tag/v${encodeURIComponent(shownVersion)}`
     : undefined
 
+  // #520: the server composes the build suffix once ("latest@d6a1f3c"). It stays
+  // outside the release anchor: the link is the release the version names, and the
+  // build is not that release — a floating-tag build must not open the tag page.
+  const suffix = shownLabel ? ` · ${shownLabel}` : ''
+
   const versionLink = (
     <a
       href={releaseUrl}
@@ -271,10 +291,17 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
       {collapsed ? (
         <Tooltip>
           <TooltipTrigger asChild>{versionLink}</TooltipTrigger>
-          <TooltipContent side="right">rootcoz v{shownVersion}</TooltipContent>
+          <TooltipContent side="right">rootcoz v{shownVersion}{suffix}</TooltipContent>
         </Tooltip>
       ) : (
-        versionLink
+        <span className="flex items-center justify-center font-mono text-xs text-text-tertiary">
+          {versionLink}
+          {shownLabel && (
+            <span data-testid="sidebar-build" className="opacity-70">
+              {suffix}
+            </span>
+          )}
+        </span>
       )}
     </div>
   ) : null

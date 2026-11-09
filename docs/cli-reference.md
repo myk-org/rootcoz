@@ -40,7 +40,7 @@ That single command resolves the server, authenticates, and returns machine-read
 | --- | --- |
 | `rootcoz register USERNAME` | Register a user and print the new API key once. |
 | `rootcoz health` | Server health, per-check status, and recent error rate. |
-| `rootcoz version` | Server version string. |
+| `rootcoz version` | The same line the sidebar footer shows — `RootCoz v4.14.1`, plus the build identity when the image carries one (`RootCoz v4.14.1 · latest@d6a1f3c`); `--json` keeps the raw shape, with the `build` block (`commit`, `ref`, `built_at`, `label`) beside `version`. |
 
 3. **Manage authentication and AI keys.**
 
@@ -71,7 +71,7 @@ Roles reported by `auth whoami` are `viewer`, `reviewer`, `operator`, and `admin
 | `rootcoz config filter-presets update ID [--name NAME] [--filters FILTERS_JSON]` | Rename a preset and/or replace its filters. Requires a server. |
 | `rootcoz config filter-presets delete ID` | Delete a preset you own (personal) or any server preset (operator+). Requires a server. |
 
-Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries, and a shared `[defaults]` table merged into every server. Per-server keys include `url`, `username`, `api_key`, `no_verify_ssl`, `ai_provider`, `ai_model`, `jenkins_*`, `jira_*`, `github_token`, `peers`, `additional_repos`, `labels`, `prow_url`, and `gcs_bucket`. See [Configuration Reference](configuration-reference.html) for the full list.
+Config keys are grouped as `[default] server = "NAME"`, `[servers.NAME]` entries, and a shared `[defaults]` table merged into every server. Per-server keys include `url`, `username`, `api_key`, `no_verify_ssl`, `ai_provider`, `ai_model`, `jenkins_*`, the Jira *destination* keys (`jira_project_key`, `jira_security_level`, `jira_site_url`, `atlassian_oauth_cloud_id`, `jira_max_results`, `enable_jira`), `github_token`, `peers`, `additional_repos`, `labels`, `prow_url`, and `gcs_bucket`. Jira *credentials* are not CLI config keys: `jira_token`, `jira_email` and `jira_sa_token` are the account's saved tokens (`Settings` → `Tracker Tokens`), or Server Settings for the deployment. See [Configuration Reference](configuration-reference.html) for the full list.
 
 5. **Submit analyses.**
 
@@ -188,15 +188,18 @@ Sparse field paths include `result.summary`, `result.failed_count`, `result.fail
 | Command | Flags | Purpose |
 | --- | --- | --- |
 | `rootcoz capabilities` | — | Whether the server can create GitHub issues and Jira bugs. |
-| `rootcoz jira-projects` | `--query`, `--jira-token`, `--jira-email`, `--jira-sa-token` | Available Jira projects. |
-| `rootcoz jira-security-levels PROJECT_KEY` | `--jira-token`, `--jira-email`, `--jira-sa-token` | Security levels for a project. |
-| `rootcoz preview-issue JOB_ID` | `--test`/`-t`, `--type` (`github` or `jira`), `--child-job`, `--child-build`, `--include-links`, `--ai-provider`, `--ai-model`, `--github-token`, `--github-repo-url`, `--jira-token`, `--jira-email`, `--jira-sa-token`, `--jira-project-key`, `--jira-security-level`, `--issue-prompt` | Render issue title, body, and similar issues without creating anything. |
+| `rootcoz jira-projects` | `--query` | Available Jira projects, as seen by your saved Jira credential. |
+| `rootcoz jira-security-levels PROJECT_KEY` | — | Security levels for a project, as seen by your saved Jira credential. |
+| `rootcoz preview-issue JOB_ID` | `--test`/`-t`, `--type` (`github` or `jira`), `--child-job`, `--child-build`, `--include-links`, `--ai-provider`, `--ai-model`, `--github-repo-url`, `--jira-project-key`, `--jira-security-level`, `--issue-prompt` | Render issue title, body, and similar issues without creating anything. |
 | `rootcoz get-issue-prompt JOB_ID` | — | The issue prompt attached to the job's tests repo. |
-| `rootcoz create-issue JOB_ID` | `--test`/`-t`, `--type`, `--title`, `--body`, `--child-job`, `--child-build`, `--github-token`, `--github-repo-url`, `--jira-token`, `--jira-email`, `--jira-sa-token`, `--jira-project-key`, `--jira-security-level`, `--jira-issue-type` (default `Bug`) | Create the issue. |
+| `rootcoz create-issue JOB_ID` | `--test`/`-t`, `--type`, `--title`, `--body`, `--child-job`, `--child-build`, `--github-repo-url`, `--jira-project-key`, `--jira-security-level`, `--jira-issue-type` (default `Bug`) | Create the issue. |
 | `rootcoz propose-chat-issue` | `--target` (`github` or `jira`), `--title`, `--body`, `--repo`, `--job-id`, `--jira-project-key`, `--jira-security-level`, `--jira-issue-type` (default `Bug`) | Draft the issue and print the confirmation id, the confirmation code, and the `create-chat-issue` command that redeems them. Files nothing. The repo/run/project named here is part of the draft, so the create call must name the same one. |
 | `rootcoz create-chat-issue` | `--target` (`github` or `jira`), `--confirmation-id`, `--confirmation-code`, `--title`, `--body`, `--repo`, `--job-id`, `--jira-project-key`, `--jira-security-level`, `--jira-issue-type` (default `Bug`) | File the issue drafted by `propose-chat-issue`, passing the confirmation id and the confirmation code it printed. Deliberately exposes **no** token flags: the issue is created with the credentials saved in your account, so it can never be filed under a server token. |
 | `rootcoz validate-token github\|jira` | `--token` (hidden prompt), `--email` | Check a tracker token before using it. An ATOA-prefixed Jira value (an Atlassian OAuth 2.0 credential client secret) is validated as a service account against the scoped Atlassian gateway, using the server's `atlassian_oauth_client_id`; an ATST-prefixed value (an Atlassian service-account scoped token) is sent as Bearer to the same gateway with no exchange. |
 | `rootcoz ai-models` | `--provider`/`-p` | Model IDs per provider, with credential sources and a `session` column (`yes`/`no`/`unknown`) that says whether the sidecar can open a chat session with that ID. |
+
+`jira-projects`, `jira-security-levels`, `preview-issue` and `create-issue` have **no token flags**: the tracker credential is the account token saved in `Settings` → `Tracker Tokens`, which the server reads when it handles the call. A `jira_token`/`jira_email`/`jira_sa_token` key left in an old `config.toml` profile is ignored, and the flags themselves now fail at argument parsing (`no such option`) instead of being silently dropped.
+
 
 12. **Push to exporters.**
 

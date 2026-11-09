@@ -870,6 +870,49 @@ class TestEnrichWithJiraMatches:
         assert "filter" in record["reason"]
         assert product_bug_failure.analysis.product_bug_report.jira_matches == []
 
+    async def test_oversized_prompt_is_recorded_as_not_run(self, jira_settings) -> None:
+        """A prompt too large to send is not run, not a failed filter call."""
+        failure = FailureAnalysis(
+            test_name="test_huge",
+            error="err",
+            analysis=AnalysisDetail(
+                classification="PRODUCT BUG",
+                product_bug_report=ProductBugReport(
+                    title="Login fails",
+                    description="x" * 200_000,
+                    jira_search_keywords=["login"],
+                ),
+            ),
+        )
+        mock_candidates = [
+            {
+                "key": "PROJ-500",
+                "summary": "Login fails",
+                "description": "500",
+                "status": "Open",
+                "priority": "High",
+                "url": "https://jira.example.com/browse/PROJ-500",
+            },
+        ]
+        with patch("rootcoz.jira.JiraClient") as mock_client_cls:
+            mock_instance = AsyncMock()
+            mock_instance.search = AsyncMock(return_value=mock_candidates)
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_instance
+
+            with patch(
+                "rootcoz.jira.filter_matches_with_ai", new_callable=AsyncMock
+            ) as mock_filter:
+                record = await enrich_with_jira_matches(
+                    [failure], jira_settings, "claude", "test-model"
+                )
+
+        mock_filter.assert_not_called()
+        assert record["candidates"] == 1
+        assert "not run: prompt too large" in record["reason"]
+        assert "filter call(s) failed" not in record["reason"]
+
     async def test_record_counts_candidates_and_matches(
         self, product_bug_failure, jira_settings
     ) -> None:

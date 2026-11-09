@@ -31,17 +31,13 @@ poll_interval_minutes = 2
 max_wait_minutes = 0  # 0 = no limit (wait forever)
 # Jira
 jira_url = "https://your-jira.atlassian.net"
-# Jira credentials are Server Settings only — analysis requests never
-# carry them. jira_email below is the per-user fallback for bug-creation
-# and listing commands, paired with jira_token / jira_sa_token.
-jira_email = "you@example.com"
+# Jira credentials are never CLI config keys: the tracker token is the account
+# token saved in Profile Settings, or Server Settings for the deployment.
 atlassian_oauth_cloud_id = ""
 # Accepted for configuration-shape compatibility only — ATST service account
 # tokens have no refresh flow, so no OAuth client is used
 atlassian_oauth_client_id = ""
 jira_site_url = ""
-# Per-user tracker token (Profile Settings equivalent), NOT the analysis override
-jira_sa_token = ""
 jira_project_key = "PROJ"
 jira_ssl_verify = true
 jira_max_results = 50
