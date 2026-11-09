@@ -10413,13 +10413,25 @@ async def preview_jira_bug(
                         )
                     finally:
                         ai_username.reset(token)
-                    # Merge AI score into original candidate data to preserve all fields
-                    candidate_by_key = {c["key"]: c for c in candidates}
-                    similar = [
-                        {**candidate_by_key[m.key], "score": m.score}
-                        for m in matches
-                        if m.key in candidate_by_key
-                    ]
+                    if matches is None:
+                        # The filter could not judge — not the same as judging
+                        # every candidate irrelevant.
+                        logger.warning(
+                            "Jira relevance filter returned no verdict for %d "
+                            "candidate(s) for job_id=%s, returning unfiltered "
+                            "candidates",
+                            len(candidates),
+                            job_id,
+                        )
+                        similar = candidates
+                    else:
+                        # Merge AI score into original candidate data to preserve all fields
+                        candidate_by_key = {c["key"]: c for c in candidates}
+                        similar = [
+                            {**candidate_by_key[m.key], "score": m.score}
+                            for m in matches
+                            if m.key in candidate_by_key
+                        ]
                 except Exception:
                     logger.warning(
                         "AI relevance filtering failed for job_id=%s, "

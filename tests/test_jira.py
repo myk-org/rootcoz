@@ -835,6 +835,41 @@ class TestEnrichWithJiraMatches:
         assert "filter" in record["reason"]
         assert product_bug_failure.analysis.product_bug_report.jira_matches == []
 
+    async def test_unjudged_filter_is_named_not_read_as_no_matches(
+        self, product_bug_failure, jira_settings
+    ) -> None:
+        """A filter returning no verdict is a failure, not "nothing relevant"."""
+        mock_candidates = [
+            {
+                "key": "PROJ-401",
+                "summary": "Login fails",
+                "description": "500",
+                "status": "Open",
+                "priority": "High",
+                "url": "https://jira.example.com/browse/PROJ-401",
+            },
+        ]
+        with patch("rootcoz.jira.JiraClient") as mock_client_cls:
+            mock_instance = AsyncMock()
+            mock_instance.search = AsyncMock(return_value=mock_candidates)
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_instance
+
+            with patch(
+                "rootcoz.jira.filter_matches_with_ai",
+                new_callable=AsyncMock,
+                return_value=None,
+            ):
+                record = await enrich_with_jira_matches(
+                    [product_bug_failure], jira_settings, "claude", "test-model"
+                )
+
+        assert record["searched"] is True
+        assert record["candidates"] == 1
+        assert "filter" in record["reason"]
+        assert product_bug_failure.analysis.product_bug_report.jira_matches == []
+
     async def test_record_counts_candidates_and_matches(
         self, product_bug_failure, jira_settings
     ) -> None:

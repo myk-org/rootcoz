@@ -179,6 +179,12 @@ class TestParseGitHubRepoUrl:
         assert owner == "org"
         assert repo == "my-repo"
 
+    def test_parses_git_scheme_clone_url(self) -> None:
+        """The git:// clone form _validate_repo_url accepts is still GitHub."""
+        owner, repo = parse_github_repo_url("git://github.com/org/my-repo.git")
+        assert owner == "org"
+        assert repo == "my-repo"
+
     def test_raises_on_invalid_url(self) -> None:
         with pytest.raises(ValueError, match="Cannot parse"):
             parse_github_repo_url("https://gitlab.com/org/repo")
@@ -611,6 +617,12 @@ class TestRunRepoUrls:
         urls, _ = run_repo_urls("https://github.com/org/repo:develop", [])
         assert urls == ["https://github.com/org/repo"]
 
+    def test_git_scheme_repo_is_searchable(self) -> None:
+        """A run cloned over git:// is still searched, canonicalised to https."""
+        urls, skipped = run_repo_urls("git://github.com/org/repo", [])
+        assert urls == ["https://github.com/org/repo"]
+        assert skipped == 0
+
     def test_skips_non_github_urls_and_counts_them(self) -> None:
         urls, skipped = run_repo_urls(
             "https://gitlab.com/org/repo",
@@ -1018,6 +1030,109 @@ class TestEnrichWithGithubDuplicateMatches:
         assert (
             product_bug_with_keywords.analysis.product_bug_report.github_matches == []
         )
+
+    async def test_unjudged_filter_is_named_not_read_as_no_matches(
+        self, product_bug_with_keywords, settings_with_tests_repo
+    ) -> None:
+        """A filter that returns no verdict is a failure, not "nothing relevant"."""
+
+        async def search(_keywords, _repo_url, _token=""):
+            return [_candidate(7)]
+
+        with (
+            patch("rootcoz.github_issues.search_github_issues", side_effect=search),
+            patch(
+                "rootcoz.github_issues.filter_issue_matches_with_ai",
+                new_callable=AsyncMock,
+                return_value=None,
+            ),
+        ):
+            record = await enrich_with_github_duplicate_matches(
+                [product_bug_with_keywords],
+                settings_with_tests_repo,
+                _TEST_GITHUB_TOKEN,
+                "claude",
+                "test-model",
+                repo_urls=["https://github.com/org/test-repo"],
+            )
+
+        assert record["searched"] is True
+        assert record["candidates"] == 1
+        assert "filter" in record["reason"]
+        assert record["matches"] == 0
+
+    async def test_judged_no_matches_records_no_failure(
+        self, product_bug_with_keywords, settings_with_tests_repo
+    ) -> None:
+        """An empty evaluation list is a completed judgement, not a failure."""
+
+        async def search(_keywords, _repo_url, _token=""):
+            return [_candidate(7)]
+
+        with (
+            patch("rootcoz.github_issues.search_github_issues", side_effect=search),
+            patch(
+                "rootcoz.github_issues.filter_issue_matches_with_ai",
+                new_callable=AsyncMock,
+                return_value=[],
+            ),
+        ):
+            record = await enrich_with_github_duplicate_matches(
+                [product_bug_with_keywords],
+                settings_with_tests_repo,
+                _TEST_GITHUB_TOKEN,
+                "claude",
+                "test-model",
+                repo_urls=["https://github.com/org/test-repo"],
+            )
+
+        assert record["searched"] is True
+        assert record["reason"] == ""
+
+    async def test_malformed_ai_key_does_not_abandon_the_record(
+        self, product_bug_with_keywords, settings_with_tests_repo
+    ) -> None:
+        """An unhashable AI key costs its keyword set, not the whole record."""
+        other = FailureAnalysis(
+            test_name="test_other",
+            error="timeout",
+            analysis=AnalysisDetail(
+                classification="PRODUCT BUG",
+                product_bug_report=ProductBugReport(
+                    title="VM start fails",
+                    description="Migration start times out",
+                    jira_search_keywords=["vm start"],
+                ),
+            ),
+        )
+
+        async def search(_keywords, _repo_url, _token=""):
+            return [_candidate(1)]
+
+        with (
+            patch("rootcoz.github_issues.search_github_issues", side_effect=search),
+            patch(
+                "rootcoz.github_issues.filter_issue_matches_with_ai",
+                new_callable=AsyncMock,
+                side_effect=[
+                    [{"key": ["unhashable"], "relevant": True, "score": 0.9}],
+                    [{"key": "org/test-repo#1", "relevant": True, "score": 0.9}],
+                ],
+            ),
+        ):
+            record = await enrich_with_github_duplicate_matches(
+                [product_bug_with_keywords, other],
+                settings_with_tests_repo,
+                _TEST_GITHUB_TOKEN,
+                "claude",
+                "test-model",
+                repo_urls=["https://github.com/org/test-repo"],
+            )
+
+        assert record["searched"] is True
+        assert "filter" in record["reason"]
+        # The later keyword set still ran and its match was attached.
+        assert other.analysis.product_bug_report.github_matches[0].number == 1
 
     async def test_no_write_request_is_made(
         self, product_bug_with_keywords, settings_with_tests_repo

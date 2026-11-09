@@ -351,6 +351,10 @@ async def _search_and_filter(
                     job_id=job_id,
                     call_type=call_type,
                 )
+                # Conversion is inside the guard too: a malformed AI key must
+                # cost this keyword set, not abandon the whole record.
+                if evaluations is not None:
+                    matches = _evaluations_to_similar_issues(evaluations, candidates)
             except Exception:
                 # One failed filter must not discard the keyword sets after it:
                 # their searches already succeeded.
@@ -363,7 +367,18 @@ async def _search_and_filter(
                 )
                 filter_failures += 1
                 continue
-            matches = _evaluations_to_similar_issues(evaluations, candidates)
+            if evaluations is None:
+                # The filter could not judge — not the same as judging every
+                # candidate irrelevant.
+                logger.warning(
+                    "GitHub %s relevance filter returned no verdict for %d "
+                    "candidate(s) for job=%s",
+                    call_type,
+                    len(candidates),
+                    job_id,
+                )
+                filter_failures += 1
+                continue
         else:
             # No AI config — fall back to returning all candidates as matches
             logger.debug(

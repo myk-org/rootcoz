@@ -3952,6 +3952,83 @@ class TestPreviewJiraBug:
         assert "description" in match
 
     @pytest.mark.asyncio
+    async def test_preview_unjudged_ai_filter_falls_back_to_candidates(
+        self, test_client, caplog
+    ):
+        """A filter that returns no verdict is a failure, not "no matches"."""
+        result_data = {
+            "status": "completed",
+            "summary": "",
+            "failures": [
+                {
+                    "test_name": "test_network",
+                    "error": "ConnectionError",
+                    "analysis": {
+                        "classification": "PRODUCT BUG",
+                        "details": "Connection refused",
+                    },
+                }
+            ],
+        }
+        await storage.save_result(
+            "job-ai-filter-none", "http://jenkins", "completed", result_data
+        )
+
+        candidates = [
+            {
+                "key": "TEST-100",
+                "title": "Connection refused in prod",
+                "summary": "Connection refused in prod",
+                "url": "https://jira.example.com/browse/TEST-100",
+                "status": "Open",
+            },
+            {
+                "key": "TEST-200",
+                "title": "Unrelated issue",
+                "summary": "Unrelated issue",
+                "url": "https://jira.example.com/browse/TEST-200",
+                "status": "Closed",
+            },
+        ]
+
+        with (
+            _enable_feature("jira_enabled"),
+            patch("rootcoz.main.generate_jira_bug_content") as mock_gen,
+        ):
+            mock_gen.return_value = {
+                "title": "Connection refused",
+                "body": "h2. Summary\n\nConnection fails",
+            }
+            with patch("rootcoz.main.search_jira_duplicates") as mock_dup:
+                mock_dup.return_value = candidates
+                with (
+                    patch(
+                        "rootcoz.main.filter_matches_with_ai",
+                        new_callable=AsyncMock,
+                        return_value=None,
+                    ),
+                    capture_main_logs(caplog),
+                ):
+                    response = test_client.post(
+                        "/results/job-ai-filter-none/preview-jira-bug",
+                        json={
+                            "test_name": "test_network",
+                            "ai_provider": "claude",
+                            "ai_model": "opus",
+                            "jira_token": "user_jira_token",
+                        },
+                    )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert [m["key"] for m in data["similar_issues"]] == ["TEST-100", "TEST-200"]
+        # Unfiltered fallback keeps the raw candidate shape (no AI score)
+        assert all("score" not in m for m in data["similar_issues"])
+        # The verdict is missing, not the candidates: say so, don't report a crash.
+        assert "returned no verdict for 2 candidate(s)" in caplog.text
+        assert "AI relevance filtering failed" not in caplog.text
+
+    @pytest.mark.asyncio
     async def test_preview_child_job_uses_child_jenkins_url(self, test_client):
         """Preview for a child job failure uses the child's jenkins_url, not the parent's."""
         result_data = _make_child_preview_result(

@@ -835,7 +835,7 @@ async def filter_matches_with_ai(
     ai_model: str,
     ai_call_timeout: int | None = None,
     job_id: str = "",
-) -> list[JiraMatch]:
+) -> list[JiraMatch] | None:
     """Use AI to determine which Jira candidates are relevant to the bug.
 
     Delegates to the shared :func:`filter_issue_matches_with_ai` and
@@ -851,7 +851,9 @@ async def filter_matches_with_ai(
         job_id: Job identifier for token usage tracking.
 
     Returns:
-        List of JiraMatch objects for relevant candidates only.
+        List of JiraMatch objects for relevant candidates only, or ``None``
+        when the filter could not judge at all (see
+        :func:`filter_issue_matches_with_ai`).
     """
     # Ensure candidates have a consistent 'key' field for the shared filter
     evaluations = await filter_issue_matches_with_ai(
@@ -864,6 +866,8 @@ async def filter_matches_with_ai(
         job_id=job_id,
         call_type="jira_filter",
     )
+    if evaluations is None:
+        return None
 
     # Convert evaluations to JiraMatch objects
     candidate_by_key = {c["key"]: c for c in candidates}
@@ -990,6 +994,17 @@ async def enrich_with_jira_matches(
                         logger.exception(
                             "Jira relevance filtering failed for %d candidate(s) "
                             "for job=%s",
+                            len(candidates),
+                            job_id,
+                        )
+                        filter_failures += 1
+                        continue
+                    if matches is None:
+                        # The filter could not judge — not the same as judging
+                        # every candidate irrelevant.
+                        logger.warning(
+                            "Jira relevance filter returned no verdict for %d "
+                            "candidate(s) for job=%s",
                             len(candidates),
                             job_id,
                         )

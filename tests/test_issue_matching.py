@@ -158,8 +158,8 @@ class TestFilterIssueMatchesWithAi:
         )
         assert results == []
 
-    async def test_ai_failure_returns_empty(self) -> None:
-        """Returns empty list when AI call fails."""
+    async def test_ai_failure_returns_none(self) -> None:
+        """Returns None when the AI call fails, so "could not judge" is visible."""
         candidates = [
             {"key": "X-1", "summary": "Bug", "description": "d", "status": "Open"}
         ]
@@ -186,10 +186,10 @@ class TestFilterIssueMatchesWithAi:
                 job_id="job-1",
             )
 
-        assert results == []
+        assert results is None
 
-    async def test_unparseable_response_returns_empty(self) -> None:
-        """Returns empty list when AI response can't be parsed."""
+    async def test_unparseable_response_returns_none(self) -> None:
+        """Returns None when the AI response can't be parsed."""
         candidates = [
             {"key": "X-1", "summary": "Bug", "description": "d", "status": "Open"}
         ]
@@ -215,7 +215,7 @@ class TestFilterIssueMatchesWithAi:
                 ai_model="model",
             )
 
-        assert results == []
+        assert results is None
 
     async def test_handles_markdown_wrapped_json(self) -> None:
         """Extracts JSON from markdown code blocks."""

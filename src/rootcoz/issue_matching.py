@@ -124,7 +124,7 @@ async def filter_issue_matches_with_ai(
     ai_call_timeout: int | None = None,
     job_id: str = "",
     call_type: str = "issue_filter",
-) -> list[dict[str, Any]]:
+) -> list[dict[str, Any]] | None:
     """Use AI to determine which candidate issues are relevant to a bug.
 
     Sends the bug context and all candidate issues to the AI, asking it
@@ -148,7 +148,10 @@ async def filter_issue_matches_with_ai(
 
     Returns:
         List of dicts with ``key``, ``relevant`` (True), and ``score`` for
-        relevant candidates only, sorted by score descending.
+        relevant candidates only, sorted by score descending. ``None`` when the
+        filter could not judge at all (the AI call failed or its answer could
+        not be parsed) — an empty list means it judged and kept nothing, so the
+        two must stay distinguishable in the tracker record.
     """
     if not candidates:
         return []
@@ -214,7 +217,7 @@ Respond with ONLY the JSON array, no other text."""
 
     if not result.success:
         logger.warning("AI relevance filtering failed: %s", result.text)
-        return []
+        return None
 
     # Parse AI response
     try:
@@ -237,7 +240,7 @@ Respond with ONLY the JSON array, no other text."""
         evaluations = json.loads(text)
     except json.JSONDecodeError, ValueError:
         logger.warning("Failed to parse AI relevance response")
-        return []
+        return None
 
     relevant: list[dict[str, Any]] = []
     for evaluation in evaluations:
