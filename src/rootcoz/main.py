@@ -5188,7 +5188,8 @@ async def _enrich_result_with_jira(
             )
         logger.info("Jira search not run for job=%s: %s", job_id, reason)
         return issue_matching.tracker_search(
-            reason=reason, scope=[settings.jira_project_key or ""]
+            reason=reason,
+            scope=[settings.jira_project_key] if settings.jira_project_key else [],
         )
 
     all_failures = _collect_all_failures(failures)
@@ -5200,7 +5201,8 @@ async def _enrich_result_with_jira(
         reason = "no PRODUCT BUG failure carried search keywords"
         logger.info("Jira search not run for job=%s: %s", job_id, reason)
         return issue_matching.tracker_search(
-            reason=reason, scope=[settings.jira_project_key or ""]
+            reason=reason,
+            scope=[settings.jira_project_key] if settings.jira_project_key else [],
         )
     await safe_update_progress(job_id, "enriching_jira")
     logger.info("Enriching failures with Jira for job=%s", job_id)

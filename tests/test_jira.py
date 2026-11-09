@@ -729,6 +729,22 @@ class TestEnrichWithJiraMatches:
         assert "auth" in record["reason"]
         mock_client_cls.assert_not_called()
 
+    async def test_no_project_key_records_empty_scope(
+        self, product_bug_failure
+    ) -> None:
+        """Unset project key: scope is empty, not one blank project entry."""
+        env = {
+            "JENKINS_URL": "https://jenkins.example.com",
+            "JENKINS_USER": "testuser",
+            "JENKINS_PASSWORD": "testpassword",  # pragma: allowlist secret
+        }
+        with patch.dict(os.environ, env, clear=True):
+            settings = Settings(_env_file=None)
+
+        record = await enrich_with_jira_matches([product_bug_failure], settings)
+
+        assert record["scope"] == []
+
     async def test_records_reason_when_no_keywords(
         self, product_bug_no_keywords, jira_settings
     ) -> None:

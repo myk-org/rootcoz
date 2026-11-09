@@ -57,6 +57,42 @@ def tracker_search(
     )
 
 
+def search_failure_reason(
+    *,
+    search_label: str,
+    filter_label: str,
+    failed_searches: int,
+    total_searches: int,
+    filter_failures: int,
+) -> str:
+    """Join the reason a tracker search was partial or total.
+
+    Shared by both trackers so the two records cannot drift apart: a failed
+    search is a warning, a failed relevance filter is recorded separately so
+    "could not look" and "could not judge" stay distinguishable.
+
+    Args:
+        search_label: The searches, e.g. ``"Jira search(es)"``.
+        filter_label: The relevance filter calls, e.g. ``"Jira relevance filter"``.
+        failed_searches: How many search requests failed.
+        total_searches: How many search requests were made.
+        filter_failures: How many relevance filter calls failed.
+
+    Returns:
+        The reason joined with ``"; "``, empty when nothing failed.
+    """
+    reasons: list[str] = []
+    if failed_searches:
+        reasons.append(
+            f"all {total_searches} {search_label} failed"
+            if failed_searches == total_searches
+            else f"{failed_searches} of {total_searches} {search_label} failed"
+        )
+    if filter_failures:
+        reasons.append(f"{filter_failures} {filter_label} call(s) failed")
+    return "; ".join(reasons)
+
+
 def collect_product_bug_reports(
     failures: Sequence[FailureAnalysis],
 ) -> list[ProductBugReport]:

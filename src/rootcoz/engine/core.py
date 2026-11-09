@@ -1080,6 +1080,28 @@ def extract_json_dict(raw_text: str) -> dict[str, Any] | None:
     return None
 
 
+def _drop_ai_supplied_tracker_matches(analysis: AnalysisDetail) -> None:
+    """Blank tracker matches an AI answer supplied — only enrichment sets them.
+
+    ``jira_matches``/``github_matches`` are documented as populated in
+    post-processing, but the answer is parsed into the model as-is, so nothing
+    stops a model from filling them. Attached matches must always be ones a
+    tracker actually returned.
+    """
+    report = analysis.product_bug_report
+    if not isinstance(report, ProductBugReport):
+        return
+    if not (report.jira_matches or report.github_matches):
+        return
+    logger.warning(
+        "AI answer supplied tracker matches (jira=%d, github=%d); dropping them",
+        len(report.jira_matches),
+        len(report.github_matches),
+    )
+    report.jira_matches = []
+    report.github_matches = []
+
+
 def parse_json_response(raw_text: str) -> AnalysisDetail | None:
     """Parse AI JSON response into an AnalysisDetail.
 
@@ -1115,6 +1137,7 @@ def parse_json_response(raw_text: str) -> AnalysisDetail | None:
                 "AI JSON validated as object but failed schema parsing: %s", exc
             )
         else:
+            _drop_ai_supplied_tracker_matches(parsed)
             classification = _usable_classification(parsed.classification)
             if classification:
                 return parsed.model_copy(update={"classification": classification})

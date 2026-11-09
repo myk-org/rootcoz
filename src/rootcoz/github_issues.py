@@ -26,6 +26,7 @@ from rootcoz.issue_matching import (
     TrackerSearch,
     collect_product_bug_reports,
     filter_issue_matches_with_ai,
+    search_failure_reason,
     tracker_search,
 )
 from rootcoz.models import (
@@ -376,18 +377,15 @@ async def _search_and_filter(
             attach(target, matches)
         total_matches += len(matches)
 
-    reasons: list[str] = []
-    if failed_searches:
-        # A failure reason is a warning, a configuration reason is not.
-        reasons.append(
-            f"all {total_searches} GitHub issue search(es) failed"
-            if failed_searches == total_searches
-            else f"{failed_searches} of {total_searches} GitHub issue search(es) failed"
-        )
-    if filter_failures:
-        reasons.append(f"{filter_failures} GitHub relevance filter call(s) failed")
-    reason = "; ".join(reasons)
-    if reasons:
+    # A failed search is a warning, a configuration reason is not.
+    reason = search_failure_reason(
+        search_label="GitHub issue search(es)",
+        filter_label="GitHub relevance filter",
+        failed_searches=failed_searches,
+        total_searches=total_searches,
+        filter_failures=filter_failures,
+    )
+    if reason:
         logger.warning("GitHub %s: %s for job=%s", call_type, reason, job_id)
     logger.info(
         "GitHub %s complete for job=%s: %d keyword set(s), %d candidate(s), "

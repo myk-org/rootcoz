@@ -7,6 +7,7 @@ import json
 import logging
 import threading
 from pathlib import Path
+from typing import ClassVar
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import jenkins
@@ -3004,6 +3005,42 @@ class TestParseJsonResponseUsability:
             {"details": "The failing log line read **Classification: PRODUCT BUG**"}
         )
         assert parse_json_response(quoted) is None
+
+
+class TestAISuppliedTrackerMatches:
+    """Tracker matches come from enrichment, never from the AI answer."""
+
+    ANSWER: ClassVar[dict[str, object]] = {
+        "classification": "PRODUCT BUG",
+        "details": "real diagnosis",
+        "product_bug_report": {
+            "title": "VM fails to start",
+            "jira_search_keywords": ["VM start failure"],
+            "jira_matches": [{"key": "PROJ-1", "summary": "invented"}],
+            "github_matches": [{"key": "org/repo#1", "title": "invented"}],
+        },
+    }
+
+    def test_matches_in_the_answer_are_dropped(self) -> None:
+        """A model that fills a post-processing field cannot attach a match."""
+        parsed = parse_json_response(json.dumps(self.ANSWER))
+        assert parsed is not None
+        report = parsed.product_bug_report
+        assert report.jira_matches == []
+        assert report.github_matches == []
+
+    def test_answer_without_matches_is_untouched(self) -> None:
+        """The ordinary answer keeps its keywords and gains no matches."""
+        answer = {
+            **self.ANSWER,
+            "product_bug_report": {"title": "VM fails to start"},
+        }
+        parsed = parse_json_response(json.dumps(answer))
+        assert parsed is not None
+        report = parsed.product_bug_report
+        assert report.title == "VM fails to start"
+        assert report.jira_matches == []
+        assert report.github_matches == []
 
 
 class TestRecoverFromDetailsCodeFields:

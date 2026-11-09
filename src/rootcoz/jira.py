@@ -22,6 +22,7 @@ from rootcoz.issue_matching import (
     TrackerSearch,
     collect_product_bug_reports,
     filter_issue_matches_with_ai,
+    search_failure_reason,
     tracker_search,
 )
 from rootcoz.models import (
@@ -910,7 +911,8 @@ async def enrich_with_jira_matches(
         ai_model: AI model for relevance filtering.
         job_id: Job identifier for token usage tracking.
     """
-    scope = [settings.jira_project_key or ""]
+    # No project key means nothing is in scope — not one blank project.
+    scope = [settings.jira_project_key] if settings.jira_project_key else []
     if not settings.jira_enabled:
         reason = jira_unavailable_reason(settings) or "Jira search is disabled"
         logger.info("Jira search not run for job=%s: %s", job_id, reason)
@@ -1019,17 +1021,14 @@ async def enrich_with_jira_matches(
         logger.exception("Jira enrichment failed unexpectedly")
         return tracker_search(reason="Jira search failed unexpectedly", scope=scope)
 
-    reasons: list[str] = []
-    if failed_searches:
-        reasons.append(
-            f"all {total_searches} Jira search(es) failed"
-            if failed_searches == total_searches
-            else f"{failed_searches} of {total_searches} Jira search(es) failed"
-        )
-    if filter_failures:
-        reasons.append(f"{filter_failures} Jira relevance filter call(s) failed")
-    reason = "; ".join(reasons)
-    if reasons:
+    reason = search_failure_reason(
+        search_label="Jira search(es)",
+        filter_label="Jira relevance filter",
+        failed_searches=failed_searches,
+        total_searches=total_searches,
+        filter_failures=filter_failures,
+    )
+    if reason:
         logger.warning("Jira search: %s for job=%s", reason, job_id)
     logger.info(
         "Jira search complete: %d relevant match(es) found for job=%s",
