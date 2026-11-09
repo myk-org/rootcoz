@@ -219,6 +219,43 @@ describe('ProfileForm tracker tokens', () => {
     expect(keys).toEqual([])
   })
 
+  it('never clears stored tokens when the account read fails', async () => {
+    role.value = 'reviewer'
+    apiMock.get.mockImplementation(async (path: string) => {
+      if (path === '/api/user/tokens') throw new Error('server unavailable')
+      return {}
+    })
+
+    const onSaved = renderForm()
+    await waitFor(() => expect(apiMock.get).toHaveBeenCalledWith('/api/user/tokens'))
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    // The fields are empty because the read failed, not because the account is
+    // empty: writing that back would erase the credentials the server holds.
+    await waitFor(() => expect(onSaved).toHaveBeenCalled())
+    expect(apiMock.put).not.toHaveBeenCalledWith('/api/user/tokens', expect.anything())
+  })
+
+  it('keeps a credential typed before the account read lands', async () => {
+    role.value = 'reviewer'
+    let resolveTokens: (tokens: Record<string, string>) => void = () => {}
+    apiMock.get.mockImplementation((path: string) =>
+      path === '/api/user/tokens'
+        ? new Promise<Record<string, string>>((resolve) => { resolveTokens = resolve })
+        : Promise.resolve({}),
+    )
+
+    renderForm()
+    const github = await screen.findByLabelText(/GitHub Token/i)
+    await userEvent.type(github, 'ghp_typed')
+
+    resolveTokens({ github_token: 'ghp_server', jira_email: '', jira_token: '', jira_sa_token: '' })
+    // Save turns on only once the read has landed, so the field has taken it.
+    const save = screen.getByRole('button', { name: /^save$/i })
+    await waitFor(() => expect(save).toBeEnabled())
+    expect(github).toHaveValue('ghp_typed')
+  })
+
   it('clears one token even when an unchanged stored token is invalid (#294)', async () => {
     role.value = 'reviewer'
     // Server hands back a stored GitHub token that no longer validates.

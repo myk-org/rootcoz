@@ -44,6 +44,9 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
   const [saving, setSaving] = useState(false)
   const [usernameError, setUsernameError] = useState<string | null>(null)
   const [tokensLoaded, setTokensLoaded] = useState(false)
+  /** True once the server actually answered: only then do the fields describe
+   *  what is stored, and only then may a save write them back. */
+  const [tokensHydrated, setTokensHydrated] = useState(false)
   /** Token values as last returned by the server. A save only re-validates what
    *  differs from these, so an untouched stored credential is not re-checked and
    *  a stale browser-cached one is (#294). */
@@ -62,10 +65,13 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
       // and the baseline a save compares against, so an untouched credential is
       // never re-validated and a stale value cannot win (#294).
       setBaseline(server)
-      setGithubTokenValue(server.gh)
-      setJiraEmailValue(server.je)
-      setJiraTokenValue(server.jt)
-      setJiraSaTokenValue(server.jst)
+      setTokensHydrated(true)
+      // Only fill a field the user has not typed into yet (empty): a slow read
+      // must not throw away an edit started before it landed.
+      setGithubTokenValue((prev) => prev || server.gh)
+      setJiraEmailValue((prev) => prev || server.je)
+      setJiraTokenValue((prev) => prev || server.jt)
+      setJiraSaTokenValue((prev) => prev || server.jst)
     } catch (err) {
       // 401 (no cookie yet) and 404 (user not registered) are expected; log anything else.
       if (!isExpectedTokenSyncError(err)) {
@@ -111,7 +117,10 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
 
     async function commitProfile(trimmedUsername: string) {
       setUsername(trimmedUsername)
-      if (isViewer) return
+      // Nothing is written until the server's own values are known: the fields
+      // are empty after a failed read, and sending them would clear every
+      // stored credential (#294 clears deliberately, this is not one).
+      if (isViewer || !tokensHydrated) return
       // Every field is sent, including empty ones: the server reads an empty
       // field as a clear for that credential (#294).
       const gh = githubToken.trim()

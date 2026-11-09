@@ -483,6 +483,22 @@ describe('BugCreationDialog tracker credential', () => {
     },
   )
 
+  it('keeps Create usable when the credential read fails', async () => {
+    get.mockImplementation(async (path) => {
+      if (path === '/api/user/tokens') throw new Error('server unavailable')
+      if (path.startsWith('/api/ai-models')) return catalog
+      if (path.endsWith('/issue-prompt')) return { issue_prompt: 'Describe the bug' }
+      return {}
+    })
+    const user = userEvent.setup()
+    await openGeneratedPreview(user)
+
+    // A failed read leaves the row unknown, not empty: the server's own refusal
+    // names the fix, while a disabled button leaves no way to try.
+    expect(screen.getByRole('button', { name: /create github issue/i })).toBeEnabled()
+    expect(screen.queryByRole('link', { name: /Open Profile Settings/ })).not.toBeInTheDocument()
+  })
+
   it('enables Create when the row holds a token', async () => {
     const user = userEvent.setup()
     await openGeneratedPreview(user)
