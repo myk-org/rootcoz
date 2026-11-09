@@ -18249,7 +18249,9 @@ class TestGetJobResultsFullEndpoint:
             assert "job_ids" in response.json()["detail"]
 
     @pytest.mark.asyncio
-    async def test_batch_drops_a_blank_among_valid_ids(self, test_client) -> None:
+    async def test_batch_rejects_a_blank_among_valid_ids(self, test_client) -> None:
+        # A dropped blank would answer for fewer ids than the caller named with
+        # no signal, and would let a blank pad a 51-value request under the cap.
         response = test_client.get(
             "/api/results/full",
             params=[
@@ -18259,8 +18261,41 @@ class TestGetJobResultsFullEndpoint:
             ],
         )
 
+        assert response.status_code == 400
+        assert "job_ids" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_batch_scrubs_every_item_like_the_single_job_read(
+        self, test_client, monkeypatch
+    ) -> None:
+        """The batch must pass each item through the same redaction step.
+
+        The scrub is a no-op for this payload shape today, so a payload diff
+        cannot prove it. Intercept the call instead: the shared builder is the
+        only place it may happen, which is what stops the two routes drifting.
+        """
+        from rootcoz import main
+
+        await storage.save_result(
+            "batch-scrub",
+            "http://jenkins",
+            "completed",
+            {"job_name": "pipe", "build_number": 2, "failures": []},
+        )
+        real = main.strip_sensitive_from_response
+        scrubbed: list[dict] = []
+
+        def _spy(payload):
+            scrubbed.append(payload)
+            return real(payload)
+
+        monkeypatch.setattr(main, "strip_sensitive_from_response", _spy)
+
+        response = test_client.get(
+            "/api/results/full", params={"job_ids": "batch-scrub"}
+        )
         assert response.status_code == 200
-        assert response.json()["missing"] == ["batch-blank-a", "batch-blank-b"]
+        assert [item["job"]["job_id"] for item in scrubbed] == ["batch-scrub"]
 
     @pytest.mark.asyncio
     async def test_batch_does_not_cap_or_truncate_failures(self, test_client) -> None:

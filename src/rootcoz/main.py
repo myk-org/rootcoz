@@ -8072,7 +8072,7 @@ async def get_job_result_full(
     if result.get("status") in IN_PROGRESS_STATUSES:
         response.status_code = 202
 
-    return strip_sensitive_from_response(payload)
+    return payload
 
 
 async def _build_full_result_payload(
@@ -8090,8 +8090,9 @@ async def _build_full_result_payload(
 
     The single shared shaping path for ``GET /api/results/{job_id}/full`` and
     the batch ``GET /api/results/full``: same effective classifications, same
-    failure flattening, same review resolution, same sanitising. Returns the
-    unscrubbed payload and never raises 404 — the caller owns both.
+    failure flattening, same review resolution, same sanitising. Sanitising
+    lives *here* so neither route can return an unscrubbed payload. Never
+    raises 404 — the caller owns that.
     """
     result_data = result.get("result") or {}
     await _apply_effective_classifications(job_id, result_data)
@@ -8174,7 +8175,9 @@ async def _build_full_result_payload(
     # byte-identical, and a batch item simply never carries the key.
     if not include_tests:
         del payload["tests"]
-    return payload
+    # Scrubbed in the shared builder, not per route: a batch item and a
+    # single-job response cannot diverge on redaction.
+    return strip_sensitive_from_response(payload)
 
 
 MAX_BATCH_JOB_IDS = 50
@@ -8185,17 +8188,21 @@ MAX_JOB_ID_CHARS = 64
 
 
 def _normalize_job_ids(values: list[str] | None) -> list[str]:
-    """Normalise batch ``job_ids``; 400 on empty, on either bound, else dedupe.
+    """Normalise batch ``job_ids``; 400 on blank, on either bound, else dedupe.
 
-    The id count is checked **before** dedupe: the bound exists to bound the
-    request, so repeating one id 51 times is still a rejection. Order is
-    preserved because the response pairs ids with items positionally.
+    A blank value is rejected, never dropped: dropping it would answer for
+    fewer ids than the caller named with no signal, and would let a blank pad a
+    51-value request under the cap. The id count is checked **before** dedupe:
+    the bound exists to bound the request, so repeating one id 51 times is still
+    a rejection. Order is preserved for the parent route's logging.
     """
-    trimmed = [value.strip() for value in values or [] if value.strip()]
+    trimmed = [value.strip() for value in values or []]
     if not trimmed:
         raise HTTPException(
             status_code=400, detail="job_ids is required: name at least one id"
         )
+    if any(not value for value in trimmed):
+        raise HTTPException(status_code=400, detail="job_ids must not be blank")
     if len(trimmed) > MAX_BATCH_JOB_IDS:
         raise HTTPException(
             status_code=400,

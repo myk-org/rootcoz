@@ -15,6 +15,7 @@ from typing import Annotated, Any
 
 import typer
 import yaml
+from click.core import ParameterSource
 
 from rootcoz.cli.client import RootCozClient, RootCozError
 from rootcoz.cli.config import (
@@ -1339,6 +1340,7 @@ def results_tests(
 
 @results_app.command("full")
 def results_full(
+    ctx: typer.Context,
     job_ids: Annotated[list[str] | None, typer.Argument(help="Job id(s).")] = None,
     status: list[str] = _STATUS_FILTER_OPTION,
     child_job_name: str = typer.Option(
@@ -1395,16 +1397,19 @@ def results_full(
         _render_full_result(data, offset=offset, limit=limit)
         return
 
+    # Ask whether the flag was *passed*, not whether it differs from its
+    # default: `--child-build 0` and `--limit 50` are real intent (build 0 is a
+    # valid build number) and must be refused, not silently ignored.
     tests_filters = [
         flag
-        for set_, flag in (
-            (status, "--status"),
-            (child_job_name, "--child-job"),
-            (child_build_number, "--child-build"),
-            (offset, "--offset"),
-            (limit != 50, "--limit"),
+        for name, flag in (
+            ("status", "--status"),
+            ("child_job_name", "--child-job"),
+            ("child_build_number", "--child-build"),
+            ("offset", "--offset"),
+            ("limit", "--limit"),
         )
-        if set_
+        if ctx.get_parameter_source(name) == ParameterSource.COMMANDLINE
     ]
     if tests_filters:
         typer.echo(

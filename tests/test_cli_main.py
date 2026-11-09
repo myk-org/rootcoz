@@ -837,6 +837,26 @@ class TestResultsFullCommand:
         assert "--limit" in result.output
         mock_client.get_full_results.assert_not_called()
 
+    @pytest.mark.parametrize(
+        "flag",
+        [
+            ["--status", "passed"],
+            ["--child-job", "child"],
+            ["--child-build", "0"],
+            ["--offset", "0"],
+            ["--limit", "50"],
+        ],
+        ids=lambda flag: flag[0],
+    )
+    def test_results_full_multiple_ids_rejects_explicit_default_filters(
+        self, mock_client, flag
+    ):
+        """A flag equal to its default is still intent and must not be ignored."""
+        result = runner.invoke(app, ["results", "full", "a", "b", *flag])
+        assert result.exit_code == 1
+        assert flag[0] in result.output
+        mock_client.get_full_results.assert_not_called()
+
     def test_results_full_multiple_ids_json_envelope(self, mock_client):
         mock_client.get_full_results.return_value = {
             "jobs": [self._batch_job("a"), self._batch_job("b")],
