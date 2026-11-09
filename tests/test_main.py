@@ -13734,6 +13734,61 @@ class TestStaticAssetHeaders:
         cache_control = response.headers.get("cache-control", "")
         assert "immutable" not in cache_control
 
+    def test_spa_shell_revalidates(self, test_client, tmp_path, monkeypatch):
+        """The SPA shell must revalidate so a deploy is picked up on reload.
+
+        Without ``no-cache`` the browser heuristically caches index.html and
+        keeps pointing at the previous (immutable, unchangeable) asset hashes,
+        so the old UI survives every deploy until a hard refresh.
+        """
+        dist = tmp_path / "dist"
+        dist.mkdir()
+        (dist / "index.html").write_text("<html><body>spa</body></html>")
+        monkeypatch.setattr("rootcoz.main._FRONTEND_DIR", dist)
+
+        response = test_client.get("/", headers={"Accept": "text/html"})
+
+        assert response.status_code == 200
+        assert response.headers.get("cache-control") == "no-cache"
+
+    def test_spa_shell_no_cache_on_catchall(self, test_client, tmp_path, monkeypatch):
+        """Deep links served by the SPA catch-all revalidate too."""
+        dist = tmp_path / "dist"
+        dist.mkdir()
+        (dist / "index.html").write_text("<html><body>spa</body></html>")
+        monkeypatch.setattr("rootcoz.main._FRONTEND_DIR", dist)
+
+        response = test_client.get("/status/abc", headers={"Accept": "text/html"})
+
+        assert response.status_code == 200
+        assert response.headers.get("cache-control") == "no-cache"
+
+    def test_vite_assets_stay_immutable(self, tmp_path):
+        """Hashed assets keep the immutable policy — the shell fix must not weaken it.
+
+        Built on the real middleware because the ``/assets`` mount only exists
+        when ``frontend/dist`` is present, which the test env has not built.
+        """
+        from fastapi import FastAPI
+        from fastapi.responses import Response
+        from fastapi.testclient import TestClient
+
+        from rootcoz.main import CacheControlMiddleware
+
+        asset_app = FastAPI()
+        asset_app.add_middleware(CacheControlMiddleware)
+
+        @asset_app.get("/assets/index-abc123.js")
+        async def _asset() -> Response:
+            return Response("console.log(1)", media_type="application/javascript")
+
+        response = TestClient(asset_app).get("/assets/index-abc123.js")
+
+        assert response.status_code == 200
+        assert response.headers.get("cache-control") == (
+            "public, max-age=31536000, immutable"
+        )
+
 
 class TestAdminSettingsEndpoints:
     """Tests for /api/admin/settings endpoints."""

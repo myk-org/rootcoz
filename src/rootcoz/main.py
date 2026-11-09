@@ -15959,7 +15959,12 @@ def _serve_spa() -> HTMLResponse:
     index_file = _FRONTEND_DIR / "index.html"
     if not index_file.is_file():
         raise HTTPException(status_code=404, detail="Frontend not built")
-    return HTMLResponse(content=index_file.read_text(encoding="utf-8"))
+    # no-cache: the shell names the hashed bundle, so a stale shell keeps loading
+    # the previous deploy's UI until a hard refresh.
+    return HTMLResponse(
+        content=index_file.read_text(encoding="utf-8"),
+        headers={"Cache-Control": "no-cache"},
+    )
 
 
 # --- Auth endpoints ---
