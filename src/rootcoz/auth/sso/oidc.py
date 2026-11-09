@@ -33,6 +33,7 @@ from rootcoz import get_child_logger
 from rootcoz.auth.sso.base import AuthError, ClaimSet, SSOProvider
 from rootcoz.auth.sso.http import request_json
 from rootcoz.config import Settings, issuer_is_secure
+from rootcoz.url_utils import is_safe_navigation_url
 
 logger = get_child_logger(__name__)
 
@@ -448,9 +449,12 @@ class OIDCProvider(SSOProvider):
                 back (a value registered at the provider).
 
         Returns:
-            The logout URL, or ``None`` when the provider advertises no
-            ``end_session_endpoint`` or discovery fails — a local logout is then
-            the safe answer.
+            The end-session URL carrying ``post_logout_redirect_uri`` and
+            ``client_id`` (Keycloak needs the client to validate the redirect
+            when no ``id_token_hint`` is sent), or ``None`` when the provider
+            advertises no ``end_session_endpoint``, discovery is unreachable, or
+            the discovered endpoint is not a plain https URL (loopback http for
+            a dev IdP) — a local logout is then the safe answer.
         """
         try:
             document = await self.metadata()
@@ -458,12 +462,25 @@ class OIDCProvider(SSOProvider):
             logger.debug("No end-session URL for %s: %s", self.issuer, exc.reason)
             return None
         endpoint = document.get("end_session_endpoint")
-        if not endpoint:
+        if not endpoint or not is_safe_navigation_url(
+            str(endpoint), allow_loopback_http=True
+        ):
+            # The endpoint comes from the issuer's discovery document: it is
+            # trusted for identity, not for navigation. Anything that is not a
+            # plain https URL (loopback http for a dev IdP) is refused.
             return None
+        # Keycloak (Red Hat SSO) needs `client_id` to know whose redirect URI it
+        # is validating when no `id_token_hint` is sent; other providers ignore
+        # the extra parameter.
         query = httpx.QueryParams(
-            {"post_logout_redirect_uri": post_logout_redirect_uri}
+            {
+                "post_logout_redirect_uri": post_logout_redirect_uri,
+                "client_id": self._client_id,
+            }
         )
-        return f"{endpoint}?{query}"
+        # An endpoint may already carry a query; a second "?" would corrupt it.
+        separator = "&" if "?" in endpoint else "?"
+        return f"{endpoint}{separator}{query}"
 
 
 def username_hint(claims: dict[str, Any], email: str | None) -> str:

@@ -46,6 +46,19 @@ ALLOW_LIST_EXEMPT_ROUTES = {
     # A POST for the same reason: the ticket is the credential, and the route
     # only reads what it stands for (no write, so no allow-list question).
     ("POST", "/api/auth/sso/ticket"),
+    # CLI device flow (issue #197): both are authentication, and neither can
+    # widen what the caller may do. `start` runs before any account is known and
+    # writes only a device-code row that expires on its own; `approve` records
+    # the *calling* account, so an off-list user can only approve their own —
+    # already restricted — access, exactly like `login`.
+    ("POST", "/api/auth/sso/device/start"),
+    ("POST", "/api/auth/sso/device/approve"),
+    # Poll is a POST so the live device code never lands in an access log; it
+    # writes only a throttle timestamp and belongs to no account yet.
+    ("POST", "/api/auth/sso/device/poll"),
+    # POST for the same transport reason, and it only reads: the code lookup
+    # that the approval page runs before it writes anything.
+    ("POST", "/api/auth/sso/device/approve/lookup"),
     ("POST", "/api/jira-projects"),
     ("POST", "/api/jira-security-levels"),
     ("POST", "/api/validate-token"),

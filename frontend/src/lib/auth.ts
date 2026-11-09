@@ -14,7 +14,12 @@ export interface AuthState {
   loading: boolean
   authenticated: boolean
   login: (username: string, apiKey: string) => Promise<void>
-  logout: () => Promise<void>
+  /**
+   * End the session and resolve to the IdP logout URL when the provider has a
+   * session to end — the caller navigates to it (see `useSignOut`) — or `null`
+   * for a purely local logout, which the caller sends to `/login`.
+   */
+  logout: () => Promise<string | null>
   refreshAuth: () => Promise<void>
 }
 
