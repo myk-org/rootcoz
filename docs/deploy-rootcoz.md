@@ -517,10 +517,11 @@ kubectl exec -n rootcoz deploy/rootcoz -- python -c \
   Settings — and the resume INFO follows within 30 seconds.
 
 - A line you expected is missing from the log
-  Consecutive **identical** lines are collapsed by the duplicate filter, and its key is the
-  *unformatted* message template: same logger, same level and same template is one line, even when
-  the arguments differ. `[AUDIT]` lines are exempt, so the audit trail never loses a record — a
-  missing audit line is a real gap, not deduplication.
+  Consecutive **identical rendered** lines are collapsed by the duplicate filter: same logger, same
+  level, same `job_id` and the same text after `%s` substitution is one line. Different arguments are
+  different lines, and because the key carries the `job_id`, two jobs' identical lines are two records.
+  `[AUDIT]` lines are exempt, so the audit trail never loses a record — a missing audit line is a real
+  gap, not deduplication.
 
 - `route.enabled and ingress.enabled are mutually exclusive`
   The chart refuses to render with both on. Set the one you are not using to `false`.
