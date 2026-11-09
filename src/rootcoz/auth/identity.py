@@ -14,7 +14,10 @@ The rules, and why each one exists:
   a local account that is not on the list can still claim itself, because that
   list bounds who may write, not who may sign in (see ``AGENTS.md``).
 * Email is never used to merge accounts: two providers can both claim the same
-  address, and auto-merging on it is an account-takeover primitive.
+  address, and auto-merging on it is an account-takeover primitive. The address
+  *domain* is used for exactly one thing: the deployment's optional
+  ``SSO_ALLOWED_DOMAINS`` allow-list, checked before any account is looked up so
+  it applies to linked accounts too.
 
 This module decides *which account*, never *whether it may act* — that is
 :mod:`rootcoz.auth.approval` — and it writes no SQL; persistence belongs to
@@ -88,6 +91,102 @@ class LoginChoice:
     suggested_username: str
 
 
+def domain_allowed(domain: str, allowed: frozenset[str]) -> bool:
+    """Whether a domain is on the allow-list.
+
+    A subdomain of an entry is allowed; a look-alike suffix is not — ``redhat.com``
+    must never match ``notredhat.com`` or ``redhat.com.evil.io``.
+
+    Args:
+        domain: The email domain, lower-cased.
+        allowed: The normalised allow-list.
+
+    Returns:
+        True when the domain equals an entry or ends with ``"." + entry``.
+    """
+    return any(domain == entry or domain.endswith("." + entry) for entry in allowed)
+
+
+def check_domain(claims: ClaimSet, settings: Settings) -> None:
+    """Apply the deployment's SSO domain policy to one login.
+
+    Runs before the account is looked up, so it applies to a linked account too:
+    removing a domain revokes access on the next sign-in, not on the next
+    account. The policy is admission only — approval and roles are decided
+    elsewhere.
+
+    While the list is set the address must be *positively* verified: a provider
+    that omits ``email_verified`` (or sends ``false``) is refused, because an
+    unverified address can be changed by whoever holds the account.
+
+    Args:
+        claims: The verified claims.
+        settings: Application settings (``SSO_ALLOWED_DOMAINS``).
+
+    Raises:
+        AuthError: ``domain_not_allowed`` when the address is missing or its
+            domain is not listed, ``email_not_verified`` when the provider does
+            not assert that the address is verified.
+    """
+    try:
+        allowed = settings.sso_allowed_domains_set
+    except ValueError as exc:
+        # A malformed list is a deployment bug, not a caller error: refuse the
+        # login cleanly instead of raising a 500 out of the callback.
+        logger.error("SSO domain allow-list is malformed: %s", exc)
+        raise AuthError(
+            "callback_misconfigured", "SSO domain list is malformed"
+        ) from exc
+    if not allowed:
+        return
+    email = (claims.email or "").strip().lower()
+    if "@" not in email:
+        # Fail closed: without an address there is nothing to check against.
+        raise AuthError("domain_not_allowed", "provider returned no email address")
+    if claims.asserts_email_verified:
+        assertion = claims.claims.get("email_verified")
+        # Only a positive assertion passes: a provider that publishes the claim
+        # and stays silent about verification cannot satisfy an allow-list that
+        # checks the address. A provider that publishes no such claim at all
+        # (OpenShift) has nothing to assert, and the domain check is all there is.
+        if not (assertion is True or str(assertion).lower() == "true"):
+            raise AuthError(
+                "email_not_verified",
+                "provider did not assert that the email is verified",
+            )
+    domain = email.rsplit("@", 1)[-1]
+    if not domain_allowed(domain, allowed):
+        logger.info("SSO login refused: domain '%s' is not allowed", domain)
+        raise AuthError("domain_not_allowed", f"domain '{domain}' is not allowed")
+
+
+def check_email_domain(email: str | None, settings: Settings) -> None:
+    """Re-apply the domain policy to an address read back from a ticket.
+
+    A ticket lives up to ten minutes, so a domain revoked between the IdP
+    callback and the person pressing "Create" or "Connect" must still be
+    refused. Verification is not re-checked: it is an IdP fact recorded at
+    callback time, and it cannot change inside the ticket's lifetime.
+
+    Args:
+        email: The address stored on the ticket.
+        settings: Application settings (``SSO_ALLOWED_DOMAINS``).
+
+    Raises:
+        AuthError: ``domain_not_allowed`` when the list is set and the address
+            is missing or its domain is not listed.
+    """
+    allowed = settings.sso_allowed_domains_set
+    if not allowed:
+        return
+    address = (email or "").strip().lower()
+    if "@" not in address:
+        raise AuthError("domain_not_allowed", "ticket carried no email address")
+    domain = address.rsplit("@", 1)[-1]
+    if not domain_allowed(domain, allowed):
+        raise AuthError("domain_not_allowed", f"domain '{domain}' is not allowed")
+
+
 def suggested_username(claims: ClaimSet) -> str:
     """Best name to propose for a new account.
 
@@ -130,6 +229,7 @@ async def resolve(
         AuthError: When the linked account must not sign in
             (``account_disabled``, ``account_locked``).
     """
+    check_domain(claims, settings)
     linked = await storage.get_user_identity(provider, claims.subject)
     if linked is not None:
         user = await storage.get_user_by_username(linked["username"])
