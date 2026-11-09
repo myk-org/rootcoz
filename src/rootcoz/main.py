@@ -8059,6 +8059,41 @@ async def get_job_result_full(
     if not result:
         raise HTTPException(status_code=404, detail="Job not found")
 
+    payload = await _build_full_result_payload(
+        job_id,
+        result,
+        status=status,
+        child_job_name=child_job_name,
+        child_build_number=child_build_number,
+        offset=offset,
+        limit=limit,
+    )
+
+    if result.get("status") in IN_PROGRESS_STATUSES:
+        response.status_code = 202
+
+    return payload
+
+
+async def _build_full_result_payload(
+    job_id: str,
+    result: dict[str, Any],
+    *,
+    include_tests: bool = True,
+    status: list[str] | None = None,
+    child_job_name: str | None = None,
+    child_build_number: int | None = None,
+    offset: int = 0,
+    limit: int = 50,
+) -> dict[str, Any]:
+    """Shape one job into the ``/full`` payload (minus ``tests`` if asked).
+
+    The single shared shaping path for ``GET /api/results/{job_id}/full`` and
+    the batch ``GET /api/results/full``: same effective classifications, same
+    failure flattening, same review resolution, same sanitising. Sanitising
+    lives *here* so neither route can return an unscrubbed payload. Never
+    raises 404 — the caller owns that.
+    """
     result_data = result.get("result") or {}
     await _apply_effective_classifications(job_id, result_data)
 
@@ -8099,14 +8134,16 @@ async def get_job_result_full(
             }
         )
 
-    tests = await storage.get_test_entries(
-        job_id,
-        status=status,
-        child_job_name=child_job_name,
-        child_build_number=child_build_number,
-        offset=offset,
-        limit=limit,
-    )
+    tests = None
+    if include_tests:
+        tests = await storage.get_test_entries(
+            job_id,
+            status=status,
+            child_job_name=child_job_name,
+            child_build_number=child_build_number,
+            offset=offset,
+            limit=limit,
+        )
     comments = await storage.get_comments_for_job(job_id)
     tracked_in = await storage.get_tracked_in_for_job(job_id)
 
@@ -8134,11 +8171,90 @@ async def get_job_result_full(
         "comments": comments,
         "tracked_in": tracked_in,
     }
-
-    if result.get("status") in IN_PROGRESS_STATUSES:
-        response.status_code = 202
-
+    # Same key order as before the batch existed: the single-job response stays
+    # byte-identical, and a batch item simply never carries the key.
+    if not include_tests:
+        del payload["tests"]
+    # Scrubbed in the shared builder, not per route: a batch item and a
+    # single-job response cannot diverge on redaction.
     return strip_sensitive_from_response(payload)
+
+
+MAX_BATCH_JOB_IDS = 50
+# Deliberately its own name, not storage.MAX_SUBMITTED_BY_LENGTH: a job id is a
+# different concept, and binding the wire bound to the username limit would widen
+# this contract silently the day that limit changes. Equal value by convention.
+MAX_JOB_ID_CHARS = 64
+
+
+def _normalize_job_ids(values: list[str] | None) -> list[str]:
+    """Normalise batch ``job_ids``; 400 on blank, on either bound, else dedupe.
+
+    A blank value is rejected, never dropped: dropping it would answer for
+    fewer ids than the caller named with no signal, and would let a blank pad a
+    51-value request under the cap. The id count is checked **before** dedupe:
+    the bound exists to bound the request, so repeating one id 51 times is still
+    a rejection. Order is preserved for the parent route's logging.
+    """
+    trimmed = [value.strip() for value in values or []]
+    if not trimmed:
+        raise HTTPException(
+            status_code=400, detail="job_ids is required: name at least one id"
+        )
+    if any(not value for value in trimmed):
+        raise HTTPException(status_code=400, detail="job_ids must not be blank")
+    if len(trimmed) > MAX_BATCH_JOB_IDS:
+        raise HTTPException(
+            status_code=400,
+            detail=(f"Too many job_ids ({len(trimmed)}, max {MAX_BATCH_JOB_IDS})"),
+        )
+    too_long = [value for value in trimmed if len(value) > MAX_JOB_ID_CHARS]
+    if too_long:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"job_ids value too long ({len(too_long[0])} chars, "
+                f"max {MAX_JOB_ID_CHARS})"
+            ),
+        )
+    return list(dict.fromkeys(trimmed))
+
+
+@app.get("/api/results/full", operation_id="getJobResultsFull")
+async def get_job_results_full(
+    job_ids: Annotated[
+        list[str] | None,
+        Query(description="Repeatable job id (1-50 ids, 64 chars each)"),
+    ] = None,
+) -> dict[str, Any]:
+    """Get the ``/full`` summary for up to 50 jobs in one response (viewer+).
+
+    Each item is the ``GET /api/results/{job_id}/full`` payload minus the
+    ``tests`` section; page a job's tests via ``GET /api/results/{job_id}/tests``.
+    Unknown ids land in ``missing`` and the call still answers 200 — a batch is
+    never failed by one absent id. An in-progress job is likewise a 200: its
+    ``job.status``/``job.analysis_state`` say it is unfinished.
+
+    ``forbidden`` is always empty today because there is no per-id read rule:
+    any authenticated user may read any job (see ``get_job_result_full``).
+    """
+    local_ids = _normalize_job_ids(job_ids)
+    logger.debug(f"GET /api/results/full: requested={len(local_ids)}")
+
+    jobs: list[dict[str, Any]] = []
+    missing: list[str] = []
+    for job_id in local_ids:
+        result = await get_result(job_id)
+        if not result:
+            missing.append(job_id)
+            continue
+        jobs.append(
+            await _build_full_result_payload(job_id, result, include_tests=False)
+        )
+
+    logger.debug(f"GET /api/results/full: found={len(jobs)}, missing={len(missing)}")
+    # shortcut: always [] — start populating it the day a per-id read rule lands
+    return {"jobs": jobs, "missing": missing, "forbidden": []}
 
 
 @app.get("/api/failures/{failure_uuid}", operation_id="getFailureByUuid")

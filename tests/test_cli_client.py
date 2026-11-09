@@ -322,6 +322,23 @@ class TestRootCozClientResults:
         result = client.get_full_result("abc-123")
         assert result["job"]["status"] == "running"
 
+    def test_get_full_results(self):
+        """The batch read sends repeated job_ids parameters, never a CSV."""
+        envelope = {
+            "jobs": [{"job": {"job_id": "abc-123"}}],
+            "missing": ["def-456"],
+            "forbidden": [],
+        }
+
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/results/full"
+            assert request.url.params.get_list("job_ids") == ["abc-123", "def-456"]
+            return httpx.Response(200, json=envelope)
+
+        client = _make_client(handler)
+        assert client.get_full_results(["abc-123", "def-456"]) == envelope
+
     def test_get_full_result_not_found(self):
         client = _make_client(
             lambda request: httpx.Response(404, json={"detail": "Job not found"})

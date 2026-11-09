@@ -18120,6 +18120,414 @@ class TestGetJobResultFullEndpoint:
         assert "Invalid status values" in response.json()["detail"]
 
 
+class TestGetJobResultsFullEndpoint:
+    """Tests for GET /api/results/full (batch, issue #492)."""
+
+    @pytest.mark.asyncio
+    async def test_batch_returns_one_item_per_id_in_request_order(
+        self, test_client
+    ) -> None:
+        for job_id in ("batch-c", "batch-a", "batch-b"):
+            await storage.save_result(
+                job_id,
+                "http://jenkins",
+                "completed",
+                {
+                    "job_name": f"pipe-{job_id}",
+                    "build_number": 1,
+                    "failures": [],
+                },
+            )
+
+        response = test_client.get(
+            "/api/results/full",
+            params=[
+                ("job_ids", "batch-c"),
+                ("job_ids", "batch-missing-1"),
+                ("job_ids", "batch-a"),
+                ("job_ids", "batch-b"),
+                ("job_ids", "batch-a"),
+                ("job_ids", "batch-missing-1"),
+            ],
+        )
+        assert response.status_code == 200
+        data = response.json()
+
+        assert [item["job"]["job_id"] for item in data["jobs"]] == [
+            "batch-c",
+            "batch-a",
+            "batch-b",
+        ]
+        assert data["missing"] == ["batch-missing-1"]
+        assert data["forbidden"] == []
+        assert set(data["jobs"][0]) == {
+            "job",
+            "counts",
+            "failures",
+            "summary",
+            "comments",
+            "tracked_in",
+        }
+
+    @pytest.mark.asyncio
+    async def test_batch_flattens_child_failures_and_joins_reviews(
+        self, test_client
+    ) -> None:
+        await storage.save_result(
+            "batch-child",
+            "http://jenkins",
+            "completed",
+            {
+                "job_name": "pipeline",
+                "build_number": 11,
+                "failures": [],
+                "child_job_analyses": [
+                    {
+                        "job_name": "child-job",
+                        "build_number": 7,
+                        "failures": [
+                            {
+                                "test_name": "test_child",
+                                "error": "crash",
+                                "error_signature": "sig-child",
+                                "analysis": {
+                                    "classification": "PRODUCT BUG",
+                                    "pattern": "REGRESSION",
+                                },
+                            }
+                        ],
+                        "failed_children": [],
+                    }
+                ],
+            },
+        )
+        await storage.set_reviewed(
+            "batch-child",
+            "test_child",
+            reviewed=True,
+            username="bob",
+            child_job_name="child-job",
+            child_build_number=0,
+        )
+
+        data = test_client.get(
+            "/api/results/full", params={"job_ids": "batch-child"}
+        ).json()
+        item = data["jobs"][0]
+
+        assert len(item["failures"]) == 1
+        failure = item["failures"][0]
+        assert failure["test_name"] == "test_child"
+        assert failure["child_job_name"] == "child-job"
+        assert failure["child_build_number"] == 7
+        assert failure["reviewed"] is True
+        assert failure["reviewed_by"] == "bob"
+        assert item["summary"]["classifications"] == {"PRODUCT BUG": 1}
+
+    @pytest.mark.asyncio
+    async def test_batch_unknown_ids_are_reported_not_failed(self, test_client) -> None:
+        await storage.save_result(
+            "batch-real",
+            "http://jenkins",
+            "completed",
+            {"job_name": "pipe", "build_number": 2, "failures": []},
+        )
+
+        response = test_client.get(
+            "/api/results/full",
+            params=[
+                ("job_ids", "batch-unknown1"),
+                ("job_ids", "batch-real"),
+                ("job_ids", "batch-unknown2"),
+            ],
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["missing"] == ["batch-unknown1", "batch-unknown2"]
+        assert [item["job"]["job_id"] for item in data["jobs"]] == ["batch-real"]
+
+    @pytest.mark.asyncio
+    async def test_batch_requires_job_ids(self, test_client) -> None:
+        response = test_client.get("/api/results/full")
+
+        assert response.status_code == 400
+        assert response.status_code != 422
+        assert "job_ids" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_batch_rejects_more_than_fifty_ids(self, test_client) -> None:
+        response = test_client.get(
+            "/api/results/full",
+            params=[("job_ids", f"batch-id-{i}") for i in range(51)],
+        )
+
+        assert response.status_code == 400
+        assert "50" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_batch_counts_ids_before_dedupe(self, test_client) -> None:
+        response = test_client.get(
+            "/api/results/full",
+            params=[("job_ids", "batch-dup")] * 51,
+        )
+
+        assert response.status_code == 400
+        assert "50" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_batch_rejects_an_over_long_id(self, test_client) -> None:
+        response = test_client.get("/api/results/full", params={"job_ids": "x" * 65})
+
+        assert response.status_code == 400
+        assert "64" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_batch_accepts_the_boundary_values(self, test_client) -> None:
+        long_id = "x" * 64
+        ids = [long_id] + [f"batch-unknown-{i}" for i in range(49)]
+
+        response = test_client.get(
+            "/api/results/full", params=[("job_ids", value) for value in ids]
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert len(data["missing"]) == 50
+        assert long_id in data["missing"]
+
+    @pytest.mark.asyncio
+    async def test_batch_rejects_blank_ids(self, test_client) -> None:
+        for value in ("", "   "):
+            response = test_client.get("/api/results/full", params={"job_ids": value})
+            assert response.status_code == 400
+            assert "job_ids" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_batch_rejects_a_blank_among_valid_ids(self, test_client) -> None:
+        # A dropped blank would answer for fewer ids than the caller named with
+        # no signal, and would let a blank pad a 51-value request under the cap.
+        response = test_client.get(
+            "/api/results/full",
+            params=[
+                ("job_ids", "batch-blank-a"),
+                ("job_ids", "   "),
+                ("job_ids", "batch-blank-b"),
+            ],
+        )
+
+        assert response.status_code == 400
+        assert "job_ids" in response.json()["detail"]
+
+    @pytest.mark.asyncio
+    async def test_batch_scrubs_every_item_like_the_single_job_read(
+        self, test_client, monkeypatch
+    ) -> None:
+        """The batch must pass each item through the same redaction step.
+
+        The scrub is a no-op for this payload shape today, so a payload diff
+        cannot prove it. Intercept the call instead: the shared builder is the
+        only place it may happen, which is what stops the two routes drifting.
+        """
+        from rootcoz import main
+
+        await storage.save_result(
+            "batch-scrub",
+            "http://jenkins",
+            "completed",
+            {"job_name": "pipe", "build_number": 2, "failures": []},
+        )
+        real = main.strip_sensitive_from_response
+        scrubbed: list[dict] = []
+
+        def _spy(payload):
+            scrubbed.append(payload)
+            return real(payload)
+
+        monkeypatch.setattr(main, "strip_sensitive_from_response", _spy)
+
+        response = test_client.get(
+            "/api/results/full", params={"job_ids": "batch-scrub"}
+        )
+        assert response.status_code == 200
+        assert [item["job"]["job_id"] for item in scrubbed] == ["batch-scrub"]
+
+    @pytest.mark.asyncio
+    async def test_batch_does_not_cap_or_truncate_failures(self, test_client) -> None:
+        await storage.save_result(
+            "batch-many",
+            "http://jenkins",
+            "completed",
+            {
+                "job_name": "pipe",
+                "build_number": 3,
+                "failures": [
+                    {
+                        "test_name": f"test_{i}",
+                        "error": f"boom-{i}",
+                        "error_signature": f"sig-{i}",
+                        "analysis": {
+                            "classification": "CODE ISSUE",
+                            "pattern": "NEW",
+                        },
+                    }
+                    for i in range(120)
+                ],
+            },
+        )
+
+        data = test_client.get(
+            "/api/results/full", params={"job_ids": "batch-many"}
+        ).json()
+
+        assert len(data["jobs"][0]["failures"]) == 120
+
+    @pytest.mark.asyncio
+    async def test_batch_in_progress_job_answers_200_with_sections(
+        self, test_client
+    ) -> None:
+        await storage.save_result(
+            "batch-running",
+            "http://jenkins",
+            "running",
+            {
+                "job_name": "pipe",
+                "build_number": 4,
+                "failures": [
+                    {
+                        "test_name": "test_partial",
+                        "error": "boom",
+                        "analysis": {"classification": "CODE ISSUE"},
+                    }
+                ],
+            },
+        )
+        await storage.add_comment(
+            "batch-running", "test_partial", "working on it", username="carol"
+        )
+        await storage.add_tracked_in_link(
+            "batch-running",
+            "test_partial",
+            "https://github.com/org/repo/issues/9",
+            "github",
+            tracked_by="alice",
+        )
+        await storage.save_result(
+            "batch-finished",
+            "http://jenkins",
+            "completed",
+            {"job_name": "pipe", "build_number": 5, "failures": []},
+        )
+
+        response = test_client.get(
+            "/api/results/full",
+            params=[("job_ids", "batch-running"), ("job_ids", "batch-finished")],
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        item = data["jobs"][0]
+        assert item["job"]["status"] == "running"
+        assert "tests" not in item
+        assert item["failures"][0]["test_name"] == "test_partial"
+        assert item["comments"][0]["comment"] == "working on it"
+        assert item["tracked_in"]["test_partial"][0]["tracked_in_url"] == (
+            "https://github.com/org/repo/issues/9"
+        )
+        assert data["jobs"][1]["job"]["status"] == "completed"
+        assert data["jobs"][1]["failures"] == []
+
+    @pytest.mark.asyncio
+    async def test_batch_applies_effective_classification_override(
+        self, test_client
+    ) -> None:
+        await storage.save_result(
+            "batch-override",
+            "http://jenkins",
+            "completed",
+            {
+                "job_name": "pipe",
+                "build_number": 6,
+                "failures": [
+                    {
+                        "test_name": "test_o",
+                        "error": "boom",
+                        "error_signature": "sig-o",
+                        "analysis": {
+                            "classification": "CODE ISSUE",
+                            "pattern": "NEW",
+                        },
+                    }
+                ],
+            },
+        )
+        await storage.override_classification(
+            "batch-override", "test_o", "INFRASTRUCTURE", username="alice"
+        )
+
+        data = test_client.get(
+            "/api/results/full", params={"job_ids": "batch-override"}
+        ).json()
+        item = data["jobs"][0]
+
+        assert item["failures"][0]["classification"] == "INFRASTRUCTURE"
+        assert item["summary"]["classifications"] == {"INFRASTRUCTURE": 1}
+
+    @pytest.mark.asyncio
+    async def test_batch_permission_split_matches_the_single_job_read(
+        self, test_client
+    ) -> None:
+        await storage.save_result(
+            "batch-foreign",
+            "http://jenkins",
+            "completed",
+            {
+                "job_name": "pipe",
+                "build_number": 8,
+                "request_params": {"submitted_by": "someone-else"},
+                "failures": [
+                    {
+                        "test_name": "test_f",
+                        "error": "boom",
+                        "error_signature": "sig-f",
+                        "analysis": {"classification": "CODE ISSUE"},
+                    }
+                ],
+            },
+        )
+        _, viewer_key = await storage.create_user("batch-viewer", role="viewer")
+        viewer_headers = {"Authorization": f"Bearer {viewer_key}"}
+
+        # Prove the non-admin identity actually took effect: an admin-only
+        # route must refuse it, otherwise this test would pass as admin.
+        denied = test_client.put(
+            "/results/batch-foreign/reviewed",
+            json={"test_name": "test_f", "reviewed": True},
+            headers=viewer_headers,
+        )
+        assert denied.status_code == 403
+
+        single = test_client.get(
+            "/api/results/batch-foreign/full", headers=viewer_headers
+        )
+        assert single.status_code == 200
+
+        response = test_client.get(
+            "/api/results/full",
+            params={"job_ids": "batch-foreign"},
+            headers=viewer_headers,
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert [item["job"]["job_id"] for item in data["jobs"]] == ["batch-foreign"]
+        assert data["forbidden"] == []
+        assert data["missing"] == []
+        assert {
+            key: value for key, value in single.json().items() if key != "tests"
+        } == data["jobs"][0]
+
+
 class TestPersistTestEntriesAndCacheCounts:
     """Tests for the shared early-exit counts helper."""
 
