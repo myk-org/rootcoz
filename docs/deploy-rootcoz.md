@@ -38,6 +38,14 @@ curl http://localhost:8000/health
 
 This uses the repo’s `docker-compose.yaml`, builds the local image, and keeps the SQLite database in `./data`. Use it for laptops, demos, and single-user environments where `localhost` access is enough.
 
+- Pass the build identity so the sidebar footer and `rootcoz version` name the build instead of just the package version:
+
+  ```bash
+  GIT_COMMIT=$(git rev-parse HEAD) GIT_REF=latest BUILT_AT=$(date -u +%FT%TZ) docker compose build
+  docker compose up -d --force-recreate rootcoz
+  ```
+
+  `docker compose build` only produces the image; recreate the container so it serves the new one, or the `up -d` above keeps running the old image. All three are optional; without them the footer stays the bare `v<version>`. The arg names are the CI contract (`GIT_COMMIT`, `GIT_REF`, `BUILT_AT`) — the Dockerfile declares exactly those, and a `--build-arg` it does not declare is silently dropped. `GIT_REF` is the ref the image is published under, printed verbatim — `GIT_REF=latest` renders `v4.14.1 · latest@d6a1f3c`, because a floating tag is not the release its version string names. Set `GIT_REF` to the release tag (for example `v4.14.1`) and the suffix disappears: a release build already says which release it is.
 - After changing `.env`, reload with `docker compose up -d --force-recreate rootcoz`.
 - Continue with [Quickstart](quickstart.html) once the health check returns `{"status":"healthy"}`.
 

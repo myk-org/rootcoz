@@ -155,7 +155,22 @@ class TestHealthCommand:
         mock_client.version.return_value = {"version": "4.5.0"}
         result = runner.invoke(app, ["version"])
         assert result.exit_code == 0
-        assert "4.5.0" in result.output
+        assert result.output.strip() == "RootCoz v4.5.0"
+
+    def test_version_prints_build_label(self, mock_client):
+        """#520: the CLI names the same build the sidebar footer shows."""
+        mock_client.version.return_value = {
+            "version": "4.5.0",
+            "build": {
+                "commit": "d6a1f3c",
+                "ref": "latest",
+                "label": "latest@d6a1f3c",
+            },
+        }
+        result = runner.invoke(app, ["version"])
+        assert result.exit_code == 0
+        # The whole footer line, not just the suffix: #520 asks for the same line.
+        assert result.output.strip() == "RootCoz v4.5.0 · latest@d6a1f3c"
 
     def test_version_json(self, mock_client):
         mock_client.version.return_value = {"version": "4.5.0"}

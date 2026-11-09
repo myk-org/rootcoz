@@ -852,7 +852,14 @@ def version(
     if _state.get("json", False):
         print_output(data, columns=[], as_json=True)
     else:
-        typer.echo(data.get("version", "unknown"))
+        # The same line the sidebar footer shows: #520 compares the CLI against the
+        # footer, and the server composes the build suffix once for both.
+        label = (data.get("build") or {}).get("label")
+        typer.echo(
+            "RootCoz v"
+            + data.get("version", "unknown")
+            + (f" · {label}" if label else "")
+        )
 
 
 # -- Results ------------------------------------------------------------------

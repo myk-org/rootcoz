@@ -484,10 +484,75 @@ class TestProcessProbe:
         assert block["loop_lag_ms"] is None
         # A container cannot read its own restart count: unknown, not zero.
         assert block["restart_count"] is None
+        # No build identity in this process's env: empty, never a fabricated commit.
+        assert block["git_sha"] == ""
 
         monkeypatch.setattr(server_status, "_loop_lag_peak", 42.0)
         assert server_status.read_process()["loop_lag_ms"] == 42.0
         server_status.reset_loop_lag()
+
+
+class TestBuildInfo:
+    """#520: the build identity the image carries, read from the environment."""
+
+    # A real-shaped 40-char sha; the display label is its first 7 characters.
+    COMMIT = "d6a1f3c9e8b7a6f5d4c3b2a1f0e9d8c7b6a5f4e3"  # pragma: allowlist secret
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch) -> None:
+        for name in (
+            "ROOTCOZ_BUILD_COMMIT",
+            "ROOTCOZ_BUILD_REF",
+            "ROOTCOZ_BUILD_BUILT_AT",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+    def test_nothing_supplied_reads_none(self) -> None:
+        assert server_status.read_build_info() is None
+
+    def test_whitespace_only_reads_none(self, monkeypatch) -> None:
+        monkeypatch.setenv("ROOTCOZ_BUILD_COMMIT", "  ")
+        monkeypatch.setenv("ROOTCOZ_BUILD_REF", "\t")
+        monkeypatch.setenv("ROOTCOZ_BUILD_BUILT_AT", " ")
+        assert server_status.read_build_info() is None
+
+    def test_commit_only(self, monkeypatch) -> None:
+        commit = self.COMMIT
+        monkeypatch.setenv("ROOTCOZ_BUILD_COMMIT", commit)
+        assert server_status.read_build_info() == {
+            "commit": commit,
+            "label": "d6a1f3c",
+        }
+
+    def test_all_three_supplied(self, monkeypatch) -> None:
+        commit = self.COMMIT
+        monkeypatch.setenv("ROOTCOZ_BUILD_COMMIT", commit)
+        monkeypatch.setenv("ROOTCOZ_BUILD_REF", "latest")
+        monkeypatch.setenv("ROOTCOZ_BUILD_BUILT_AT", "2026-01-02T03:04:05Z")
+        assert server_status.read_build_info() == {
+            "commit": commit,
+            "ref": "latest",
+            "built_at": "2026-01-02T03:04:05Z",
+            "label": "latest@d6a1f3c",
+        }
+
+    def test_release_ref_has_no_label(self, monkeypatch) -> None:
+        """D2: a ref equal to the running version renders the bare version."""
+        monkeypatch.setenv("ROOTCOZ_BUILD_COMMIT", self.COMMIT)
+        monkeypatch.setenv("ROOTCOZ_BUILD_REF", "v4.15.0")
+        monkeypatch.setattr(server_status, "_get_app_version", lambda: "4.15.0")
+        info = server_status.read_build_info()
+        assert info is not None
+        assert "label" not in info
+        assert info["ref"] == "v4.15.0"
+
+    def test_process_card_commit_comes_from_the_same_reader(self, monkeypatch) -> None:
+        commit = self.COMMIT
+        monkeypatch.setenv("ROOTCOZ_BUILD_COMMIT", commit)
+        assert (
+            server_status.read_process()["git_sha"]
+            == (server_status.read_build_info() or {})["commit"]
+        )
 
 
 class TestLoopLagWatchdog:
