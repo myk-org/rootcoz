@@ -17,6 +17,20 @@ const get = vi.fn()
 const post = vi.fn()
 let grant = true
 
+/** The caller's stored tracker credentials — the dialog's only token source. */
+const mockUserTokens = vi.fn(() => ({
+  github_token: 'ghp_test_token',
+  jira_email: '',
+  jira_token: 'jira-tok',
+  jira_sa_token: '',
+}))
+
+/** A `get` implementation that starts from the account row, so no case has to mock it. */
+function withAccountRow(impl: (path: string) => unknown) {
+  return async (path: string) =>
+    path === '/api/user/tokens' ? mockUserTokens() : impl(path)
+}
+
 vi.mock('@/lib/api', () => {
   class _ApiError extends Error {
     status: number
@@ -38,12 +52,6 @@ vi.mock('@/lib/api', () => {
     },
   }
 })
-vi.mock('@/lib/cookies', () => ({
-  getGithubToken: () => 'ghp_test_token',
-  getJiraToken: () => '',
-  getJiraEmail: () => '',
-  getJiraSaToken: () => 'jira-sa-token',
-}))
 vi.mock('@/lib/auth', () => ({
   useAuth: () => ({ role: 'operator', isOperator: true, isAdmin: false, username: 'alice', authenticated: true, canUseServerProviders: grant }),
 }))
@@ -80,11 +88,17 @@ async function openPicker(defaultProvider: string, defaultModel: string) {
 beforeEach(() => {
   vi.clearAllMocks()
   grant = true
-  get.mockImplementation(async (path: string) => {
+  mockUserTokens.mockReturnValue({
+    github_token: 'ghp_test_token',
+    jira_email: '',
+    jira_token: 'jira-tok',
+    jira_sa_token: '',
+  })
+  get.mockImplementation(withAccountRow((path) => {
     if (path.startsWith('/api/ai-models')) return catalog
     if (path.endsWith('/issue-prompt')) return { issue_prompt: 'Describe the bug' }
     return {}
-  })
+  }))
   post.mockResolvedValue({ title: 'Issue title', body: 'Issue body', similar_issues: [] })
 })
 
@@ -331,7 +345,7 @@ describe('BugCreationDialog submit retry', () => {
     // The POST reports a failure, but the server did file the issue: its
     // tracked-in link appears between the snapshot and the failure.
     let reads = 0
-    get.mockImplementation(async (path: string) => {
+    get.mockImplementation(withAccountRow((path) => {
       if (path.startsWith('/api/ai-models')) return catalog
       if (path.endsWith('/issue-prompt')) return { issue_prompt: 'Describe the bug' }
       if (path.endsWith('/tracked-in')) {
@@ -339,7 +353,7 @@ describe('BugCreationDialog submit retry', () => {
         return reads === 1 ? { tracked_in: {} } : { tracked_in: { 'test-a': [{ id: 7, tracked_in_url: 'https://tracker/issue/7', tracked_in_type: 'github', tracked_in_by: 'alice' }] } }
       }
       return {}
-    })
+    }))
     await openGeneratedPreview(user)
 
     await user.click(screen.getByRole('button', { name: /create github issue/i }))
@@ -357,7 +371,7 @@ describe('BugCreationDialog submit retry', () => {
     // Bob files an issue for this same failure while our POST fails: the link is
     // scoped to our failure and tracker, but it is not the issue we created.
     let reads = 0
-    get.mockImplementation(async (path: string) => {
+    get.mockImplementation(withAccountRow((path) => {
       if (path.startsWith('/api/ai-models')) return catalog
       if (path.endsWith('/issue-prompt')) return { issue_prompt: 'Describe the bug' }
       if (path.endsWith('/tracked-in')) {
@@ -365,7 +379,7 @@ describe('BugCreationDialog submit retry', () => {
         return reads === 1 ? { tracked_in: {} } : { tracked_in: { 'test-a': [{ id: 7, tracked_in_url: 'https://tracker/issue/7', tracked_in_type: 'github', tracked_in_by: 'bob' }] } }
       }
       return {}
-    })
+    }))
     await openGeneratedPreview(user)
 
     await user.click(screen.getByRole('button', { name: /create github issue/i }))
@@ -379,14 +393,14 @@ describe('BugCreationDialog submit retry', () => {
     const user = userEvent.setup()
     mockCreateFlow('github', new ApiError(502, 'Bad Gateway', { detail: 'GitHub is unavailable right now.' }))
     // Someone else files an issue for a different test while our POST fails.
-    get.mockImplementation(async (path: string) => {
+    get.mockImplementation(withAccountRow((path) => {
       if (path.startsWith('/api/ai-models')) return catalog
       if (path.endsWith('/issue-prompt')) return { issue_prompt: 'Describe the bug' }
       if (path.endsWith('/tracked-in')) {
         return { tracked_in: { 'test-b': [{ id: 9, tracked_in_url: 'https://tracker/issue/9', tracked_in_type: 'github', tracked_in_by: 'bob' }] } }
       }
       return {}
-    })
+    }))
     await openGeneratedPreview(user)
 
     await user.click(screen.getByRole('button', { name: /create github issue/i }))
@@ -399,12 +413,12 @@ describe('BugCreationDialog submit retry', () => {
   it('still offers the retry when the tracked-in check itself fails', async () => {
     const user = userEvent.setup()
     mockCreateFlow('github', new ApiError(502, 'Bad Gateway', { detail: 'GitHub is unavailable right now.' }))
-    get.mockImplementation(async (path: string) => {
+    get.mockImplementation(withAccountRow((path) => {
       if (path.startsWith('/api/ai-models')) return catalog
       if (path.endsWith('/issue-prompt')) return { issue_prompt: 'Describe the bug' }
       if (path.endsWith('/tracked-in')) throw new Error('tracked-in unavailable')
       return {}
-    })
+    }))
     await openGeneratedPreview(user)
 
     await user.click(screen.getByRole('button', { name: /create github issue/i }))
@@ -430,5 +444,49 @@ describe('BugCreationDialog submit retry', () => {
 
     // One failed create + exactly one retry.
     expect(post.mock.calls.filter(([path]) => path === createPathFor('github'))).toHaveLength(2)
+  })
+})
+
+describe('BugCreationDialog tracker credential', () => {
+  const CREDENTIAL_KEYS = ['github_token', 'jira_token', 'jira_email', 'jira_sa_token']
+
+  it('sends no tracker credential in the preview or the create payload', async () => {
+    const user = userEvent.setup()
+    await openGeneratedPreview(user)
+    await user.click(screen.getByRole('button', { name: /create github issue/i }))
+    await waitFor(() => expect(screen.getByText('GitHub Issue created successfully.')).toBeInTheDocument())
+
+    const trackerBodies = post.mock.calls
+      .filter(([path]) => path === previewPathFor('github') || path === createPathFor('github'))
+      .map(([, body]) => body as Record<string, unknown>)
+    expect(trackerBodies).toHaveLength(2)
+    for (const body of trackerBodies) {
+      for (const key of CREDENTIAL_KEYS) expect(body).not.toHaveProperty(key)
+    }
+  })
+
+  it.each([
+    ['github', '/results/job-1/preview-github-issue'],
+    ['jira', '/results/job-1/preview-jira-bug'],
+  ] as const)(
+    'disables Create and points at Profile Settings when the row holds no %s token',
+    async (target, previewPath) => {
+      mockUserTokens.mockReturnValue({ github_token: '', jira_email: '', jira_token: '', jira_sa_token: '' })
+      const user = userEvent.setup()
+      await openGeneratedPreview(user, target)
+
+      expect(post.mock.calls.filter(([path]) => path === previewPath)).toHaveLength(1)
+      expect(await screen.findByRole('link', { name: /Open Profile Settings/ })).toBeInTheDocument()
+      expect(
+        screen.getByRole('button', { name: target === 'github' ? /create github issue/i : /create jira ticket/i }),
+      ).toBeDisabled()
+    },
+  )
+
+  it('enables Create when the row holds a token', async () => {
+    const user = userEvent.setup()
+    await openGeneratedPreview(user)
+    expect(screen.getByRole('button', { name: /create github issue/i })).toBeEnabled()
+    expect(screen.queryByRole('link', { name: /Open Profile Settings/ })).not.toBeInTheDocument()
   })
 })

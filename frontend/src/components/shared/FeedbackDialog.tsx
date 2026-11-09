@@ -3,9 +3,9 @@ import { api } from '@/lib/api'
 import { createIssueFailureMessage } from '@/lib/issueCreateError'
 import { getRecentFailedCalls } from '@/lib/api'
 import { getRecentErrors } from '@/lib/errorCapture'
-import { getGithubToken } from '@/lib/cookies'
 import { IssueCreateError } from '@/components/shared/IssueCreateError'
 import { useSubmitGuard } from '@/lib/useSubmitGuard'
+import { useUserTokenPresence } from '@/lib/useUserTokens'
 import {
   Dialog,
   DialogContent,
@@ -57,9 +57,9 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
   const [previewLabels, setPreviewLabels] = useState<string[]>([])
   // Server-RESOLVED pair for attribution — never the values this dialog sent.
   const [previewAi, setPreviewAi] = useState({ provider: '', model: '', generated: false })
-  // getGithubToken() reads from auth context loaded via /api/user/tokens on login,
-  // which mirrors the backend's storage.get_user_tokens() used in the create endpoint.
-  const hasGithubToken = !!getGithubToken()
+  // The account row is the only credential source, so ask it when the dialog opens
+  // — the same row the server reads when it files the issue.
+  const hasGithubToken = useUserTokenPresence(open).github
 
   // Track dialog open/close to guard async setState
   useEffect(() => {

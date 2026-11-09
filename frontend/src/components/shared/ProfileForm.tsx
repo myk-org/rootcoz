@@ -1,18 +1,7 @@
-import { useState, useEffect, useCallback, useRef, type FormEvent } from 'react'
+import { useState, useEffect, useCallback, type FormEvent } from 'react'
 import { api, isExpectedTokenSyncError } from '@/lib/api'
 import { persistTokensToServer } from '@/lib/tokens'
-import {
-  setUsername,
-  setGithubToken,
-  setJiraToken,
-  setJiraEmail,
-  setJiraSaToken,
-  getUsername,
-  getGithubToken,
-  getJiraToken,
-  getJiraEmail,
-  getJiraSaToken,
-} from '@/lib/cookies'
+import { setUsername, getUsername } from '@/lib/cookies'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
@@ -40,10 +29,11 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
   const [rotateError, setRotateError] = useState<string | null>(null)
   const [newApiKey, setNewApiKey] = useState('')
   const [keyCopied, setKeyCopied] = useState(false)
-  const [githubToken, setGithubTokenValue] = useState(getGithubToken())
-  const [jiraEmail, setJiraEmailValue] = useState(getJiraEmail())
-  const [jiraToken, setJiraTokenValue] = useState(getJiraToken())
-  const [jiraSaToken, setJiraSaTokenValue] = useState(getJiraSaToken())
+  // Empty until the server answers: the browser keeps no trailer-token copy.
+  const [githubToken, setGithubTokenValue] = useState('')
+  const [jiraEmail, setJiraEmailValue] = useState('')
+  const [jiraToken, setJiraTokenValue] = useState('')
+  const [jiraSaToken, setJiraSaTokenValue] = useState('')
   const [validatingGithub, setValidatingGithub] = useState(false)
   const [validatingJira, setValidatingJira] = useState(false)
   const [validatingJiraSa, setValidatingJiraSa] = useState(false)
@@ -59,66 +49,42 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
    *  a stale browser-cached one is (#294). */
   const [baseline, setBaseline] = useState({ gh: '', je: '', jt: '', jst: '' })
 
-  const githubTokenRef = useRef(githubToken)
-  githubTokenRef.current = githubToken
-  const jiraEmailRef = useRef(jiraEmail)
-  jiraEmailRef.current = jiraEmail
-  const jiraTokenRef = useRef(jiraToken)
-  jiraTokenRef.current = jiraToken
-  const jiraSaTokenRef = useRef(jiraSaToken)
-  jiraSaTokenRef.current = jiraSaToken
-
-  const hydrateTokensFromServer = useCallback(
-    async (current: { gh: string; je: string; jt: string; jst: string }) => {
-      try {
-        const tokens = await api.get<{ github_token: string; jira_email: string; jira_token: string; jira_sa_token: string }>('/api/user/tokens')
-        const server = {
-          gh: (tokens.github_token || '').trim(),
-          je: (tokens.jira_email || '').trim(),
-          jt: (tokens.jira_token || '').trim(),
-          jst: (tokens.jira_sa_token || '').trim(),
-        }
-        // Baseline is the server's value, not the browser's: a cookie left over
-        // from another browser that has since been replaced counts as changed.
-        setBaseline(server)
-        if (server.gh && !current.gh.trim()) {
-          setGithubTokenValue(server.gh)
-          setGithubToken(server.gh)
-        }
-        if (server.je && !current.je.trim()) {
-          setJiraEmailValue(server.je)
-          setJiraEmail(server.je)
-        }
-        if (server.jt && !current.jt.trim()) {
-          setJiraTokenValue(server.jt)
-          setJiraToken(server.jt)
-        }
-        if (server.jst && !current.jst.trim()) {
-          setJiraSaTokenValue(server.jst)
-          setJiraSaToken(server.jst)
-        }
-      } catch (err) {
-        // 401 (no cookie yet) and 404 (user not registered) are expected; log anything else.
-        if (!isExpectedTokenSyncError(err)) {
-          console.error('Failed to hydrate tokens from server:', err)
-        }
+  const hydrateTokensFromServer = useCallback(async () => {
+    try {
+      const tokens = await api.get<{ github_token: string; jira_email: string; jira_token: string; jira_sa_token: string }>('/api/user/tokens')
+      const server = {
+        gh: (tokens.github_token || '').trim(),
+        je: (tokens.jira_email || '').trim(),
+        jt: (tokens.jira_token || '').trim(),
+        jst: (tokens.jira_sa_token || '').trim(),
       }
-    },
-    [],
-  )
+      // The server is the only source: its value is both what the fields show
+      // and the baseline a save compares against, so an untouched credential is
+      // never re-validated and a stale value cannot win (#294).
+      setBaseline(server)
+      setGithubTokenValue(server.gh)
+      setJiraEmailValue(server.je)
+      setJiraTokenValue(server.jt)
+      setJiraSaTokenValue(server.jst)
+    } catch (err) {
+      // 401 (no cookie yet) and 404 (user not registered) are expected; log anything else.
+      if (!isExpectedTokenSyncError(err)) {
+        console.error('Failed to hydrate tokens from server:', err)
+      }
+    }
+  }, [])
 
   useEffect(() => {
     if (!initialUsername) {
       setTokensLoaded(true) // no user yet, nothing to load
       return
     }
-    hydrateTokensFromServer({ gh: githubTokenRef.current, je: jiraEmailRef.current, jt: jiraTokenRef.current, jst: jiraSaTokenRef.current })
-      .finally(() => setTokensLoaded(true))
+    hydrateTokensFromServer().finally(() => setTokensLoaded(true))
   // eslint-disable-next-line react-hooks/exhaustive-deps -- initialUsername (lazy useState) and hydrateTokensFromServer (useCallback) are stable; run once on mount
   }, [])
 
   async function refreshTokensFromServer() {
-    await hydrateTokensFromServer({ gh: githubToken, je: jiraEmail, jt: jiraToken, jst: jiraSaToken })
+    await hydrateTokensFromServer()
   }
 
   async function handleRotateKey() {
@@ -152,10 +118,6 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
       const je = jiraEmail.trim()
       const jt = jiraToken.trim()
       const jst = jiraSaToken.trim()
-      setGithubToken(gh)
-      setJiraEmail(je)
-      setJiraToken(jt)
-      setJiraSaToken(jst)
       await persistTokensToServer(gh, je, jt, jst)
     }
 

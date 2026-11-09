@@ -3102,8 +3102,20 @@ def test_transcript_download_names_the_session_and_its_job(
     assert events[0]["details"] == {"session_id": "not-a-uuid"}
 
 
+def _tracker_admin_headers(**tokens: str) -> dict[str, str]:
+    """Bearer headers for an admin account whose row holds *tokens*.
+
+    The report create endpoints read the caller's stored credential, so an
+    audit test needs an admin WITH a row — the bootstrap ``admin``
+    ``admin_login`` signs in has none.
+    """
+    username, api_key = asyncio.run(storage.create_admin_user("audit-issuer"))
+    asyncio.run(storage.save_user_tokens(username, **tokens))
+    return {"Authorization": f"Bearer {api_key}"}
+
+
 def test_issue_create_is_audited(app_client) -> None:
-    admin_login(app_client)
+    headers = _tracker_admin_headers(github_token="gh-token-0123456789")
     with (
         patch.object(
             main, "_load_effective_failure", AsyncMock(return_value=(None, {}, None))
@@ -3124,8 +3136,8 @@ def test_issue_create_is_audited(app_client) -> None:
                 "test_name": "test_a",
                 "title": "T",
                 "body": "B",
-                "github_token": "gh-token-0123456789",
             },
+            headers=headers,
         )
     assert response.status_code == 201, response.text
 
@@ -3139,7 +3151,7 @@ def test_issue_create_is_audited(app_client) -> None:
 
 def _create_github_issue_for(app_client, repo_url: str) -> dict[str, Any]:
     """File one GitHub issue through the report endpoint; return its audit row."""
-    admin_login(app_client)
+    headers = _tracker_admin_headers(github_token="gh-token-0123456789")
     owner_repo = repo_url.removeprefix("https://github.com/")
     with (
         patch.object(
@@ -3164,8 +3176,8 @@ def _create_github_issue_for(app_client, repo_url: str) -> dict[str, Any]:
                 "test_name": "test_a",
                 "title": "T",
                 "body": "B",
-                "github_token": "gh-token-0123456789",
             },
+            headers=headers,
         )
     assert response.status_code == 201, response.text
     events = _events(action="issue.create")
@@ -3241,7 +3253,9 @@ def _create_jira_issue_for(
     app_client, issue_url: str
 ) -> tuple[dict[str, Any], AsyncMock]:
     """File one Jira issue through the report endpoint; return its audit row."""
-    admin_login(app_client)
+    headers = _tracker_admin_headers(
+        jira_sa_token="ATOA-test-secret"  # pragma: allowlist secret
+    )
     _use_jira_oauth_settings()
     create = AsyncMock(return_value={"key": "PROJ-1", "url": issue_url})
     with (
@@ -3257,8 +3271,8 @@ def _create_jira_issue_for(
                 "test_name": "test_a",
                 "title": "T",
                 "body": "B",
-                "jira_token": "ATOA-test-secret",  # pragma: allowlist secret
             },
+            headers=headers,
         )
     assert response.status_code == 201, response.text
     events = _events(action="issue.create")

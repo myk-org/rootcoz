@@ -1,21 +1,8 @@
 import { useState, useEffect, useCallback, useRef, type ReactNode } from 'react'
 import { api, ApiError } from './api'
-import { getUsername, setUsername, getIsAdmin, setIsAdmin, setRole, clearTokens, clearUsername, setGithubToken, setJiraEmail, setJiraToken } from './cookies'
+import { getUsername, setUsername, getIsAdmin, setIsAdmin, setRole, clearTokens, clearUsername } from './cookies'
 import type { AuthUser } from '@/types'
 import { AuthContext } from './auth'
-
-async function syncTokensFromServer(forUsername: string, isCurrent: () => boolean) {
-  if (!forUsername) return
-  try {
-    const tokens = await api.get<{ github_token: string; jira_email: string; jira_token: string }>('/api/user/tokens')
-    if (!isCurrent()) return
-    setGithubToken(tokens.github_token)
-    setJiraEmail(tokens.jira_email)
-    setJiraToken(tokens.jira_token)
-  } catch {
-    // Server tokens not available — keep localStorage values
-  }
-}
 
 export function AuthProvider({ children }: { children: ReactNode }) {
   const [username, setUsernameState] = useState(getUsername())
@@ -79,7 +66,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         const { resetProviderCatalogCache } = await import('@/lib/useProviderOptions')
         if (isCurrent()) resetProviderCatalogCache()
       }
-      if (isCurrent()) await syncTokensFromServer(me.username, isCurrent)
     } catch (err) {
       if (!isCurrent()) return
       // 401 means not authenticated — clear identity and require login
@@ -90,9 +76,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
         clearUsername()
       } else if (serverGrant.current === null) {
         // No verified session yet: cookie identity is for display only.
-        const cookieUsername = getUsername()
-        setUsernameState(cookieUsername)
-        await syncTokensFromServer(cookieUsername, isCurrent)
+        setUsernameState(getUsername())
       }
     } finally {
       if (isCurrent()) setLoading(false)
@@ -156,8 +140,6 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       // Apply login payload (includes can_view_reports) immediately — do not wait on /me
       guard.advance()
       applyAuthUser(result)
-      await syncTokensFromServer(result.username, isCurrent)
-      if (!isCurrent()) return
       // Optional /me refresh for other session fields; keep login values if it fails
       try {
         const me = await api.get<AuthUser>('/api/auth/me')

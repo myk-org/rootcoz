@@ -3,7 +3,6 @@ import { useNavigate, useLocation } from 'react-router-dom'
 import { useAuth } from '@/lib/auth'
 import { api, ApiError } from '@/lib/api'
 import { persistTokensToServer } from '@/lib/tokens'
-import { setGithubToken, setJiraEmail, setJiraToken, setJiraSaToken } from '@/lib/cookies'
 import { Card, CardContent } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
 import { Button } from '@/components/ui/button'
@@ -99,10 +98,6 @@ export function RegisterPage() {
       const je = jiraEmail.trim()
       const jt = jiraToken.trim()
       const jst = jiraSaToken.trim()
-      if (gh) setGithubToken(gh)
-      if (je) setJiraEmail(je)
-      if (jt) setJiraToken(jt)
-      if (jst) setJiraSaToken(jst)
       // Only when something was typed: the server reads an empty field as a
       // clear, and a keyless account can already hold tracker credentials from
       // earlier authenticated activity (#294).

@@ -1265,18 +1265,18 @@ class RootCozClient:
         ai_model: str = "",
         title: str = "",
         body_text: str = "",
-        github_token: str = "",
         github_repo_url: str = "",
-        jira_token: str = "",
-        jira_email: str = "",
-        jira_sa_token: str = "",
         jira_project_key: str = "",
         jira_security_level: str = "",
         include_github: bool = True,
         include_jira: bool = True,
         issue_prompt: str = "",
     ) -> dict[str, Any]:
-        """Build the common payload for tracker preview/create endpoints."""
+        """Build the common payload for tracker preview/create endpoints.
+
+        Choices only: the tracker credential is the account token saved in
+        Profile Settings, which the server reads itself.
+        """
         payload: dict[str, Any] = {"test_name": test_name}
         if title:
             payload["title"] = title
@@ -1290,16 +1290,8 @@ class RootCozClient:
             payload["ai_model"] = ai_model
         if issue_prompt:
             payload["issue_prompt"] = issue_prompt
-        if include_github and github_token:
-            payload["github_token"] = github_token
         if include_github and github_repo_url:
             payload["github_repo_url"] = github_repo_url
-        if include_jira and jira_token:
-            payload["jira_token"] = jira_token
-        if include_jira and jira_email:
-            payload["jira_email"] = jira_email
-        if include_jira and jira_sa_token:
-            payload["jira_sa_token"] = jira_sa_token
         if include_jira and jira_project_key:
             payload["jira_project_key"] = jira_project_key
         if include_jira and jira_security_level:
@@ -1319,7 +1311,6 @@ class RootCozClient:
         include_links: bool = False,
         ai_provider: str = "",
         ai_model: str = "",
-        github_token: str = "",
         github_repo_url: str = "",
         issue_prompt: str = "",
     ) -> dict[str, Any]:
@@ -1331,7 +1322,6 @@ class RootCozClient:
             include_links=include_links,
             ai_provider=ai_provider,
             ai_model=ai_model,
-            github_token=github_token,
             github_repo_url=github_repo_url,
             include_jira=False,
             issue_prompt=issue_prompt,
@@ -1349,9 +1339,6 @@ class RootCozClient:
         include_links: bool = False,
         ai_provider: str = "",
         ai_model: str = "",
-        jira_token: str = "",
-        jira_email: str = "",
-        jira_sa_token: str = "",
         jira_project_key: str = "",
         jira_security_level: str = "",
         issue_prompt: str = "",
@@ -1364,9 +1351,6 @@ class RootCozClient:
             include_links=include_links,
             ai_provider=ai_provider,
             ai_model=ai_model,
-            jira_token=jira_token,
-            jira_email=jira_email,
-            jira_sa_token=jira_sa_token,
             jira_project_key=jira_project_key,
             jira_security_level=jira_security_level,
             include_github=False,
@@ -1382,7 +1366,6 @@ class RootCozClient:
         body: str,
         child_job_name: str = "",
         child_build_number: int = 0,
-        github_token: str = "",
         github_repo_url: str = "",
     ) -> dict[str, Any]:
         """Create a GitHub issue. POST /results/{job_id}/create-github-issue"""
@@ -1392,7 +1375,6 @@ class RootCozClient:
             child_build_number,
             title=title,
             body_text=body,
-            github_token=github_token,
             github_repo_url=github_repo_url,
             include_jira=False,
         )
@@ -1411,9 +1393,6 @@ class RootCozClient:
         body: str,
         child_job_name: str = "",
         child_build_number: int = 0,
-        jira_token: str = "",
-        jira_email: str = "",
-        jira_sa_token: str = "",
         jira_project_key: str = "",
         jira_security_level: str = "",
         jira_issue_type: str = "Bug",
@@ -1425,9 +1404,6 @@ class RootCozClient:
             child_build_number,
             title=title,
             body_text=body,
-            jira_token=jira_token,
-            jira_email=jira_email,
-            jira_sa_token=jira_sa_token,
             jira_project_key=jira_project_key,
             jira_security_level=jira_security_level,
             include_github=False,
@@ -1618,46 +1594,22 @@ class RootCozClient:
 
     # -- Jira Projects --------------------------------------------------------
 
-    @staticmethod
-    def _with_jira_auth_fields(
-        body: dict[str, Any],
-        jira_token: str = "",
-        jira_email: str = "",
-        jira_sa_token: str = "",
-    ) -> dict[str, Any]:
-        """Add jira_token/jira_email/jira_sa_token to *body* when set."""
-        if jira_token and jira_token.strip():
-            body["jira_token"] = jira_token.strip()
-        if jira_email and jira_email.strip():
-            body["jira_email"] = jira_email.strip()
-        if jira_sa_token and jira_sa_token.strip():
-            body["jira_sa_token"] = jira_sa_token.strip()
-        return body
-
     def jira_projects(
         self,
-        jira_token: str = "",
-        jira_email: str = "",
         query: str = "",
-        jira_sa_token: str = "",
     ) -> list[dict[str, Any]]:
         """List Jira projects. POST /api/jira-projects"""
         body: dict[str, Any] = {}
         if query:
             body["query"] = query
-        body = self._with_jira_auth_fields(body, jira_token, jira_email, jira_sa_token)
         return self._request("POST", "/api/jira-projects", json=body)
 
     def jira_security_levels(
         self,
         project_key: str,
-        jira_token: str = "",
-        jira_email: str = "",
-        jira_sa_token: str = "",
     ) -> list[dict[str, Any]]:
         """List security levels for a Jira project. POST /api/jira-security-levels"""
         body: dict[str, Any] = {"project_key": project_key}
-        body = self._with_jira_auth_fields(body, jira_token, jira_email, jira_sa_token)
         return self._request("POST", "/api/jira-security-levels", json=body)
 
     # -- Token Usage ----------------------------------------------------------

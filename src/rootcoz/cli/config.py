@@ -37,13 +37,11 @@ class ServerConfig:
     ai_model: str = ""
     ai_call_timeout: int = 0  # 0 means use server default
     max_concurrent_ai_calls: int = 0  # 0 means use server default
-    # Jira — per-method URLs and credentials are Server Settings only.
-    # Per-user Jira credentials used by bug creation / listing commands.
-    jira_email: str = ""
+    # Jira — per-method URLs are Server Settings only. The tracker credential
+    # itself is never a config key: it is the account token saved in Profile
+    # Settings, read by the server.
     atlassian_oauth_cloud_id: str = ""
     jira_site_url: str = ""
-    jira_token: str = ""
-    jira_sa_token: str = ""
     jira_project_key: str = ""
     jira_security_level: str = ""
     jira_max_results: int = 0  # 0 means use server default
@@ -238,11 +236,8 @@ def _server_config_from_dict(data: dict[str, Any]) -> ServerConfig:
         # Additional repos
         additional_repos=_validated_str(data, "additional_repos"),
         # Jira
-        jira_email=data.get("jira_email", ""),
         atlassian_oauth_cloud_id=data.get("atlassian_oauth_cloud_id", ""),
         jira_site_url=data.get("jira_site_url", ""),
-        jira_token=_validated_str(data, "jira_token"),
-        jira_sa_token=_validated_str(data, "jira_sa_token"),
         jira_project_key=data.get("jira_project_key", ""),
         jira_security_level=_validated_str(data, "jira_security_level"),
         jira_max_results=data.get("jira_max_results", 0),
