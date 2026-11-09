@@ -82,7 +82,9 @@
 /* Markdown (typography plugin) palette. The plugin bakes a light-on-white
  * palette into --tw-prose-* and this build has no `dark:` variant, so the
  * variables are mapped to tokens and follow html[data-theme] at use time.
- * Unlayered on purpose: it must outrank the plugin's components layer. */
+ * Unlayered on purpose: it must outrank the plugin's own layer.
+ * Counters carry the list ordinal, so they stay at secondary (4.5:1); bullets
+ * are decorative and sit at tertiary. */
 .prose {
   --tw-prose-body: var(--color-text-primary);
   --tw-prose-headings: var(--color-text-primary);
@@ -93,7 +95,7 @@
   --tw-prose-pre-code: var(--color-text-secondary);
   --tw-prose-pre-bg: var(--color-surface-elevated);
   --tw-prose-quotes: var(--color-text-secondary);
-  --tw-prose-counters: var(--color-text-tertiary);
+  --tw-prose-counters: var(--color-text-secondary);
   --tw-prose-bullets: var(--color-text-tertiary);
   --tw-prose-captions: var(--color-text-tertiary);
   --tw-prose-hr: var(--color-border-default);

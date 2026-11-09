@@ -28,7 +28,7 @@ const PROSE_TOKENS: Record<string, string> = {
   '--tw-prose-pre-code': '--color-text-secondary',
   '--tw-prose-pre-bg': '--color-surface-elevated',
   '--tw-prose-quotes': '--color-text-secondary',
-  '--tw-prose-counters': '--color-text-tertiary',
+  '--tw-prose-counters': '--color-text-secondary',
   '--tw-prose-bullets': '--color-text-tertiary',
   '--tw-prose-hr': '--color-border-default',
   '--tw-prose-quote-borders': '--color-border-default',
