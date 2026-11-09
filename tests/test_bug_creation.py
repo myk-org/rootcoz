@@ -8,6 +8,7 @@ from pi_sidecar_client import AIResult
 
 from rootcoz.attribution import AiProvenance, apply_ai_attribution, read_provenance
 from rootcoz.bug_creation import create_github_issue
+from rootcoz.jira import resolve_jira_connection_from_params
 from rootcoz.models import (
     AnalysisDetail,
     CodeFix,
@@ -364,6 +365,20 @@ class TestCreateGithubIssue:
             assert _GITHUB_FOOTER_MARKER in posted_body
 
 
+def _oauth_connection(
+    *,
+    atlassian_oauth_cloud_id: str = "2b9e35e3-6bd3-4cec-b838-f4249ee02432",
+    jira_site_url: str = "https://myorg.atlassian.net",
+):
+    """An OAuth 2.0 credential (service account) connection for create tests."""
+    return resolve_jira_connection_from_params(
+        jira_oauth_client_secret="ATOA-test-secret",  # pragma: allowlist secret
+        atlassian_oauth_client_id="test-client-id",
+        atlassian_oauth_cloud_id=atlassian_oauth_cloud_id,
+        jira_site_url=jira_site_url,
+    )
+
+
 def _seed_minted_token(
     client_id: str = "test-client-id",
     secret: str = "ATOA-test-secret",
@@ -394,18 +409,11 @@ class TestCreateJiraBug:
     async def test_creates_bug(self):
         from rootcoz.bug_creation import create_jira_bug
 
-        mock_settings = MagicMock()
-        mock_settings.jira_auth_mode = "basic"
-        mock_settings.jira_cloud_url = "https://jira.example.com"
-        mock_settings.jira_project_key = "PROJ"
-        mock_settings.jira_email = "test@example.com"
-        mock_settings.jira_api_token = MagicMock()
-        mock_settings.jira_api_token.get_secret_value.return_value = "token123"
-        mock_settings.jira_pat = None
-        mock_settings.jira_oauth_client_secret = None
-        mock_settings.atlassian_oauth_cloud_id = None
-        mock_settings.jira_site_url = None
-        mock_settings.jira_cloud_ssl_verify = True
+        connection = resolve_jira_connection_from_params(
+            jira_cloud_url="https://jira.example.com",
+            jira_email="test@example.com",
+            jira_token="token123",
+        )
 
         mock_response = httpx.Response(
             201,
@@ -425,7 +433,8 @@ class TestCreateJiraBug:
             result = await create_jira_bug(
                 title="DNS timeout on resolver",
                 body="DNS resolution fails intermittently",
-                settings=mock_settings,
+                connection=connection,
+                project_key="PROJ",
             )
             assert result["key"] == "PROJ-456"
             assert "jira.example.com" in result["url"]
@@ -440,21 +449,11 @@ class TestCreateJiraBug:
         """Test Jira Server/DC auth (Bearer PAT, no email)."""
         from rootcoz.bug_creation import create_jira_bug
 
-        mock_settings = MagicMock()
-        mock_settings.jira_auth_mode = "pat"
-        mock_settings.jira_server_url = "https://jira-server.example.com"
-        mock_settings.jira_project_key = "PROJ"
-        mock_settings.jira_email = None
-        mock_settings.jira_api_token = None
-        mock_settings.jira_pat = MagicMock()
-        mock_settings.jira_oauth_client_secret = None
-        mock_settings.atlassian_oauth_cloud_id = None
-        mock_settings.jira_site_url = None
-        mock_settings.jira_pat.get_secret_value.return_value = "pat123"
-        mock_settings.jira_oauth_client_secret = None
-        mock_settings.atlassian_oauth_cloud_id = None
-        mock_settings.jira_site_url = None
-        mock_settings.jira_server_ssl_verify = False
+        connection = resolve_jira_connection_from_params(
+            jira_server_url="https://jira-server.example.com",
+            jira_pat="pat123",
+            jira_server_ssl_verify=False,
+        )
 
         mock_response = httpx.Response(
             201,
@@ -471,26 +470,21 @@ class TestCreateJiraBug:
             result = await create_jira_bug(
                 title="DNS timeout",
                 body="Description",
-                settings=mock_settings,
+                connection=connection,
+                project_key="PROJ",
             )
             assert result["key"] == "PROJ-789"
+            assert MockClient.call_args.kwargs["verify"] is False
 
     async def test_creates_bug_with_custom_issue_type(self):
         """Test creating a Jira issue with a custom issue type."""
         from rootcoz.bug_creation import create_jira_bug
 
-        mock_settings = MagicMock()
-        mock_settings.jira_auth_mode = "basic"
-        mock_settings.jira_cloud_url = "https://jira.example.com"
-        mock_settings.jira_project_key = "PROJ"
-        mock_settings.jira_email = "test@example.com"
-        mock_settings.jira_api_token = MagicMock()
-        mock_settings.jira_api_token.get_secret_value.return_value = "token123"
-        mock_settings.jira_pat = None
-        mock_settings.jira_oauth_client_secret = None
-        mock_settings.atlassian_oauth_cloud_id = None
-        mock_settings.jira_site_url = None
-        mock_settings.jira_cloud_ssl_verify = True
+        connection = resolve_jira_connection_from_params(
+            jira_cloud_url="https://jira.example.com",
+            jira_email="test@example.com",
+            jira_token="token123",
+        )
 
         mock_response = httpx.Response(
             201,
@@ -507,7 +501,8 @@ class TestCreateJiraBug:
             result = await create_jira_bug(
                 title="Story title",
                 body="Story description",
-                settings=mock_settings,
+                connection=connection,
+                project_key="PROJ",
                 issue_type="Story",
             )
             assert result["key"] == "PROJ-999"
@@ -521,18 +516,11 @@ class TestCreateJiraBug:
         """Test that default issue type is 'Bug' when not specified."""
         from rootcoz.bug_creation import create_jira_bug
 
-        mock_settings = MagicMock()
-        mock_settings.jira_auth_mode = "basic"
-        mock_settings.jira_cloud_url = "https://jira.example.com"
-        mock_settings.jira_project_key = "PROJ"
-        mock_settings.jira_email = "test@example.com"
-        mock_settings.jira_api_token = MagicMock()
-        mock_settings.jira_api_token.get_secret_value.return_value = "token123"
-        mock_settings.jira_pat = None
-        mock_settings.jira_oauth_client_secret = None
-        mock_settings.atlassian_oauth_cloud_id = None
-        mock_settings.jira_site_url = None
-        mock_settings.jira_cloud_ssl_verify = True
+        connection = resolve_jira_connection_from_params(
+            jira_cloud_url="https://jira.example.com",
+            jira_email="test@example.com",
+            jira_token="token123",
+        )
 
         mock_response = httpx.Response(
             201,
@@ -549,7 +537,8 @@ class TestCreateJiraBug:
             result = await create_jira_bug(
                 title="Bug title",
                 body="Bug description",
-                settings=mock_settings,
+                connection=connection,
+                project_key="PROJ",
             )
             assert result["key"] == "PROJ-100"
 
@@ -563,6 +552,166 @@ class TestCreateJiraBug:
                 "description"
             ]
             assert _JIRA_FOOTER_MARKER in posted_body
+
+
+class TestCreateJiraBugRefusesTheDeploymentCredential:
+    """A tracker write must be unable to obtain the deployment credential.
+
+    ``create_jira_bug`` takes a resolved :class:`JiraConnection` and no settings,
+    so it has nothing to resolve a credential from, and the connection it does
+    receive is checked against the deployment's own secret.
+    """
+
+    _DEPLOYMENT_PAT = "deployment-pat-0123456789"  # pragma: allowlist secret
+
+    def _deployment_settings(self) -> None:
+        """Install a pat deployment whose secret is ``_DEPLOYMENT_PAT``."""
+        from rootcoz.config import update_db_settings_cache
+
+        update_db_settings_cache(
+            {
+                "jira_auth_mode": "pat",
+                "jira_server_url": "https://jira-server.example.com",
+                "jira_cloud_url": "https://myorg.atlassian.net",
+                "jira_pat": self._DEPLOYMENT_PAT,
+            }
+        )
+
+    async def test_a_deployment_connection_cannot_reach_a_create(self):
+        from rootcoz.bug_creation import create_jira_bug
+        from rootcoz.config import get_settings
+        from rootcoz.error_messages import deployment_credential_message
+        from rootcoz.jira import (
+            JiraDeploymentCredentialRefused,
+            resolve_jira_connection,
+        )
+
+        self._deployment_settings()
+        # Exactly what a careless caller would build.
+        connection = resolve_jira_connection(get_settings())
+
+        with (
+            patch("rootcoz.bug_creation.httpx.AsyncClient") as AsyncClient,
+            pytest.raises(JiraDeploymentCredentialRefused) as excinfo,
+        ):
+            await create_jira_bug(
+                title="t", body="b", connection=connection, project_key="PROJ"
+            )
+        # Refused, NOT filed — no request was even attempted.
+        AsyncClient.assert_not_called()
+        assert str(excinfo.value) == deployment_credential_message()
+
+    async def test_the_deployment_token_cannot_be_laundered_with_the_callers_email(
+        self,
+    ):
+        """The deployment's PAT plus the caller's own e-mail is still a refusal.
+
+        Whole-connection equality would pass this: the effective connection
+        differs from the deployment's only in ``auth[0]``.
+        """
+        from rootcoz.bug_creation import create_jira_bug
+        from rootcoz.config import get_settings
+        from rootcoz.jira import (
+            JiraDeploymentCredentialRefused,
+            resolve_jira_connection,
+        )
+        from rootcoz.main import _build_effective_jira_settings
+
+        self._deployment_settings()
+        effective = _build_effective_jira_settings(
+            get_settings(), self._DEPLOYMENT_PAT, "me@example.com"
+        )
+        connection = resolve_jira_connection(effective)
+        assert connection.mode == "cloud"
+        assert connection.auth == ("me@example.com", self._DEPLOYMENT_PAT)
+        assert connection != resolve_jira_connection(get_settings())
+
+        with (
+            patch("rootcoz.bug_creation.httpx.AsyncClient") as AsyncClient,
+            pytest.raises(JiraDeploymentCredentialRefused),
+        ):
+            await create_jira_bug(
+                title="t", body="b", connection=connection, project_key="PROJ"
+            )
+        AsyncClient.assert_not_called()
+
+    async def test_a_caller_connection_still_files(self):
+        """A personal credential that is not the deployment's files as before."""
+        from rootcoz.bug_creation import create_jira_bug
+
+        self._deployment_settings()
+        connection = resolve_jira_connection_from_params(
+            jira_server_url="https://jira-server.example.com",
+            jira_pat="caller-pat",  # pragma: allowlist secret
+        )
+        mock_response = httpx.Response(
+            201, json={"key": "PROJ-1"}, request=_mock_request()
+        )
+        with patch("rootcoz.bug_creation.httpx.AsyncClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_client
+
+            result = await create_jira_bug(
+                title="t", body="b", connection=connection, project_key="PROJ"
+            )
+        assert result["key"] == "PROJ-1"
+        assert mock_client.post.call_args.kwargs["headers"]["Authorization"] == (
+            "Bearer caller-pat"
+        )
+
+    async def test_an_oauth_deployment_is_not_refused(self):
+        """Gateway modes stay usable: the credential there is the site's.
+
+        A user's only mintable OAuth 2.0 value is byte-identical to the
+        deployment's, so refusing it would 400 every create on such a
+        deployment.
+        """
+        from rootcoz.bug_creation import create_jira_bug
+        from rootcoz.config import get_settings, update_db_settings_cache
+        from rootcoz.jira import resolve_jira_connection
+
+        update_db_settings_cache(
+            {
+                "jira_auth_mode": "oauth",
+                "jira_oauth_client_secret": "ATOA-test-secret",  # pragma: allowlist secret
+                "atlassian_oauth_client_id": "test-client-id",
+                "atlassian_oauth_cloud_id": "2b9e35e3-6bd3-4cec-b838-f4249ee02432",
+                "jira_site_url": "https://myorg.atlassian.net",
+            }
+        )
+        connection = resolve_jira_connection(get_settings())
+        assert connection.mode == "sa"
+
+        _seed_minted_token()
+        mock_response = httpx.Response(
+            201, json={"key": "PROJ-2"}, request=_mock_request()
+        )
+        with patch("rootcoz.bug_creation.httpx.AsyncClient") as MockClient:
+            mock_client = AsyncMock()
+            mock_client.post.return_value = mock_response
+            mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+            mock_client.__aexit__ = AsyncMock(return_value=False)
+            MockClient.return_value = mock_client
+
+            result = await create_jira_bug(
+                title="t", body="b", connection=connection, project_key="PROJ"
+            )
+        assert result["key"] == "PROJ-2"
+
+    def test_the_create_helper_has_no_credential_source(self):
+        """Pins the signature: no ``settings``, so nothing to resolve from."""
+        import inspect
+
+        from rootcoz.bug_creation import create_jira_bug
+
+        parameters = inspect.signature(create_jira_bug).parameters
+        assert "connection" in parameters
+        assert "project_key" in parameters
+        assert parameters["project_key"].kind is inspect.Parameter.KEYWORD_ONLY
+        assert "settings" not in parameters
 
 
 class TestParseGithubRepoUrl:
@@ -769,18 +918,11 @@ class TestAiFooterNotDoubled:
 
         body_with_footer = "h2. Details\nSome content" + JIRA_AI_FOOTER
 
-        mock_settings = MagicMock()
-        mock_settings.jira_auth_mode = "basic"
-        mock_settings.jira_cloud_url = "https://jira.example.com"
-        mock_settings.jira_project_key = "PROJ"
-        mock_settings.jira_email = "test@example.com"
-        mock_settings.jira_api_token = MagicMock()
-        mock_settings.jira_api_token.get_secret_value.return_value = "token"
-        mock_settings.jira_pat = None
-        mock_settings.jira_oauth_client_secret = None
-        mock_settings.atlassian_oauth_cloud_id = None
-        mock_settings.jira_site_url = None
-        mock_settings.jira_cloud_ssl_verify = True
+        connection = resolve_jira_connection_from_params(
+            jira_cloud_url="https://jira.example.com",
+            jira_email="test@example.com",
+            jira_token="token",
+        )
 
         mock_response = httpx.Response(
             201,
@@ -797,7 +939,8 @@ class TestAiFooterNotDoubled:
             await create_jira_bug(
                 title="Test",
                 body=body_with_footer,
-                settings=mock_settings,
+                connection=connection,
+                project_key="PROJ",
             )
             posted_body = mock_client.post.call_args.kwargs["json"]["fields"][
                 "description"
@@ -808,21 +951,9 @@ class TestAiFooterNotDoubled:
         """Service account tokens post to the scoped gateway with REST v3."""
         from rootcoz.bug_creation import create_jira_bug
 
-        mock_settings = MagicMock()
-        mock_settings.atlassian_oauth_cloud_id = "2b9e35e3-6bd3-4cec-b838-f4249ee02432"
-        mock_settings.jira_project_key = "PROJ"
-        mock_settings.jira_auth_mode = "oauth"
-        mock_settings.jira_email = "user@example.com"
-        mock_settings.jira_api_token = MagicMock()
-        mock_settings.jira_api_token.get_secret_value.return_value = "token123"
-        mock_settings.jira_pat = None
-        mock_settings.jira_oauth_client_secret = MagicMock()
-        mock_settings.jira_oauth_client_secret.get_secret_value.return_value = (
-            "ATOA-test-secret"
+        connection = _oauth_connection(
+            jira_site_url="https://myorg.atlassian.net",
         )
-        mock_settings.atlassian_oauth_client_id = "test-client-id"
-        mock_settings.jira_site_url = "https://myorg.atlassian.net"
-        mock_settings.jira_oauth_ssl_verify = True
 
         _seed_minted_token()
         mock_response = httpx.Response(
@@ -838,7 +969,8 @@ class TestAiFooterNotDoubled:
             result = await create_jira_bug(
                 title="SA bug",
                 body="body",
-                settings=mock_settings,
+                connection=connection,
+                project_key="PROJ",
             )
             assert result["key"] == "PROJ-789"
             # Browse link uses the site URL, never the scoped gateway
@@ -856,20 +988,7 @@ class TestAiFooterNotDoubled:
         """An unresolvable SA cloud ID fails fast with a clear message."""
         from rootcoz.bug_creation import create_jira_bug
 
-        mock_settings = MagicMock()
-        mock_settings.jira_project_key = "PROJ"
-        mock_settings.jira_auth_mode = "oauth"
-        mock_settings.jira_email = None
-        mock_settings.jira_api_token = None
-        mock_settings.jira_pat = None
-        mock_settings.jira_oauth_client_secret = MagicMock()
-        mock_settings.jira_oauth_client_secret.get_secret_value.return_value = (
-            "ATOA-test-secret"
-        )
-        mock_settings.atlassian_oauth_client_id = "test-client-id"
-        mock_settings.atlassian_oauth_cloud_id = None
-        mock_settings.jira_site_url = None
-        mock_settings.jira_oauth_ssl_verify = True
+        connection = _oauth_connection(atlassian_oauth_cloud_id="", jira_site_url="")
 
         with patch("rootcoz.bug_creation.httpx.AsyncClient") as MockClient:
             mock_client = AsyncMock()
@@ -880,52 +999,42 @@ class TestAiFooterNotDoubled:
 
             with pytest.raises(ValueError, match="cloud ID"):
                 await create_jira_bug(
-                    title="SA bug", body="body", settings=mock_settings
+                    title="SA bug",
+                    body="body",
+                    connection=connection,
+                    project_key="PROJ",
                 )
 
     async def test_basic_mode_without_cloud_url_error_names_jira_cloud_url(self):
         """Basic auth with no cloud URL points at jira_cloud_url, not the SA cloud ID."""
         from rootcoz.bug_creation import create_jira_bug
 
-        mock_settings = MagicMock()
-        mock_settings.jira_auth_mode = "basic"
-        mock_settings.jira_cloud_url = ""
-        mock_settings.jira_project_key = "PROJ"
-        mock_settings.jira_email = "test@example.com"
-        mock_settings.jira_api_token = MagicMock()
-        mock_settings.jira_api_token.get_secret_value.return_value = "token123"
-        mock_settings.jira_pat = None
-        mock_settings.jira_oauth_client_secret = None
-        mock_settings.atlassian_oauth_client_id = None
-        mock_settings.atlassian_oauth_cloud_id = None
-        mock_settings.jira_site_url = None
-        mock_settings.jira_cloud_ssl_verify = True
+        connection = resolve_jira_connection_from_params(
+            jira_cloud_url="",
+            jira_email="test@example.com",
+            jira_token="token123",
+        )
 
         with pytest.raises(ValueError, match="jira_cloud_url"):
             await create_jira_bug(
-                title="basic bug", body="body", settings=mock_settings
+                title="basic bug",
+                body="body",
+                connection=connection,
+                project_key="PROJ",
             )
 
     async def test_pat_mode_without_server_url_error_names_jira_server_url(self):
         """PAT with no server URL points at jira_server_url, not the SA cloud ID."""
         from rootcoz.bug_creation import create_jira_bug
 
-        mock_settings = MagicMock()
-        mock_settings.jira_auth_mode = "pat"
-        mock_settings.jira_server_url = ""
-        mock_settings.jira_project_key = "PROJ"
-        mock_settings.jira_email = None
-        mock_settings.jira_api_token = None
-        mock_settings.jira_pat = MagicMock()
-        mock_settings.jira_pat.get_secret_value.return_value = "pat-token"
-        mock_settings.jira_oauth_client_secret = None
-        mock_settings.atlassian_oauth_client_id = None
-        mock_settings.atlassian_oauth_cloud_id = None
-        mock_settings.jira_site_url = None
-        mock_settings.jira_server_ssl_verify = True
+        connection = resolve_jira_connection_from_params(
+            jira_server_url="", jira_pat="pat-token"
+        )
 
         with pytest.raises(ValueError, match="jira_server_url"):
-            await create_jira_bug(title="pat bug", body="body", settings=mock_settings)
+            await create_jira_bug(
+                title="pat bug", body="body", connection=connection, project_key="PROJ"
+            )
 
     async def test_sa_description_is_adf_document(self):
         """SA mode (REST v3) wraps the description in an ADF document."""
@@ -940,20 +1049,7 @@ class TestAiFooterNotDoubled:
             [],
             [{"type": "text", "text": "line three"}],
         ]
-        mock_settings = MagicMock()
-        mock_settings.atlassian_oauth_cloud_id = "2b9e35e3-6bd3-4cec-b838-f4249ee02432"
-        mock_settings.jira_project_key = "PROJ"
-        mock_settings.jira_auth_mode = "oauth"
-        mock_settings.jira_email = None
-        mock_settings.jira_api_token = None
-        mock_settings.jira_pat = None
-        mock_settings.jira_oauth_client_secret = MagicMock()
-        mock_settings.jira_oauth_client_secret.get_secret_value.return_value = (
-            "ATOA-test-secret"
-        )
-        mock_settings.atlassian_oauth_client_id = "test-client-id"
-        mock_settings.jira_site_url = "https://myorg.atlassian.net"
-        mock_settings.jira_oauth_ssl_verify = True
+        connection = _oauth_connection(jira_site_url="https://myorg.atlassian.net")
 
         _seed_minted_token()
         mock_response = httpx.Response(
@@ -967,7 +1063,10 @@ class TestAiFooterNotDoubled:
             MockClient.return_value = mock_client
 
             await create_jira_bug(
-                title="SA bug", body="plain body", settings=mock_settings
+                title="SA bug",
+                body="plain body",
+                connection=connection,
+                project_key="PROJ",
             )
             payload = mock_client.post.call_args.kwargs["json"]
             description = payload["fields"]["description"]
@@ -981,24 +1080,13 @@ class TestAiFooterNotDoubled:
         """A scoped URL without a site URL fails fast — no broken links."""
         from rootcoz.bug_creation import create_jira_bug
 
-        mock_settings = MagicMock()
-        mock_settings.atlassian_oauth_cloud_id = "2b9e35e3-6bd3-4cec-b838-f4249ee02432"
-        mock_settings.jira_project_key = "PROJ"
-        mock_settings.jira_auth_mode = "oauth"
-        mock_settings.jira_email = None
-        mock_settings.jira_api_token = None
-        mock_settings.jira_pat = None
-        mock_settings.jira_oauth_client_secret = MagicMock()
-        mock_settings.jira_oauth_client_secret.get_secret_value.return_value = (
-            "ATOA-test-secret"
-        )
-        mock_settings.atlassian_oauth_client_id = "test-client-id"
-        mock_settings.jira_site_url = None
-        mock_settings.jira_oauth_ssl_verify = True
+        connection = _oauth_connection(jira_site_url="")
 
         _seed_minted_token()
         with pytest.raises(ValueError, match="JIRA_SITE_URL"):
-            await create_jira_bug(title="SA bug", body="body", settings=mock_settings)
+            await create_jira_bug(
+                title="SA bug", body="body", connection=connection, project_key="PROJ"
+            )
 
     async def test_text_to_adf_translates_wiki_markup(self):
         """Fallback wiki markup renders as structured ADF, not literal text."""

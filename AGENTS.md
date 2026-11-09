@@ -346,6 +346,8 @@ Signature comparison goes through `storage.signatures_match()`, never a raw colu
 
 A caller with no credentials gets a clear, actionable error and the action is blocked (`400` naming the setting to add, e.g. "GitHub token is required. Set up your token in Profile Settings.") — never a silent retry under someone else's token, and never an exception for the bootstrap `admin` account. The error must be followable by the account that receives it: the bootstrap `admin` has no users row, so `PUT /api/user/tokens` answers `404` for it and `POST /api/feedback/create` — the one path that reads the token from the row — tells it to sign in with its own registered account instead of pointing at Profile Settings. The same rule applies to anything added later that writes to an external tracker: if the code is about to hand a server token to a create/write call, it is a bug.
 
+The write helper is also shaped so it *cannot* resolve one: `bug_creation.create_jira_bug` takes a resolved `JiraConnection` and has **no** `Settings` argument (the same structural property `create_github_issue` gets from its required `github_token`), and it runs `jira.require_caller_connection(connection)` first, which refuses a connection whose secret is the deployment's own (`get_settings()`, resolved inside the guard so a caller cannot weaken the reference). A new tracker write helper follows that shape — required credential parameter, no settings to resolve from, a guard at the top.
+
 ### Feedback System
 
 Users submit feedback (bugs, feature requests) via the FeedbackDialog component. Feedback is previewed with AI-generated issue content, then created as a GitHub issue. This replaces the old "Report Bug" flow.
