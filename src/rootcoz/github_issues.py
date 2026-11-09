@@ -23,7 +23,9 @@ from rootcoz import get_child_logger
 from rootcoz.bug_creation import parse_github_repo_url
 from rootcoz.config import Settings, parse_repo_ref
 from rootcoz.issue_matching import (
+    MAX_FILTER_PROMPT_CHARS,
     TrackerSearch,
+    build_filter_prompt,
     collect_product_bug_reports,
     filter_issue_matches_with_ai,
     search_failure_reason,
@@ -324,6 +326,7 @@ async def _search_and_filter(
 
     failed_searches = 0
     filter_failures = 0
+    oversized_filters = 0
     total_candidates = 0
     total_matches = 0
     for index, (keywords, targets) in enumerate(targets_by_keywords.items()):
@@ -340,6 +343,23 @@ async def _search_and_filter(
 
         bug_title, bug_description = bug_context(targets[0])
         if ai_provider and ai_model:
+            prompt_chars = len(
+                build_filter_prompt(bug_title, bug_description, candidates)
+            )
+            if prompt_chars > MAX_FILTER_PROMPT_CHARS:
+                # Not sent: the overflow would come back as "no verdict" and be
+                # recorded as a failed verdict instead of an unrun one.
+                logger.warning(
+                    "GitHub %s relevance filter not run for %d candidate(s) "
+                    "for job=%s: prompt is %d chars, over the %d char limit",
+                    call_type,
+                    len(candidates),
+                    job_id,
+                    prompt_chars,
+                    MAX_FILTER_PROMPT_CHARS,
+                )
+                oversized_filters += 1
+                continue
             try:
                 evaluations = await filter_issue_matches_with_ai(
                     bug_title=bug_title,
@@ -399,6 +419,7 @@ async def _search_and_filter(
         failed_searches=failed_searches,
         total_searches=total_searches,
         filter_failures=filter_failures,
+        prompt_overflows=oversized_filters,
     )
     if reason:
         logger.warning("GitHub %s: %s for job=%s", call_type, reason, job_id)

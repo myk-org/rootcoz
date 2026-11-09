@@ -64,6 +64,7 @@ def search_failure_reason(
     failed_searches: int,
     total_searches: int,
     filter_failures: int,
+    prompt_overflows: int = 0,
 ) -> str:
     """Join the reason a tracker search was partial or total.
 
@@ -77,6 +78,8 @@ def search_failure_reason(
         failed_searches: How many search requests failed.
         total_searches: How many search requests were made.
         filter_failures: How many relevance filter calls failed.
+        prompt_overflows: How many relevance filter calls were not made
+            because their prompt was too large to send.
 
     Returns:
         The reason joined with ``"; "``, empty when nothing failed.
@@ -87,6 +90,12 @@ def search_failure_reason(
             f"all {total_searches} {search_label} failed"
             if failed_searches == total_searches
             else f"{failed_searches} of {total_searches} {search_label} failed"
+        )
+    if prompt_overflows:
+        # Not run, not failed: an oversized prompt is its own outcome so it is
+        # never read as "the filter judged and kept nothing".
+        reasons.append(
+            f"{prompt_overflows} {filter_label} call(s) not run: prompt too large"
         )
     if filter_failures:
         reasons.append(f"{filter_failures} {filter_label} call(s) failed")
@@ -113,6 +122,71 @@ def collect_product_bug_reports(
         if isinstance(detail.product_bug_report, ProductBugReport):
             reports.append(detail.product_bug_report)
     return reports
+
+
+# Per-candidate cap on the body put in the filter prompt: a keyword set can
+# carry many candidates, and untruncated bodies overflow the model context.
+_CANDIDATE_DESCRIPTION_CHARS = 1000
+
+# A prompt above this size is not sent at all: the overflow would come back as
+# "no verdict", indistinguishable from a filter failure.
+MAX_FILTER_PROMPT_CHARS = 150_000
+
+
+def _candidate_excerpt(description: str) -> str:
+    """Trim one candidate body, saying plainly that it was trimmed."""
+    if len(description) <= _CANDIDATE_DESCRIPTION_CHARS:
+        return description
+    return (
+        description[:_CANDIDATE_DESCRIPTION_CHARS]
+        + f" [... truncated, {len(description)} chars total]"
+    )
+
+
+def build_filter_prompt(
+    bug_title: str,
+    bug_description: str,
+    candidates: list[dict[str, Any]],
+) -> str:
+    """The exact prompt :func:`filter_issue_matches_with_ai` sends.
+
+    Every candidate is included (bodies capped per candidate, never dropped)
+    so the candidate count stays truthful, and the caller can measure the
+    prompt before paying for it.
+    """
+    candidate_lines = []
+    for i, c in enumerate(candidates, 1):
+        title = c.get("summary") or c.get("title") or ""
+        desc = _candidate_excerpt(c.get("description") or "No description")
+        status = c.get("status", "")
+        key = c.get("key", "")
+        candidate_lines.append(
+            f"{i}. {key} [{status}] - {title}\n   Description: {desc}"
+        )
+
+    return f"""You are evaluating whether existing issue tickets match a newly discovered bug.
+
+NEW BUG:
+Title: {bug_title}
+Description: {bug_description}
+
+CANDIDATES:
+{chr(10).join(candidate_lines)}
+
+For each candidate, determine if it describes the SAME bug or a closely related issue
+(including regressions of previously fixed bugs).
+
+A match means the ticket describes essentially the same broken behavior,
+not just that it mentions similar components or technologies.
+
+Respond with ONLY a JSON array. For each candidate include:
+- "key": the issue key/identifier
+- "relevant": true or false
+- "score": relevance score 0.0 to 1.0 (1.0 = exact same bug, 0.5+ = likely related)
+
+Example: [{{"key": "PROJ-123", "relevant": true, "score": 0.9}}, {{"key": "PROJ-456", "relevant": false, "score": 0.1}}]
+
+Respond with ONLY the JSON array, no other text."""
 
 
 async def filter_issue_matches_with_ai(
@@ -156,40 +230,15 @@ async def filter_issue_matches_with_ai(
     if not candidates:
         return []
 
-    # Build candidate list for the AI prompt
-    candidate_lines = []
-    for i, c in enumerate(candidates, 1):
-        title = c.get("summary") or c.get("title") or ""
-        desc = c.get("description") or "No description"
-        status = c.get("status", "")
-        key = c.get("key", "")
-        candidate_lines.append(
-            f"{i}. {key} [{status}] - {title}\n   Description: {desc}"
+    prompt = build_filter_prompt(bug_title, bug_description, candidates)
+    if len(prompt) > MAX_FILTER_PROMPT_CHARS:
+        logger.warning(
+            "AI relevance filtering not run: prompt is %d chars, over the %d "
+            "char limit",
+            len(prompt),
+            MAX_FILTER_PROMPT_CHARS,
         )
-
-    prompt = f"""You are evaluating whether existing issue tickets match a newly discovered bug.
-
-NEW BUG:
-Title: {bug_title}
-Description: {bug_description}
-
-CANDIDATES:
-{chr(10).join(candidate_lines)}
-
-For each candidate, determine if it describes the SAME bug or a closely related issue
-(including regressions of previously fixed bugs).
-
-A match means the ticket describes essentially the same broken behavior,
-not just that it mentions similar components or technologies.
-
-Respond with ONLY a JSON array. For each candidate include:
-- "key": the issue key/identifier
-- "relevant": true or false
-- "score": relevance score 0.0 to 1.0 (1.0 = exact same bug, 0.5+ = likely related)
-
-Example: [{{"key": "PROJ-123", "relevant": true, "score": 0.9}}, {{"key": "PROJ-456", "relevant": false, "score": 0.1}}]
-
-Respond with ONLY the JSON array, no other text."""
+        return None
 
     logger.info(
         "AI call: provider=%s, model=%s, call_type=%s, job_id=%s",

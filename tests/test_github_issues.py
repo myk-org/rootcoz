@@ -5,12 +5,15 @@ Two questions, two destinations: the code-fix search (``tests_repo_filter`` →
 (``github_duplicate_filter`` → ``ProductBugReport.github_matches``).
 """
 
+import json
 import os
+import re
 from collections.abc import Generator
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
+from pi_sidecar_client import AIResult
 
 from rootcoz.config import Settings
 from rootcoz.github_issues import (
@@ -1175,3 +1178,72 @@ class TestEnrichWithGithubDuplicateMatches:
             )
 
         assert requests == [("GET", "https://api.github.com/search/issues")]
+
+    async def test_oversized_prompt_loses_no_match_and_is_named(
+        self, product_bug_with_keywords, settings_with_tests_repo
+    ) -> None:
+        """A prompt too large for the model is cut per candidate, never blamed
+        on the filter — and when even that is too large, the record says the
+        filter was not run."""
+        other = FailureAnalysis(
+            test_name="test_other",
+            error="timeout",
+            analysis=AnalysisDetail(
+                classification="PRODUCT BUG",
+                product_bug_report=ProductBugReport(
+                    title="VM start fails",
+                    description="Migration start times out",
+                    jira_search_keywords=["vm start"],
+                ),
+            ),
+        )
+        repos = [f"https://github.com/org/repo{i}" for i in range(30)]
+        body = "x" * 5000
+        prompts: list[str] = []
+
+        async def search(keywords, repo_url, _token=""):
+            if "login" in " ".join(keywords):
+                found = 5 if repo_url == repos[0] else 0
+                return [
+                    {**_candidate(n), "description": body} for n in range(1, found + 1)
+                ]
+            name = repo_url.rsplit("/", 1)[-1]
+            return [
+                {**_candidate(n, repo=name), "description": body} for n in range(1, 11)
+            ]
+
+        async def fake_call_ai(prompt, **_kwargs):
+            prompts.append(prompt)
+            if len(prompt) > 20_000:
+                return AIResult(success=False, text="maximum context length exceeded")
+            keys = re.findall(r"^\d+\. (\S+) \[", prompt, re.MULTILINE)
+            return AIResult(
+                success=True,
+                text=json.dumps(
+                    [{"key": k, "relevant": True, "score": 0.9} for k in keys]
+                ),
+            )
+
+        with (
+            patch("rootcoz.github_issues.search_github_issues", side_effect=search),
+            patch("rootcoz.issue_matching.call_ai_once", side_effect=fake_call_ai),
+        ):
+            record = await enrich_with_github_duplicate_matches(
+                [product_bug_with_keywords, other],
+                settings_with_tests_repo,
+                _TEST_GITHUB_TOKEN,
+                "claude",
+                "test-model",
+                repo_urls=repos,
+            )
+
+        report = product_bug_with_keywords.analysis.product_bug_report
+        # The keyword set that fits once bodies are excerpted keeps its matches.
+        assert [m.number for m in report.github_matches] == [1, 2, 3, 4, 5]
+        assert "[... truncated, 5000 chars total]" in prompts[0]
+        # Every candidate is still counted: capping never drops one.
+        assert record["candidates"] == 5 + 300
+        # The set that cannot fit is recorded as not run, not as a failed filter.
+        assert other.analysis.product_bug_report.github_matches == []
+        assert "not run: prompt too large" in record["reason"]
+        assert "filter call(s) failed" not in record["reason"]
