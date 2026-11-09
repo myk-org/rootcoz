@@ -27,10 +27,10 @@ services:
       dockerfile: Dockerfile
       # Build identity shown beside the version (sidebar, /api/version,
       # `rootcoz version`). Set them for a real build:
-      #   GIT_SHA=$(git rev-parse HEAD) GIT_REF=latest BUILT_AT=$(date -u +%FT%TZ) docker compose build
+      #   GIT_COMMIT=$(git rev-parse HEAD) GIT_REF=latest BUILT_AT=$(date -u +%FT%TZ) docker compose build
       # Empty is fine: the UI then shows the bare version.
       args:
-        GIT_SHA: ${GIT_SHA:-}
+        GIT_COMMIT: ${GIT_COMMIT:-}
         GIT_REF: ${GIT_REF:-}
         BUILT_AT: ${BUILT_AT:-}
 

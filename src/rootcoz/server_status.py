@@ -451,10 +451,14 @@ def read_build_info() -> dict[str, str] | None:
     Empty is the absence of a fact, not a value: a plain local ``docker build``
     has no commit/ref/time to name, so it reports nothing at all and every
     surface degrades to the bare version.
+
+    The names are the ``ENV`` the image exports from its build args
+    (``ROOTCOZ_BUILD_*``); they cannot change at runtime, so they are not
+    settings.
     """
-    commit = os.getenv("GIT_SHA", "").strip()
-    ref = os.getenv("GIT_REF", "").strip()
-    built_at = os.getenv("BUILT_AT", "").strip()
+    commit = os.getenv("ROOTCOZ_BUILD_COMMIT", "").strip()
+    ref = os.getenv("ROOTCOZ_BUILD_REF", "").strip()
+    built_at = os.getenv("ROOTCOZ_BUILD_BUILT_AT", "").strip()
     info = {
         key: value
         for key, value in (("commit", commit), ("ref", ref), ("built_at", built_at))
@@ -485,10 +489,10 @@ def read_process() -> dict[str, Any]:
     """Version, build sha, uptime, pid, restarts and the loop-lag sample."""
     return {
         "version": _get_app_version(),
-        # The image builder passes the commit as ``--build-arg GIT_SHA=...`` (see
-        # ``read_build_info`` for the ref and build time); empty when a builder
-        # omits it. Read through the one reader so this card and the version
-        # endpoint cannot disagree about the commit.
+        # The image builder passes the commit as ``--build-arg GIT_COMMIT=...``
+        # (see ``read_build_info`` for the ref and build time); empty when a
+        # builder omits it. Read through the one reader so this card and the
+        # version endpoint cannot disagree about the commit.
         "git_sha": (read_build_info() or {}).get("commit", ""),
         "uptime_seconds": round(time.monotonic() - _PROCESS_STARTED, 1),
         "pid": os.getpid(),

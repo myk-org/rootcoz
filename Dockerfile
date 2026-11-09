@@ -180,12 +180,17 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
 # the API omits the `build` block. Declared here, after the last RUN, because a
 # build arg mid-stage invalidates every layer below it — these are read at
 # runtime only (`server_status.read_build_info`).
-ARG GIT_SHA=""
+#
+# The arg names are the CI contract (`container.build-args`: `GIT_COMMIT={revision}`,
+# `GIT_REF={tag}`, `BUILT_AT={created}`), not a free choice: a --build-arg whose
+# name the Dockerfile does not declare is silently dropped and the image would
+# carry no identity at all.
+ARG GIT_COMMIT=""
 ARG GIT_REF=""
 ARG BUILT_AT=""
-ENV GIT_SHA=${GIT_SHA} \
-    GIT_REF=${GIT_REF} \
-    BUILT_AT=${BUILT_AT}
+ENV ROOTCOZ_BUILD_COMMIT=${GIT_COMMIT} \
+    ROOTCOZ_BUILD_REF=${GIT_REF} \
+    ROOTCOZ_BUILD_BUILT_AT=${BUILT_AT}
 
 # Use uv run for uvicorn
 # --no-sync prevents uv from attempting to modify the venv at runtime.

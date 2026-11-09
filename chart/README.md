@@ -94,7 +94,7 @@ imagePullSecrets:
 
 ### Build git SHA
 
-Every version surface — the sidebar footer, `GET /api/version`, `rootcoz version` and the Process card on Admin → Server Status — shows which build the image is: the commit, the ref (the tag the image was published under) and, in the API and `--json` output, the build time. Only the image builder can supply them: pass `--build-arg GIT_SHA=$(git rev-parse HEAD) --build-arg GIT_REF=<tag> --build-arg BUILT_AT=$(date -u +%FT%TZ)` (`docker-compose.yaml` forwards `GIT_SHA`/`GIT_REF`/`BUILT_AT` environment variables to the build); this chart does not build images, so it cannot supply them and an image built without the args shows the bare version and `not visible in this container` on the Process card — honest, not a bug.
+Every version surface — the sidebar footer, `GET /api/version`, `rootcoz version` and the Process card on Admin → Server Status — shows which build the image is: the commit, the ref (the tag the image was published under) and, in the API and `--json` output, the build time. Only the image builder can supply them: pass `--build-arg GIT_COMMIT=$(git rev-parse HEAD) --build-arg GIT_REF=<tag> --build-arg BUILT_AT=$(date -u +%FT%TZ)` (`docker-compose.yaml` forwards `GIT_COMMIT`/`GIT_REF`/`BUILT_AT` environment variables to the build); this chart does not build images, so it cannot supply them and an image built without the args shows the bare version and `not visible in this container` on the Process card — honest, not a bug.
 
 ## Required Values
 
