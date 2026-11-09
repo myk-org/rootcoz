@@ -435,11 +435,23 @@ class ProductBugReport(BaseModel):
     description: str = Field(default="", description="What product behavior is broken")
     evidence: str = Field(default="", description="Relevant log snippets")
     jira_search_keywords: list[str] = Field(
-        default_factory=list, description="AI-suggested keywords for Jira search"
+        default_factory=list,
+        description=(
+            "AI-suggested keywords for finding an already-filed duplicate. "
+            "Tracker-neutral terms used by both the Jira and the GitHub search."
+        ),
     )
     jira_matches: list[JiraMatch] = Field(
         default_factory=list,
         description="Matched Jira issues (populated in post-processing)",
+    )
+    github_matches: list[SimilarIssue] = Field(
+        default_factory=list,
+        description=(
+            "Matched GitHub issues already filed for this bug (populated in "
+            "post-processing) — the duplicate question, distinct from "
+            "CodeFix.tests_repo_matches"
+        ),
     )
 
 

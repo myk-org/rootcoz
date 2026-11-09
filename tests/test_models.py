@@ -1270,3 +1270,39 @@ class TestNormalizeStringList:
 
         with pytest.raises(TypeError, match="my_field must be a list"):
             _normalize_string_list("bad", field_name="my_field")
+
+
+class TestProductBugReportGithubMatches:
+    """Tests for the GitHub duplicate matches field (#501)."""
+
+    def test_defaults_to_empty_list(self) -> None:
+        assert ProductBugReport().github_matches == []
+
+    def test_roundtrips_through_json(self) -> None:
+        report = ProductBugReport(
+            title="Bug",
+            jira_search_keywords=["login 500"],
+            github_matches=[
+                SimilarIssue(
+                    number=42,
+                    title="Login fails",
+                    url="https://github.com/org/repo/issues/42",
+                    status="open",
+                )
+            ],
+        )
+        data = report.model_dump(mode="json")
+        assert data["github_matches"][0]["number"] == 42
+        assert ProductBugReport.model_validate(data).github_matches[0].title == (
+            "Login fails"
+        )
+
+    def test_does_not_collide_with_tests_repo_matches(self) -> None:
+        report = ProductBugReport(
+            github_matches=[SimilarIssue(number=1, url="https://github.com/o/r/1")]
+        )
+        fix = CodeFix(
+            tests_repo_matches=[SimilarIssue(number=2, url="https://github.com/o/r/2")]
+        )
+        assert [m.number for m in report.github_matches] == [1]
+        assert [m.number for m in fix.tests_repo_matches] == [2]

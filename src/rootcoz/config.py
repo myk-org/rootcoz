@@ -1162,32 +1162,10 @@ class Settings(BaseSettings):
     @property
     def jira_enabled(self) -> bool:
         """Check if Jira integration is enabled and configured with valid credentials."""
-        if self.enable_jira is False:
-            return False
-        if not normalize_jira_auth_mode(self.jira_auth_mode):
-            # No method selected: Jira is disabled — no credential inference.
-            if self.enable_jira is True:
-                logger.warning(
-                    "enable_jira is True but no Jira auth method is selected "
-                    "(choose one in Server Settings)"
-                )
-            return False
-        missing = jira_method_missing_fields(self)
-        if missing:
-            if self.enable_jira is True:
-                logger.warning(
-                    "enable_jira is True but Jira auth method '%s' is missing: %s",
-                    self.jira_auth_mode,
-                    ", ".join(missing),
-                )
-            return False
-        if not self.jira_project_key:
-            if self.enable_jira is True:
-                logger.warning(
-                    "enable_jira is True but JIRA_PROJECT_KEY is not configured"
-                )
-            return False
-        return True
+        reason = jira_unavailable_reason(self)
+        if reason and self.enable_jira is True:
+            logger.warning("enable_jira is True but Jira cannot be used: %s", reason)
+        return not reason
 
     @property
     def github_issues_enabled(self) -> bool:
@@ -1399,6 +1377,29 @@ def jira_method_missing_fields(settings: Settings) -> list[str]:
         ],
     }
     return [name for name, value in required[mode] if not value]
+
+
+def jira_unavailable_reason(settings: Settings) -> str:
+    """Why analysis-time Jira search cannot run; ``""`` when it can.
+
+    The single source of truth for ``Settings.jira_enabled`` and for the
+    ``tracker_search.jira.reason`` recorded on a result: one sentence naming
+    the exact setting an administrator has to fix.
+
+    Pure on purpose — it returns text and logs nothing, so a caller recording
+    the reason never duplicates ``jira_enabled``'s warning.
+    """
+    if settings.enable_jira is False:
+        return "Jira is disabled on this deployment (ENABLE_JIRA is false)"
+    mode = normalize_jira_auth_mode(settings.jira_auth_mode)
+    if not mode:
+        return "no Jira auth method is selected in Server Settings"
+    missing = jira_method_missing_fields(settings)
+    if missing:
+        return f"the '{mode}' Jira auth method is missing: {', '.join(missing)}"
+    if not settings.jira_project_key:
+        return "JIRA_PROJECT_KEY is not configured"
+    return ""
 
 
 # Legacy auto-detection (ATST prefix sniffing, email-presence Cloud

@@ -152,6 +152,8 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    With `ENABLE_GITHUB_ISSUES` unset, GitHub issue creation auto-enables when both `TESTS_REPO_URL` and `GITHUB_TOKEN` are configured. The user-facing feedback dialog stays available whenever the toggle is not explicitly `false`.
 
+   The toggle also governs the read-only GitHub duplicate search that runs during analysis, and there it means only *creation*: an explicit `false` disables the duplicate search too, but leaving it unset keeps that search available on a deployment that cannot file issues (no `TESTS_REPO_URL`) as long as `GITHUB_TOKEN` is set and the run has a GitHub repository in scope. The search uses the deployment token only — never a user's.
+
 7. **Report Portal category.**
 
    | Variable | Default | Type | Secret | Restart | After login |

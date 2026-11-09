@@ -1,16 +1,82 @@
 """Shared AI relevance filtering for issue matching (Jira, GitHub, etc.).
 
 Provides the common logic for using AI to evaluate whether candidate
-issues from any tracker match a given bug/failure description.
+issues from any tracker match a given bug/failure description, plus the
+per-tracker search record (``TrackerSearch``) both tracker paths fill in.
 """
 
 import json
-from typing import Any
+from collections.abc import Sequence
+from typing import Any, TypedDict
 
 from rootcoz import get_child_logger
 from rootcoz.ai_client import call_ai_once
+from rootcoz.models import AnalysisDetail, FailureAnalysis, ProductBugReport
 
 logger = get_child_logger(__name__)
+
+
+class TrackerSearch(TypedDict):
+    """What one tracker's duplicate search did, recorded on the result.
+
+    ``searched`` is True only when at least one search request actually
+    succeeded, so ``searched: True, candidates: 0`` means "looked and found
+    nothing" while ``searched: False`` plus a ``reason`` means "could not
+    look". A ``searched: False`` record always carries a non-empty reason.
+
+    ``scope`` is what was searched (GitHub repository URLs or
+    ``[jira_project_key]``), ``keyword_sets``/``candidates``/``matches`` are
+    the counts the caller already computes.
+    """
+
+    searched: bool
+    reason: str
+    scope: list[str]
+    keyword_sets: int
+    candidates: int
+    matches: int
+
+
+def tracker_search(
+    *,
+    searched: bool = False,
+    reason: str = "",
+    scope: list[str] | None = None,
+    keyword_sets: int = 0,
+    candidates: int = 0,
+    matches: int = 0,
+) -> TrackerSearch:
+    """Build a TrackerSearch — the single builder both trackers use."""
+    return TrackerSearch(
+        searched=searched,
+        reason=reason,
+        scope=list(scope or []),
+        keyword_sets=keyword_sets,
+        candidates=candidates,
+        matches=matches,
+    )
+
+
+def collect_product_bug_reports(
+    failures: Sequence[FailureAnalysis],
+) -> list[ProductBugReport]:
+    """Collect all ProductBugReport instances from a list of failures.
+
+    Shared by the Jira and GitHub duplicate searches so both ask the same
+    population of failures the same question.
+
+    Args:
+        failures: List of failure analyses to scan.
+
+    Returns:
+        List of ProductBugReport objects found.
+    """
+    reports: list[ProductBugReport] = []
+    for failure in failures:
+        detail: AnalysisDetail = failure.analysis
+        if isinstance(detail.product_bug_report, ProductBugReport):
+            reports.append(detail.product_bug_report)
+    return reports
 
 
 async def filter_issue_matches_with_ai(

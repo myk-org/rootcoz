@@ -15,7 +15,6 @@ import {
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
-import { Badge } from '@/components/ui/badge'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { TokenRequiredBanner } from '@/components/shared/TokenRequiredBanner'
@@ -25,6 +24,7 @@ import { getGithubToken, getJiraToken, getJiraEmail, getJiraSaToken } from '@/li
 import { useReportDispatch, useRefreshEnrichments } from '@/pages/report/reportState'
 import { useAiSelection } from '@/lib/useAiSelection'
 import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
+import { IssueMatchList } from './IssueMatchList'
 import { isAnalysisAiAvailable } from '@/lib/analysisAi'
 import { useProviderCatalog } from '@/lib/useProviderOptions'
 import { useAuth } from '@/lib/auth'
@@ -562,21 +562,14 @@ export function BugCreationDialog({
                   <AlertTriangle className="h-4 w-4" />
                   {similar.length} similar {similar.length === 1 ? 'issue' : 'issues'} found
                 </div>
-                <ul className="mt-2 space-y-1">
-                  {similar.map((s) => (
-                    <li key={s.url || s.key} className="text-xs">
-                      <a href={s.url} target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline">
-                        {s.key || `#${s.number}`}: {s.title}
-                      </a>
-                      {s.status && (
-                        <Badge variant="outline" className="ml-2 text-[10px]">
-                          {s.status}
-                        </Badge>
-                      )}
-                    </li>
-                  ))}
-                </ul>
-              </div>
+                <IssueMatchList
+                  testId="similar-issues"
+                  items={similar.map((s) => ({
+                    label: `${s.key || `#${s.number}`}: ${s.title}`,
+                    url: s.url,
+                    status: s.status,
+                  }))}
+                />              </div>
             )}
             <div className="space-y-2">
               <label htmlFor="bug-title" className="text-xs font-display uppercase tracking-widest text-text-tertiary">Title</label>

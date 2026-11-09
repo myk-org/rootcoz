@@ -26,6 +26,7 @@ import { CommentsSection } from './CommentsSection'
 import { ClassificationSelect } from './ClassificationSelect'
 import { PatternSelect } from './PatternSelect'
 import { BugCreationDialog } from './BugCreationDialog'
+import { IssueMatchList } from './IssueMatchList'
 import { TrackInDialog, TrackerIcon } from './TrackedInBadge'
 import { ReAnalyzeDialog } from './ReAnalyzeDialog'
 import { useReviewSuggestion } from './useReviewSuggestion'
@@ -613,20 +614,25 @@ export function FailureCard({ group, jobId, childJobName, childBuildNumber, inde
                   {analysis.product_bug_report.severity && <Badge variant="warning" className="text-[10px]">{analysis.product_bug_report.severity}</Badge>}
                   {analysis.product_bug_report.description && <p className="text-text-secondary whitespace-pre-wrap"><LinkedText text={analysis.product_bug_report.description} repoUrls={repoUrls} /></p>}
                   {analysis.product_bug_report?.jira_matches?.length > 0 && (
-                    <div className="mt-2">
-                      <p className="text-xs font-display uppercase tracking-widest text-text-tertiary mb-1">Matching Jira Issues</p>
-                      <ul className="space-y-1">
-                        {analysis.product_bug_report.jira_matches.map((m) => (
-                          <li key={m.key} className="flex items-center gap-2 text-xs">
-                            <a href={m.url} target="_blank" rel="noopener noreferrer" className="text-text-link hover:underline">
-                              {m.key}: {m.summary}
-                            </a>
-                            {m.status && <Badge variant="outline" className="text-[10px]">{m.status}</Badge>}
-                          </li>
-                        ))}
-                      </ul>
-                    </div>
+                    <IssueMatchList
+                      heading="Matching Jira Issues"
+                      testId="jira-matches"
+                      items={analysis.product_bug_report.jira_matches.map((m) => ({
+                        label: `${m.key}: ${m.summary}`,
+                        url: m.url,
+                        status: m.status,
+                      }))}
+                    />
                   )}
+                  <IssueMatchList
+                    heading="Matching GitHub Issues"
+                    testId="github-matches"
+                    items={(analysis.product_bug_report?.github_matches ?? []).map((m) => ({
+                      label: `#${m.number}: ${m.title}`,
+                      url: m.url,
+                      status: m.status,
+                    }))}
+                  />
                 </div>
               </div>
             )}

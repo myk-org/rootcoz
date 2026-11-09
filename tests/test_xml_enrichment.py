@@ -248,3 +248,79 @@ class TestApplyAnalysisToXml:
                 assert system_out is not None
                 assert "Classification: CODE ISSUE" in system_out.text
                 assert "The assertion is incorrect" in system_out.text
+
+
+def test_enriched_xml_carries_github_duplicates() -> None:
+    """The shipped artifact shows both trackers, not just Jira (#501)."""
+    analysis_map = {
+        ("com.example.Tests", "test_fail_with_message"): {
+            "classification": "PRODUCT BUG",
+            "details": "VM scheduling issue",
+            "product_bug_report": {
+                "title": "VM fails to schedule",
+                "jira_matches": [
+                    {
+                        "key": "PROJ-1",
+                        "summary": "Scheduling fails",
+                        "status": "Open",
+                        "url": "https://jira.example.com/browse/PROJ-1",
+                        "priority": "High",
+                    }
+                ],
+                "github_matches": [
+                    {
+                        "number": 42,
+                        "title": "Scheduling fails on GitHub",
+                        "status": "open",
+                        "url": "https://github.com/org/repo/issues/42",
+                    }
+                ],
+            },
+        },
+    }
+    enriched = apply_analysis_to_xml(JUNIT_XML_WITH_FAILURES, analysis_map)
+    root = ET.fromstring(enriched)
+    for testcase in root.iter("testcase"):
+        if testcase.get("name") != "test_fail_with_message":
+            continue
+        props = testcase.find("properties")
+        assert props is not None
+        prop_names = [p.get("name") for p in props]
+        assert "ai_jira_match_0_key" in prop_names
+        assert "ai_github_match_0_number" in prop_names
+        assert "ai_github_match_0_title" in prop_names
+        assert "ai_github_match_0_status" in prop_names
+        values = {p.get("name"): p.get("value") for p in props}
+        assert values["ai_github_match_0_number"] == "42"
+        assert values["ai_github_match_0_url"] == (
+            "https://github.com/org/repo/issues/42"
+        )
+        system_out = testcase.find("system-out")
+        assert system_out is not None
+        assert "Possible Jira Matches:" in system_out.text
+        assert "Possible GitHub Matches:" in system_out.text
+        assert "Scheduling fails on GitHub" in system_out.text
+
+
+def test_enriched_xml_omits_github_properties_without_matches() -> None:
+    analysis_map = {
+        ("com.example.Tests", "test_fail_with_message"): {
+            "classification": "PRODUCT BUG",
+            "details": "VM scheduling issue",
+            "product_bug_report": {
+                "title": "VM fails to schedule",
+                "jira_matches": [],
+                "github_matches": [],
+            },
+        },
+    }
+    enriched = apply_analysis_to_xml(JUNIT_XML_WITH_FAILURES, analysis_map)
+    root = ET.fromstring(enriched)
+    for testcase in root.iter("testcase"):
+        if testcase.get("name") != "test_fail_with_message":
+            continue
+        props = testcase.find("properties")
+        prop_names = [p.get("name") for p in props] if props is not None else []
+        assert not [name for name in prop_names if name.startswith("ai_github_match_")]
+        system_out = testcase.find("system-out")
+        assert "Possible GitHub Matches:" not in (system_out.text or "")

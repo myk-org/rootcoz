@@ -11,6 +11,7 @@ from rootcoz.config import (
     duplicate_additional_repo_names,
     get_settings,
     jira_method_missing_fields,
+    jira_unavailable_reason,
     parse_additional_repos,
     parse_peer_configs,
     parse_repo_ref,
@@ -284,6 +285,89 @@ class TestJiraSettings:
             settings = Settings()
             assert settings.jira_cloud_url == "https://canonical-dotenv.example.com"
             assert settings.jira_server_url == "https://alias-dotenv.example.com"
+
+
+class TestJiraUnavailableReason:
+    """Tests for jira_unavailable_reason — one sentence per refusal (D6)."""
+
+    def _settings(self, **env: str) -> Settings:
+        with patch.dict(os.environ, _build_env(**env), clear=True):
+            settings = Settings(_env_file=None)
+        return settings
+
+    def test_empty_when_configured(self) -> None:
+        with patch.dict(
+            os.environ,
+            _build_env(
+                JIRA_URL="https://jira.example.com",
+                JIRA_PAT="pat-token",  # pragma: allowlist secret
+                JIRA_PROJECT_KEY="TEST",
+            ),
+            clear=True,
+        ):
+            settings = Settings(_env_file=None, jira_auth_mode="pat")
+        assert jira_unavailable_reason(settings) == ""
+        assert settings.jira_enabled is True
+
+    def test_names_explicitly_disabled(self) -> None:
+        with patch.dict(
+            os.environ,
+            _build_env(
+                JIRA_URL="https://jira.example.com",
+                JIRA_PAT="pat-token",  # pragma: allowlist secret
+                JIRA_PROJECT_KEY="TEST",
+                ENABLE_JIRA="false",
+            ),
+            clear=True,
+        ):
+            settings = Settings(_env_file=None, jira_auth_mode="pat")
+        assert "ENABLE_JIRA" in jira_unavailable_reason(settings)
+        assert settings.jira_enabled is False
+
+    def test_names_missing_auth_mode(self) -> None:
+        settings = self._settings()
+        assert "auth method" in jira_unavailable_reason(settings)
+        assert settings.jira_enabled is False
+
+    def test_names_missing_method_field(self) -> None:
+        with patch.dict(
+            os.environ,
+            _build_env(
+                JIRA_PAT="pat-token",  # pragma: allowlist secret
+                JIRA_PROJECT_KEY="TEST",
+            ),
+            clear=True,
+        ):
+            settings = Settings(_env_file=None, jira_auth_mode="pat")
+        reason = jira_unavailable_reason(settings)
+        assert "jira_server_url" in reason
+        assert settings.jira_enabled is False
+
+    def test_names_missing_project_key(self) -> None:
+        with patch.dict(
+            os.environ,
+            _build_env(
+                JIRA_URL="https://jira.example.com",
+                JIRA_PAT="pat-token",  # pragma: allowlist secret
+            ),
+            clear=True,
+        ):
+            settings = Settings(_env_file=None, jira_auth_mode="pat")
+        assert "JIRA_PROJECT_KEY" in jira_unavailable_reason(settings)
+        assert settings.jira_enabled is False
+
+    @pytest.mark.parametrize(
+        "env",
+        [
+            {},
+            {"ENABLE_JIRA": "false"},
+            {"JIRA_URL": "https://jira.example.com", "JIRA_PROJECT_KEY": "T"},
+        ],
+    )
+    def test_jira_enabled_matches_reason(self, env: dict[str, str]) -> None:
+        """The property and the reason are one source of truth."""
+        settings = self._settings(**env)
+        assert settings.jira_enabled is (jira_unavailable_reason(settings) == "")
 
 
 class TestJiraAuthMode:

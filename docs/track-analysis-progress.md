@@ -63,6 +63,7 @@ This prints just the three fields a status check needs, instead of the full resu
    | `analyzing`, `analyzing_failures`, `analyzing_child_jobs` | Analyzing test failures, including the current group number |
    | `peer_review_round_N`, `orchestrator_revising_round_N` | Peer review or main-AI revision, by round |
    | `enriching_jira` | Searching Jira for matching bugs |
+   | `enriching_github_search` | Searching GitHub for matching issues |
    | `saving` | Saving results |
 
    If a repository fails to clone, that repo is marked in red and the job continues if the remaining context is enough to analyze.

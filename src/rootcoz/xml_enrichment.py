@@ -401,6 +401,23 @@ def _inject_analysis(testcase: Element, analysis: dict[str, Any]) -> None:
                 if score is not None:
                     _add_property(properties, f"ai_jira_match_{idx}_score", str(score))
 
+        for idx, match in enumerate(bug_report.get("github_matches", [])):
+            if isinstance(match, dict):
+                number = match.get("number")
+                if number is not None:
+                    _add_property(
+                        properties, f"ai_github_match_{idx}_number", str(number)
+                    )
+                _add_property(
+                    properties, f"ai_github_match_{idx}_title", match.get("title", "")
+                )
+                _add_property(
+                    properties, f"ai_github_match_{idx}_status", match.get("status", "")
+                )
+                _add_property(
+                    properties, f"ai_github_match_{idx}_url", match.get("url", "")
+                )
+
     text = _format_analysis_text(analysis)
     if text:
         system_out = testcase.find("system-out")
@@ -459,5 +476,16 @@ def _format_analysis_text(analysis: dict[str, Any]) -> str:
                     status = match.get("status", "")
                     url = match.get("url", "")
                     parts.append(f"  {key}: {summary} [{status}] {url}")
+
+        github_matches = bug_report.get("github_matches", [])
+        if github_matches:
+            parts.append("\nPossible GitHub Matches:")
+            for match in github_matches:
+                if isinstance(match, dict):
+                    number = match.get("number")
+                    title = match.get("title", "")
+                    status = match.get("status", "")
+                    url = match.get("url", "")
+                    parts.append(f"  #{number}: {title} [{status}] {url}")
 
     return "\n".join(parts) if parts else ""

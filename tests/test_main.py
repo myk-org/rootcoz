@@ -19232,3 +19232,441 @@ async def test_the_enriched_xml_omission_sink_is_registered(temp_db_path: Path) 
     assert event["target_type"] == "job"
     assert event["target_id"] == "job-omitted"
     assert event["details"] == {"characters": 4_000_000, "limit": 1_048_576}
+
+
+# --- Issue #501: tracker duplicate search recorded on the result -----------
+
+
+def _deployment_settings(**env: Any) -> Settings:
+    """Build deployment Settings from an explicit env (no ambient config)."""
+    jira_auth_mode = env.pop("jira_auth_mode", None)
+    base = {
+        "JENKINS_URL": "https://jenkins.example.com",
+        "JENKINS_USER": "testuser",
+        "JENKINS_PASSWORD": FAKE_JENKINS_PASSWORD,
+    }
+    with patch.dict(os.environ, {**base, **env}, clear=True):
+        return Settings(_env_file=None, jira_auth_mode=jira_auth_mode)
+
+
+def _product_bug_failure(keywords: list[str] | None = None) -> FailureAnalysis:
+    """A PRODUCT BUG failure carrying the AI search keywords."""
+    from rootcoz.models import ProductBugReport
+
+    return FailureAnalysis(
+        test_name="test_login",
+        error="HTTP 500",
+        analysis=AnalysisDetail(
+            classification="PRODUCT BUG",
+            details="Login service returns 500",
+            product_bug_report=ProductBugReport(
+                title="Login fails",
+                description="The login endpoint returns 500",
+                jira_search_keywords=["login 500"] if keywords is None else keywords,
+            ),
+        ),
+    )
+
+
+async def _run_issue501_pipeline(
+    *,
+    job_id: str,
+    temp_db_path: Path,
+    tmp_path: Path,
+    analyses: list[FailureAnalysis] | None = None,
+    children: list[Any] | None = None,
+    body: Any = None,
+    merged: Settings | None = None,
+    deployment: Settings | None = None,
+) -> dict[str, Any]:
+    """Run ``_process_ci_source_analysis`` end to end with the minimal stack."""
+    from rootcoz.main import _process_ci_source_analysis
+    from rootcoz.models import (
+        BaseTestEntry,
+        ChildJobAnalysis,
+        FailedTest,
+        UnifiedAnalyzeRequest,
+    )
+    from rootcoz.sources.base import CISourceResult, WorkspaceSetupResult
+
+    children = children or []
+    if body is None:
+        body = UnifiedAnalyzeRequest(
+            type="raw", failures=[FailedTest(test_name="test", error_message="err")]
+        )
+    source_result = CISourceResult(
+        failures=[] if children else body.failures,
+        passed_tests=[BaseTestEntry(test_name="passed", status="passed")],
+        child_job_infos=[
+            (child.job_name, child.build_number)
+            for child in children
+            if isinstance(child, ChildJobAnalysis)
+        ],
+    )
+    with (
+        patch.object(storage, "DB_PATH", temp_db_path),
+        patch("rootcoz.main.get_settings", return_value=deployment or Settings()),
+        patch("rootcoz.main.create_source_from_request") as source,
+        patch(
+            "rootcoz.main.setup_analysis_workspace",
+            new_callable=AsyncMock,
+            return_value=(WorkspaceSetupResult(tmp_path), ""),
+        ),
+        patch(
+            "rootcoz.main._preflight_sidecar_check",
+            new_callable=AsyncMock,
+            return_value=True,
+        ),
+        patch(
+            "rootcoz.main._validate_catalog_pair",
+            new_callable=AsyncMock,
+            return_value=("claude", "model"),
+        ),
+        patch(
+            "rootcoz.main._create_ai_auth_header",
+            new_callable=AsyncMock,
+            return_value="",
+        ),
+        patch(
+            "rootcoz.main.run_orchestrated_analysis",
+            new_callable=AsyncMock,
+            return_value=(analyses or [], []),
+        ),
+        patch(
+            "rootcoz.main.clone_additional_repos",
+            new_callable=AsyncMock,
+            return_value=({}, None),
+        ),
+        patch("rootcoz.main.populate_failure_history", new_callable=AsyncMock),
+        patch("rootcoz.main._auto_review_matching_failures", new_callable=AsyncMock),
+        patch("rootcoz.main._auto_assign_metadata", new_callable=AsyncMock),
+        patch(
+            "rootcoz.main.storage.make_classifications_visible", new_callable=AsyncMock
+        ),
+    ):
+        source.return_value.raw_xml = None
+        source.return_value.requires_pre_fetch.return_value = False
+        source.return_value.prepare_workspace = AsyncMock(return_value=[])
+        source.return_value.fetch = AsyncMock(return_value=source_result)
+        source.return_value.analyze_children = AsyncMock(return_value=(children, []))
+        source.return_value.persist_fetch_metadata = AsyncMock()
+        await storage.init_db()
+        await storage.save_result(job_id, status="pending", result={})
+        await _process_ci_source_analysis(
+            job_id=job_id,
+            body=body,
+            merged=merged or Settings(),
+            display_name="test",
+            ai_provider="claude",
+            ai_model="model",
+            peer_ai_configs=None,
+            tests_repo_url=str((merged or Settings()).tests_repo_url or ""),
+            tests_repo_ref="",
+            resolved_tests_repo_token="",
+            additional_repos_list=[],
+            base_url="",
+        )
+        row = await storage.get_result(job_id)
+    return row["result"]
+
+
+@pytest.mark.asyncio
+async def test_tracker_search_stamped_on_result(
+    temp_db_path: Path, tmp_path: Path
+) -> None:
+    """Both trackers record why nothing was searched — never silence (D6, T15)."""
+    result = await _run_issue501_pipeline(
+        job_id="tracker-search-none",
+        temp_db_path=temp_db_path,
+        tmp_path=tmp_path,
+        analyses=[_product_bug_failure()],
+        deployment=_deployment_settings(),
+    )
+
+    tracker = result["tracker_search"]
+    assert tracker["jira"]["searched"] is False
+    assert tracker["jira"]["reason"]
+    assert tracker["github"]["searched"] is False
+    assert tracker["github"]["reason"]
+
+
+@pytest.mark.asyncio
+async def test_request_disabled_jira_records_its_own_reason(
+    temp_db_path: Path, tmp_path: Path
+) -> None:
+    """A per-request refusal is distinguishable from an unconfigured deployment (T11b)."""
+    from rootcoz.models import FailedTest, UnifiedAnalyzeRequest
+
+    body = UnifiedAnalyzeRequest(
+        type="raw",
+        failures=[FailedTest(test_name="test", error_message="err")],
+        enable_jira=False,
+    )
+    deployment = _deployment_settings(
+        jira_auth_mode="pat",
+        JIRA_URL="https://jira.example.com",
+        JIRA_PAT="pat-token",  # pragma: allowlist secret
+        JIRA_PROJECT_KEY="PROJ",
+    )
+    result = await _run_issue501_pipeline(
+        job_id="tracker-jira-request-disabled",
+        temp_db_path=temp_db_path,
+        tmp_path=tmp_path,
+        analyses=[_product_bug_failure()],
+        body=body,
+        merged=_deployment_settings(
+            jira_auth_mode="pat",
+            JIRA_URL="https://jira.example.com",
+            JIRA_PAT="pat-token",  # pragma: allowlist secret
+            JIRA_PROJECT_KEY="PROJ",
+        ),
+        deployment=deployment,
+    )
+
+    jira_record = result["tracker_search"]["jira"]
+    assert jira_record["searched"] is False
+    assert "enable_jira" in jira_record["reason"]
+
+
+@pytest.mark.asyncio
+async def test_request_jira_project_key_still_searches(
+    temp_db_path: Path, tmp_path: Path
+) -> None:
+    """A request-supplied project key keeps the search alive (T11c)."""
+    from rootcoz.models import FailedTest, UnifiedAnalyzeRequest
+
+    body = UnifiedAnalyzeRequest(
+        type="raw",
+        failures=[FailedTest(test_name="test", error_message="err")],
+        jira_project_key="REQ",
+    )
+    merged = _deployment_settings(
+        jira_auth_mode="pat",
+        JIRA_URL="https://jira.example.com",
+        JIRA_PAT="pat-token",  # pragma: allowlist secret
+        JIRA_PROJECT_KEY="REQ",
+    )
+    deployment = _deployment_settings(
+        jira_auth_mode="pat",
+        JIRA_URL="https://jira.example.com",
+        JIRA_PAT="pat-token",  # pragma: allowlist secret
+    )
+    with patch("rootcoz.jira.JiraClient") as client_cls:
+        client = AsyncMock()
+        client.search = AsyncMock(return_value=[])
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=False)
+        client_cls.return_value = client
+        result = await _run_issue501_pipeline(
+            job_id="tracker-jira-request-key",
+            temp_db_path=temp_db_path,
+            tmp_path=tmp_path,
+            analyses=[_product_bug_failure()],
+            body=body,
+            merged=merged,
+            deployment=deployment,
+        )
+
+    jira_record = result["tracker_search"]["jira"]
+    assert jira_record["searched"] is True
+    assert jira_record["scope"] == ["REQ"]
+
+
+@pytest.mark.asyncio
+async def test_github_duplicate_search_runs_without_a_user(
+    temp_db_path: Path, tmp_path: Path
+) -> None:
+    """No user, no session, no body credential — the deployment token still searches (T16)."""
+    token = "deployment-token"  # pragma: allowlist secret
+    candidates = [
+        {
+            "key": "42",
+            "title": "Login 500",
+            "summary": "Login 500",
+            "description": "same bug",
+            "status": "open",
+            "url": "https://github.com/org/product/issues/42",
+            "number": 42,
+        }
+    ]
+    with (
+        patch(
+            "rootcoz.github_issues.search_github_issues",
+            new_callable=AsyncMock,
+            return_value=candidates,
+        ) as search_mock,
+        patch(
+            "rootcoz.github_issues.filter_issue_matches_with_ai",
+            new_callable=AsyncMock,
+            return_value=[{"key": "org/product#42", "relevant": True, "score": 0.9}],
+        ),
+    ):
+        result = await _run_issue501_pipeline(
+            job_id="dup-no-user",
+            temp_db_path=temp_db_path,
+            tmp_path=tmp_path,
+            analyses=[_product_bug_failure()],
+            merged=_deployment_settings(
+                TESTS_REPO_URL="https://github.com/org/product",
+                GITHUB_TOKEN=token,
+            ),
+            deployment=_deployment_settings(
+                TESTS_REPO_URL="https://github.com/org/product",
+                GITHUB_TOKEN=token,
+            ),
+        )
+
+    assert result["tracker_search"]["github"]["searched"] is True
+    assert search_mock.call_args.args[2] == token
+    report = result["failures"][0]["analysis"]["product_bug_report"]
+    assert report["github_matches"][0]["number"] == 42
+
+
+@pytest.mark.asyncio
+async def test_github_duplicate_search_uses_the_deployment_token_on_replay(
+    temp_db_path: Path, tmp_path: Path
+) -> None:
+    """A replayed blank body token must not read as "no credential" (T16b)."""
+    from rootcoz.models import FailedTest, UnifiedAnalyzeRequest
+
+    token = "deployment-token"  # pragma: allowlist secret
+    body = UnifiedAnalyzeRequest(
+        type="raw",
+        failures=[FailedTest(test_name="test", error_message="err")],
+        github_token="",
+    )
+    with (
+        patch(
+            "rootcoz.github_issues.search_github_issues",
+            new_callable=AsyncMock,
+            return_value=[],
+        ) as search_mock,
+        patch(
+            "rootcoz.github_issues.filter_issue_matches_with_ai",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+    ):
+        result = await _run_issue501_pipeline(
+            job_id="dup-replay",
+            temp_db_path=temp_db_path,
+            tmp_path=tmp_path,
+            analyses=[_product_bug_failure()],
+            body=body,
+            merged=_deployment_settings(
+                TESTS_REPO_URL="https://github.com/org/product",
+                GITHUB_TOKEN="",
+            ),
+            deployment=_deployment_settings(
+                TESTS_REPO_URL="https://github.com/org/product",
+                GITHUB_TOKEN=token,
+            ),
+        )
+
+    assert result["tracker_search"]["github"]["searched"] is True
+    assert search_mock.call_args.args[2] == token
+
+
+@pytest.mark.asyncio
+async def test_user_supplied_github_token_is_not_used_for_the_duplicate_search(
+    temp_db_path: Path, tmp_path: Path
+) -> None:
+    """A body token belongs to the clone, never to this server-side search (T16c)."""
+    from rootcoz.models import FailedTest, UnifiedAnalyzeRequest
+
+    deployment_token = "deployment-token"  # pragma: allowlist secret
+    user_token = "user-supplied-token"  # pragma: allowlist secret
+    body = UnifiedAnalyzeRequest(
+        type="raw",
+        failures=[FailedTest(test_name="test", error_message="err")],
+        github_token=user_token,
+    )
+    with (
+        patch(
+            "rootcoz.github_issues.search_github_issues",
+            new_callable=AsyncMock,
+            return_value=[],
+        ) as search_mock,
+        patch(
+            "rootcoz.github_issues.filter_issue_matches_with_ai",
+            new_callable=AsyncMock,
+            return_value=[],
+        ),
+    ):
+        await _run_issue501_pipeline(
+            job_id="dup-user-token",
+            temp_db_path=temp_db_path,
+            tmp_path=tmp_path,
+            analyses=[_product_bug_failure()],
+            body=body,
+            merged=_deployment_settings(
+                TESTS_REPO_URL="https://github.com/org/product",
+                GITHUB_TOKEN=user_token,
+            ),
+            deployment=_deployment_settings(
+                TESTS_REPO_URL="https://github.com/org/product",
+                GITHUB_TOKEN=deployment_token,
+            ),
+        )
+
+    assert search_mock.call_args.args[2] == deployment_token
+
+
+@pytest.mark.asyncio
+async def test_tracker_search_and_github_matches_reach_nested_child_failures(
+    temp_db_path: Path, tmp_path: Path
+) -> None:
+    """The child-jobs branch stamps both keys and fills nested failures (T17)."""
+    from rootcoz.models import ChildJobAnalysis
+
+    token = "deployment-token"  # pragma: allowlist secret
+    child = ChildJobAnalysis(
+        job_name="leaf",
+        build_number=7,
+        failures=[_product_bug_failure()],
+    )
+    candidates = [
+        {
+            "key": "42",
+            "title": "Login 500",
+            "summary": "Login 500",
+            "description": "same bug",
+            "status": "open",
+            "url": "https://github.com/org/product/issues/42",
+            "number": 42,
+        }
+    ]
+    with (
+        patch(
+            "rootcoz.github_issues.search_github_issues",
+            new_callable=AsyncMock,
+            return_value=candidates,
+        ),
+        patch(
+            "rootcoz.github_issues.filter_issue_matches_with_ai",
+            new_callable=AsyncMock,
+            return_value=[{"key": "org/product#42", "relevant": True, "score": 0.9}],
+        ),
+    ):
+        result = await _run_issue501_pipeline(
+            job_id="dup-child",
+            temp_db_path=temp_db_path,
+            tmp_path=tmp_path,
+            analyses=[],
+            children=[child],
+            merged=_deployment_settings(
+                TESTS_REPO_URL="https://github.com/org/product",
+                GITHUB_TOKEN=token,
+            ),
+            deployment=_deployment_settings(
+                TESTS_REPO_URL="https://github.com/org/product",
+                GITHUB_TOKEN=token,
+            ),
+        )
+
+    assert set(result["tracker_search"]) == {"jira", "github"}
+    assert result["tracker_search"]["github"]["searched"] is True
+    nested = result["child_job_analyses"][0]["failures"][0]["analysis"][
+        "product_bug_report"
+    ]
+    assert nested["github_matches"][0]["number"] == 42

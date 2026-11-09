@@ -13,7 +13,6 @@ from rootcoz.jira import (
     ATLASSIAN_TOKEN_URL,
     JiraClient,
     JiraOAuthMintError,
-    _collect_product_bug_reports,
     _extract_text_from_adf,
     complete_jira_connection,
     enrich_with_jira_matches,
@@ -199,29 +198,6 @@ class TestExtractTextFromAdf:
             ],
         }
         assert "item" in _extract_text_from_adf(adf)
-
-
-class TestCollectProductBugReports:
-    """Tests for _collect_product_bug_reports."""
-
-    def test_collects_product_bugs(self, product_bug_failure) -> None:
-        reports = _collect_product_bug_reports([product_bug_failure])
-        assert len(reports) == 1
-        assert reports[0].title == "Login fails"
-
-    def test_skips_code_issues(self, code_issue_failure) -> None:
-        reports = _collect_product_bug_reports([code_issue_failure])
-        assert len(reports) == 0
-
-    def test_mixed_failures(self, product_bug_failure, code_issue_failure) -> None:
-        reports = _collect_product_bug_reports(
-            [product_bug_failure, code_issue_failure]
-        )
-        assert len(reports) == 1
-
-    def test_empty_list(self) -> None:
-        reports = _collect_product_bug_reports([])
-        assert len(reports) == 0
 
 
 class TestJiraClient:
@@ -735,6 +711,108 @@ class TestEnrichWithJiraMatches:
             await enrich_with_jira_matches([product_bug_failure], jira_settings)
 
         assert product_bug_failure.analysis.product_bug_report.jira_matches == []
+
+    async def test_records_reason_when_disabled(self, product_bug_failure) -> None:
+        """A refusal is recorded with the setting that caused it (D6)."""
+        env = {
+            "JENKINS_URL": "https://jenkins.example.com",
+            "JENKINS_USER": "testuser",
+            "JENKINS_PASSWORD": "testpassword",  # pragma: allowlist secret
+        }
+        with patch.dict(os.environ, env, clear=True):
+            settings = Settings(_env_file=None)
+
+        with patch("rootcoz.jira.JiraClient") as mock_client_cls:
+            record = await enrich_with_jira_matches([product_bug_failure], settings)
+
+        assert record["searched"] is False
+        assert "auth" in record["reason"]
+        mock_client_cls.assert_not_called()
+
+    async def test_records_reason_when_no_keywords(
+        self, product_bug_no_keywords, jira_settings
+    ) -> None:
+        """No keyword-bearing PRODUCT BUG: recorded, not silent."""
+        record = await enrich_with_jira_matches(
+            [product_bug_no_keywords], jira_settings
+        )
+        assert record["searched"] is False
+        assert "keywords" in record["reason"]
+
+    async def test_successful_search_with_no_candidates_is_not_a_failure(
+        self, product_bug_failure, jira_settings
+    ) -> None:
+        """Searches that succeed and return nothing are not a failed lookup."""
+        with patch("rootcoz.jira.JiraClient") as mock_client_cls:
+            mock_instance = AsyncMock()
+            mock_instance.search = AsyncMock(return_value=[])
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_instance
+
+            record = await enrich_with_jira_matches(
+                [product_bug_failure], jira_settings
+            )
+
+        assert record == {
+            "searched": True,
+            "reason": "",
+            "scope": ["PROJ"],
+            "keyword_sets": 1,
+            "candidates": 0,
+            "matches": 0,
+        }
+        assert product_bug_failure.analysis.product_bug_report.jira_matches == []
+
+    async def test_search_failure_sets_searched_false(
+        self, product_bug_failure, jira_settings
+    ) -> None:
+        """A transport failure is recorded, not reported as "no duplicates"."""
+        with patch("rootcoz.jira.JiraClient") as mock_client_cls:
+            mock_instance = AsyncMock()
+            mock_instance.search = AsyncMock(
+                side_effect=httpx.ConnectError("Connection refused")
+            )
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_instance
+
+            record = await enrich_with_jira_matches(
+                [product_bug_failure], jira_settings
+            )
+
+        assert record["searched"] is False
+        assert "failed" in record["reason"]
+
+    async def test_record_counts_candidates_and_matches(
+        self, product_bug_failure, jira_settings
+    ) -> None:
+        """The record counts what was searched and what was attached."""
+        mock_candidates = [
+            {
+                "key": "PROJ-300",
+                "summary": "Login fails",
+                "description": "500",
+                "status": "Open",
+                "priority": "High",
+                "url": "https://jira.example.com/browse/PROJ-300",
+            },
+        ]
+        with patch("rootcoz.jira.JiraClient") as mock_client_cls:
+            mock_instance = AsyncMock()
+            mock_instance.search = AsyncMock(return_value=mock_candidates)
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_instance
+
+            record = await enrich_with_jira_matches(
+                [product_bug_failure], jira_settings
+            )
+
+        assert record["candidates"] == 1
+        assert record["matches"] == 1
+        assert record["scope"] == ["PROJ"]
+        assert record["searched"] is True
 
 
 class TestJiraConnectionResolver:
