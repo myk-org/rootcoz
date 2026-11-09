@@ -12,6 +12,7 @@ a login automatically.
 """
 
 import base64
+import contextlib
 import json
 import sqlite3
 import time
@@ -25,7 +26,7 @@ from rootcoz.auth import identity as auth_identity
 from rootcoz.auth.sso import AuthError, ClaimSet, configured_providers, get_provider
 from rootcoz.auth.sso import state as sso_state
 from rootcoz.auth.sso.google import GoogleProvider
-from rootcoz.config import get_settings
+from rootcoz.config import get_settings, normalize_domain_list
 from rootcoz.encryption import encrypt_value
 from tests.conftest import build_test_env, make_app_client
 
@@ -46,7 +47,13 @@ def _claims(
         subject=subject,
         username_hint=username_hint,
         email=email,
-        claims={"sub": subject, "email": email, "preferred_username": username_hint},
+        # Google asserts verification; the allow-list tests depend on it.
+        claims={
+            "sub": subject,
+            "email": email,
+            "email_verified": True,
+            "preferred_username": username_hint,
+        },
     )
 
 
@@ -56,6 +63,25 @@ def _sealed(provider: str = "google", next_path: str = "/report/1") -> tuple[str
         provider=provider, next_path=next_path, ttl_seconds=600
     )
     return sealed, attempt.state
+
+
+@contextlib.contextmanager
+def _github_client(transport):
+    """Run with `httpx.AsyncClient` bound to a mock transport.
+
+    The real class is captured before the patch, so every call in the flow gets
+    its own client (the helper opens and closes one per request) without the
+    patch re-entering itself.
+    """
+    import httpx
+
+    real_client = httpx.AsyncClient
+
+    def factory(*_args: object, **_kwargs: object) -> object:
+        return real_client(transport=transport, timeout=5.0)
+
+    with patch("httpx.AsyncClient", factory):
+        yield
 
 
 async def _ticket(
@@ -119,8 +145,77 @@ def test_the_registry_and_storage_agree_on_provider_names() -> None:
     """A provider storage does not know would fail at the first link."""
     from rootcoz.auth.sso import PROVIDER_BY_NAME
 
-    assert set(PROVIDER_BY_NAME) <= set(storage.SSO_PROVIDERS)
+    # Equality, not a subset: a provider in storage but missing from the registry
+    # is exactly the omission this stage could introduce.
+    assert set(PROVIDER_BY_NAME) == set(storage.SSO_PROVIDERS)
     assert GoogleProvider.issuer == "https://accounts.google.com"
+
+
+def test_each_provider_is_offered_only_when_fully_configured() -> None:
+    """A half-configured provider would render a button that cannot work."""
+    import os
+
+    from rootcoz.auth.sso import configured_providers
+    from rootcoz.auth.sso.github import GitHubProvider
+    from rootcoz.auth.sso.openshift import OpenShiftProvider
+    from rootcoz.auth.sso.redhat import RedHatSSOProvider
+
+    full = build_test_env(
+        SSO_GITHUB_CLIENT_ID="gh-id",
+        SSO_GITHUB_CLIENT_SECRET="gh-secret",  # pragma: allowlist secret
+        SSO_OPENSHIFT_CLIENT_ID="ocp-id",
+        SSO_OPENSHIFT_CLIENT_SECRET="ocp-secret",  # pragma: allowlist secret
+        SSO_OPENSHIFT_ISSUER="https://oauth-openshift.apps.example.com",
+        SSO_REDHAT_CLIENT_ID="rh-id",
+        SSO_REDHAT_CLIENT_SECRET="rh-secret",  # pragma: allowlist secret
+        SSO_REDHAT_ISSUER="https://sso.redhat.com/auth/realms/redhat-external",
+    )
+    with patch.dict(os.environ, full, clear=True):
+        get_settings.cache_clear()
+        names = [provider.name for provider in configured_providers(get_settings())]
+        assert names == ["github", "openshift", "redhat"]
+        # The per-deployment issuers are what the OIDC flow will discover from.
+        assert get_provider("openshift", get_settings()).issuer == (
+            "https://oauth-openshift.apps.example.com"
+        )
+        assert get_provider("redhat", get_settings()).issuer == (
+            "https://sso.redhat.com/auth/realms/redhat-external"
+        )
+
+    # An OIDC provider without its issuer cannot work, so it is not offered.
+    missing_issuer = build_test_env(
+        SSO_OPENSHIFT_CLIENT_ID="ocp-id",
+        SSO_OPENSHIFT_CLIENT_SECRET="ocp-secret",  # pragma: allowlist secret
+    )
+    with patch.dict(os.environ, missing_issuer, clear=True):
+        get_settings.cache_clear()
+        assert configured_providers(get_settings()) == []
+        assert get_provider("openshift", get_settings()) is None
+        assert OpenShiftProvider.from_settings(get_settings()) is None
+
+    # An issuer without a scheme is a deployment error, not a hidden provider:
+    # settings validation refuses it (the same way an invalid DEFAULT_USER_ROLE
+    # fails at startup) instead of making the button quietly disappear.
+    scheme_less = build_test_env(
+        SSO_OPENSHIFT_CLIENT_ID="ocp-id",
+        SSO_OPENSHIFT_CLIENT_SECRET="ocp-secret",  # pragma: allowlist secret
+        SSO_OPENSHIFT_ISSUER="oauth-openshift.apps.example.com",
+    )
+    from pydantic import ValidationError
+
+    with patch.dict(os.environ, scheme_less, clear=True):
+        get_settings.cache_clear()
+        with pytest.raises(ValidationError, match="http"):
+            get_settings()
+
+    # GitHub needs both credentials and nothing else.
+    github_only = build_test_env(SSO_GITHUB_CLIENT_ID="gh-id")
+    with patch.dict(os.environ, github_only, clear=True):
+        get_settings.cache_clear()
+        assert GitHubProvider.from_settings(get_settings()) is None
+
+    get_settings.cache_clear()
+    assert RedHatSSOProvider.name == "redhat"
 
 
 def test_the_providers_endpoint_lists_only_configured_providers(
@@ -224,6 +319,68 @@ def test_an_expired_attempt_is_refused() -> None:
 
 
 @pytest.mark.parametrize(
+    "field,value",
+    [
+        ("sso_openshift_issuer", "oauth-openshift.apps.example.com"),
+        ("sso_openshift_issuer", "ftp://example.com"),
+        ("sso_openshift_issuer", "http://oauth-openshift.apps.example.com"),
+        ("sso_redhat_issuer", "sso.redhat.com/auth/realms/x"),
+        ("sso_redhat_issuer", "http://sso.redhat.com/auth/realms/x"),
+    ],
+)
+def test_a_malformed_issuer_is_refused_where_it_is_written(
+    field: str, value: str
+) -> None:
+    """A bad issuer used to make the provider silently vanish from the login page."""
+    from pydantic import ValidationError
+
+    from rootcoz.config import Settings
+
+    with pytest.raises(ValidationError, match="http"):
+        Settings.model_validate({field: value})
+
+
+def test_a_plaintext_issuer_disables_the_provider_at_runtime() -> None:
+    """A value that bypassed validation (an old DB row) must not be discovered.
+
+    Settings validation refuses such a value on write; this is the second line
+    of defence for a row that predates the rule.
+    """
+    from pydantic import SecretStr
+
+    from rootcoz.auth.sso.openshift import OpenShiftProvider
+
+    settings = get_settings().model_copy(
+        update={
+            "sso_openshift_client_id": "ocp-id",
+            "sso_openshift_client_secret": SecretStr(
+                "ocp-secret"  # pragma: allowlist secret
+            ),
+            "sso_openshift_issuer": "http://oauth-openshift.apps.example.com",
+        }
+    )
+    assert OpenShiftProvider.from_settings(settings) is None
+
+    # A loopback dev issuer is allowed, so a local Keycloak still works.
+    dev = settings.model_copy(update={"sso_openshift_issuer": "http://localhost:8443"})
+    assert OpenShiftProvider.from_settings(dev) is not None
+
+
+def test_a_malformed_list_is_refused_wherever_settings_are_built() -> None:
+    """The field validator makes every write path reject it, not just the login."""
+    from pydantic import ValidationError
+
+    from rootcoz.config import Settings
+
+    with pytest.raises(ValidationError, match="Invalid SSO domain entry"):
+        Settings.model_validate({"sso_allowed_domains": "*"})
+    # A valid list round-trips unchanged (the accessor does the parsing).
+    assert Settings.model_validate(
+        {"sso_allowed_domains": "@RedHat.com"}
+    ).sso_allowed_domains_set == frozenset({"redhat.com"})
+
+
+@pytest.mark.parametrize(
     "raw,expected",
     [
         ("/report/1", "/report/1"),
@@ -239,6 +396,220 @@ def test_the_post_login_destination_cannot_leave_the_site(
 ) -> None:
     """An SSO link must not double as an open redirect."""
     assert sso_state.safe_next(raw) == expected
+
+
+def _github_transport(*, emails: object, user: dict | None = None):
+    """A MockTransport standing in for GitHub's endpoints.
+
+    Returns the transport and the list of requests it saw, so a test can assert
+    the token POST shape as well as the outcome.
+    """
+    import httpx
+
+    seen: list[httpx.Request] = []
+    default_user = {"id": 42, "login": "rnetser", "email": "old@example.com"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path == "/login/oauth/access_token":
+            return httpx.Response(200, json={"access_token": "gho_token"})
+        if request.url.path == "/user/emails":
+            return httpx.Response(200, json=emails)
+        if request.url.path == "/user":
+            return httpx.Response(200, json=user if user is not None else default_user)
+        return httpx.Response(404, json={"message": "not found"})
+
+    return httpx.MockTransport(handler), seen
+
+
+@pytest.mark.parametrize(
+    "provider,asserts",
+    [("google", True), ("github", True), ("openshift", False), ("redhat", True)],
+)
+def test_each_provider_declares_whether_it_asserts_verification(
+    provider: str, asserts: bool
+) -> None:
+    """The domain rule can only demand a claim the IdP actually publishes."""
+    from rootcoz.auth.sso import PROVIDER_BY_NAME
+
+    assert (
+        PROVIDER_BY_NAME[provider].__dict__.get("asserts_email_verified", asserts)
+        is asserts
+    )
+
+
+async def test_an_idp_without_a_verification_claim_still_uses_the_domain_rule(
+    temp_db_path: Path,
+) -> None:
+    """OpenShift publishes no `email_verified`; the domain check is still applied."""
+    from rootcoz.auth.sso.base import ClaimSet as BaseClaimSet
+
+    env = dict(_SSO_ENV, SSO_ALLOWED_DOMAINS="redhat.com")
+    for _client in make_app_client(temp_db_path, env):
+        # A claim set from a provider that does not assert verification.
+        openshift_claims = BaseClaimSet(
+            subject="ocp-1",
+            username_hint="alice",
+            email="alice@redhat.com",
+            claims={"sub": "ocp-1", "email": "alice@redhat.com"},
+            asserts_email_verified=False,
+        )
+        choice = await auth_identity.resolve(
+            "openshift", openshift_claims, get_settings()
+        )
+        assert isinstance(choice, auth_identity.LoginChoice)
+
+        # The domain rule still refuses a domain that is not listed.
+        wrong = BaseClaimSet(
+            subject="ocp-2",
+            username_hint="alice",
+            email="alice@gmail.com",
+            claims={"sub": "ocp-2", "email": "alice@gmail.com"},
+            asserts_email_verified=False,
+        )
+        with pytest.raises(AuthError) as excinfo:
+            await auth_identity.resolve("openshift", wrong, get_settings())
+        assert excinfo.value.reason == "domain_not_allowed"
+
+
+async def test_github_returns_the_verified_primary_address() -> None:
+    """The real HTTP path: GitHub is OAuth2, and only a verified address counts."""
+    import httpx
+
+    from rootcoz.auth.sso.github import GitHubProvider
+
+    transport, seen = _github_transport(
+        emails=[
+            {"email": "old@example.com", "primary": False, "verified": False},
+            {"email": "rnetser@redhat.com", "primary": True, "verified": True},
+        ]
+    )
+    provider = GitHubProvider(client_id="id", client_secret="secret")
+    with _github_client(transport):
+        claims = await provider.exchange(
+            code="c", code_verifier="", redirect_uri="https://x/cb", nonce=""
+        )
+
+    assert claims.subject == "42"
+    assert claims.username_hint == "rnetser"
+    assert claims.email == "rnetser@redhat.com"
+    assert claims.claims["email_verified"] is True
+
+    token_request = next(r for r in seen if r.url.path == "/login/oauth/access_token")
+    body = token_request.content.decode()
+    assert "grant_type" not in body  # GitHub's OAuth2 token POST has no such field
+    assert "code=c" in body and "client_id=id" in body
+    assert token_request.headers.get("accept") == "application/json"
+    emails_request = next(r for r in seen if r.url.path == "/user/emails")
+    assert emails_request.headers.get("authorization") == "Bearer gho_token"
+    assert httpx  # the transport itself is the proof the helper ran
+
+
+async def test_github_prefers_the_primary_verified_address() -> None:
+    """Order in GitHub's response must not decide which address is used."""
+    from rootcoz.auth.sso.github import GitHubProvider
+
+    transport, _seen = _github_transport(
+        emails=[
+            {"email": "secondary@redhat.com", "primary": False, "verified": True},
+            {"email": "primary@redhat.com", "primary": True, "verified": True},
+        ]
+    )
+    provider = GitHubProvider(client_id="id", client_secret="secret")
+    with _github_client(transport):
+        claims = await provider.exchange(
+            code="c", code_verifier="", redirect_uri="https://x/cb", nonce=""
+        )
+
+    assert claims.email == "primary@redhat.com"
+
+
+async def test_github_without_a_verified_address_reports_it_unverified() -> None:
+    """No verified address → `email_verified: false`, so the domain rule refuses it."""
+    from rootcoz.auth.sso.github import GitHubProvider
+
+    transport, _seen = _github_transport(
+        emails=[{"email": "unverified@example.com", "primary": True, "verified": False}]
+    )
+    provider = GitHubProvider(client_id="id", client_secret="secret")
+    with _github_client(transport):
+        claims = await provider.exchange(
+            code="c", code_verifier="", redirect_uri="https://x/cb", nonce=""
+        )
+
+    assert claims.claims["email_verified"] is False
+    # Not stored on the identity: an unverified address is one its holder can
+    # change at will. It stays in `claims` for the audit trail.
+    assert claims.email is None
+    assert claims.claims["email"] == "old@example.com"
+
+
+async def test_github_rejects_a_token_response_without_a_token() -> None:
+    """A 200 with an error body is still a failure, not a login."""
+    import httpx
+
+    from rootcoz.auth.sso.github import GitHubProvider
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"error": "bad_verification_code"})
+
+    provider = GitHubProvider(client_id="id", client_secret="secret")
+    with (
+        _github_client(httpx.MockTransport(handler)),
+        pytest.raises(AuthError) as excinfo,
+    ):
+        await provider.exchange(
+            code="c", code_verifier="", redirect_uri="https://x/cb", nonce=""
+        )
+    assert excinfo.value.reason == "exchange_failed"
+
+
+def test_the_http_helper_checks_status_and_shape() -> None:
+    """A 500, a non-JSON body and a wrong shape are all the same refusal."""
+    import asyncio
+
+    import httpx
+
+    from rootcoz.auth.sso.http import request_json
+
+    def run(handler, *, expect: str = "object"):
+        transport = httpx.MockTransport(handler)
+        with _github_client(transport):
+            return asyncio.run(
+                request_json(
+                    "GET", "https://api.github.com/x", reason="r", expect=expect
+                )
+            )
+
+    assert run(lambda request: httpx.Response(200, json={"a": 1})) == {"a": 1}
+    assert run(lambda request: httpx.Response(200, json=[1, 2]), expect="array") == [
+        1,
+        2,
+    ]
+
+    for handler, expect in (
+        (lambda request: httpx.Response(500, json={}), "object"),
+        (lambda request: httpx.Response(200, text="not json"), "object"),
+        (lambda request: httpx.Response(200, json=[1]), "object"),
+        (lambda request: httpx.Response(200, json={"a": 1}), "array"),
+    ):
+        with pytest.raises(AuthError) as excinfo:
+            run(handler, expect=expect)
+        assert excinfo.value.reason == "r"
+
+
+async def test_github_authorization_url_asks_for_the_email_scope() -> None:
+    """Without `user:email` GitHub returns no address at all."""
+    from rootcoz.auth.sso.github import GitHubProvider
+
+    provider = GitHubProvider(client_id="id", client_secret="secret")
+    url = await provider.authorization_url(
+        redirect_uri="https://x/cb", state="st", code_challenge="", nonce=""
+    )
+    assert url.startswith(GitHubProvider.authorize_endpoint)
+    assert "user%3Aemail" in url
+    assert "state=st" in url
+    assert "redirect_uri=https%3A%2F%2Fx%2Fcb" in url
 
 
 async def test_an_unlinked_identity_gets_a_suggestion_not_an_account(
@@ -273,6 +644,273 @@ async def test_a_reserved_name_is_never_suggested(temp_db_path: Path) -> None:
         )
         assert isinstance(choice, auth_identity.LoginChoice)
         assert choice.suggested_username == "alice"
+
+
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        ("", frozenset()),
+        ("   ", frozenset()),
+        ("@RedHat.com", frozenset({"redhat.com"})),
+        ("redhat.com.", frozenset({"redhat.com"})),
+        ("a.com, B.com ", frozenset({"a.com", "b.com"})),
+        ("a.com,,b.com", frozenset({"a.com", "b.com"})),
+    ],
+)
+def test_the_domain_list_is_normalised(raw: str, expected: frozenset[str]) -> None:
+    """Case, a leading '@', blanks and whitespace never change the meaning."""
+    assert normalize_domain_list(raw) == expected
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "*",
+        "*.redhat.com",
+        "https://redhat.com",
+        "redhat.com/x",
+        "red hat.com",
+        ".redhat.com",
+        # A value that yields no domain would silently disable the policy.
+        ",",
+        ",,",
+        "@",
+    ],
+)
+def test_a_malformed_domain_list_is_refused(raw: str) -> None:
+    """A wildcard, a URI, a dot-entry or a list of blanks must fail closed."""
+    with pytest.raises(ValueError, match="Invalid SSO domain entry"):
+        normalize_domain_list(raw)
+
+
+@pytest.mark.parametrize(
+    "email,allowed,verdict",
+    [
+        ("alice@redhat.com", "redhat.com", "ok"),
+        ("alice@eng.redhat.com", "redhat.com", "ok"),
+        ("alice@REDHAT.com", "redhat.com", "ok"),
+        ("alice@redhat.com", "@redhat.com", "ok"),
+        ("alice@notredhat.com", "redhat.com", "denied"),
+        ("alice@redhat.com.evil.io", "redhat.com", "denied"),
+        ("alice@redhat.co", "redhat.com", "denied"),
+        ("alice@gmail.com", "redhat.com", "denied"),
+        ("alice@redhat.com", "", "ok"),
+        ("alice@anything.example", "", "ok"),
+    ],
+)
+async def test_the_domain_allow_list_decides_who_may_sign_in(
+    temp_db_path: Path, email: str, allowed: str, verdict: str
+) -> None:
+    """Exact domain or a real subdomain — never a look-alike suffix."""
+    env = dict(_SSO_ENV, SSO_ALLOWED_DOMAINS=allowed)
+    for _client in make_app_client(temp_db_path, env):
+        if verdict == "ok":
+            choice = await auth_identity.resolve(
+                "google", _claims(email=email), get_settings()
+            )
+            assert isinstance(choice, auth_identity.LoginChoice)
+        else:
+            with pytest.raises(AuthError) as excinfo:
+                await auth_identity.resolve(
+                    "google", _claims(email=email), get_settings()
+                )
+            assert excinfo.value.reason == "domain_not_allowed"
+
+
+async def test_a_ticket_cannot_finish_after_its_domain_is_revoked(
+    temp_db_path: Path,
+) -> None:
+    """A ten-minute ticket must not outlive the policy that produced it."""
+    env = dict(_SSO_ENV, SSO_ALLOWED_DOMAINS="redhat.com")
+    for client in make_app_client(temp_db_path, env):
+        # Minted while the domain was allowed (the callback mints it).
+        ticket = await _ticket(client, email="alice@redhat.com")
+
+        # The admin tightens the list before the person presses "Create"; the
+        # setting is reloaded per request, so no restart is involved.
+        tightened = client.put(
+            "/api/admin/settings",
+            json={"settings": {"sso_allowed_domains": "example.org"}},
+            headers={
+                "Authorization": "Bearer test-admin-key-16chars"
+            },  # pragma: allowlist secret
+        )
+        assert tightened.status_code == 200
+
+        response = client.post(
+            "/api/auth/sso/create", json={"ticket": ticket, "username": "alice"}
+        )
+
+        assert response.status_code == 403
+        async with storage._connect_db() as db:
+            cursor = await db.execute("SELECT COUNT(*) AS n FROM users")
+            assert (await cursor.fetchone())["n"] == 0
+
+
+async def test_an_unlisted_domain_creates_nothing(temp_db_path: Path) -> None:
+    """Refused before the account lookup, so nothing is written for a stranger."""
+    env = dict(_SSO_ENV, SSO_ALLOWED_DOMAINS="redhat.com")
+    for client in make_app_client(temp_db_path, env):
+        sealed, state = _sealed()
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+        with patch.object(
+            GoogleProvider,
+            "exchange",
+            return_value=_claims(email="alice@gmail.com"),
+            autospec=True,
+        ):
+            response = client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 303
+        assert response.headers["location"] == "/login?sso_error=domain_not_allowed"
+        async with storage._connect_db() as db:
+            cursor = await db.execute("SELECT COUNT(*) AS n FROM users")
+            assert (await cursor.fetchone())["n"] == 0
+
+
+async def test_an_unverified_email_is_refused_when_the_list_is_set(
+    temp_db_path: Path,
+) -> None:
+    """The list is only as good as the claim it checks."""
+    env = dict(_SSO_ENV, SSO_ALLOWED_DOMAINS="redhat.com")
+    for _client in make_app_client(temp_db_path, env):
+        claims = ClaimSet(
+            subject="sub-1",
+            username_hint="alice",
+            email="alice@redhat.com",
+            claims={
+                "sub": "sub-1",
+                "email": "alice@redhat.com",
+                "email_verified": False,
+            },
+        )
+        with pytest.raises(AuthError) as excinfo:
+            await auth_identity.resolve("google", claims, get_settings())
+        assert excinfo.value.reason == "email_not_verified"
+
+
+async def test_a_verified_email_passes_and_a_silent_provider_does_not(
+    temp_db_path: Path,
+) -> None:
+    """Only a positive `email_verified` assertion satisfies the list."""
+    env = dict(_SSO_ENV, SSO_ALLOWED_DOMAINS="redhat.com")
+    for _client in make_app_client(temp_db_path, env):
+        verified = ClaimSet(
+            subject="sub-ok",
+            username_hint="alice",
+            email="alice@redhat.com",
+            claims={
+                "sub": "sub-ok",
+                "email": "alice@redhat.com",
+                "email_verified": True,
+            },
+        )
+        choice = await auth_identity.resolve("google", verified, get_settings())
+        assert isinstance(choice, auth_identity.LoginChoice)
+
+        silent = ClaimSet(
+            subject="sub-silent",
+            username_hint="alice",
+            email="alice@redhat.com",
+            claims={"sub": "sub-silent", "email": "alice@redhat.com"},
+        )
+        with pytest.raises(AuthError) as excinfo:
+            await auth_identity.resolve("google", silent, get_settings())
+        assert excinfo.value.reason == "email_not_verified"
+
+
+async def test_a_missing_email_is_refused_when_the_list_is_set(
+    temp_db_path: Path,
+) -> None:
+    """No address means nothing to check: fail closed, do not guess."""
+    env = dict(_SSO_ENV, SSO_ALLOWED_DOMAINS="redhat.com")
+    for _client in make_app_client(temp_db_path, env):
+        with pytest.raises(AuthError) as excinfo:
+            await auth_identity.resolve("google", _claims(email=None), get_settings())
+        assert excinfo.value.reason == "domain_not_allowed"
+
+
+async def test_revoking_a_domain_cuts_off_an_already_linked_account(
+    temp_db_path: Path,
+) -> None:
+    """The list applies on every login, not only at creation."""
+    for _client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        await storage.add_user_identity("alice", "google", "sub-1")
+
+        # Allowed now.
+        resolved = await auth_identity.resolve("google", _claims(), get_settings())
+        assert isinstance(resolved, auth_identity.IdentityResolution)
+
+    revoked = dict(_SSO_ENV, SSO_ALLOWED_DOMAINS="example.org")
+    for _client in make_app_client(temp_db_path, revoked):
+        with pytest.raises(AuthError) as excinfo:
+            await auth_identity.resolve("google", _claims(), get_settings())
+        assert excinfo.value.reason == "domain_not_allowed"
+
+
+async def test_the_domain_policy_does_not_touch_key_logins(temp_db_path: Path) -> None:
+    """Username + API key and ADMIN_KEY ignore the SSO domain list entirely."""
+    env = dict(_SSO_ENV, SSO_ALLOWED_DOMAINS="redhat.com")
+    for client in make_app_client(temp_db_path, env):
+        _name, raw_key = await storage.create_user("alice")
+        login = client.post(
+            "/api/auth/login", json={"username": "alice", "api_key": raw_key}
+        )
+        assert login.status_code == 200
+        assert client.get("/api/auth/me").status_code == 200
+
+        # The bootstrap admin never consults the list, so a restrictive domain
+        # can never lock an operator out of the deployment.
+        admin = client.post(
+            "/api/auth/login",
+            json={
+                "username": "admin",
+                "api_key": "test-admin-key-16chars",  # pragma: allowlist secret
+            },
+        )
+        assert admin.status_code == 200
+        assert admin.json()["is_admin"] is True
+
+
+async def test_the_domain_refusal_is_audited_without_the_address(
+    temp_db_path: Path,
+) -> None:
+    """The trail carries provider and reason — never the address (not even the domain).
+
+    `AGENTS.md` allows provider, username, reason and subject ids in `details`;
+    an address is contact data, so it stays out.
+    """
+    env = dict(_SSO_ENV, SSO_ALLOWED_DOMAINS="redhat.com")
+    for client in make_app_client(temp_db_path, env):
+        sealed, state = _sealed()
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+        with patch.object(
+            GoogleProvider,
+            "exchange",
+            return_value=_claims(email="alice@gmail.com"),
+            autospec=True,
+        ):
+            client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+    rows = [
+        r
+        for r in await _audit_actions(temp_db_path)
+        if r["action"] == "auth.sso_login_failed"
+    ]
+    assert len(rows) == 1
+    assert rows[0]["outcome"] == "denied"
+    assert rows[0]["details"] == {
+        "provider": "google",
+        "reason": "domain_not_allowed",
+    }
+    assert "alice@gmail.com" not in json.dumps(rows)
 
 
 async def test_a_linked_account_skips_the_choice(temp_db_path: Path) -> None:

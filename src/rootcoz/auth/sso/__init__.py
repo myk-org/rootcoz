@@ -12,11 +12,19 @@ from __future__ import annotations
 
 from rootcoz import storage
 from rootcoz.auth.sso.base import AuthError, ClaimSet, SSOProvider
+from rootcoz.auth.sso.github import GitHubProvider
 from rootcoz.auth.sso.google import GoogleProvider
+from rootcoz.auth.sso.openshift import OpenShiftProvider
+from rootcoz.auth.sso.redhat import RedHatSSOProvider
 from rootcoz.config import Settings
 
 #: Every known provider, in the order the login page offers them.
-PROVIDER_CLASSES: tuple[type[SSOProvider], ...] = (GoogleProvider,)
+PROVIDER_CLASSES: tuple[type[SSOProvider], ...] = (
+    GoogleProvider,
+    GitHubProvider,
+    OpenShiftProvider,
+    RedHatSSOProvider,
+)
 
 #: Lookup by machine name, for the routes (`/api/auth/sso/{provider}/...`).
 PROVIDER_BY_NAME: dict[str, type[SSOProvider]] = {
