@@ -47,6 +47,8 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
   /** True once the server actually answered: only then do the fields describe
    *  what is stored, and only then may a save write them back. */
   const [tokensHydrated, setTokensHydrated] = useState(false)
+  /** Shown when the account read failed: the fields are unknown, not empty. */
+  const [tokensError, setTokensError] = useState<string | null>(null)
   /** Token values as last returned by the server. A save only re-validates what
    *  differs from these, so an untouched stored credential is not re-checked and
    *  a stale browser-cached one is (#294). */
@@ -66,6 +68,7 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
       // never re-validated and a stale value cannot win (#294).
       setBaseline(server)
       setTokensHydrated(true)
+      setTokensError(null)
       // Only fill a field the user has not typed into yet (empty): a slow read
       // must not throw away an edit started before it landed.
       setGithubTokenValue((prev) => prev || server.gh)
@@ -77,6 +80,7 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
       if (!isExpectedTokenSyncError(err)) {
         console.error('Failed to hydrate tokens from server:', err)
       }
+      setTokensError('Could not read your saved tracker credentials.')
     }
   }, [])
 
@@ -114,6 +118,14 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
 
     setUsernameError(null)
     setSaving(true)
+
+    // A save writes every credential field, empty ones included (#294). After a
+    // failed read the fields do not describe what is stored, so write nothing
+    // and do not report success — the banner offers the retry instead.
+    if (!isViewer && !tokensHydrated) {
+      setSaving(false)
+      return
+    }
 
     async function commitProfile(trimmedUsername: string) {
       setUsername(trimmedUsername)
@@ -303,6 +315,15 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
             jiraValidation={jiraValidation}
             newPasswordAutoComplete
           />}
+
+          {!isViewer && tokensError && (
+            <div className="flex items-center justify-between gap-2 rounded-md border border-signal-red/30 bg-signal-red/10 px-3 py-2">
+              <p className="text-xs text-signal-red">{tokensError}</p>
+              <Button type="button" variant="outline" size="sm" onClick={refreshTokensFromServer}>
+                Retry
+              </Button>
+            </div>
+          )}
 
           <Button type="submit" className="w-full" disabled={(!readOnlyUsername && !username.trim()) || saving || validatingGithub || validatingJira || validatingJiraSa || !tokensLoaded}>
             {saving ? 'Saving...' : 'Save'}

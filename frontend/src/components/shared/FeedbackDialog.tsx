@@ -59,7 +59,12 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
   const [previewAi, setPreviewAi] = useState({ provider: '', model: '', generated: false })
   // The account row is the only credential source, so ask it when the dialog opens
   // — the same row the server reads when it files the issue.
-  const hasGithubToken = useUserTokenPresence(open).github
+  const tokenPresence = useUserTokenPresence(open)
+  const hasGithubToken = tokenPresence.github
+  // Only a read that ANSWERED "no token" is a missing credential: while it is in
+  // flight the row is unknown, so no false warning and no blocked Create — the
+  // create call's own refusal names the fix.
+  const tokenMissing = tokenPresence.loaded && !hasGithubToken
 
   // Track dialog open/close to guard async setState
   useEffect(() => {
@@ -361,7 +366,7 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
           </div>
         )}
 
-        {phase === 'preview' && !hasGithubToken && (
+        {phase === 'preview' && tokenMissing && (
           <TokenRequiredBanner provider="GitHub" action="submit feedback" />
         )}
 
@@ -378,7 +383,7 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
               <Button variant="outline" onClick={() => handleClose(false)}>Cancel</Button>
               <Button
                 onClick={handleCreate}
-                disabled={!previewTitle.trim() || !previewBody.trim() || !hasGithubToken}
+                disabled={!previewTitle.trim() || !previewBody.trim() || tokenMissing}
               >{createError ? 'Retry' : 'Create Issue'}</Button>
             </div>
           )}

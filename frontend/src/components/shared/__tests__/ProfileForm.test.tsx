@@ -231,9 +231,44 @@ describe('ProfileForm tracker tokens', () => {
     await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
 
     // The fields are empty because the read failed, not because the account is
-    // empty: writing that back would erase the credentials the server holds.
+    // empty: writing that back would erase the credentials the server holds,
+    // and a save that writes nothing must not report success either.
+    expect(
+      await screen.findByText(/could not read your saved tracker credentials/i),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^retry$/i })).toBeInTheDocument()
+    expect(onSaved).not.toHaveBeenCalled()
+    expect(apiMock.put).not.toHaveBeenCalled()
+  })
+
+  it('saves once the retried account read succeeds', async () => {
+    role.value = 'reviewer'
+    let failing = true
+    apiMock.get.mockImplementation(async (path: string) => {
+      if (path !== '/api/user/tokens') return {}
+      if (failing) {
+        failing = false
+        throw new Error('server unavailable')
+      }
+      return { github_token: '', jira_email: '', jira_token: '', jira_sa_token: '' }
+    })
+
+    const onSaved = renderForm()
+    const github = await screen.findByLabelText(/GitHub Token/i)
+    await userEvent.type(github, 'ghp_after_retry')
+    await userEvent.click(await screen.findByRole('button', { name: /^retry$/i }))
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/could not read your saved tracker credentials/i),
+      ).not.toBeInTheDocument(),
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
     await waitFor(() => expect(onSaved).toHaveBeenCalled())
-    expect(apiMock.put).not.toHaveBeenCalledWith('/api/user/tokens', expect.anything())
+    expect(apiMock.put).toHaveBeenCalledWith(
+      '/api/user/tokens',
+      expect.objectContaining({ github_token: 'ghp_after_retry' }),
+    )
   })
 
   it('keeps a credential typed before the account read lands', async () => {

@@ -12,6 +12,13 @@ const mockUserTokens = vi.fn(() => ({
   jira_sa_token: '',
 }))
 
+const defaultGet = (path?: string) =>
+  Promise.resolve(
+    path === '/api/user/tokens'
+      ? mockUserTokens()
+      : { providers: {}, provider_status: {} },
+  )
+
 // Mock the api module
 vi.mock('@/lib/api', () => {
   class _ApiError extends Error {
@@ -28,13 +35,7 @@ vi.mock('@/lib/api', () => {
   return {
     api: {
       post: vi.fn(),
-      get: vi.fn((path?: string) =>
-        Promise.resolve(
-          path === '/api/user/tokens'
-            ? mockUserTokens()
-            : { providers: {}, provider_status: {} },
-        ),
-      ),
+      get: vi.fn((path?: string) => defaultGet(path)),
     },
     getRecentFailedCalls: vi.fn(() => []),
     ApiError: _ApiError,
@@ -81,6 +82,7 @@ vi.mock('@/components/shared/AnalysisAiPicker', () => ({
 import { api, getRecentFailedCalls } from '@/lib/api'
 
 const mockPost = api.post as ReturnType<typeof vi.fn>
+const mockGet = api.get as ReturnType<typeof vi.fn>
 const mockGetFailedCalls = getRecentFailedCalls as ReturnType<typeof vi.fn>
 
 /** Wrapper that owns the open state so the dialog can be closed and reopened. */
@@ -99,6 +101,7 @@ describe('FeedbackDialog', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    mockGet.mockImplementation((path?: string) => defaultGet(path))
   })
 
   afterEach(() => {
@@ -518,6 +521,25 @@ describe('FeedbackDialog', () => {
     await waitFor(() =>
       expect(screen.getByText(/AI is not configured on this server/)).toBeInTheDocument()
     )
+  })
+
+  it('shows no token warning while the account read is still pending', async () => {
+    mockGet.mockImplementation((path?: string) =>
+      path === '/api/user/tokens'
+        ? new Promise(() => {})
+        : Promise.resolve({ providers: {}, provider_status: {} }),
+    )
+    mockPost.mockResolvedValue({ title: 'AI title', body: 'AI body', labels: ['bug'] })
+    const user = userEvent.setup()
+    render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
+    await user.type(screen.getByLabelText('Description'), 'Some feedback')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+    // Unknown is not empty: the read has not answered, so there is nothing to warn
+    // about and nothing to block on.
+    expect(screen.queryByText('GitHub token required')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /create issue/i })).toBeEnabled()
   })
 
   it('shows warning banner and disables Create Issue when no GitHub token', async () => {

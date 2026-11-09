@@ -43,6 +43,10 @@ export function useUserTokenPresence(enabled: boolean): UserTokenPresence {
       })
     return () => {
       ignore = true
+      // The answer belongs to the opening it was read for: closing the dialog
+      // invalidates it, so the next one starts pending instead of showing the
+      // previous account state while its own read is in flight.
+      setPresence((prev) => (prev.loaded ? { github: false, jira: false, loaded: false } : prev))
     }
   }, [enabled])
   return presence

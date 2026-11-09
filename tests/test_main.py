@@ -4836,6 +4836,54 @@ class TestTrackerCredentialComesFromTheRow:
         assert response.json()["similar_issues"] == []
         mock_dup.assert_not_called()
 
+    @pytest.mark.asyncio
+    async def test_preview_github_drafts_when_the_row_read_fails(self, test_client):
+        """A failed row read skips duplicate detection, never the draft."""
+        await self._stored_run("job-row-prev-gh-down")
+        headers = await _tracker_user("row-prev-gh-down", github_token="ghp_row")
+        with (
+            patch("rootcoz.main.generate_github_issue_content") as mock_gen,
+            patch("rootcoz.main.search_github_duplicates") as mock_dup,
+            patch(
+                "rootcoz.main.storage.get_user_tokens",
+                side_effect=RuntimeError("db unavailable"),
+            ),
+            _enable_feature("github_issues_enabled"),
+        ):
+            mock_gen.return_value = {"title": "T", "body": "B"}
+            response = test_client.post(
+                "/results/job-row-prev-gh-down/preview-github-issue",
+                json={"test_name": "test_row"},
+                headers=headers,
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["similar_issues"] == []
+        mock_dup.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_preview_jira_drafts_when_the_row_read_fails(self, test_client):
+        """The Jira preview too — and never with the deployment's credential."""
+        await self._stored_run("job-row-prev-jira-down")
+        headers = await _tracker_user("row-prev-jira-down", jira_token="row-jira-pat")
+        with (
+            patch("rootcoz.main.generate_jira_bug_content") as mock_gen,
+            patch("rootcoz.main.search_jira_duplicates") as mock_dup,
+            patch(
+                "rootcoz.main.storage.get_user_tokens",
+                side_effect=RuntimeError("db unavailable"),
+            ),
+            _enable_feature("jira_enabled"),
+        ):
+            mock_gen.return_value = {"title": "T", "body": "B"}
+            response = test_client.post(
+                "/results/job-row-prev-jira-down/preview-jira-bug",
+                json={"test_name": "test_row"},
+                headers=headers,
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["similar_issues"] == []
+        mock_dup.assert_not_called()
+
     # -- Jira service accounts -------------------------------------------------
 
     @pytest.mark.asyncio

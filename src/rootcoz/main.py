@@ -10076,6 +10076,26 @@ async def get_issue_prompt(
         return {"prompt": ""}
 
 
+async def _read_user_tokens_for_preview(username: str, job_id: str) -> dict[str, str]:
+    """The caller's row for a preview, or an empty row if it cannot be read.
+
+    A preview drafts content and searches duplicates best-effort: a failed read
+    must not abort the draft, and it must never fall back to a server
+    credential — so it reads as an empty row, which skips the duplicate search
+    and leaves the create endpoint's own refusal as the authority.
+    """
+    try:
+        return await storage.get_user_tokens(username)
+    except Exception:
+        logger.warning(
+            "Could not read stored tracker tokens for job_id=%s — "
+            "previewing without duplicate detection",
+            job_id,
+            exc_info=True,
+        )
+        return {}
+
+
 # NOTE: Preview/create bug endpoints intentionally bypass _merge_settings().
 # These are server-level operations (GITHUB_TOKEN, TESTS_REPO_URL, Jira config)
 # that act on behalf of the server, not per-request analysis overrides. The
@@ -10138,7 +10158,7 @@ async def preview_github_issue(
     # Uses the caller's stored token — no body token, no server token.
     # If no stored token, skip duplicate detection (preview still works).
     tests_repo_url = _resolve_github_repo_url(settings)
-    user_tokens = await storage.get_user_tokens(request.state.username)
+    user_tokens = await _read_user_tokens_for_preview(request.state.username, job_id)
     github_token = (user_tokens.get("github_token", "") or "").strip()
     _debug_credential_source("github", bool(github_token))
     similar: list[dict[str, Any]] = []
@@ -10182,7 +10202,7 @@ async def preview_jira_bug(
         )
     # A legacy (non-ATOA) service-account secret must be rejected, not
     # silently dropped (which would fall back to the server credentials).
-    user_tokens = await storage.get_user_tokens(request.state.username)
+    user_tokens = await _read_user_tokens_for_preview(request.state.username, job_id)
     user_jira_token = (user_tokens.get("jira_token", "") or "").strip()
     user_jira_sa_token = (user_tokens.get("jira_sa_token", "") or "").strip()
     _debug_credential_source("jira", bool(user_jira_token or user_jira_sa_token))

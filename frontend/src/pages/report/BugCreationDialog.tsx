@@ -626,7 +626,7 @@ export function BugCreationDialog({
           {promptPhase === 'preview' && (
             <div className="flex gap-2 sm:ml-auto">
               <Button variant="outline" onClick={() => handleCancel()}>Cancel</Button>
-              <Button onClick={handleCreate} disabled={!title.trim() || !hasToken || (target === 'jira' && jiraIssueType === '__custom__' && !customIssueType.trim())}>{createError ? 'Retry' : `Create ${label}`}</Button>
+              <Button onClick={handleCreate} disabled={!title.trim() || tokenMissing || (target === 'jira' && jiraIssueType === '__custom__' && !customIssueType.trim())}>{createError ? 'Retry' : `Create ${label}`}</Button>
             </div>
           )}
           {promptPhase === 'prompt' && (
