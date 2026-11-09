@@ -1339,7 +1339,7 @@ def results_tests(
 
 @results_app.command("full")
 def results_full(
-    job_id: str = typer.Argument(help="Job ID to get complete data for."),
+    job_ids: Annotated[list[str] | None, typer.Argument(help="Job id(s).")] = None,
     status: list[str] = _STATUS_FILTER_OPTION,
     child_job_name: str = typer.Option(
         None, "--child-job", help="Filter the tests section by child job name."
@@ -1349,27 +1349,95 @@ def results_full(
     ),
     offset: int = typer.Option(0, "--offset", help="Tests section pagination offset."),
     limit: int = typer.Option(50, "--limit", help="Tests section page size (max 200)."),
+    job_ids_option: Annotated[
+        list[str] | None,
+        typer.Option(
+            "--job-ids", help="Job ids for a batch — comma-separated, and repeatable."
+        ),
+    ] = None,
     json_output: bool = _JSON_OPTION,
 ) -> None:
-    """Show complete job data: failures, reviews, classifications, tests."""
+    """Show complete job data: failures, reviews, classifications, tests.
+
+    One id renders the single-job payload (including its tests section).
+    Several ids (positionally or via ``--job-ids``) are read in one batch call;
+    each job is rendered the same way minus the tests section, and unknown ids
+    are listed by ``missing``.
+    """
     _set_json(json_output)
+    # Positionals are taken verbatim (an id may contain a comma); option values
+    # are comma-split like every other list option here. Dedupe keeps order.
+    ids = list(job_ids or [])
+    for value in job_ids_option or []:
+        ids.extend(_split_csv(value))
+    ids = list(dict.fromkeys(ids))
+    if not ids:
+        typer.echo("Error: name at least one job id.", err=True)
+        raise typer.Exit(1)
+
+    if len(ids) == 1:
+        try:
+            client = _get_client()
+            data = client.get_full_result(
+                ids[0],
+                status=status or None,
+                child_job_name=child_job_name,
+                child_build_number=child_build_number,
+                offset=offset,
+                limit=limit,
+            )
+        except RootCozError as err:
+            _handle_error(err)
+
+        if _state.get("json"):
+            print_output(data, columns=[], as_json=True)
+            return
+        _render_full_result(data, offset=offset, limit=limit)
+        return
+
+    tests_filters = [
+        flag
+        for set_, flag in (
+            (status, "--status"),
+            (child_job_name, "--child-job"),
+            (child_build_number, "--child-build"),
+            (offset, "--offset"),
+            (limit != 50, "--limit"),
+        )
+        if set_
+    ]
+    if tests_filters:
+        typer.echo(
+            f"Error: {'/'.join(tests_filters)} scope the single-job tests "
+            "section; run `rootcoz results tests JOB_ID` instead.",
+            err=True,
+        )
+        raise typer.Exit(1)
+
     try:
         client = _get_client()
-        data = client.get_full_result(
-            job_id,
-            status=status or None,
-            child_job_name=child_job_name,
-            child_build_number=child_build_number,
-            offset=offset,
-            limit=limit,
-        )
+        envelope = client.get_full_results(ids)
     except RootCozError as err:
         _handle_error(err)
 
     if _state.get("json"):
-        print_output(data, columns=[], as_json=True)
+        print_output(envelope, columns=[], as_json=True)
         return
 
+    for data in envelope.get("jobs", []):
+        _render_full_result(data, offset=offset, limit=limit)
+        typer.echo("")
+    missing = envelope.get("missing", [])
+    if missing:
+        typer.echo(f"Missing ids: {', '.join(missing)}")
+
+
+def _render_full_result(data: dict[str, Any], *, offset: int, limit: int) -> None:
+    """Render one ``/full`` payload as text (shared by both CLI paths).
+
+    Skips the tests block when the payload carries no ``tests`` key, which is
+    exactly the batch case.
+    """
     job = data.get("job", {})
     counts = data.get("counts", {})
     summary = data.get("summary", {})
@@ -1410,22 +1478,24 @@ def results_full(
                 f"{f.get('classification', '')} / {f.get('pattern', '')}{reviewed_by}"
             )
 
-    tests = data.get("tests", {})
-    entries = tests.get("entries", [])
-    total = tests.get("total", 0)
-    typer.echo(f"\nTests ({len(entries)} of {total}):")
-    for entry in entries:
-        icon = {"passed": "✓", "skipped": "⊘", "failed": "✗"}.get(
-            entry.get("status", ""), "?"
-        )
-        typer.echo(
-            f"  {icon} {entry.get('test_name', '')} ({entry.get('duration', 0.0):.2f}s)"
-        )
-    if tests.get("has_more"):
-        typer.echo(
-            f"\n  ... {total - len(entries) - offset} more "
-            f"(use --offset {offset + limit})"
-        )
+    if "tests" in data:
+        tests = data.get("tests") or {}
+        entries = tests.get("entries", [])
+        total = tests.get("total", 0)
+        typer.echo(f"\nTests ({len(entries)} of {total}):")
+        for entry in entries:
+            icon = {"passed": "✓", "skipped": "⊘", "failed": "✗"}.get(
+                entry.get("status", ""), "?"
+            )
+            typer.echo(
+                f"  {icon} {entry.get('test_name', '')} "
+                f"({entry.get('duration', 0.0):.2f}s)"
+            )
+        if tests.get("has_more"):
+            typer.echo(
+                f"\n  ... {total - len(entries) - offset} more "
+                f"(use --offset {offset + limit})"
+            )
 
     comments = data.get("comments", [])
     if comments:

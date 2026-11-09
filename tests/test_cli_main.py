@@ -730,6 +730,147 @@ class TestResultsFullCommand:
         assert result.exit_code == 0
         assert "--offset 1" in result.output
 
+    @staticmethod
+    def _batch_job(job_id: str) -> dict:
+        """One batch item: the single-job payload minus the tests section."""
+        return {
+            "job": {
+                "job_id": job_id,
+                "job_name": "pipe",
+                "build_number": 42,
+                "status": "completed",
+                "analysis_state": "analyzed",
+                "created_at": "2026-01-01T00:00:00Z",
+            },
+            "counts": {"passed": 10, "skipped": 1, "failed": 2},
+            "failures": [
+                {
+                    "test_name": "test_a",
+                    "classification": "CODE ISSUE",
+                    "pattern": "NEW",
+                    "error": "boom",
+                    "error_signature": "sig",
+                    "child_job_name": "",
+                    "child_build_number": 0,
+                    "reviewed": False,
+                    "reviewed_by": "",
+                }
+            ],
+            "summary": {
+                "total_failures": 1,
+                "reviewed_count": 0,
+                "classifications": {"CODE ISSUE": 1},
+            },
+            "comments": [],
+            "tracked_in": {},
+        }
+
+    def test_results_full_multiple_ids_uses_batch(self, mock_client):
+        mock_client.get_full_results.return_value = {
+            "jobs": [self._batch_job("a"), self._batch_job("b")],
+            "missing": [],
+            "forbidden": [],
+        }
+        result = runner.invoke(app, ["results", "full", "a", "b"])
+        assert result.exit_code == 0
+        mock_client.get_full_results.assert_called_once_with(["a", "b"])
+        mock_client.get_full_result.assert_not_called()
+        assert "Job a " in result.output
+        assert "Job b " in result.output
+
+    def test_results_full_job_ids_option(self, mock_client):
+        mock_client.get_full_results.return_value = {
+            "jobs": [],
+            "missing": ["a", "b"],
+            "forbidden": [],
+        }
+        result = runner.invoke(
+            app, ["results", "full", "--job-ids", "a", "--job-ids", "b"]
+        )
+        assert result.exit_code == 0
+        mock_client.get_full_results.assert_called_once_with(["a", "b"])
+
+    def test_results_full_job_ids_comma_form(self, mock_client):
+        mock_client.get_full_results.return_value = {
+            "jobs": [],
+            "missing": ["a", "b"],
+            "forbidden": [],
+        }
+        result = runner.invoke(app, ["results", "full", "--job-ids", "a,b"])
+        assert result.exit_code == 0
+        mock_client.get_full_results.assert_called_once_with(["a", "b"])
+
+    def test_results_full_positional_comma_is_not_split(self, mock_client):
+        mock_client.get_full_result.return_value = self._batch_job("a,b")
+        mock_client.get_full_result.return_value["tests"] = {
+            "entries": [],
+            "total": 0,
+            "offset": 0,
+            "limit": 50,
+            "has_more": False,
+        }
+        result = runner.invoke(app, ["results", "full", "a,b"])
+        assert result.exit_code == 0
+        mock_client.get_full_result.assert_called_once_with(
+            "a,b",
+            status=None,
+            child_job_name=None,
+            child_build_number=None,
+            offset=0,
+            limit=50,
+        )
+        mock_client.get_full_results.assert_not_called()
+
+    def test_results_full_positionals_and_option_dedupe_in_order(self, mock_client):
+        mock_client.get_full_results.return_value = {
+            "jobs": [],
+            "missing": ["a", "b", "c"],
+            "forbidden": [],
+        }
+        result = runner.invoke(app, ["results", "full", "a", "b", "--job-ids", "b,c"])
+        assert result.exit_code == 0
+        mock_client.get_full_results.assert_called_once_with(["a", "b", "c"])
+
+    def test_results_full_multiple_ids_rejects_tests_flags(self, mock_client):
+        result = runner.invoke(app, ["results", "full", "a", "b", "--limit", "1"])
+        assert result.exit_code == 1
+        assert "--limit" in result.output
+        mock_client.get_full_results.assert_not_called()
+
+    def test_results_full_multiple_ids_json_envelope(self, mock_client):
+        mock_client.get_full_results.return_value = {
+            "jobs": [self._batch_job("a"), self._batch_job("b")],
+            "missing": ["c"],
+            "forbidden": [],
+        }
+        result = runner.invoke(app, ["results", "full", "a", "b", "--json"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert set(parsed) == {"jobs", "missing", "forbidden"}
+        assert [item["job"]["job_id"] for item in parsed["jobs"]] == ["a", "b"]
+
+    def test_results_full_with_no_ids_errors(self, mock_client):
+        result = runner.invoke(app, ["results", "full"])
+        assert result.exit_code == 1
+        assert "job id" in result.output.lower()
+        mock_client.get_full_result.assert_not_called()
+        mock_client.get_full_results.assert_not_called()
+
+    def test_results_full_batch_renders_each_job_like_the_single_id_path(
+        self, mock_client
+    ):
+        mock_client.get_full_results.return_value = {
+            "jobs": [self._batch_job("a"), self._batch_job("b")],
+            "missing": ["gone-1"],
+            "forbidden": [],
+        }
+        result = runner.invoke(app, ["results", "full", "a", "b"])
+        assert result.exit_code == 0
+        assert result.output.count("10 passed") == 2
+        assert result.output.count("Classifications: CODE ISSUE: 1") == 2
+        assert "Tests (" not in result.output
+        assert "Missing ids: gone-1" in result.output
+
 
 class TestReviewStatusCommand:
     def test_review_status(self, mock_client):
