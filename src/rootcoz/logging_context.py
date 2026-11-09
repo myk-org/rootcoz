@@ -9,10 +9,12 @@ the application log file path, derived from the ``DB_PATH`` env var —
 and :func:`enable_log_file`, which creates the one shared file handler the
 whole application writes through (see ``rootcoz.get_child_logger``).
 
-The module is stdlib-only at import time: ``simple_logger`` is imported
-inside :func:`enable_log_file`, so importing this module never calls
-``logging.setLoggerClass(SimpleLogger)`` behind ``rootcoz/__init__.py``'s
-level-authority parent.
+The module is stdlib-only at import time except for ``DuplicateFilter``: it
+is imported at module level so :class:`RootcozDuplicateFilter` can subclass it
+and inherit its behaviour instead of copying it. That import only runs
+``logging.setLoggerClass(SimpleLogger)``, which cannot reach the ``rootcoz``
+level-authority parent — ``rootcoz/__init__`` creates it, and has to run,
+before this module can be imported.
 """
 
 from __future__ import annotations
@@ -26,6 +28,8 @@ import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
+
+from simple_logger.logger import DuplicateFilter
 
 if TYPE_CHECKING:
     from io import TextIOWrapper
@@ -84,6 +88,41 @@ class JobIdFilter(logging.Filter):
             if not isinstance(record.msg, str) or not record.msg.startswith(prefix):
                 record.msg = f"{prefix}{record.msg}"
         return True
+
+
+class RootcozDuplicateFilter(DuplicateFilter):
+    """simple_logger's duplicate filter, minus hiding audit records.
+
+    ``DuplicateFilter`` keys on ``(module, levelno, msg)`` — the *unformatted*
+    template, arguments ignored — and drops every consecutive repeat. For
+    chatter that is the point; for the audit trail it destroys evidence: two
+    identical consecutive attempts, or two warnings off one ``%s`` template,
+    are distinct records. A record marked ``dedup_exempt`` passes untouched,
+    and leaves the remember-state alone so it cannot mask a following repeat.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if getattr(record, "dedup_exempt", False):
+            return True
+        return super().filter(record)
+
+
+def install_dedup_exempt_filter(logger: logging.Logger) -> None:
+    """Swap every ``DuplicateFilter`` on *logger* and its handlers in place.
+
+    simple_logger attaches one instance to the logger and one to the console
+    handler, and the logger-level one drops a record before any handler sees
+    it, so both must change. Called from ``rootcoz.get_child_logger`` on every
+    call, hence the skip: an installed instance keeps its state and is never
+    stacked with a second one.
+    """
+    for target in (logger, *logger.handlers):
+        if any(isinstance(f, RootcozDuplicateFilter) for f in target.filters):
+            continue
+        target.filters = [
+            RootcozDuplicateFilter() if isinstance(f, DuplicateFilter) else f
+            for f in target.filters
+        ]
 
 
 def _debug(message: str, *args: object) -> None:

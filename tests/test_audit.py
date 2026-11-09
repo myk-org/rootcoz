@@ -7417,6 +7417,7 @@ async def test_volume_guard_never_throttles_other_actions(
 async def test_suppressed_auth_failures_still_log_once_per_window(
     audit_db: Path, caplog: pytest.LogCaptureFixture, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """The guard caps the rows and the log keeps every attempt plus one summary."""
     _reset_suppression(monkeypatch)
     monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(1))
     caplog.set_level(logging.INFO)
@@ -7431,13 +7432,29 @@ async def test_suppressed_auth_failures_still_log_once_per_window(
         main_logger.removeHandler(caplog.handler)
         monitoring_logger.removeHandler(caplog.handler)
 
-    # The existing per-event line survives for every attempt, stored or not.
-    for index in range(4):
-        assert f"Failed login attempt #{index}" in caplog.text
+    # Four attempts against a one-per-minute budget: one row, three drops.
+    stored = await storage.list_audit_events(action="auth.login_failed")
+    assert stored["total"] == 1
+    assert [event["actor"] for event in stored["events"]] == ["mallory"]
+    assert monitoring.audit_health_check()["suppressed_auth_events"] == 3
+
+    # Every attempt is evidence, and audit records are dedup-exempt, so no filter
+    # state an earlier test left behind can swallow #0.
+    attempted = [
+        record.getMessage()
+        for record in caplog.records
+        if "Failed login attempt #" in record.getMessage()
+    ]
+    assert attempted == [
+        f"[AUDIT] Failed login attempt #{index} for username 'mallory'"
+        for index in range(4)
+    ]
+
     summaries = [r for r in caplog.records if "volume guard" in r.getMessage()]
     assert len(summaries) == 1
     assert summaries[0].levelno == logging.WARNING
     assert "beyond 1 per minute" in summaries[0].getMessage()
+    assert "previous window dropped 0" in summaries[0].getMessage()
 
 
 def test_suppression_tracking_is_capped_for_junk_usernames(
