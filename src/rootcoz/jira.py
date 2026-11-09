@@ -17,7 +17,13 @@ from urllib.parse import urlparse
 import httpx
 
 from rootcoz import get_child_logger
-from rootcoz.config import Settings, jira_unavailable_reason, normalize_jira_auth_mode
+from rootcoz.config import (
+    Settings,
+    get_settings,
+    jira_unavailable_reason,
+    normalize_jira_auth_mode,
+)
+from rootcoz.error_messages import deployment_credential_message
 from rootcoz.issue_matching import (
     TrackerSearch,
     collect_product_bug_reports,
@@ -353,6 +359,91 @@ def resolve_jira_connection_from_params(
         jira_auth_mode=auth_mode,
     )
     return resolve_jira_connection(settings)
+
+
+#: Modes whose credential is a PERSONAL one (an e-mail + API token pair, or a
+#: PAT), so "this is the deployment's own secret" is a refusal a user can act on.
+#: In the gateway modes (``sa``/OAuth 2.0 credential, ``atst`` scoped token) the
+#: credential belongs to the site's service account and a user's only mintable
+#: value is byte-identical to the deployment's — refusing it would refuse every
+#: write on such a deployment with advice nobody can follow.
+_PERSONAL_JIRA_MODES = frozenset({"cloud", "server"})
+
+
+class JiraDeploymentCredentialRefused(ValueError):
+    """A tracker WRITE presented the deployment's own credential.
+
+    Subclasses ``ValueError`` on purpose: ``main._ISSUE_CREATE_REFUSALS``
+    already carries ``ValueError`` and maps it to a 400 with ``str(exc)``, and
+    ``main._create_may_have_filed`` already classifies it as "nothing was
+    sent" — so the refusal can never become a 500/502 and a chat confirmation
+    survives it instead of being spent.
+    """
+
+
+def _identity_secret(connection: JiraConnection) -> str:
+    """The raw secret a personal-credential connection carries ("" otherwise)."""
+    if connection.mode == "cloud" and connection.auth:
+        return connection.auth[1]
+    if connection.mode == "server":
+        return (
+            connection.headers.get("Authorization", "").removeprefix("Bearer ").strip()
+        )
+    return ""
+
+
+def _deployment_secrets(settings: Settings) -> set[str]:
+    """Every PERSONAL secret the deployment holds, whichever method is active.
+
+    A method switch saves only ``jira_auth_mode`` (Server Settings), so the
+    previous method's field keeps a live token: the deployment's credentials are
+    not the active mode's alone.
+    """
+    secrets: set[str] = set()
+    for secret in (settings.jira_api_token, settings.jira_pat):
+        if secret:
+            value = secret.get_secret_value().removeprefix("Bearer ").strip()
+            if value:
+                secrets.add(value)
+    return secrets
+
+
+def require_caller_connection(connection: JiraConnection) -> None:
+    """Refuse a write whose connection carries the DEPLOYMENT's own secret.
+
+    The tracker write paths (``bug_creation.create_jira_bug``) take a resolved
+    connection instead of ``Settings`` so they have no credential to resolve,
+    and every one of them runs this guard first: a caller that builds the
+    connection carelessly must not file as the deployment.
+
+    The reference is ``get_settings()``, read HERE — the deployment accessor the
+    server already uses — so a caller cannot weaken the check by passing a
+    smaller ``Settings``, and it is every personal secret the deployment holds
+    (:func:`_deployment_secrets`), not the selected method's alone: a switch
+    leaves the previous method's field populated, so comparing only the active
+    one let the retained token file as the deployment. The comparison is on the
+    SECRET, never the whole connection: ``auth=("their_email", <deployment
+    token>)`` differs from the deployment's connection in the e-mail alone, and
+    the reverse (a deployment ``basic`` credential sent as a bare bearer PAT)
+    differs only in field placement — hence the ``Bearer `` prefix is stripped
+    on both sides. Gateway modes are out of scope; see
+    :data:`_PERSONAL_JIRA_MODES`.
+
+    Raises:
+        JiraDeploymentCredentialRefused: the connection's secret is the
+            deployment's own, in a mode where the user could supply another.
+    """
+    if connection.mode not in _PERSONAL_JIRA_MODES:
+        return
+    # shortcut: personal-mode secrets only, so the deployment's gateway
+    # credential (oauth/atst) presented as a personal token is not caught.
+    # Upgrade if a refusal there becomes actionable for the user.
+    if _identity_secret(connection) in _deployment_secrets(get_settings()):
+        logger.warning(
+            "Refusing to file a Jira issue with the deployment credential (mode=%s)",
+            connection.mode,
+        )
+        raise JiraDeploymentCredentialRefused(deployment_credential_message())
 
 
 def jira_missing_api_base_error(connection: JiraConnection) -> ValueError:

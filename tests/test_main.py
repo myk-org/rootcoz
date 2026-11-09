@@ -4240,6 +4240,22 @@ class TestCreateGithubIssue:
         assert "disabled" in response.json()["detail"].lower()
 
 
+def _jira_create_result_data() -> dict:
+    """One completed job result with a PRODUCT BUG failure, for create tests."""
+    return {
+        "status": "completed",
+        "summary": "",
+        "failures": [
+            {
+                "test_name": "test_login_success",
+                "error": "err",
+                "error_signature": "sig456",
+                "analysis": {"classification": "PRODUCT BUG"},
+            }
+        ],
+    }
+
+
 class TestCreateJiraBug:
     """Tests for POST /results/{job_id}/create-jira-bug."""
 
@@ -4289,6 +4305,87 @@ class TestCreateJiraBug:
         assert "PROJ-456" in tracker_comment["comment"]
         assert "DNS timeout" in tracker_comment["comment"]
         assert tracker_comment["username"] == "testuser-jira"
+
+    @pytest.mark.asyncio
+    async def test_create_jira_bug_refuses_the_deployment_credential(self, test_client):
+        """Submitting the server's own token is a 400, not a filing — and audited.
+
+        The refusal is a credential-policy denial, so unlike the tracker
+        refusals it leaves exactly one ``issue.create`` row, carrying no title
+        and no body (nothing reached the tracker and no submitted text belongs
+        in the trail).
+        """
+        from rootcoz.error_messages import deployment_credential_message
+
+        await storage.save_result(
+            "job-jira-deploy-cred",
+            "http://jenkins",
+            "completed",
+            _jira_create_result_data(),
+        )
+        with (
+            _enable_feature("jira_enabled"),
+            patch("rootcoz.bug_creation.httpx.AsyncClient") as AsyncClient,
+        ):
+            response = test_client.post(
+                "/results/job-jira-deploy-cred/create-jira-bug",
+                json={
+                    "test_name": "test_login_success",
+                    "title": "Forbidden title",
+                    "body": "Forbidden body",
+                    # The deployment's own API token (from _enable_feature).
+                    "jira_token": "test_jira_token",
+                },
+            )
+        # The helper IS called; the HTTP client is not — nothing was posted.
+        AsyncClient.assert_not_called()
+        assert response.status_code == 400, response.text
+        assert response.json()["detail"] == deployment_credential_message()
+
+        events = (await storage.list_audit_events(action="issue.create"))["events"]
+        assert len(events) == 1, events
+        event = events[0]
+        assert event["outcome"] == "denied"
+        assert event["target_type"] == "job"
+        assert event["target_id"] == "job-jira-deploy-cred"
+        assert set(event["details"]) == {"reason"}
+        serialized = json.dumps(event)
+        assert "Forbidden title" not in serialized
+        assert "Forbidden body" not in serialized
+
+    @pytest.mark.asyncio
+    async def test_create_jira_bug_falls_back_to_the_configured_project_key(
+        self, test_client
+    ):
+        """No request project key → the deployment's ``JIRA_PROJECT_KEY``.
+
+        The fallback moved from the create helper (which no longer takes
+        settings) to this caller, so it must stay visible here.
+        """
+        await storage.save_result(
+            "job-jira-proj-fallback",
+            "http://jenkins",
+            "completed",
+            _jira_create_result_data(),
+        )
+        with patch("rootcoz.main.create_jira_bug") as mock_create:
+            mock_create.return_value = {
+                "key": "TEST-1",
+                "url": "https://jira.example.com/browse/TEST-1",
+            }
+            # JIRA_PROJECT_KEY=TEST is part of the enabled-Jira fixture.
+            with _enable_feature("jira_enabled"):
+                response = test_client.post(
+                    "/results/job-jira-proj-fallback/create-jira-bug",
+                    json={
+                        "test_name": "test_login_success",
+                        "title": "Bug",
+                        "body": "Details",
+                        "jira_token": "user_jira_token",
+                    },
+                )
+        assert response.status_code == 201, response.text
+        assert mock_create.call_args.kwargs["project_key"] == "TEST"
 
     @pytest.mark.asyncio
     async def test_create_jira_disabled_returns_403(self, test_client):
@@ -4715,10 +4812,11 @@ class TestJiraMethodConfiguredUsesEffectiveSettings:
         finally:
             app.dependency_overrides.pop(get_settings, None)
         assert response.status_code == 201, response.text
-        # Created with the USER's credential, not the (absent) server secret
-        call_settings = mock_create.call_args[1]["settings"]
-        assert call_settings.jira_pat.get_secret_value() == "user_jira_pat"
-        assert call_settings.jira_auth_mode == "pat"
+        # Created with the USER's credential, not the (absent) server secret —
+        # read off the resolved connection the create helper now receives.
+        connection = mock_create.call_args[1]["connection"]
+        assert connection.mode == "server"
+        assert connection.headers["Authorization"] == "Bearer user_jira_pat"
 
     @pytest.mark.asyncio
     async def test_preview_proceeds_with_user_token_without_server_secret(
@@ -6179,9 +6277,9 @@ class TestChatIssueEndpoint:
             "jira_project": "TEST",
             "site": "jira.example.com",
         }
-        call_settings = mock_create.call_args[1]["settings"]
-        assert call_settings.jira_api_token.get_secret_value() == "user_jira_token"
-        assert call_settings.jira_auth_mode == "basic"
+        connection = mock_create.call_args[1]["connection"]
+        assert connection.mode == "cloud"
+        assert connection.auth == ("user@example.com", "user_jira_token")
 
     @pytest.mark.asyncio
     async def test_jira_never_falls_back_to_the_server_token(self, test_client):
