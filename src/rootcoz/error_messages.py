@@ -142,6 +142,21 @@ def tracker_credential_message(kind: str, *, has_profile: bool = True) -> str:
     )
 
 
+def deployment_credential_message() -> str:
+    """The refusal for a tracker write that presented the server's own token.
+
+    Deliberately does not point at Profile Settings: the bootstrap ``admin``
+    has no ``users`` row and ``PUT /api/user/tokens`` answers 404 for it — the
+    dead end ``tracker_credential_message``'s ``has_profile`` exists to avoid.
+    A doc and a test quote this one string, so the wording lives here.
+    """
+    return (
+        "This Jira token is the server's own deployment credential, which can "
+        "only be used for reading. Filing uses your own token — supply a "
+        "personal Jira token and try again."
+    )
+
+
 def ai_not_configured_message(what: str, *, is_admin: bool = False) -> str:
     """Build a role-aware error message when AI provider/model is not configured."""
     if is_admin:
