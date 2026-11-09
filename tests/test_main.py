@@ -336,6 +336,36 @@ class TestHealthEndpoint:
         assert isinstance(data["version"], str)
         assert len(data["version"]) > 0
 
+    def test_version_payload_is_only_version_without_build_args(
+        self, test_client, monkeypatch
+    ) -> None:
+        """#520: no build args ⇒ no build key, so the two states stay distinct."""
+        for name in ("GIT_SHA", "GIT_REF", "BUILT_AT"):
+            monkeypatch.delenv(name, raising=False)
+        response = test_client.get("/api/version")
+        assert response.status_code == 200
+        assert set(response.json()) == {"version"}
+
+    def test_version_endpoint_reports_build_when_args_are_set(
+        self, test_client, monkeypatch
+    ) -> None:
+        """#520: the image's own identity, beside an unchanged version."""
+        commit = "d6a1f3c9e8b7a6f5d4c3b2a1f0e9d8c7b6a5f4e3"  # pragma: allowlist secret
+        monkeypatch.setenv("GIT_SHA", commit)
+        monkeypatch.setenv("GIT_REF", "latest")
+        monkeypatch.setenv("BUILT_AT", "2026-01-02T03:04:05Z")
+        response = test_client.get("/api/version")
+        assert response.status_code == 200
+        data = response.json()
+        assert set(data) == {"version", "build"}
+        assert isinstance(data["version"], str)
+        assert data["build"] == {
+            "commit": commit,
+            "ref": "latest",
+            "built_at": "2026-01-02T03:04:05Z",
+            "label": "latest@d6a1f3c",
+        }
+
     def test_version_endpoint_requires_auth(
         self, mock_settings, temp_db_path: Path
     ) -> None:

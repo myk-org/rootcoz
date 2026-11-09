@@ -40,7 +40,7 @@ That single command resolves the server, authenticates, and returns machine-read
 | --- | --- |
 | `rootcoz register USERNAME` | Register a user and print the new API key once. |
 | `rootcoz health` | Server health, per-check status, and recent error rate. |
-| `rootcoz version` | Server version string. |
+| `rootcoz version` | Server version, plus the build identity when the image carries one (`4.14.1 · latest@d6a1f3c`); `--json` includes the `build` block (`commit`, `ref`, `built_at`, `label`). |
 
 3. **Manage authentication and AI keys.**
 

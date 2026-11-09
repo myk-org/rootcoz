@@ -108,10 +108,12 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
 
   // ─── Server version ─────────────────────────────────────────────
   const [version, setVersion] = useState('')
+  const [buildLabel, setBuildLabel] = useState('')
   // While auth is still resolving the version is meaningless; derive it instead
   // of clearing it from an effect so no stale value is ever rendered.
   const showVersion = !loading && authenticated
   const shownVersion = showVersion ? version : ''
+  const shownLabel = showVersion ? buildLabel : ''
 
   useEffect(() => {
     if (!showVersion) return
@@ -120,9 +122,10 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
 
     async function fetchVersion() {
       try {
-        const data = await api.get<{ version: string }>('/api/version', { signal: controller.signal })
+        const data = await api.get<{ version: string; build?: { label?: string } }>('/api/version', { signal: controller.signal })
         if (!data.version) return
         setVersion(data.version)
+        setBuildLabel(data.build?.label ?? '')
       } catch (err) {
         if (err instanceof DOMException && err.name === 'AbortError') return
         console.debug('Failed to fetch server version:', err)
@@ -252,6 +255,11 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
     ? `https://github.com/myk-org/rootcoz/releases/tag/v${encodeURIComponent(shownVersion)}`
     : undefined
 
+  // #520: the server composes the build suffix once ("latest@d6a1f3c"), and it is
+  // link text only — a floating-tag build must not link to a tag that is not the
+  // release the version names.
+  const suffix = shownLabel ? ` · ${shownLabel}` : ''
+
   const versionLink = (
     <a
       href={releaseUrl}
@@ -262,7 +270,7 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
         collapsed && 'gap-1',
       )}
     >
-      {collapsed ? 'v' : <span className="font-semibold">RootCoz v{shownVersion}</span>}
+      {collapsed ? 'v' : <span className="font-semibold">RootCoz v{shownVersion}{suffix}</span>}
     </a>
   )
 
@@ -271,7 +279,7 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
       {collapsed ? (
         <Tooltip>
           <TooltipTrigger asChild>{versionLink}</TooltipTrigger>
-          <TooltipContent side="right">rootcoz v{shownVersion}</TooltipContent>
+          <TooltipContent side="right">rootcoz v{shownVersion}{suffix}</TooltipContent>
         </Tooltip>
       ) : (
         versionLink

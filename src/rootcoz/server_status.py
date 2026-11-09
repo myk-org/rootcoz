@@ -445,13 +445,51 @@ def read_disk(
 _PROCESS_STARTED = time.monotonic()
 
 
+def read_build_info() -> dict[str, str] | None:
+    """The build identity this image carries, or ``None`` when none was supplied.
+
+    Empty is the absence of a fact, not a value: a plain local ``docker build``
+    has no commit/ref/time to name, so it reports nothing at all and every
+    surface degrades to the bare version.
+    """
+    commit = os.getenv("GIT_SHA", "").strip()
+    ref = os.getenv("GIT_REF", "").strip()
+    built_at = os.getenv("BUILT_AT", "").strip()
+    info = {
+        key: value
+        for key, value in (("commit", commit), ("ref", ref), ("built_at", built_at))
+        if value
+    }
+    if not info:
+        return None
+    label = _build_label(version=_get_app_version(), ref=ref, commit=commit)
+    if label:
+        info["label"] = label
+    return info
+
+
+def _build_label(*, version: str, ref: str, commit: str) -> str:
+    """Display suffix beside the version, empty when the ref *is* that release.
+
+    ``v4.15.0`` on version ``4.15.0`` is the same fact stated twice, so a
+    release build renders the bare version it always did; any other ref
+    (``latest``, a branch, ``pr-123``) is printed with its commit so it can
+    never be read as a release.
+    """
+    if ref and ref.removeprefix("v") == version.removeprefix("v"):
+        return ""
+    return "@".join(part for part in (ref, commit[:7]) if part)
+
+
 def read_process() -> dict[str, Any]:
     """Version, build sha, uptime, pid, restarts and the loop-lag sample."""
     return {
         "version": _get_app_version(),
-        # The image builder passes the commit (`--build-arg GIT_SHA=...`, which
-        # docker-compose.yaml forwards); empty when a builder omits it.
-        "git_sha": os.getenv("GIT_SHA", ""),
+        # The image builder passes the commit as ``--build-arg GIT_SHA=...`` (see
+        # ``read_build_info`` for the ref and build time); empty when a builder
+        # omits it. Read through the one reader so this card and the version
+        # endpoint cannot disagree about the commit.
+        "git_sha": (read_build_info() or {}).get("commit", ""),
         "uptime_seconds": round(time.monotonic() - _PROCESS_STARTED, 1),
         "pid": os.getpid(),
         # A container cannot read its own restart count (it is a Kubernetes

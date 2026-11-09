@@ -478,6 +478,9 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `PI_SIDECAR_AGENT_DIR` | — (no setting) | excluded | env-only (sidecar agent dir) |
 | `PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS` | — (no setting) | excluded | env-only (sidecar pruning) |
 | `PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB` | — (no setting) | excluded | env-only (sidecar pruning) |
+| `GIT_SHA` | — (no setting) | Build | restart (image build) |
+| `GIT_REF` | — (no setting) | Build | restart (image build) |
+| `BUILT_AT` | — (no setting) | Build | restart (image build) |
 
 `ADMIN_KEY` also bootstraps the `admin` superuser before any settings exist; keep the env var authoritative for bootstrap. Admin-managed server provider API keys (the `GEMINI_API_KEY` replacement for server-credential sessions) live in the encrypted `server_ai_providers` table, managed under Server Settings → AI — they are not env vars.
 
@@ -501,6 +504,19 @@ These are read straight from the process environment and have no `Settings` fiel
 | `GOOGLE_APPLICATION_CREDENTIALS` | unset | Path to the Vertex service-account key file the Helm chart mounts (`/gcloud-credentials/application_default_credentials.json`) |
 | `CLOUDSDK_CONFIG` | unset | gcloud config directory for the Vertex credential mount (`/gcloud-credentials` in the chart) |
 | `PI_SIDECAR_AGENT_DIR` | unset | Sidecar agent dir for custom providers and settings (see below) |
+| `GIT_SHA`, `GIT_REF`, `BUILT_AT` | empty | Which build this image is — see [Build identity](#build-identity) |
+
+#### Build identity
+
+`GIT_SHA`, `GIT_REF` and `BUILT_AT` are facts about the image, not configuration: they cannot change at runtime, so they are read straight from the process environment and have no Server Setting — the same class as `PUBLIC_BASE_URL`. All three are optional; empty means the builder supplied nothing and every surface degrades to the bare version.
+
+They reach the image through whatever builds it:
+
+- **The CI publisher** — `container.build-args` in the webhook-server configuration, with the placeholders it substitutes: `GIT_SHA: "{revision}"`, `GIT_REF: "{tag}"`, `BUILT_AT: "{created}"`. `{tag}` is the tag the image is published under (a release tag, `latest` for a main build, `pr-<n>` for a PR build), which is why `latest` is displayed verbatim — it is literally what the deployment pulls, not a synonym for `main`.
+- **A local `docker build`** — `--build-arg GIT_SHA=$(git rev-parse HEAD) --build-arg GIT_REF=latest --build-arg BUILT_AT=$(date -u +%FT%TZ)`. The bundled `docker-compose.yaml` forwards the same three environment variables to its build.
+- **An OpenShift `--branch` build** — a BuildConfig has no git metadata in the image, so set them in `spec.strategy.dockerStrategy.env` as `GIT_SHA`, `GIT_REF` and `BUILT_AT`. Without them the build carries no identity.
+
+The footer reads `v<version> · <ref>@<commit>` whenever the ref is not the release itself; a ref equal to the version (a release build) and an image with no args both render the bare `v<version>`.
 
 #### Transcript retention
 

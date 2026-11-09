@@ -245,6 +245,45 @@ describe('Sidebar', () => {
     })
   })
 
+  it('shows the build label beside the version when the image carries one', async () => {
+    // #520: a floating-tag build must never read as the release it reports.
+    mockApiGet.mockResolvedValue({ version: '4.5.0', build: { label: 'latest@d6a1f3c' } })
+    renderSidebar()
+    await waitFor(() => {
+      expect(screen.getByTestId('sidebar-version')).toHaveTextContent('RootCoz v4.5.0 · latest@d6a1f3c')
+    })
+    // D7: the label is link text, never part of the release URL.
+    const link = screen.getByTestId('sidebar-version').querySelector('a')
+    expect(link?.getAttribute('href')).toBe('https://github.com/myk-org/rootcoz/releases/tag/v4.5.0')
+  })
+
+  it('renders the build label in the mobile sidebar too', async () => {
+    mockApiGet.mockResolvedValue({ version: '4.5.0', build: { label: 'latest@d6a1f3c' } })
+    renderSidebar('/', { ...defaultProps, mobileOpen: true })
+    await waitFor(() => {
+      const footers = screen.getAllByTestId('sidebar-version')
+      expect(footers.length).toBe(2)
+      for (const footer of footers) {
+        expect(footer).toHaveTextContent('RootCoz v4.5.0 · latest@d6a1f3c')
+      }
+    })
+  })
+
+  it('carries the build label in the collapsed tooltip', async () => {
+    localStorage.setItem('rootcoz_sidebar_collapsed', 'true')
+    mockApiGet.mockResolvedValue({ version: '4.5.0', build: { label: 'latest@d6a1f3c' } })
+    renderSidebar()
+    await waitFor(() => {
+      expect(screen.getByTestId('sidebar-version')).toBeDefined()
+    })
+    const trigger = screen.getByTestId('sidebar-version').querySelector('a')
+    expect(trigger?.textContent).toBe('v')
+    await userEvent.hover(trigger!)
+    await waitFor(() => {
+      expect(screen.getByRole('tooltip')).toHaveTextContent('rootcoz v4.5.0 · latest@d6a1f3c')
+    })
+  })
+
   it('hides version footer when health endpoint fails', async () => {
     mockApiGet.mockRejectedValue(new Error('unavailable'))
     renderSidebar()

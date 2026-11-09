@@ -25,11 +25,14 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-      # Commit shown on the admin Server Status page. Set it for a real build:
-      #   GIT_SHA=$(git rev-parse HEAD) docker compose build
-      # Empty is fine: the Process card then says "not visible in this container".
+      # Build identity shown beside the version (sidebar, /api/version,
+      # `rootcoz version`). Set them for a real build:
+      #   GIT_SHA=$(git rev-parse HEAD) GIT_REF=latest BUILT_AT=$(date -u +%FT%TZ) docker compose build
+      # Empty is fine: the UI then shows the bare version.
       args:
         GIT_SHA: ${GIT_SHA:-}
+        GIT_REF: ${GIT_REF:-}
+        BUILT_AT: ${BUILT_AT:-}
 
     # Container name for easier management
     container_name: rootcoz

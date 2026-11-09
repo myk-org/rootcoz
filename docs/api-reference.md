@@ -72,7 +72,7 @@ That single authenticated GET returns the stored analysis for one job, including
 
 | Method | Path | Min role | Notes |
 | --- | --- | --- | --- |
-| GET | `/api/version` | viewer | Running version |
+| GET | `/api/version` | viewer | Running version, plus `build` when the image was built with its identity args: `{commit, ref, built_at, label?}`. `commit` is the full sha, `ref` the tag the image was published under, `built_at` the build timestamp, and `label` the display suffix the sidebar and `rootcoz version` print (`latest@d6a1f3c`) — absent when the ref *is* the version (a release build prints the bare version). The whole `build` key is omitted when the builder supplied nothing, so `"unknown"` is distinguishable from a real ref, and `version` is a plain string as it always was |
 | POST | `/api/auth/logout` | authenticated | Clears the session cookie |
 | GET | `/api/auth/me` | viewer | Username, role, `can_view_reports`, `can_use_server_providers` |
 | POST | `/api/auth/rotate-key` | viewer | Rotates your own API key; the old key stops working. Known gap — see the note below |

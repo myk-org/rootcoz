@@ -15567,8 +15567,18 @@ async def health_check() -> dict[str, Any]:
 
 @app.get("/api/version", operation_id="getVersion")
 async def get_version() -> dict[str, Any]:
-    """Return the application version (lightweight, no dependency checks)."""
-    return {"version": _get_app_version()}
+    """Return the application version (lightweight, no dependency checks).
+
+    ``build`` appears only when the image was built with its identity args, so
+    the UI can tell "unknown" from an actual ref and a plain ``version``
+    consumer keeps seeing exactly what it saw before #520.
+    """
+    payload: dict[str, Any] = {"version": _get_app_version()}
+    build = server_status.read_build_info()
+    if build:
+        payload["build"] = build
+    logger.debug("Reported version %s build %s", payload["version"], build)
+    return payload
 
 
 @app.get("/api/health", operation_id="healthCheckDetailed")

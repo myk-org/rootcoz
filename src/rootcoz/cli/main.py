@@ -852,7 +852,10 @@ def version(
     if _state.get("json", False):
         print_output(data, columns=[], as_json=True)
     else:
-        typer.echo(data.get("version", "unknown"))
+        line = data.get("version", "unknown")
+        # Same line the sidebar footer shows: the server composes the suffix once.
+        label = (data.get("build") or {}).get("label")
+        typer.echo(f"{line} · {label}" if label else line)
 
 
 # -- Results ------------------------------------------------------------------
