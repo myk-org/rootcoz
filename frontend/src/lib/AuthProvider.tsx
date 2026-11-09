@@ -157,19 +157,21 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     }
   }, [beginTransition, loading])
 
-  const logout = useCallback(async () => {
+  const logout = useCallback(async (): Promise<string | null> => {
     const guard = beginTransition()
-    if (!guard) return
+    if (!guard) return null
     const { isCurrent } = guard
+    let idpLogoutUrl: string | null = null
     try {
       try {
-        await api.post('/api/auth/logout')
+        const result = await api.post<{ idp_logout_url?: string | null }>('/api/auth/logout')
+        idpLogoutUrl = result?.idp_logout_url ?? null
       } catch {
         // ignore
       }
-      if (!isCurrent()) return
+      if (!isCurrent()) return null
       const { resetProviderCatalogCache } = await import('@/lib/useProviderOptions')
-      if (!isCurrent()) return
+      if (!isCurrent()) return null
       guard.advance()
       resetProviderCatalogCache()
       clearPrivileges()
@@ -180,6 +182,9 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     } finally {
       guard.finish()
     }
+    // The caller owns the navigation: it decides between the IdP and /login, so
+    // a logout can never navigate twice.
+    return idpLogoutUrl
   }, [beginTransition])
 
   return (

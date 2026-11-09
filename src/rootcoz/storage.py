@@ -2408,6 +2408,7 @@ async def init_db() -> None:
                 client_name TEXT,
                 expires_at TEXT NOT NULL,
                 interval_seconds INTEGER NOT NULL,
+                last_polled_at TEXT,
                 created_at TEXT NOT NULL
             )
         """)
@@ -2415,6 +2416,10 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_sso_device_codes_expires_at"
             " ON sso_device_codes (expires_at)"
         )
+        # Databases created before the poll throttle existed have no
+        # last_polled_at; without it the server cannot tell an honest poll from
+        # a flood, so the interval would be advisory only.
+        await _migrate_add_column(db, "sso_device_codes", "last_polled_at", "TEXT")
 
         # One-time tickets for the first-login choice screen: after the IdP has
         # authenticated someone with no link, the browser holds this instead of a
@@ -9948,6 +9953,44 @@ async def renew_session(token: str) -> bool:
         return cursor.rowcount > 0
 
 
+#: The columns a logout needs: who the session belongs to, and which provider
+#: issued it. One list so the two readers cannot drift.
+_SESSION_IDENTITY_COLUMNS = "username, auth_provider, is_admin, role"
+
+
+async def get_session_identity(token: str) -> dict[str, Any] | None:
+    """Who a session belongs to and which provider issued it, expiry ignored.
+
+    Logout needs both: a browser can hold a cookie past its TTL, and the row it
+    names still says which account (for the audit trail) and which IdP session
+    (for the end-session call) the cookie stands for. ``get_session`` filters
+    expired rows, which is right for authentication and wrong here.
+
+    Args:
+        token: Raw session token from the cookie.
+
+    Returns:
+        ``{"username": ..., "auth_provider": ..., "is_admin": ..., "role": ...}``,
+        or ``None`` when the token names no session at all. The role and admin
+        bit exist for the audit row: logout is a public path, so the middleware
+        never populates them.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            f"SELECT {_SESSION_IDENTITY_COLUMNS} FROM sessions WHERE token = ?",
+            (_hash_token(token),),
+        )
+        row = await cursor.fetchone()
+    if row is None:
+        return None
+    return {
+        "username": str(row["username"]),
+        "auth_provider": row["auth_provider"] or None,
+        "is_admin": bool(row["is_admin"]),
+        "role": str(row["role"] or "reviewer"),
+    }
+
+
 async def delete_session(token: str) -> None:
     """Delete a session (logout)."""
     token_hash = _hash_token(token)
@@ -10458,12 +10501,13 @@ def _device_code_row(row: Any) -> dict[str, Any]:
         "authorized": row["user_id"] is not None,
         "expires_at": row["expires_at"],
         "interval_seconds": row["interval_seconds"],
+        "last_polled_at": row["last_polled_at"],
     }
 
 
 _DEVICE_CODE_SELECT = (
     "SELECT user_code, provider, user_id, client_name, expires_at,"
-    " interval_seconds FROM sso_device_codes"
+    " interval_seconds, last_polled_at FROM sso_device_codes"
 )
 
 
@@ -10566,6 +10610,80 @@ async def authorize_device_code(
             return updated.rowcount > 0
 
     return await _retry_contended(_attempt)
+
+
+async def record_device_code_poll(device_code: str) -> bool:
+    """Record a poll and say whether it arrived inside the allowed interval.
+
+    The CLI promises to poll no faster than ``interval_seconds``; the server is
+    what makes that promise binding, so a caller that ignores it is answered
+    ``slow_down`` instead of being served. The timestamp is stamped even for a
+    too-early poll, so a client cannot escape the window by polling constantly.
+
+    Args:
+        device_code: The raw device code the CLI holds.
+
+    Returns:
+        True when this poll is inside the window (and is now the reference
+        point), False when it came too soon after the previous one or the code
+        is unknown/expired.
+    """
+    device_hash = _hash_token(device_code)
+    now = datetime.now(UTC)
+    now_str = now.strftime(SQL_TIMESTAMP_FORMAT)
+
+    async def _attempt() -> bool:
+        async with _connect_db() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    "SELECT interval_seconds, last_polled_at FROM sso_device_codes"
+                    f" WHERE device_code_hash = ? AND {_LIVE_ROW}",
+                    (device_hash,),
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    await db.rollback()
+                    return False
+                last = row["last_polled_at"]
+                # Compare the stored strings at the precision the column keeps:
+                # ``last_polled_at`` comes back naive (SQLite has no zone), so
+                # subtracting it from an aware ``now`` would raise instead of
+                # answering.
+                stamped = datetime.strptime(now_str, SQL_TIMESTAMP_FORMAT)
+                too_soon = last is not None and (
+                    stamped - datetime.strptime(last, SQL_TIMESTAMP_FORMAT)
+                ) < timedelta(seconds=row["interval_seconds"])
+                await db.execute(
+                    "UPDATE sso_device_codes SET last_polled_at = ?"
+                    " WHERE device_code_hash = ?",
+                    (now_str, device_hash),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+            return not too_soon
+
+    return await _with_lock_retry(_attempt)
+
+
+async def count_live_device_codes() -> int:
+    """How many device codes are currently approvable.
+
+    The flow's start route is anonymous and public, so the table it writes to is
+    reachable by anyone; a cap on *live* codes is what bounds it, because the
+    hourly purge is far slower than a caller can insert.
+
+    Returns:
+        The number of unexpired `sso_device_codes` rows.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            f"SELECT COUNT(*) AS n FROM sso_device_codes WHERE {_LIVE_ROW}"
+        )
+        row = await cursor.fetchone()
+    return int(row["n"]) if row else 0
 
 
 async def redeem_device_code(device_code: str) -> dict[str, Any] | None:

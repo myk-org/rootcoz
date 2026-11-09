@@ -108,6 +108,14 @@ async def _ticket(
     return ticket
 
 
+async def _last_logout_reason(temp_db_path: Path) -> str | None:
+    """The `idp_logout` reason on the most recent logout row."""
+    rows = [
+        r for r in await _audit_actions(temp_db_path) if r["action"] == "auth.logout"
+    ]
+    return rows[-1]["details"]["idp_logout"] if rows else None
+
+
 async def _audit_actions(temp_db_path: Path) -> list[dict]:
     """Every audit row written to the test database."""
     with patch.object(storage, "DB_PATH", temp_db_path):
@@ -139,6 +147,30 @@ def test_a_provider_is_offered_only_when_it_is_configured() -> None:
         assert get_provider("github", get_settings()) is None
 
     get_settings.cache_clear()
+
+
+@pytest.mark.parametrize(
+    "url,allow_loopback,expected",
+    [
+        ("https://idp.example.com/logout", False, True),
+        ("http://idp.example.com/logout", True, False),
+        ("http://localhost:8443/logout", True, True),
+        ("http://127.0.0.1/logout", True, True),
+        ("https://u:p@idp.example.com/logout", True, False),  # pragma: allowlist secret
+        ("https://idp.example.com/logout#frag", True, False),
+        ("https://idp.example.com/logout\n", True, False),
+        ("javascript:alert(1)", True, False),
+        ("https://[::1/x", True, False),
+        ("", True, False),
+    ],
+)
+def test_the_navigation_predicate_answers_a_boolean(
+    url: str, allow_loopback: bool, expected: bool
+) -> None:
+    """One rule for "may the browser go here", and it never raises."""
+    from rootcoz.url_utils import is_safe_navigation_url
+
+    assert is_safe_navigation_url(url, allow_loopback_http=allow_loopback) is expected
 
 
 def test_the_registry_and_storage_agree_on_provider_names() -> None:
@@ -1471,6 +1503,315 @@ async def test_a_linked_pending_account_lands_on_pending(temp_db_path: Path) -> 
         assert client.get("/api/auth/me").status_code == 403
 
 
+async def test_an_anonymous_logout_writes_no_audit_row(temp_db_path: Path) -> None:
+    """The route is public; a call that cleared nothing must not fill the trail."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        response = client.post("/api/auth/logout")
+
+        assert response.status_code == 200
+        assert response.json()["idp_logout_url"] is None
+
+    assert await _audit_actions(temp_db_path) == []
+
+
+async def test_logout_of_an_api_key_session_has_no_idp_url(
+    temp_db_path: Path,
+) -> None:
+    """Nothing external to end for a session this deployment issued itself."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        _name, raw_key = await storage.create_user("alice")
+        client.post("/api/auth/login", json={"username": "alice", "api_key": raw_key})
+
+        response = client.post("/api/auth/logout")
+
+        assert response.status_code == 200
+        assert response.json()["idp_logout_url"] is None
+        # The local session is gone either way.
+        assert client.get("/api/auth/me").status_code == 401
+
+
+async def test_logout_of_an_sso_session_ends_the_provider_session(
+    temp_db_path: Path,
+) -> None:
+    """The IdP session is only endable when the provider advertises a URL."""
+    from rootcoz.auth.sso.oidc import OIDCProvider
+
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        token = await storage.create_session(
+            "alice", is_admin=False, role="reviewer", auth_provider="google"
+        )
+        client.cookies.set("rootcoz_session", token)
+
+        with patch.object(
+            OIDCProvider,
+            "metadata",
+            return_value={"end_session_endpoint": "https://accounts.google.com/logout"},
+            autospec=True,
+        ):
+            response = client.post("/api/auth/logout")
+
+        assert response.status_code == 200
+        url = response.json()["idp_logout_url"]
+        assert url is not None
+        assert url.startswith("https://accounts.google.com/logout")
+        assert "post_logout_redirect_uri=https%3A%2F%2Frootcoz.example%2Flogin" in url
+        # Keycloak needs the client id to validate that redirect, since no ID
+        # token hint is sent.
+        assert "client_id=test-client-id" in url
+        # The IdP URL is a bonus: the local session is already gone.
+        assert client.get("/api/auth/me").status_code == 401
+
+    rows = [
+        r for r in await _audit_actions(temp_db_path) if r["action"] == "auth.logout"
+    ]
+    assert rows[-1]["details"] == {"session_cleared": True, "idp_logout": "offered"}
+
+
+@pytest.mark.parametrize(
+    "endpoint",
+    [
+        "javascript:alert(1)",
+        "http://sso.example.com/logout",
+        # userinfo in a discovered URL must be refused, not navigated to
+        "https://user:pass@sso.example.com/logout",  # pragma: allowlist secret
+        "https://sso.example.com/logout#frag",
+        "",
+    ],
+)
+async def test_a_discovered_end_session_endpoint_must_be_a_plain_https_url(
+    endpoint: str,
+) -> None:
+    """Discovery is trusted for identity, not for navigation."""
+    from rootcoz.auth.sso.oidc import OIDCProvider
+
+    provider = OIDCProvider(client_id="cid", client_secret="s", issuer="https://i")
+    with patch.object(
+        OIDCProvider,
+        "metadata",
+        return_value={"end_session_endpoint": endpoint},
+        autospec=True,
+    ):
+        assert await provider.end_session_url("https://rootcoz.example/login") is None
+
+
+async def test_an_endpoint_that_already_has_a_query_keeps_it() -> None:
+    """A discovered endpoint may carry parameters; a second '?' would corrupt it."""
+    from rootcoz.auth.sso.oidc import OIDCProvider
+
+    provider = OIDCProvider(client_id="cid", client_secret="s", issuer="https://i")
+    with patch.object(
+        OIDCProvider,
+        "metadata",
+        return_value={"end_session_endpoint": "https://sso.example.com/logout?realm=x"},
+        autospec=True,
+    ):
+        url = await provider.end_session_url("https://rootcoz.example/login")
+
+    assert url is not None
+    assert "?realm=x&" in url
+    assert "?realm=x?" not in url
+
+
+async def test_a_loopback_dev_endpoint_is_allowed() -> None:
+    """A local Keycloak over http is a real development setup."""
+    from rootcoz.auth.sso.oidc import OIDCProvider
+
+    provider = OIDCProvider(client_id="cid", client_secret="s", issuer="https://i")
+    with patch.object(
+        OIDCProvider,
+        "metadata",
+        return_value={"end_session_endpoint": "http://localhost:8443/logout"},
+        autospec=True,
+    ):
+        url = await provider.end_session_url("https://rootcoz.example/login")
+    assert url is not None and url.startswith("http://localhost:8443/logout")
+
+
+async def test_a_provider_without_end_session_logs_out_locally(
+    temp_db_path: Path,
+) -> None:
+    """GitHub has no end-session endpoint at all; the answer is null, not a URL."""
+    env = dict(
+        _SSO_ENV,
+        SSO_GITHUB_CLIENT_ID="gh-id",
+        SSO_GITHUB_CLIENT_SECRET="gh-secret",  # pragma: allowlist secret
+    )
+    for client in make_app_client(temp_db_path, env):
+        await storage.create_user("alice")
+        token = await storage.create_session(
+            "alice", is_admin=False, role="reviewer", auth_provider="github"
+        )
+        client.cookies.set("rootcoz_session", token)
+
+        response = client.post("/api/auth/logout")
+
+        assert response.json()["idp_logout_url"] is None
+        # The local logout always happened first.
+        assert client.get("/api/auth/me").status_code == 401
+
+    assert await _last_logout_reason(temp_db_path) == "local_only"
+
+
+async def test_sso_logout_deletes_the_session_row(temp_db_path: Path) -> None:
+    """The row is gone, not merely the cookie: a copied cookie must not survive."""
+    from rootcoz.auth.sso.oidc import OIDCProvider
+
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        token = await storage.create_session(
+            "alice", is_admin=False, role="reviewer", auth_provider="google"
+        )
+        client.cookies.set("rootcoz_session", token)
+
+        with patch.object(OIDCProvider, "metadata", return_value={}, autospec=True):
+            client.post("/api/auth/logout")
+
+        # Neither lookup sees it any more — the cookie was not the only copy.
+        assert await storage.get_session(token) is None
+        assert await storage.get_session_identity(token) is None
+
+
+async def test_a_provider_whose_settings_were_removed_logs_out_locally(
+    temp_db_path: Path,
+) -> None:
+    """`provider_unavailable`: the session names a provider the deployment dropped."""
+    env = {
+        # No Google client pair: the provider is not offered any more.
+        "PUBLIC_BASE_URL": "https://rootcoz.example",
+    }
+    for client in make_app_client(temp_db_path, env):
+        await storage.create_user("alice")
+        token = await storage.create_session(
+            "alice", is_admin=False, role="reviewer", auth_provider="google"
+        )
+        client.cookies.set("rootcoz_session", token)
+
+        response = client.post("/api/auth/logout")
+
+        assert response.json()["idp_logout_url"] is None
+        assert client.get("/api/auth/me").status_code == 401
+
+    assert await _last_logout_reason(temp_db_path) == "provider_unavailable"
+
+
+async def test_a_provider_bug_does_not_fail_the_logout(
+    temp_db_path: Path,
+) -> None:
+    """An unexpected provider error is logged, and the logout still succeeds."""
+    from rootcoz.auth.sso.oidc import OIDCProvider
+
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        token = await storage.create_session(
+            "alice", is_admin=False, role="reviewer", auth_provider="google"
+        )
+        client.cookies.set("rootcoz_session", token)
+
+        with patch.object(
+            OIDCProvider,
+            "end_session_url",
+            side_effect=RuntimeError("provider bug"),
+            autospec=True,
+        ):
+            response = client.post("/api/auth/logout")
+
+        assert response.status_code == 200
+        assert response.json()["idp_logout_url"] is None
+        # Local logout is authoritative even when the provider misbehaves.
+        assert await storage.get_session(token) is None
+
+
+async def test_an_expired_session_still_ends_the_provider_session(
+    temp_db_path: Path,
+) -> None:
+    """A cookie can outlive its row's TTL; the IdP session it opened has not."""
+    from rootcoz.auth.sso.oidc import OIDCProvider
+
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        token = await storage.create_session(
+            "alice", is_admin=False, role="reviewer", auth_provider="google"
+        )
+        # Expire the row: get_session no longer sees it, a cookie would linger.
+        async with storage._connect_db() as db:
+            await db.execute(
+                "UPDATE sessions SET expires_at = '2000-01-01 00:00:00' WHERE 1"
+            )
+            await db.commit()
+        client.cookies.set("rootcoz_session", token)
+
+        with patch.object(
+            OIDCProvider,
+            "metadata",
+            return_value={"end_session_endpoint": "https://accounts.google.com/logout"},
+            autospec=True,
+        ):
+            response = client.post("/api/auth/logout")
+
+        assert response.json()["idp_logout_url"].startswith(
+            "https://accounts.google.com/logout"
+        )
+
+
+async def test_an_unreachable_provider_still_logs_out_locally(
+    temp_db_path: Path,
+) -> None:
+    """A discovery failure during logout must not keep the local session alive."""
+    from rootcoz.auth.sso.base import AuthError
+    from rootcoz.auth.sso.oidc import OIDCProvider
+
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        token = await storage.create_session(
+            "alice", is_admin=False, role="reviewer", auth_provider="google"
+        )
+        client.cookies.set("rootcoz_session", token)
+
+        with patch.object(
+            OIDCProvider,
+            "metadata",
+            side_effect=AuthError("discovery_failed", "boom"),
+            autospec=True,
+        ):
+            response = client.post("/api/auth/logout")
+
+        assert response.status_code == 200
+        assert response.json()["idp_logout_url"] is None
+        assert client.get("/api/auth/me").status_code == 401
+
+
+async def test_logout_without_a_public_base_url_stays_local(
+    temp_db_path: Path,
+) -> None:
+    """No configured origin means no absolute redirect can be trusted."""
+    from rootcoz.auth.sso.oidc import OIDCProvider
+
+    env = {
+        "SSO_GOOGLE_CLIENT_ID": "test-client-id",
+        "SSO_GOOGLE_CLIENT_SECRET": "test-client-secret",  # pragma: allowlist secret
+    }
+    for client in make_app_client(temp_db_path, env):
+        await storage.create_user("alice")
+        token = await storage.create_session(
+            "alice", is_admin=False, role="reviewer", auth_provider="google"
+        )
+        client.cookies.set("rootcoz_session", token)
+
+        with patch.object(
+            OIDCProvider,
+            "metadata",
+            return_value={"end_session_endpoint": "https://accounts.google.com/logout"},
+            autospec=True,
+        ):
+            response = client.post("/api/auth/logout")
+
+        assert response.json()["idp_logout_url"] is None
+        assert client.get("/api/auth/me").status_code == 401
+
+    assert await _last_logout_reason(temp_db_path) == "no_public_base_url"
+
+
 def test_login_redirects_to_the_provider_with_a_sealed_state(
     temp_db_path: Path,
 ) -> None:
@@ -1811,3 +2152,268 @@ async def test_a_token_signed_by_a_foreign_key_is_refused() -> None:
     with pytest.raises(AuthError) as excinfo:
         await _verify(token, other_keys)
     assert excinfo.value.reason == "id_token_invalid"
+
+
+# -- CLI device flow ----------------------------------------------------------
+
+
+def _start_device(client, **body: object) -> dict:
+    """Start a device flow and return the server's answer."""
+    response = client.post("/api/auth/sso/device/start", json=body)
+    assert response.status_code == 200, response.text
+    return response.json()
+
+
+async def test_device_start_needs_a_configured_provider(temp_db_path: Path) -> None:
+    """With no IdP configured there is nothing a code could be approved against."""
+    for client in make_app_client(temp_db_path):
+        response = client.post("/api/auth/sso/device/start", json={})
+        assert response.status_code == 404
+
+
+def test_device_start_refuses_an_unknown_or_oversized_input(temp_db_path: Path) -> None:
+    """The provider must be configured, and the label a human reads is bounded."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        assert (
+            client.post(
+                "/api/auth/sso/device/start", json={"provider": "nope"}
+            ).status_code
+            == 400
+        )
+        assert (
+            client.post(
+                "/api/auth/sso/device/start", json={"client_name": "x" * 201}
+            ).status_code
+            == 400
+        )
+
+
+async def test_a_client_name_cannot_forge_a_log_line(temp_db_path: Path) -> None:
+    """The label is anonymous input: a newline in it must not split the log."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        started = client.post(
+            "/api/auth/sso/device/start",
+            json={"client_name": "laptop\n[AUDIT] forged entry\twith tabs"},
+        )
+        assert started.status_code == 200
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT details FROM audit_events"
+                " WHERE action = 'auth.sso_device_started' ORDER BY id DESC LIMIT 1"
+            )
+            row = await cursor.fetchone()
+        stored = json.loads(row["details"])["client_name"]
+        assert "\n" not in stored and "\t" not in stored
+        # The control characters became spaces: the label survives as one line.
+        assert stored == "laptop [AUDIT] forged entry with tabs"
+
+
+async def test_a_flood_of_pending_codes_is_refused_before_the_insert(
+    temp_db_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The start route is anonymous: its table needs a cap, not just a log budget."""
+    from rootcoz import main as app_module
+
+    monkeypatch.setattr(app_module, "_MAX_LIVE_DEVICE_CODES", 2)
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        assert client.post("/api/auth/sso/device/start", json={}).status_code == 200
+        assert client.post("/api/auth/sso/device/start", json={}).status_code == 200
+        refused = client.post("/api/auth/sso/device/start", json={})
+        assert refused.status_code == 429
+        # The refusal costs no row: the cap is checked before the insert.
+        assert await storage.count_live_device_codes() == 2
+
+
+async def test_the_approval_url_is_a_path_when_no_origin_is_configured(
+    temp_db_path: Path,
+) -> None:
+    """No PUBLIC_BASE_URL means no absolute URL can be trusted, so none is built."""
+    env = {
+        "SSO_GOOGLE_CLIENT_ID": "test-client-id",
+        "SSO_GOOGLE_CLIENT_SECRET": "test-client-secret",  # pragma: allowlist secret
+    }
+    for client in make_app_client(temp_db_path, env):
+        started = _start_device(client, provider="google", client_name="laptop")
+        assert started["verification_uri"] == "/login/device"
+        assert started["interval"] == 5
+        assert started["expires_in"] == 600
+
+
+async def test_device_poll_is_pending_and_then_throttled(temp_db_path: Path) -> None:
+    """An unapproved code answers 'pending', and a too-fast poll is refused."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        started = _start_device(client, provider="google")
+        first = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": started["device_code"]}
+        )
+        assert first.json()["status"] == "pending"
+        second = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": started["device_code"]}
+        )
+        # Inside the advertised interval: the server refuses rather than serves.
+        assert second.json()["status"] == "slow_down"
+
+
+async def test_an_unknown_device_code_reports_expiry(temp_db_path: Path) -> None:
+    """A code the server never issued is 'expired', not an error page."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        response = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": "never-issued"}
+        )
+        assert response.json() == {"status": "expired"}
+
+
+async def test_the_approved_code_hands_out_one_working_session(
+    temp_db_path: Path,
+) -> None:
+    """Approval names the account; redemption mints a session, exactly once."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        session = await storage.create_session(
+            "alice", is_admin=False, role="reviewer", auth_provider="google"
+        )
+        started = _start_device(client, client_name="laptop")
+
+        client.cookies.set("rootcoz_session", session)
+        info = client.post(
+            "/api/auth/sso/device/approve/lookup",
+            json={"user_code": started["user_code"]},
+        )
+        assert info.json()["client_name"] == "laptop"
+        approved = client.post(
+            "/api/auth/sso/device/approve", json={"user_code": started["user_code"]}
+        )
+        assert approved.status_code == 200
+        assert approved.json()["provider"] == "google"
+        client.cookies.clear()
+
+        polled = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": started["device_code"]}
+        )
+        body = polled.json()
+        assert body["status"] == "approved"
+        assert body["username"] == "alice"
+        # The token is a session, so it names its issuer and expires on its own.
+        assert await storage.get_session(body["token"]) is not None
+        assert (await storage.get_session_identity(body["token"]))[
+            "auth_provider"
+        ] == "google"
+
+        # Redemption consumed the code: the same device code yields nothing more.
+        again = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": started["device_code"]}
+        )
+        assert again.json()["status"] == "expired"
+
+
+async def test_the_token_from_the_device_flow_works_as_a_bearer(
+    temp_db_path: Path,
+) -> None:
+    """The CLI's existing credential slot accepts it without new machinery."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        session = await storage.create_session(
+            "alice", is_admin=False, role="reviewer", auth_provider="google"
+        )
+        started = _start_device(client)
+        client.cookies.set("rootcoz_session", session)
+        client.post(
+            "/api/auth/sso/device/approve", json={"user_code": started["user_code"]}
+        )
+        client.cookies.clear()
+        token = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": started["device_code"]}
+        ).json()["token"]
+
+        me = client.get("/api/auth/me", headers={"Authorization": f"Bearer {token}"})
+        assert me.status_code == 200
+        assert me.json()["username"] == "alice"
+
+
+async def test_an_account_that_became_unusable_is_denied_at_redemption(
+    temp_db_path: Path,
+) -> None:
+    """Approval is minutes older than redemption; the account's state is not."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        session = await storage.create_session("alice", is_admin=False, role="reviewer")
+        started = _start_device(client)
+        client.cookies.set("rootcoz_session", session)
+        client.post(
+            "/api/auth/sso/device/approve", json={"user_code": started["user_code"]}
+        )
+        client.cookies.clear()
+        async with storage._connect_db() as db:
+            await db.execute("UPDATE users SET disabled = 1 WHERE username = 'alice'")
+            await db.commit()
+
+        polled = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": started["device_code"]}
+        )
+        assert polled.json()["status"] == "denied"
+
+
+async def test_an_approval_cannot_stamp_a_provider_the_code_was_not_opened_for(
+    temp_db_path: Path,
+) -> None:
+    """A flow pinned to one IdP cannot be approved with another person's issuer."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        session = await storage.create_session(
+            "alice", is_admin=False, role="reviewer", auth_provider="github"
+        )
+        started = _start_device(client, provider="google")
+        client.cookies.set("rootcoz_session", session)
+
+        response = client.post(
+            "/api/auth/sso/device/approve", json={"user_code": started["user_code"]}
+        )
+        assert response.status_code == 400
+
+
+async def test_an_unknown_user_code_is_not_approvable(temp_db_path: Path) -> None:
+    """A mistyped code answers like an expired one, and never as a 500."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        session = await storage.create_session("alice", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+        response = client.post(
+            "/api/auth/sso/device/approve", json={"user_code": "ZZZZ-ZZZZ"}
+        )
+        assert response.status_code == 404
+
+
+async def test_the_device_flow_is_audited_where_it_changes_anything(
+    temp_db_path: Path,
+) -> None:
+    """Start, approve and redeem each leave one row naming the actor."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        session = await storage.create_session(
+            "alice", is_admin=False, role="reviewer", auth_provider="google"
+        )
+        started = _start_device(client, client_name="laptop")
+        client.cookies.set("rootcoz_session", session)
+        client.post(
+            "/api/auth/sso/device/approve", json={"user_code": started["user_code"]}
+        )
+        client.cookies.clear()
+        client.post(
+            "/api/auth/sso/device/poll", json={"device_code": started["device_code"]}
+        )
+
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT action, actor, details FROM audit_events"
+                " WHERE action LIKE 'auth.sso_device%' ORDER BY id"
+            )
+            rows = [tuple(row) for row in await cursor.fetchall()]
+        assert [(action, actor) for action, actor, _ in rows] == [
+            ("auth.sso_device_started", "anonymous"),
+            ("auth.sso_device_approved", "alice"),
+            ("auth.sso_device_redeemed", "alice"),
+        ]
+        # The user code is a credential a human types: the trail records who and
+        # which client, never the code itself (#379).
+        for action, _actor, details in rows:
+            assert "user_code" not in json.loads(details or "{}"), action

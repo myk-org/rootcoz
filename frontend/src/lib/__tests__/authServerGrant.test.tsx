@@ -142,7 +142,9 @@ it.each([['login', false], ['logout', false], ['logout', true]] as const)('ignor
   post.mockImplementation(() => new Promise((resolve, reject) => { resolvePost = resolve; rejectPost = reject }))
   function Controls() {
     const auth = useAuth()
-    return <button onClick={() => { pending = operation === 'login' ? auth.login('stale', 'key') : auth.logout() }}>
+    // `logout` resolves to the IdP URL (or null); this test only cares that the
+    // transition settles, so the value is dropped.
+    return <button onClick={() => { pending = operation === 'login' ? auth.login('stale', 'key') : auth.logout().then(() => undefined) }}>
       {auth.username}:{auth.authenticated ? 'yes' : 'no'}:{auth.loading ? 'loading' : 'ready'}
     </button>
   }

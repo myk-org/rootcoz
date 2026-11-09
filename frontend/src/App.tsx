@@ -6,6 +6,7 @@ import { Layout } from '@/components/layout/Layout'
 import { ProtectedRoute } from '@/components/shared/ProtectedRoute'
 
 import { RegisterPage } from '@/pages/RegisterPage'
+import { DeviceApprovalPage } from '@/pages/DeviceApprovalPage'
 import { DashboardPage } from '@/pages/DashboardPage'
 import { StatusPage } from '@/pages/StatusPage'
 import { SettingsPage } from '@/pages/SettingsPage'
@@ -33,6 +34,14 @@ export default function App() {
         <SSEProvider>
         <Routes>
           <Route path="/login" element={<RegisterPage />} />
+          <Route
+            path="/login/device"
+            element={
+              <ProtectedRoute>
+                <DeviceApprovalPage />
+              </ProtectedRoute>
+            }
+          />
           <Route path="/pending" element={<PendingApprovalPage />} />
           <Route element={<Layout />}>
             <Route index element={<ProtectedRoute><DashboardPage /></ProtectedRoute>} />

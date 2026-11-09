@@ -36,6 +36,9 @@ AUDIT_EXEMPT: dict[tuple[str, str], str] = {
     # A POST only because the ticket is a credential and must not travel in a
     # query string: the route reads the ticket and returns what it stands for.
     ("POST", "/api/auth/sso/ticket"): "reads a ticket, stores nothing",
+    # Same reason for the device flow's lookup: POST only so a live user code
+    # never reaches an access log. It reads a code and stores nothing.
+    ("POST", "/api/auth/sso/device/approve/lookup"): "reads a code, stores nothing",
     ("POST", "/results/{job_id}/preview-github-issue"): "read-only preview",
     ("POST", "/results/{job_id}/preview-jira-bug"): "read-only preview",
     ("POST", "/api/feedback/preview"): "read-only preview",
@@ -209,6 +212,12 @@ def test_exemptions_are_not_stale() -> None:
         "auth.sso_create",
         "auth.sso_link",
         "auth.sso_login_failed",
+        # CLI device flow (issue #197 Stage 8): the code is started, approved by
+        # a signed-in person, and redeemed once. Start and poll are GET/POST on
+        # a public path, so the mutating-route gate alone would not cover them.
+        "auth.sso_device_started",
+        "auth.sso_device_approved",
+        "auth.sso_device_redeemed",
     ],
 )
 def test_contract_action_is_implemented(action: str) -> None:

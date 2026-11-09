@@ -409,6 +409,7 @@ from rootcoz.transcripts import (
     write_sidecar_env_bridge,
 )
 from rootcoz.url_utils import (
+    is_safe_navigation_url,
     mask_url_credentials_in_text,
     redact_urls_in_text,
     strip_url_credentials,
@@ -644,6 +645,8 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "sso_redhat_issuer",
         "sso_allowed_domains",
         "sso_state_ttl_seconds",
+        "sso_device_code_ttl_seconds",
+        "sso_device_poll_interval_seconds",
     ],
     "Jenkins": [
         "jenkins_url",
@@ -1643,9 +1646,13 @@ _AUDIT_SAFE_DETAIL_KEYS: frozenset[str] = frozenset(
     }
 )
 
-# The only actions the volume guard throttles (#379): a brute-force run can
-# emit one per attempt, and none of them may push a real event out of the trail.
-_AUDIT_AUTH_FAILURE_ACTIONS: frozenset[str] = frozenset(
+# The only actions the volume guard throttles (#379) — the ones a caller can
+# emit per request without a credential, so no flood of them may push a real
+# event out of the trail. Named for that property, not for "failure": one
+# member (`auth.sso_device_started`) is a success row that is equally cheap to
+# produce. The budget itself is `audit_auth_failure_max_per_minute`, whose name
+# predates this member and is kept for config compatibility.
+_AUDIT_THROTTLED_ACTIONS: frozenset[str] = frozenset(
     {
         "auth.login_failed",
         "auth.login_blocked",
@@ -1654,6 +1661,11 @@ _AUDIT_AUTH_FAILURE_ACTIONS: frozenset[str] = frozenset(
         # the same per-minute guard.
         "auth.sso_login_failed",
         "auth.sso_login_blocked",
+        # Device-flow start is an anonymous public POST that writes a row per
+        # call (the code itself is created either way), so it needs the same
+        # per-minute budget — otherwise the trail can be filled without a
+        # credential.
+        "auth.sso_device_started",
     }
 )
 
@@ -1875,12 +1887,12 @@ async def record_audit(
     logger.info(f"[AUDIT] {message}", extra={"dedup_exempt": True})
     resolved_actor = actor or "anonymous"
     throttle: storage.AuditThrottle | None = None
-    if action in _AUDIT_AUTH_FAILURE_ACTIONS:
+    if action in _AUDIT_THROTTLED_ACTIONS:
         limit = get_settings().audit_auth_failure_max_per_minute
         if limit > 0:
             throttle = storage.AuditThrottle(
                 limit=limit,
-                actions=tuple(sorted(_AUDIT_AUTH_FAILURE_ACTIONS)),
+                actions=tuple(sorted(_AUDIT_THROTTLED_ACTIONS)),
                 since=storage.audit_timestamp(
                     datetime.now(UTC) - timedelta(seconds=60)
                 ),
@@ -4003,6 +4015,10 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/api/health",
             "/api/auth/register",
             "/api/auth/login",
+            # Logout acts only on the caller's own cookie, and it must still work
+            # when that cookie's session has expired — otherwise a browser that
+            # sat past its TTL could never end the provider's session either.
+            "/api/auth/logout",
             # SSO discovery is public; /login and /callback are matched by
             # suffix in _is_public_path because they carry the provider name.
             "/api/auth/sso/providers",
@@ -4011,6 +4027,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
             "/api/auth/sso/ticket",
             "/api/auth/sso/create",
             "/api/auth/sso/link",
+            # CLI device flow: start and poll exist before any session — the
+            # device code is the credential the CLI polls with. Approval is NOT
+            # public (it acts on a signed-in account) and is deliberately absent.
+            "/api/auth/sso/device/start",
+            "/api/auth/sso/device/poll",
             "/api/auth/needs-key",
             "/api/auth/pending-status",
             "/api/releases/latest",
@@ -16627,24 +16648,120 @@ async def login(request: Request) -> JSONResponse:
     return response
 
 
+async def _idp_logout_url(
+    auth_provider: str | None, settings: Settings
+) -> tuple[str | None, str]:
+    """Where the browser must go to end the provider's session too.
+
+    Only an SSO-backed session has an IdP session to end, and only a provider
+    that advertises an ``end_session_endpoint`` can end it. Everything else is a
+    local logout — the safe answer, never a broken URL.
+
+    No ``id_token_hint`` is sent, because the flow keeps only
+    ``sessions.auth_provider`` and never the ID token. Google advertises no
+    end-session endpoint (its SSO logouts are always local), GitHub has none at
+    all, and Keycloak accepts the call without the hint. A provider that
+    *requires* the hint would need it stored at login — a deliberate cost, not a
+    silent addition.
+
+    May fetch the provider's discovery document (bounded by the SSO HTTP
+    timeout), so a cold cache makes logout take up to that long; a provider whose
+    credentials were removed from settings returns ``None`` here.
+
+    Args:
+        auth_provider: The provider stamped on the session, or ``None``.
+        settings: Application settings (``PUBLIC_BASE_URL``).
+
+    Returns:
+        ``(url, reason)`` — the absolute logout URL when one can be built, and a
+        stable reason for the audit trail: ``not_sso``, ``no_public_base_url``,
+        ``provider_unavailable``, ``local_only`` (no end-session endpoint, an
+        unreachable discovery document, or a URL that is not http(s)), or
+        ``offered``.
+    """
+    if not auth_provider:
+        return None, "not_sso"
+    if not settings.public_base_url:
+        return None, "no_public_base_url"
+    provider = auth_sso.get_provider(auth_provider, settings)
+    if provider is None:
+        return None, "provider_unavailable"
+    post_logout = f"{settings.public_base_url.rstrip('/')}/login"
+    try:
+        url = await provider.end_session_url(post_logout)
+    # A logout must never fail after the local session is already gone, so this
+    # catch is deliberately broad — but it is loud: a provider bug must show up
+    # in the log rather than silently degrade every logout to local-only.
+    except Exception:
+        logger.warning(
+            "Could not build an IdP logout URL for %s", auth_provider, exc_info=True
+        )
+        return None, "local_only"
+    if not url or not is_safe_navigation_url(url, allow_loopback_http=True):
+        # A discovery document could name any scheme; the browser must only ever
+        # be sent to a URL this deployment would navigate to itself.
+        return None, "local_only"
+    return url, "offered"
+
+
 @app.post("/api/auth/logout", operation_id="logout")
 async def logout(request: Request) -> JSONResponse:
-    """Clear admin session."""
+    """Clear the session, and say where to end the provider's session too.
+
+    Callable while anonymous: a cookie that outlived its session TTL still names
+    the provider whose session should end, and the audit actor is read from that
+    row rather than from the middleware.
+
+    Returns:
+        ``{"ok": true, "idp_logout_url": ...}`` — ``null`` for an API-key
+        session, a provider with no end-session endpoint, a deployment without
+        ``PUBLIC_BASE_URL``, an unreachable provider, or a URL that is not
+        http(s). The local session is deleted in every case.
+
+    A call that cleared nothing (no cookie, or a row already gone) writes no
+    audit row: this route is public, and auditing every probe would let anyone
+    fill the trail.
+    """
     session_token = read_cookie(request, SESSION_COOKIE)
+    # Read the provider before the row is gone — and without the expiry filter:
+    # a browser can hold a cookie past its TTL, and the IdP session it opened is
+    # still worth ending.
+    session = (
+        await storage.get_session_identity(session_token) if session_token else None
+    )
+    auth_provider = session["auth_provider"] if session else None
+    # Logout is reachable while anonymous (a stale cookie must still end its IdP
+    # session), so the actor comes from the session row, not from the middleware.
+    actor = (session["username"] if session else "") or request.state.username
     if session_token:
         await storage.delete_session(session_token)
     settings = get_settings()
-    response = JSONResponse(content={"ok": True})
+    idp_logout_url, idp_logout_reason = await _idp_logout_url(auth_provider, settings)
+    response = JSONResponse(content={"ok": True, "idp_logout_url": idp_logout_url})
     clear_session_cookie(response, secure=settings.secure_cookies)
-    await record_audit(
-        action="auth.logout",
-        actor=request.state.username,
-        message=f"Logout: user='{request.state.username or 'anonymous'}'",
-        target_type="user",
-        target_id=request.state.username,
-        details={"session_cleared": bool(session_token)},
-        request=request,
-    )
+    if session is not None or actor:
+        # A cookie-less anonymous call changed nothing, and this route is public:
+        # auditing it would let anyone write rows at will.
+        await record_audit(
+            action="auth.logout",
+            actor=actor,
+            message=f"Logout: user='{actor or 'anonymous'}'",
+            # This is a public path, so the middleware never set these: read them
+            # from the session row or every operator's logout is logged as a
+            # reviewer.
+            actor_role=(session["role"] if session else None),
+            is_admin=bool(session and session["is_admin"]),
+            target_type="user",
+            target_id=actor,
+            details={
+                "session_cleared": bool(session_token),
+                # Why an IdP logout was or was not offered — a bool would
+                # collapse a normal case (provider publishes no endpoint) into a
+                # misconfiguration.
+                "idp_logout": idp_logout_reason,
+            },
+            request=request,
+        )
     return response
 
 
@@ -17432,6 +17549,351 @@ async def sso_link_account(request: Request) -> Response:
     )
     response.delete_cookie(auth_sso_state.TICKET_COOKIE, path="/")
     return response
+
+
+_DEVICE_APPROVAL_PATH = "/login/device"
+# A client name is a label a human reads on the approval page, not a payload:
+# an unbounded one is refused rather than silently shortened.
+_DEVICE_CLIENT_NAME_MAX = 200
+# Ceiling on device codes that are simultaneously approvable. The start route is
+# anonymous, and the hourly purge is much slower than a caller can insert, so
+# without a cap the table grows at request rate. A real deployment has a handful
+# of pending logins at a time; 500 is far above that and still finite.
+_MAX_LIVE_DEVICE_CODES = 500
+
+
+def _device_client_name(raw: object) -> str | None:
+    """Normalise the label a client reports about itself.
+
+    The value is anonymous input that reaches two places a control character
+    must not: a log line (a newline would forge a second ``[AUDIT]`` entry) and
+    the approval page. Unprintable characters become spaces here, once, rather
+    than being remembered at each use — dropping them outright would glue
+    "laptop" to a forged "[AUDIT]" into one word.
+
+    Args:
+        raw: The ``client_name`` field from the request body, if any.
+
+    Returns:
+        The printable label, collapsed to single spaces, or ``None`` when
+        nothing usable is left.
+    """
+    text = "".join(ch if ch.isprintable() else " " for ch in str(raw or ""))
+    collapsed = " ".join(text.split())
+    return collapsed or None
+
+
+def _device_approval_uri(settings: Settings) -> str:
+    """Where a human approves a device code.
+
+    Args:
+        settings: Active settings, read for ``public_base_url``.
+
+    Returns:
+        An absolute URL when ``PUBLIC_BASE_URL`` is configured, otherwise the
+        bare path. Never derived from request headers: the caller controls
+        those, and a forged ``Host`` would send a person to somewhere else to
+        type a code.
+    """
+    base = (settings.public_base_url or "").rstrip("/")
+    return f"{base}{_DEVICE_APPROVAL_PATH}" if base else _DEVICE_APPROVAL_PATH
+
+
+@app.post("/api/auth/sso/device/start", operation_id="ssoDeviceStart")
+async def sso_device_start(request: Request) -> JSONResponse:
+    """Open a CLI device-authorization flow.
+
+    The CLI gets a secret ``device_code`` it polls with and a short
+    ``user_code`` a human types on the approval page, where they must be signed
+    in. Nothing is granted here: the flow grants only what a signed-in person
+    approves in a browser.
+
+    Args:
+        request: Body ``{"provider"?: str, "client_name"?: str}``. The provider
+            is optional — naming one up front pins the flow to that IdP, and the
+            approval page then cannot stamp a different issuer on the session.
+
+    Returns:
+        ``{"device_code", "user_code", "verification_uri", "expires_in",
+        "interval"}``. The device code is shown once and never stored in
+        plaintext.
+
+    Raises:
+        HTTPException: 404 when no SSO provider is configured (there is nothing
+            to approve against), 400 for an unknown provider or an oversized
+            client name, 429 when :data:`_MAX_LIVE_DEVICE_CODES` are already
+            pending (the route is anonymous, so its table needs a ceiling).
+    """
+    body = await _read_json_object(request)
+    settings = get_settings()
+    if not auth_sso.configured_providers(settings):
+        raise HTTPException(status_code=404, detail="No SSO provider is configured")
+    provider = str(body.get("provider") or "").strip().lower() or None
+    if provider is not None and auth_sso.get_provider(provider, settings) is None:
+        raise HTTPException(status_code=400, detail="Unknown SSO provider")
+    client_name = _device_client_name(body.get("client_name"))
+    if client_name is not None and len(client_name) > _DEVICE_CLIENT_NAME_MAX:
+        raise HTTPException(status_code=400, detail="client_name is too long")
+
+    if await storage.count_live_device_codes() >= _MAX_LIVE_DEVICE_CODES:
+        # Refuse before the insert: throttling only the audit row would leave the
+        # table and the code space growing at request rate.
+        raise HTTPException(
+            status_code=429,
+            detail="Too many pending sign-in codes. Try again in a few minutes.",
+        )
+    record = await storage.create_device_code(
+        ttl_seconds=settings.sso_device_code_ttl_seconds,
+        interval_seconds=settings.sso_device_poll_interval_seconds,
+        provider=provider,
+        client_name=client_name,
+    )
+    await record_audit(
+        action="auth.sso_device_started",
+        actor="anonymous",
+        message=(
+            f"SSO device code started for provider '{provider or 'any'}'"
+            f" client='{client_name or 'unknown'}'"
+        ),
+        target_type="provider",
+        target_id=provider or "",
+        # No user_code: it is a short-lived credential a human types, and the
+        # #379 contract stores provider, username and reason — never a code.
+        details={"provider": provider, "client_name": client_name},
+        request=request,
+    )
+    response = JSONResponse(
+        content={
+            "device_code": record["device_code"],
+            "user_code": record["user_code"],
+            "verification_uri": _device_approval_uri(settings),
+            "expires_in": settings.sso_device_code_ttl_seconds,
+            "interval": record["interval_seconds"],
+        }
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+@app.post("/api/auth/sso/device/poll", operation_id="ssoDevicePoll")
+async def sso_device_poll(request: Request) -> JSONResponse:
+    """Answer the CLI's poll: still waiting, slow down, or here is your token.
+
+    Polling faster than ``interval`` is refused with ``slow_down`` — the interval
+    is what bounds how fast an unapproved flow can be probed, so it is enforced
+    here rather than trusted to the client.
+
+    The code travels in a body, not a query string: a GET would write a live
+    credential into the server's (and any proxy's) access log once per poll, and
+    a login polls for up to ten minutes.
+
+    Args:
+        request: Body ``{"device_code": str}`` — the secret value handed out by
+            :func:`sso_device_start`.
+
+    Returns:
+        ``{"status": "pending"}``, ``{"status": "slow_down"}``,
+        ``{"status": "expired"}``, ``{"status": "denied"}``, or
+        ``{"status": "approved", "token", "username", "provider"}``. The token
+        is a session token — a bounded, individually revocable credential — and
+        it is handed out exactly once, because redemption consumes the code.
+
+    A code approved for an account that has since become unusable is denied
+    here rather than handed a session: approval is minutes older than this call,
+    and the account's state is not.
+    """
+    body = await _read_json_object(request)
+    device_code = str(body.get("device_code") or "")
+    settings = get_settings()
+    record = await storage.get_device_code(device_code) if device_code else None
+    if record is None:
+        return JSONResponse(content={"status": "expired"})
+    if not await storage.record_device_code_poll(device_code):
+        return JSONResponse(
+            content={"status": "slow_down", "interval": record["interval_seconds"]}
+        )
+    if not record["authorized"]:
+        return JSONResponse(
+            content={"status": "pending", "interval": record["interval_seconds"]}
+        )
+
+    redeemed = await storage.redeem_device_code(device_code)
+    if redeemed is None:
+        # Approved between the two reads and consumed by a concurrent poll, or
+        # expired in the same window: either way this caller gets nothing.
+        return JSONResponse(content={"status": "expired"})
+    username = redeemed["username"]
+    user = await storage.get_user_by_username(username)
+    if user is None:
+        await _audit_sso_refusal(
+            request, redeemed["provider"], "account_missing", subject=username
+        )
+        return JSONResponse(content={"status": "denied"})
+    block_reason = auth_approval.account_block_reason(user)
+    if block_reason is not None:
+        await _audit_sso_refusal(
+            request, redeemed["provider"], f"account_{block_reason}", subject=username
+        )
+        return JSONResponse(content={"status": "denied"})
+
+    role, is_admin = role_and_admin(user, settings.default_user_role)
+    token = await storage.create_session(
+        username,
+        is_admin=is_admin,
+        role=role,
+        auth_provider=redeemed["provider"],
+    )
+    await record_audit(
+        action="auth.sso_device_redeemed",
+        actor=username,
+        actor_role=role,
+        is_admin=is_admin,
+        message=f"SSO device code redeemed: user='{username}'",
+        target_type="user",
+        target_id=username,
+        details={"provider": redeemed["provider"], "role": role},
+        request=request,
+    )
+    response = JSONResponse(
+        content={
+            "status": "approved",
+            "token": token,
+            "username": username,
+            "provider": redeemed["provider"],
+        }
+    )
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+async def _device_code_or_404(request: Request) -> dict[str, Any]:
+    """Read the user code from the body and return its live record.
+
+    Shared by the describe and the approve routes so an unknown code answers
+    identically in both, and any future guard on a code has one place to live.
+
+    Args:
+        request: The request; body ``{"user_code": str}``.
+
+    Returns:
+        The device-code view for a live code.
+
+    Raises:
+        HTTPException: 404 when the body carries no code, or the code is
+            unknown, expired or already redeemed.
+    """
+    body = await _read_json_object(request)
+    user_code = str(body.get("user_code") or "").strip()
+    record = (
+        await storage.get_device_code_by_user_code(user_code) if user_code else None
+    )
+    if record is None:
+        raise HTTPException(status_code=404, detail="That code is not valid")
+    return record
+
+
+@app.post("/api/auth/sso/device/approve/lookup", operation_id="ssoDeviceApproveLookup")
+async def sso_device_approve_lookup(request: Request) -> JSONResponse:
+    """Describe a pending code so a signed-in person can recognise it.
+
+    Signed in on purpose: the page must not tell an anonymous visitor which
+    client names are waiting, and the approval that follows is a write on the
+    caller's account.
+
+    A body rather than a query string: a user code is what ties a CLI to the
+    account that approves it, so a log line holding a live one would let its
+    reader bind somebody's terminal to their own account.
+
+    Args:
+        request: Body ``{"user_code": str}``, authenticated as usual.
+
+    Returns:
+        ``{"user_code", "provider", "client_name", "expires_at",
+        "authorized"}``.
+
+    Raises:
+        HTTPException: 404 when the code is unknown or expired.
+    """
+    record = await _device_code_or_404(request)
+    return JSONResponse(
+        content={
+            "user_code": record["user_code"],
+            "provider": record["provider"],
+            "client_name": record["client_name"],
+            "expires_at": record["expires_at"],
+            "authorized": record["authorized"],
+        }
+    )
+
+
+@app.post("/api/auth/sso/device/approve", operation_id="ssoDeviceApprove")
+async def sso_device_approve(request: Request) -> JSONResponse:
+    """Approve a device code for the signed-in account.
+
+    The session the CLI receives is minted later, at redemption, for the account
+    named *here* — which is why an approval can never hand out a session issued
+    for a different login.
+
+    Args:
+        request: Body ``{"user_code": str}``, authenticated as usual.
+
+    Returns:
+        ``{"ok": true, "user_code", "provider"}``. ``provider`` is the issuer
+        recorded for the session the CLI will receive — the approver's own, when
+        they signed in through SSO, so an IdP logout can end it later.
+
+    Raises:
+        HTTPException: 404 when the code is unknown or expired, 409 when it was
+            already approved, 400 when it was opened for a different provider
+            than the one this person signed in with.
+    """
+    record = await _device_code_or_404(request)
+    user_code = record["user_code"]
+    username = request.state.username
+    session_token = read_cookie(request, SESSION_COOKIE)
+    session = (
+        await storage.get_session_identity(session_token) if session_token else None
+    )
+    provider = session["auth_provider"] if session else None
+    if record["authorized"]:
+        raise HTTPException(status_code=409, detail="That code was already approved")
+    if (
+        record["provider"] is not None
+        and provider is not None
+        and record["provider"] != provider
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="That code was opened for a different provider",
+        )
+    if not await storage.authorize_device_code(
+        user_code, username=username, provider=provider
+    ):
+        raise HTTPException(status_code=409, detail="That code was already approved")
+    await record_audit(
+        action="auth.sso_device_approved",
+        actor=username,
+        actor_role=request.state.role,
+        is_admin=request.state.is_admin,
+        message=(
+            f"SSO device code approved: user='{username}'"
+            f" provider='{provider or record['provider'] or 'any'}'"
+        ),
+        target_type="user",
+        target_id=username,
+        details={
+            "provider": provider or record["provider"],
+            "client_name": record["client_name"],
+        },
+        request=request,
+    )
+    return JSONResponse(
+        content={
+            "ok": True,
+            "user_code": record["user_code"],
+            "provider": provider or record["provider"],
+        }
+    )
 
 
 @app.post("/api/auth/register", operation_id="registerUser")

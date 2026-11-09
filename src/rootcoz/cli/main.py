@@ -6,8 +6,10 @@ import json as json_mod
 import logging
 import os
 import shlex
+import socket
 import sys
 import tempfile
+import time
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -3684,6 +3686,163 @@ def auth_whoami(
         lambda c: c.auth_me(),
         columns=["username", "role", "is_admin", "can_view_reports"],
     )
+
+
+@auth_app.command("sso")
+def auth_sso(
+    provider: str = typer.Option(
+        "", "--provider", help="Pin the flow to one provider (google, github, ...)."
+    ),
+    client_name: str = typer.Option(
+        "", "--client-name", help="Label shown on the approval page."
+    ),
+    list_providers: bool = typer.Option(
+        False, "--list-providers", help="Show the providers this server offers."
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Sign in with SSO from the terminal (device flow).
+
+    Prints a code and a URL: open the URL in any browser, sign in, and approve
+    the code. The token that comes back is a session token — bounded, and
+    revocable on its own — and it is shown once: put it in the server's
+    ``api_key`` in config.toml or export ROOTCOZ_API_KEY. Nothing on disk is
+    rewritten, and your existing API key is not rotated.
+    """
+    _set_json(json_output)
+    as_json = _state.get("json", False)
+    client = _get_client()
+    try:
+        offered = client.sso_providers().get("providers", [])
+    except RootCozError as err:
+        _handle_error(err)
+        return
+    if list_providers:
+        print_output({"providers": offered}, columns=["providers"], as_json=as_json)
+        return
+    if provider and provider not in {p.get("name") for p in offered}:
+        # Fail here rather than after printing a code nobody could approve.
+        names = ", ".join(sorted(p.get("name", "") for p in offered)) or "none"
+        typer.echo(
+            f"Unknown provider '{provider}'. This server offers: {names}", err=True
+        )
+        raise typer.Exit(1)
+    try:
+        start = client.sso_device_start(
+            provider=provider, client_name=client_name or socket.gethostname()
+        )
+    except RootCozError as err:
+        _handle_error(err)
+        return
+    device_code = start.get("device_code", "")
+    user_code = start.get("user_code", "")
+    interval = int(start.get("interval") or 5)
+    verification_uri = start.get("verification_uri", "")
+    if verification_uri.startswith("/"):
+        # Without PUBLIC_BASE_URL the server answers with the bare path: it will
+        # not build an absolute URL from request headers a caller controls, so
+        # joining it here — where the address the user actually reached is
+        # known — is the only honest way to point them at the page.
+        verification_uri = f"{client.server_url.rstrip('/')}{verification_uri}"
+    # Always on stderr: stdout stays machine-readable under --json, and the code
+    # is the one thing a human cannot proceed without.
+    typer.echo(f"Open {verification_uri} and enter the code: {user_code}", err=True)
+    if not as_json:
+        typer.echo("Waiting for approval...", err=True)
+
+    deadline = time.monotonic() + int(start.get("expires_in") or 600)
+    token = ""
+    username = ""
+    while time.monotonic() < deadline:
+        time.sleep(interval)
+        try:
+            polled = client.sso_device_poll(device_code)
+        except RootCozError as err:
+            _handle_error(err)
+            return
+        status = str(polled.get("status", ""))
+        if status == "approved":
+            token = str(polled.get("token", ""))
+            username = str(polled.get("username", ""))
+            break
+        if status == "slow_down":
+            # The server refuses polls inside its window; back off further rather
+            # than hammer it, as RFC 8628 asks.
+            interval += 5
+            continue
+        if status in ("expired", "denied"):
+            typer.echo(
+                "The code expired before it was approved."
+                if status == "expired"
+                else "That account cannot be used to sign in.",
+                err=True,
+            )
+            raise typer.Exit(1)
+
+    if not token:
+        typer.echo("Timed out waiting for approval.", err=True)
+        raise typer.Exit(1)
+
+    if as_json:
+        print_output(
+            {"username": username, "token": token},
+            columns=["username", "token"],
+            as_json=True,
+        )
+        return
+    typer.echo(f"Signed in as {username}")
+    typer.echo("Session token (shown once):")
+    typer.echo(token)
+    typer.echo(
+        "Store it as api_key in your rootcoz config.toml, or export it as "
+        "ROOTCOZ_API_KEY. It expires; run this again when it does."
+    )
+
+
+@auth_app.command("sso-approve")
+def auth_sso_approve(
+    user_code: str = typer.Argument(help="The code shown by the waiting client."),
+    yes: bool = typer.Option(
+        False, "--yes", "-y", help="Approve without asking for confirmation."
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Approve a device code from the terminal you are signed in on.
+
+    The browser page is the normal way; this is the same action for someone
+    already authenticated here.
+
+    What is asking is shown *before* approval and has to be confirmed, exactly
+    as on the page: the client name is the only defence against approving a code
+    somebody else sent you, so approving unseen would defeat it. ``--yes`` skips
+    the prompt for scripts that have already shown it.
+    """
+    _set_json(json_output)
+    as_json = _state.get("json", False)
+    client = _get_client()
+    try:
+        info = client.sso_device_approve_info(user_code)
+        if not as_json:
+            client_name = info.get("client_name") or "an unnamed client"
+            typer.echo(f"Code {info.get('user_code', user_code)} for {client_name}")
+            typer.echo(
+                f"Provider: {info.get('provider') or 'any configured provider'}"
+                f" · expires {info.get('expires_at', '')}"
+            )
+        if not yes:
+            if as_json:
+                # No prompt in a machine-readable run: consent has to be explicit,
+                # so the caller must have shown the client name itself.
+                typer.echo("Refusing to approve under --json without --yes.", err=True)
+                raise typer.Exit(1)
+            if not typer.confirm("Approve this sign-in?"):
+                typer.echo("Not approved.", err=True)
+                raise typer.Exit(1)
+        result = client.sso_device_approve(user_code)
+    except RootCozError as err:
+        _handle_error(err)
+        return
+    print_output(result, columns=["ok", "user_code", "provider"], as_json=as_json)
 
 
 # -- Admin --------------------------------------------------------------------

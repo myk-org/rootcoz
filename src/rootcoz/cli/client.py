@@ -175,6 +175,50 @@ class RootCozClient:
         """Get current user info including can_view_reports. GET /api/auth/me"""
         return self._request("GET", "/api/auth/me")
 
+    def sso_providers(self) -> dict[str, Any]:
+        """List the SSO providers this deployment has configured.
+
+        GET /api/auth/sso/providers
+        """
+        return self._request("GET", "/api/auth/sso/providers")
+
+    def sso_device_start(
+        self, provider: str = "", client_name: str = ""
+    ) -> dict[str, Any]:
+        """Open a CLI device-authorization flow. POST /api/auth/sso/device/start"""
+        body: dict[str, Any] = {}
+        if provider:
+            body["provider"] = provider
+        if client_name:
+            body["client_name"] = client_name
+        return self._request("POST", "/api/auth/sso/device/start", json=body)
+
+    def sso_device_poll(self, device_code: str) -> dict[str, Any]:
+        """Poll a device code. POST /api/auth/sso/device/poll
+
+        A body rather than a query string: a live credential in a URL lands in
+        the server's access log once per poll.
+        """
+        return self._request(
+            "POST", "/api/auth/sso/device/poll", json={"device_code": device_code}
+        )
+
+    def sso_device_approve_info(self, user_code: str) -> dict[str, Any]:
+        """Describe a pending device code. POST /api/auth/sso/device/approve/lookup
+
+        A body rather than a query string: a user code ties a terminal to the
+        account that approves it, so it must not land in an access log.
+        """
+        return self._request(
+            "POST", "/api/auth/sso/device/approve/lookup", json={"user_code": user_code}
+        )
+
+    def sso_device_approve(self, user_code: str) -> dict[str, Any]:
+        """Approve a device code for the current user. POST /api/auth/sso/device/approve"""
+        return self._request(
+            "POST", "/api/auth/sso/device/approve", json={"user_code": user_code}
+        )
+
     def list_ai_credentials(self) -> dict[str, Any]:
         """List configured AI credential providers without exposing keys."""
         return self._request("GET", "/api/user/ai-credentials")
