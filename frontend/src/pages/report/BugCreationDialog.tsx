@@ -21,7 +21,7 @@ import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { TokenRequiredBanner } from '@/components/shared/TokenRequiredBanner'
 import { CheckCircle2, ExternalLink, AlertTriangle } from 'lucide-react'
 import type { PreviewIssueResponse, CreateIssueResponse, SimilarIssue, CommentsAndReviews, TrackedInEntry } from '@/types'
-import { getGithubToken, getJiraToken, getJiraEmail, getJiraSaToken } from '@/lib/cookies'
+import { useUserTokenPresence } from '@/lib/useUserTokens'
 import { useReportDispatch, useRefreshEnrichments } from '@/pages/report/reportState'
 import { useAiSelection } from '@/lib/useAiSelection'
 import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
@@ -125,15 +125,14 @@ export function BugCreationDialog({
   const previewPath = target === 'github' ? 'preview-github-issue' : 'preview-jira-bug'
   const createPath = target === 'github' ? 'create-github-issue' : 'create-jira-bug'
   const label = target === 'github' ? 'GitHub Issue' : 'Jira Ticket'
-  const hasToken =
-    target === 'github' ? !!getGithubToken() : !!getJiraToken() || !!getJiraSaToken()
+  // "Can I file?" is the account's stored state at the moment the dialog opens —
+  // the browser holds no tracker token to read.
+  const tokenPresence = useUserTokenPresence(open)
+  const hasToken = target === 'github' ? tokenPresence.github : tokenPresence.jira
+  const tokenMissing = tokenPresence.loaded && !hasToken
 
-  function getTrackerCredentials() {
+  function getTrackerChoices() {
     return {
-      github_token: target === 'github' ? getGithubToken() : '',
-      jira_token: target === 'jira' ? getJiraToken() : '',
-      jira_email: target === 'jira' ? getJiraEmail() : '',
-      jira_sa_token: target === 'jira' ? getJiraSaToken() : '',
       ...(target === 'github' && selectedRepo ? { github_repo_url: selectedRepo } : {}),
       ...(target === 'jira' && jiraProjectKey ? { jira_project_key: jiraProjectKey } : {}),
       ...(target === 'jira' && jiraSecurityLevel ? { jira_security_level: jiraSecurityLevel } : {}),
@@ -150,9 +149,6 @@ export function BugCreationDialog({
     if (jiraProjectKey.length < 2) return
     const timer = setTimeout(() => {
       api.post<JiraProject[]>('/api/jira-projects', {
-        jira_token: getJiraToken(),
-        jira_email: getJiraEmail(),
-        jira_sa_token: getJiraSaToken(),
         query: jiraProjectKey,
       })
         .then((data) => { if (!ignore) setProjectSearch({ query: jiraProjectKey, projects: data }) })
@@ -166,9 +162,6 @@ export function BugCreationDialog({
     let ignore = false
     if (!open || target !== 'jira' || !confirmedProjectKey) return
     api.post<JiraSecurityLevel[]>('/api/jira-security-levels', {
-      jira_token: getJiraToken(),
-      jira_email: getJiraEmail(),
-      jira_sa_token: getJiraSaToken(),
       project_key: confirmedProjectKey,
     })
       .then((data) => { if (!ignore) setSecurityLevelResult({ key: securityLevelsKey, levels: data }) })
@@ -208,7 +201,7 @@ export function BugCreationDialog({
         child_job_name: childJobName ?? '',
         child_build_number: childBuildNumber ?? 0,
         issue_prompt: issuePrompt,
-        ...getTrackerCredentials(),
+        ...getTrackerChoices(),
       })
       .then((res) => {
         setTitle(res.title)
@@ -237,7 +230,7 @@ export function BugCreationDialog({
           body,
           child_job_name: childJobName ?? '',
           child_build_number: childBuildNumber ?? 0,
-          ...getTrackerCredentials(),
+          ...getTrackerChoices(),
         })
         markCreated(res.url)
       } catch (err) {
@@ -625,7 +618,7 @@ export function BugCreationDialog({
           </div>
         )}
 
-        {promptPhase === 'preview' && !hasToken && (
+        {promptPhase === 'preview' && tokenMissing && (
           <TokenRequiredBanner provider={target === 'github' ? 'GitHub' : 'Jira'} />
         )}
 
@@ -633,7 +626,7 @@ export function BugCreationDialog({
           {promptPhase === 'preview' && (
             <div className="flex gap-2 sm:ml-auto">
               <Button variant="outline" onClick={() => handleCancel()}>Cancel</Button>
-              <Button onClick={handleCreate} disabled={!title.trim() || !hasToken || (target === 'jira' && jiraIssueType === '__custom__' && !customIssueType.trim())}>{createError ? 'Retry' : `Create ${label}`}</Button>
+              <Button onClick={handleCreate} disabled={!title.trim() || tokenMissing || (target === 'jira' && jiraIssueType === '__custom__' && !customIssueType.trim())}>{createError ? 'Retry' : `Create ${label}`}</Button>
             </div>
           )}
           {promptPhase === 'prompt' && (

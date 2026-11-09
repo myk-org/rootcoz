@@ -2,7 +2,6 @@ import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ProfileForm } from '@/components/shared/ProfileForm'
-import { setGithubToken } from '@/lib/cookies'
 
 const apiMock = vi.hoisted(() => ({
   get: vi.fn(async (path: string) => (path === '/api/user/tokens' ? { github_token: '', jira_email: '', jira_token: '', jira_sa_token: '' } : {})),
@@ -61,8 +60,7 @@ describe('ProfileForm tracker tokens', () => {
     expect(screen.getByLabelText(/GitHub Token/i)).toBeInTheDocument()
   })
 
-  it('never syncs tokens to the server for a viewer, even with a token in the cookie', async () => {
-    setGithubToken('ghp_from_cookie')
+  it('never syncs tokens to the server for a viewer', async () => {
     const onSaved = renderForm()
     await waitFor(() => expect(apiMock.get).toHaveBeenCalledWith('/api/user/tokens'))
 
@@ -180,26 +178,117 @@ describe('ProfileForm tracker tokens', () => {
     expect(apiMock.post).not.toHaveBeenCalledWith('/api/validate-token', expect.anything())
   })
 
-  it('validates a browser-cached token that the server no longer has (#294)', async () => {
+  it('test_server_value_wins_over_a_stale_local_copy', async () => {
     role.value = 'reviewer'
-    setGithubToken('ghp_stale_local')
+    // A browser that upgraded still holds a copy — it must never win.
+    localStorage.setItem('rootcoz_github_token', 'ghp_stale_local')
     apiMock.get.mockImplementation(async (path: string) =>
       path === '/api/user/tokens'
-        ? { github_token: 'ghp_server_current', jira_email: '', jira_token: '', jira_sa_token: '' }
+        ? { github_token: 'ghp_server', jira_email: '', jira_token: '', jira_sa_token: '' }
         : {},
     )
 
     const onSaved = renderForm()
+    // The field shows what the server holds, not the stored copy.
+    await waitFor(() =>
+      expect(screen.getByLabelText(/GitHub Token/i)).toHaveValue('ghp_server'),
+    )
     await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
 
-    // The local cookie disagrees with the server, so it is a new value to check.
-    await waitFor(() =>
-      expect(apiMock.post).toHaveBeenCalledWith(
-        '/api/validate-token',
-        expect.objectContaining({ token_type: 'github', token: 'ghp_stale_local' }),
-      ),
-    )
     await waitFor(() => expect(onSaved).toHaveBeenCalled())
+    expect(apiMock.put).toHaveBeenCalledWith(
+      '/api/user/tokens',
+      expect.objectContaining({ github_token: 'ghp_server' }),
+    )
+    // The stale copy was never what the save sent.
+    expect(apiMock.put).not.toHaveBeenCalledWith(
+      '/api/user/tokens',
+      expect.objectContaining({ github_token: 'ghp_stale_local' }),
+    )
+  })
+
+  it('test_saving_leaves_no_token_in_storage', async () => {
+    role.value = 'reviewer'
+    const onSaved = renderForm()
+    const github = await screen.findByLabelText(/GitHub Token/i)
+    await userEvent.type(github, 'ghp_valid')
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(onSaved).toHaveBeenCalled())
+
+    const keys = Object.keys(localStorage).filter((k) => /token|email/.test(k))
+    expect(keys).toEqual([])
+  })
+
+  it('never clears stored tokens when the account read fails', async () => {
+    role.value = 'reviewer'
+    apiMock.get.mockImplementation(async (path: string) => {
+      if (path === '/api/user/tokens') throw new Error('server unavailable')
+      return {}
+    })
+
+    const onSaved = renderForm()
+    await waitFor(() => expect(apiMock.get).toHaveBeenCalledWith('/api/user/tokens'))
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+
+    // The fields are empty because the read failed, not because the account is
+    // empty: writing that back would erase the credentials the server holds,
+    // and a save that writes nothing must not report success either.
+    expect(
+      await screen.findByText(/could not read your saved tracker credentials/i),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^retry$/i })).toBeInTheDocument()
+    expect(onSaved).not.toHaveBeenCalled()
+    expect(apiMock.put).not.toHaveBeenCalled()
+  })
+
+  it('saves once the retried account read succeeds', async () => {
+    role.value = 'reviewer'
+    let failing = true
+    apiMock.get.mockImplementation(async (path: string) => {
+      if (path !== '/api/user/tokens') return {}
+      if (failing) {
+        failing = false
+        throw new Error('server unavailable')
+      }
+      return { github_token: '', jira_email: '', jira_token: '', jira_sa_token: '' }
+    })
+
+    const onSaved = renderForm()
+    const github = await screen.findByLabelText(/GitHub Token/i)
+    await userEvent.type(github, 'ghp_after_retry')
+    await userEvent.click(await screen.findByRole('button', { name: /^retry$/i }))
+    await waitFor(() =>
+      expect(
+        screen.queryByText(/could not read your saved tracker credentials/i),
+      ).not.toBeInTheDocument(),
+    )
+
+    await userEvent.click(screen.getByRole('button', { name: /^save$/i }))
+    await waitFor(() => expect(onSaved).toHaveBeenCalled())
+    expect(apiMock.put).toHaveBeenCalledWith(
+      '/api/user/tokens',
+      expect.objectContaining({ github_token: 'ghp_after_retry' }),
+    )
+  })
+
+  it('keeps a credential typed before the account read lands', async () => {
+    role.value = 'reviewer'
+    let resolveTokens: (tokens: Record<string, string>) => void = () => {}
+    apiMock.get.mockImplementation((path: string) =>
+      path === '/api/user/tokens'
+        ? new Promise<Record<string, string>>((resolve) => { resolveTokens = resolve })
+        : Promise.resolve({}),
+    )
+
+    renderForm()
+    const github = await screen.findByLabelText(/GitHub Token/i)
+    await userEvent.type(github, 'ghp_typed')
+
+    resolveTokens({ github_token: 'ghp_server', jira_email: '', jira_token: '', jira_sa_token: '' })
+    // Save turns on only once the read has landed, so the field has taken it.
+    const save = screen.getByRole('button', { name: /^save$/i })
+    await waitFor(() => expect(save).toBeEnabled())
+    expect(github).toHaveValue('ghp_typed')
   })
 
   it('clears one token even when an unchanged stored token is invalid (#294)', async () => {

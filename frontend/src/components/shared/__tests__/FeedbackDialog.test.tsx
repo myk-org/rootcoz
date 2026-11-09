@@ -4,6 +4,21 @@ import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { FeedbackDialog } from '../FeedbackDialog'
 
+// The account row is the dialog's only credential source.
+const mockUserTokens = vi.fn(() => ({
+  github_token: 'ghp_test_token',
+  jira_email: '',
+  jira_token: '',
+  jira_sa_token: '',
+}))
+
+const defaultGet = (path?: string) =>
+  Promise.resolve(
+    path === '/api/user/tokens'
+      ? mockUserTokens()
+      : { providers: {}, provider_status: {} },
+  )
+
 // Mock the api module
 vi.mock('@/lib/api', () => {
   class _ApiError extends Error {
@@ -20,7 +35,7 @@ vi.mock('@/lib/api', () => {
   return {
     api: {
       post: vi.fn(),
-      get: vi.fn(() => Promise.resolve({ providers: {}, provider_status: {} })),
+      get: vi.fn((path?: string) => defaultGet(path)),
     },
     getRecentFailedCalls: vi.fn(() => []),
     ApiError: _ApiError,
@@ -37,12 +52,6 @@ vi.mock('@/lib/api', () => {
 // Mock errorCapture
 vi.mock('@/lib/errorCapture', () => ({
   getRecentErrors: vi.fn(() => ['error1', 'error2']),
-}))
-
-// Mock cookies
-const mockGetGithubToken = vi.fn(() => 'ghp_test_token')
-vi.mock('@/lib/cookies', () => ({
-  getGithubToken: () => mockGetGithubToken(),
 }))
 
 // The dialog is rendered bare, so it has no AuthProvider; the hook reads the user key.
@@ -73,6 +82,7 @@ vi.mock('@/components/shared/AnalysisAiPicker', () => ({
 import { api, getRecentFailedCalls } from '@/lib/api'
 
 const mockPost = api.post as ReturnType<typeof vi.fn>
+const mockGet = api.get as ReturnType<typeof vi.fn>
 const mockGetFailedCalls = getRecentFailedCalls as ReturnType<typeof vi.fn>
 
 /** Wrapper that owns the open state so the dialog can be closed and reopened. */
@@ -91,6 +101,7 @@ describe('FeedbackDialog', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    mockGet.mockImplementation((path?: string) => defaultGet(path))
   })
 
   afterEach(() => {
@@ -512,8 +523,27 @@ describe('FeedbackDialog', () => {
     )
   })
 
+  it('shows no token warning while the account read is still pending', async () => {
+    mockGet.mockImplementation((path?: string) =>
+      path === '/api/user/tokens'
+        ? new Promise(() => {})
+        : Promise.resolve({ providers: {}, provider_status: {} }),
+    )
+    mockPost.mockResolvedValue({ title: 'AI title', body: 'AI body', labels: ['bug'] })
+    const user = userEvent.setup()
+    render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
+    await user.type(screen.getByLabelText('Description'), 'Some feedback')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+    // Unknown is not empty: the read has not answered, so there is nothing to warn
+    // about and nothing to block on.
+    expect(screen.queryByText('GitHub token required')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /create issue/i })).toBeEnabled()
+  })
+
   it('shows warning banner and disables Create Issue when no GitHub token', async () => {
-    mockGetGithubToken.mockReturnValue('')
+    mockUserTokens.mockReturnValue({ github_token: '', jira_email: '', jira_token: '', jira_sa_token: '' })
     mockPost.mockResolvedValue({
       title: 'AI title',
       body: 'AI body',
@@ -529,7 +559,12 @@ describe('FeedbackDialog', () => {
     expect(screen.getByText(/Set up your GitHub token in Profile Settings/)).toBeInTheDocument()
     expect(screen.getByText('Open Profile Settings →')).toHaveAttribute('href', '/settings')
     expect(screen.getByRole('button', { name: /create issue/i })).toBeDisabled()
-    mockGetGithubToken.mockReturnValue('ghp_test_token')
+    mockUserTokens.mockReturnValue({
+      github_token: 'ghp_test_token',
+      jira_email: '',
+      jira_token: '',
+      jira_sa_token: '',
+    })
   })
 
   it('shows token hint in error when create fails with token error', async () => {

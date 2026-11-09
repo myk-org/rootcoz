@@ -33,7 +33,7 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    Expand a failure, then use `GitHub Issue` or `Jira Ticket` in the `Actions` row. RootCoz opens the issue prompt, which comes from the `issue_prompt` stored with the job or from `.rootcoz/ROOTCOZ_ISSUE_PROMPT.md` in the test repository. Edit it if you want to steer the title and body, then click `Continue`.
 
-   RootCoz calls `POST /results/{job_id}/preview-github-issue` or `POST /results/{job_id}/preview-jira-bug`, which draft a title and body, and search for issues that look like duplicates of the same bug.
+   RootCoz calls `POST /results/{job_id}/preview-github-issue` or `POST /results/{job_id}/preview-jira-bug`, which draft a title and body, and search for issues that look like duplicates of the same bug. That duplicate search uses the tracker token saved in `Settings` → `Tracker Tokens`, read by the server at the moment of the call — the browser holds no copy and the request carries none, so a token rotated in another browser takes effect here immediately.
 
    `Include links` adds clickable report and build URLs. `AI for issue generation` lets you pick a different provider or model for the draft. On first use the picker starts on the pair that analysed this job. The pair you pick is remembered for your account and reused by later issue drafts and by chat; `Server default` forgets it and goes back to the server's configured model, and that choice is remembered too. The preview also lists any similar issues it found, so you can link existing work instead of filing a duplicate.
 
@@ -41,7 +41,7 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
 3. Set the Jira specifics when you file a Jira ticket.
 
-   In the preview step, pick or type the `Jira Project` (the server searches your projects as you type), choose an `Issue Type` from `Bug`, `Task`, `Story`, `Epic`, `Sub-task`, or `Custom...`, and optionally pick a `Security Level`. A project key must be available on the server or in the request, otherwise ticket creation fails.
+   In the preview step, pick or type the `Jira Project` (the server searches your projects as you type), choose an `Issue Type` from `Bug`, `Task`, `Story`, `Epic`, `Sub-task`, or `Custom...`, and optionally pick a `Security Level`. A project key must be available on the server or in the request, otherwise ticket creation fails. The project search (`/api/jira-projects`) and the security-level lookup (`/api/jira-security-levels`) authenticate with the Jira credential saved on your account — the request body names only the query or the project key, never a token.
 
    GitHub issues need a repository: RootCoz always uses the deployment's `TESTS_REPO_URL`. It deliberately ignores the job's additional repositories, so you cannot retarget issue creation at another repo — a job's `request_params` are never consulted for this. To file against a different repository, change `TESTS_REPO_URL` on the server (or the `GITHUB` category in Server Settings) first.
 
@@ -52,7 +52,7 @@ This generates and reviews issue content, creates the issue, confirms which expo
    - adds a comment on the failure containing the new issue link, and
    - adds a tracked-in link for that issue, shown as a `GitHub` or `Jira` badge under the failure, which you can remove later like any other tracked link.
 
-   Creation uses your own credentials. A missing or expired token returns an error that points back to your profile settings, and so does a token that turns out to be the server's own deployment credential — that one can only read, so filing needs a personal token.
+   Creation uses the tracker token saved on your own account (`Settings` → `Tracker Tokens`), which the server reads when it handles the call; nothing is sent from the browser. A missing or expired token returns an error that points back to your profile settings, and so does a token that turns out to be the server's own deployment credential — that one can only read, so filing needs a personal token.
 
    If creation fails, the dialog stays on the preview with the generated `Title` and `Body` — and the repository, Jira project, issue type, and security level you chose — still filled in and editable. The primary action becomes `Retry`, which resubmits that same content; the model is not called again, so a retry neither costs AI tokens nor rewrites the draft. Retrying is the whole fix for a transient failure. A credential problem is refused again with the same message until the token is corrected, and any message mentioning a token gets a link to `Profile Settings` next to it.
 
@@ -201,7 +201,7 @@ rootcoz push-reportportal JOB_ID --child-job-name "CHILD_JOB" --child-build-numb
 rootcoz push JOB_ID --plugin reportportal --json
 ```
 
-Tracker flags fall back to the values in your CLI server profile, so pass them explicitly only when you need to override. See [CLI Command Reference](cli-reference.html) for details.
+The *destination* flags (`--jira-project-key`, `--jira-security-level`, `--github-repo-url`) fall back to the values in your CLI server profile, so pass them explicitly only when you need to override. A tracker credential is always the account token saved in `Settings` → `Tracker Tokens` — never a CLI flag and never a `~/.config/rootcoz/config.toml` key, so a credential key left in an older profile is ignored. See [CLI Command Reference](cli-reference.html) for details.
 
 Send feedback about RootCoz itself through the `Feedback` button in the application header. You describe the problem, RootCoz collects browser context and recent console and API errors automatically, then drafts a GitHub issue you can edit before it is created. This flow is separate from failure issues and requires feedback to be enabled on the server. A failed submission keeps the draft on screen with `Retry` as the primary action, and reports the server's own reason — the same error classes as in step 4.
 

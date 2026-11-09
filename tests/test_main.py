@@ -228,6 +228,18 @@ def mock_settings(temp_db_path: Path):
 _ADMIN_AUTH_HEADERS = {"Authorization": f"Bearer {_TEST_ADMIN_KEY}"}
 
 
+async def _tracker_user(name: str, **tokens: str) -> dict[str, str]:
+    """Auth headers for a registered account whose row holds *tokens*.
+
+    The bootstrap ``admin`` has no ``users`` row, so every tracker route that
+    reads the caller's stored credential needs a real account.
+    """
+    _, api_key = await storage.create_user(name, role="reviewer")
+    if tokens:
+        await storage.save_user_tokens(name, **tokens)
+    return {"Authorization": f"Bearer {api_key}"}
+
+
 def _gh_release(version: str, name: str = "", body: str = "body") -> dict[str, Any]:
     """A GitHub API release dict (tag_name keeps or drops the v prefix)."""
     return {
@@ -3947,6 +3959,7 @@ class TestPreviewJiraBug:
             ),
         ]
 
+        headers = await _tracker_user("ai-filter-jira", jira_token="user_jira_token")
         with (
             _enable_feature("jira_enabled"),
             patch("rootcoz.main.generate_jira_bug_content") as mock_gen,
@@ -3968,8 +3981,8 @@ class TestPreviewJiraBug:
                             "test_name": "test_network",
                             "ai_provider": "claude",
                             "ai_model": "opus",
-                            "jira_token": "user_jira_token",
                         },
+                        headers=headers,
                     )
 
         assert response.status_code == 200
@@ -4087,16 +4100,15 @@ class TestCreateGithubIssue:
                 "number": 99,
             }
             with _with_github_issue_config():
-                _, user_key = await storage.create_user("testuser")
+                headers = await _tracker_user("testuser", github_token="ghp_user_token")
                 response = test_client.post(
                     "/results/job-create-gh/create-github-issue",
                     json={
                         "test_name": "test_login_success",
                         "title": "Bug: login fails",
                         "body": "## Details\nLogin returns 500",
-                        "github_token": "ghp_user_token",
                     },
-                    headers={"Authorization": f"Bearer {user_key}"},
+                    headers=headers,
                 )
         assert response.status_code == 201
         data = response.json()
@@ -4139,16 +4151,15 @@ class TestCreateGithubIssue:
                 "number": 98,
             }
             with _with_github_issue_config():
-                _, user_key = await storage.create_user("testuser")
+                headers = await _tracker_user("testuser", github_token="ghp_user_token")
                 response = test_client.post(
                     "/results/job-create-gh-attr/create-github-issue",
                     json={
                         "test_name": "test_login_success",
                         "title": "Bug: login fails",
                         "body": spoofed,
-                        "github_token": "ghp_user_token",
                     },
-                    headers={"Authorization": f"Bearer {user_key}"},
+                    headers=headers,
                 )
         assert response.status_code == 201
         _, kwargs = mock_create.call_args
@@ -4241,16 +4252,17 @@ class TestCreateJiraBug:
             }
             # Mock settings to have jira_enabled=True
             with _enable_feature("jira_enabled"):
-                _, user_key = await storage.create_user("testuser-jira")
+                headers = await _tracker_user(
+                    "testuser-jira", jira_token="user_jira_token"
+                )
                 response = test_client.post(
                     "/results/job-create-jira/create-jira-bug",
                     json={
                         "test_name": "test_login_success",
                         "title": "DNS timeout",
                         "body": "DNS resolution fails",
-                        "jira_token": "user_jira_token",
                     },
-                    headers={"Authorization": f"Bearer {user_key}"},
+                    headers=headers,
                 )
         assert response.status_code == 201
         data = response.json()
@@ -4265,7 +4277,7 @@ class TestCreateJiraBug:
 
     @pytest.mark.asyncio
     async def test_create_jira_bug_refuses_the_deployment_credential(self, test_client):
-        """Submitting the server's own token is a 400, not a filing — and audited.
+        """A stored token that IS the server's own is a 400, not a filing.
 
         The refusal is a credential-policy denial, so unlike the tracker
         refusals it leaves exactly one ``issue.create`` row, carrying no title
@@ -4280,6 +4292,10 @@ class TestCreateJiraBug:
             "completed",
             _jira_create_result_data(),
         )
+        # The deployment's own API token (from _enable_feature), stored in the
+        # caller's row: the credential source is the account, the guard is the
+        # deployment comparison.
+        headers = await _tracker_user("jira-deploy-cred", jira_token="test_jira_token")
         with (
             _enable_feature("jira_enabled"),
             patch("rootcoz.bug_creation.httpx.AsyncClient") as AsyncClient,
@@ -4290,9 +4306,8 @@ class TestCreateJiraBug:
                     "test_name": "test_login_success",
                     "title": "Forbidden title",
                     "body": "Forbidden body",
-                    # The deployment's own API token (from _enable_feature).
-                    "jira_token": "test_jira_token",
                 },
+                headers=headers,
             )
         # The helper IS called; the HTTP client is not — nothing was posted.
         AsyncClient.assert_not_called()
@@ -4325,6 +4340,9 @@ class TestCreateJiraBug:
             "completed",
             _jira_create_result_data(),
         )
+        headers = await _tracker_user(
+            "jira-proj-fallback", jira_token="user_jira_token"
+        )
         with patch("rootcoz.main.create_jira_bug") as mock_create:
             mock_create.return_value = {
                 "key": "TEST-1",
@@ -4338,8 +4356,8 @@ class TestCreateJiraBug:
                         "test_name": "test_login_success",
                         "title": "Bug",
                         "body": "Details",
-                        "jira_token": "user_jira_token",
                     },
+                    headers=headers,
                 )
         assert response.status_code == 201, response.text
         assert mock_create.call_args.kwargs["project_key"] == "TEST"
@@ -4452,10 +4470,11 @@ class TestIssueCreationRequiresUserCredentials:
 
     @pytest.mark.asyncio
     async def test_github_create_with_user_token_succeeds(self, test_client):
-        """GitHub issue creation works when user provides their own token."""
+        """GitHub issue creation works when the caller's row holds a token."""
         await storage.save_result(
             "job-gh-usr-tok", "http://j", "completed", self._RESULT_DATA
         )
+        headers = await _tracker_user("cred-gh-tok", github_token="ghp_user_provided")
         with patch("rootcoz.main.create_github_issue") as mock_create:
             mock_create.return_value = {
                 "url": "https://github.com/org/repo/issues/1",
@@ -4468,11 +4487,11 @@ class TestIssueCreationRequiresUserCredentials:
                         "test_name": "test_cred",
                         "title": "Bug",
                         "body": "Details",
-                        "github_token": "ghp_user_provided",
                     },
+                    headers=headers,
                 )
         assert response.status_code == 201
-        # Verify the user token was passed, not the server token
+        # Verify the row token was passed, not the server token
         call_kwargs = mock_create.call_args[1]
         assert call_kwargs["github_token"] == "ghp_user_provided"
 
@@ -4520,10 +4539,11 @@ class TestIssueCreationRequiresUserCredentials:
 
     @pytest.mark.asyncio
     async def test_jira_create_with_user_token_succeeds(self, test_client):
-        """Jira bug creation works when user provides their own token."""
+        """Jira bug creation works when the caller's row holds a token."""
         await storage.save_result(
             "job-jira-usr-tok", "http://j", "completed", self._RESULT_DATA
         )
+        headers = await _tracker_user("cred-jira-tok", jira_token="user_jira_pat")
         with patch("rootcoz.main.create_jira_bug") as mock_create:
             mock_create.return_value = {
                 "key": "PROJ-1",
@@ -4536,8 +4556,8 @@ class TestIssueCreationRequiresUserCredentials:
                         "test_name": "test_cred",
                         "title": "Bug",
                         "body": "Details",
-                        "jira_token": "user_jira_pat",
                     },
+                    headers=headers,
                 )
         assert response.status_code == 201
 
@@ -4574,10 +4594,11 @@ class TestIssueCreationRequiresUserCredentials:
 
     @pytest.mark.asyncio
     async def test_github_preview_with_token_includes_duplicates(self, test_client):
-        """Preview with user token should include duplicate detection."""
+        """Preview with a stored token should include duplicate detection."""
         await storage.save_result(
             "job-gh-prev-tok", "http://j", "completed", self._RESULT_DATA
         )
+        headers = await _tracker_user("cred-gh-prev", github_token="ghp_user_token")
         with (
             patch("rootcoz.main.generate_github_issue_content") as mock_gen,
             patch("rootcoz.main.search_github_duplicates") as mock_dup,
@@ -4591,8 +4612,8 @@ class TestIssueCreationRequiresUserCredentials:
                 "/results/job-gh-prev-tok/preview-github-issue",
                 json={
                     "test_name": "test_cred",
-                    "github_token": "ghp_user_token",
                 },
+                headers=headers,
             )
         assert response.status_code == 200
         data = response.json()
@@ -4647,14 +4668,18 @@ class TestIssueCreationRequiresUserCredentials:
             patch("rootcoz.main.create_jira_bug") as mock_create,
             _enable_feature("jira_enabled"),
         ):
+            headers = await _tracker_user(
+                "cred-jira-legacy-sa",
+                jira_sa_token="legacy-secret-token",  # pragma: allowlist secret
+            )
             response = test_client.post(
                 "/results/job-jira-legacy-sa/create-jira-bug",
                 json={
                     "test_name": "test_cred",
                     "title": "Bug",
                     "body": "Details",
-                    "jira_sa_token": "legacy-secret-token",  # pragma: allowlist secret
                 },
+                headers=headers,
             )
         assert response.status_code == 400
         detail = response.json()["detail"]
@@ -4670,12 +4695,16 @@ class TestIssueCreationRequiresUserCredentials:
             "job-jira-prev-legacy-sa", "http://j", "completed", self._RESULT_DATA
         )
         with _enable_feature("jira_enabled"):
+            headers = await _tracker_user(
+                "cred-jira-prev-legacy-sa",
+                jira_sa_token="legacy-secret-token",  # pragma: allowlist secret
+            )
             response = test_client.post(
                 "/results/job-jira-prev-legacy-sa/preview-jira-bug",
                 json={
                     "test_name": "test_cred",
-                    "jira_sa_token": "legacy-secret-token",  # pragma: allowlist secret
                 },
+                headers=headers,
             )
         assert response.status_code == 400
         assert "not a recognized" in response.json()["detail"]
@@ -4692,21 +4721,479 @@ class TestIssueCreationRequiresUserCredentials:
             patch("rootcoz.main.create_jira_bug") as mock_create,
             _enable_feature("jira_enabled"),
         ):
+            headers = await _tracker_user(
+                "cred-jira-legacy-plus-tok",
+                jira_token="user_jira_pat",
+                jira_sa_token="legacy-secret-token",  # pragma: allowlist secret
+            )
             response = test_client.post(
                 "/results/job-jira-legacy-sa-plus-tok/create-jira-bug",
                 json={
                     "test_name": "test_cred",
                     "title": "Bug",
                     "body": "Details",
-                    "jira_token": "user_jira_pat",
-                    "jira_sa_token": "legacy-secret-token",  # pragma: allowlist secret
                 },
+                headers=headers,
             )
         assert response.status_code == 400
         assert "not a recognized" in response.json()["detail"]
         # Invalid input is never silently dropped in favor of the regular
         # token — no bug is created
         mock_create.assert_not_called()
+
+
+class TestTrackerCredentialComesFromTheRow:
+    """The caller's account row is the only tracker credential on the report path.
+
+    Chat already reads ``storage.get_user_tokens``; the report endpoints must
+    read the same row, so a body credential cannot override it, a preview cannot
+    search with one credential while the create files with another, and both
+    paths answer a caller with no stored token with the same sentence.
+    """
+
+    _RESULT_DATA: ClassVar[dict] = {
+        "status": "completed",
+        "summary": "",
+        "failures": [
+            {
+                "test_name": "test_row",
+                "error": "err",
+                "analysis": {"classification": "CODE ISSUE"},
+            }
+        ],
+    }
+
+    async def _stored_run(self, job_id: str, **params: str) -> str:
+        """A stored run with a failed test the report path can name."""
+        await storage.save_result(
+            job_id,
+            "http://jenkins",
+            "completed",
+            {
+                **self._RESULT_DATA,
+                "request_params": {"job_name": job_id, "build_number": 1, **params},
+            },
+        )
+        return job_id
+
+    # -- create ---------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_body_github_token_cannot_override_the_row(self, test_client):
+        """A body token is ignored: the outbound call carries the row's."""
+        await self._stored_run("job-row-gh")
+        headers = await _tracker_user("row-gh", github_token="ghp_row")
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/1",
+                "number": 1,
+            }
+            with _with_github_issue_config():
+                response = test_client.post(
+                    "/results/job-row-gh/create-github-issue",
+                    json={
+                        "test_name": "test_row",
+                        "title": "Bug",
+                        "body": "Details",
+                        "github_token": "ghp_body",
+                    },
+                    headers=headers,
+                )
+        assert response.status_code == 201, response.text
+        assert mock_create.call_args[1]["github_token"] == "ghp_row"
+
+    @pytest.mark.asyncio
+    async def test_body_jira_credentials_cannot_override_the_row(self, test_client):
+        """A body Jira token is ignored: the create call gets the row's PAT."""
+        await self._stored_run("job-row-jira")
+        headers = await _tracker_user("row-jira", jira_token="row-jira-pat")
+        with patch("rootcoz.main.create_jira_bug") as mock_create:
+            mock_create.return_value = {
+                "key": "PROJ-1",
+                "url": "https://jira.example.com/browse/PROJ-1",
+            }
+            with _enable_feature("jira_enabled"):
+                response = test_client.post(
+                    "/results/job-row-jira/create-jira-bug",
+                    json={
+                        "test_name": "test_row",
+                        "title": "Bug",
+                        "body": "Details",
+                        "jira_token": "body-tok",
+                    },
+                    headers=headers,
+                )
+        assert response.status_code == 201, response.text
+        # Read off the resolved connection: the create helper takes no settings.
+        connection = mock_create.call_args[1]["connection"]
+        assert connection.mode == "server"
+        assert connection.headers["Authorization"] == "Bearer row-jira-pat"
+
+    @pytest.mark.asyncio
+    async def test_github_create_without_row_token_returns_400_even_with_a_body_token(
+        self, test_client
+    ):
+        """An empty row is refused, and a body token cannot fill it."""
+        from rootcoz.error_messages import tracker_credential_message
+
+        await self._stored_run("job-row-gh-empty")
+        headers = await _tracker_user("row-gh-empty")
+        with (
+            patch("rootcoz.main.create_github_issue") as mock_create,
+            _with_github_issue_config(),
+        ):
+            response = test_client.post(
+                "/results/job-row-gh-empty/create-github-issue",
+                json={
+                    "test_name": "test_row",
+                    "title": "Bug",
+                    "body": "Details",
+                    "github_token": "ghp_body",
+                },
+                headers=headers,
+            )
+        assert response.status_code == 400
+        assert response.json()["detail"] == tracker_credential_message("GitHub")
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_jira_create_without_row_token_returns_400_even_with_a_body_token(
+        self, test_client
+    ):
+        """The Jira create refuses an empty row the same way."""
+        from rootcoz.error_messages import tracker_credential_message
+
+        await self._stored_run("job-row-jira-empty")
+        headers = await _tracker_user("row-jira-empty")
+        with (
+            patch("rootcoz.main.create_jira_bug") as mock_create,
+            _enable_feature("jira_enabled"),
+        ):
+            response = test_client.post(
+                "/results/job-row-jira-empty/create-jira-bug",
+                json={
+                    "test_name": "test_row",
+                    "title": "Bug",
+                    "body": "Details",
+                    "jira_token": "body-tok",
+                },
+                headers=headers,
+            )
+        assert response.status_code == 400
+        assert response.json()["detail"] == tracker_credential_message("Jira")
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_report_and_chat_refusal_are_the_same_sentence_for_a_profileless_admin(
+        self, test_client
+    ):
+        """The bootstrap ``admin`` is told the truth on both paths, alike."""
+        await self._stored_run("job-admin-refusal")
+        with _with_github_issue_config():
+            report = test_client.post(
+                "/results/job-admin-refusal/create-github-issue",
+                json={
+                    "test_name": "test_row",
+                    "title": "Bug",
+                    "body": "Details",
+                },
+            )
+            chat = test_client.post(
+                "/api/chat-issue",
+                json={"target": "github", "title": "Bug", "body": "Details"},
+            )
+        assert report.status_code == 400, report.text
+        assert chat.status_code == 400, chat.text
+        assert report.json()["detail"] == chat.json()["detail"]
+        assert "no profile to store one" in report.json()["detail"]
+
+    # -- preview --------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_preview_github_searches_duplicates_with_the_row_token(
+        self, test_client
+    ):
+        """The duplicate search uses the row's token, not the body's."""
+        await self._stored_run("job-row-prev-gh")
+        headers = await _tracker_user("row-prev-gh", github_token="ghp_row")
+        with (
+            patch("rootcoz.main.generate_github_issue_content") as mock_gen,
+            patch("rootcoz.main.search_github_duplicates") as mock_dup,
+            _enable_feature("github_issues_enabled"),
+        ):
+            mock_gen.return_value = {"title": "T", "body": "B"}
+            mock_dup.return_value = []
+            response = test_client.post(
+                "/results/job-row-prev-gh/preview-github-issue",
+                json={"test_name": "test_row", "github_token": "ghp_body"},
+                headers=headers,
+            )
+        assert response.status_code == 200, response.text
+        assert mock_dup.call_args[1]["github_token"] == "ghp_row"
+
+    @pytest.mark.asyncio
+    async def test_preview_jira_searches_duplicates_with_the_row_token(
+        self, test_client
+    ):
+        """The Jira duplicate search uses the row's credential too."""
+        await self._stored_run("job-row-prev-jira")
+        headers = await _tracker_user("row-prev-jira", jira_token="row-jira-pat")
+        with (
+            patch("rootcoz.main.generate_jira_bug_content") as mock_gen,
+            patch("rootcoz.main.search_jira_duplicates") as mock_dup,
+            _enable_feature("jira_enabled"),
+        ):
+            mock_gen.return_value = {"title": "T", "body": "B"}
+            mock_dup.return_value = []
+            response = test_client.post(
+                "/results/job-row-prev-jira/preview-jira-bug",
+                json={"test_name": "test_row", "jira_token": "body-tok"},
+                headers=headers,
+            )
+        assert response.status_code == 200, response.text
+        settings = mock_dup.call_args[1]["settings"]
+        assert settings.jira_pat.get_secret_value() == "row-jira-pat"
+
+    @pytest.mark.asyncio
+    async def test_preview_still_drafts_without_a_row_token(self, test_client):
+        """An empty row still previews — only the duplicate search is skipped."""
+        await self._stored_run("job-row-prev-none")
+        headers = await _tracker_user("row-prev-none")
+        with (
+            patch("rootcoz.main.generate_github_issue_content") as mock_gen,
+            patch("rootcoz.main.search_github_duplicates") as mock_dup,
+            _enable_feature("github_issues_enabled"),
+        ):
+            mock_gen.return_value = {"title": "T", "body": "B"}
+            response = test_client.post(
+                "/results/job-row-prev-none/preview-github-issue",
+                json={"test_name": "test_row", "github_token": "ghp_body"},
+                headers=headers,
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["similar_issues"] == []
+        mock_dup.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_preview_github_drafts_when_the_row_read_fails(self, test_client):
+        """A failed row read skips duplicate detection, never the draft."""
+        await self._stored_run("job-row-prev-gh-down")
+        headers = await _tracker_user("row-prev-gh-down", github_token="ghp_row")
+        with (
+            patch("rootcoz.main.generate_github_issue_content") as mock_gen,
+            patch("rootcoz.main.search_github_duplicates") as mock_dup,
+            patch(
+                "rootcoz.main.storage.get_user_tokens",
+                side_effect=RuntimeError("db unavailable"),
+            ),
+            _enable_feature("github_issues_enabled"),
+        ):
+            mock_gen.return_value = {"title": "T", "body": "B"}
+            response = test_client.post(
+                "/results/job-row-prev-gh-down/preview-github-issue",
+                json={"test_name": "test_row"},
+                headers=headers,
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["similar_issues"] == []
+        mock_dup.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_preview_jira_drafts_when_the_row_read_fails(self, test_client):
+        """The Jira preview too — and never with the deployment's credential."""
+        await self._stored_run("job-row-prev-jira-down")
+        headers = await _tracker_user("row-prev-jira-down", jira_token="row-jira-pat")
+        with (
+            patch("rootcoz.main.generate_jira_bug_content") as mock_gen,
+            patch("rootcoz.main.search_jira_duplicates") as mock_dup,
+            patch(
+                "rootcoz.main.storage.get_user_tokens",
+                side_effect=RuntimeError("db unavailable"),
+            ),
+            _enable_feature("jira_enabled"),
+        ):
+            mock_gen.return_value = {"title": "T", "body": "B"}
+            response = test_client.post(
+                "/results/job-row-prev-jira-down/preview-jira-bug",
+                json={"test_name": "test_row"},
+                headers=headers,
+            )
+        assert response.status_code == 200, response.text
+        assert response.json()["similar_issues"] == []
+        mock_dup.assert_not_called()
+
+    # -- Jira service accounts -------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_legacy_row_sa_token_is_rejected(self, test_client):
+        """A non-ATOA row value now reaches the refusal instead of being absent."""
+        await self._stored_run("job-row-legacy-sa")
+        headers = await _tracker_user(
+            "row-legacy-sa",
+            jira_sa_token="legacy-secret-token",  # pragma: allowlist secret
+        )
+        with (
+            patch("rootcoz.main.create_jira_bug") as mock_create,
+            _enable_feature("jira_enabled"),
+        ):
+            response = test_client.post(
+                "/results/job-row-legacy-sa/create-jira-bug",
+                json={"test_name": "test_row", "title": "Bug", "body": "D"},
+                headers=headers,
+            )
+        assert response.status_code == 400
+        assert "not a recognized" in response.json()["detail"]
+        mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("mode", "connection_mode", "row_token"),
+        [
+            ("oauth", "sa", "ATOA-row-client-secret"),
+            ("atst", "atst", "ATST-row-scoped-token"),
+        ],
+    )
+    async def test_row_jira_sa_token_drives_create_jira_bug(
+        self, test_client, mode: str, connection_mode: str, row_token: str
+    ):
+        """A row ATOA/ATST credential files the bug, as it does from chat."""
+        from rootcoz.main import app, get_settings
+
+        await self._stored_run(f"job-row-sa-{mode}")
+        headers = await _tracker_user(f"row-sa-{mode}", jira_sa_token=row_token)
+        sa_settings = _build_wait_settings(
+            jira_auth_mode=mode,
+            atlassian_oauth_client_id="test-client-id",
+            atlassian_oauth_cloud_id="2b9e35e3-6bd3-4cec-b838-f4249ee02432",
+            jira_site_url="https://myorg.atlassian.net",
+            jira_project_key="PROJ",
+        )
+        app.dependency_overrides[get_settings] = lambda: sa_settings
+        try:
+            with patch("rootcoz.main.create_jira_bug") as mock_create:
+                mock_create.return_value = {
+                    "key": "PROJ-1",
+                    "url": "https://myorg.atlassian.net/browse/PROJ-1",
+                }
+                response = test_client.post(
+                    f"/results/job-row-sa-{mode}/create-jira-bug",
+                    json={
+                        "test_name": "test_row",
+                        "title": "Bug",
+                        "body": "Details",
+                    },
+                    headers=headers,
+                )
+        finally:
+            app.dependency_overrides.pop(get_settings, None)
+        assert response.status_code == 201, response.text
+        connection = mock_create.call_args[1]["connection"]
+        assert connection.mode == connection_mode
+        if connection_mode == "sa":
+            assert connection.sa_client_secret == row_token
+        else:
+            assert connection.headers["Authorization"] == f"Bearer {row_token}"
+        # The service-account credential is unambiguous: the personal secret is
+        # not on the connection at all.
+        assert connection.auth is None
+
+    # -- body contract ---------------------------------------------------------
+
+    def test_create_issue_request_has_no_credential_fields(self):
+        """The body carries choices only; a legacy credential is ignored (D8)."""
+        from rootcoz.models import CreateIssueRequest, PreviewIssueRequest
+
+        credentials = {"github_token", "jira_token", "jira_email", "jira_sa_token"}
+        for model in (CreateIssueRequest, PreviewIssueRequest):
+            assert not credentials & set(model.model_fields)
+        body = CreateIssueRequest(
+            test_name="test_row",
+            title="Bug",
+            body="Details",
+            github_token="ghp_body",
+            jira_token="body-tok",
+            jira_email="body@example.com",
+            jira_sa_token="ATOA-body",
+            jira_project_key="PROJ",
+        )
+        assert not credentials & set(body.model_dump())
+        # The destination choices stay part of the body
+        assert body.jira_project_key == "PROJ"
+
+    # -- one account, both paths ----------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_report_and_chat_agree_for_one_registered_account(self, test_client):
+        """One account files with the same token on both paths, and refuses alike."""
+        job_id = await self._stored_run(
+            "job-agree", tests_repo_url="https://github.com/org/repo"
+        )
+        headers = await _tracker_user("agree-user", github_token="ghp_agree")
+        filed: list[str] = []
+        with patch("rootcoz.main.create_github_issue") as mock_create:
+            mock_create.return_value = {
+                "url": "https://github.com/org/repo/issues/5",
+                "number": 5,
+            }
+            with _with_github_issue_config():
+                report = test_client.post(
+                    f"/results/{job_id}/create-github-issue",
+                    json={"test_name": "test_row", "title": "T", "body": "B"},
+                    headers=headers,
+                )
+                assert report.status_code == 201, report.text
+                filed.append(mock_create.call_args[1]["github_token"])
+
+                proposal = test_client.post(
+                    "/api/chat-issue/propose",
+                    json={
+                        "title": "T",
+                        "body": "B",
+                        "target": "github",
+                        "job_id": job_id,
+                        "conversation": job_id,
+                    },
+                    headers=headers,
+                )
+                assert proposal.status_code == 201, proposal.text
+                draft = proposal.json()
+                await storage.add_chat_message(
+                    job_id,
+                    role="user",
+                    content=f"Yes, file it: {draft['confirmation_code']}",
+                    username="agree-user",
+                )
+                chat = test_client.post(
+                    "/api/chat-issue",
+                    json={
+                        "confirmation_id": draft["confirmation_id"],
+                        "confirmation_code": draft["confirmation_code"],
+                        "title": draft["title"],
+                        "body": draft["body"],
+                        "target": "github",
+                        "job_id": job_id,
+                    },
+                    headers=headers,
+                )
+                assert chat.status_code == 201, chat.text
+                filed.append(mock_create.call_args[1]["github_token"])
+        assert filed == ["ghp_agree", "ghp_agree"]
+
+        await storage.save_user_tokens("agree-user", github_token="")
+        with _with_github_issue_config():
+            report = test_client.post(
+                f"/results/{job_id}/create-github-issue",
+                json={"test_name": "test_row", "title": "T", "body": "B"},
+                headers=headers,
+            )
+            chat = test_client.post(
+                "/api/chat-issue",
+                json={"title": "T", "body": "B", "target": "github", "job_id": job_id},
+                headers=headers,
+            )
+        assert report.status_code == 400, report.text
+        assert chat.status_code == 400, chat.text
+        assert report.json()["detail"] == chat.json()["detail"]
 
 
 class TestJiraMethodConfiguredUsesEffectiveSettings:
@@ -4751,6 +5238,7 @@ class TestJiraMethodConfiguredUsesEffectiveSettings:
         app.dependency_overrides[get_settings] = (
             self._pat_settings_without_server_secret
         )
+        headers = await _tracker_user("eff-create", jira_token="user_jira_pat")
         try:
             with patch("rootcoz.main.create_jira_bug") as mock_create:
                 mock_create.return_value = {
@@ -4763,8 +5251,8 @@ class TestJiraMethodConfiguredUsesEffectiveSettings:
                         "test_name": "test_eff",
                         "title": "Bug",
                         "body": "Details",
-                        "jira_token": "user_jira_pat",
                     },
+                    headers=headers,
                 )
         finally:
             app.dependency_overrides.pop(get_settings, None)
@@ -4788,6 +5276,7 @@ class TestJiraMethodConfiguredUsesEffectiveSettings:
         app.dependency_overrides[get_settings] = (
             self._pat_settings_without_server_secret
         )
+        headers = await _tracker_user("eff-preview", jira_token="user_jira_pat")
         try:
             with (
                 patch("rootcoz.main.generate_jira_bug_content") as mock_gen,
@@ -4805,8 +5294,8 @@ class TestJiraMethodConfiguredUsesEffectiveSettings:
                     "/results/job-jira-eff-prev/preview-jira-bug",
                     json={
                         "test_name": "test_eff",
-                        "jira_token": "user_jira_pat",
                     },
+                    headers=headers,
                 )
         finally:
             app.dependency_overrides.pop(get_settings, None)
@@ -5064,6 +5553,7 @@ class TestBugCreationIntegration:
             assert preview_resp.status_code == 200
 
             # Create (need settings with TESTS_REPO_URL)
+            headers = await _tracker_user("integ-gh", github_token="ghp_user_token")
             with _with_github_issue_config():
                 create_resp = test_client.post(
                     "/results/job-integ-gh/create-github-issue",
@@ -5071,8 +5561,8 @@ class TestBugCreationIntegration:
                         "test_name": "test_login_success",
                         "title": "Bug title",
                         "body": "Bug body",
-                        "github_token": "ghp_user_token",
                     },
+                    headers=headers,
                 )
             assert create_resp.status_code == 201
             data = create_resp.json()
@@ -5153,14 +5643,17 @@ class TestCreateGithubIssueApiErrors:
             patch("rootcoz.main.create_github_issue", side_effect=exc),
             _with_github_issue_config(),
         ):
+            headers = await _tracker_user(
+                f"gh-api-err-{job_id}", github_token=_REPORT_GITHUB_TOKEN
+            )
             return test_client.post(
                 f"/results/{job_id}/create-github-issue",
                 json={
                     "test_name": "test_foo",
                     "title": "Bug",
                     "body": _REPORT_BODY,
-                    "github_token": _REPORT_GITHUB_TOKEN,
                 },
+                headers=headers,
             )
 
     @pytest.mark.asyncio
@@ -5345,14 +5838,17 @@ class TestCreateGithubIssueApiErrors:
                 request=httpx.Request("POST", "https://api.github.com"),
             )
             with _with_github_issue_config():
+                headers = await _tracker_user(
+                    "gh-net-err", github_token="ghp_user_token"
+                )
                 response = test_client.post(
                     "/results/job-gh-net-err/create-github-issue",
                     json={
                         "test_name": "test_foo",
                         "title": "Bug",
                         "body": "Details",
-                        "github_token": "ghp_user_token",
                     },
+                    headers=headers,
                 )
         assert response.status_code == 502
         assert "GitHub API unreachable" in response.json()["detail"]
@@ -5395,14 +5891,15 @@ class TestCreateJiraBugApiErrors:
             patch("rootcoz.main.create_jira_bug", side_effect=exc),
             _enable_feature("jira_enabled"),
         ):
+            headers = await _tracker_user("jira-api-503", jira_token="user_jira_token")
             response = test_client.post(
                 "/results/job-jira-err/create-jira-bug",
                 json={
                     "test_name": "test_foo",
                     "title": "Bug",
                     "body": _REPORT_BODY,
-                    "jira_token": "user_jira_token",
                 },
+                headers=headers,
             )
         assert response.status_code == 502
         assert response.json()["detail"] == (
@@ -5439,14 +5936,17 @@ class TestCreateJiraBugApiErrors:
                 response=httpx.Response(400),
             )
             with _enable_feature("jira_enabled"):
+                headers = await _tracker_user(
+                    "jira-api-400", jira_token="user_jira_token"
+                )
                 response = test_client.post(
                     "/results/job-jira-bad-request/create-jira-bug",
                     json={
                         "test_name": "test_foo",
                         "title": "Bug",
                         "body": "Details",
-                        "jira_token": "user_jira_token",
                     },
+                    headers=headers,
                 )
         assert response.status_code == 502
         assert response.json()["detail"] == "Jira API error: 400"
@@ -5476,14 +5976,17 @@ class TestCreateJiraBugApiErrors:
                 request=httpx.Request("POST", "https://jira.example.com"),
             )
             with _enable_feature("jira_enabled"):
+                headers = await _tracker_user(
+                    "jira-api-net", jira_token="user_jira_token"
+                )
                 response = test_client.post(
                     "/results/job-jira-net-err/create-jira-bug",
                     json={
                         "test_name": "test_foo",
                         "title": "Bug",
                         "body": "Details",
-                        "jira_token": "user_jira_token",
                     },
+                    headers=headers,
                 )
         assert response.status_code == 502
         assert "Jira API unreachable" in response.json()["detail"]
@@ -5527,14 +6030,17 @@ class TestCreateJiraBugApiErrors:
             patch("rootcoz.main.create_jira_bug", side_effect=exc),
             _enable_feature("jira_enabled"),
         ):
+            headers = await _tracker_user(
+                "jira-api-404", jira_token="secret_jira_token"
+            )
             response = test_client.post(
                 "/results/job-jira-404/create-jira-bug",
                 json={
                     "test_name": "test_foo",
                     "title": "Bug",
                     "body": _REPORT_BODY,
-                    "jira_token": "secret_jira_token",
                 },
+                headers=headers,
             )
         assert response.status_code == 403
         detail = response.json()["detail"]
@@ -5582,14 +6088,17 @@ class TestCreateJiraBugApiErrors:
             patch("rootcoz.main.create_jira_bug", side_effect=exc),
             _enable_feature("jira_enabled"),
         ):
+            headers = await _tracker_user(
+                f"jira-api-auth-{status}", jira_token="secret_jira_token"
+            )
             response = test_client.post(
                 f"/results/job-jira-auth-{status}/create-jira-bug",
                 json={
                     "test_name": "test_foo",
                     "title": "Bug",
                     "body": _REPORT_BODY,
-                    "jira_token": "secret_jira_token",
                 },
+                headers=headers,
             )
         assert response.status_code == 401
         assert response.json()["detail"] == (
@@ -13214,25 +13723,33 @@ class TestJiraProjectsEndpoint:
         assert response.status_code == 200
         assert response.json() == []
 
-    def test_legacy_sa_token_rejected(self, test_client):
-        """A legacy (non-ATOA) SA secret is a clear 400, not a silent drop."""
+    @pytest.mark.asyncio
+    async def test_legacy_sa_token_rejected(self, test_client):
+        """A legacy (non-ATOA) stored SA secret is a clear 400, not a silent drop."""
+        headers = await _tracker_user(
+            "jira-projects-legacy",
+            jira_sa_token="legacy-secret-token",  # pragma: allowlist secret
+        )
         response = test_client.post(
             "/api/jira-projects",
-            json={"jira_sa_token": "legacy-secret-token"},  # pragma: allowlist secret
-            headers=_ADMIN_AUTH_HEADERS,
+            json={},
+            headers=headers,
         )
         assert response.status_code == 400
         assert "not a recognized" in response.json()["detail"]
 
-    def test_legacy_sa_token_rejected_with_regular_token(self, test_client):
+    @pytest.mark.asyncio
+    async def test_legacy_sa_token_rejected_with_regular_token(self, test_client):
         """A legacy SA secret 400s even alongside a regular token (fail closed)."""
+        headers = await _tracker_user(
+            "jira-projects-legacy-both",
+            jira_token="user-pat",
+            jira_sa_token="legacy-secret-token",  # pragma: allowlist secret
+        )
         response = test_client.post(
             "/api/jira-projects",
-            json={
-                "jira_token": "user-pat",
-                "jira_sa_token": "legacy-secret-token",  # pragma: allowlist secret
-            },
-            headers=_ADMIN_AUTH_HEADERS,
+            json={},
+            headers=headers,
         )
         assert response.status_code == 400
         assert "not a recognized" in response.json()["detail"]
@@ -13249,6 +13766,10 @@ class TestJiraProjectsEndpoint:
             atlassian_oauth_cloud_id="cloud-id-123",
         )
         app.dependency_overrides[get_settings] = lambda: jira_settings
+        headers = await _tracker_user(
+            "jira-projects-atst",
+            jira_sa_token="ATST-user-token",  # pragma: allowlist secret
+        )
         try:
             with patch("rootcoz.main.JiraClient") as MockJiraClient:
                 mock_client = AsyncMock()
@@ -13258,10 +13779,8 @@ class TestJiraProjectsEndpoint:
                 MockJiraClient.return_value = mock_client
                 response = test_client.post(
                     "/api/jira-projects",
-                    json={
-                        "jira_sa_token": "ATST-user-token"
-                    },  # pragma: allowlist secret
-                    headers=_ADMIN_AUTH_HEADERS,
+                    json={},
+                    headers=headers,
                 )
             assert response.status_code == 200
             assert any(p["key"] == "PROJ" for p in response.json())
@@ -13287,6 +13806,11 @@ class TestJiraProjectsEndpoint:
             atlassian_oauth_cloud_id="cloud-id-123",
         )
         app.dependency_overrides[get_settings] = lambda: jira_settings
+        headers = await _tracker_user(
+            "jira-projects-atst-both",
+            jira_token="user-pat",
+            jira_sa_token="ATST-user-token",  # pragma: allowlist secret
+        )
         try:
             with patch("rootcoz.main.JiraClient") as MockJiraClient:
                 mock_client = AsyncMock()
@@ -13296,11 +13820,8 @@ class TestJiraProjectsEndpoint:
                 MockJiraClient.return_value = mock_client
                 response = test_client.post(
                     "/api/jira-projects",
-                    json={
-                        "jira_token": "user-pat",
-                        "jira_sa_token": "ATST-user-token",  # pragma: allowlist secret
-                    },
-                    headers=_ADMIN_AUTH_HEADERS,
+                    json={},
+                    headers=headers,
                 )
             assert response.status_code == 200
             # The classified SA token wins over the regular token's field
@@ -13330,6 +13851,11 @@ class TestJiraProjectsEndpoint:
             atlassian_oauth_cloud_id="cloud-id-123",
         )
         app.dependency_overrides[get_settings] = lambda: jira_settings
+        headers = await _tracker_user(
+            "jira-projects-atst-bare",
+            jira_token="ATST-user-token",  # pragma: allowlist secret
+            jira_email="user@example.com",
+        )
         try:
             with patch("rootcoz.main.JiraClient") as MockJiraClient:
                 mock_client = AsyncMock()
@@ -13339,11 +13865,8 @@ class TestJiraProjectsEndpoint:
                 MockJiraClient.return_value = mock_client
                 response = test_client.post(
                     "/api/jira-projects",
-                    json={
-                        "jira_token": "ATST-user-token",  # pragma: allowlist secret
-                        "jira_email": "user@example.com",
-                    },
-                    headers=_ADMIN_AUTH_HEADERS,
+                    json={},
+                    headers=headers,
                 )
             assert response.status_code == 200
             # Prefix detection wins over field placement: atst mode with the
@@ -13371,6 +13894,7 @@ class TestJiraProjectsEndpoint:
             jira_server_url="https://jira-server.example.com",
         )
         app.dependency_overrides[get_settings] = lambda: jira_settings
+        headers = await _tracker_user("jira-projects-pat", jira_token="tok")
         try:
             with patch("rootcoz.main.JiraClient") as MockJiraClient:
                 mock_client = AsyncMock()
@@ -13380,8 +13904,8 @@ class TestJiraProjectsEndpoint:
                 MockJiraClient.return_value = mock_client
                 response = test_client.post(
                     "/api/jira-projects",
-                    json={"jira_token": "tok"},
-                    headers=_ADMIN_AUTH_HEADERS,
+                    json={},
+                    headers=headers,
                 )
             assert response.status_code == 200
             assert any(p["key"] == "PROJ" for p in response.json())
@@ -13402,12 +13926,13 @@ class TestJiraProjectsEndpoint:
             jira_server_url="",
         )
         app.dependency_overrides[get_settings] = lambda: jira_settings
+        headers = await _tracker_user("jira-projects-no-url", jira_token="tok")
         try:
             with patch("rootcoz.main.JiraClient") as MockJiraClient:
                 response = test_client.post(
                     "/api/jira-projects",
-                    json={"jira_token": "tok"},
-                    headers=_ADMIN_AUTH_HEADERS,
+                    json={},
+                    headers=headers,
                 )
             assert response.status_code == 200
             assert response.json() == []
@@ -13425,6 +13950,9 @@ class TestJiraProjectsEndpoint:
             jira_auth_mode="basic", jira_cloud_url="https://jira.example.com"
         )
         app.dependency_overrides[get_settings] = lambda: jira_settings
+        headers = await _tracker_user(
+            "jira-projects-returns", jira_token="tok", jira_email="u@e.com"
+        )
         try:
             with patch("rootcoz.main.JiraClient") as MockJiraClient:
                 mock_client = AsyncMock()
@@ -13434,12 +13962,43 @@ class TestJiraProjectsEndpoint:
                 MockJiraClient.return_value = mock_client
                 response = test_client.post(
                     "/api/jira-projects",
-                    json={"jira_token": "tok", "jira_email": "u@e.com"},
-                    headers=_ADMIN_AUTH_HEADERS,
+                    json={},
+                    headers=headers,
                 )
             assert response.status_code == 200
             data = response.json()
             assert any(p["key"] == "PROJ" for p in data)
+        finally:
+            app.dependency_overrides.pop(get_settings, None)
+
+    @pytest.mark.asyncio
+    async def test_project_search_uses_the_row_credentials(self, test_client):
+        """The picker authenticates with the caller's row, not the body."""
+        from rootcoz.main import app, get_settings
+
+        jira_settings = _build_wait_settings(
+            jira_auth_mode="basic",
+            jira_cloud_url="https://jira.example.com",
+            jira_server_url="https://jira-server.example.com",
+        )
+        headers = await _tracker_user("jira-projects-row", jira_token="row-jira-pat")
+        app.dependency_overrides[get_settings] = lambda: jira_settings
+        try:
+            with patch("rootcoz.main.JiraClient") as MockJiraClient:
+                mock_client = AsyncMock()
+                mock_client.list_projects = AsyncMock(return_value=[])
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                MockJiraClient.return_value = mock_client
+                response = test_client.post(
+                    "/api/jira-projects",
+                    json={"query": "PRO", "jira_token": "body-tok"},
+                    headers=headers,
+                )
+            assert response.status_code == 200, response.text
+            effective = MockJiraClient.call_args.args[0]
+            assert effective.jira_pat.get_secret_value() == "row-jira-pat"
+            assert mock_client.list_projects.call_args[1]["query"] == "PRO"
         finally:
             app.dependency_overrides.pop(get_settings, None)
 
@@ -13476,15 +14035,17 @@ class TestJiraSecurityLevelsEndpoint:
         finally:
             app.dependency_overrides.pop(get_settings, None)
 
-    def test_legacy_sa_token_rejected(self, test_client):
-        """A legacy (non-ATOA) SA secret is a clear 400, not a silent drop."""
+    @pytest.mark.asyncio
+    async def test_legacy_sa_token_rejected(self, test_client):
+        """A legacy (non-ATOA) stored SA secret is a clear 400, not a silent drop."""
+        headers = await _tracker_user(
+            "jira-levels-legacy",
+            jira_sa_token="legacy-secret-token",  # pragma: allowlist secret
+        )
         response = test_client.post(
             "/api/jira-security-levels",
-            json={
-                "project_key": "PROJ",
-                "jira_sa_token": "legacy-secret-token",  # pragma: allowlist secret
-            },
-            headers=_ADMIN_AUTH_HEADERS,
+            json={"project_key": "PROJ"},
+            headers=headers,
         )
         assert response.status_code == 400
         assert "not a recognized" in response.json()["detail"]
@@ -13501,6 +14062,7 @@ class TestJiraSecurityLevelsEndpoint:
             jira_server_url="https://jira-server.example.com",
         )
         app.dependency_overrides[get_settings] = lambda: jira_settings
+        headers = await _tracker_user("jira-levels-pat", jira_token="tok")
         try:
             with patch("rootcoz.main.JiraClient") as MockJiraClient:
                 mock_client = AsyncMock()
@@ -13510,8 +14072,8 @@ class TestJiraSecurityLevelsEndpoint:
                 MockJiraClient.return_value = mock_client
                 response = test_client.post(
                     "/api/jira-security-levels",
-                    json={"project_key": "PROJ", "jira_token": "tok"},
-                    headers=_ADMIN_AUTH_HEADERS,
+                    json={"project_key": "PROJ"},
+                    headers=headers,
                 )
             assert response.status_code == 200
             assert response.json() == levels
@@ -13530,12 +14092,13 @@ class TestJiraSecurityLevelsEndpoint:
             jira_server_url="",
         )
         app.dependency_overrides[get_settings] = lambda: jira_settings
+        headers = await _tracker_user("jira-levels-no-url", jira_token="tok")
         try:
             with patch("rootcoz.main.JiraClient") as MockJiraClient:
                 response = test_client.post(
                     "/api/jira-security-levels",
-                    json={"project_key": "PROJ", "jira_token": "tok"},
-                    headers=_ADMIN_AUTH_HEADERS,
+                    json={"project_key": "PROJ"},
+                    headers=headers,
                 )
             assert response.status_code == 200
             assert response.json() == []
@@ -13553,6 +14116,9 @@ class TestJiraSecurityLevelsEndpoint:
             jira_auth_mode="basic", jira_cloud_url="https://jira.example.com"
         )
         app.dependency_overrides[get_settings] = lambda: jira_settings
+        headers = await _tracker_user(
+            "jira-levels-returns", jira_token="tok", jira_email="u@e.com"
+        )
         try:
             with patch("rootcoz.main.JiraClient") as MockJiraClient:
                 mock_client = AsyncMock()
@@ -13562,17 +14128,48 @@ class TestJiraSecurityLevelsEndpoint:
                 MockJiraClient.return_value = mock_client
                 response = test_client.post(
                     "/api/jira-security-levels",
-                    json={
-                        "project_key": "PROJ",
-                        "jira_token": "tok",
-                        "jira_email": "u@e.com",
-                    },
-                    headers=_ADMIN_AUTH_HEADERS,
+                    json={"project_key": "PROJ"},
+                    headers=headers,
                 )
             assert response.status_code == 200
             data = response.json()
             assert len(data) == 1
             assert data[0]["name"] == "Internal"
+        finally:
+            app.dependency_overrides.pop(get_settings, None)
+
+    @pytest.mark.asyncio
+    async def test_security_levels_use_the_row_credentials(self, test_client):
+        """The security-level lookup authenticates with the caller's row."""
+        from rootcoz.main import app, get_settings
+
+        jira_settings = _build_wait_settings(
+            jira_auth_mode="basic",
+            jira_cloud_url="https://jira.example.com",
+            jira_server_url="https://jira-server.example.com",
+        )
+        headers = await _tracker_user("jira-levels-row", jira_token="row-jira-pat")
+        app.dependency_overrides[get_settings] = lambda: jira_settings
+        try:
+            with patch("rootcoz.main.JiraClient") as MockJiraClient:
+                mock_client = AsyncMock()
+                mock_client.list_security_levels = AsyncMock(return_value=[])
+                mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+                mock_client.__aexit__ = AsyncMock(return_value=False)
+                MockJiraClient.return_value = mock_client
+                response = test_client.post(
+                    "/api/jira-security-levels",
+                    json={
+                        "project_key": "PROJ",
+                        "jira_token": "body-tok",
+                        "jira_sa_token": "ATOA-body",
+                    },
+                    headers=headers,
+                )
+            assert response.status_code == 200, response.text
+            effective = MockJiraClient.call_args.args[0]
+            assert effective.jira_pat.get_secret_value() == "row-jira-pat"
+            assert mock_client.list_security_levels.call_args.args[0] == "PROJ"
         finally:
             app.dependency_overrides.pop(get_settings, None)
 
