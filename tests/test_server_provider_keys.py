@@ -94,12 +94,13 @@ def _captured_logs(caplog, *names, level=logging.WARNING):
         # only covers the handler).
         module_logger.setLevel(level)
         module_logger.addHandler(caplog.handler)
-        # The app's DuplicateFilter swallows a consecutive repeat of the same
-        # message template, so a warning an earlier test already logged would
-        # never reach caplog. Clear that state for the assertion below.
+        # A duplicate is a repeated rendered line inside one module/level/job
+        # context, and the filter keeps that state for the whole session, so a
+        # warning an earlier test already logged would never reach caplog. Clear
+        # that state for the assertion below.
         for log_filter in module_logger.filters:
             if hasattr(log_filter, "last_log"):
-                log_filter.last_log = ("", 0, "")
+                log_filter.last_log = None
     try:
         with caplog.at_level(level):
             yield caplog

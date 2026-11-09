@@ -120,8 +120,8 @@ def _capture_reaper_logs(caplog: pytest.LogCaptureFixture) -> Iterator[None]:
     original_filters = list(reaper_logger.filters)
     reaper_logger.setLevel(logging.DEBUG)
     reaper_logger.addHandler(caplog.handler)
-    # simple_logger's DuplicateFilter keys on (module, level, msg) and keeps that
-    # state for the whole session, so a later test's identical line is dropped.
+    # The duplicate filter keeps its remembered line for the whole session, so a
+    # later test's identical line would be dropped.
     for log_filter in original_filters:
         reaper_logger.removeFilter(log_filter)
     try:
