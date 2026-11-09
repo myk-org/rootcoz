@@ -331,6 +331,17 @@ class TestUnreadableBodies:
         assert "no usable rootcoz_requests_total" in result.stdout
         assert len(result.stdout.strip().splitlines()) == 1
 
+    def test_unusable_denominator_is_loud_even_with_zero_errors(self):
+        """A present "n/a" or negative denominator is not an empty window."""
+        for name in (
+            "nonnumeric-requests-total-zero-errors.metrics",
+            "negative-requests-total-zero-errors.metrics",
+        ):
+            result = run_script(metrics_file=fixture(name))
+            assert result.returncode == 0, name
+            assert "no usable rootcoz_requests_total" in result.stdout, name
+            assert len(result.stdout.strip().splitlines()) == 1, name
+
     def test_non_numeric_class_count_is_loud(self):
         """A garbage field 2 must not coerce to a silent "no 5xx"."""
         result = run_script(metrics_file=fixture("nonnumeric-count.metrics"))

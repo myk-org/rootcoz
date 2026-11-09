@@ -166,10 +166,12 @@ elif ! numeric "$serr" || ! numeric "$cerr" || ! numeric "$etotal"; then
   config="🔴 configuration: /metrics has a non-numeric rootcoz_errors_by_class or rootcoz_errors_total count, so server errors cannot be judged"
 elif ne "$(awk -v a="$serr" -v b="$cerr" 'BEGIN { printf "%d", (a + 0) + (b + 0) }')" "$etotal"; then
   config="🔴 configuration: rootcoz_errors_by_class does not add up to rootcoz_errors_total, so server errors cannot be judged"
-# An absent denominator is loud even with zero errors: silently reading it as "nothing
-# to judge" leaves a renamed series unnoticed until the first error. A present 0 with
-# zero errors is an empty window, which is a legitimate answer and stays silent.
-elif ! gt "$total" 0 && { [ -z "$total" ] || ne "$serr" 0 || ne "$cerr" 0 || ne "$etotal" 0; }; then
+# An absent, non-numeric or negative denominator is loud even with zero errors:
+# silently reading it as "nothing to judge" leaves a renamed or unreadable series
+# unnoticed until the first error. A present numeric 0 with zero errors is an empty
+# window, which is a legitimate answer and stays silent.
+elif ! numeric "$total" || gt 0 "$total" ||
+  { ! gt "$total" 0 && { ne "$serr" 0 || ne "$cerr" 0 || ne "$etotal" 0; }; }; then
   config="🔴 configuration: /metrics has no usable rootcoz_requests_total, so the error share cannot be judged"
 fi
 
