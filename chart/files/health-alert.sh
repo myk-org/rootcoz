@@ -52,6 +52,12 @@ ne() {
   awk -v a="$1" -v b="$2" 'BEGIN { exit !(a + 0 != b + 0) }'
 }
 
+# A field 2 with no numeric prefix ("n/a") coerces to 0, which would read as "no 5xx"
+# and hide the class it belongs to. Text after a number still counts (see count()).
+numeric() {
+  awk -v v="$1" 'BEGIN { exit !(v ~ /^[+-]?[0-9]/) }'
+}
+
 # errors / total as a share, strictly above the threshold, and only for a non-empty
 # window: a share of nothing is not comparable. Every operand is coerced, so a
 # non-numeric threshold ("5%") can never turn a page off.
@@ -156,9 +162,14 @@ cerr="${cerr:-0}"
 config=""
 if [ -z "$etotal" ]; then
   config="🔴 configuration: /metrics has no rootcoz_errors_total, so server errors cannot be judged"
+elif ! numeric "$serr" || ! numeric "$cerr" || ! numeric "$etotal"; then
+  config="🔴 configuration: /metrics has a non-numeric rootcoz_errors_by_class or rootcoz_errors_total count, so server errors cannot be judged"
 elif ne "$(awk -v a="$serr" -v b="$cerr" 'BEGIN { printf "%d", (a + 0) + (b + 0) }')" "$etotal"; then
   config="🔴 configuration: rootcoz_errors_by_class does not add up to rootcoz_errors_total, so server errors cannot be judged"
-elif ! gt "$total" 0 && { ne "$serr" 0 || ne "$cerr" 0 || ne "$etotal" 0; }; then
+# An absent denominator is loud even with zero errors: silently reading it as "nothing
+# to judge" leaves a renamed series unnoticed until the first error. A present 0 with
+# zero errors is an empty window, which is a legitimate answer and stays silent.
+elif ! gt "$total" 0 && { [ -z "$total" ] || ne "$serr" 0 || ne "$cerr" 0 || ne "$etotal" 0; }; then
   config="🔴 configuration: /metrics has no usable rootcoz_requests_total, so the error share cannot be judged"
 fi
 

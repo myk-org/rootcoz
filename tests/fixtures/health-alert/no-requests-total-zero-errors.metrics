@@ -1,0 +1,6 @@
+# No rootcoz_requests_total and no errors at all: an absent denominator must not read
+# as "nothing to judge" (a present 0 with zero errors is an empty window instead).
+rootcoz_errors_total 0
+rootcoz_error_rate 0
+rootcoz_errors_by_class{status_class="4xx"} 0
+rootcoz_health_up 1

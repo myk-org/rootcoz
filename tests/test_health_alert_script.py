@@ -322,6 +322,23 @@ class TestUnreadableBodies:
         assert "no usable rootcoz_requests_total" in result.stdout
         assert "rootcoz_errors_by_class does not add up" not in result.stdout
 
+    def test_missing_denominator_is_loud_even_with_zero_errors(self):
+        """Drift must not wait for the first error to be noticed."""
+        result = run_script(
+            metrics_file=fixture("no-requests-total-zero-errors.metrics")
+        )
+        assert result.returncode == 0
+        assert "no usable rootcoz_requests_total" in result.stdout
+        assert len(result.stdout.strip().splitlines()) == 1
+
+    def test_non_numeric_class_count_is_loud(self):
+        """A garbage field 2 must not coerce to a silent "no 5xx"."""
+        result = run_script(metrics_file=fixture("nonnumeric-count.metrics"))
+        assert result.returncode == 0
+        assert "non-numeric rootcoz_errors_by_class" in result.stdout
+        assert "server errors 5xx" not in result.stdout
+        assert "ℹ️" not in result.stdout
+
     def test_comment_less_body_is_judged_normally(self):
         """HELP/TYPE are optional: samples alone must be judged, never refused."""
         result = run_script(metrics_file=fixture("no-help-comments.metrics"))

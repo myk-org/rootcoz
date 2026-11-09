@@ -414,7 +414,7 @@ rootcoz admin settings reset log_max_bytes   # back to the derived value
 
 For clusters that scrape nothing **and do not enable the in-app monitor above**, the chart can run its own check: a CronJob that curls `/metrics` on a schedule and posts one Slack message combining every failing check — unhealthy, the share of **server errors (5xx)** above the threshold, a **client-error (4xx) storm** above its own higher threshold, and the data directory's filesystem above the warning or critical threshold with absolute sizes such as `5.4G / 6.0G (90%)`.
 
-Server errors and client errors come from the two series `/metrics` already exports over the same rolling window, `rootcoz_errors_by_class{status_class="5xx"}` and `{status_class="4xx"}`, over `rootcoz_requests_total`; a class with no sample in the window counts as zero. Client errors never page on their own — an unauthenticated client must not be able to pace the notification channel with 404s.
+Server errors and client errors come from the two series `/metrics` already exports over the same rolling window, `rootcoz_errors_by_class{status_class="5xx"}` and `{status_class="4xx"}`, over `rootcoz_requests_total`; a class with no sample in the window counts as zero. A client-error share pages only from `clientErrorMinRequests` requests **and** above `clientErrorPercent`, a bar a mistyped login never clears — but it is still a page, so an unauthenticated client that sends enough 4xx responses can raise one. Set `clientErrorPercent: 100` to turn the storm off entirely (the in-app monitor above never pages on 4xx at all).
 
 | Condition | Pages? | Line |
 | --- | --- | --- |
@@ -424,7 +424,7 @@ Server errors and client errors come from the two series `/metrics` already expo
 | 4xx present but at or below the storm threshold | no | `ℹ️ client errors 4xx 2/20 (10.00%) at or below the 25% storm threshold`, only alongside another reason to page |
 | 4xx in a window below `clientErrorMinRequests` | no — the share is unjudgeable, so nothing is claimed about it | — |
 | disk ratio at or above `diskWarnPercent` / `diskCritPercent` | yes, 🔴 | `disk 5.4G / 6.0G (90%)` |
-| the body cannot answer "share of requests" | yes, 🔴 configuration line; health and disk keep working | `… has no rootcoz_errors_total …`, `… rootcoz_errors_by_class does not add up to rootcoz_errors_total …`, or `… has no usable rootcoz_requests_total …` |
+| the body cannot answer "share of requests" | yes, 🔴 configuration line; health and disk keep working | `… has no rootcoz_errors_total …`, `… has a non-numeric rootcoz_errors_by_class or rootcoz_errors_total count …`, `… rootcoz_errors_by_class does not add up to rootcoz_errors_total …`, or `… has no usable rootcoz_requests_total …` |
 
 The 5xx check has no request floor (one failed request is an incident, and the job samples once per schedule rather than holding a condition); the 4xx storm does, because one mistyped login is 20 % of five requests and 100 % of one.
 
