@@ -1881,6 +1881,73 @@ class TestRootCozClientAuth:
         assert result["username"] == "admin"
         assert result["is_admin"] is True
 
+    def test_sso_device_start(self):
+        def handler(request):
+            assert request.method == "POST"
+            assert request.url.path == "/api/auth/sso/device/start"
+            body = json.loads(request.content)
+            assert body == {"provider": "google", "client_name": "laptop"}
+            return httpx.Response(
+                200,
+                json={
+                    "device_code": "dc",
+                    "user_code": "ABCD-EFGH",
+                    "verification_uri": "https://rootcoz.example/login/device",
+                    "expires_in": 600,
+                    "interval": 5,
+                },
+            )
+
+        client = _make_client(handler)
+        result = client.sso_device_start(provider="google", client_name="laptop")
+        assert result["user_code"] == "ABCD-EFGH"
+
+    def test_sso_device_start_sends_only_what_was_given(self):
+        def handler(request):
+            assert json.loads(request.content) == {}
+            return httpx.Response(200, json={"device_code": "dc", "user_code": "U"})
+
+        client = _make_client(handler)
+        client.sso_device_start()
+
+    def test_sso_device_poll(self):
+        def handler(request):
+            assert request.method == "POST"
+            assert request.url.path == "/api/auth/sso/device/poll"
+            assert json.loads(request.content) == {"device_code": "dc"}
+            return httpx.Response(200, json={"status": "approved", "token": "t"})
+
+        client = _make_client(handler)
+        assert client.sso_device_poll("dc")["status"] == "approved"
+
+    def test_sso_device_approve_info(self):
+        def handler(request):
+            assert request.method == "POST"
+            assert request.url.path == "/api/auth/sso/device/approve/lookup"
+            assert json.loads(request.content) == {"user_code": "ABCD-EFGH"}
+            return httpx.Response(200, json={"client_name": "laptop"})
+
+        client = _make_client(handler)
+        assert client.sso_device_approve_info("ABCD-EFGH")["client_name"] == "laptop"
+
+    def test_sso_device_approve(self):
+        def handler(request):
+            assert request.method == "POST"
+            assert request.url.path == "/api/auth/sso/device/approve"
+            assert json.loads(request.content) == {"user_code": "ABCD-EFGH"}
+            return httpx.Response(200, json={"ok": True, "provider": "google"})
+
+        client = _make_client(handler)
+        assert client.sso_device_approve("ABCD-EFGH")["ok"] is True
+
+    def test_sso_providers(self):
+        def handler(request):
+            assert request.url.path == "/api/auth/sso/providers"
+            return httpx.Response(200, json={"providers": []})
+
+        client = _make_client(handler)
+        assert client.sso_providers() == {"providers": []}
+
     def test_logout(self):
         def handler(request):
             assert request.method == "POST"

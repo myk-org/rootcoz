@@ -20,6 +20,7 @@ from rootcoz.metadata_rules import load_metadata_rules
 from rootcoz.url_utils import (
     _parse_valid_url,
     has_whitespace_or_control,
+    is_safe_navigation_url,
     mask_stored_url,
     validate_http_url,
 )
@@ -894,6 +895,22 @@ class Settings(BaseSettings):
         gt=0,
         description="Lifetime of an SSO login attempt's state cookie, in seconds.",
     )
+    sso_device_code_ttl_seconds: int = Field(
+        default=600,
+        gt=0,
+        description=(
+            "Lifetime of a CLI device-authorization code, in seconds. The human "
+            "has this long to approve it in the browser."
+        ),
+    )
+    sso_device_poll_interval_seconds: int = Field(
+        default=5,
+        gt=0,
+        description=(
+            "Minimum interval the CLI must wait between device-code polls, in "
+            "seconds. The server refuses an earlier poll with 'slow_down'."
+        ),
+    )
 
     # GitHub (optional) -- for comment enrichment (PR status)
     github_token: SecretStr | None = None
@@ -1422,8 +1439,10 @@ class Settings(BaseSettings):
         default=20,
         ge=0,
         description=(
-            "How many failed or blocked logins may be recorded in the audit "
-            "trail per minute — per username N, N×10 server-wide, plus at most "
+            "How many rows from the unauthenticated, per-request audit "
+            "actions (failed or blocked logins, SSO refusals, an anonymous "
+            "device-flow start) may be recorded per minute — "
+            "per username N, N×10 server-wide, plus at most "
             "N rescued rows per window for attempts against existing accounts. "
             "Cycling names does not reset the budget, no flood of junk "
             "usernames can starve the target's rows, and the total per window "
@@ -1737,7 +1756,8 @@ def issuer_is_secure(url: str) -> bool:
 
     Discovery, JWKS and the token exchange all cross this URL, so plaintext is
     refused — except for a loopback development server, where there is no network
-    to intercept.
+    to intercept. The rule lives in :func:`rootcoz.url_utils.is_safe_navigation_url`
+    because the IdP logout URL needs the same answer.
 
     Args:
         url: The configured issuer.
@@ -1745,12 +1765,7 @@ def issuer_is_secure(url: str) -> bool:
     Returns:
         True for https, and for http on a loopback host.
     """
-    if url.startswith("https://"):
-        return True
-    if not url.startswith("http://"):
-        return False
-    host = url[len("http://") :].split("/", 1)[0].split(":", 1)[0].lower()
-    return host in {"localhost", "127.0.0.1", "[::1]", "::1"}
+    return is_safe_navigation_url(url, allow_loopback_http=True)
 
 
 def csv_entries(value: str | None, *, lower: bool = True) -> list[str]:
