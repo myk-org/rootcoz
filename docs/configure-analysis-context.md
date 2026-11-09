@@ -204,7 +204,7 @@ This clones the tests repository plus both extra repositories into the analysis 
 - **Defer the AI choice.** When a tests repository is set and no provider or model is chosen, RootCoz can resolve the AI configuration from `.rootcoz/settings.json` after the clone, so the repository picks its own model.
 - **Repository-wide defaults.** `tests_repo_url`, `additional_repos`, `peer_ai_configs`, `peer_analysis_max_rounds`, `ai_call_timeout`, and `max_concurrent_ai_calls` all exist as server settings in the `AI`, `GitHub`, and `Server` categories, which makes them defaults for every submission. See [Managing Users and Server Settings](manage-users-and-server-settings.html) for details.
 - **Metadata rules.** `metadata_rules_file` extracts team, tier, and version metadata from job names so history and reports can filter by them. It requires a restart when changed.
-- **Auto-review.** `enable_auto_review` marks a failure reviewed automatically when the same job, test, and error signature was reviewed by a human before — useful once you have history to match against.
+- **Auto-review.** `enable_auto_review` marks a failure reviewed automatically when the same job, test, and error signature was reviewed by a human before — useful once you have history to match against. Results retention shrinks that window: with `results_retention_days` set, a pruned job's failure history and reviews are gone, so nothing older than the retained window can be auto-reviewed from. See [Managing Users and Server Settings](manage-users-and-server-settings.html).
 
 ## Troubleshooting
 

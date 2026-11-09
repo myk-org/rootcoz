@@ -10679,6 +10679,41 @@ class TestReAnalyzeEndpoint:
             )
 
     @pytest.mark.asyncio
+    async def test_delete_endpoint_finishes_the_job(self, test_client) -> None:
+        """One delete path, one end state: unlinked origin and no chat workspace."""
+        from rootcoz.engine.chat import ensure_chat_workspace
+
+        await self._create_reanalysis_chain(["re-1"])
+        workspace = ensure_chat_workspace("re-1")
+        assert workspace.is_dir()
+
+        assert test_client.delete("/results/re-1").status_code == 200
+
+        assert not workspace.exists()
+        origin = await storage.get_result("origin-delete")
+        assert origin["result"]["request_params"]["reanalyzed_to_job_ids"] == []
+        assert test_client.get("/results/re-1").status_code == 404
+
+    @pytest.mark.asyncio
+    async def test_bulk_delete_endpoint_finishes_the_jobs(self, test_client) -> None:
+        """The bulk path performs the same post-delete steps as the single one."""
+        from rootcoz.engine.chat import ensure_chat_workspace
+
+        await self._create_reanalysis_chain(["re-1", "re-2"])
+        workspaces = [ensure_chat_workspace("re-1"), ensure_chat_workspace("re-2")]
+        assert all(workspace.is_dir() for workspace in workspaces)
+
+        response = test_client.request(
+            "DELETE", "/api/results/bulk", json={"job_ids": ["re-1", "re-2"]}
+        )
+
+        assert response.status_code == 200
+        assert not any(workspace.exists() for workspace in workspaces)
+        origin = await storage.get_result("origin-delete")
+        assert origin["result"]["request_params"]["reanalyzed_to_job_ids"] == []
+        assert test_client.get("/results/re-1").status_code == 404
+
+    @pytest.mark.asyncio
     async def test_re_analyze_file_stores_reanalyzed_metadata(
         self, test_client
     ) -> None:

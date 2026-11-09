@@ -2573,6 +2573,30 @@ class TestAdminSettings:
         assert len(result) == 1
         assert result[0]["env_var"] == "JENKINS_URL"
 
+    def test_admin_results_retention_preview(self):
+        seen: list[dict[str, str]] = []
+
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/admin/results-retention"
+            seen.append(dict(request.url.params))
+            return httpx.Response(
+                200,
+                json={"enabled": True, "jobs": 1, "rows": {"results": 1}},
+            )
+
+        client = _make_client(handler)
+        result = client.admin_results_retention_preview()
+        assert result["jobs"] == 1
+        # Nothing given, nothing sent: the server's stored settings decide.
+        assert seen == [{}]
+
+        client.admin_results_retention_preview(retention_days=30)
+        assert seen[-1] == {"retention_days": "30"}
+
+        client.admin_results_retention_preview(retention_days=0, max_rows=2)
+        assert seen[-1] == {"retention_days": "0", "max_rows": "2"}
+
     def test_admin_set_setting(self):
         def handler(request):
             assert request.method == "PUT"

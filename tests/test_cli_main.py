@@ -8722,3 +8722,100 @@ class TestConfigFilterPresets:
         )
         result = runner.invoke(app, ["config", "filter-presets", "delete", "3"])
         assert result.exit_code == 1
+
+
+class TestAdminRetentionPreviewCommand:
+    RESPONSE: ClassVar[dict] = {
+        "enabled": True,
+        "retention_days": 30,
+        "max_rows": 0,
+        "jobs": 2,
+        "truncated": False,
+        "oldest_created_at": "2026-01-01 00:00:00",
+        "newest_created_at": "2026-01-02 00:00:00",
+        "rows": {"results": 2, "test_entries": 7},
+    }
+
+    def test_retention_preview_prints_the_count_and_window(self, mock_client):
+        mock_client.admin_results_retention_preview.return_value = self.RESPONSE
+        result = runner.invoke(app, ["admin", "retention", "preview"])
+        assert result.exit_code == 0
+        assert "2 job(s) would be deleted" in result.output
+        assert "2026-01-01 00:00:00" in result.output
+        assert "test_entries" in result.output
+        mock_client.admin_results_retention_preview.assert_called_once_with(
+            retention_days=None, max_rows=None
+        )
+
+    def test_retention_preview_passes_the_bounds(self, mock_client):
+        mock_client.admin_results_retention_preview.return_value = self.RESPONSE
+        result = runner.invoke(
+            app,
+            [
+                "admin",
+                "retention",
+                "preview",
+                "--retention-days",
+                "30",
+                "--max-rows",
+                "5",
+            ],
+        )
+        assert result.exit_code == 0
+        mock_client.admin_results_retention_preview.assert_called_once_with(
+            retention_days=30, max_rows=5
+        )
+
+    def test_retention_preview_json(self, mock_client):
+        mock_client.admin_results_retention_preview.return_value = self.RESPONSE
+        result = runner.invoke(app, ["--json", "admin", "retention", "preview"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        assert parsed["jobs"] == 2
+        assert parsed["rows"]["test_entries"] == 7
+
+    def test_retention_preview_reports_disabled(self, mock_client):
+        mock_client.admin_results_retention_preview.return_value = {
+            **self.RESPONSE,
+            "enabled": False,
+            "jobs": 0,
+            "rows": {},
+        }
+        result = runner.invoke(app, ["admin", "retention", "preview"])
+        assert result.exit_code == 0
+        assert "nothing would be deleted" in result.output
+
+    def test_retention_preview_rejects_a_negative_bound(self, mock_client):
+        result = runner.invoke(
+            app, ["admin", "retention", "preview", "--retention-days", "-1"]
+        )
+        assert result.exit_code != 0
+        mock_client.admin_results_retention_preview.assert_not_called()
+
+    def test_settings_set_round_trips_the_retention_key(self, mock_client):
+        mock_client.admin_set_setting.return_value = {
+            "updated": {"results_retention_days": "30"}
+        }
+        mock_client.admin_list_settings.return_value = [
+            {
+                "key": "results_retention_days",
+                "env_var": "RESULTS_RETENTION_DAYS",
+                "value": "30",
+                "source": "db",
+                "category": "Storage",
+            }
+        ]
+        set_result = runner.invoke(
+            app, ["admin", "settings", "set", "results_retention_days", "30"]
+        )
+        assert set_result.exit_code == 0
+        mock_client.admin_set_setting.assert_called_once_with(
+            "results_retention_days", "30"
+        )
+
+        listed = runner.invoke(
+            app, ["admin", "settings", "list", "--category", "Storage"]
+        )
+        assert listed.exit_code == 0
+        assert "RESULTS_RETENTION_DAYS" in listed.output
+        assert "db" in listed.output

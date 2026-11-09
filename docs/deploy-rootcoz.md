@@ -245,9 +245,10 @@ the explicit request; Kubernetes copies the matching limit into the request when
 supplies one, so the default profile still schedules for `8Gi`. Clear the limit too for a genuine
 no-floor pod, or let a namespace `LimitRange` default the request.
 
-**Persistent storage.** Database growth is ~83 KB per stored result with no retention yet (#409); the
-PVC size is not part of the production profile, because applying it over a live release either no-ops
-or triggers a PVC resize.
+**Persistent storage.** Database growth is ~83 KB per stored result, and it is unbounded unless
+`results_retention_days` / `results_max_rows` are set (both default `0` = keep everything, which is why
+the figure is still 83 KB per result). The PVC size is not part of the production profile, because
+applying it over a live release either no-ops or triggers a PVC resize.
 
 **Ephemeral storage and `/tmp`.** Repo clones and code-graph indexes live under `/tmp`, and the chart
 caps it **by default**: defaults set `ephemeral-storage: 12Gi` on both `requests` and `limits`, and the
@@ -457,8 +458,10 @@ migration step, no setting to turn it on.
   first batch and logs that once; a file that goes away during the pass leaves
   the batches already committed in place and the log reports no database file
   size after, because the file it started on is no longer there.
-- The database **file** only shrinks after a rewrite plus `VACUUM`, which takes
-  the write lock and needs free space roughly equal to the file size. That is an
+- A `DELETE` — an interactive job delete, results retention, or the audit prune —
+  frees pages into SQLite's freelist, which new writes reuse, so growth stops.
+  The database **file** itself only shrinks after a rewrite plus `VACUUM`, which
+  takes the write lock and needs free space roughly equal to the file size. That is an
   operator step, deliberately not automated on a live single-replica deployment.
   The image has no `sqlite3` CLI, but it does ship Python:
 

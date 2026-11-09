@@ -127,6 +127,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | `Prow` | `prow_url`, `gcs_bucket` |
    | `Server` | `public_base_url`, `additional_repos`, `max_concurrent_repo_clones`, `wait_for_completion`, `poll_interval_minutes`, `max_wait_minutes`, `metadata_rules_file`, `enable_auto_review`, `auto_push_exporters` |
    | `Web Push` | `vapid_public_key`, `vapid_private_key`, `vapid_claim_email` |
+   | `Storage` | `results_retention_days`, `results_max_rows` |
 
    Each row shows the environment variable name, a source badge, and where relevant three other signals:
 
@@ -191,7 +192,7 @@ That creates an active operator who can submit analyses, and one server setting 
 
 13. **Review the audit log.**
 
-   Every audited action is written as one row in the audit trail, newest first. Each event records the actor, the actor's role and admin flag, the action id, an outcome (`success`, `failure`, or `denied`), an optional target (`user`, `job`, `setting`, `provider`), the client IP when `trust_proxy_headers` is on, and a `details` object with the non-secret specifics.
+   Every audited action is written as one row in the audit trail, newest first. Each event records the actor, the actor's role and admin flag, the action id, an outcome (`success`, `failure`, or `denied`), an optional target (`user`, `job`, `setting`, `provider`, `storage`), the client IP when `trust_proxy_headers` is on, and a `details` object with the non-secret specifics.
 
    | What is recorded | Action ids |
    | --- | --- |
@@ -200,9 +201,9 @@ That creates an active operator who can submit analyses, and one server setting 
    | Server settings and AI providers | `settings.update`, `settings.reset`, `settings.import`, `admin.setting_persist`, `provider.key.store`, `provider.key.promote`, `provider.key.rotate`, `provider.remove`, `provider.models_set`, `provider.models_refresh`, `provider.deployment_refresh`, `provider.selection_seed`, `provider.free_selection_auto_include`, `free_models.set` |
    | Jobs, results, and trackers | `admin.job_delete`, `user.job_delete`, `user.abort_job`, `analysis.submit`, `analysis.rerun`, `review.delete`, `classification.override`, `pattern.override`, `comment.add`, `comment.enrich`, `comment.delete`, `issue.create`, `export.push`, `job.tags_set`, `job.metadata_set`, `job.metadata_delete`, `tracked_in.set`, `tracked_in.delete`, `result.enriched_xml_omitted` |
    | Admin tooling and exports | `transcript.list`, `transcript.download`, `admin.db_schema`, `admin.db_query` (results are masked, and the row records the count and a query hash, never the rows), `admin.settings_export`, `audit.export`, `feedback.create` |
-   | Server background actions | `startup.workspace_reclaim` |
+   | Server background actions | `startup.workspace_reclaim`, `storage.results_retention` |
 
-   `startup.workspace_reclaim` is written by the server itself, not by a request: one row per boot that reclaimed a leftover workspace tree or left one behind, with `actor: system` and `details` = `{workspace_trees, chat_workspaces, artifact_extracts, survived}`. Its `outcome` is `success` when nothing survived and `failure` **only** when at least one tree survived its delete — it does not report that the sweep could not run.
+   `startup.workspace_reclaim` is written by the server itself, not by a request: one row per boot that reclaimed a leftover workspace tree or left one behind, with `actor: system` and `details` = `{workspace_trees, chat_workspaces, artifact_extracts, survived}`. Its `outcome` is `success` when nothing survived and `failure` **only** when at least one tree survived its delete — it does not report that the sweep could not run. `storage.results_retention` follows the same convention: one row per pass that selected a candidate or failed, `actor: system`, `target_type: storage`, and `details` carrying the limits that ran, `deleted_jobs`, `skipped_jobs`, `failed_jobs`, `cleanup_failed_jobs`, `truncated`, the deleted window (`oldest_deleted_at` / `newest_deleted_at`, present only when the pass deleted something) and **every** deleted id in `job_ids` — never truncated, so one row answers "which analyses did this policy remove". Its `outcome` is `failure` when a job failed to delete, a cleanup could not finish, or the pass hit a database error, and `success` otherwise, including a pass that selected work and skipped all of it. It is registered as a job-removal action, so the surviving `analysis.submit`, `comment.add` and `tracked_in.*` rows about a pruned job still resolve to the removal that explains them.
 
    **What is audited, and what is not.** An event is recorded when it changed stored state on the server or is security-relevant. Transient user activity is deliberately **not** recorded: chat sessions and messages, mention read-state, notification toggles, saved filter presets, connection tests and read-only previews. The rule is the question an administrator actually asks — "who did that / what changed / who read that" — so a settings export that can carry plaintext secrets is recorded (`admin.settings_export`, with `include_sensitive`), and so is exporting the trail itself (`audit.export`, with the format and row count), while opening a chat is not. `tests/test_audit_coverage.py` enforces this: a new mutating endpoint fails the build unless it writes a row or is exempt with a written reason.
 
@@ -237,6 +238,38 @@ That creates an active operator who can submit analyses, and one server setting 
    Read the trail with `rootcoz admin audit list` / `rootcoz admin audit actions` / `rootcoz admin audit verify` / `rootcoz admin audit export`, or over the API at `GET /api/admin/audit`, `GET /api/admin/audit/actions`, `GET /api/admin/audit/verify`, `GET /api/admin/audit/export`, and the `GET /api/admin/audit/stream` SSE feed. All are admin-only; see [API Reference](api-reference.html#audit-events).
 
    **Watch the write path.** An audit row that fails to persist is a compliance hole, so the failure is logged at `ERROR`, counted for the life of the process, and surfaced as `checks.audit` in `GET /api/health` (`{"status": "degraded", "write_failures": N, "suppressed_auth_events": M}`) and as the `rootcoz_audit_write_failures` gauge in `GET /metrics`.
+
+14. **Results retention is opt-in and deletes stored analyses.**
+
+   Both limits live under `Settings` → `Storage` and both default to `0`, which keeps every analysis forever — so upgrading changes nothing. **`0` means off, and the unit of retention is the whole analysis (job):** the stored result payload, its test entries, its failure history and reviews, its classifications, its comments and mention read-state, its job chat, its token-usage rows and its tracker links all go together. There is no half-deleted job.
+
+   | Setting | Effect |
+   | --- | --- |
+   | `results_retention_days` | Delete analysed jobs older than this many days. `0` keeps them all. A job is only aged when both its creation and its last analysis are older than the cutoff, so a re-analysis is never aged by an old submission. |
+   | `results_max_rows` | Keep at most this many analysed jobs, deleting the oldest first. `0` keeps every job. |
+
+   **The two limits are alternatives, not a floor.** A job older than `results_retention_days` is deleted even when it is among the newest `results_max_rows`, so the cap is a size bound on a young population and never raises the age policy's floor. An ingest-only job (`analysis_state: submitted`) is **never** pruned: it exists to be analysed later, and `POST /results/{job_id}/analyze` or a manual delete are how it goes. A job that is still being analysed — or has a chat turn or a single-failure re-analysis in flight — is skipped, re-checked inside the deleting transaction, and is a candidate again on the next pass.
+
+   What **stays** when a job goes: the audit trail (that has its own retention), `job_metadata` / `job_metadata_labels` (they describe the Jenkins job, not one analysis), every other job's data, server settings, users, sessions and saved filter presets, and the sidecar session transcripts on disk — those are pruned only by the sidecar's own `PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS` / `PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB`, and `rootcoz admin transcripts` is read-only. Retention of `test_entries` on its own is a separate decision and stays out of scope: an entry belongs to an analysis and is deleted with the job that owns it, never aged by itself.
+
+   **What a user sees afterwards is a `404`, with no tombstone:** the report route loads and its results call answers `Job not found`, so the page shows its not-found state. That is the same end state an interactive delete produces — the origin's re-analysis links are unlinked, the job's chat workspace is removed, revoked AI sessions are swept — because the pass calls the same helper the delete endpoints do. **One link is not cleaned:** a surviving re-analysis whose *origin* was pruned keeps a backward `reanalyzed_from_job_id` that 404s. Clearing it would need a reverse JSON lookup across every surviving payload, which is not worth a full-table scan inside a delete path.
+
+   **Retention has four consequences, and they are the cost of turning it on:**
+
+   - **The auto-review window shrinks to the retained window.** `find_matching_previous_analysis` joins `failure_history` with `failure_reviews` across jobs to inherit a human review; both sides are deleted with the pruned job, so with `results_retention_days=30` nothing older than 30 days can be auto-reviewed from. See [Configure analysis context](configure-analysis-context.html).
+   - **Reports and token usage get a cliff.** `get_report_totals` and `get_report_issues_created` aggregate surviving rows and cannot tell "no jobs that day" from "pruned", and the `Tokens` page loses the pruned jobs' history the same way. `rootcoz admin audit export` is the way to retain evidence before retention deletes it.
+   - **Comments and job chat die with the job.** There is no orphaned-comment state; an operator who wants the discussion keeps the job.
+   - **A human classification stops being inherited once its job is pruned.** `carry_forward_user_overrides` reads *other* jobs' `test_classifications` rows, so a test whose last human classification lived in a pruned job comes back unclassified.
+
+   **A per-failure re-analysis does not extend a job's life.** `POST /api/failures/{failure_uuid}/re-analyze` re-runs one failure in place and does not move the job's clock, so a job past `results_retention_days` keeps that new analysis and is still pruned on the next pass. Retention dates the *job*, not every later edit of its payload: if you are still working on old jobs, raise the limit.
+
+   **Preview before you save anything.** `rootcoz admin retention preview` (or `GET /api/admin/results-retention`) is a read-only dry run: it reports how many jobs the current settings would delete, the window, and the per-table row counts, using the same guards the pass uses. `--retention-days` / `--max-rows` let you ask "what would 30 days delete?" without saving it. Nothing is deleted and no audit row is written by a preview.
+
+   **Cadence.** The pass runs at most once a day: at startup and then on the hourly background wake, which the daily throttle turns into "at most once a day". A pass that failed, was truncated by its per-run bound, or could not finish a cleanup does **not** consume the daily slot, so the next hourly wake retries. A job that cannot be deleted is excluded for the rest of the process's life so it costs one failure row, not an hourly storm. Each pass writes **one** audit row with the deleted count and every job id — a pruning pass is one operator decision, so thousands of per-job rows would stop the trail answering "what did the operator do".
+
+   **Disk space is not returned to the filesystem.** `DELETE` frees pages into SQLite's freelist, which new writes reuse, so growth stops — but the file does not shrink. Only a rewrite plus `VACUUM` shrinks it, and retention runs none; see [Database size and compaction](deploy-rootcoz.html#database-size-and-compaction).
+
+   **Two things retention does not fix.** A writer that started before a chunk's delete can still insert one job-scoped row for a job whose row is gone (foreign keys are not enforced), and a pass killed with `SIGKILL` inside a chunk leaves that chunk's deletions out of the trail. Both are recorded as known limits rather than silently claimed as covered.
 
 ## Advanced Usage
 

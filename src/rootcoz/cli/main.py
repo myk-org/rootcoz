@@ -26,7 +26,12 @@ from rootcoz.cli.config import (
     load_config,
 )
 from rootcoz.cli.output import print_output
-from rootcoz.config import parse_additional_repos, parse_peer_configs
+from rootcoz.config import (
+    RESULTS_RETENTION_DAYS_MAX,
+    SQLITE_INT_MAX,
+    parse_additional_repos,
+    parse_peer_configs,
+)
 from rootcoz.storage import MAX_INCOMPLETE_LIST_LIMIT, VALID_ROLES
 
 # -- App and sub-command groups -----------------------------------------------
@@ -4666,6 +4671,65 @@ admin_app.add_typer(transcripts_app, name="transcripts")
 
 audit_app = typer.Typer(help="Browse the audit trail. Admin only.")
 admin_app.add_typer(audit_app, name="audit")
+
+retention_app = typer.Typer(
+    help="Results retention — dry runs only, changes nothing.", no_args_is_help=True
+)
+admin_app.add_typer(retention_app, name="retention")
+
+
+@retention_app.command("preview")
+def admin_retention_preview(
+    retention_days: int | None = typer.Option(
+        None,
+        "--retention-days",
+        min=0,
+        max=RESULTS_RETENTION_DAYS_MAX,
+        help="Age limit to preview (default: the server's current setting).",
+    ),
+    max_rows: int | None = typer.Option(
+        None,
+        "--max-rows",
+        min=0,
+        max=SQLITE_INT_MAX,
+        help="Row cap to preview (default: the server's current setting).",
+    ),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Show what results retention would delete right now. Deletes nothing."""
+    _set_json(json_output)
+    try:
+        client = _get_client()
+        data = client.admin_results_retention_preview(
+            retention_days=retention_days, max_rows=max_rows
+        )
+    except RootCozError as exc:
+        _handle_error(exc)
+        raise typer.Exit(1)
+    if _state.get("json", False):
+        typer.echo(json_mod.dumps(data, indent=2))
+        return
+    if not data.get("enabled"):
+        typer.echo(
+            "Results retention is off (results_retention_days=0 and"
+            " results_max_rows=0): nothing would be deleted."
+        )
+        return
+    typer.echo(
+        f"{data.get('jobs', 0)} job(s) would be deleted"
+        f" (retention_days={data.get('retention_days')},"
+        f" max_rows={data.get('max_rows')})"
+    )
+    oldest = data.get("oldest_created_at") or "-"
+    newest = data.get("newest_created_at") or "-"
+    typer.echo(f"Window: {oldest} .. {newest}")
+    if data.get("truncated"):
+        typer.echo("Note: more jobs than one pass deletes; the rest waits.")
+    rows = data.get("rows") or {}
+    if rows:
+        width = max(len(name) for name in rows)
+        for table, count in rows.items():
+            typer.echo(f"  {table.ljust(width)}  {count}")
 
 
 def _audit_target_label(event: dict[str, Any]) -> str:
