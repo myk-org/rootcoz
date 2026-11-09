@@ -969,6 +969,56 @@ class TestEnrichWithGithubDuplicateMatches:
         assert record["matches"] == 1
         assert "1 of 2" in record["reason"]
 
+    async def test_filter_failure_does_not_discard_later_keyword_sets(
+        self, product_bug_with_keywords, settings_with_tests_repo
+    ) -> None:
+        """A raising relevance filter costs its own keyword set only."""
+        other = FailureAnalysis(
+            test_name="test_other",
+            error="timeout",
+            analysis=AnalysisDetail(
+                classification="PRODUCT BUG",
+                product_bug_report=ProductBugReport(
+                    title="VM start fails",
+                    description="Migration start times out",
+                    jira_search_keywords=["vm start"],
+                ),
+            ),
+        )
+
+        async def search(keywords, _repo_url, _token=""):
+            return [_candidate(1 if "login 500" in keywords else 2)]
+
+        with (
+            patch("rootcoz.github_issues.search_github_issues", side_effect=search),
+            patch(
+                "rootcoz.github_issues.filter_issue_matches_with_ai",
+                new_callable=AsyncMock,
+                side_effect=[
+                    RuntimeError("usage recording failed"),
+                    [{"key": "org/test-repo#2", "relevant": True, "score": 0.9}],
+                ],
+            ),
+        ):
+            record = await enrich_with_github_duplicate_matches(
+                [product_bug_with_keywords, other],
+                settings_with_tests_repo,
+                _TEST_GITHUB_TOKEN,
+                "claude",
+                "test-model",
+                repo_urls=["https://github.com/org/test-repo"],
+            )
+
+        # The searches succeeded, so the record must not claim otherwise.
+        assert record["searched"] is True
+        assert record["candidates"] == 2
+        assert "filter" in record["reason"]
+        # The later keyword set still ran and its matches were attached.
+        assert other.analysis.product_bug_report.github_matches[0].number == 2
+        assert (
+            product_bug_with_keywords.analysis.product_bug_report.github_matches == []
+        )
+
     async def test_no_write_request_is_made(
         self, product_bug_with_keywords, settings_with_tests_repo
     ) -> None:

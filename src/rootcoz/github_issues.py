@@ -322,6 +322,7 @@ async def _search_and_filter(
     )
 
     failed_searches = 0
+    filter_failures = 0
     total_candidates = 0
     total_matches = 0
     for index, (keywords, targets) in enumerate(targets_by_keywords.items()):
@@ -338,16 +339,29 @@ async def _search_and_filter(
 
         bug_title, bug_description = bug_context(targets[0])
         if ai_provider and ai_model:
-            evaluations = await filter_issue_matches_with_ai(
-                bug_title=bug_title,
-                bug_description=bug_description,
-                candidates=candidates,
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                ai_call_timeout=ai_call_timeout,
-                job_id=job_id,
-                call_type=call_type,
-            )
+            try:
+                evaluations = await filter_issue_matches_with_ai(
+                    bug_title=bug_title,
+                    bug_description=bug_description,
+                    candidates=candidates,
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
+                    ai_call_timeout=ai_call_timeout,
+                    job_id=job_id,
+                    call_type=call_type,
+                )
+            except Exception:
+                # One failed filter must not discard the keyword sets after it:
+                # their searches already succeeded.
+                logger.exception(
+                    "GitHub %s relevance filtering failed for %d candidate(s) "
+                    "for job=%s",
+                    call_type,
+                    len(candidates),
+                    job_id,
+                )
+                filter_failures += 1
+                continue
             matches = _evaluations_to_similar_issues(evaluations, candidates)
         else:
             # No AI config — fall back to returning all candidates as matches
@@ -362,14 +376,18 @@ async def _search_and_filter(
             attach(target, matches)
         total_matches += len(matches)
 
-    reason = ""
+    reasons: list[str] = []
     if failed_searches:
         # A failure reason is a warning, a configuration reason is not.
-        reason = (
+        reasons.append(
             f"all {total_searches} GitHub issue search(es) failed"
             if failed_searches == total_searches
             else f"{failed_searches} of {total_searches} GitHub issue search(es) failed"
         )
+    if filter_failures:
+        reasons.append(f"{filter_failures} GitHub relevance filter call(s) failed")
+    reason = "; ".join(reasons)
+    if reasons:
         logger.warning("GitHub %s: %s for job=%s", call_type, reason, job_id)
     logger.info(
         "GitHub %s complete for job=%s: %d keyword set(s), %d candidate(s), "

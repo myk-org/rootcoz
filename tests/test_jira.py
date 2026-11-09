@@ -784,6 +784,41 @@ class TestEnrichWithJiraMatches:
         assert record["searched"] is False
         assert "failed" in record["reason"]
 
+    async def test_filter_failure_keeps_successful_search_record(
+        self, product_bug_failure, jira_settings
+    ) -> None:
+        """A failed filter is named; it is not reported as an unsearched Jira."""
+        mock_candidates = [
+            {
+                "key": "PROJ-400",
+                "summary": "Login fails",
+                "description": "500",
+                "status": "Open",
+                "priority": "High",
+                "url": "https://jira.example.com/browse/PROJ-400",
+            },
+        ]
+        with patch("rootcoz.jira.JiraClient") as mock_client_cls:
+            mock_instance = AsyncMock()
+            mock_instance.search = AsyncMock(return_value=mock_candidates)
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_instance
+
+            with patch(
+                "rootcoz.jira.filter_matches_with_ai",
+                new_callable=AsyncMock,
+                side_effect=RuntimeError("usage recording failed"),
+            ):
+                record = await enrich_with_jira_matches(
+                    [product_bug_failure], jira_settings, "claude", "test-model"
+                )
+
+        assert record["searched"] is True
+        assert record["candidates"] == 1
+        assert "filter" in record["reason"]
+        assert product_bug_failure.analysis.product_bug_report.jira_matches == []
+
     async def test_record_counts_candidates_and_matches(
         self, product_bug_failure, jira_settings
     ) -> None:

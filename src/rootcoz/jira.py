@@ -938,6 +938,7 @@ async def enrich_with_jira_matches(
 
     total_searches = len(keyword_to_reports)
     failed_searches = 0
+    filter_failures = 0
     total_candidates = 0
     total_matches = 0
     try:
@@ -971,15 +972,27 @@ async def enrich_with_jira_matches(
                 representative = keyword_to_reports[kw_tuple][0]
 
                 if ai_provider and ai_model:
-                    matches = await filter_matches_with_ai(
-                        bug_title=representative.title,
-                        bug_description=representative.description,
-                        candidates=candidates,
-                        ai_provider=ai_provider,
-                        ai_model=ai_model,
-                        ai_call_timeout=settings.ai_call_timeout,
-                        job_id=job_id,
-                    )
+                    try:
+                        matches = await filter_matches_with_ai(
+                            bug_title=representative.title,
+                            bug_description=representative.description,
+                            candidates=candidates,
+                            ai_provider=ai_provider,
+                            ai_model=ai_model,
+                            ai_call_timeout=settings.ai_call_timeout,
+                            job_id=job_id,
+                        )
+                    except Exception:
+                        # A failed filter is not a failed search: keep the record
+                        # truthful and let the other keyword sets run.
+                        logger.exception(
+                            "Jira relevance filtering failed for %d candidate(s) "
+                            "for job=%s",
+                            len(candidates),
+                            job_id,
+                        )
+                        filter_failures += 1
+                        continue
                 else:
                     # No AI config — fall back to returning all candidates as matches
                     logger.debug(
@@ -1006,13 +1019,17 @@ async def enrich_with_jira_matches(
         logger.exception("Jira enrichment failed unexpectedly")
         return tracker_search(reason="Jira search failed unexpectedly", scope=scope)
 
-    reason = ""
+    reasons: list[str] = []
     if failed_searches:
-        reason = (
+        reasons.append(
             f"all {total_searches} Jira search(es) failed"
             if failed_searches == total_searches
             else f"{failed_searches} of {total_searches} Jira search(es) failed"
         )
+    if filter_failures:
+        reasons.append(f"{filter_failures} Jira relevance filter call(s) failed")
+    reason = "; ".join(reasons)
+    if reasons:
         logger.warning("Jira search: %s for job=%s", reason, job_id)
     logger.info(
         "Jira search complete: %d relevant match(es) found for job=%s",
