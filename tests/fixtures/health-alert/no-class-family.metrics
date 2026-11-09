@@ -1,0 +1,9 @@
+# No rootcoz_errors_by_class family, but real class errors (6), an unhealthy server
+# and a nearly full filesystem: the configuration line must not silence health/disk.
+rootcoz_health_up 0
+rootcoz_requests_total 20
+rootcoz_errors_total 6
+rootcoz_error_rate 0.3
+rootcoz_data_used_bytes 6120328397
+rootcoz_data_capacity_bytes 6442450944
+rootcoz_data_used_ratio 0.9500
