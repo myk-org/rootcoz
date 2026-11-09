@@ -54,12 +54,17 @@ class ClaimSet:
             resolver decides, and may fall back when it is unusable.
         email: Email the provider reports, for display and admin search.
         claims: The full claim set, for the audit trail.
+        asserts_email_verified: Whether this provider publishes an
+            ``email_verified`` claim at all. Google and GitHub do; an OpenShift
+            OAuth server does not, and a deployment must not be unable to use
+            ``SSO_ALLOWED_DOMAINS`` merely because its IdP is silent about it.
     """
 
     subject: str
     username_hint: str
     email: str | None = None
     claims: dict[str, Any] = field(default_factory=dict)
+    asserts_email_verified: bool = True
 
 
 class SSOProvider(ABC):
@@ -87,17 +92,23 @@ class SSOProvider(ABC):
 
     @abstractmethod
     async def authorization_url(
-        self, *, redirect_uri: str, state: str, code_challenge: str, nonce: str
+        self,
+        *,
+        redirect_uri: str,
+        state: str,
+        code_challenge: str = "",
+        nonce: str = "",
     ) -> str:
         """Where to send the browser to start the login.
 
         Args:
             redirect_uri: Callback URL registered with the provider.
             state: CSRF nonce for this attempt.
-            code_challenge: PKCE challenge derived from the verifier.
+            code_challenge: PKCE challenge derived from the verifier. A provider
+                whose protocol has no PKCE (GitHub) ignores it.
             nonce: OIDC nonce, echoed into the ID token and checked on return —
                 the OAuth ``state`` binds the redirect, the nonce binds the
-                token itself.
+                token itself. A non-OIDC provider ignores it.
 
         Returns:
             The provider's authorization URL.
@@ -105,7 +116,7 @@ class SSOProvider(ABC):
 
     @abstractmethod
     async def exchange(
-        self, *, code: str, code_verifier: str, redirect_uri: str, nonce: str
+        self, *, code: str, code_verifier: str = "", redirect_uri: str, nonce: str = ""
     ) -> ClaimSet:
         """Turn an authorization code into claims.
 

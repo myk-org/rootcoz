@@ -7,8 +7,10 @@ attributes on top of this base.
 
 Two rules keep this safe:
 
-* The **issuer is a constant in code**, never a request parameter — an attacker
-  who could point discovery at their own server would be minting identities.
+* The **issuer comes from configuration, never from a request** — a constant in
+  code for Google, a deployment setting for OpenShift and Red Hat SSO. Nothing in
+  the flow lets a caller point discovery elsewhere; issuing identities from an
+  attacker's server would require an admin to set that server as the issuer.
 * The ID token is verified against the issuer's JWKS — signature pinned to
   RS256, then ``iss``, ``aud``, ``exp``/``nbf``/``iat`` with a small clock skew —
   before any claim is trusted. The userinfo endpoint is only a fallback for
@@ -29,7 +31,8 @@ import httpx
 
 from rootcoz import get_child_logger
 from rootcoz.auth.sso.base import AuthError, ClaimSet, SSOProvider
-from rootcoz.config import Settings
+from rootcoz.auth.sso.http import request_json
+from rootcoz.config import Settings, issuer_is_secure
 
 logger = get_child_logger(__name__)
 
@@ -54,9 +57,6 @@ def _reset_discovery_cache() -> None:
     _METADATA_CACHE.clear()
     _JWKS_CACHE.clear()
 
-
-#: Ceiling for any call to the provider, so a hung IdP cannot hold a request.
-HTTP_TIMEOUT_SECONDS = 10.0
 
 #: Tolerance for clock drift between rootcoz and the provider, applied to
 #: ``exp``/``nbf``/``iat``: without it a good token can be refused because two
@@ -88,6 +88,11 @@ class OIDCProvider(SSOProvider):
     client_id_setting: ClassVar[str] = ""
     client_secret_setting: ClassVar[str] = ""
 
+    #: Whether this provider publishes ``email_verified``. Overridden by the
+    #: providers whose IdP does not (OpenShift), so a deployment can still use
+    #: SSO_ALLOWED_DOMAINS against them.
+    asserts_email_verified: ClassVar[bool] = True
+
     def __init__(self, client_id: str, client_secret: str, issuer: str) -> None:
         """Store the client credentials and the issuer they belong to.
 
@@ -118,49 +123,21 @@ class OIDCProvider(SSOProvider):
         issuer = cls.issuer
         if cls.issuer_setting:
             configured = (getattr(settings, cls.issuer_setting, "") or "").strip()
-            if not configured.startswith(("https://", "http://")):
+            # Same rule the settings field enforces: https, or loopback http for
+            # a development IdP. A plaintext issuer would put the token exchange
+            # and the JWKS on a network anyone can rewrite.
+            if not configured or not issuer_is_secure(configured):
+                if configured:
+                    logger.warning(
+                        "SSO provider %s is disabled: issuer %r is not https",
+                        cls.name,
+                        configured,
+                    )
                 return None
             issuer = configured
         if not issuer:
             return None
         return cls(client_id=client_id, client_secret=client_secret, issuer=issuer)
-
-    async def _request_json(
-        self,
-        method: str,
-        url: str,
-        *,
-        reason: str,
-        **kwargs: Any,
-    ) -> dict[str, Any]:
-        """Call the provider once and return its JSON object.
-
-        One place for the timeout, the status check, the decode and the
-        ``AuthError`` translation, so every provider call fails the same way.
-
-        Args:
-            method: HTTP method.
-            url: Absolute URL.
-            reason: Reason code to report when the call fails.
-            **kwargs: Passed to ``httpx`` (``data``, ``headers``, ...).
-
-        Returns:
-            The decoded JSON object.
-
-        Raises:
-            AuthError: On a transport error, a non-2xx status, or a body that is
-                not a JSON object.
-        """
-        try:
-            async with httpx.AsyncClient(timeout=HTTP_TIMEOUT_SECONDS) as client:
-                response = await client.request(method, url, **kwargs)
-                response.raise_for_status()
-                payload = response.json()
-        except (httpx.HTTPError, ValueError) as exc:
-            raise AuthError(reason, f"{reason}: {exc}") from exc
-        if not isinstance(payload, dict):
-            raise AuthError(reason, f"{reason}: response is not an object")
-        return payload
 
     async def metadata(self) -> dict[str, Any]:
         """Fetch (and cache) the provider's discovery document.
@@ -175,7 +152,7 @@ class OIDCProvider(SSOProvider):
         cached = _METADATA_CACHE.get(self.issuer)
         if cached is not None and now - cached[0] < METADATA_TTL_SECONDS:
             return cached[1]
-        document = await self._request_json(
+        document = await request_json(
             "GET",
             f"{self.issuer}/.well-known/openid-configuration",
             reason="discovery_failed",
@@ -189,7 +166,12 @@ class OIDCProvider(SSOProvider):
         return document
 
     async def authorization_url(
-        self, *, redirect_uri: str, state: str, code_challenge: str, nonce: str
+        self,
+        *,
+        redirect_uri: str,
+        state: str,
+        code_challenge: str = "",
+        nonce: str = "",
     ) -> str:
         """Build the authorization URL.
 
@@ -221,7 +203,12 @@ class OIDCProvider(SSOProvider):
         return f"{endpoint}{separator}{httpx.QueryParams(query)}"
 
     async def exchange(
-        self, *, code: str, code_verifier: str, redirect_uri: str, nonce: str
+        self,
+        *,
+        code: str,
+        code_verifier: str = "",
+        redirect_uri: str,
+        nonce: str = "",
     ) -> ClaimSet:
         """Exchange an authorization code for claims.
 
@@ -271,7 +258,7 @@ class OIDCProvider(SSOProvider):
             "client_secret": self._client_secret,
             "code_verifier": code_verifier,
         }
-        return await self._request_json(
+        return await request_json(
             "POST",
             str(document["token_endpoint"]),
             reason="exchange_failed",
@@ -400,7 +387,7 @@ class OIDCProvider(SSOProvider):
         now = time.monotonic()
         cached = _JWKS_CACHE.get(jwks_uri)
         if force_refresh or cached is None or now - cached[0] >= METADATA_TTL_SECONDS:
-            document = await self._request_json("GET", jwks_uri, reason="jwks_failed")
+            document = await request_json("GET", jwks_uri, reason="jwks_failed")
             cached = (now, document)
             _JWKS_CACHE[jwks_uri] = cached
         return KeySet.import_key_set(cached[1])
@@ -418,7 +405,7 @@ class OIDCProvider(SSOProvider):
         Raises:
             AuthError: When userinfo fails or is not an object.
         """
-        return await self._request_json(
+        return await request_json(
             "GET",
             endpoint,
             reason="userinfo_failed",
@@ -447,6 +434,7 @@ class OIDCProvider(SSOProvider):
             username_hint=username_hint(claims, email),
             email=email,
             claims=claims,
+            asserts_email_verified=self.asserts_email_verified,
         )
 
     async def end_session_url(self, post_logout_redirect_uri: str) -> str | None:

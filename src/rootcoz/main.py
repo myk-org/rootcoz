@@ -147,11 +147,14 @@ from rootcoz.config import (
     SQLITE_INT_MAX,
     Settings,
     atlassian_cloud_id_error,
+    csv_entries,
     duplicate_additional_repo_names,
     get_settings,
     jira_availability,
+    jira_method_missing_fields,
     jira_site_url_error,
     jira_unavailable_reason,
+    normalize_domain_list,
     normalize_jira_auth_mode,
     parse_additional_repos,
     parse_peer_configs,
@@ -442,6 +445,9 @@ _SENSITIVE_SETTINGS: frozenset[str] = frozenset(
         "datadog_app_key",
         "admin_key",
         "sso_google_client_secret",
+        "sso_github_client_secret",
+        "sso_openshift_client_secret",
+        "sso_redhat_client_secret",
         "vapid_private_key",
         "smtp_password",
         "slack_webhook_url",
@@ -628,6 +634,15 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
     "SSO": [
         "sso_google_client_id",
         "sso_google_client_secret",
+        "sso_github_client_id",
+        "sso_github_client_secret",
+        "sso_openshift_client_id",
+        "sso_openshift_client_secret",
+        "sso_openshift_issuer",
+        "sso_redhat_client_id",
+        "sso_redhat_client_secret",
+        "sso_redhat_issuer",
+        "sso_allowed_domains",
         "sso_state_ttl_seconds",
     ],
     "Jenkins": [
@@ -16756,6 +16771,8 @@ _SSO_PUBLIC_REASONS = frozenset(
         "userinfo_failed",
         "no_subject",
         "callback_misconfigured",
+        "domain_not_allowed",
+        "email_not_verified",
     }
 )
 
@@ -16768,6 +16785,27 @@ _SSO_CONFLICT_DETAIL = "That sign-in is already connected to another account"
 
 #: Generic 400 for a rejected name; the rule that rejected it goes to the audit row.
 _SSO_NAME_DETAIL = "That name cannot be used"
+
+#: Status per refusal reason for the two ticket endpoints, so a policy refusal
+#: (domain / verification) does not read as a bad request or a conflict.
+_SSO_ERROR_STATUS: dict[str, int] = {
+    "identity_conflict": 409,
+    "account_missing": 404,
+    "domain_not_allowed": 403,
+    "email_not_verified": 403,
+}
+
+
+def _sso_error_status(reason: str) -> int:
+    """HTTP status for a refusal reason.
+
+    Args:
+        reason: The ``AuthError`` reason.
+
+    Returns:
+        The status; 400 for a name that cannot be used.
+    """
+    return _SSO_ERROR_STATUS.get(reason, 400)
 
 
 def _sso_public_reason(reason: str) -> str:
@@ -17241,6 +17279,8 @@ async def sso_create_account(request: Request) -> Response:
         raise HTTPException(status_code=400, detail=_SSO_NAME_DETAIL) from exc
 
     try:
+        # A ticket can outlive a domain revocation; re-apply the policy.
+        auth_identity.check_email_domain(record["email"], settings)
         resolution = await auth_identity.create_new(
             provider=record["provider"],
             subject=record["subject"],
@@ -17252,13 +17292,14 @@ async def sso_create_account(request: Request) -> Response:
         await _audit_sso_refusal(request, record["provider"], exc.reason)
         # The ticket survives: the account+link write is transactional, so a
         # failure leaves nothing behind and the person can retry the screen.
-        status_code = 409 if exc.reason == "identity_conflict" else 400
         detail = (
             _SSO_CONFLICT_DETAIL
             if exc.reason == "identity_conflict"
             else _SSO_NAME_DETAIL
         )
-        raise HTTPException(status_code=status_code, detail=detail) from exc
+        raise HTTPException(
+            status_code=_sso_error_status(exc.reason), detail=detail
+        ) from exc
 
     # Consumed only after the rows exist, so a failed attempt never costs the
     # person another trip through the IdP.
@@ -17351,6 +17392,8 @@ async def sso_link_account(request: Request) -> Response:
         raise HTTPException(status_code=403, detail="User not allowed")
 
     try:
+        # Same re-check as create: the ticket is minutes old, the list may not be.
+        auth_identity.check_email_domain(record["email"], settings)
         resolution = await auth_identity.link_existing(
             username=username,
             provider=record["provider"],
@@ -17367,7 +17410,14 @@ async def sso_link_account(request: Request) -> Response:
             raise HTTPException(
                 status_code=404, detail="That account no longer exists"
             ) from exc
-        raise HTTPException(status_code=409, detail=_SSO_CONFLICT_DETAIL) from exc
+        detail = (
+            _SSO_CONFLICT_DETAIL
+            if exc.reason == "identity_conflict"
+            else "That sign-in cannot be used"
+        )
+        raise HTTPException(
+            status_code=_sso_error_status(exc.reason), detail=detail
+        ) from exc
 
     if await storage.consume_sso_ticket(ticket) is None:
         raise HTTPException(status_code=404, detail="This sign-in link has expired")
@@ -21348,7 +21398,7 @@ def _normalize_allowed_users(value: str) -> tuple[list[str], str | None]:
     legitimate (SSO and trusted-proxy deployments provision the account on
     first login), so membership is never checked here.
     """
-    names = [part.strip() for part in value.split(",") if part.strip()]
+    names = csv_entries(value, lower=False)
     if any(any(ch.isspace() for ch in name) for name in names):
         return names, (
             "allowed_users: must be comma-separated usernames — "
@@ -21373,6 +21423,12 @@ async def _normalize_enumerated_value(key: str, value: str) -> tuple[str, str | 
     if key == "allowed_users":
         names, error = _normalize_allowed_users(value)
         return ", ".join(names), error
+    if key == "sso_allowed_domains":
+        try:
+            domains = sorted(normalize_domain_list(value))
+        except ValueError as exc:
+            return value, f"sso_allowed_domains: {exc}"
+        return ", ".join(domains), None
     if key == "ambient_auth_providers":
         ids, error = await _normalize_ambient_auth_providers(value)
         return ", ".join(ids), error
@@ -21417,7 +21473,15 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
         )
 
     # Pre-validate fields with Pydantic model-level validators
-    for key in ("prow_url", "gcs_bucket", "jira_auth_mode", "default_user_role"):
+    for key in (
+        "prow_url",
+        "gcs_bucket",
+        "jira_auth_mode",
+        "default_user_role",
+        "sso_allowed_domains",
+        "sso_openshift_issuer",
+        "sso_redhat_issuer",
+    ):
         if key not in settings_updates:
             continue
         value = settings_updates[key]

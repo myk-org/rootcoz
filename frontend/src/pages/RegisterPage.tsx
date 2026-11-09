@@ -44,6 +44,8 @@ const SSO_ERROR_MESSAGES: Record<string, string> = {
   no_subject: 'The provider returned no account identity. Please try again.',
   callback_misconfigured: 'SSO is misconfigured on this server. Contact an admin.',
   denied: "That account can't sign in with this provider.",
+  domain_not_allowed: 'This account\'s email domain is not allowed on this server. Contact an admin.',
+  email_not_verified: 'Your provider has not verified this email address, so it cannot be used here.',
 }
 const SSO_ERROR_FALLBACK = 'Sign-in with the provider did not finish. Please try again.'
 

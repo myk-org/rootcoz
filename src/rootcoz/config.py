@@ -655,6 +655,140 @@ class Settings(BaseSettings):
         ),
     )
 
+    # GitHub is OAuth2, not OIDC: no issuer, and the email comes from its API.
+    sso_github_client_id: str = Field(
+        default="",
+        description=(
+            "OAuth App client id from GitHub. GitHub sign-in is offered only when"
+            " this and the client secret are both set; the app needs the"
+            " 'user:email' scope so a verified address is available."
+        ),
+    )
+    sso_github_client_secret: SecretStr | None = Field(
+        default=None,
+        description=(
+            "OAuth App client secret from GitHub. Stored encrypted and masked."
+        ),
+    )
+
+    # OpenShift and Red Hat SSO are OIDC, but the issuer is per deployment.
+    sso_openshift_client_id: str = Field(
+        default="",
+        description=(
+            "OAuth client id from the cluster's OpenShift OAuth server."
+            " OpenShift sign-in is offered only when the id, the secret and"
+            " SSO_OPENSHIFT_ISSUER are all set."
+        ),
+    )
+    sso_openshift_client_secret: SecretStr | None = Field(
+        default=None,
+        description=(
+            "OAuth client secret for the OpenShift OAuth client. Stored encrypted"
+            " and masked."
+        ),
+    )
+    sso_openshift_issuer: str = Field(
+        default="",
+        description=(
+            "Issuer of the cluster's OAuth server — exactly the value it puts in"
+            " its ID token's 'iss' claim, with no '/.well-known/...' path and no"
+            " trailing path, e.g. 'https://oauth-openshift.apps.example.com'."
+            " Must be https (http only for a loopback dev server); any other value"
+            " is refused, so a misconfiguration cannot silently hide the button."
+        ),
+    )
+    sso_redhat_client_id: str = Field(
+        default="",
+        description=(
+            "Client id of the Red Hat SSO (Keycloak) realm client. Red Hat SSO"
+            " sign-in is offered only when the id, the secret and"
+            " SSO_REDHAT_ISSUER are all set."
+        ),
+    )
+    sso_redhat_client_secret: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Client secret for the Red Hat SSO realm client. Stored encrypted and"
+            " masked."
+        ),
+    )
+    sso_redhat_issuer: str = Field(
+        default="",
+        description=(
+            "Issuer of the Red Hat SSO realm — exactly the value it puts in its ID"
+            " token's 'iss' claim, e.g."
+            " 'https://sso.redhat.com/auth/realms/redhat-external'. Must be https"
+            " (http only for a loopback dev server); any other value is refused, so"
+            " a misconfiguration cannot silently hide the button."
+        ),
+    )
+
+    #: Email domains allowed to sign in through any SSO provider, comma-separated.
+    #: Unlike ``ALLOWED_USERS``, a malformed entry here is *rejected* at save time
+    #: rather than silently dropped: a silently dropped domain would quietly widen
+    #: or narrow who can sign in.
+    #: (``redhat.com,example.org``). Empty means no restriction. An entry matches
+    #: the domain itself and its subdomains, never a look-alike suffix.
+    sso_allowed_domains: str = Field(
+        default="",
+        description=(
+            "Comma-separated email domains allowed to sign in with SSO, e.g."
+            " 'redhat.com,example.org' (a leading '@' is accepted). An entry"
+            " admits that domain and its real subdomains — 'redhat.com' allows"
+            " 'eng.redhat.com' but not 'notredhat.com'. Checked on every SSO"
+            " login; a login whose address is missing or unverified is refused"
+            " while this is set. Empty disables the check."
+        ),
+    )
+
+    @field_validator("sso_openshift_issuer", "sso_redhat_issuer")
+    @classmethod
+    def _validate_issuer(cls, value: str) -> str:
+        """Require an absolute http(s) issuer URL, where it is written.
+
+        A malformed issuer used to make the provider silently disappear from the
+        login page; refusing it at save time tells the admin instead.
+
+        Args:
+            value: The raw setting.
+
+        Returns:
+            The value without a trailing slash (the form discovery is built from).
+
+        Raises:
+            ValueError: When the value is set but is not an http(s) URL.
+        """
+        issuer = value.strip()
+        if not issuer:
+            return ""
+        if not issuer.startswith(("https://", "http://")):
+            msg = f"{issuer!r} is not an http(s) URL"
+            raise ValueError(msg)
+        if not issuer_is_secure(issuer):
+            msg = (
+                f"{issuer!r} uses plaintext http; an issuer must be https"
+                " (http is only accepted for a loopback development server)"
+            )
+            raise ValueError(msg)
+        return issuer.rstrip("/")
+
+    @field_validator("sso_allowed_domains")
+    @classmethod
+    def _validate_sso_allowed_domains(cls, value: str) -> str:
+        """Reject a malformed allow-list where it is written, not at login.
+
+        Args:
+            value: The raw setting.
+
+        Returns:
+            The value unchanged; validation only.
+
+        Raises:
+            ValueError: When an entry is a wildcard, a scheme or a path.
+        """
+        normalize_domain_list(value)
+        return value
+
     #: How long a login attempt's state (CSRF nonce + PKCE verifier) stays valid.
     sso_state_ttl_seconds: int = Field(
         default=600,
@@ -1215,16 +1349,17 @@ class Settings(BaseSettings):
         return self
 
     @property
+    def sso_allowed_domains_set(self) -> frozenset[str]:
+        """The SSO domain allow-list, normalised; empty means "no restriction"."""
+        return normalize_domain_list(self.sso_allowed_domains)
+
+    @property
     def allowed_users_set(self) -> frozenset[str]:
         """Parse ALLOWED_USERS into a frozen set of lowercase usernames.
 
         Returns an empty frozenset when unset (open access).
         """
-        if not self.allowed_users or not self.allowed_users.strip():
-            return frozenset()
-        return frozenset(
-            u.strip().lower() for u in self.allowed_users.split(",") if u.strip()
-        )
+        return frozenset(csv_entries(self.allowed_users))
 
     @property
     def jira_enabled(self) -> bool:
@@ -1430,6 +1565,97 @@ def jira_site_url_error(value: str | None) -> str | None:
             "https://api.atlassian.com/ex/jira/<cloudId>"
         )
     return None
+
+
+def issuer_is_secure(url: str) -> bool:
+    """Whether an issuer URL protects the tokens that travel over it.
+
+    Discovery, JWKS and the token exchange all cross this URL, so plaintext is
+    refused — except for a loopback development server, where there is no network
+    to intercept.
+
+    Args:
+        url: The configured issuer.
+
+    Returns:
+        True for https, and for http on a loopback host.
+    """
+    if url.startswith("https://"):
+        return True
+    if not url.startswith("http://"):
+        return False
+    host = url[len("http://") :].split("/", 1)[0].split(":", 1)[0].lower()
+    return host in {"localhost", "127.0.0.1", "[::1]", "::1"}
+
+
+def csv_entries(value: str | None, *, lower: bool = True) -> list[str]:
+    """Split a comma-separated setting into entries.
+
+    One splitter for the settings layer, so every list-valued field strips,
+    drops blanks and (by default) lower-cases the same way; the *policy* on top
+    (wildcard rejection, ``@`` stripping, membership) stays with each setting.
+
+    Args:
+        value: The raw setting.
+        lower: Lower-case the entries.
+
+    Returns:
+        The entries in the order written.
+    """
+    if not value:
+        return []
+    entries = [raw.strip() for raw in value.split(",")]
+    entries = [entry for entry in entries if entry]
+    return [entry.lower() for entry in entries] if lower else entries
+
+
+def normalize_domain_list(value: str | None) -> frozenset[str]:
+    """Parse a comma-separated domain allow-list.
+
+    Entries are trimmed, lower-cased, and a leading ``@`` is dropped, so
+    ``@RedHat.com`` and ``redhat.com`` mean the same thing; a trailing dot (the
+    DNS root) is stripped. ``*``, a scheme or a path is rejected — an allow-list
+    whose value is "everything" is a typo, not an intention — and so is a list
+    whose entries are all blank, which would otherwise disable the policy. An
+    entry that starts with ``.`` is refused too: ``.redhat.com`` matches nothing.
+
+    Args:
+        value: The raw setting.
+
+    Returns:
+        The domains. Empty means "no restriction".
+
+    Raises:
+        ValueError: When an entry is a wildcard, a scheme, a path or starts with
+            a dot, or when the value contains no usable domain at all.
+    """
+    if not value or not value.strip():
+        # Unset means "no restriction"; a value that is only blanks/comma is a
+        # typo and is refused below.
+        return frozenset()
+    entries = csv_entries(value)
+    domains: set[str] = set()
+    for entry in entries:
+        candidate = entry.lstrip("@")
+        # A trailing dot is the DNS root, not a different domain: `redhat.com.`
+        # must mean `redhat.com`, or a login would be refused for a stray dot.
+        candidate = candidate.rstrip(".")
+        if not candidate:
+            continue
+        if "*" in candidate or "/" in candidate or ":" in candidate or " " in candidate:
+            msg = f"Invalid SSO domain entry: '{entry}'"
+            raise ValueError(msg)
+        if candidate.startswith("."):
+            # `.redhat.com` is not `redhat.com` and would match nothing.
+            msg = f"Invalid SSO domain entry: '{entry}'"
+            raise ValueError(msg)
+        domains.add(candidate)
+    if not domains:
+        # A value was written but every entry was blank: treating that as "no
+        # restriction" would silently disable the policy.
+        msg = "Invalid SSO domain entry: no domain in the list"
+        raise ValueError(msg)
+    return frozenset(domains)
 
 
 def normalize_jira_auth_mode(value: str | None) -> str:
