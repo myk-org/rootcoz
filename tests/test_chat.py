@@ -4312,6 +4312,40 @@ class TestChatIssueRepoAllowList:
         assert mock_create.call_count == 1, mock_create.call_args
         return mock_create.call_args.kwargs["repo_url"]
 
+    async def test_a_legacy_duplicate_setting_is_refused_with_the_names(
+        self, test_client, temp_db_path: Path, github_issue_config
+    ):
+        """#402: a row stored before PUT validated it is a 422, never a 500.
+
+        The run stored no repos of its own, so the allow-list falls back to the
+        server setting — and that setting cannot be parsed.
+        """
+        from rootcoz.config import update_db_settings_cache
+
+        job_id = await self._save_run(
+            temp_db_path,
+            "job-repo-duplicate",
+            {
+                "job_name": "job",
+                "build_number": 1,
+                "tests_repo_url": "https://github.com/org/tests",
+            },
+        )
+        update_db_settings_cache(
+            {
+                "additional_repos": (
+                    "shared-infra:https://example.com/a/shared-infra,"
+                    "shared-infra:https://example.com/b/shared-infra"
+                )
+            }
+        )
+        headers = await self._reviewer("duplicate-filer")
+        response = await self._draft(test_client, headers, job_id=job_id)
+        assert response.status_code == 422, response.text
+        assert (
+            "Duplicate additional repo names: shared-infra" in response.json()["detail"]
+        )
+
     async def test_empty_repo_files_in_the_runs_test_repo(
         self, test_client, temp_db_path: Path, github_issue_config
     ):

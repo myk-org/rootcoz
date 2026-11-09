@@ -30,6 +30,15 @@ def make_user_friendly_error(error: str | Exception) -> str:
     if err_str.startswith(SESSION_REFUSAL_MARKER):
         return err_str
 
+    # Same reason: this refusal already names the colliding repos, and the
+    # generic sentence would erase the only feedback the user gets.
+    if "duplicate additional repo names" in err_lower:
+        logger.debug(
+            "Error mapped to duplicate-additional-repo: %s",
+            err_str[:LOG_ERROR_PREVIEW_CHARS],
+        )
+        return f"{err_str}. Rename one of them and re-run the analysis."
+
     if (
         "not found in jenkins" in err_lower
         or "job does not exist" in err_lower

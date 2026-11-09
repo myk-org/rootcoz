@@ -167,13 +167,28 @@ export function isExpectedTokenSyncError(err: unknown): boolean {
   return err instanceof ApiError && (err.status === 404 || err.status === 401)
 }
 
-/** Extract the `detail` string from an ApiError's body, if present. */
+/** The individual `detail` messages of an ApiError's body, `Value error, ` stripped.
+ *
+ *  FastAPI answers a string, or for a request-validation failure a list of
+ *  `{loc, msg, type}` objects — whose `msg` carries Pydantic's `Value error, `
+ *  prefix when the field validator raised. Kept per entry, so a caller can match
+ *  one message and a `;` inside it survives. */
+export function apiDetailMessages(err: unknown): string[] {
+  if (!(err instanceof ApiError)) return []
+  const detail = (err.body as { detail?: unknown } | null)?.detail
+  const raw =
+    typeof detail === 'string'
+      ? [detail]
+      : Array.isArray(detail)
+        ? detail.map((entry) => (typeof entry?.msg === 'string' ? entry.msg : ''))
+        : []
+  return raw.map((message) => message.replace(/^Value error, /, '')).filter(Boolean)
+}
+
+/** Extract the human-readable `detail` from an ApiError's body, if present. Messages are joined for the user. */
 export function extractApiDetail(err: unknown): string | null {
-  if (err instanceof ApiError) {
-    const detail = (err.body as { detail?: unknown })?.detail
-    if (typeof detail === 'string') return detail
-  }
-  return null
+  const messages = apiDetailMessages(err)
+  return messages.length > 0 ? messages.join('; ') : null
 }
 
 export { ApiError }

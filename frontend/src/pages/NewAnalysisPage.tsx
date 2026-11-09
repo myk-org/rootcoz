@@ -2,7 +2,7 @@ import { useState, useCallback, useRef, useEffect } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
-import { api } from '@/lib/api'
+import { api, ApiError, apiDetailMessages, extractApiDetail } from '@/lib/api'
 import { toIntInRange, PROW_JOB_NAME_RE, PROW_BUILD_ID_RE } from '@/lib/utils'
 import { Section } from '@/components/shared/Section'
 import { Toggle } from '@/components/shared/Toggle'
@@ -19,6 +19,27 @@ import { Send, Upload, Loader2 } from 'lucide-react'
 import type { DefaultServerSettings } from '@/types'
 import { normalizeProvider } from '@/lib/aiProviders'
 import { useAuth } from '@/lib/auth'
+
+const DUPLICATE_PREFIX = 'Duplicate additional repo names: '
+
+/**
+ * The names that clash, read from one detail entry so a name may contain `;` and a second
+ * validator message joined into the same detail cannot leak into the copy.
+ */
+function duplicateNames(err: unknown): string | null {
+  const hit = apiDetailMessages(err).find((m) => m.startsWith(DUPLICATE_PREFIX))
+  return hit ? hit.slice(DUPLICATE_PREFIX.length) : null
+}
+
+/** Submit-failure copy the user can act on; `null` when the API named nothing useful. */
+function submitErrorMessage(err: unknown): string | null {
+  // A 5xx detail is server internals, never something the user can fix.
+  if (!(err instanceof ApiError) || err.status >= 500) return null
+  const duplicates = duplicateNames(err)
+  return duplicates
+    ? `Each additional repo needs a unique name — duplicated: \`${duplicates}\`.`
+    : extractApiDetail(err)
+}
 
 export function NewAnalysisPage() {
   const navigate = useNavigate()
@@ -260,7 +281,7 @@ export function NewAnalysisPage() {
       }
     } catch (err) {
       console.error('Failed to submit analysis', err)
-      setError('Failed to submit analysis. Please try again.')
+      setError(submitErrorMessage(err) ?? 'Failed to submit analysis. Please try again.')
     } finally {
       setSubmitting(false)
     }

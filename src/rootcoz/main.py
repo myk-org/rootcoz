@@ -114,6 +114,7 @@ from rootcoz.config import (
     JIRA_AUTH_MODES,
     Settings,
     atlassian_cloud_id_error,
+    duplicate_additional_repo_names,
     get_settings,
     jira_method_missing_fields,
     normalize_jira_auth_mode,
@@ -277,7 +278,6 @@ from rootcoz.result_fields import (
     parse_fields_param,
 )
 from rootcoz.rootcoz_repo_settings import (
-    EffectiveRepoAnalysisSettings,
     RootcozSettingsError,
     assert_no_tests_repo_name_collision,
     resolve_repo_analysis_settings,
@@ -2663,7 +2663,16 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> None:
         resolved_tests_repo_token = (
             resolve_tests_repo_token(body, merged) if tests_repo_url else ""
         )
-        additional_repos_list = resolve_additional_repos(body, merged)
+        try:
+            additional_repos_list = _resolve_additional_repos_validated(body, merged)
+        except HTTPException as exc:
+            # No client is waiting on a resume (startup), so the refusal that
+            # would be a 422 on the analysis path fails just this job.
+            logger.warning(f"Cannot resume waiting job {job['job_id']}: {exc.detail}")
+            await _fail_resumed_waiting_job(
+                job["job_id"], result_data, f"Cannot resume: {exc.detail}"
+            )
+            continue
         display_name = (
             result_data.get("display_name")
             or result_data.get("job_name")
@@ -5111,137 +5120,6 @@ async def _carry_forward_overrides(job_id: str, result_data: dict[str, Any]) -> 
         )
 
 
-async def _resolve_settings_json_before_analysis(
-    job_id: str,
-    body: BaseAnalysisRequest,
-    settings: Settings,
-    ai_provider: str,
-    ai_model: str,
-    display_name: str,
-    *,
-    build_number: int | None = None,
-    jenkins_url: str = "",
-    job_name: str = "",
-    is_admin: bool = False,
-) -> tuple[EffectiveRepoAnalysisSettings, bool] | None:
-    """Shallow-clone tests repo and resolve ``.rootcoz/settings.json`` once.
-
-    Runs for every analysis that has a tests repo (not only when AI is deferred)
-    so request → settings.json → server is applied before Jenkins wait / preflight.
-
-    Returns:
-        ``(effective, clone_ok)`` when the caller should continue.
-        ``clone_ok`` is True when there was no tests repo, or the early clone
-        succeeded (analysis need not re-merge). False means analysis must
-        re-resolve after its full workspace clone.
-        ``None`` when the job was already marked failed (caller must return).
-    """
-
-    async def _fail_job(error: str) -> None:
-        fail_data: dict[str, Any] = {
-            "job_name": job_name or display_name,
-            "display_name": display_name,
-            "error": error,
-        }
-        if build_number is not None:
-            fail_data["build_number"] = build_number
-        if jenkins_url:
-            fail_data["jenkins_url"] = jenkins_url
-        await _preserve_request_params(job_id, fail_data)
-        await update_status(job_id, "failed", fail_data)
-        notify_active_count_changed()
-        notify_dashboard_changed()
-        notify_job_status_changed(job_id)
-
-    tests_repo_url_raw = resolve_tests_repo_url(body, settings)
-    peer_ai_configs = _resolve_peer_ai_configs(body, settings)
-    additional_repos_list = resolve_additional_repos(body, settings)
-
-    if not tests_repo_url_raw:
-        effective = await resolve_repo_analysis_settings(
-            job_id,
-            None,
-            body,
-            settings,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            peer_ai_configs=peer_ai_configs,
-            additional_repos=additional_repos_list,
-        )
-        if not effective.ai_provider or not effective.ai_model:
-            await _fail_job(
-                _ai_not_configured_message(None, "AI provider/model", is_admin=is_admin)
-            )
-            return None
-        return effective, True
-
-    clean_url, tests_ref = parse_repo_ref(tests_repo_url_raw)
-    token = resolve_tests_repo_token(body, settings)
-
-    logger.info(
-        "Resolving .rootcoz/settings.json before analysis (job_id=%s)",
-        job_id,
-    )
-    clone_ok = False
-    repo_manager = RepositoryManager()
-    try:
-        workspace = repo_manager.create_workspace()
-        target = workspace / "tests-repo-early"
-        tests_path: Path | None = target
-        try:
-            await asyncio.to_thread(
-                repo_manager.clone_into,
-                clean_url,
-                target,
-                depth=1,
-                branch=tests_ref,
-                token=token or None,
-            )
-            clone_ok = True
-        except (GitCommandError, OSError, ValueError) as exc:
-            logger.warning(
-                "Early settings.json clone failed (%s); "
-                "continuing until analysis workspace clone",
-                type(exc).__name__,
-            )
-            tests_path = None
-
-        try:
-            effective = await resolve_repo_analysis_settings(
-                job_id,
-                tests_path,
-                body,
-                settings,
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                peer_ai_configs=peer_ai_configs,
-                additional_repos=additional_repos_list,
-            )
-        except RootcozSettingsError as exc:
-            logger.error("Invalid .rootcoz/settings.json (details redacted)")
-            await _fail_job(str(exc))
-            return None
-    finally:
-        # Off the loop: this clone tree is a full repository checkout.
-        await cleanup_off_loop(job_id, repo_manager.cleanup)
-
-    if not effective.ai_provider or not effective.ai_model:
-        if not clone_ok:
-            # Retry after full workspace clone in CI source analysis.
-            return effective, False
-        await _fail_job(
-            _ai_not_configured_message(None, "AI provider/model", is_admin=is_admin)
-        )
-        return None
-
-    logger.info(
-        "Resolved analysis settings: %s/%s",
-        effective.ai_provider,
-        effective.ai_model,
-    )
-    return effective, clone_ok
-
-
 def _build_base_request_params(
     ai_provider: str,
     ai_model: str,
@@ -5550,6 +5428,21 @@ async def _finish_ci_ingest(
     )
 
 
+def _resolve_additional_repos_validated(
+    request: BaseAnalysisRequest, settings: Settings
+) -> list[AdditionalRepo]:
+    """Additional repos from the request or the stored server setting.
+
+    A duplicate name inherited from a setting written before the write path
+    validated it must be refused with the same 422 a duplicate in the request
+    body gets — not escape as a server error (#402).
+    """
+    try:
+        return resolve_additional_repos(request, settings)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
 async def _enqueue_ci_source_analysis(
     body: UnifiedAnalyzeRequest,
     merged: Settings,
@@ -5609,7 +5502,7 @@ async def _enqueue_ci_source_analysis(
     resolved_tests_repo_token = (
         resolve_tests_repo_token(body, persist_merged) if tests_repo_url else ""
     )
-    additional_repos_list = resolve_additional_repos(body, persist_merged)
+    additional_repos_list = _resolve_additional_repos_validated(body, persist_merged)
 
     job_id = existing_job_id or str(uuid.uuid4())
     job_id_var.set(job_id)
@@ -10745,7 +10638,7 @@ def _job_issue_repo_slugs(
     slugs: set[str] = set()
     if default:
         slugs.add(default)
-    for repo in resolve_additional_repos(body, merged):
+    for repo in _resolve_additional_repos_validated(body, merged):
         slug = _github_repo_slug(repo.url)
         if slug:
             slugs.add(slug)
@@ -20111,6 +20004,18 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
             for err in exc.errors():
                 ctx_err = err.get("ctx", {}).get("error")
                 errors.append(str(ctx_err) if ctx_err else err.get("msg", str(err)))
+
+    # ``additional_repos`` is one "name:url,name:url" string and the name is
+    # the clone directory, so a repeated name silently loses a repo at analysis
+    # time. Refuse it here, with the message the analysis path raises (#402).
+    # Other malformed shapes stay accepted: an env-sourced value may still be
+    # one, and export/import mask those (#361).
+    if settings_updates.get("additional_repos") and (
+        dupes := duplicate_additional_repo_names(
+            str(settings_updates["additional_repos"])
+        )
+    ):
+        errors.append(f"Duplicate additional repo names: {', '.join(dupes)}")
 
     # An account-ID-shaped cloud ID is rejected with a direct 422 — the
     # same status and clear message the per-request model validator
