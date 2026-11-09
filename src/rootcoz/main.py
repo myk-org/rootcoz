@@ -10732,6 +10732,13 @@ def _chat_tracker_gate(
     whether that credential can actually file — the GitHub destination, or the
     Jira auth method the saved credential pins.
 
+    A Jira credential the settings cannot serve has two causes, and the fix
+    differs: when the deployment itself configures no usable method (no site or
+    cloud URL, no auth mode) the reason is ``server_unconfigured`` — an
+    administrator setting, so re-saving the credential cannot help; when the
+    deployment has a method and only the saved credential pins one it cannot
+    serve, the reason stays ``unusable_credential`` (Profile Settings).
+
     ``github_repo_available`` answers "is there a repository this caller may
     file in?". The tool list knows its run's repos and says so; a create request
     keeps the default, because it resolves its destination itself and its own
@@ -10764,16 +10771,33 @@ def _chat_tracker_gate(
         # an auth method the effective settings cannot serve, is refused by the
         # create call — so it must not read as usable here either.
         _require_usable_jira_sa_token(jira_token, jira_sa_token)
-        _require_jira_method_configured(
-            _build_effective_jira_settings(
-                settings,
-                jira_token,
-                user_tokens.get("jira_email", ""),
-                user_jira_sa_token=jira_sa_token,
-            )
-        )
     except HTTPException as exc:
         return "unusable_credential", exc
+    effective = _build_effective_jira_settings(
+        settings,
+        jira_token,
+        user_tokens.get("jira_email", ""),
+        user_jira_sa_token=jira_sa_token,
+    )
+    try:
+        _require_jira_method_configured(effective)
+    except HTTPException as exc:
+        # Only a credential the settings could serve is fixed by re-saving it.
+        if _jira_server_can_serve_a_credential(settings):
+            return "unusable_credential", exc
+        logger.debug(
+            "Chat: Jira reads as unconfigured on this server (%s); no saved "
+            "credential can file",
+            exc.detail,
+        )
+        return "server_unconfigured", HTTPException(
+            status_code=400,
+            detail=(
+                f"Jira is not configured on this server: {exc.detail}. An "
+                "administrator has to configure it in Server Settings — a "
+                "saved credential cannot help."
+            ),
+        )
     return "", None
 
 
@@ -10792,6 +10816,35 @@ _PROBE_TOKENS: dict[str, tuple[dict[str, str], ...]] = {
         {"jira_sa_token": "ATSTprobe"},
     ),
 }
+
+
+def _jira_server_can_serve_a_credential(settings: Settings) -> bool:
+    """Could ANY Jira credential this account can save file on this deployment?
+
+    The split :func:`_chat_tracker_gate` needs: when the caller's saved
+    credential cannot be used, ask whether a re-save in Profile Settings could
+    produce one that can. Each shape :data:`_PROBE_TOKENS` lists is resolved
+    against the settings the same way the create call resolves it, so a
+    deployment missing the site/cloud URL (or the ids) every method needs
+    answers ``False`` — the reason an administrator setting fixes, not the user.
+    """
+    for probe in _PROBE_TOKENS["jira"]:
+        try:
+            _require_usable_jira_sa_token(
+                probe.get("jira_token", ""), probe.get("jira_sa_token", "")
+            )
+            _require_jira_method_configured(
+                _build_effective_jira_settings(
+                    settings,
+                    probe.get("jira_token", ""),
+                    probe.get("jira_email", ""),
+                    user_jira_sa_token=probe.get("jira_sa_token", ""),
+                )
+            )
+        except HTTPException:
+            continue
+        return True
+    return False
 
 
 def _token_would_enable_filing(
