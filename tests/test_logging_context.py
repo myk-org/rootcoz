@@ -199,6 +199,56 @@ class TestJobIdFilter:
             test_logger.removeHandler(handler)
 
 
+class TestDuplicateFilterExemption:
+    """An audit record is never deduped; an ordinary repeat still is."""
+
+    @staticmethod
+    def _forget_duplicate_history(logger: logging.Logger) -> None:
+        """Clear the session-wide state simple_logger's filter keeps per instance."""
+        for target in (logger, *logger.handlers):
+            for log_filter in target.filters:
+                vars(log_filter).pop("last_log", None)
+                vars(log_filter).pop("repeated_number", None)
+
+    def test_audit_lines_survive_repeats_that_collapse_ordinary_lines(self) -> None:
+        from simple_logger.logger import DuplicateFilter
+
+        from rootcoz import get_child_logger
+        from rootcoz.logging_context import RootcozDuplicateFilter
+
+        name = "rootcoz.tests_dedup_exemption"
+        logger = get_child_logger(name)
+        # Installed by get_child_logger, replaced in place and never stacked.
+        get_child_logger(name)
+        for target in (logger, *logger.handlers):
+            assert not [f for f in target.filters if type(f) is DuplicateFilter]
+            assert (
+                len(
+                    [f for f in target.filters if isinstance(f, RootcozDuplicateFilter)]
+                )
+                <= 1
+            )
+
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        logger.addHandler(handler)
+        self._forget_duplicate_history(logger)
+        original_level = logger.level
+        logger.setLevel(logging.INFO)
+        try:
+            logger.info("same ordinary line")
+            logger.info("same ordinary line")
+            logger.info("[AUDIT] same audit line", extra={"dedup_exempt": True})
+            logger.info("[AUDIT] same audit line", extra={"dedup_exempt": True})
+        finally:
+            logger.removeHandler(handler)
+            logger.setLevel(original_level)
+
+        lines = stream.getvalue().splitlines()
+        assert lines.count("same ordinary line") == 1
+        assert lines.count("[AUDIT] same audit line") == 2
+
+
 class TestGetLogFile:
     def test_creates_writable_log_file(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.setenv("DB_PATH", str(tmp_path / "results.db"))

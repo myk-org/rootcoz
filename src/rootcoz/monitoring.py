@@ -459,12 +459,13 @@ def record_audit_auth_suppression(actor: str, limit: int) -> int:
         # the front holds the oldest window: dropping from it bounds memory.
         while len(windows) > _AUDIT_AUTH_SUPPRESSION_MAX_ACTORS:
             del windows[next(iter(windows))]
-    # Fully formatted on purpose: the log dedup filter drops a repeat of the
-    # same ``msg``, and the window summary must survive a later actor's line.
+    # Fully formatted on purpose: the wording is what log consumers match on.
+    # ``dedup_exempt`` keeps a summary that repeats a previous window's text.
     logger.warning(
         f"[AUDIT] Auth-failure volume guard: suppressing further stored audit"
         f" rows for '{actor}' beyond {limit} per minute"
-        f" (previous window dropped {seen})"
+        f" (previous window dropped {seen})",
+        extra={"dedup_exempt": True},
     )
     return total
 

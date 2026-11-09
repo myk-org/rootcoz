@@ -510,6 +510,12 @@ kubectl exec -n rootcoz deploy/rootcoz -- python -c \
   stream on `/admin/logs` continue. Free space — or lower *Log free-space floor (bytes)* in Server
   Settings — and the resume INFO follows within 30 seconds.
 
+- A line you expected is missing from the log
+  Consecutive **identical** lines are collapsed by the duplicate filter, and its key is the
+  *unformatted* message template: same logger, same level and same template is one line, even when
+  the arguments differ. `[AUDIT]` lines are exempt, so the audit trail never loses a record — a
+  missing audit line is a real gap, not deduplication.
+
 - `route.enabled and ingress.enabled are mutually exclusive`
   The chart refuses to render with both on. Set the one you are not using to `false`.
 

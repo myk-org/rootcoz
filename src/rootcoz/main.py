@@ -1767,9 +1767,10 @@ async def record_audit(
     count. The log line above still fires, a summary line is logged per window,
     and the drop is counted in health. Every other action is always stored.
     """
-    # Fully formatted on purpose: the log dedup filter suppresses consecutive
-    # identical ``msg`` values, which a shared "[AUDIT] %s" format would be.
-    logger.info(f"[AUDIT] {message}")
+    # Fully formatted on purpose: the wording is what log consumers match on.
+    # ``dedup_exempt`` (see logging_context.RootcozDuplicateFilter) keeps a
+    # repeated audit line: two identical attempts are two pieces of evidence.
+    logger.info(f"[AUDIT] {message}", extra={"dedup_exempt": True})
     resolved_actor = actor or "anonymous"
     throttle: storage.AuditThrottle | None = None
     if action in _AUDIT_AUTH_FAILURE_ACTIONS:
@@ -1810,6 +1811,7 @@ async def record_audit(
             action,
             resolved_actor,
             failures,
+            extra={"dedup_exempt": True},
         )
         return None
     if event is None:

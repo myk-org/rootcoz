@@ -28,13 +28,22 @@ def get_child_logger(name: str) -> logging.Logger:
     (``logging_context.enable_log_file``), so every module's records reach the
     same log file. ``propagate`` stays False: duplication is prevented by the
     one shared handler instance, not by bubbling.
+
+    simple_logger's duplicate filter is swapped for
+    ``logging_context.RootcozDuplicateFilter`` here, the one place every module
+    logger is created, so an audit record (``dedup_exempt``) is never collapsed
+    while ordinary repeats still are (#489).
     """
     from simple_logger.logger import get_logger
 
-    from rootcoz.logging_context import get_log_file_handler
+    from rootcoz.logging_context import (
+        get_log_file_handler,
+        install_dedup_exempt_filter,
+    )
 
     child = get_logger(name=name)
     child.setLevel(logging.NOTSET)
+    install_dedup_exempt_filter(child)
     handler = get_log_file_handler()
     if handler is not None and handler not in child.handlers:
         child.addHandler(handler)
