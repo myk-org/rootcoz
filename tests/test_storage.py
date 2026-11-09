@@ -1488,7 +1488,8 @@ class TestAnalysisWindow:
         ``update_status`` writes both stamps with ``COALESCE``, so a claim that
         only flipped the status would leave the ingest window in place: a 24 h
         "running" age (a false stuck alert) and a ``completed_at`` *before* the new
-        start (which the report header renders as its invalid-date fallback).
+        start (which the report header renders as its invalid-date fallback). The
+        claim therefore moves the start to its own time and clears the end.
         """
         from datetime import datetime
 
@@ -1544,7 +1545,8 @@ class TestAnalysisWindow:
 
         assert claim is not None
         assert claim[2:] == (ingest_start, ingest_end)
-        assert claimed["analysis_started_at"] is None
+        assert claimed["analysis_started_at"] != ingest_start
+        assert storage.elapsed_seconds_since(claimed["analysis_started_at"]) < 5
         assert claimed["completed_at"] is None
         assert age is not None
         assert age < 5, "the new run starts its own window, not yesterday's"
@@ -1555,7 +1557,7 @@ class TestAnalysisWindow:
         ) - datetime.fromisoformat(finished["analysis_started_at"])
         assert span.total_seconds() >= 0
 
-        assert while_claimed["analysis_started_at"] is None
+        assert while_claimed["analysis_started_at"] != ingest_start
         assert while_claimed["completed_at"] is None
         assert restored["analysis_started_at"] == ingest_start
         assert restored["completed_at"] == ingest_end
@@ -4361,3 +4363,104 @@ async def test_pin_db_path_without_a_path_keeps_the_inherited_pin(
     with patch.object(storage, "DB_PATH", moved_to):
         storage.pin_db_path()
         assert storage.current_db_path() == started_on
+
+
+# --- the shared job-scoped deletion spec (#455) -----------------------------
+
+
+async def test_delete_job_rows_removes_tracked_in_links(setup_test_db: Path) -> None:
+    """The interactive delete leaked tracker links; the one spec now covers them."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.save_result(
+            "job-til", status="completed", result={"summary": "s"}
+        )
+        await storage.add_tracked_in_link(
+            job_id="job-til",
+            test_name="t1",
+            url="https://tracker.example.com/1",
+            tracked_type="jira",
+        )
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM tracked_in_links WHERE job_id = ?", ("job-til",)
+            )
+            assert (await cursor.fetchone())[0] == 1
+
+        assert await storage.delete_job("job-til") is True
+
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) FROM tracked_in_links WHERE job_id = ?", ("job-til",)
+            )
+            assert (await cursor.fetchone())[0] == 0
+
+
+async def test_every_job_scoped_table_is_in_the_deletion_spec(
+    setup_test_db: Path,
+) -> None:
+    """A new job-scoped table must be added here, or a delete orphans its rows."""
+    allowed = {"results"}
+    exempt = {
+        "mention_reads",
+        "ai_session_sources",
+        "job_metadata",
+        "job_metadata_labels",
+    }
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        async with storage._connect_db() as db:
+            tables = [
+                row[0]
+                for row in await (
+                    await db.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )
+                ).fetchall()
+            ]
+            job_scoped = set()
+            for table in tables:
+                columns = await (
+                    await db.execute(f"PRAGMA table_info({table})")
+                ).fetchall()
+                if any(column[1] == "job_id" for column in columns):
+                    job_scoped.add(table)
+    spec = {table for table, _ in storage._JOB_SCOPED_DELETES}
+    # ``mention_reads`` is keyed by ``comment_id``, so it is job-scoped through
+    # the ``comments`` row and has no ``job_id`` column of its own.
+    exempt = exempt | {"mention_reads"}
+    missing = job_scoped - spec - allowed - exempt
+    assert not missing, f"job-scoped tables missing from _JOB_SCOPED_DELETES: {missing}"
+    stale = spec - set(tables)
+    assert not stale, f"_JOB_SCOPED_DELETES names tables that do not exist: {stale}"
+
+
+async def test_delete_jobs_bulk_require_ended_skips_a_running_job(
+    setup_test_db: Path,
+) -> None:
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.save_result("running-job", status="running", result={"a": 1})
+        result = await storage.delete_jobs_bulk(["running-job"], require_ended=True)
+        assert result["deleted"] == []
+        assert result["failed"] == [{"job_id": "running-job", "reason": "not ended"}]
+        assert await storage.get_result("running-job") is not None
+
+
+async def test_delete_jobs_bulk_default_still_deletes_a_running_job(
+    setup_test_db: Path,
+) -> None:
+    """The shipped endpoints delete exactly what they named."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.save_result("running-job", status="running", result={"a": 1})
+        result = await storage.delete_jobs_bulk(["running-job"])
+        assert result["deleted"] == ["running-job"]
+        assert await storage.get_result("running-job") is None
+
+
+async def test_delete_jobs_bulk_is_protected_skips_a_job(setup_test_db: Path) -> None:
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.save_result("busy-job", status="completed", result={"a": 1})
+        result = await storage.delete_jobs_bulk(
+            ["busy-job"], is_protected=lambda job_id: job_id == "busy-job"
+        )
+        assert result["deleted"] == []
+        assert result["failed"] == [{"job_id": "busy-job", "reason": "busy"}]
+        assert await storage.get_result("busy-job") is not None

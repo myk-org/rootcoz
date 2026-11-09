@@ -35,6 +35,7 @@ import aiosqlite
 
 from rootcoz import get_child_logger
 from rootcoz.comment_enrichment import detect_mentions
+from rootcoz.config import SQLITE_INT_MAX
 from rootcoz.encryption import (
     decrypt_value,
     decrypt_value_or_none,
@@ -447,9 +448,6 @@ def current_session_ttl_seconds() -> int:
 MIN_KEY_LENGTH = 16
 VALID_USER_STATUSES = ("active", "pending", "rejected")
 AI_SYSTEM_USERNAME = "rootcoz-ai"
-
-# SQLite signed INTEGER max — Prow build_id strings may exceed this.
-SQLITE_INT_MAX = 9223372036854775807
 
 
 def validate_api_key(key: str) -> None:
@@ -4243,12 +4241,17 @@ async def claim_submitted_job_for_analyze(
     again, and a restart marker left on it (#458) would still be reported beside
     the *new* run's status -- a completed job carrying ``server_restart``.
 
-    ``analysis_started_at`` and ``completed_at`` are cleared with it, so the next
-    ``running``/``completed`` transition re-stamps the analysis window (#464):
-    ``update_status`` writes both with ``COALESCE``, so without this the ingest
-    run's stamps survive and an ingest-then-analyze job carries a 24 h "running"
-    age -- and a ``completed_at`` *before* its new start, which the report header
-    renders as its invalid-date fallback.
+    The analysis window moves with the claim: ``analysis_started_at`` becomes now
+    and ``completed_at`` is cleared. ``update_status`` writes both with
+    ``COALESCE``, so leaving the ingest run's stamps in place would make an
+    ingest-then-analyze job carry a 24 h "running" age -- and a ``completed_at``
+    *before* its new start, which the report header renders as its invalid-date
+    fallback (#464). Moving the start, rather than only clearing it, is also what
+    keeps results retention off this row (#455): a submitted job can sit
+    unanalysed for weeks, and a run that ends before ever reaching ``running``
+    would otherwise leave retention ageing the analysis that was just paid for by
+    its submit day -- the claim time stands in as the start, and ``running``
+    keeps it.
     """
     placeholders = ",".join("?" for _ in ACTIVE_STATUSES)
     async with _connect_db() as db:
@@ -4267,7 +4270,7 @@ async def claim_submitted_job_for_analyze(
             f"""
             UPDATE results
             SET status = 'pending', failure_reason = '',
-                analysis_started_at = NULL, completed_at = NULL
+                analysis_started_at = CURRENT_TIMESTAMP, completed_at = NULL
             WHERE job_id = ?
               AND COALESCE(analysis_state, 'analyzed') = ?
               AND status NOT IN ({placeholders})
@@ -7397,21 +7400,45 @@ async def get_all_failures(
         }
 
 
+# Each entry is a job-SET predicate: ``{jobs}`` is replaced by a placeholder list,
+# so the same spec serves one job (delete) and a filtered id list (preview). The
+# fragment is a module constant with exactly one ``{jobs}`` slot — never user text.
+# Order matters: children before ``test_entries``, and ``results`` last (its
+# ``rowcount`` is the caller's "did this job exist"). FKs are not enabled, so this
+# order is the only guard.
+_JOB_SCOPED_DELETES: tuple[tuple[str, str], ...] = (
+    (
+        "mention_reads",
+        "comment_id IN (SELECT id FROM comments WHERE job_id IN ({jobs}))",
+    ),
+    ("comments", "job_id IN ({jobs})"),
+    ("failure_reviews", "job_id IN ({jobs})"),
+    ("failure_history", "job_id IN ({jobs})"),
+    ("test_classifications", "job_id IN ({jobs})"),
+    ("ai_token_usage", "job_id IN ({jobs})"),
+    ("chat_messages", "job_id IN ({jobs})"),
+    ("test_entries", "job_id IN ({jobs})"),
+    ("tracked_in_links", "job_id IN ({jobs})"),
+)
+# ``results`` is deleted last, separately: its rowcount is the caller's "did this
+# job exist" answer.
+
+
+def _jobs_placeholder(count: int) -> str:
+    """``?,?,?`` for *count* bound ids — never interpolated text."""
+    return ",".join("?" * count)
+
+
 async def _delete_job_rows(db: aiosqlite.Connection, job_id: str) -> bool:
     """Delete all rows for a job across related tables. Returns True if the job existed."""
-    await db.execute(
-        "DELETE FROM mention_reads WHERE comment_id IN "
-        "(SELECT id FROM comments WHERE job_id = ?)",
-        (job_id,),
-    )
-    await db.execute("DELETE FROM comments WHERE job_id = ?", (job_id,))
-    await db.execute("DELETE FROM failure_reviews WHERE job_id = ?", (job_id,))
-    await db.execute("DELETE FROM failure_history WHERE job_id = ?", (job_id,))
-    await db.execute("DELETE FROM test_classifications WHERE job_id = ?", (job_id,))
-    await db.execute("DELETE FROM ai_token_usage WHERE job_id = ?", (job_id,))
-    await _revoke_chat_session_sources(db, "job_id = ?", (job_id,))
-    await db.execute("DELETE FROM chat_messages WHERE job_id = ?", (job_id,))
-    await db.execute("DELETE FROM test_entries WHERE job_id = ?", (job_id,))
+    for table, predicate in _JOB_SCOPED_DELETES:
+        if table == "chat_messages":
+            # Revoke (never delete) the job->sidecar-session links first: the
+            # tombstone is what makes the session cleanup drop them.
+            await _revoke_chat_session_sources(db, "job_id = ?", (job_id,))
+        await db.execute(
+            f"DELETE FROM {table} WHERE {predicate.format(jobs='?')}", (job_id,)
+        )
     cursor = await db.execute("DELETE FROM results WHERE job_id = ?", (job_id,))
     return cursor.rowcount > 0
 
@@ -7572,11 +7599,44 @@ async def delete_job(job_id: str) -> bool:
         return job_existed
 
 
-async def delete_jobs_bulk(job_ids: list[str]) -> dict[str, Any]:
+async def _delete_skip_reason(
+    db: aiosqlite.Connection,
+    job_id: str,
+    *,
+    require_ended: bool,
+    is_protected: Callable[[str], bool] | None,
+) -> str:
+    """Why *job_id* must not be deleted now, or ``""`` when it may be."""
+    if is_protected is not None and is_protected(job_id):
+        return "busy"  # a live analysis, chat turn or per-failure re-analysis
+    if not require_ended:
+        # The shipped endpoints delete exactly what they named (a running job
+        # included), so only the protection check above applies.
+        return ""
+    row = await (
+        await db.execute("SELECT status FROM results WHERE job_id = ?", (job_id,))
+    ).fetchone()
+    if row is None:
+        return "not found"
+    return "" if row["status"] in ENDED_STATUSES else "not ended"
+
+
+async def delete_jobs_bulk(
+    job_ids: list[str],
+    *,
+    require_ended: bool = False,
+    is_protected: Callable[[str], bool] | None = None,
+) -> dict[str, Any]:
     """Delete multiple jobs and all their related data in a single transaction.
 
     Returns dict with 'deleted' (list of successfully deleted job_ids) and
     'failed' (list of dicts with 'job_id' and 'reason' for failures).
+
+    ``require_ended`` re-checks the status inside the deleting transaction, so a
+    job re-analysed between selection and deletion is skipped (``not ended``)
+    instead of pulled from under a live analysis. ``is_protected`` is the same
+    guard for work no status shows. Both default off, which is what the shipped
+    delete endpoints do: they delete exactly what they named.
     """
     deleted = []
     failed = []
@@ -7589,7 +7649,15 @@ async def delete_jobs_bulk(job_ids: list[str]) -> dict[str, Any]:
                 savepoint = f"delete_job_{idx}"
                 await db.execute(f"SAVEPOINT {savepoint}")
                 try:
-                    if await _delete_job_rows(db, job_id):
+                    skip_reason = await _delete_skip_reason(
+                        db,
+                        job_id,
+                        require_ended=require_ended,
+                        is_protected=is_protected,
+                    )
+                    if skip_reason:
+                        failed.append({"job_id": job_id, "reason": skip_reason})
+                    elif await _delete_job_rows(db, job_id):
                         deleted.append(job_id)
                     else:
                         failed.append({"job_id": job_id, "reason": "not found"})
@@ -7604,6 +7672,293 @@ async def delete_jobs_bulk(job_ids: list[str]) -> dict[str, Any]:
             await db.execute("ROLLBACK")
             raise
     return {"deleted": deleted, "failed": failed, "total": len(unique_ids)}
+
+
+# --- Results retention (#455) ---
+
+# One job is ~10 indexed DELETEs, so 50 jobs is ~500 statements — a hold well
+# inside the 5 s ``busy_timeout`` that keeps a live analysis from seeing
+# ``database is locked``.
+_RESULTS_RETENTION_BATCH_SIZE = 50
+# Bounds one run's memory and wall time. Above the known prod scale, so a first
+# run finishes in one pass; a larger backlog drains over the next hourly wakes.
+_RESULTS_RETENTION_MAX_PER_RUN = 20000
+# delete_jobs_bulk reasons that mean "correctly left alone", not "failed".
+_DELETE_SKIPPED_REASONS = frozenset({"not found", "not ended", "busy"})
+# When the job last did any work. Unqualified on purpose: it is interpolated into
+# statements that select ``FROM results`` with no alias.
+_RESULTS_ACTIVITY_TS = "COALESCE(analysis_started_at, created_at)"
+# A live analysis and an ingest-only job are never candidates. Built FROM
+# ENDED_STATUSES so growing that tuple cannot silently break these statements.
+_RETAINABLE_WHERE = (
+    "status IN (" + ", ".join("?" * len(ENDED_STATUSES)) + ")"
+    " AND COALESCE(analysis_state, 'analyzed') = 'analyzed'"
+)
+
+
+def _results_retention_candidates_sql(
+    retention_days: int, max_rows: int
+) -> tuple[str, list[Any]]:
+    """``SELECT job_id`` over the jobs retention may delete — one column.
+
+    Two rules, unioned; each is emitted ONLY when its own limit is > 0, because a
+    disabled limit must contribute nothing rather than an empty keep-set. Both
+    restrict to :data:`_RETAINABLE_WHERE` and require a non-NULL ``created_at``, so
+    an in-progress, submitted or undatable row is never a candidate.
+
+    One column, because both callers use it as ``WHERE job_id IN (<this>)``.
+    """
+    rules: list[str] = []
+    params: list[Any] = []
+    if retention_days > 0:
+        cutoff = (datetime.now(UTC) - timedelta(days=retention_days)).strftime(
+            "%Y-%m-%d %H:%M:%S"
+        )
+        rules.append(
+            "SELECT job_id FROM results WHERE created_at IS NOT NULL"
+            f" AND created_at < ? AND {_RESULTS_ACTIVITY_TS} < ? AND {_RETAINABLE_WHERE}"
+        )
+        params.extend([cutoff, cutoff, *ENDED_STATUSES])
+    if max_rows > 0:
+        # The keep-set repeats ``_RETAINABLE_WHERE`` on purpose: counting
+        # submitted and in-progress rows would let them occupy every keep slot.
+        # The ``created_at IS NOT NULL`` is repeated for the same reason: an
+        # undated job is never a candidate, so holding a slot for it would delete
+        # a dated job the cap was meant to keep.
+        rules.append(
+            "SELECT job_id FROM results WHERE created_at IS NOT NULL"
+            f" AND {_RETAINABLE_WHERE} AND job_id NOT IN ("
+            f"SELECT job_id FROM results WHERE created_at IS NOT NULL"
+            f" AND {_RETAINABLE_WHERE}"
+            f" ORDER BY {_RESULTS_ACTIVITY_TS} DESC, job_id DESC LIMIT ?)"
+        )
+        params.extend([*ENDED_STATUSES, *ENDED_STATUSES, max_rows])
+    return " UNION ".join(rules), params
+
+
+async def _retention_candidate_rows(
+    retention_days: int,
+    max_rows: int,
+    exclude: Collection[str],
+    max_per_run: int,
+) -> list[tuple[str, str]]:
+    """``(job_id, created_at)`` for candidates, oldest activity first.
+
+    One extra row is fetched and dropped by the caller, which is what makes the
+    candidate count and ``truncated`` computable without a second query.
+    """
+    candidate_sql, params = _results_retention_candidates_sql(retention_days, max_rows)
+    query = f"SELECT job_id, created_at FROM results WHERE job_id IN ({candidate_sql})"
+    bound = list(params)
+    if exclude:
+        # An empty exclude emits no clause at all: ``NOT IN ()`` is a SQLite
+        # syntax error and the empty set is the normal case.
+        query += f" AND job_id NOT IN ({_jobs_placeholder(len(exclude))})"
+        bound.extend(exclude)
+    query += f" ORDER BY {_RESULTS_ACTIVITY_TS} ASC, job_id ASC LIMIT ?"
+    bound.append(max_per_run + 1)
+    async with _connect_db() as db:
+        rows = await (await db.execute(query, bound)).fetchall()
+    return [(str(row[0]), str(row[1] or "")) for row in rows]
+
+
+async def _count_job_scoped_rows(
+    db: aiosqlite.Connection, job_ids: list[str]
+) -> dict[str, int]:
+    """Rows the deletion spec would remove for *job_ids*, table by table.
+
+    Counted in chunks: SQLite refuses more than 32 766 bound variables, and a dry
+    run over a larger database must answer with a number, not fail on exactly the
+    population retention exists for.
+    """
+    counts = {table: 0 for table, _ in _JOB_SCOPED_DELETES}
+    counts["results"] = 0
+    spec = [*_JOB_SCOPED_DELETES, ("results", "job_id IN ({jobs})")]
+    for start in range(0, len(job_ids), _RESULTS_RETENTION_BATCH_SIZE):
+        chunk = job_ids[start : start + _RESULTS_RETENTION_BATCH_SIZE]
+        jobs = _jobs_placeholder(len(chunk))
+        for table, predicate in spec:
+            count = await (
+                await db.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE {predicate.format(jobs=jobs)}",
+                    chunk,
+                )
+            ).fetchone()
+            counts[table] += int(count[0]) if count else 0
+    return counts
+
+
+async def preview_results_retention(
+    retention_days: int = 0,
+    max_rows: int = 0,
+    exclude: Collection[str] = (),
+    is_protected: Callable[[str], bool] | None = None,
+    max_per_run: int = _RESULTS_RETENTION_MAX_PER_RUN,
+) -> dict[str, Any]:
+    """Read-only: what retention would delete right now, table by table.
+
+    Takes the same three bounds the pass takes — ``exclude``, ``is_protected``
+    and ``max_per_run`` — so the dry run is a promise the prune can keep. No
+    writes, no audit row.
+    """
+    preview: dict[str, Any] = {
+        "enabled": retention_days > 0 or max_rows > 0,
+        "retention_days": retention_days,
+        "max_rows": max_rows,
+        "jobs": 0,
+        "truncated": False,
+        "oldest_created_at": "",
+        "newest_created_at": "",
+        "rows": {},
+    }
+    if not preview["enabled"]:
+        return preview
+    rows = await _retention_candidate_rows(
+        retention_days, max_rows, exclude, max_per_run
+    )
+    preview["truncated"] = len(rows) > max_per_run
+    rows = rows[:max_per_run]
+    selected = [
+        (job_id, created_at)
+        for job_id, created_at in rows
+        if not (is_protected is not None and is_protected(job_id))
+    ]
+    preview["jobs"] = len(selected)
+    stamps = sorted(created_at for _, created_at in selected if created_at)
+    if stamps:
+        preview["oldest_created_at"] = stamps[0]
+        preview["newest_created_at"] = stamps[-1]
+    async with _connect_db() as db:
+        preview["rows"] = await _count_job_scoped_rows(
+            db, [job_id for job_id, _ in selected]
+        )
+    return preview
+
+
+async def prune_results(
+    retention_days: int = 0,
+    max_rows: int = 0,
+    batch_size: int = _RESULTS_RETENTION_BATCH_SIZE,
+    max_per_run: int = _RESULTS_RETENTION_MAX_PER_RUN,
+    exclude: Collection[str] = (),
+    is_protected: Callable[[str], bool] | None = None,
+    prepare: Callable[[list[str]], Awaitable[Mapping[str, str]]] | None = None,
+    finish: (
+        Callable[[list[str], list[str], Mapping[str, str]], Awaitable[list[str]]] | None
+    ) = None,
+    stats: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Delete the jobs retention names, oldest first, in bounded batches.
+
+    Returns ``{"deleted": int, "deleted_ids": list[str], "skipped": int,
+    "failed": [{"job_id", "reason"}], "cleanup_failed": list[str],
+    "candidates": int, "batches": int, "truncated": bool, "error": str,
+    "oldest_deleted_at": str, "newest_deleted_at": str}``.
+
+    ``prepare``/``finish`` are the caller's post-delete hooks: the first reads
+    what is needed before the rows go (a failure aborts the chunk, nothing
+    deleted), the second runs after the commit (a failure is a *cleanup* failure:
+    those jobs are deleted and must not be reported as undeleted). ``stats`` is a
+    caller-supplied accumulator, so the quantities already committed stay
+    readable however the pass ends.
+
+    Never raises for database trouble: a chunk's failure is recorded in
+    ``stats["error"]`` and returned with the counts already committed — a
+    partially destructive run must report what it destroyed.
+    """
+    result: dict[str, Any] = stats if stats is not None else {}
+    result.update(
+        deleted=0,
+        deleted_ids=[],
+        skipped=0,
+        failed=[],
+        cleanup_failed=[],
+        candidates=0,
+        batches=0,
+        truncated=False,
+        error="",
+        oldest_deleted_at="",
+        newest_deleted_at="",
+    )
+    if retention_days <= 0 and max_rows <= 0:
+        return result
+    try:
+        rows = await _retention_candidate_rows(
+            retention_days, max_rows, exclude, max_per_run
+        )
+    except sqlite3.Error, OSError:
+        logger.warning("Results retention: candidate selection failed", exc_info=True)
+        result["error"] = "select_failed"
+        return result
+    result["truncated"] = len(rows) > max_per_run
+    rows = rows[:max_per_run]
+    result["candidates"] = len(rows)
+    # A frozen list, iterated with a ``for``: delete_jobs_bulk swallowing per-job
+    # exceptions can never spin the loop, and a job that fails is not retried in
+    # this run.
+    for start in range(0, len(rows), batch_size):
+        chunk = rows[start : start + batch_size]
+        chunk_ids = [job_id for job_id, _ in chunk]
+        created_at = dict(chunk)
+        origins: Mapping[str, str] = {}
+        if prepare is not None:
+            try:
+                origins = await prepare(chunk_ids)
+            except Exception:
+                logger.warning(
+                    "Results retention: pre-delete hook failed for %d job(s)",
+                    len(chunk_ids),
+                    exc_info=True,
+                )
+                result["failed"].extend(
+                    {"job_id": job_id, "reason": "hook_failed"} for job_id in chunk_ids
+                )
+                continue
+        try:
+            outcome = await delete_jobs_bulk(
+                chunk_ids, require_ended=True, is_protected=is_protected
+            )
+        except sqlite3.Error, OSError:
+            logger.warning("Results retention: chunk delete failed", exc_info=True)
+            result["error"] = "commit_failed"
+            break
+        result["batches"] += 1
+        for item in outcome["failed"]:
+            reason = str(item.get("reason") or "")
+            if reason in _DELETE_SKIPPED_REASONS:
+                result["skipped"] += 1
+            else:
+                result["failed"].append({"job_id": item["job_id"], "reason": reason})
+        deleted = outcome["deleted"]
+        result["deleted_ids"].extend(deleted)
+        result["deleted"] += len(deleted)
+        stamps = sorted(
+            created_at[job_id] for job_id in deleted if created_at.get(job_id)
+        )
+        if stamps:
+            oldest = result["oldest_deleted_at"]
+            newest = result["newest_deleted_at"]
+            result["oldest_deleted_at"] = (
+                min(oldest, stamps[0]) if oldest else stamps[0]
+            )
+            result["newest_deleted_at"] = (
+                max(newest, stamps[-1]) if newest else stamps[-1]
+            )
+        if finish is not None and deleted:
+            # After the commit: these jobs are gone, so a hook failure is a
+            # cleanup failure, never an undeleted job.
+            try:
+                result["cleanup_failed"].extend(
+                    await finish(chunk_ids, deleted, origins)
+                )
+            except Exception:
+                logger.warning(
+                    "Results retention: post-delete hook failed for %d job(s)",
+                    len(deleted),
+                    exc_info=True,
+                )
+                result["cleanup_failed"].extend(deleted)
+    return result
 
 
 async def _override_failure_field(
@@ -12967,7 +13322,9 @@ def _audit_resolved_target(
 #: (``failure``, ``feedback``, ``audit``, ``database``, ``logs``, ``metadata``,
 #: ``settings``) are absent for that same reason.
 _AUDIT_REMOVAL_ACTIONS: dict[str, tuple[str, ...]] = {
-    "job": ("user.job_delete", "admin.job_delete"),
+    # ``storage.results_retention`` is the removal a pruned job's surviving
+    # ``analysis.submit`` / ``comment.add`` / ``tracked_in.*`` rows point at.
+    "job": ("user.job_delete", "admin.job_delete", "storage.results_retention"),
     "user": ("admin.user_delete",),
     "provider": ("provider.remove",),
     "provider_credential": ("user.ai_credential_delete",),

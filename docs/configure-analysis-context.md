@@ -55,11 +55,14 @@ This clones the tests repository plus both extra repositories into the analysis 
 
    `Additional Repositories` accepts a list of `name`, `url`, and optional `ref` entries. Each clone becomes a subdirectory of the workspace, and the AI is told the path and what is in it — for example that a repository contains VCS metadata it can browse.
 
+   Every declared repository is cloned before the analysis starts — never lazily on a first lookup miss, and never trimmed to a subset to keep a job fast. `max_concurrent_repo_clones` and the job's clone share slow the clones down, they do not drop any. A repository that fails to clone is reported in the result's `Source Warnings` on the report page, and the analysis continues with the rest.
+
    | Rule | Behaviour |
    | --- | --- |
    | `name` | Becomes the clone directory name. No slashes, no `..`, no leading dot. |
    | Reserved name | `build-artifacts` is reserved for downloaded artifacts and is rejected. |
    | Collision | A name matching the tests repository clone directory fails the job. |
+   | Duplicate name | Two repositories with the same `name` are rejected — one of them would otherwise be lost. |
    | `ref` | Branch, tag, or commit. Empty means the remote default branch. |
 
    The server-side equivalent is the `additional_repos` setting, stored as `name:url` or `name:url:ref` separated by commas. `max_concurrent_repo_clones` caps how many clones run at once.
@@ -201,7 +204,7 @@ This clones the tests repository plus both extra repositories into the analysis 
 - **Defer the AI choice.** When a tests repository is set and no provider or model is chosen, RootCoz can resolve the AI configuration from `.rootcoz/settings.json` after the clone, so the repository picks its own model.
 - **Repository-wide defaults.** `tests_repo_url`, `additional_repos`, `peer_ai_configs`, `peer_analysis_max_rounds`, `ai_call_timeout`, and `max_concurrent_ai_calls` all exist as server settings in the `AI`, `GitHub`, and `Server` categories, which makes them defaults for every submission. See [Managing Users and Server Settings](manage-users-and-server-settings.html) for details.
 - **Metadata rules.** `metadata_rules_file` extracts team, tier, and version metadata from job names so history and reports can filter by them. It requires a restart when changed.
-- **Auto-review.** `enable_auto_review` marks a failure reviewed automatically when the same job, test, and error signature was reviewed by a human before — useful once you have history to match against.
+- **Auto-review.** `enable_auto_review` marks a failure reviewed automatically when the same job, test, and error signature was reviewed by a human before — useful once you have history to match against. Results retention shrinks that window: with `results_retention_days` set, a pruned job's failure history and reviews are gone, so nothing older than the retained window can be auto-reviewed from. See [Managing Users and Server Settings](manage-users-and-server-settings.html).
 
 ## Troubleshooting
 

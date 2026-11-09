@@ -1178,11 +1178,6 @@ async def test_reanalyze_finally_does_not_block_the_loop(tmp_path, monkeypatch) 
             new_callable=AsyncMock,
             return_value="",
         ),
-        patch(
-            "rootcoz.main._resolve_settings_json_before_analysis",
-            new_callable=AsyncMock,
-            return_value=None,
-        ),
     ):
         manager.return_value.create_workspace.return_value = tmp_path / "workspace"
         manager.return_value.clone_into.return_value = None

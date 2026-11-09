@@ -328,6 +328,19 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
     `SIDECAR_HOST` accepts only values the container's loopback health probe can still reach: loopback addresses, `0.0.0.0`/`::` (wildcard binds that also answer on `127.0.0.1`), or empty. A specific non-loopback address is rejected with a `400` on save — the entrypoint probes `http://127.0.0.1:$SIDECAR_PORT` before every boot and aborts when it fails, so such a value would brick every restart. `0.0.0.0` is accepted with a trust warning: the sidecar will listen on an external interface, the same trust class as `TRUST_PROXY_HEADERS` — only do it on a network you control. `SIDECAR_PORT` must be an integer between 1 and 65535. When `SIDECAR_PORT` is overridden and `SIDECAR_URL` is not set, rootcoz derives `SIDECAR_URL=http://127.0.0.1:<port>` so the Python client follows the listener; an explicit `SIDECAR_URL` always wins. Because the derived value is exported into the process environment, `SIDECAR_URL` shows as env-sourced in Server Settings, but the persist path rejects it — persisting the derived URL would pin it and silently beat the port derivation after a later `sidecar_port` change. Persist `sidecar_port` instead.
 
+15. **Storage category** (added with #455).
+
+    Retention for **stored analysis results**. Both limits default to `0`, which keeps every analysis forever, so an upgrade changes no behaviour. This is operator policy, never a default.
+
+    | Variable | Default | Type | Secret | Restart | After login |
+    | --- | --- | --- | --- | --- | --- |
+    | `RESULTS_RETENTION_DAYS` | `0` | integer 0–36500 | no | no | yes |
+    | `RESULTS_MAX_ROWS` | `0` | integer 0–9223372036854775807 | no | no | yes |
+
+    The unit of retention is the whole analysis (job): the result payload, its test entries, its failure history and reviews, its classifications, its comments, its job chat, its token-usage rows and its tracker links. `RESULTS_RETENTION_DAYS` deletes analysed jobs older than that many days; `RESULTS_MAX_ROWS` keeps at most that many analysed jobs, oldest first. Both `0` disables the pass entirely.
+
+    The two limits are **OR-ed, not a floor**: a job older than `RESULTS_RETENTION_DAYS` is deleted even when it is among the newest `RESULTS_MAX_ROWS`. Ingest-only jobs (`analysis_state: submitted`), jobs still being analysed, and jobs with a chat turn or single-failure re-analysis in flight are never pruned. The pass runs in the background at most once a day, at startup and then on the hourly wake; a failed, truncated or cleanup-incomplete pass keeps the slot open so the next hourly wake retries, and every pass that selected a candidate writes one audit row (`storage.results_retention`) naming every deleted job id. Preview before saving anything with `rootcoz admin retention preview` or `GET /api/admin/results-retention` — a read-only dry run that deletes nothing. The full contract, the retained data and the four consequences are in [Managing Users and Server Settings](manage-users-and-server-settings.html), step 14.
+
 ### Environment variable audit (#347)
 
 Every environment variable rootcoz or the sidecar consumes, in exactly one row. "Setting key" is the Server Settings field (empty field name in the UI clears the override and falls back to the env value). "Runtime" means a saved change applies without a restart; "restart" means it applies at the next boot (sidecar rows apply through the `/data/pi-sidecar/env` bridge).
@@ -447,6 +460,8 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `PI_SIDECAR_LOG_LEVEL` | `pi_sidecar_log_level` | Sidecar | restart (env bridge) |
 | `NODE_BINARY` | `node_binary` | Sidecar | restart (env bridge) |
 | `PI_SIDECAR_TRANSCRIPTS_DIR` | `pi_sidecar_transcripts_dir` | Sidecar | restart (env bridge) |
+| `RESULTS_RETENTION_DAYS` | `results_retention_days` | Storage | runtime |
+| `RESULTS_MAX_ROWS` | `results_max_rows` | Storage | runtime |
 | `DB_PATH` | — (no setting) | excluded | env-only |
 | `ROOTCOZ_ENCRYPTION_KEY` | — (no setting) | excluded | env-only |
 | `PORT` | — (no setting) | excluded | env-only |

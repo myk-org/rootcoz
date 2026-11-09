@@ -1,6 +1,6 @@
 """Pipeline stage boundaries persist without duplicate phase entries."""
 
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from pathlib import Path
 from typing import Any
 from unittest.mock import AsyncMock, PropertyMock, patch
@@ -10,6 +10,7 @@ import pytest
 from rootcoz import storage
 from rootcoz.config import Settings
 from rootcoz.models import (
+    AdditionalRepo,
     AnalysisDetail,
     BaseTestEntry,
     ChildJobAnalysis,
@@ -750,3 +751,202 @@ async def test_fully_failed_analysis_caches_no_counts_when_persist_fails(
     assert result.get("passed_count", 0) == persisted.get("passed", 0)
     assert result.get("skipped_count", 0) == persisted.get("skipped", 0)
     assert result.get("failed_count", 0) == persisted.get("failed", 0)
+
+
+def _repo_clone_patches(clone_into):
+    """Patches shared by the additional-repo tests below (#402 C4)."""
+    return (
+        patch("rootcoz.repository.RepositoryManager.clone_into", clone_into),
+        patch("rootcoz.main._auto_review_matching_failures", new_callable=AsyncMock),
+        patch("rootcoz.main._auto_assign_metadata", new_callable=AsyncMock),
+        patch(
+            "rootcoz.main.storage.make_classifications_visible", new_callable=AsyncMock
+        ),
+    )
+
+
+async def _run_with_additional_repos(
+    *,
+    job_id: str,
+    temp_db_path: Path,
+    tmp_path: Path,
+    clone_into,
+    additional_repos_list: list[AdditionalRepo],
+    run_orchestrated_analysis,
+    tests_repo_url: str = "",
+) -> dict[str, Any]:
+    """Drive one analysis through the real clone-then-analyse path."""
+    from rootcoz.main import _process_ci_source_analysis
+
+    source_result = CISourceResult(
+        failures=[FailedTest(test_name="direct", error_message="boom")]
+    )
+    with ExitStack() as stack:
+        stack.enter_context(patch.object(storage, "DB_PATH", temp_db_path))
+        source = stack.enter_context(patch("rootcoz.main.create_source_from_request"))
+        stack.enter_context(
+            patch(
+                "rootcoz.main.setup_analysis_workspace",
+                new_callable=AsyncMock,
+                return_value=(WorkspaceSetupResult(tmp_path, {}), ""),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "rootcoz.main._preflight_sidecar_check",
+                new_callable=AsyncMock,
+                return_value=True,
+            )
+        )
+        stack.enter_context(
+            patch(
+                "rootcoz.main._validate_catalog_pair",
+                new_callable=AsyncMock,
+                return_value=("claude", "model"),
+            )
+        )
+        stack.enter_context(
+            patch(
+                "rootcoz.main.run_orchestrated_analysis",
+                new_callable=AsyncMock,
+                side_effect=run_orchestrated_analysis,
+            )
+        )
+        for repo_patch in _repo_clone_patches(clone_into):
+            stack.enter_context(repo_patch)
+        source.return_value.raw_xml = None
+        source.return_value.requires_pre_fetch.return_value = False
+        source.return_value.prepare_workspace = AsyncMock(return_value=[])
+        source.return_value.fetch = AsyncMock(return_value=source_result)
+        source.return_value.analyze_children = AsyncMock(return_value=([], []))
+        source.return_value.persist_fetch_metadata = AsyncMock()
+        source.return_value.apply_workspace_files = AsyncMock(
+            side_effect=lambda *_args: _args[2]
+        )
+        await storage.init_db()
+        await storage.save_result(job_id, status="pending", result={})
+        await _process_ci_source_analysis(
+            job_id=job_id,
+            body=UnifiedAnalyzeRequest(type="raw", failures=source_result.failures),
+            merged=Settings(),
+            display_name="parent",
+            ai_provider="claude",
+            ai_model="model",
+            peer_ai_configs=None,
+            tests_repo_url=tests_repo_url,
+            tests_repo_ref="",
+            resolved_tests_repo_token="",
+            additional_repos_list=additional_repos_list,
+            base_url="",
+        )
+        row = await storage.get_result(job_id)
+    return row
+
+
+@pytest.mark.asyncio
+async def test_failed_additional_repo_clone_continues_and_warns_the_user(
+    temp_db_path: Path, tmp_path: Path
+) -> None:
+    """One repo fails to clone: the analysis still runs and the user is told (#402 C4).
+
+    The warning has to land where the UI reads it: the completed result's
+    ``progress_log`` keeps the final per-repo state, and the report renders a
+    failed one as "Repository clone failed: <name>". A server log line is not
+    enough -- nobody watching the report sees it.
+    """
+    from git import GitCommandError
+
+    def clone_into(_self, _url, target, **_kwargs):
+        if target.name == "two":
+            raise GitCommandError(["git", "clone"], 128, b"denied", b"denied")
+        target.mkdir(parents=True, exist_ok=True)
+        return target
+
+    analyses: list[str] = []
+
+    async def orchestrate(**_kwargs):
+        analyses.append("ran")
+        return [
+            FailureAnalysis(
+                test_name="good",
+                error="boom",
+                error_signature="same",
+                analysis=AnalysisDetail(details="diagnosed"),
+            )
+        ], []
+
+    row = await _run_with_additional_repos(
+        job_id="repo-clone-fails",
+        temp_db_path=temp_db_path,
+        tmp_path=tmp_path,
+        clone_into=clone_into,
+        additional_repos_list=[
+            AdditionalRepo(name="one", url="https://example.com/one"),
+            AdditionalRepo(name="two", url="https://example.com/two"),
+        ],
+        run_orchestrated_analysis=orchestrate,
+    )
+
+    # The clone failure is not fatal: the analysis ran to completion.
+    assert row["status"] == "completed", row["result"]
+    assert analyses == ["ran"]
+    assert (tmp_path / "one").is_dir()
+    assert not (tmp_path / "two").exists()
+
+    # ...and the failure is visible to the user, per repo, in the result payload.
+    final_state: dict[str, str] = {}
+    for entry in row["result"]["progress_log"]:
+        if entry.get("phase") == "cloning" and entry.get("repo"):
+            final_state[entry["repo"]] = entry["state"]
+    assert final_state == {"one": "cloned", "two": "failed"}
+
+
+@pytest.mark.asyncio
+async def test_additional_repos_are_all_cloned_before_the_first_ai_call(
+    temp_db_path: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Cloning is eager: every declared repo is on disk before AI work starts (#402 C4).
+
+    Admission is pinned to two at a time so the last clones are still queued
+    when the first ones finish: a later "clone lazily on first read miss"
+    change makes the AI call land in the middle of this list.
+    """
+    monkeypatch.setattr(
+        "rootcoz.engine.core.get_settings",
+        lambda: Settings(max_concurrent_repo_clones=2, max_concurrent_ai_calls=2),
+    )
+    events: list[str] = []
+
+    def clone_into(_self, _url, target, **_kwargs):
+        target.mkdir(parents=True, exist_ok=True)
+        events.append(f"clone:{target.name}")
+        return target
+
+    async def orchestrate(**_kwargs):
+        events.append("ai")
+        return [
+            FailureAnalysis(
+                test_name="good",
+                error="boom",
+                error_signature="same",
+                analysis=AnalysisDetail(details="diagnosed"),
+            )
+        ], []
+
+    repos = [
+        AdditionalRepo(name=f"repo{i}", url=f"https://example.com/repo{i}")
+        for i in range(6)
+    ]
+    row = await _run_with_additional_repos(
+        job_id="eager-clones",
+        temp_db_path=temp_db_path,
+        tmp_path=tmp_path,
+        clone_into=clone_into,
+        additional_repos_list=repos,
+        run_orchestrated_analysis=orchestrate,
+    )
+
+    assert row["status"] == "completed", row["result"]
+    assert events[-1] == "ai"
+    assert sorted(events[:-1]) == sorted(f"clone:{repo.name}" for repo in repos)
+    assert all((tmp_path / repo.name).is_dir() for repo in repos)

@@ -8,6 +8,7 @@ from pydantic import SecretStr
 
 from rootcoz.config import (
     Settings,
+    duplicate_additional_repo_names,
     get_settings,
     jira_method_missing_fields,
     parse_additional_repos,
@@ -780,6 +781,13 @@ class TestParseAdditionalRepos:
             parse_additional_repos(
                 "infra:https://github.com/org/a,infra:https://github.com/org/b"
             )
+
+    def test_duplicate_names_found_without_a_full_parse(self) -> None:
+        """The save-time check still sees a collision next to a malformed entry."""
+        assert duplicate_additional_repo_names(
+            "infra:https://github.com/org/a,infra:https://github.com/org/b,"
+        ) == ["infra"]
+        assert duplicate_additional_repo_names("infra:a,b:b") == []
 
     def test_repo_with_token(self) -> None:
         """Repo URL with @token extracts token into result dict."""
