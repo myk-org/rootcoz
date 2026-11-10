@@ -158,7 +158,8 @@ async def test_clone_reports_repo_name_before_cloning(monkeypatch, tmp_path):
         {"tests_repo_url": "https://github.com/acme/tests-repo.git"},
         on_repo=reported.append,
     )
-    assert reported == ["tests-repo"]
+    # Named before the clone starts, cleared when it ends (nothing left running).
+    assert reported == ["tests-repo", ""]
 
 
 @pytest.mark.asyncio
