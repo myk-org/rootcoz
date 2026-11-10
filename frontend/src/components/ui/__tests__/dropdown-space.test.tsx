@@ -18,6 +18,12 @@ const SOURCES = import.meta.glob('/src/components/ui/*.tsx', {
 
 const source = (name: string) => SOURCES[`/src/components/ui/${name}.tsx`] ?? ''
 
+const SHARED = import.meta.glob('/src/components/shared/ServerProvidersCard.tsx', {
+  query: '?raw',
+  import: 'default',
+  eager: true,
+}) as Record<string, string>
+
 /** Each primitive, its collision props, and the height var Radix publishes on it. */
 const PRIMITIVES = [
   { file: 'popover', heightVar: '--radix-popover-content-available-height' },
@@ -35,6 +41,15 @@ describe('menu primitives fit the space available', () => {
     const text = source(file)
     expect(text).toContain(`var(${heightVar})`)
     // A fixed cap is the bug: it ignores how much room is actually left.
+    expect(text).not.toMatch(/max-h-(64|96|48)\b/)
+  })
+})
+
+describe('a list inside a popover leaves room for its own filter row', () => {
+  it('the models list reserves the filter row instead of a fixed cap', () => {
+    const text = SHARED['/src/components/shared/ServerProvidersCard.tsx'] ?? ''
+    expect(text).toContain('var(--radix-popover-content-available-height)')
+    // A fixed cap lets the outer popover scroll the filter field out of view.
     expect(text).not.toMatch(/max-h-(64|96|48)\b/)
   })
 })
