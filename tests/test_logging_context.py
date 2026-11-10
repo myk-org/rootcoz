@@ -21,6 +21,7 @@ from rootcoz.sources.jenkins_source import (
     handle_jenkins_exception,
     wait_for_jenkins_completion,
 )
+from tests.conftest import capture_main_logs, forget_duplicate_history
 
 pytestmark = pytest.mark.xdist_group("logging_context")
 
@@ -200,18 +201,6 @@ class TestJobIdFilter:
             test_logger.removeHandler(handler)
 
 
-def _forget_duplicate_history(logger: logging.Logger) -> None:
-    """Clear the session-wide state the duplicate filter keeps per instance.
-
-    The state outlives a test (one filter instance per logger and per handler,
-    for the whole session), so a later test's identical line would be dropped.
-    """
-    for target in (logger, *logger.handlers):
-        for log_filter in target.filters:
-            vars(log_filter).pop("last_log", None)
-            vars(log_filter).pop("repeated_number", None)
-
-
 class _RecordingHandler(logging.Handler):
     """Collect the rendered text of every record that reaches a handler.
 
@@ -247,7 +236,7 @@ def dedup_logger(
     original_level = logger.level
     logger.setLevel(logging.DEBUG)
     job_id_var.set("")
-    _forget_duplicate_history(logger)
+    forget_duplicate_history(logger)
     try:
         yield logger, handler
     finally:
@@ -255,6 +244,56 @@ def dedup_logger(
         logger.setLevel(original_level)
         # A leaked job id would make the job-id test pass vacuously.
         job_id_var.set("")
+
+
+def test_a_captured_line_survives_an_earlier_identical_line(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The filter's history spans the session, so a capture starts from a clean one.
+
+    Without it, a line another test already logged is dropped before any handler
+    sees it and the assertion fails as if the product had not logged it at all
+    (#522).
+    """
+    main_logger = logging.getLogger("rootcoz.main")
+    line = "startup reclaim: an identical line"
+    # The previous run of this test left the line remembered; seed from a clean one.
+    forget_duplicate_history(main_logger)
+    sink = _RecordingHandler()
+    main_logger.addHandler(sink)
+    try:
+        with caplog.at_level(logging.INFO, logger="rootcoz.main"):
+            main_logger.info(line)
+            main_logger.info(line)  # dropped: the filter now remembers the line
+    finally:
+        main_logger.removeHandler(sink)
+    assert sink.messages == [line], "the duplicate filter was not seeded"
+    caplog.clear()
+
+    with capture_main_logs(caplog, level=logging.INFO):
+        main_logger.info(line)
+
+    assert line in caplog.text
+
+
+def test_a_capture_is_counted_once_despite_a_leaked_handler(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """``caplog.handler`` is one session-wide instance, not one per test.
+
+    A test that leaves it attached to ``rootcoz.main`` must not make every later
+    capture on that logger count the same record twice (#513).
+    """
+    main_logger = logging.getLogger("rootcoz.main")
+    line = "a refusal that must be counted once"
+    main_logger.addHandler(caplog.handler)  # the leftover a leaking test leaves
+    try:
+        with capture_main_logs(caplog, level=logging.WARNING):
+            main_logger.warning(line)
+    finally:
+        main_logger.removeHandler(caplog.handler)
+
+    assert caplog.messages.count(line) == 1
 
 
 class TestDuplicateFilterExemption:
@@ -282,7 +321,7 @@ class TestDuplicateFilterExemption:
         stream = io.StringIO()
         handler = logging.StreamHandler(stream)
         logger.addHandler(handler)
-        _forget_duplicate_history(logger)
+        forget_duplicate_history(logger)
         original_level = logger.level
         logger.setLevel(logging.INFO)
         try:

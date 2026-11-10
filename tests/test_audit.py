@@ -29,7 +29,7 @@ import pytest
 from rootcoz import ai_client, main, monitoring, storage
 from rootcoz.config import update_db_settings_cache
 from rootcoz.encryption import encrypt_sensitive_fields
-from tests.conftest import admin_login, make_app_client
+from tests.conftest import admin_login, forget_duplicate_history, make_app_client
 
 MAIN_PATH = Path(__file__).resolve().parents[1] / "src" / "rootcoz" / "main.py"
 
@@ -230,9 +230,17 @@ async def test_prune_audit_events_by_cutoff(audit_db: Path) -> None:
 
 
 def _capture_main_logs(caplog: pytest.LogCaptureFixture) -> Any:
-    """Attach caplog to the main module logger (simple_logger sets propagate=False)."""
+    """Attach caplog to the main module logger (simple_logger sets propagate=False).
+
+    The duplicate filter keeps its remembered line for the whole session, so an
+    identical line another test logged is dropped before this handler sees it.
+    Every caller removes the handler again: ``caplog.handler`` is one
+    session-wide instance, and a leftover attach would make a later test's
+    capture count the same record twice (#513).
+    """
     main_logger = main.logger
     main_logger.setLevel(logging.INFO)
+    forget_duplicate_history(main_logger)
     main_logger.addHandler(caplog.handler)
     return main_logger
 
@@ -271,14 +279,17 @@ async def test_record_audit_stores_compact_details(
     audit_db: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.INFO)
-    _capture_main_logs(caplog)
+    main_logger = _capture_main_logs(caplog)
 
-    await main.record_audit(
-        action="admin.setting_persist",
-        actor="admin",
-        message="Admin 'admin' stored a setting",
-        details={"key": "value", "note": "naïve"},
-    )
+    try:
+        await main.record_audit(
+            action="admin.setting_persist",
+            actor="admin",
+            message="Admin 'admin' stored a setting",
+            details={"key": "value", "note": "naïve"},
+        )
+    finally:
+        main_logger.removeHandler(caplog.handler)
 
     with sqlite3.connect(audit_db) as conn:
         (raw,) = conn.execute(

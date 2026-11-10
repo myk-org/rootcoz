@@ -5852,7 +5852,7 @@ class TestCreateGithubIssueApiErrors:
         refused = [
             record.getMessage()
             for record in caplog.records
-            if "GitHub refused" in record.getMessage()
+            if record.name == "rootcoz.main" and "GitHub refused" in record.getMessage()
         ]
         assert len(refused) == 1
         # The text is kept, the line break that would fabricate an entry is not.
@@ -9851,7 +9851,10 @@ class TestStartupWorkspaceReclaim:
 
         assert chat.exists()
         assert extract.exists()
-        assert "the job table has no jobs, chat workspaces stay on disk" in caplog.text
+        assert (
+            "Startup reclaim: the job table has no jobs, chat workspaces stay on disk"
+            in caplog.messages
+        )
 
     # -- a hostile temp root cannot widen the delete or forge a log line --------
 
