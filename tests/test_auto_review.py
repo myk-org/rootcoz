@@ -16,7 +16,7 @@ import pytest
 from starlette.testclient import TestClient
 
 from rootcoz import storage
-from rootcoz.config import Settings, get_settings
+from rootcoz.config import Settings, clear_settings_cache
 from rootcoz.engine.core import (
     get_failure_signature,
     normalize_for_signature,
@@ -682,13 +682,13 @@ class TestReservedUsername:
                 "REQUIRE_APPROVAL": "false",
             },
         ):
-            get_settings.cache_clear()
+            clear_settings_cache()
             with patch.object(storage, "DB_PATH", temp_db_path):
                 from rootcoz.main import app
 
                 with TestClient(app) as c:
                     yield c
-            get_settings.cache_clear()
+            clear_settings_cache()
 
     def test_blocks_rootcoz_prefix(self, client):
         """Should reject username starting with 'rootcoz'."""

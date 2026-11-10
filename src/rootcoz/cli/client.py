@@ -1535,6 +1535,14 @@ class RootCozClient:
             body["jira_sa_token"] = jira_sa_token
         return self._request("PUT", "/api/user/tokens", json=body)
 
+    def test_user_token(self, integration: str) -> dict[str, Any]:
+        """Test a token saved in your account.
+
+        POST /api/user/tokens/test/{integration} — always HTTP 200 with
+        ``{ok, message, details?}``; it tests the SAVED credential only.
+        """
+        return self._request("POST", f"/api/user/tokens/test/{integration}")
+
     # -- Token Validation -----------------------------------------------------
 
     def validate_token(

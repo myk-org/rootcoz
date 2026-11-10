@@ -157,6 +157,13 @@ export const api = {
       `/api/admin/settings/test/${encodeURIComponent(integration)}`,
     ),
 
+  /** Test the caller's own SAVED tracker tokens — the server reads its row, never a body. */
+  testUserTokens: (integration: string) =>
+    requestWithJsonBody<TestIntegrationResult>(
+      'POST',
+      `/api/user/tokens/test/${encodeURIComponent(integration)}`,
+    ),
+
   delete: <T>(path: string, body?: unknown, options?: RequestInit) =>
     requestWithJsonBody<T>('DELETE', path, body, options),
 }

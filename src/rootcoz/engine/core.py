@@ -15,7 +15,8 @@ import os
 import re
 import shutil
 import threading
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -108,6 +109,130 @@ def _job_clone_share(settings: Settings) -> int:
     return min(settings.max_concurrent_repo_clones, settings.max_concurrent_ai_calls)
 
 
+@dataclass(frozen=True, slots=True)
+class CloneRequest:
+    """One repository clone, as the shared fan-out needs it."""
+
+    name: str
+    url: str
+    target: Path
+    depth: int
+    branch: str = ""
+    token: str | None = None
+
+
+async def _admit_clone(active_here: list[int]) -> Callable[[], None]:
+    """Wait for a free clone slot, then return the callback that frees it.
+
+    ``active_here[0]`` is this batch's own count, so one batch cannot occupy the
+    host's whole budget. The budget itself is process-wide and shared by every
+    caller, analysis and chat alike (#461).
+    """
+    global _active_clones
+    while True:
+        # One snapshot per attempt, *before* the lock: the decision needs both
+        # numbers and re-reading settings while holding the lock pays for the
+        # same read twice on the hot path.
+        settings = get_settings()
+        share = _job_clone_share(settings)
+        with _clone_lock:
+            admitted = (
+                _active_clones < settings.max_concurrent_repo_clones
+                and active_here[0] < share
+            )
+            if admitted:
+                _active_clones += 1
+                active_here[0] += 1
+        if admitted:
+            break
+        # ponytail: poll while full; replace with per-loop notifications if
+        # clone admission latency becomes material.
+        await asyncio.sleep(0.05)
+
+    def _release() -> None:
+        global _active_clones
+        with _clone_lock:
+            _active_clones -= 1
+            active_here[0] -= 1
+
+    return _release
+
+
+async def clone_repo_batch(
+    repo_manager: RepositoryManager,
+    requests: Sequence[CloneRequest],
+    *,
+    on_start: Callable[[CloneRequest], Awaitable[None]] | None = None,
+    on_finish: Callable[[CloneRequest, str], Awaitable[None]] | None = None,
+    on_error: Callable[[str, BaseException], None] | None = None,
+) -> list[tuple[CloneRequest, BaseException | None]]:
+    """Clone every request concurrently, under the one clone admission budget.
+
+    The only clone fan-out in the codebase: analysis and chat both come through
+    here, so N repos cost one clone's latency instead of the sum, and both
+    compete for the same slots.
+
+    ``on_start`` runs once admitted and before the clone starts, ``on_finish``
+    receives the outcome (``cloned`` / ``failed`` / ``cancelled``), ``on_error``
+    is the per-repo failure hook (a cancelled clone is not a failure, so it is
+    not reported). Returns (request, error) per request, in declaration order:
+    the caller decides what a failure means -- chat warns and carries on,
+    analysis re-raises the unexpected ones.
+    """
+    active_here = [0]
+
+    async def _clone_one(request: CloneRequest) -> Path:
+        release = await _admit_clone(active_here)
+        clone_task: asyncio.Task[Path] | None = None
+        outcome = "cancelled"
+        try:
+            if on_start is not None:
+                await on_start(request)
+            clone_task = asyncio.create_task(
+                asyncio.to_thread(
+                    repo_manager.clone_into,
+                    request.url,
+                    request.target,
+                    depth=request.depth,
+                    branch=request.branch,
+                    token=request.token or None,
+                )
+            )
+
+            def release_slot(task: asyncio.Task[Path]) -> None:
+                if not task.cancelled():
+                    task.exception()  # Observe failures even when the caller was cancelled.
+                release()
+
+            clone_task.add_done_callback(release_slot)
+            await asyncio.shield(clone_task)
+            outcome = "cloned"
+            return request.target
+        except Exception:
+            outcome = "failed"
+            raise
+        finally:
+            if clone_task is None:
+                release()
+            if on_finish is not None:
+                await on_finish(request, outcome)
+
+    results = await asyncio.gather(
+        *[_clone_one(request) for request in requests], return_exceptions=True
+    )
+    outcomes: list[tuple[CloneRequest, BaseException | None]] = []
+    for request, result in zip(requests, results, strict=True):
+        error = result if isinstance(result, BaseException) else None
+        if (
+            error is not None
+            and not isinstance(error, asyncio.CancelledError)
+            and on_error is not None
+        ):
+            on_error(request.name, error)
+        outcomes.append((request, error))
+    return outcomes
+
+
 async def clone_additional_repos(
     repo_manager: RepositoryManager,
     additional_repos_list: list[AdditionalRepo],
@@ -148,8 +273,6 @@ async def clone_additional_repos(
         raise ValueError(f"Duplicate additional repo names: {', '.join(dupes)}")
 
     cloned: dict[str, Path] = {}
-    # This call's clones in flight; mutated under _clone_lock only.
-    active_here = 0
     settings = get_settings()
     logger.info(
         "Cloning %d additional repo(s) at most %d at a time "
@@ -161,125 +284,83 @@ async def clone_additional_repos(
         job_id or "-",
     )
 
-    async def _clone_into_subdir(ar: AdditionalRepo) -> None:
-        target = repo_path / ar.name
-        try:
-            global _active_clones
-            nonlocal active_here
-            while True:
-                # One snapshot per attempt, *before* the lock: the decision needs
-                # both numbers and re-reading settings while holding the lock
-                # pays for the same read twice on the hot path.
-                settings = get_settings()
-                share = _job_clone_share(settings)
-                with _clone_lock:
-                    admitted = (
-                        _active_clones < settings.max_concurrent_repo_clones
-                        and active_here < share
-                    )
-                    if admitted:
-                        _active_clones += 1
-                        active_here += 1
-                if admitted:
-                    break
-                # ponytail: poll while full; replace with per-loop notifications if
-                # clone admission latency becomes material.
-                await asyncio.sleep(0.05)
+    def _operation_id(name: str) -> str:
+        return f"{operation_id}:additional:{name}" if operation_id else ""
 
-            def _release() -> None:
-                global _active_clones
-                nonlocal active_here
-                with _clone_lock:
-                    _active_clones -= 1
-                    active_here -= 1
+    async def _started(request: CloneRequest) -> None:
+        if reanalysis:
+            await safe_update_clone_progress(
+                job_id,
+                request.name,
+                True,
+                reanalysis=True,
+                operation_id=_operation_id(request.name),
+                url=request.url,
+                ref=request.branch,
+            )
+        else:
+            await safe_update_clone_progress(
+                job_id, request.name, True, url=request.url, ref=request.branch
+            )
 
-            def release_slot(task: asyncio.Task[Path]) -> None:
-                if not task.cancelled():
-                    task.exception()  # Observe failures even when the analysis was cancelled.
-                _release()
+    async def _finished(request: CloneRequest, outcome: str) -> None:
+        if reanalysis:
+            await safe_update_clone_progress(
+                job_id,
+                request.name,
+                False,
+                state=outcome,
+                reanalysis=True,
+                operation_id=_operation_id(request.name),
+            )
+        elif outcome == "cloned":
+            await safe_update_clone_progress(job_id, request.name, False)
+        else:
+            await safe_update_clone_progress(job_id, request.name, False, state=outcome)
+        if outcome == "cloned":
+            logger.info(
+                "Cloned additional repo '%s' into %s", request.name, request.target
+            )
 
-            clone_task = None
-            outcome = "cancelled"
-            try:
-                if reanalysis:
-                    await safe_update_clone_progress(
-                        job_id,
-                        ar.name,
-                        True,
-                        reanalysis=True,
-                        operation_id=f"{operation_id}:additional:{ar.name}"
-                        if operation_id
-                        else "",
-                        url=str(ar.url),
-                        ref=ar.ref,
-                    )
-                else:
-                    await safe_update_clone_progress(
-                        job_id, ar.name, True, url=str(ar.url), ref=ar.ref
-                    )
-                clone_task = asyncio.create_task(
-                    asyncio.to_thread(
-                        repo_manager.clone_into,
-                        str(ar.url),
-                        target,
-                        depth=1,
-                        branch=ar.ref,
-                        token=ar.token or None,
-                    )
-                )
-                clone_task.add_done_callback(release_slot)
-                await asyncio.shield(clone_task)
-                cloned[ar.name] = target
-                outcome = "cloned"
-            except Exception:
-                outcome = "failed"
-                raise
-            finally:
-                if clone_task is None:
-                    _release()
-                if outcome == "cloned" and not reanalysis:
-                    await safe_update_clone_progress(job_id, ar.name, False)
-                elif reanalysis:
-                    await safe_update_clone_progress(
-                        job_id,
-                        ar.name,
-                        False,
-                        state=outcome,
-                        reanalysis=True,
-                        operation_id=f"{operation_id}:additional:{ar.name}"
-                        if operation_id
-                        else "",
-                    )
-                else:
-                    await safe_update_clone_progress(
-                        job_id, ar.name, False, state=outcome
-                    )
-            logger.info(f"Cloned additional repo '{ar.name}' into {target}")
-        except (GitCommandError, ValueError, OSError, RuntimeError) as e:
+    outcomes = await clone_repo_batch(
+        repo_manager,
+        [
+            CloneRequest(
+                name=ar.name,
+                url=str(ar.url),
+                target=repo_path / ar.name,
+                depth=1,
+                branch=ar.ref,
+                token=ar.token or None,
+            )
+            for ar in additional_repos_list
+        ],
+        on_start=_started,
+        on_finish=_finished,
+    )
+
+    for request, error in outcomes:
+        if error is None:
+            cloned[request.name] = request.target
+            continue
+        if isinstance(error, asyncio.CancelledError):
+            continue
+        if isinstance(error, (GitCommandError, ValueError, OSError, RuntimeError)):
             # non-fatal additional repo clone failure
             logger.warning(
                 "Failed to clone additional repo '%s' (%s)",
-                ar.name,
-                type(e).__name__,
+                request.name,
+                type(error).__name__,
             )
-
-    outcomes = await asyncio.gather(
-        *[_clone_into_subdir(ar) for ar in additional_repos_list],
-        return_exceptions=True,
-    )
-    # Known clone failures are handled per repo above and stay non-fatal. An
-    # exception that reaches here is unexpected, so fail the job instead of
-    # analyzing with that repo silently missing.
-    for ar, outcome in zip(additional_repos_list, outcomes, strict=True):
-        if isinstance(outcome, BaseException) and not isinstance(
-            outcome, asyncio.CancelledError
-        ):
-            logger.error(
-                "Additional repo '%s' failed unexpectedly: %s",
-                ar.name,
-                type(outcome).__name__,
-            )
-            raise outcome
+            continue
+        # An exception outside the known set is unexpected, so fail the job
+        # instead of analyzing with that repo silently missing.
+        logger.error(
+            "Additional repo '%s' failed unexpectedly: %s",
+            request.name,
+            type(error).__name__,
+        )
+        raise error
 
     return cloned, repo_path
 

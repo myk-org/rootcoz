@@ -17,7 +17,7 @@ from pi_sidecar_client import AIResult
 
 from rootcoz.config import (
     Settings,
-    get_settings,
+    clear_settings_cache,
     remove_from_db_settings_cache,
     update_db_settings_cache,
 )
@@ -2587,7 +2587,7 @@ class TestAnalyzeFailuresWorkspacePattern:
             "ROOTCOZ_ENCRYPTION_KEY", "test-encryption-key-for-hmac"
         )  # pragma: allowlist secret
 
-        get_settings.cache_clear()
+        clear_settings_cache()
         try:
             from starlette.testclient import TestClient
 
@@ -2614,7 +2614,7 @@ class TestAnalyzeFailuresWorkspacePattern:
             )
             assert response.status_code == 202
         finally:
-            get_settings.cache_clear()
+            clear_settings_cache()
 
         # Verify background task was dispatched with correct args
         mock_process.assert_called_once()
@@ -2648,7 +2648,7 @@ class TestWorkspaceAlwaysCreated:
             "ROOTCOZ_ENCRYPTION_KEY", "test-encryption-key-for-hmac"
         )  # pragma: allowlist secret
 
-        get_settings.cache_clear()
+        clear_settings_cache()
         try:
             from starlette.testclient import TestClient
 
@@ -2674,7 +2674,7 @@ class TestWorkspaceAlwaysCreated:
             )
             assert response.status_code == 202
         finally:
-            get_settings.cache_clear()
+            clear_settings_cache()
 
         # Verify background task was dispatched (workspace creation happens inside the task)
         mock_process.assert_called_once()

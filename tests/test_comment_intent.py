@@ -26,13 +26,13 @@ def _mock_settings(temp_db_path: Path):
         GEMINI_API_KEY="test-key",  # pragma: allowlist secret
     )
     with patch.dict(os.environ, env, clear=True):
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache
 
-        get_settings.cache_clear()
+        clear_settings_cache()
         try:
             yield
         finally:
-            get_settings.cache_clear()
+            clear_settings_cache()
 
 
 @pytest.fixture
@@ -184,13 +184,13 @@ class TestAnalyzeCommentIntentJobFallback:
         env.pop("AI_PROVIDER", None)
         env.pop("AI_MODEL", None)
         with patch.dict(os.environ, env, clear=True):
-            from rootcoz.config import get_settings
+            from rootcoz.config import clear_settings_cache
 
-            get_settings.cache_clear()
+            clear_settings_cache()
             try:
                 yield
             finally:
-                get_settings.cache_clear()
+                clear_settings_cache()
 
     @pytest.fixture
     def client_no_ai(self, _mock_settings_no_ai, temp_db_path: Path):

@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { ProfileForm } from '@/components/shared/ProfileForm'
@@ -8,6 +8,7 @@ const apiMock = vi.hoisted(() => ({
   post: vi.fn(async (path: string) => (path === '/api/validate-token' ? { valid: true, username: 'jdoe', message: 'ok' } : {})),
   put: vi.fn(async () => ({})),
   delete: vi.fn(async () => ({})),
+  testUserTokens: vi.fn(async () => ({ ok: true, message: 'ok' })),
 }))
 vi.mock('@/lib/api', () => ({ api: apiMock, isExpectedTokenSyncError: () => true }))
 
@@ -34,6 +35,8 @@ describe('ProfileForm tracker tokens', () => {
       path === '/api/validate-token' ? { valid: true, username: 'jdoe', message: 'ok' } : {},
     )
     apiMock.put.mockClear()
+    apiMock.testUserTokens.mockReset()
+    apiMock.testUserTokens.mockImplementation(async () => ({ ok: true, message: 'ok' }))
     role.value = 'viewer'
   })
 
@@ -316,5 +319,150 @@ describe('ProfileForm tracker tokens', () => {
       '/api/user/tokens',
       expect.objectContaining({ github_token: 'ghp_revoked', jira_token: '' }),
     )
+  })
+})
+
+describe('ProfileForm saved-token connection test (#537)', () => {
+  beforeEach(() => {
+    apiMock.testUserTokens.mockReset()
+    apiMock.testUserTokens.mockImplementation(async () => ({ ok: true, message: 'ok' }))
+    role.value = 'reviewer'
+  })
+
+  it('tests the saved GitHub token and shows a success banner', async () => {
+    role.value = 'reviewer'
+    apiMock.testUserTokens.mockResolvedValue({ ok: true, message: 'GitHub token is valid for jdoe' })
+    renderForm()
+    await waitFor(() => expect(apiMock.get).toHaveBeenCalledWith('/api/user/tokens'))
+
+    await userEvent.click(screen.getByRole('button', { name: /test github connection/i }))
+
+    await waitFor(() => expect(apiMock.testUserTokens).toHaveBeenCalledWith('github'))
+    const banner = await screen.findByRole('status')
+    expect(banner).toHaveTextContent('Connection successful')
+    expect(banner).toHaveTextContent('GitHub token is valid for jdoe')
+  })
+
+  it('tests the saved Jira tokens once and shows the server message on failure', async () => {
+    role.value = 'reviewer'
+    apiMock.testUserTokens.mockResolvedValue({ ok: false, message: 'Jira rejected the API token' })
+    renderForm()
+    await waitFor(() => expect(apiMock.get).toHaveBeenCalledWith('/api/user/tokens'))
+
+    await userEvent.click(screen.getByRole('button', { name: /test jira connection/i }))
+
+    await waitFor(() => expect(apiMock.testUserTokens).toHaveBeenCalledWith('jira'))
+    const banner = await screen.findByRole('status')
+    expect(banner).toHaveTextContent('Connection failed')
+    expect(banner).toHaveTextContent('Jira rejected the API token')
+  })
+
+  it('renders exactly one test button per connection (one GitHub, one Jira)', () => {
+    renderForm()
+    expect(screen.getAllByRole('button', { name: /connection/i })).toHaveLength(2)
+    expect(screen.getAllByRole('button', { name: /test github connection/i })).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: /test jira connection/i })).toHaveLength(1)
+  })
+
+  it('disables the button in flight and issues one request for two rapid clicks', async () => {
+    role.value = 'reviewer'
+    let resolveTest: (value: { ok: boolean; message: string }) => void = () => {}
+    apiMock.testUserTokens.mockReturnValue(
+      new Promise((resolve) => { resolveTest = resolve }),
+    )
+    renderForm()
+    await waitFor(() => expect(apiMock.get).toHaveBeenCalledWith('/api/user/tokens'))
+
+    const button = screen.getByRole('button', { name: /test github connection/i })
+    fireEvent.click(button)
+    fireEvent.click(button)
+
+    await waitFor(() => expect(button).toBeDisabled())
+    expect(apiMock.testUserTokens).toHaveBeenCalledTimes(1)
+
+    resolveTest({ ok: true, message: 'ok' })
+    await waitFor(() => expect(screen.getByRole('status')).toHaveTextContent('Connection successful'))
+    expect(apiMock.testUserTokens).toHaveBeenCalledTimes(1)
+  })
+
+  it('refuses to test unsaved input: an edit disables the button until it is saved', async () => {
+    role.value = 'reviewer'
+    renderForm()
+    await waitFor(() => expect(apiMock.get).toHaveBeenCalledWith('/api/user/tokens'))
+
+    const github = screen.getByLabelText(/GitHub Token/i)
+    await userEvent.type(github, 'ghp_unsaved')
+
+    expect(screen.getByRole('button', { name: /test github connection/i })).toBeDisabled()
+    // The Jira connection is untouched, so its test stays available.
+    expect(screen.getByRole('button', { name: /test jira connection/i })).toBeEnabled()
+  })
+
+  it('drops a result that arrives after an edit invalidated its test', async () => {
+    role.value = 'reviewer'
+    let resolveTest: (value: { ok: boolean; message: string }) => void = () => {}
+    apiMock.testUserTokens.mockReturnValue(
+      new Promise((resolve) => { resolveTest = resolve }),
+    )
+    renderForm()
+    await waitFor(() => expect(apiMock.get).toHaveBeenCalledWith('/api/user/tokens'))
+
+    fireEvent.click(screen.getByRole('button', { name: /test github connection/i }))
+    // An edit while the request is in flight: the answer describes the token
+    // that was saved when it started, not what the fields now show.
+    await userEvent.type(screen.getByLabelText(/GitHub Token/i), 'ghp_edited')
+
+    resolveTest({ ok: true, message: 'GitHub token is valid for jdoe' })
+    await waitFor(() => expect(apiMock.testUserTokens).toHaveBeenCalledTimes(1))
+    await waitFor(() =>
+      expect(screen.getByRole('button', { name: /test github connection/i })).toBeDisabled(),
+    )
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('keeps both buttons disabled until the saved tokens have loaded', async () => {
+    role.value = 'reviewer'
+    let resolveTokens: (value: Record<string, string>) => void = () => {}
+    apiMock.get.mockReturnValue(
+      new Promise((resolve) => {
+        resolveTokens = resolve as (value: Record<string, string>) => void
+      }),
+    )
+    renderForm()
+
+    const github = screen.getByRole('button', { name: /test github connection/i })
+    const jira = screen.getByRole('button', { name: /test jira connection/i })
+    // The fields are empty because nothing has been read yet, not because
+    // nothing is saved — testing now would report a credential that exists.
+    expect(github).toBeDisabled()
+    expect(jira).toBeDisabled()
+
+    resolveTokens({ github_token: 'ghp_saved', jira_email: '', jira_token: 'jira_saved', jira_sa_token: '' })
+    await waitFor(() => expect(github).toBeEnabled())
+    expect(jira).toBeEnabled()
+  })
+
+  it('never echoes a form token into the request or the banner', async () => {
+    role.value = 'reviewer'
+    apiMock.get.mockImplementation(async (path: string) =>
+      path === '/api/user/tokens'
+        ? { github_token: 'ghp_secret', jira_email: 'jdoe@test.com', jira_token: 'jira_secret', jira_sa_token: 'ATST_secret' }
+        : {},
+    )
+    apiMock.testUserTokens.mockResolvedValue({ ok: true, message: 'Connected' })
+    renderForm()
+    await waitFor(() => expect(screen.getByLabelText(/GitHub Token/i)).toHaveValue('ghp_secret'))
+
+    await userEvent.click(screen.getByRole('button', { name: /test github connection/i }))
+    await waitFor(() => expect(apiMock.testUserTokens).toHaveBeenCalledWith('github'))
+    await userEvent.click(screen.getByRole('button', { name: /test jira connection/i }))
+    await waitFor(() => expect(apiMock.testUserTokens).toHaveBeenCalledWith('jira'))
+
+    const banner = await screen.findByRole('status')
+    for (const secret of ['ghp_secret', 'jira_secret', 'ATST_secret']) {
+      expect(banner).not.toHaveTextContent(secret)
+    }
+    // The endpoint reads the caller's row: the body carries nothing at all.
+    expect(apiMock.testUserTokens.mock.calls).toEqual([['github'], ['jira']])
   })
 })

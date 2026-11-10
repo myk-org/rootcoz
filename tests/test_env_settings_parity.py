@@ -14,6 +14,7 @@ from rootcoz.config import (
     SQLITE_INT_MAX,
     Settings,
     clear_db_settings_cache,
+    clear_settings_cache,
     get_settings,
     update_db_settings_cache,
 )
@@ -26,10 +27,10 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("ADMIN_KEY", "parity-bootstrap-key")
     monkeypatch.setenv("SECURE_COOKIES", "false")
     monkeypatch.setenv("DB_PATH", str(tmp_path / "parity.db"))
-    get_settings.cache_clear()
+    clear_settings_cache()
     with TestClient(app) as client:
         yield client
-    get_settings.cache_clear()
+    clear_settings_cache()
     clear_db_settings_cache()
 
 
@@ -400,12 +401,12 @@ def timedelta_hours(hours: float):
 
 async def test_session_ttl_invalid_env_keeps_default(monkeypatch):
     monkeypatch.setenv("SESSION_TTL_HOURS", "not-a-number")
-    get_settings.cache_clear()
+    clear_settings_cache()
     try:
         assert get_settings().session_ttl_hours == 720
     finally:
         monkeypatch.delenv("SESSION_TTL_HOURS")
-        get_settings.cache_clear()
+        clear_settings_cache()
 
 
 # --- Save-to-DB persist (env → DB promotion, #347 add-on) ---
@@ -413,7 +414,7 @@ async def test_session_ttl_invalid_env_keeps_default(monkeypatch):
 
 def test_persist_promotes_env_value_to_db(client, monkeypatch):
     monkeypatch.setenv("SMTP_HOST", "smtp.parity.example.com")
-    get_settings.cache_clear()
+    clear_settings_cache()
     before = {
         item["key"]: item
         for item in client.get("/api/admin/settings", headers=_admin_headers()).json()
@@ -436,7 +437,7 @@ def test_persist_promotes_env_value_to_db(client, monkeypatch):
     # Dropping the deployment env no longer reverts the setting — the DB
     # override (and the updated cache) keeps the persisted value.
     monkeypatch.delenv("SMTP_HOST")
-    get_settings.cache_clear()
+    clear_settings_cache()
     assert get_settings().smtp_host == "smtp.parity.example.com"
 
 
@@ -663,7 +664,7 @@ def test_dotenv_sourced_setting_is_labeled_env_and_persistable(
     monkeypatch.delenv("SMTP_HOST", raising=False)
     (tmp_path / ".env").write_text("SMTP_HOST=smtp.metadata.example.com\n")
     monkeypatch.chdir(tmp_path)
-    get_settings.cache_clear()
+    clear_settings_cache()
     try:
         by_key = {
             item["key"]: item
@@ -678,7 +679,7 @@ def test_dotenv_sourced_setting_is_labeled_env_and_persistable(
         )
         assert promoted.status_code == 200
     finally:
-        get_settings.cache_clear()
+        clear_settings_cache()
 
 
 def test_metadata_flags_persistability(client):
@@ -737,14 +738,14 @@ def test_session_ttl_bounds_on_save(client):
 
 def test_session_ttl_out_of_range_env_is_clamped(monkeypatch):
     monkeypatch.setenv("SESSION_TTL_HOURS", "999999999")
-    get_settings.cache_clear()
+    clear_settings_cache()
     try:
         # Settings() never fails app-wide; the env value is clamped into
         # the field's 1-87600 range instead of overflowing datetime math.
         assert get_settings().session_ttl_hours == 87600
     finally:
         monkeypatch.delenv("SESSION_TTL_HOURS")
-        get_settings.cache_clear()
+        clear_settings_cache()
 
 
 # --- Malformed SMTP_PORT no longer bricks Settings() (#347 review) ---
@@ -752,22 +753,22 @@ def test_session_ttl_out_of_range_env_is_clamped(monkeypatch):
 
 def test_smtp_port_invalid_env_falls_back_to_default(monkeypatch):
     monkeypatch.setenv("SMTP_PORT", "not-a-port")
-    get_settings.cache_clear()
+    clear_settings_cache()
     try:
         assert get_settings().smtp_port == 587
     finally:
         monkeypatch.delenv("SMTP_PORT")
-        get_settings.cache_clear()
+        clear_settings_cache()
 
 
 def test_smtp_port_zero_env_falls_back_to_default(monkeypatch):
     monkeypatch.setenv("SMTP_PORT", "0")
-    get_settings.cache_clear()
+    clear_settings_cache()
     try:
         assert get_settings().smtp_port == 587
     finally:
         monkeypatch.delenv("SMTP_PORT")
-        get_settings.cache_clear()
+        clear_settings_cache()
 
 
 def test_send_email_alert_never_raises_when_settings_fail(monkeypatch):
@@ -868,7 +869,7 @@ def test_health_monitor_settings_are_registered_runtime_applied(client):
         },
     )
     assert saved.status_code == 200
-    get_settings.cache_clear()
+    clear_settings_cache()
     fresh = get_settings()
     assert fresh.enable_health_monitor is True
     assert fresh.health_monitor_interval_seconds == 30

@@ -327,13 +327,13 @@ class TestServerSettingsPriority:
         assert cfg == {}
 
     def test_web_push_enabled_with_only_db_private_key(self):
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache, get_settings
 
         keys = _generate_vapid_keys()
         self._set_db(vapid_private_key=keys["private_key"])
         env = self._no_env() | {"JENKINS_URL": "https://jenkins.example.com"}
         with patch.dict(os.environ, env, clear=True):
-            get_settings.cache_clear()
+            clear_settings_cache()
             settings = get_settings()
-            get_settings.cache_clear()
+            clear_settings_cache()
             assert settings.web_push_enabled is True
