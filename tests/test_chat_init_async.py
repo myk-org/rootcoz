@@ -8,6 +8,7 @@ because a permission refusal has to arrive as a refusal, not as a retry hint.
 import asyncio
 import errno
 import logging
+import sqlite3
 import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -17,7 +18,7 @@ from fastapi import HTTPException
 
 from rootcoz import ai_client, main, storage
 from rootcoz.models import ChatInitRequest
-from tests.conftest import capture_main_logs
+from tests.conftest import capture_main_logs, record_chat_pushes
 
 KEY = "job:alice"
 
@@ -869,3 +870,58 @@ async def test_index_and_session_tools_share_one_deadline(monkeypatch, tmp_path)
     assert isinstance(deadline, float)
     assert before < deadline <= time.monotonic() + main.CHAT_INDEX_DEADLINE_SECONDS
     assert rig.session_tools_calls == [False], "the session build must not index"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("arm", ["refused", "transient"])
+async def test_a_failed_row_write_does_not_lose_a_refusal_or_sidecar_sentence(
+    monkeypatch, tmp_path, caplog, arm
+):
+    """#534: both arms must say why in the log when the failed row cannot be written.
+
+    ``_chat_prep_failure_row`` is best-effort, so the transcript can legitimately
+    carry no sentence — the server log is then the only record of the cause. The
+    refusal arm added that line for this reason; the sidecar arm already had one
+    and must keep exactly it.
+    """
+    import httpx
+
+    rig = await Rig(monkeypatch, tmp_path).install()
+    if arm == "refused":
+        rig.session_error = ai_client.SessionCreationRefused(
+            f"{ai_client.SESSION_REFUSAL_MARKER}: no session"
+        )
+    else:
+        # 429, not an arbitrary status: ``_chat_start_sidecar_error`` re-raises
+        # anything outside the transient set, so the row would never be attempted.
+        request = httpx.Request("POST", "https://sidecar/sessions")
+        rig.session_error = httpx.HTTPStatusError(
+            "429", request=request, response=httpx.Response(429, request=request)
+        )
+
+    async def refuse(**_kwargs):
+        raise sqlite3.OperationalError("no such table: chat_messages")
+
+    monkeypatch.setattr(storage, "add_chat_message", refuse)
+
+    with capture_main_logs(caplog), record_chat_pushes(monkeypatch) as pushes:
+        caplog.clear()
+        await main.init_chat("job", _request(), _body())
+        await rig.settle()
+
+    assert any(gone for gone, _ in pushes), "the push was silenced by the lost row"
+    if arm == "refused":
+        lines = [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith(
+                "Chat preparation refused for job job, user alice"
+            )
+        ]
+        assert len(lines) == 1, "the refusal sentence was lost with the row"
+        assert main._redacted_error(rig.session_error) in lines[0]
+    else:
+        assert any(
+            "Chat start: sidecar answered a transient status 429" in r.getMessage()
+            for r in caplog.records
+        )

@@ -14,8 +14,12 @@ const DropdownMenuContent = React.forwardRef<
     <DropdownMenuPrimitive.Content
       ref={ref}
       sideOffset={sideOffset}
+      // Same as the popover: cap on Radix's measured space, so a menu near the
+      // bottom edge flips or scrolls instead of being clipped by the viewport.
+      avoidCollisions
+      collisionPadding={8}
       className={cn(
-        "relative z-50 max-h-96 min-w-[8rem] overflow-auto rounded-xl border border-border-default bg-surface-card shadow-lg backdrop-blur-sm data-[state=open]:animate-fade-in",
+        "relative z-50 max-h-[min(24rem,var(--radix-dropdown-menu-content-available-height))] min-w-[8rem] overflow-auto rounded-xl border border-border-default bg-surface-card shadow-lg backdrop-blur-sm data-[state=open]:animate-fade-in",
         "data-[side=bottom]:translate-y-1 data-[side=left]:-translate-x-1 data-[side=right]:translate-x-1 data-[side=top]:-translate-y-1",
         className,
       )}

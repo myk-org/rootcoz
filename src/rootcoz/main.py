@@ -5386,10 +5386,20 @@ async def _ai_admin_role_current(username: str) -> bool:
     return bool(user and user["role"] == "admin")
 
 
-async def _create_ai_auth_header(username: str, is_admin: bool = False) -> str:
+async def _create_ai_auth_header(
+    username: str, is_admin: bool = False, *, refuse_storage_fault: bool = False
+) -> str:
     """Create a short-lived session token for AI internal API calls.
 
     Returns a Bearer auth header string, or empty string on failure/no user.
+
+    ``refuse_storage_fault`` is for a caller that cannot serve a useful result
+    without the token: a non-transient storage fault is re-raised instead of
+    returning ``""``, which every other caller needs so a run still proceeds.
+    A lock is never re-raised — it is transient and already retried by
+    ``storage.create_session``. Neither the empty-username exit nor the two
+    ``is_admin`` role re-checks are affected: they return ``""`` before any
+    exception exists, so the flag is a no-op for a demoted admin.
     """
     if not username:
         return ""
@@ -5409,8 +5419,10 @@ async def _create_ai_auth_header(username: str, is_admin: bool = False) -> str:
             )
             return ""
         return f"Bearer {session_token}"
-    except Exception:
-        logger.warning("Failed to create AI session for history access", exc_info=True)
+    except Exception as exc:
+        logger.warning("Failed to create AI session", exc_info=True)
+        if refuse_storage_fault and not storage.is_lock_failure(exc):
+            raise
         return ""
 
 
@@ -23921,7 +23933,9 @@ async def _init_chat_under_barrier(
                 has_profile=await _account_has_profile(username),
                 job_chat=True,
             )
-            auth_header = await _create_ai_auth_header(username)
+            auth_header = await _create_ai_auth_header(
+                username, refuse_storage_fault=True
+            )
             if auth_header:
                 server_url = _build_internal_server_url()
                 custom_tools = build_chat_custom_tools(
@@ -23940,7 +23954,8 @@ async def _init_chat_under_barrier(
                 )
             else:
                 logger.warning(
-                    "Chat init: no auth token for %s — tools unavailable in system prompt",
+                    "Chat init: internal tools token unavailable for %s — "
+                    "the chat starts without internal tools",
                     username,
                 )
 
@@ -24174,14 +24189,26 @@ def _redacted_error(exc: BaseException) -> str:
 
 
 async def _chat_prep_failure_row(job_id: str, username: str, sentence: str) -> None:
-    """One failed assistant row carrying a constant, redacted sentence."""
-    await storage.add_chat_message(
-        job_id=job_id,
-        role="assistant",
-        content=sentence,
-        username=username,
-        status="failed",
-    )
+    """One failed assistant row carrying a constant, redacted sentence.
+
+    Best-effort, like ``_fail_chat_assistant_placeholder``: the caller's job is to
+    tell the browser, and a store that refuses the row must not also silence the
+    push — that is the failure this path exists to report.
+    """
+    try:
+        await storage.add_chat_message(
+            job_id=job_id,
+            role="assistant",
+            content=sentence,
+            username=username,
+            status="failed",
+        )
+    except Exception:
+        logger.exception(
+            "Chat preparation could not record its failed row for job %s, user %s",
+            job_id,
+            username,
+        )
 
 
 async def _run_chat_preparation(
@@ -24250,7 +24277,14 @@ async def _run_chat_preparation(
                     )
                     notify = True
             except SessionCreationRefused as exc:
-                # Written for the user: its sentence passes through unchanged.
+                # Written for the user: its sentence passes through unchanged, and
+                # logged because a failed row write would otherwise lose the cause.
+                logger.warning(
+                    "Chat preparation refused for job %s, user %s: %s",
+                    job_id,
+                    username,
+                    _redacted_error(exc),
+                )
                 await _chat_prep_failure_row(job_id, username, str(exc))
                 notify = True
             except httpx.HTTPStatusError as exc:

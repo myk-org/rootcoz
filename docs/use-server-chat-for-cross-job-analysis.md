@@ -159,6 +159,9 @@ For every available command and flag, see [CLI Command Reference](cli-reference.
 - `A saved artifact link returns 404.`  
   You started a new session or ran `rootcoz admin-chat clear`, which deletes saved artifacts for your account.
 
+- `The admin assistant cannot read results or the database, though Server Chat started normally.`  
+  Admin chat starts even when the server cannot mint the internal tools token — `get_job_result`, `db_schema`, `db_query` and `save_report` are then missing from its tool list and the server log carries `Failed to create AI session`. Job chat refuses that preparation and shows the failure message instead; admin chat is deliberately kept available, so start a new admin session once the storage fault is fixed to pick the tools up. The residual is tracked as issue #540.
+
 - `The CLI did not show a final answer.`  
   `admin-chat send` waits up to about two minutes. Check the result later with `rootcoz admin-chat history --limit 20`. For the raw endpoints, see [API Endpoint Reference](api-reference.html) for details.
 

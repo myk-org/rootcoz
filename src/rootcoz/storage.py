@@ -235,12 +235,24 @@ async def _retry_contended[T](operation: Callable[[], Awaitable[T]]) -> T:
         try:
             return await operation()
         except sqlite3.OperationalError as exc:
-            message = str(exc).lower()
-            contended = "locked" in message or "busy" in message
-            if not contended or attempt == _LOCK_RETRY_ATTEMPTS - 1:
+            if not is_lock_failure(exc) or attempt == _LOCK_RETRY_ATTEMPTS - 1:
                 raise
             await asyncio.sleep(_LOCK_RETRY_BACKOFF_SECONDS * (2**attempt))
     raise AssertionError("unreachable: the retry loop returns or raises")
+
+
+def is_lock_failure(exc: BaseException) -> bool:
+    """Whether a failure is the lock, not the write.
+
+    A lock is transient and worth retrying or degrading for; anything else is a
+    real storage fault and the caller decides what it means. The type gate is
+    part of the predicate: ``OSError(errno.EBUSY)`` says "resource busy" too and
+    is not a SQLite lock.
+    """
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    message = str(exc).lower()
+    return "locked" in message or "busy" in message
 
 
 def _db_uri(path: Path) -> str:
@@ -9548,8 +9560,9 @@ async def create_session(
             )
             await db.commit()
 
-    # Chat Start mints one of these for its internal tools and swallows the
-    # failure, so a momentary lock silently started the chat without tools.
+    # The retry exists so a transient lock never reaches chat preparation's
+    # refusal: what a refused Start reports is a storage fault the server could
+    # not retry past.
     await _retry_contended(_insert)
     return token
 
