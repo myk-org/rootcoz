@@ -148,7 +148,15 @@ class TestGetSettings:
         from rootcoz import config
 
         slept: list[float] = []
-        monkeypatch.setattr(config.time, "sleep", slept.append)
+
+        def hold(seconds: float) -> None:
+            # The hold must sit between the build and the publish: publishing
+            # first would close the window the seam exists to open while a
+            # sleep-only assertion above stayed green.
+            assert config.__dict__["_cached_settings"] is None
+            slept.append(seconds)
+
+        monkeypatch.setattr(config.time, "sleep", hold)
         monkeypatch.setenv("ROOTCOZ_SETTINGS_BUILD_HOLD_MS", "1500")
         clear_settings_cache()
         settings = get_settings()
