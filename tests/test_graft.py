@@ -958,14 +958,15 @@ def test_workspace_budget_is_a_hard_bound(tmp_path, monkeypatch):
         "indexed"
     )
 
-    # No room: a fresh workspace, so a build is actually attempted. It is then
-    # dropped, nothing is left behind, and the reason says why.
+    # No room: a fresh workspace, so a build is actually attempted. The estimate
+    # that admits it (a few source bytes) fits, the graph that comes out does not,
+    # so it is dropped, nothing is left behind, and the reason says why.
     tight = tmp_path / "tight"
     tight_repo = tight / "repo"
     tight_repo.mkdir(parents=True)
     git(tight_repo, "init")
     (tight_repo / "a.py").write_text("pass")
-    monkeypatch.setattr(graft, "max_workspace_graph_bytes", lambda: 1)
+    monkeypatch.setattr(graft, "max_workspace_graph_bytes", lambda: 200)
     outcome = graft.index_repositories(tight, {"repo": tight_repo})["repo"]
     assert outcome == {"status": "skipped", "reason": "workspace graph budget"}
     # The only residual is the budget.json retry marker (~55 bytes); the graph

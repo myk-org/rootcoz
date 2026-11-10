@@ -136,14 +136,16 @@ class Rig:
 
         self.monkeypatch.setattr(self.chat, "init_chat_session", create_session)
 
-        async def index(workspace, repos=None, job_id="", deadline=None):
+        def index(workspace, repos=None, job_id="", deadline=None):
             self.index_calls.append(deadline)
 
-        self.monkeypatch.setattr(main, "_index_chat_repositories", index)
+        self.monkeypatch.setattr(main, "_schedule_chat_index", index)
 
         async def build_tools(**kwargs):
-            self.session_tools_calls.append(kwargs.get("index_deadline"))
-            return SimpleNamespace(custom=[], builtin=list(kwargs["builtin"]))
+            self.session_tools_calls.append(kwargs.get("wait_for_index"))
+            return SimpleNamespace(
+                custom=[], builtin=list(kwargs["builtin"]), graph_root=None
+            )
 
         self.monkeypatch.setattr(session_tools, "build_session_tools", build_tools)
 
@@ -388,7 +390,6 @@ async def test_phases_advance_and_session_appears(monkeypatch, tmp_path):
         "cloning",
         "cloning",
         "cloning",
-        "indexing",
         "fetching_build_data",
         "starting_session",
     ]
@@ -856,7 +857,7 @@ async def test_deadline_does_not_fail_chat_init(monkeypatch, tmp_path):
 
 @pytest.mark.asyncio
 async def test_index_and_session_tools_share_one_deadline(monkeypatch, tmp_path):
-    """One clock per preparation: the index call and the session build agree."""
+    """No turn waits for the graph: the index is scheduled, the tools are not."""
     rig = await Rig(monkeypatch, tmp_path).install()
     rig.report_repos = ["repo"]
     before = time.monotonic()
@@ -867,4 +868,4 @@ async def test_index_and_session_tools_share_one_deadline(monkeypatch, tmp_path)
     deadline = rig.index_calls[0]
     assert isinstance(deadline, float)
     assert before < deadline <= time.monotonic() + main.CHAT_INDEX_DEADLINE_SECONDS
-    assert rig.session_tools_calls == [deadline]
+    assert rig.session_tools_calls == [False], "the session build must not index"

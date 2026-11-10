@@ -33,7 +33,6 @@ const INIT_STEPS = [
 const PREP_STEPS = [
   { phase: 'preparing', label: 'Preparing workspace' },
   { phase: 'cloning', label: 'Cloning repositories' },
-  { phase: 'indexing', label: 'Indexing repositories for search' },
   { phase: 'fetching_build_data', label: 'Fetching CI build data' },
   { phase: 'starting_session', label: 'Starting AI session' },
 ] as const
