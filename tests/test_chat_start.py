@@ -1,7 +1,10 @@
 """Explicit chat Start selects a user-owned credential source, not job defaults."""
 
 import asyncio
+import contextlib
 import logging
+import sqlite3
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -598,3 +601,53 @@ async def test_admin_chat_init_answers_a_transient_creation_status_with_retry(
         )
     assert exc.value.status_code == 503
     assert exc.value.detail == main._TRANSIENT_CHAT_START_DETAIL
+
+
+async def _contended_once(monkeypatch: pytest.MonkeyPatch, counter: dict) -> None:
+    """Make the next chat-row write lose the lock once, then work normally."""
+    real_connect = storage._connect_db
+
+    @contextlib.asynccontextmanager
+    async def flaky_connect(*args, **kwargs):  # type: ignore[no-untyped-def]
+        counter["connect"] = counter.get("connect", 0) + 1
+        if counter["connect"] == 1:
+            counter["contended"] = counter.get("contended", 0) + 1
+            raise sqlite3.OperationalError("database is locked")
+        async with real_connect(*args, **kwargs) as db:
+            yield db
+
+    monkeypatch.setattr(storage, "_connect_db", flaky_connect)
+    monkeypatch.setattr(storage, "_LOCK_RETRY_BACKOFF_SECONDS", 0)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("write", ["message", "source"])
+async def test_a_session_row_survives_one_contended_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, write: str
+):
+    """A momentary lock must not cost the session a Start just created.
+
+    The preparation answers 202 before this write, so a lost row is a session the
+    user is told is ready and then never sees — the failure the chat-init test
+    caught on CI as ``active_session: None``.
+    """
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "chat.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    counter: dict = {}
+    await _contended_once(monkeypatch, counter)
+
+    if write == "message":
+        msg_id = await storage.add_chat_message(
+            "job", "assistant", "", username="alice", session_id="sess-1"
+        )
+        assert msg_id > 0, "the session marker row must exist"
+        assert [m["session_id"] for m in await storage.get_chat_messages("job")] == [
+            "sess-1"
+        ]
+    else:
+        await storage.save_ai_session_source("sess-1", "alice", "claude", "server")
+        assert (
+            await storage.get_ai_session_source("sess-1", "alice", "claude") == "server"
+        )
+    assert counter["contended"] == 1, "the lock was retried, not surfaced"

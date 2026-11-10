@@ -217,6 +217,32 @@ async def _connect_db(
         yield db
 
 
+#: Attempts (and backoff base) for one write a momentary lock must not lose.
+_LOCK_RETRY_ATTEMPTS = 4
+_LOCK_RETRY_BACKOFF_SECONDS = 0.05
+
+
+async def _retry_contended[T](operation: Callable[[], Awaitable[T]]) -> T:
+    """Run *operation* again when the lock, not the write, was the failure.
+
+    ``busy_timeout`` covers a writer that is mid-commit; it does not cover a lock
+    handed around under contention (a login writing ``users.last_seen`` next to a
+    background chat preparation), where every attempt can time out in turn. Only
+    a lock is retried, and only for the rows whose loss the user would see: an
+    audit event, a chat session.
+    """
+    for attempt in range(_LOCK_RETRY_ATTEMPTS):
+        try:
+            return await operation()
+        except sqlite3.OperationalError as exc:
+            message = str(exc).lower()
+            contended = "locked" in message or "busy" in message
+            if not contended or attempt == _LOCK_RETRY_ATTEMPTS - 1:
+                raise
+            await asyncio.sleep(_LOCK_RETRY_BACKOFF_SECONDS * (2**attempt))
+    raise AssertionError("unreachable: the retry loop returns or raises")
+
+
 def _db_uri(path: Path) -> str:
     """A ``file:`` URI that fails instead of creating *path*.
 
@@ -10460,45 +10486,51 @@ async def save_ai_session_source(
     """Remember the source of a sidecar session, never its key."""
     if bootstrap_admin and (username != "admin" or expected_account_id is not None):
         raise ValueError("Invalid bootstrap admin session owner")
-    async with _connect_db() as db:
-        await db.execute("BEGIN IMMEDIATE")
-        if expected_account_id is not None or bootstrap_admin:
-            collision = await (
-                await db.execute(
-                    "SELECT 1 FROM ai_session_sources WHERE session_id = ?",
-                    (session_id,),
-                )
-            ).fetchone()
-            if collision:
+
+    async def _insert() -> None:
+        async with _connect_db() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            if expected_account_id is not None or bootstrap_admin:
+                collision = await (
+                    await db.execute(
+                        "SELECT 1 FROM ai_session_sources WHERE session_id = ?",
+                        (session_id,),
+                    )
+                ).fetchone()
+                if collision:
+                    raise AiSessionCollisionError("AI session ID already active")
+            if bootstrap_admin:
+                account = await (
+                    await db.execute("SELECT 1 FROM users WHERE username = 'admin'")
+                ).fetchone()
+                if account:
+                    raise LookupError("Bootstrap admin account unexpectedly exists")
+            if expected_account_id is not None:
+                account = await (
+                    await db.execute(
+                        "SELECT 1 FROM users WHERE username = ? AND id = ?",
+                        (username, expected_account_id),
+                    )
+                ).fetchone()
+                if not account:
+                    raise LookupError(
+                        "AI session owner account changed during session creation"
+                    )
+            cursor = await db.execute(
+                "INSERT INTO ai_session_sources "
+                "(session_id, username, provider, credential_source, credential_generation) "
+                "VALUES (?, ?, ?, ?, (SELECT COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(?)), 0) "
+                "FROM users WHERE username = ?)) "
+                "ON CONFLICT(session_id) DO NOTHING",
+                (session_id, username, provider, source, provider, username),
+            )
+            if not cursor.rowcount:
                 raise AiSessionCollisionError("AI session ID already active")
-        if bootstrap_admin:
-            account = await (
-                await db.execute("SELECT 1 FROM users WHERE username = 'admin'")
-            ).fetchone()
-            if account:
-                raise LookupError("Bootstrap admin account unexpectedly exists")
-        if expected_account_id is not None:
-            account = await (
-                await db.execute(
-                    "SELECT 1 FROM users WHERE username = ? AND id = ?",
-                    (username, expected_account_id),
-                )
-            ).fetchone()
-            if not account:
-                raise LookupError(
-                    "AI session owner account changed during session creation"
-                )
-        cursor = await db.execute(
-            "INSERT INTO ai_session_sources "
-            "(session_id, username, provider, credential_source, credential_generation) "
-            "VALUES (?, ?, ?, ?, (SELECT COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(?)), 0) "
-            "FROM users WHERE username = ?)) "
-            "ON CONFLICT(session_id) DO NOTHING",
-            (session_id, username, provider, source, provider, username),
-        )
-        if not cursor.rowcount:
-            raise AiSessionCollisionError("AI session ID already active")
-        await db.commit()
+            await db.commit()
+
+    # A session whose source row is lost to a lock is unusable to every later
+    # turn, so a contended ``BEGIN IMMEDIATE`` is retried, not reported.
+    await _retry_contended(_insert)
 
 
 async def delete_revoked_ai_session(
@@ -11798,29 +11830,35 @@ async def add_chat_message(
     credential_generation: int | None = None,
 ) -> int:
     """Add a chat message and return its id, or zero if credentials rotated."""
-    async with _connect_db() as db:
-        cursor = await db.execute(
-            "INSERT INTO chat_messages (job_id, role, content, username, ai_provider, ai_model, session_id, status) "
-            "SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE ? IS NULL OR EXISTS "
-            "(SELECT 1 FROM users WHERE username = ? "
-            "AND COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(?)), 0) = ?)",
-            (
-                job_id,
-                role,
-                content,
-                username,
-                ai_provider,
-                ai_model,
-                session_id,
-                status,
-                credential_generation,
-                username,
-                ai_provider,
-                credential_generation,
-            ),
-        )
-        await db.commit()
-        return (cursor.lastrowid or 0) if cursor.rowcount else 0
+
+    async def _insert() -> int:
+        async with _connect_db() as db:
+            cursor = await db.execute(
+                "INSERT INTO chat_messages (job_id, role, content, username, ai_provider, ai_model, session_id, status) "
+                "SELECT ?, ?, ?, ?, ?, ?, ?, ? WHERE ? IS NULL OR EXISTS "
+                "(SELECT 1 FROM users WHERE username = ? "
+                "AND COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(?)), 0) = ?)",
+                (
+                    job_id,
+                    role,
+                    content,
+                    username,
+                    ai_provider,
+                    ai_model,
+                    session_id,
+                    status,
+                    credential_generation,
+                    username,
+                    ai_provider,
+                    credential_generation,
+                ),
+            )
+            await db.commit()
+            return (cursor.lastrowid or 0) if cursor.rowcount else 0
+
+    # This row is the session marker a Start is judged by: a locked write must
+    # not drop the session the preparation has just created.
+    return await _retry_contended(_insert)
 
 
 async def add_chat_message_pair(
@@ -13119,10 +13157,6 @@ _AUDIT_HASH_FIELDS_V2 = (*_AUDIT_HASH_FIELDS, "throttle_rescue")
 # The version new rows are written with.
 _AUDIT_HASH_VERSION = 2
 
-#: Attempts (and backoff base) for a contended audit write lock.
-_AUDIT_LOCK_ATTEMPTS = 4
-_AUDIT_LOCK_BACKOFF_SECONDS = 0.05
-
 # One column list for every reader (insert/list/verify/export) so they agree.
 # ``throttle_rescue`` is read here because a v2 hash covers it.
 _AUDIT_COLUMNS = (
@@ -13758,18 +13792,9 @@ async def insert_audit_event(
     # ``BEGIN IMMEDIATE`` contends under a burst of concurrent logins and a
     # busy_timeout alone can still time out: retry the lock instead of losing
     # the row (a dropped audit row is a compliance hole, not a lost log line).
-    # The retry lives here, in the one function that owns the arguments, so a
-    # forwarding layer can never drop one.
-    for attempt in range(_AUDIT_LOCK_ATTEMPTS):
-        try:
-            return await _attempt()
-        except sqlite3.OperationalError as exc:
-            message = str(exc).lower()
-            contended = "locked" in message or "busy" in message
-            if not contended or attempt == _AUDIT_LOCK_ATTEMPTS - 1:
-                raise
-            await asyncio.sleep(_AUDIT_LOCK_BACKOFF_SECONDS * (2**attempt))
-    raise AssertionError("unreachable: the retry loop returns or raises")
+    # The retry wraps this one function, so a forwarding layer can never drop an
+    # argument.
+    return await _retry_contended(_attempt)
 
 
 def _audit_like_escape(fragment: str) -> str:
