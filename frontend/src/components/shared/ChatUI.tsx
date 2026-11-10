@@ -157,6 +157,10 @@ export function ChatUI({
   // A 202 means the server prepares the workspace; `starting` then stays true
   // until the server reports a session, a failed row or no preparation at all.
   const prepRunningRef = useRef(false)
+  // Counts the history answers in which the client saw a preparation end (a
+  // session or a failed row, with no phase). A 202 whose POST began before such
+  // an answer describes a preparation already over, so it must not take Start.
+  const settleMarkerRef = useRef(0)
   const [initStepIndex, setInitStepIndex] = useState(0)
   const [prepPhase, setPrepPhase] = useState<{ phase: string; detail: string } | null>(null)
   const [clearing, setClearing] = useState(false)
@@ -307,9 +311,13 @@ export function ChatUI({
   // The server is the only one that knows when a preparation ended: a session, a
   // failed row, or no `preparing` at all.
   const settlePreparation = useCallback((history: ChatHistory) => {
-    if (!prepRunningRef.current) return
     const failed = history.messages.some(m => m.role === 'assistant' && m.status === 'failed')
     if (history.active_session || failed || !history.preparing) {
+      // Only a positive end product marks a settle: a merely empty history can
+      // predate the server registering the preparation, and must not block a
+      // 202 that is its own first report.
+      if (!history.preparing && (history.active_session || failed)) settleMarkerRef.current++
+      if (!prepRunningRef.current) return
       prepRunningRef.current = false
       setStarting(false)
     }
@@ -415,6 +423,7 @@ export function ChatUI({
     // A 202 hands the wait to `settlePreparation`: `starting` must survive this
     // function's `finally` or Start becomes clickable again mid-preparation.
     const startGeneration = historyGenerationRef.current
+    const startSettleMarker = settleMarkerRef.current
     try {
       const result = await api.post<{
         ready: boolean
@@ -431,9 +440,12 @@ export function ChatUI({
           // The 202 is the server saying a preparation is running, and it owns
           // `starting` before any generation check: a sync that raced this
           // request was answered before the server registered the preparation,
-          // so its "no preparing" cannot be read as "already ended". Only the
-          // phase text is generation-gated — a newer one must not be rewound.
-          prepRunningRef.current = true
+          // so its "no preparing" cannot be read as "already ended". But a sync
+          // that reported the preparation's end after this POST began already
+          // answered it — nothing re-syncs, so taking Start here would leave it
+          // disabled until a reload. Only the phase text is generation-gated — a
+          // newer one must not be rewound.
+          if (settleMarkerRef.current === startSettleMarker) prepRunningRef.current = true
           if (historyGenerationRef.current === startGeneration) {
             setPrepPhase(result.preparing)
             setInitStepIndex(0)

@@ -1008,6 +1008,34 @@ it('a 202 keeps Start owned until the server reports the preparation ended', asy
   await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled())
 })
 
+it('a stale 202 cannot take Start back after the preparation already failed', async () => {
+  setup({ total: 0, messages: [] })
+  let finishInit: (v: unknown) => void = () => {}
+  post.mockImplementation((path: string) => path.endsWith('/init')
+    ? new Promise(resolve => { finishInit = resolve })
+    : Promise.resolve({}))
+  const user = userEvent.setup()
+  render(page())
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled())
+  await user.click(screen.getByRole('button', { name: 'Start Chat' }))
+  // The preparation fails before the browser reads the POST: the server writes
+  // its failed row and pushes `chat-changed` on a different connection, so this
+  // sync reports the end of a preparation the 202 body still says is running.
+  get.mockImplementation((path: string) => Promise.resolve(path.startsWith('/api/ai-models')
+    ? catalog
+    : { messages: [{ id: 1, job_id: 'job', role: 'assistant', content: 'The chat workspace could not be prepared. Start it again.', username: 'alice', ai_provider: '', ai_model: '', status: 'failed', created_at: '' }], total: 1, active_session_version: 'no-session-version' }))
+  act(() => {
+    const handlers = (useSSE as unknown as { mock: { calls: Array<[string, Record<string, () => void>]> } }).mock.calls
+    handlers[handlers.length - 1][1]['chat-changed']()
+  })
+  expect(await screen.findByText(/could not be prepared/)).toBeInTheDocument()
+  // Now the 202 lands. Nothing re-syncs on its own, so taking Start back here
+  // would leave it disabled behind a spinner until the user reloads.
+  await act(async () => { finishInit({ ready: false, preparing: { phase: 'preparing', detail: '' } }) })
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled())
+  expect(screen.queryByText(/Preparing workspace/)).not.toBeInTheDocument()
+})
+
 it('a reload during preparation shows the phase and enables the composer once the session appears', async () => {
   setup({ total: 0, messages: [], preparing: { phase: 'cloning', detail: 'openshift-origin' } } as never)
   const { rerender } = render(page())
