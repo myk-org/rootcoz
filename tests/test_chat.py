@@ -13,6 +13,7 @@ import pytest
 from pi_sidecar_client import AIResult
 
 from rootcoz import storage
+from rootcoz.cli.main import CHAT_WAIT_SECONDS
 from rootcoz.engine.chat import (
     build_admin_custom_tools,
     build_admin_system_prompt,
@@ -24,6 +25,7 @@ from rootcoz.engine.chat import (
 )
 from rootcoz.models import ChatInitRequest
 from rootcoz.sources.jenkins_source import _extract_build_params
+from tests.conftest import AdvancingClock
 
 _TEST_ADMIN_KEY = "test-admin-key-16chars"  # pragma: allowlist secret
 _TEST_ENCRYPTION_KEY = "test-encryption-key-for-hmac"  # pragma: allowlist secret
@@ -3239,21 +3241,116 @@ async def _seed_chat_session(job_id: str, username: str = "alice") -> None:
     )
 
 
+#: The CLI's own patience for this same signal (``src/rootcoz/cli/main.py``), so the
+#: test waits exactly as long as a real client does. The bound exists to end a
+#: runaway wait; it never decides that a preparation was too slow.
+_CHAT_PREP_WAIT_SECONDS = CHAT_WAIT_SECONDS
+_CHAT_PREP_POLL_SECONDS = 0.01
+
+
 def _await_preparation(
-    test_client, path: str, timeout: float = 10, headers: dict[str, str] | None = None
+    test_client,
+    path: str,
+    timeout: float = _CHAT_PREP_WAIT_SECONDS,
+    headers: dict[str, str] | None = None,
 ) -> None:
     """Poll history until the background preparation has ended.
 
     This file drives Start through the sync ``TestClient``, so it cannot await a
     task created on the portal's loop: the server's own state is the signal. The
     phase is per user, so the caller's own headers decide whose preparation ends.
+
+    Elapsed time comes from ``monotonic``, like the deadlines in ``main.py``, and the
+    bound is the CLI's own patience, not a number picked here. The bound is checked on
+    every poll, whatever the phase label does. When it expires, the message names the
+    last phase the server published and how long it has been there -- a reading, not a
+    verdict.
     """
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if test_client.get(path, headers=headers).json()["preparing"] is None:
+    started = time.monotonic()
+    seen: dict[str, float] = {}  # distinct labels in order, with the moment first seen
+    last = ""
+    last_at = started
+    while True:
+        observed = test_client.get(path, headers=headers).json()["preparing"]
+        if observed is None:
             return
-        time.sleep(0.01)
-    raise AssertionError(f"the chat preparation for {path} never ended")
+        phase = observed.get("phase") or "?"
+        label = f"{phase} ({observed['detail']})" if observed.get("detail") else phase
+        now = time.monotonic()
+        if label != last:
+            last, last_at = label, now
+        seen.setdefault(label, now)
+        if now - started >= timeout:
+            raise AssertionError(
+                f"the chat preparation for {path} did not finish within "
+                f"{timeout:.0f} s (last phase: {label}, unchanged for "
+                f"{now - last_at:.0f} s); phases seen: {' -> '.join(seen)}"
+            )
+        time.sleep(_CHAT_PREP_POLL_SECONDS)
+
+
+class _ScriptedChat:
+    """A history client replaying scripted ``preparing`` states, counting calls.
+
+    ``states`` is a list (read in order, ``None`` past the end) or a callable taking
+    the call number. A poller that never gives up fails the test instead of hanging it.
+    """
+
+    def __init__(self, states) -> None:
+        self._states = states
+        self.calls = 0
+
+    def get(self, path: str, headers: dict[str, str] | None = None) -> SimpleNamespace:
+        self.calls += 1
+        if self.calls > 500:
+            raise AssertionError("the preparation helper never stopped polling")
+        if callable(self._states):
+            state = self._states(self.calls)
+        else:
+            state = (
+                self._states[self.calls - 1]
+                if self.calls <= len(self._states)
+                else None
+            )
+        return SimpleNamespace(json=lambda: {"preparing": state})
+
+
+def test_a_slow_preparation_is_awaited(monkeypatch) -> None:
+    """A label held far past the old 10 s passes: the bound is the CLI's own patience.
+
+    One poll = one ``sleep(_CHAT_PREP_POLL_SECONDS)`` = 10 fake seconds, so the single
+    label dwells 400 s and the default bound is what lets it through.
+    """
+    monkeypatch.setattr("tests.test_chat.time", AdvancingClock(step=10.0))
+    client = _ScriptedChat([{"phase": "cloning", "detail": "tests-repo"}] * 40 + [None])
+
+    _await_preparation(client, "/api/chat/job")
+
+    assert client.calls == 41  # 40 label polls (400 s) plus the clearing one
+
+
+def test_a_preparation_that_never_ends_reports_the_last_phase_and_elapsed(
+    monkeypatch,
+) -> None:
+    """A preparation that never ends stops at the bound and reports what it saw.
+
+    The label changes on every poll, so the bound firing proves it is checked
+    unconditionally rather than only on a repeating label.
+    """
+    monkeypatch.setattr("tests.test_chat.time", AdvancingClock(step=10.0))
+    client = _ScriptedChat(
+        lambda call: {"phase": "cloning", "detail": f"repo-{'a' if call % 2 else 'b'}"}
+    )
+
+    with pytest.raises(AssertionError) as excinfo:
+        _await_preparation(client, "/api/chat/job")
+
+    message = str(excinfo.value)
+    assert "did not finish within 600 s" in message
+    assert "last phase: cloning (repo-a)" in message
+    assert "phases seen: cloning (repo-a) -> cloning (repo-b)" in message
+    assert "never ended" not in message
+    assert client.calls == 61  # t = 600 s on the 61st poll
 
 
 async def _start_chat(

@@ -417,18 +417,34 @@ def sample_analysis_result(
     )
 
 
+class AdvancingClock:
+    """Stand-in for a module's ``time``: sleeping advances a fake clock.
+
+    Patch the module's own ``time`` attribute, never the real module's methods:
+    ``monkeypatch.setattr(<module>, "time", AdvancingClock())``. ``step`` makes one
+    sleep advance the clock by a fixed amount, for scripted pollers.
+    """
+
+    def __init__(self, step: float | None = None) -> None:
+        self.now = 0.0
+        self.step = step
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.now += self.step if self.step is not None else seconds
+
+
 @pytest.fixture
 def fake_clock() -> tuple[Callable[[], float], Callable[[float], Awaitable[None]]]:
     """Provide a controllable monotonic clock and async sleep for timer tests."""
-    clock = [0.0]
-
-    def monotonic() -> float:
-        return clock[0]
+    clock = AdvancingClock()
 
     async def sleep(seconds: float) -> None:
-        clock[0] += seconds
+        clock.sleep(seconds)
 
-    return monotonic, sleep
+    return clock.monotonic, sleep
 
 
 @pytest.fixture
