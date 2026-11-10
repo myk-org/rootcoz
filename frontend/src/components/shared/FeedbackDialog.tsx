@@ -3,9 +3,9 @@ import { api } from '@/lib/api'
 import { createIssueFailureMessage } from '@/lib/issueCreateError'
 import { getRecentFailedCalls } from '@/lib/api'
 import { getRecentErrors } from '@/lib/errorCapture'
-import { getGithubToken } from '@/lib/cookies'
 import { IssueCreateError } from '@/components/shared/IssueCreateError'
 import { useSubmitGuard } from '@/lib/useSubmitGuard'
+import { useUserTokenPresence } from '@/lib/useUserTokens'
 import {
   Dialog,
   DialogContent,
@@ -57,9 +57,14 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
   const [previewLabels, setPreviewLabels] = useState<string[]>([])
   // Server-RESOLVED pair for attribution — never the values this dialog sent.
   const [previewAi, setPreviewAi] = useState({ provider: '', model: '', generated: false })
-  // getGithubToken() reads from auth context loaded via /api/user/tokens on login,
-  // which mirrors the backend's storage.get_user_tokens() used in the create endpoint.
-  const hasGithubToken = !!getGithubToken()
+  // The account row is the only credential source, so ask it when the dialog opens
+  // — the same row the server reads when it files the issue.
+  const tokenPresence = useUserTokenPresence(open)
+  const hasGithubToken = tokenPresence.github
+  // Only a read that ANSWERED "no token" is a missing credential: while it is in
+  // flight the row is unknown, so no false warning and no blocked Create — the
+  // create call's own refusal names the fix.
+  const tokenMissing = tokenPresence.loaded && !hasGithubToken
 
   // Track dialog open/close to guard async setState
   useEffect(() => {
@@ -361,7 +366,7 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
           </div>
         )}
 
-        {phase === 'preview' && !hasGithubToken && (
+        {phase === 'preview' && tokenMissing && (
           <TokenRequiredBanner provider="GitHub" action="submit feedback" />
         )}
 
@@ -378,7 +383,7 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
               <Button variant="outline" onClick={() => handleClose(false)}>Cancel</Button>
               <Button
                 onClick={handleCreate}
-                disabled={!previewTitle.trim() || !previewBody.trim() || !hasGithubToken}
+                disabled={!previewTitle.trim() || !previewBody.trim() || tokenMissing}
               >{createError ? 'Retry' : 'Create Issue'}</Button>
             </div>
           )}

@@ -2,9 +2,98 @@
 
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from pi_sidecar_client import AIResult
 
-from rootcoz.issue_matching import filter_issue_matches_with_ai
+from rootcoz.issue_matching import (
+    collect_product_bug_reports,
+    filter_issue_matches_with_ai,
+    tracker_search,
+)
+from rootcoz.models import (
+    AnalysisDetail,
+    FailureAnalysis,
+    ProductBugReport,
+)
+
+
+@pytest.fixture
+def product_bug_failure() -> FailureAnalysis:
+    """A PRODUCT BUG failure carrying a bug report."""
+    return FailureAnalysis(
+        test_name="test_login",
+        error="HTTP 500",
+        analysis=AnalysisDetail(
+            classification="PRODUCT BUG",
+            details="Auth service broken",
+            product_bug_report=ProductBugReport(title="Login fails"),
+        ),
+    )
+
+
+@pytest.fixture
+def code_issue_failure() -> FailureAnalysis:
+    """A CODE ISSUE failure with no bug report."""
+    return FailureAnalysis(
+        test_name="test_config",
+        error="ImportError",
+        analysis=AnalysisDetail(classification="CODE ISSUE", details="Missing import"),
+    )
+
+
+class TestCollectProductBugReports:
+    """Tests for collect_product_bug_reports (shared by both trackers)."""
+
+    def test_collects_product_bugs(self, product_bug_failure) -> None:
+        reports = collect_product_bug_reports([product_bug_failure])
+        assert len(reports) == 1
+        assert reports[0].title == "Login fails"
+
+    def test_skips_code_issues(self, code_issue_failure) -> None:
+        reports = collect_product_bug_reports([code_issue_failure])
+        assert len(reports) == 0
+
+    def test_mixed_failures(self, product_bug_failure, code_issue_failure) -> None:
+        reports = collect_product_bug_reports([product_bug_failure, code_issue_failure])
+        assert len(reports) == 1
+
+    def test_empty_list(self) -> None:
+        reports = collect_product_bug_reports([])
+        assert len(reports) == 0
+
+
+class TestTrackerSearchBuilder:
+    """Tests for the single TrackerSearch builder (D6)."""
+
+    def test_defaults_are_a_refusal_with_no_scope(self) -> None:
+        record = tracker_search(reason="because")
+        assert record == {
+            "searched": False,
+            "reason": "because",
+            "scope": [],
+            "keyword_sets": 0,
+            "candidates": 0,
+            "matches": 0,
+        }
+
+    def test_carries_every_documented_key(self) -> None:
+        record = tracker_search(
+            searched=True,
+            scope=["https://github.com/org/repo"],
+            keyword_sets=2,
+            candidates=3,
+            matches=1,
+        )
+        assert set(record) == {
+            "searched",
+            "reason",
+            "scope",
+            "keyword_sets",
+            "candidates",
+            "matches",
+        }
+        assert record["searched"] is True
+        assert record["reason"] == ""
 
 
 class TestFilterIssueMatchesWithAi:
@@ -69,8 +158,8 @@ class TestFilterIssueMatchesWithAi:
         )
         assert results == []
 
-    async def test_ai_failure_returns_empty(self) -> None:
-        """Returns empty list when AI call fails."""
+    async def test_ai_failure_returns_none(self) -> None:
+        """Returns None when the AI call fails, so "could not judge" is visible."""
         candidates = [
             {"key": "X-1", "summary": "Bug", "description": "d", "status": "Open"}
         ]
@@ -97,10 +186,10 @@ class TestFilterIssueMatchesWithAi:
                 job_id="job-1",
             )
 
-        assert results == []
+        assert results is None
 
-    async def test_unparseable_response_returns_empty(self) -> None:
-        """Returns empty list when AI response can't be parsed."""
+    async def test_unparseable_response_returns_none(self) -> None:
+        """Returns None when the AI response can't be parsed."""
         candidates = [
             {"key": "X-1", "summary": "Bug", "description": "d", "status": "Open"}
         ]
@@ -126,7 +215,7 @@ class TestFilterIssueMatchesWithAi:
                 ai_model="model",
             )
 
-        assert results == []
+        assert results is None
 
     async def test_handles_markdown_wrapped_json(self) -> None:
         """Extracts JSON from markdown code blocks."""

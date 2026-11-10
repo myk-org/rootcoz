@@ -30,6 +30,7 @@ const phaseLabels: Record<string, string> = {
   analyzing_child_jobs: 'Analyzing child job failures...',
   analyzing_failures: 'Analyzing test failures...',
   enriching_jira: 'Searching Jira for matching bugs...',
+  enriching_github_search: 'Searching GitHub for matching issues...',
   saving: 'Saving results...',
 }
 

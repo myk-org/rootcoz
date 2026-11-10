@@ -796,6 +796,15 @@ class TestParseGithubRepoUrl:
         with pytest.raises(ValueError, match="Cannot parse"):
             parse_github_repo_url("not-a-url")
 
+    @pytest.mark.parametrize("host", ["github.com", "GitHub.com", "GITHUB.COM"])
+    def test_host_case_does_not_hide_the_repository(self, host):
+        """A mixed-case host is still GitHub, and the path keeps its case."""
+        from rootcoz.bug_creation import parse_github_repo_url
+
+        owner, repo = parse_github_repo_url(f"https://{host}/MyOrg/MyRepo.git")
+        assert owner == "MyOrg"
+        assert repo == "MyRepo"
+
 
 class TestBuildFailbackContent:
     def test_github_fallback_with_product_bug(self, product_bug_failure):

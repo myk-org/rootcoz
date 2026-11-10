@@ -38,6 +38,10 @@ _FAKE_GITHUB_CLI_OVERRIDE = "ghp_cli_override"  # pragma: allowlist secret
 _FAKE_JIRA_CLI_TOKEN = "jira-tok"
 _FAKE_GITHUB_TEST_TOKEN = "ghp_test"
 
+#: The tracker-credential keys no CLI call may send: the account token saved in
+#: Profile Settings is the server's to read.
+_CREDENTIAL_KWARGS = ("github_token", "jira_token", "jira_email", "jira_sa_token")
+
 
 @pytest.fixture
 def mock_client():
@@ -155,7 +159,22 @@ class TestHealthCommand:
         mock_client.version.return_value = {"version": "4.5.0"}
         result = runner.invoke(app, ["version"])
         assert result.exit_code == 0
-        assert "4.5.0" in result.output
+        assert result.output.strip() == "RootCoz v4.5.0"
+
+    def test_version_prints_build_label(self, mock_client):
+        """#520: the CLI names the same build the sidebar footer shows."""
+        mock_client.version.return_value = {
+            "version": "4.5.0",
+            "build": {
+                "commit": "d6a1f3c",
+                "ref": "latest",
+                "label": "latest@d6a1f3c",
+            },
+        }
+        result = runner.invoke(app, ["version"])
+        assert result.exit_code == 0
+        # The whole footer line, not just the suffix: #520 asks for the same line.
+        assert result.output.strip() == "RootCoz v4.5.0 · latest@d6a1f3c"
 
     def test_version_json(self, mock_client):
         mock_client.version.return_value = {"version": "4.5.0"}
@@ -2467,7 +2486,8 @@ class TestPreviewIssueCommand:
         assert result.exit_code == 0
         assert "Similar issues (1)" in result.output
 
-    def test_preview_with_user_tokens(self, mock_client):
+    def test_preview_github_sends_the_destination_choices(self, mock_client):
+        """The command sends the repo choice and no credential."""
         mock_client.preview_github_issue.return_value = {
             "title": "Fix: login handler",
             "body": "## Details...",
@@ -2482,21 +2502,18 @@ class TestPreviewIssueCommand:
                 "tests.TestA.test_one",
                 "--type",
                 "github",
-                "--github-token",
-                _FAKE_GITHUB_CLI_TOKEN,
-                "--jira-token",
-                _FAKE_JIRA_CLI_TOKEN,
-                "--jira-email",
-                "user@example.com",
+                "--github-repo-url",
+                "https://github.com/org/repo",
             ],
         )
         assert result.exit_code == 0
         kwargs = mock_client.preview_github_issue.call_args[1]
-        assert kwargs["github_token"] == _FAKE_GITHUB_CLI_TOKEN
-        assert "jira_token" not in kwargs
-        assert "jira_email" not in kwargs
+        assert kwargs["github_repo_url"] == "https://github.com/org/repo"
+        for absent in _CREDENTIAL_KWARGS:
+            assert absent not in kwargs
 
-    def test_preview_jira_with_user_tokens(self, mock_client):
+    def test_preview_jira_sends_the_destination_choices(self, mock_client):
+        """The command sends the Jira choices and no credential."""
         mock_client.preview_jira_bug.return_value = {
             "title": "DNS timeout",
             "body": "h2. Summary...",
@@ -2511,19 +2528,18 @@ class TestPreviewIssueCommand:
                 "tests.TestA.test_one",
                 "--type",
                 "jira",
-                "--github-token",
-                _FAKE_GITHUB_CLI_TOKEN,
-                "--jira-token",
-                _FAKE_JIRA_CLI_TOKEN,
-                "--jira-email",
-                "user@example.com",
+                "--jira-project-key",
+                "PROJ",
+                "--jira-security-level",
+                "Internal",
             ],
         )
         assert result.exit_code == 0
         kwargs = mock_client.preview_jira_bug.call_args[1]
-        assert "github_token" not in kwargs
-        assert kwargs["jira_token"] == _FAKE_JIRA_CLI_TOKEN
-        assert kwargs["jira_email"] == "user@example.com"
+        assert kwargs["jira_project_key"] == "PROJ"
+        assert kwargs["jira_security_level"] == "Internal"
+        for absent in _CREDENTIAL_KWARGS:
+            assert absent not in kwargs
 
     def test_preview_with_issue_prompt(self, mock_client):
         mock_client.preview_github_issue.return_value = {
@@ -2668,7 +2684,8 @@ class TestCreateIssueCommand:
         )
         assert result.exit_code == 1
 
-    def test_create_with_user_tokens(self, mock_client):
+    def test_create_github_sends_the_destination_choices(self, mock_client):
+        """The command sends the repo choice and no credential."""
         mock_client.create_github_issue.return_value = {
             "url": "https://github.com/org/repo/issues/99",
             "key": "",
@@ -2688,21 +2705,18 @@ class TestCreateIssueCommand:
                 "Bug fix",
                 "--body",
                 "Details...",
-                "--github-token",
-                _FAKE_GITHUB_CLI_TOKEN,
-                "--jira-token",
-                _FAKE_JIRA_CLI_TOKEN,
-                "--jira-email",
-                "user@example.com",
+                "--github-repo-url",
+                "https://github.com/org/repo",
             ],
         )
         assert result.exit_code == 0
         kwargs = mock_client.create_github_issue.call_args[1]
-        assert kwargs["github_token"] == _FAKE_GITHUB_CLI_TOKEN
-        assert "jira_token" not in kwargs
-        assert "jira_email" not in kwargs
+        assert kwargs["github_repo_url"] == "https://github.com/org/repo"
+        for absent in _CREDENTIAL_KWARGS:
+            assert absent not in kwargs
 
-    def test_create_jira_with_user_tokens(self, mock_client):
+    def test_create_jira_sends_the_destination_choices(self, mock_client):
+        """The command sends the Jira choices and no credential."""
         mock_client.create_jira_bug.return_value = {
             "url": "https://jira.example.com/browse/PROJ-456",
             "key": "PROJ-456",
@@ -2722,19 +2736,18 @@ class TestCreateIssueCommand:
                 "DNS timeout",
                 "--body",
                 "Description...",
-                "--github-token",
-                _FAKE_GITHUB_CLI_TOKEN,
-                "--jira-token",
-                _FAKE_JIRA_CLI_TOKEN,
-                "--jira-email",
-                "user@example.com",
+                "--jira-project-key",
+                "PROJ",
+                "--jira-issue-type",
+                "Task",
             ],
         )
         assert result.exit_code == 0
         kwargs = mock_client.create_jira_bug.call_args[1]
-        assert "github_token" not in kwargs
-        assert kwargs["jira_token"] == _FAKE_JIRA_CLI_TOKEN
-        assert kwargs["jira_email"] == "user@example.com"
+        assert kwargs["jira_project_key"] == "PROJ"
+        assert kwargs["jira_issue_type"] == "Task"
+        for absent in _CREDENTIAL_KWARGS:
+            assert absent not in kwargs
 
 
 class TestCreateChatIssueCommand:
@@ -3126,9 +3139,9 @@ class TestAnalyzeConfigDefaults:
         ai_model="2.5-pro",
         ai_call_timeout=20,
         max_concurrent_ai_calls=5,
-        # jira_email stays a valid config field (per-user fallback for bug
-        # creation) but must NOT be forwarded to the analyze payload.
-        jira_email="cfg@example.com",
+        # jira_project_key is a destination choice and stays a config field;
+        # a tracker credential never is one (the account token is read by the
+        # server), and no analyze payload carries either.
         jira_project_key="CFG",
         jira_max_results=40,
         enable_jira=True,
@@ -4397,14 +4410,33 @@ class TestJiraProjectsCommand:
         assert result.exit_code == 0
         assert "PROJ" in result.output
 
-    def test_jira_projects_sa_token_flag(self, mock_client):
-        mock_client.jira_projects.return_value = []
+    def test_credential_flags_are_gone(self, mock_client):
+        """A removed credential flag fails loudly instead of being ignored."""
+        for flag in ("--github-token", "--jira-token", "--jira-email"):
+            result = runner.invoke(
+                app,
+                [
+                    "create-issue",
+                    "job-1",
+                    "--test",
+                    "t",
+                    "--type",
+                    "github",
+                    "--title",
+                    "T",
+                    "--body",
+                    "B",
+                    flag,
+                    "x",
+                ],
+            )
+            assert result.exit_code == 2, (flag, result.output)
+            assert "no such option" in result.output.lower()
         result = runner.invoke(
             app, ["jira-projects", "--jira-sa-token", "ATST-cli-token"]
         )
-        assert result.exit_code == 0
-        kwargs = mock_client.jira_projects.call_args[1]
-        assert kwargs["jira_sa_token"] == "ATST-cli-token"
+        assert result.exit_code == 2
+        assert "no such option" in result.output.lower()
 
     def test_jira_projects_json(self, mock_client):
         mock_client.jira_projects.return_value = [

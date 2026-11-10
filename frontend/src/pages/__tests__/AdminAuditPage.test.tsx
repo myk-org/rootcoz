@@ -6,7 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { AdminAuditPage } from '@/pages/AdminAuditPage'
 import { presetSince } from '@/lib/auditFilters'
 import { ApiError } from '@/lib/api'
-import { clearTokens, clearUsername, getGithubToken, getUsername, setGithubToken, setUsername } from '@/lib/cookies'
+import { clearTokens, clearUsername, getUsername, setUsername } from '@/lib/cookies'
 import { formatTimestamp } from '@/lib/utils'
 import { MockEventSource } from '@/test/MockEventSource'
 
@@ -729,7 +729,6 @@ describe('AdminAuditPage', () => {
   it('still clears the session and reaches the login form when logout rejects', async () => {
     logout.mockRejectedValueOnce(new Error('session already gone'))
     setUsername('alice')
-    setGithubToken('gh-token')
     apiGet.mockImplementation((path: string) =>
       path.startsWith('/api/admin/audit/actions')
         ? Promise.resolve({ actions: [] })
@@ -742,7 +741,6 @@ describe('AdminAuditPage', () => {
     await waitFor(() => expect(router.state.location.pathname).toBe('/login'))
     expect(logout).toHaveBeenCalledTimes(1)
     expect(getUsername()).toBe('')
-    expect(getGithubToken()).toBe('')
   })
 
   it('shows the plain error and no sign-in action for a 500', async () => {

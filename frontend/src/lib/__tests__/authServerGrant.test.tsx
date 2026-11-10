@@ -23,18 +23,17 @@ function Grant() {
 afterEach(() => { get.mockReset(); post.mockReset(); clearUsername(); vi.restoreAllMocks() })
 
 it('treats admins as granted despite a false stored flag, but not ungranted non-admins', async () => {
-  get.mockImplementation(async (path: string) => path === '/api/auth/me'
-    ? { username: 'admin2', role: 'admin', is_admin: true, can_view_reports: true, can_use_server_providers: false }
-    : { github_token: '', jira_email: '', jira_token: '' })
+  get.mockImplementation(async () => ({
+    username: 'admin2', role: 'admin', is_admin: true, can_view_reports: true, can_use_server_providers: false,
+  }))
   const { unmount } = render(<AuthProvider><Grant /></AuthProvider>)
   await waitFor(() => expect(screen.getByText('Allowed')).toBeInTheDocument())
   unmount()
-  get.mockImplementation(async (path: string) => path === '/api/auth/me'
-    ? { username: 'alice', role: 'reviewer', is_admin: false, can_view_reports: false, can_use_server_providers: false }
-    : { github_token: '', jira_email: '', jira_token: '' })
+  get.mockImplementation(async () => ({
+    username: 'alice', role: 'reviewer', is_admin: false, can_view_reports: false, can_use_server_providers: false,
+  }))
   render(<AuthProvider><Grant /></AuthProvider>)
-  await waitFor(() => expect(get).toHaveBeenCalledWith('/api/user/tokens'))
-  expect(screen.getByText('Denied')).toBeInTheDocument()
+  await waitFor(() => expect(screen.getByText('Denied')).toBeInTheDocument())
 })
 
 it.each(['before', 'after', 'without focus'] as const)('shows a protected page after login despite an initial /me 401 settling %s login', async (order) => {

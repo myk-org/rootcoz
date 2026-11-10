@@ -69,7 +69,7 @@ from pydantic import BaseModel, Field, SecretStr, ValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
-from rootcoz import get_child_logger, server_status, storage
+from rootcoz import get_child_logger, issue_matching, server_status, storage
 from rootcoz import transcripts as sidecar_transcripts
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
@@ -124,6 +124,7 @@ from rootcoz.config import (
     duplicate_additional_repo_names,
     get_settings,
     jira_method_missing_fields,
+    jira_unavailable_reason,
     normalize_jira_auth_mode,
     parse_additional_repos,
     parse_peer_configs,
@@ -180,8 +181,14 @@ from rootcoz.feedback import (
     generate_feedback_preview,
     scrub_sensitive_data,
 )
-from rootcoz.github_issues import enrich_with_tests_repo_matches
+from rootcoz.github_issues import (
+    duplicate_search_blocker,
+    enrich_with_github_duplicate_matches,
+    enrich_with_tests_repo_matches,
+    run_repo_urls,
+)
 from rootcoz.health_monitor import run_health_monitor
+from rootcoz.issue_matching import TrackerSearch
 from rootcoz.jenkins import JenkinsClient
 from rootcoz.jira import (
     JiraClient,
@@ -5152,7 +5159,10 @@ async def _enrich_result_with_jira(
     ai_provider: str = "",
     ai_model: str = "",
     job_id: str = "",
-) -> None:
+    *,
+    requested_enable_jira: bool | None = None,
+    deployment: Settings,
+) -> TrackerSearch:
     """Enrich PRODUCT BUG failures with Jira matches.
 
     Collects all FailureAnalysis objects from the provided list,
@@ -5161,13 +5171,39 @@ async def _enrich_result_with_jira(
 
     Args:
         failures: Mixed list of FailureAnalysis and ChildJobAnalysis objects.
-        settings: Application settings with Jira configuration.
+        settings: The request's effective settings (may carry per-request
+            overrides such as ``jira_project_key``).
         ai_provider: AI provider for Jira relevance filtering.
         ai_model: AI model for Jira relevance filtering.
         job_id: Job identifier for token usage tracking.
+        requested_enable_jira: The request's own ``enable_jira`` flag, ``None``
+            when the request did not mention it.
+        deployment: The deployment settings, used only to word the reason a
+            search did not run.
+
+    Returns:
+        The per-tracker record to stamp on the result; never raises.
     """
-    if not settings.jira_enabled:
-        return
+    if not (settings.jira_enabled and requested_enable_jira is not False):
+        # Word the refusal truthfully, in this order: the request refused (on a
+        # deployment that is fine), the deployment is unconfigured, or the run's
+        # own settings lack a field the request did not supply.
+        if requested_enable_jira is False and not jira_unavailable_reason(deployment):
+            reason = (
+                "Jira search is disabled by this analysis request (enable_jira=false)"
+            )
+        elif not deployment.jira_enabled:
+            reason = jira_unavailable_reason(deployment) or "Jira search is disabled"
+        else:
+            reason = (
+                jira_unavailable_reason(settings)
+                or "Jira search is disabled by this analysis request"
+            )
+        logger.info("Jira search not run for job=%s: %s", job_id, reason)
+        return issue_matching.tracker_search(
+            reason=reason,
+            scope=[settings.jira_project_key] if settings.jira_project_key else [],
+        )
 
     all_failures = _collect_all_failures(failures)
     if not any(
@@ -5175,19 +5211,93 @@ async def _enrich_result_with_jira(
         and failure.analysis.product_bug_report.jira_search_keywords
         for failure in all_failures
     ):
-        logger.debug(
-            "Skipping Jira enrichment without product bug keywords for job=%s", job_id
+        reason = "no PRODUCT BUG failure carried search keywords"
+        logger.info("Jira search not run for job=%s: %s", job_id, reason)
+        return issue_matching.tracker_search(
+            reason=reason,
+            scope=[settings.jira_project_key] if settings.jira_project_key else [],
         )
-        return
     await safe_update_progress(job_id, "enriching_jira")
     logger.info("Enriching failures with Jira for job=%s", job_id)
-    await enrich_with_jira_matches(
+    return await enrich_with_jira_matches(
         all_failures,
         settings,
         ai_provider,
         ai_model,
         job_id=job_id,
     )
+
+
+async def _enrich_result_with_github_duplicates(
+    failures: Sequence[FailureAnalysis | ChildJobAnalysis],
+    settings: Settings,
+    deployment: Settings,
+    ai_provider: str = "",
+    ai_model: str = "",
+    job_id: str = "",
+    tests_repo_url: str = "",
+    additional_repos: Sequence[Any] = (),
+) -> TrackerSearch:
+    """Enrich PRODUCT BUG failures with already-filed GitHub issues.
+
+    Searches the run's own repositories — the existing-issue question, kept
+    distinct from the tests-repo code-fix search. Uses the deployment
+    credential only: no user or session credential is read.
+
+    Args:
+        failures: Mixed list of FailureAnalysis and ChildJobAnalysis objects.
+        settings: Settings the AI call is configured from.
+        deployment: Deployment settings (the token and the on/off gate).
+        ai_provider: AI provider for relevance filtering.
+        ai_model: AI model for relevance filtering.
+        job_id: Job identifier for token usage tracking.
+        tests_repo_url: The run's effective tests repo URL.
+        additional_repos: The run's additional repositories.
+
+    Returns:
+        The per-tracker record to stamp on the result; never raises.
+    """
+    repo_urls, skipped_repos = run_repo_urls(tests_repo_url, additional_repos)
+    github_token = (
+        deployment.github_token.get_secret_value() if deployment.github_token else ""
+    )
+    blocker = duplicate_search_blocker(
+        deployment, github_token, repo_urls, skipped_repos=skipped_repos
+    )
+    if blocker:
+        logger.info("GitHub duplicate search not run for job=%s: %s", job_id, blocker)
+        return issue_matching.tracker_search(reason=blocker, scope=repo_urls)
+
+    all_failures = _collect_all_failures(failures)
+    if not any(
+        isinstance(failure.analysis.product_bug_report, ProductBugReport)
+        and failure.analysis.product_bug_report.jira_search_keywords
+        for failure in all_failures
+    ):
+        reason = "no PRODUCT BUG failure carried search keywords"
+        logger.info("GitHub duplicate search not run for job=%s: %s", job_id, reason)
+        return issue_matching.tracker_search(reason=reason, scope=repo_urls)
+
+    await safe_update_progress(job_id, "enriching_github_search")
+    logger.info("Enriching failures with GitHub duplicate matches for job=%s", job_id)
+    return await enrich_with_github_duplicate_matches(
+        all_failures,
+        settings,
+        github_token,
+        ai_provider,
+        ai_model,
+        job_id=job_id,
+        repo_urls=repo_urls,
+    )
+
+
+def _stamp_tracker_search(
+    data: dict[str, Any],
+    jira_record: TrackerSearch,
+    github_record: TrackerSearch,
+) -> None:
+    """Attach the per-tracker search record to the stored result."""
+    data["tracker_search"] = {"jira": jira_record, "github": github_record}
 
 
 async def _enrich_result_with_tests_repo_matches(
@@ -6878,14 +6988,16 @@ async def _process_ci_source_analysis(
                     )
 
                 # Enrich child failures before saving
-                if _resolve_enable_jira(body, merged) and merged.jira_enabled:
-                    await _enrich_result_with_jira(
-                        child_job_analyses,
-                        merged,
-                        ai_provider,
-                        ai_model,
-                        job_id=job_id,
-                    )
+                deployment = get_settings()
+                jira_record = await _enrich_result_with_jira(
+                    child_job_analyses,
+                    merged,
+                    ai_provider,
+                    ai_model,
+                    job_id=job_id,
+                    requested_enable_jira=body.enable_jira,
+                    deployment=deployment,
+                )
                 if merged.tests_repo_url or tests_repo_url:
                     await _enrich_result_with_tests_repo_matches(
                         child_job_analyses,
@@ -6895,6 +7007,16 @@ async def _process_ci_source_analysis(
                         job_id=job_id,
                         tests_repo_url=tests_repo_url,
                     )
+                github_record = await _enrich_result_with_github_duplicates(
+                    child_job_analyses,
+                    merged,
+                    deployment,
+                    ai_provider,
+                    ai_model,
+                    job_id=job_id,
+                    tests_repo_url=resolve_tests_repo_url(body, merged),
+                    additional_repos=additional_repos_list,
+                )
 
                 analysis_result = FailureAnalysisResult(
                     job_id=job_id,
@@ -6912,6 +7034,7 @@ async def _process_ci_source_analysis(
                 result_data["failed_analysis_groups"] = _count_failed_child_groups(
                     child_job_analyses
                 )
+                _stamp_tracker_search(result_data, jira_record, github_record)
                 if result_data["failed_analysis_groups"]:
                     logger.warning(
                         "Analysis job %s: %d child group(s) failed",
@@ -7030,10 +7153,16 @@ async def _process_ci_source_analysis(
         logger.debug(
             f"Enriching with Jira matches (enable_jira={_resolve_enable_jira(body, merged)})"
         )
-        if _resolve_enable_jira(body, merged) and merged.jira_enabled:
-            await _enrich_result_with_jira(
-                enrich_targets, merged, ai_provider, ai_model, job_id=job_id
-            )
+        deployment = get_settings()
+        jira_record = await _enrich_result_with_jira(
+            enrich_targets,
+            merged,
+            ai_provider,
+            ai_model,
+            job_id=job_id,
+            requested_enable_jira=body.enable_jira,
+            deployment=deployment,
+        )
 
         # Enrich with tests repo matches
         logger.debug(
@@ -7048,6 +7177,18 @@ async def _process_ci_source_analysis(
                 job_id=job_id,
                 tests_repo_url=tests_repo_url,
             )
+
+        # Enrich with already-filed GitHub issues over the run's repositories
+        github_record = await _enrich_result_with_github_duplicates(
+            enrich_targets,
+            merged,
+            deployment,
+            ai_provider,
+            ai_model,
+            job_id=job_id,
+            tests_repo_url=resolve_tests_repo_url(body, merged),
+            additional_repos=additional_repos_list,
+        )
 
         # Build enriched XML if applicable (FileSource exposes raw_xml)
         enriched_xml = None
@@ -7083,6 +7224,7 @@ async def _process_ci_source_analysis(
             result_data["child_job_analyses"] = [
                 c.model_dump(mode="json") for c in child_job_analyses
             ]
+        _stamp_tracker_search(result_data, jira_record, github_record)
         _stamp_result_metadata(result_data, source_result)
         logger.info(f"Analysis completed for job_id={job_id}: {summary}")
         await _preserve_request_params(job_id, result_data)
@@ -10089,6 +10231,26 @@ async def get_issue_prompt(
         return {"prompt": ""}
 
 
+async def _read_user_tokens_for_preview(username: str, job_id: str) -> dict[str, str]:
+    """The caller's row for a preview, or an empty row if it cannot be read.
+
+    A preview drafts content and searches duplicates best-effort: a failed read
+    must not abort the draft, and it must never fall back to a server
+    credential — so it reads as an empty row, which skips the duplicate search
+    and leaves the create endpoint's own refusal as the authority.
+    """
+    try:
+        return await storage.get_user_tokens(username)
+    except Exception:
+        logger.warning(
+            "Could not read stored tracker tokens for job_id=%s — "
+            "previewing without duplicate detection",
+            job_id,
+            exc_info=True,
+        )
+        return {}
+
+
 # NOTE: Preview/create bug endpoints intentionally bypass _merge_settings().
 # These are server-level operations (GITHUB_TOKEN, TESTS_REPO_URL, Jira config)
 # that act on behalf of the server, not per-request analysis overrides. The
@@ -10148,10 +10310,12 @@ async def preview_github_issue(
         ai_username.reset(token)
 
     # Duplicate detection (best-effort: failures must not break preview)
-    # Uses only user-provided token — no server token fallback.
-    # If no user token, skip duplicate detection (preview still works).
+    # Uses the caller's stored token — no body token, no server token.
+    # If no stored token, skip duplicate detection (preview still works).
     tests_repo_url = _resolve_github_repo_url(settings)
-    github_token = (body.github_token or "").strip()
+    user_tokens = await _read_user_tokens_for_preview(request.state.username, job_id)
+    github_token = (user_tokens.get("github_token", "") or "").strip()
+    _debug_credential_source("github", bool(github_token))
     similar: list[dict[str, Any]] = []
     if tests_repo_url and github_token:
         try:
@@ -10193,17 +10357,21 @@ async def preview_jira_bug(
         )
     # A legacy (non-ATOA) service-account secret must be rejected, not
     # silently dropped (which would fall back to the server credentials).
-    _require_usable_jira_sa_token(body.jira_token, body.jira_sa_token)
-    # Effective settings first (Finding 9): the user's credential pins the
+    user_tokens = await _read_user_tokens_for_preview(request.state.username, job_id)
+    user_jira_token = (user_tokens.get("jira_token", "") or "").strip()
+    user_jira_sa_token = (user_tokens.get("jira_sa_token", "") or "").strip()
+    _debug_credential_source("jira", bool(user_jira_token or user_jira_sa_token))
+    _require_usable_jira_sa_token(user_jira_token, user_jira_sa_token)
+    # Effective settings first (Finding 9): the caller's credential pins the
     # auth method, so the method-configured check must run against the
-    # EFFECTIVE settings — a user-supplied credential can satisfy a method
+    # EFFECTIVE settings — a stored credential can satisfy a method
     # the server's own secret cannot.
     effective_jira_settings = _build_effective_jira_settings(
         settings,
-        body.jira_token,
-        body.jira_email,
+        user_jira_token,
+        user_tokens.get("jira_email", "") or "",
         body.jira_project_key,
-        user_jira_sa_token=body.jira_sa_token,
+        user_jira_sa_token=user_jira_sa_token,
     )
     _require_jira_method_configured(effective_jira_settings)
     failure, result_data, matched_child = await _load_effective_failure(
@@ -10242,11 +10410,9 @@ async def preview_jira_bug(
         ai_username.reset(token)
 
     # Duplicate detection (best-effort: failures must not break preview)
-    # Uses only user-provided token — no server token fallback.
-    # If no user token, skip duplicate detection (preview still works).
+    # Uses the caller's stored credential — no body token, no server token.
+    # If no stored credential, skip duplicate detection (preview still works).
     similar: list[dict[str, Any]] = []
-    user_jira_token = (body.jira_token or "").strip()
-    user_jira_sa_token = (body.jira_sa_token or "").strip()
     if (
         (user_jira_token or user_jira_sa_token)
         and _has_jira_credentials(effective_jira_settings)
@@ -10284,13 +10450,25 @@ async def preview_jira_bug(
                         )
                     finally:
                         ai_username.reset(token)
-                    # Merge AI score into original candidate data to preserve all fields
-                    candidate_by_key = {c["key"]: c for c in candidates}
-                    similar = [
-                        {**candidate_by_key[m.key], "score": m.score}
-                        for m in matches
-                        if m.key in candidate_by_key
-                    ]
+                    if matches is None:
+                        # The filter could not judge — not the same as judging
+                        # every candidate irrelevant.
+                        logger.warning(
+                            "Jira relevance filter returned no verdict for %d "
+                            "candidate(s) for job_id=%s, returning unfiltered "
+                            "candidates",
+                            len(candidates),
+                            job_id,
+                        )
+                        similar = candidates
+                    else:
+                        # Merge AI score into original candidate data to preserve all fields
+                        candidate_by_key = {c["key"]: c for c in candidates}
+                        similar = [
+                            {**candidate_by_key[m.key], "score": m.score}
+                            for m in matches
+                            if m.key in candidate_by_key
+                        ]
                 except Exception:
                     logger.warning(
                         "AI relevance filtering failed for job_id=%s, "
@@ -10716,6 +10894,15 @@ async def _account_has_profile(username: str) -> bool:
     """Whether this caller has a ``users`` row — false only for the bootstrap
     ``admin``, which has nowhere to save a token."""
     return bool(username) and await storage.get_user_by_username(username) is not None
+
+
+def _debug_credential_source(target: str, present: bool) -> None:
+    """Name where a create/preview credential came from — never its value."""
+    logger.debug(
+        "issuing %s create with the caller's stored token (present=%s)",
+        target,
+        present,
+    )
 
 
 async def _require_user_tracker_credential(username: str, kind: str) -> str:
@@ -11928,8 +12115,9 @@ async def _create_issue_from_text(
     gate, target resolution, the create call with attribution and the refusal
     mapping live here, so the report endpoints and chat cannot drift apart.
 
-    Every credential is the caller's — this function never reads a deployment
-    credential.
+    Every credential is the caller's account token, resolved by the caller and
+    passed in; this function never reads a deployment credential and the request
+    body never carries one.
 
     Args:
         target: Which tracker to write to.
@@ -11956,13 +12144,13 @@ async def _create_issue_from_text(
         if not (github_token or "").strip():
             raise HTTPException(
                 status_code=400,
-                detail=tracker_credential_message(label),
+                detail=await _require_user_tracker_credential(username, label),
             )
     else:
         if not (jira_token or "").strip() and not (jira_sa_token or "").strip():
             raise HTTPException(
                 status_code=400,
-                detail=tracker_credential_message(label),
+                detail=await _require_user_tracker_credential(username, label),
             )
         # A legacy (non-ATOA) service-account secret must be rejected, not
         # silently dropped (which would file the bug under the SERVER's Jira
@@ -12083,13 +12271,16 @@ async def create_github_issue_endpoint(
         f"POST /results/{job_id}/create-github-issue: test_name={body.test_name}"
     )
     username = request.state.username
+    user_tokens = await storage.get_user_tokens(username)
+    github_token = user_tokens.get("github_token", "") or ""
+    _debug_credential_source("github", bool(github_token))
     result = await _create_issue_from_text(
         "github",
         body.title,
         body.body,
         username=username,
         settings=settings,
-        github_token=body.github_token or "",
+        github_token=github_token,
         # Reject an unknown test name before an issue is filed for it.
         pre_check=lambda: _load_effective_failure(
             job_id, body.test_name, body.child_job_name, body.child_build_number
@@ -12132,6 +12323,10 @@ async def create_jira_bug_endpoint(
     logger.debug(f"POST /results/{job_id}/create-jira-bug: test_name={body.test_name}")
 
     username = request.state.username
+    user_tokens = await storage.get_user_tokens(username)
+    jira_token = user_tokens.get("jira_token", "") or ""
+    jira_sa_token = user_tokens.get("jira_sa_token", "") or ""
+    _debug_credential_source("jira", bool(jira_token or jira_sa_token))
     try:
         result = await _create_issue_from_text(
             "jira",
@@ -12139,9 +12334,9 @@ async def create_jira_bug_endpoint(
             body.body,
             username=username,
             settings=settings,
-            jira_token=body.jira_token or "",
-            jira_email=body.jira_email or "",
-            jira_sa_token=body.jira_sa_token or "",
+            jira_token=jira_token,
+            jira_email=user_tokens.get("jira_email", "") or "",
+            jira_sa_token=jira_sa_token,
             jira_project_key=body.jira_project_key,
             jira_security_level=body.jira_security_level,
             jira_issue_type=body.jira_issue_type,
@@ -14817,29 +15012,23 @@ async def get_default_server_settings(
 
 
 class JiraProjectsRequest(BaseModel):
-    """Request body for listing Jira projects with user credentials."""
+    """Request body for listing Jira projects with the caller's stored credentials."""
 
-    jira_token: str = Field(default="", description="User's Jira token")
-    jira_email: str = Field(default="", description="User's Jira email for Cloud auth")
-    jira_sa_token: str = Field(
-        default="",
-        description=("User's Atlassian OAuth 2.0 credential client secret (ATOA)"),
-    )
     query: str = Field(default="", description="Search query to filter projects")
 
 
 def _jira_client_from_body(
     settings: Settings, jira_token: str, jira_email: str, jira_sa_token: str = ""
 ) -> tuple[Settings, str] | None:
-    """Normalize user Jira credentials and return effective settings.
+    """Normalize the caller's stored Jira credentials and return effective settings.
 
-    Returns ``(effective_settings, stripped_token)`` when the user supplied a
+    Returns ``(effective_settings, stripped_token)`` when the caller's row holds a
     non-empty token (regular or service account), or *None* when no usable
     token is present.
 
     Raises:
         HTTPException: 400 when a service-account secret with an
-            unrecognized prefix is supplied — it must be rejected, not
+            unrecognized prefix is stored — it must be rejected, not
             silently dropped in favor of another credential.
     """
     _require_usable_jira_sa_token(jira_token, jira_sa_token)
@@ -14856,15 +15045,20 @@ def _jira_client_from_body(
 @app.post("/api/jira-projects", operation_id="listJiraProjects")
 async def list_jira_projects(
     body: JiraProjectsRequest,
+    request: Request,
     settings: Settings = _SETTINGS_DEP,
 ) -> list[dict[str, Any]]:
-    """List Jira projects accessible to the user.
+    """List Jira projects accessible to the caller.
 
-    Uses the user's Jira token to list projects they can see.
+    Uses the caller's stored Jira credential to list projects they can see.
     Always includes the server's configured project key.
     """
+    user_tokens = await storage.get_user_tokens(request.state.username)
     result = _jira_client_from_body(
-        settings, body.jira_token, body.jira_email, body.jira_sa_token
+        settings,
+        user_tokens.get("jira_token", ""),
+        user_tokens.get("jira_email", ""),
+        user_tokens.get("jira_sa_token", ""),
     )
     # Effective settings first: the user's credential pins the auth method,
     # so the method-URL gate must check the EFFECTIVE method's URL — the
@@ -14898,26 +15092,27 @@ async def list_jira_projects(
 
 
 class JiraSecurityLevelsRequest(BaseModel):
-    jira_token: str = Field(default="", description="User's Jira token")
-    jira_email: str = Field(default="", description="User's Jira email")
-    jira_sa_token: str = Field(
-        default="",
-        description=("User's Atlassian OAuth 2.0 credential client secret (ATOA)"),
-    )
+    """Request body for listing a project's levels with stored credentials."""
+
     project_key: str = Field(description="Jira project key")
 
 
 @app.post("/api/jira-security-levels", operation_id="listJiraSecurityLevels")
 async def list_jira_security_levels(
     body: JiraSecurityLevelsRequest,
+    request: Request,
     settings: Settings = _SETTINGS_DEP,
 ) -> list[dict[str, Any]]:
     """List available security levels for a Jira project."""
     if not body.project_key:
         return []
 
+    user_tokens = await storage.get_user_tokens(request.state.username)
     result = _jira_client_from_body(
-        settings, body.jira_token, body.jira_email, body.jira_sa_token
+        settings,
+        user_tokens.get("jira_token", ""),
+        user_tokens.get("jira_email", ""),
+        user_tokens.get("jira_sa_token", ""),
     )
     if result is None:
         return []
@@ -15579,8 +15774,18 @@ async def health_check() -> dict[str, Any]:
 
 @app.get("/api/version", operation_id="getVersion")
 async def get_version() -> dict[str, Any]:
-    """Return the application version (lightweight, no dependency checks)."""
-    return {"version": _get_app_version()}
+    """Return the application version (lightweight, no dependency checks).
+
+    ``build`` appears only when the image was built with its identity args, so
+    the UI can tell "unknown" from an actual ref and a plain ``version``
+    consumer keeps seeing exactly what it saw before #520.
+    """
+    payload: dict[str, Any] = {"version": _get_app_version()}
+    build = server_status.read_build_info()
+    if build:
+        payload["build"] = build
+    logger.debug("Reported version %s build %s", payload["version"], build)
+    return payload
 
 
 @app.get("/api/health", operation_id="healthCheckDetailed")

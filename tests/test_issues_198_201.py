@@ -137,6 +137,34 @@ class TestResultFieldsHelper:
             }
         }
 
+    def test_tracker_search_is_an_allowed_result_field(self) -> None:
+        """The new per-tracker record is reachable via ?fields= (T25)."""
+        assert "result.tracker_search" in RESULT_FIELD_PATHS
+        data = {
+            "result": {
+                "tracker_search": {
+                    "jira": {
+                        "searched": False,
+                        "reason": "ENABLE_JIRA is false",
+                        "scope": [],
+                        "keyword_sets": 0,
+                        "candidates": 0,
+                        "matches": 0,
+                    },
+                    "github": {
+                        "searched": True,
+                        "reason": "",
+                        "scope": ["https://github.com/org/repo"],
+                        "keyword_sets": 1,
+                        "candidates": 0,
+                        "matches": 0,
+                    },
+                }
+            }
+        }
+        out = filter_result_fields(data, ["result.tracker_search"])
+        assert out["result"]["tracker_search"]["github"]["searched"] is True
+
     def test_classification_alias_from_analysis(self) -> None:
         data = {
             "result": {

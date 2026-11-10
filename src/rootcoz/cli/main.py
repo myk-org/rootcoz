@@ -400,29 +400,6 @@ def _run_client_command(
     return data
 
 
-def _resolve_jira_cli_auth(
-    jira_token: str,
-    jira_email: str,
-    jira_sa_token: str = "",
-) -> tuple[str, str, str]:
-    """Resolve Jira token, email, and service account token from CLI flags with config fallback.
-
-    Args:
-        jira_token: Value from --jira-token flag (may be empty).
-        jira_email: Value from --jira-email flag (may be empty).
-        jira_sa_token: Value from --jira-sa-token flag (may be empty).
-
-    Returns:
-        (jira_token, jira_email, jira_sa_token) with config defaults applied.
-    """
-    cfg = _state.get("server_config")
-    return (
-        jira_token.strip() or ((cfg.jira_token or "").strip() if cfg else ""),
-        jira_email.strip() or ((cfg.jira_email or "").strip() if cfg else ""),
-        jira_sa_token.strip() or ((cfg.jira_sa_token or "").strip() if cfg else ""),
-    )
-
-
 def _resolve_server(
     server: str | None,
     username: str,
@@ -852,7 +829,14 @@ def version(
     if _state.get("json", False):
         print_output(data, columns=[], as_json=True)
     else:
-        typer.echo(data.get("version", "unknown"))
+        # The same line the sidebar footer shows: #520 compares the CLI against the
+        # footer, and the server composes the build suffix once for both.
+        label = (data.get("build") or {}).get("label")
+        typer.echo(
+            "RootCoz v"
+            + data.get("version", "unknown")
+            + (f" · {label}" if label else "")
+        )
 
 
 # -- Results ------------------------------------------------------------------
@@ -2563,31 +2547,16 @@ def capabilities(
 @app.command("jira-projects")
 def jira_projects_cmd(
     query: str = typer.Option("", help="Search query to filter projects."),
-    jira_token: str = typer.Option(
-        "", "--jira-token", help="Jira token (uses config fallback)."
-    ),
-    jira_email: str = typer.Option(
-        "", "--jira-email", help="Jira email (uses config fallback)."
-    ),
-    jira_sa_token: str = typer.Option(
-        "",
-        "--jira-sa-token",
-        help="Atlassian OAuth 2.0 credential client secret (ATOA).",
-    ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
-    """List available Jira projects."""
-    _jira_token, _jira_email, _jira_sa_token = _resolve_jira_cli_auth(
-        jira_token, jira_email, jira_sa_token
-    )
+    """List available Jira projects.
+
+    The tracker credential is the account token saved in Profile Settings; this
+    command sends none.
+    """
     data = _run_client_command(
         json_output,
-        lambda c: c.jira_projects(
-            jira_token=_jira_token,
-            jira_email=_jira_email,
-            query=query,
-            jira_sa_token=_jira_sa_token,
-        ),
+        lambda c: c.jira_projects(query=query),
         emit_output=False,
     )
     if not _state.get("json", False):
@@ -2605,27 +2574,16 @@ def jira_projects_cmd(
 @app.command("jira-security-levels")
 def jira_security_levels_cmd(
     project_key: str = typer.Argument(help="Jira project key."),
-    jira_token: str = typer.Option("", "--jira-token", help="Jira token."),
-    jira_email: str = typer.Option("", "--jira-email", help="Jira email."),
-    jira_sa_token: str = typer.Option(
-        "",
-        "--jira-sa-token",
-        help="Atlassian OAuth 2.0 credential client secret (ATOA).",
-    ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
-    """List security levels for a Jira project."""
-    _jira_token, _jira_email, _jira_sa_token = _resolve_jira_cli_auth(
-        jira_token, jira_email, jira_sa_token
-    )
+    """List security levels for a Jira project.
+
+    The tracker credential is the account token saved in Profile Settings; this
+    command sends none.
+    """
     data = _run_client_command(
         json_output,
-        lambda c: c.jira_security_levels(
-            project_key=project_key,
-            jira_token=_jira_token,
-            jira_email=_jira_email,
-            jira_sa_token=_jira_sa_token,
-        ),
+        lambda c: c.jira_security_levels(project_key=project_key),
         emit_output=False,
     )
     if not _state.get("json", False):
@@ -2836,26 +2794,22 @@ def mentions_mark_all_read_cmd(
 
 
 def _resolve_tracker_tokens(
-    github_token: str,
-    jira_token: str,
-    jira_email: str,
     jira_project_key: str = "",
     github_repo_url: str = "",
     jira_security_level: str = "",
-    jira_sa_token: str = "",
-) -> tuple[str, str, str, str, str, str, str]:
-    """Resolve tracker tokens and related fields with config fallback."""
+) -> tuple[str, str, str]:
+    """Resolve the tracker destination choices with config fallback.
+
+    Only choices are resolved: the credential is the account token saved in
+    Profile Settings, which the server reads itself.
+    """
     cfg = _state.get("server_config")
     return (
-        github_token.strip() or ((cfg.github_token or "").strip() if cfg else ""),
-        jira_token.strip() or ((cfg.jira_token or "").strip() if cfg else ""),
-        jira_email.strip() or ((cfg.jira_email or "").strip() if cfg else ""),
         jira_project_key.strip()
         or ((cfg.jira_project_key or "").strip() if cfg else ""),
         github_repo_url.strip() or ((cfg.github_repo_url or "").strip() if cfg else ""),
         jira_security_level.strip()
         or ((cfg.jira_security_level or "").strip() if cfg else ""),
-        jira_sa_token.strip() or ((cfg.jira_sa_token or "").strip() if cfg else ""),
     )
 
 
@@ -2887,28 +2841,10 @@ def preview_issue(
     ai_model: str = typer.Option(
         "", "--ai-model", help="AI model for content generation."
     ),
-    github_token: str = typer.Option(
-        "",
-        "--github-token",
-        help="GitHub PAT for issue creation (overrides server config).",
-    ),
     github_repo_url: str = typer.Option(
         "",
         "--github-repo-url",
         help="GitHub repository URL (overrides server config).",
-    ),
-    jira_token: str = typer.Option(
-        "",
-        "--jira-token",
-        help="Jira token for bug creation (overrides server config).",
-    ),
-    jira_email: str = typer.Option(
-        "", "--jira-email", help="Jira email for Cloud auth (used with --jira-token)."
-    ),
-    jira_sa_token: str = typer.Option(
-        "",
-        "--jira-sa-token",
-        help="Atlassian OAuth 2.0 credential client secret (ATOA) — takes precedence over --jira-token.",
     ),
     jira_project_key: str = typer.Option(
         "",
@@ -2927,26 +2863,22 @@ def preview_issue(
     ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
-    """Preview generated issue content (GitHub or Jira)."""
+    """Preview generated issue content (GitHub or Jira).
+
+    The tracker credential is the account token saved in Profile Settings; this
+    command sends none.
+    """
     _validate_child_scope(child_job_name, child_build_number)
     _set_json(json_output)
     normalized_type = _validate_issue_type(issue_type)
     (
-        _github_token,
-        _jira_token,
-        _jira_email,
         _jira_project_key,
         _github_repo_url,
         _jira_security_level,
-        _jira_sa_token,
     ) = _resolve_tracker_tokens(
-        github_token,
-        jira_token,
-        jira_email,
         jira_project_key,
         github_repo_url,
         jira_security_level,
-        jira_sa_token,
     )
     try:
         client = _get_client()
@@ -2959,7 +2891,6 @@ def preview_issue(
                 include_links=include_links,
                 ai_provider=ai_provider,
                 ai_model=ai_model,
-                github_token=_github_token,
                 github_repo_url=_github_repo_url,
                 issue_prompt=issue_prompt,
             )
@@ -2972,9 +2903,6 @@ def preview_issue(
                 include_links=include_links,
                 ai_provider=ai_provider,
                 ai_model=ai_model,
-                jira_token=_jira_token,
-                jira_email=_jira_email,
-                jira_sa_token=_jira_sa_token,
                 jira_project_key=_jira_project_key,
                 jira_security_level=_jira_security_level,
                 issue_prompt=issue_prompt,
@@ -3027,28 +2955,10 @@ def create_issue(
     body: str = typer.Option(..., "--body", help="Issue body."),
     child_job_name: str = typer.Option("", "--child-job"),
     child_build_number: int = typer.Option(0, "--child-build"),
-    github_token: str = typer.Option(
-        "",
-        "--github-token",
-        help="GitHub PAT for issue creation (overrides server config).",
-    ),
     github_repo_url: str = typer.Option(
         "",
         "--github-repo-url",
         help="GitHub repository URL (overrides server config).",
-    ),
-    jira_token: str = typer.Option(
-        "",
-        "--jira-token",
-        help="Jira token for bug creation (overrides server config).",
-    ),
-    jira_email: str = typer.Option(
-        "", "--jira-email", help="Jira email for Cloud auth (used with --jira-token)."
-    ),
-    jira_sa_token: str = typer.Option(
-        "",
-        "--jira-sa-token",
-        help="Atlassian OAuth 2.0 credential client secret (ATOA) — takes precedence over --jira-token.",
     ),
     jira_project_key: str = typer.Option(
         "",
@@ -3067,26 +2977,22 @@ def create_issue(
     ),
     json_output: bool = _JSON_OPTION,
 ) -> None:
-    """Create a GitHub issue or Jira bug from a failure analysis."""
+    """Create a GitHub issue or Jira bug from a failure analysis.
+
+    The tracker credential is the account token saved in Profile Settings; this
+    command sends none.
+    """
     _validate_child_scope(child_job_name, child_build_number)
     _set_json(json_output)
     normalized_type = _validate_issue_type(issue_type)
     (
-        _github_token,
-        _jira_token,
-        _jira_email,
         _jira_project_key,
         _github_repo_url,
         _jira_security_level,
-        _jira_sa_token,
     ) = _resolve_tracker_tokens(
-        github_token,
-        jira_token,
-        jira_email,
         jira_project_key,
         github_repo_url,
         jira_security_level,
-        jira_sa_token,
     )
     try:
         client = _get_client()
@@ -3098,7 +3004,6 @@ def create_issue(
                 body=body,
                 child_job_name=child_job_name,
                 child_build_number=child_build_number,
-                github_token=_github_token,
                 github_repo_url=_github_repo_url,
             )
         else:
@@ -3109,9 +3014,6 @@ def create_issue(
                 body=body,
                 child_job_name=child_job_name,
                 child_build_number=child_build_number,
-                jira_token=_jira_token,
-                jira_email=_jira_email,
-                jira_sa_token=_jira_sa_token,
                 jira_project_key=_jira_project_key,
                 jira_security_level=_jira_security_level,
                 jira_issue_type=jira_issue_type,

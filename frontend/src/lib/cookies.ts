@@ -1,8 +1,15 @@
 const COOKIE_NAME = 'rootcoz_username'
-const GITHUB_TOKEN_KEY = 'rootcoz_github_token'
-const JIRA_TOKEN_KEY = 'rootcoz_jira_token'
-const JIRA_EMAIL_KEY = 'rootcoz_jira_email'
-const JIRA_SA_TOKEN_KEY = 'rootcoz_jira_sa_token'
+// Tracker credentials are never stored in the browser: the server reads the
+// caller's account row, so these keys are scrubbed wherever they are found.
+const TRACKER_TOKEN_KEYS = [
+  'rootcoz_github_token',
+  'rootcoz_jira_token',
+  'rootcoz_jira_email',
+  'rootcoz_jira_sa_token',
+  'jji_github_token',
+  'jji_jira_token',
+  'jji_jira_email',
+]
 // Display-only UI hints — NOT an authorization boundary.
 // All admin gating is enforced server-side in AuthMiddleware.
 const ADMIN_KEY = 'rootcoz_is_admin'
@@ -76,59 +83,6 @@ export function isLoggedIn(): boolean {
   return getUsername() !== ''
 }
 
-function readStoredValue(key: string): string {
-  try {
-    return localStorage.getItem(key) ?? ''
-  } catch {
-    return ''
-  }
-}
-
-function writeStoredValue(key: string, value: string): void {
-  try {
-    const trimmed = value.trim()
-    if (trimmed) {
-      localStorage.setItem(key, trimmed)
-    } else {
-      localStorage.removeItem(key)
-    }
-  } catch {
-    // Storage unavailable — silently ignore
-  }
-}
-
-export function getGithubToken(): string {
-  return readStoredValue(GITHUB_TOKEN_KEY)
-}
-
-export function setGithubToken(token: string): void {
-  writeStoredValue(GITHUB_TOKEN_KEY, token)
-}
-
-export function getJiraToken(): string {
-  return readStoredValue(JIRA_TOKEN_KEY)
-}
-
-export function setJiraToken(token: string): void {
-  writeStoredValue(JIRA_TOKEN_KEY, token)
-}
-
-export function getJiraSaToken(): string {
-  return readStoredValue(JIRA_SA_TOKEN_KEY)
-}
-
-export function setJiraSaToken(token: string): void {
-  writeStoredValue(JIRA_SA_TOKEN_KEY, token)
-}
-
-export function getJiraEmail(): string {
-  return readStoredValue(JIRA_EMAIL_KEY)
-}
-
-export function setJiraEmail(email: string): void {
-  writeStoredValue(JIRA_EMAIL_KEY, email)
-}
-
 export function getIsAdmin(): boolean {
   try {
     return localStorage.getItem(ADMIN_KEY) === 'true'
@@ -171,9 +125,9 @@ export function setRole(role: string): void {
 
 export function clearTokens(): void {
   try {
-    localStorage.removeItem(GITHUB_TOKEN_KEY)
-    localStorage.removeItem(JIRA_TOKEN_KEY)
-    localStorage.removeItem(JIRA_EMAIL_KEY)
+    for (const key of TRACKER_TOKEN_KEYS) {
+      localStorage.removeItem(key)
+    }
     localStorage.removeItem(ADMIN_KEY)
     localStorage.removeItem(ROLE_KEY)
   } catch {
@@ -182,15 +136,12 @@ export function clearTokens(): void {
 }
 
 /**
- * One-time migration from legacy jji_* keys to rootcoz_*.
- * Copies values and removes the old keys so migration runs only once.
+ * One-time migration from legacy jji_* keys to rootcoz_*, and the scrub that
+ * drops every tracker token an upgrading browser still holds.
  */
 function migrateLegacyKeys(): void {
   // Migrate localStorage keys
   const LEGACY_MAP: Record<string, string> = {
-    jji_github_token: 'rootcoz_github_token',
-    jji_jira_token: 'rootcoz_jira_token',
-    jji_jira_email: 'rootcoz_jira_email',
     jji_is_admin: 'rootcoz_is_admin',
     jji_role: 'rootcoz_role',
   }
@@ -202,6 +153,11 @@ function migrateLegacyKeys(): void {
       }
       // Always remove old key (even if new key already exists)
       localStorage.removeItem(oldKey)
+    }
+    // A tracker token has no browser-side purpose: the server reads the
+    // caller's account row, so no copy may survive a tab any more.
+    for (const key of TRACKER_TOKEN_KEYS) {
+      localStorage.removeItem(key)
     }
   } catch {
     // Storage unavailable

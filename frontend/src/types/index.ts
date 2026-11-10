@@ -93,8 +93,11 @@ export interface ProductBugReport {
   component: string
   description: string
   evidence: string
+  /** Tracker-neutral search terms: they drive both the Jira and the GitHub search. */
   jira_search_keywords: string[]
   jira_matches: JiraMatch[]
+  /** Already-filed GitHub issues. Absent on results stored before #501. */
+  github_matches?: SimilarIssue[]
 }
 
 export interface CodeFix {
@@ -196,6 +199,22 @@ export interface CrossFailurePattern {
   suggested_root_cause: string
 }
 
+/** What one tracker's duplicate search did. A missing record means "not
+ *  recorded" (results written before #501, or an analysis that failed before
+ *  enrichment) — never "searched and found nothing". */
+export interface TrackerSearch {
+  /** True only when at least one search request actually succeeded, so
+   *  `searched: true, candidates: 0` = looked and found none. */
+  searched: boolean
+  /** Why it did not search, why it searched partially, or ''. */
+  reason: string
+  /** What was searched: GitHub repository URLs, or [jira_project_key]. */
+  scope: string[]
+  keyword_sets: number
+  candidates: number
+  matches: number
+}
+
 export interface AnalysisResult {
   job_id: string
   job_name: string
@@ -236,6 +255,8 @@ export interface AnalysisResult {
   /** Failures whose effective classification is empty (a reviewer override
    *  counts, so an override clears the failure from this total). */
   incomplete_count?: number
+  /** Per-tracker duplicate search record. Optional: older results predate it. */
+  tracker_search?: { jira: TrackerSearch; github: TrackerSearch }
 }
 
 // -- Dashboard ------------------------------------------------------

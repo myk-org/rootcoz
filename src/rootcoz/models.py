@@ -435,11 +435,23 @@ class ProductBugReport(BaseModel):
     description: str = Field(default="", description="What product behavior is broken")
     evidence: str = Field(default="", description="Relevant log snippets")
     jira_search_keywords: list[str] = Field(
-        default_factory=list, description="AI-suggested keywords for Jira search"
+        default_factory=list,
+        description=(
+            "AI-suggested keywords for finding an already-filed duplicate. "
+            "Tracker-neutral terms used by both the Jira and the GitHub search."
+        ),
     )
     jira_matches: list[JiraMatch] = Field(
         default_factory=list,
         description="Matched Jira issues (populated in post-processing)",
+    )
+    github_matches: list[SimilarIssue] = Field(
+        default_factory=list,
+        description=(
+            "Matched GitHub issues already filed for this bug (populated in "
+            "post-processing) — the duplicate question, distinct from "
+            "CodeFix.tests_repo_matches"
+        ),
     )
 
 
@@ -1097,22 +1109,9 @@ class ReviewStatusResponse(BaseModel):
     comment_count: int
 
 
-class _TrackerCredentialsMixin(BaseModel):
-    """Shared tracker credential fields for issue preview/create requests."""
+class _TrackerChoiceMixin(BaseModel):
+    """Shared tracker destination/choice fields for issue preview/create requests."""
 
-    github_token: str = Field(
-        default="", description="User's GitHub PAT for issue creation"
-    )
-    jira_token: str = Field(
-        default="", description="User's Jira token for bug creation"
-    )
-    jira_email: str = Field(default="", description="User's Jira email for Cloud auth")
-    jira_sa_token: str = Field(
-        default="",
-        description="User's Atlassian service-account credential — an OAuth "
-        "2.0 client secret (ATOA) or a scoped token (ATST) — takes "
-        "precedence over jira_token/jira_email",
-    )
     jira_project_key: str = Field(
         default="", description="Override Jira project key for bug creation"
     )
@@ -1127,13 +1126,13 @@ class _TrackerCredentialsMixin(BaseModel):
 
 
 # NOTE: Preview/create request models intentionally do NOT inherit
-# BaseAnalysisRequest. Target repositories (TESTS_REPO_URL) and Jira
-# per-method URLs are configured at the server level, but users may
-# provide their own tracker tokens (github_token, jira_token,
-# jira_email) to create issues under
-# their own identity. When user tokens are absent, the server falls back
-# to its deployment credentials. Analysis overrides remain out of scope.
-class PreviewIssueRequest(_ChildJobFieldsValidator, _TrackerCredentialsMixin):
+# BaseAnalysisRequest. Their bodies carry CHOICES ONLY — the issue text and
+# the tracker destination (Jira project/security level/issue type). The
+# tracker credential is always the caller's stored account token, resolved by
+# the server when the request is handled; a body token is ignored, and a
+# deployment credential is never reachable from these paths. Analysis
+# overrides remain out of scope.
+class PreviewIssueRequest(_ChildJobFieldsValidator, _TrackerChoiceMixin):
     """Request body for previewing a GitHub issue or Jira bug."""
 
     test_name: str
@@ -1164,7 +1163,7 @@ IssueTitle = Annotated[str, AfterValidator(_require_issue_title)]
 IssueTypeName = Annotated[str, AfterValidator(_default_issue_type)]
 
 
-class CreateIssueRequest(_ChildJobFieldsValidator, _TrackerCredentialsMixin):
+class CreateIssueRequest(_ChildJobFieldsValidator, _TrackerChoiceMixin):
     """Request body for creating a GitHub issue or Jira bug."""
 
     test_name: str

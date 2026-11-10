@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { Sidebar } from '../Sidebar'
@@ -242,6 +242,64 @@ describe('Sidebar', () => {
       for (const footer of footers) {
         expect(footer).toHaveTextContent('RootCoz v4.5.0')
       }
+    })
+  })
+
+  it('shows the build label beside the version when the image carries one', async () => {
+    // #520: a floating-tag build must never read as the release it reports.
+    mockApiGet.mockResolvedValue({ version: '4.5.0', build: { label: 'latest@d6a1f3c' } })
+    renderSidebar()
+    await waitFor(() => {
+      expect(screen.getByTestId('sidebar-version')).toHaveTextContent('RootCoz v4.5.0 · latest@d6a1f3c')
+    })
+    // D7: the link is the release the version names; the build is not that release,
+    // so the suffix sits beside the anchor and never inside it.
+    const link = screen.getByTestId('sidebar-version').querySelector('a')
+    expect(link?.getAttribute('href')).toBe('https://github.com/myk-org/rootcoz/releases/tag/v4.5.0')
+    expect(link?.textContent).toBe('RootCoz v4.5.0')
+    expect(screen.getByTestId('sidebar-build')).toHaveTextContent('latest@d6a1f3c')
+  })
+
+  it('renders the build label in the mobile sidebar too', async () => {
+    mockApiGet.mockResolvedValue({ version: '4.5.0', build: { label: 'latest@d6a1f3c' } })
+    renderSidebar('/', { ...defaultProps, mobileOpen: true })
+    await waitFor(() => {
+      const footers = screen.getAllByTestId('sidebar-version')
+      expect(footers.length).toBe(2)
+      for (const footer of footers) {
+        expect(footer).toHaveTextContent('RootCoz v4.5.0 · latest@d6a1f3c')
+      }
+    })
+  })
+
+  it('carries the build label in the collapsed tooltip', async () => {
+    localStorage.setItem('rootcoz_sidebar_collapsed', 'true')
+    mockApiGet.mockResolvedValue({ version: '4.5.0', build: { label: 'latest@d6a1f3c' } })
+    renderSidebar()
+    await waitFor(() => {
+      expect(screen.getByTestId('sidebar-version')).toBeDefined()
+    })
+    const trigger = screen.getByTestId('sidebar-version').querySelector('a')
+    expect(trigger?.textContent).toBe('v')
+    await userEvent.hover(trigger!)
+    await waitFor(() => {
+      expect(screen.getByRole('tooltip')).toHaveTextContent('rootcoz v4.5.0 · latest@d6a1f3c')
+    })
+  })
+
+  it('re-reads the build identity when the tab regains focus', async () => {
+    mockApiGet.mockResolvedValue({ version: '4.5.0', build: { label: 'latest@aaaaaaa' } })
+    renderSidebar()
+    await waitFor(() => {
+      expect(screen.getByTestId('sidebar-build')).toHaveTextContent('latest@aaaaaaa')
+    })
+    // A deploy replaced the build under the open page; focus picks up the new one.
+    mockApiGet.mockResolvedValue({ version: '4.5.0', build: { label: 'latest@bbbbbbb' } })
+    act(() => {
+      window.dispatchEvent(new Event('focus'))
+    })
+    await waitFor(() => {
+      expect(screen.getByTestId('sidebar-build')).toHaveTextContent('latest@bbbbbbb')
     })
   })
 

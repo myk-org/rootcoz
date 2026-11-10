@@ -152,6 +152,8 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
    With `ENABLE_GITHUB_ISSUES` unset, GitHub issue creation auto-enables when both `TESTS_REPO_URL` and `GITHUB_TOKEN` are configured. The user-facing feedback dialog stays available whenever the toggle is not explicitly `false`.
 
+   The toggle also governs the read-only GitHub duplicate search that runs during analysis, and there it means only *creation*: an explicit `false` disables the duplicate search too, but leaving it unset keeps that search available on a deployment that cannot file issues (no `TESTS_REPO_URL`) as long as `GITHUB_TOKEN` is set and the run has a GitHub repository in scope. The search uses the deployment token only — never a user's.
+
 7. **Report Portal category.**
 
    | Variable | Default | Type | Secret | Restart | After login |
@@ -480,6 +482,9 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `PI_SIDECAR_AGENT_DIR` | — (no setting) | excluded | env-only (sidecar agent dir) |
 | `PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS` | — (no setting) | excluded | env-only (sidecar pruning) |
 | `PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB` | — (no setting) | excluded | env-only (sidecar pruning) |
+| `ROOTCOZ_BUILD_COMMIT` | — (no setting) | Build | restart (image build) |
+| `ROOTCOZ_BUILD_REF` | — (no setting) | Build | restart (image build) |
+| `ROOTCOZ_BUILD_BUILT_AT` | — (no setting) | Build | restart (image build) |
 
 `ADMIN_KEY` also bootstraps the `admin` superuser before any settings exist; keep the env var authoritative for bootstrap. Admin-managed server provider API keys (the `GEMINI_API_KEY` replacement for server-credential sessions) live in the encrypted `server_ai_providers` table, managed under Server Settings → AI — they are not env vars.
 
@@ -503,6 +508,27 @@ These are read straight from the process environment and have no `Settings` fiel
 | `GOOGLE_APPLICATION_CREDENTIALS` | unset | Path to the Vertex service-account key file the Helm chart mounts (`/gcloud-credentials/application_default_credentials.json`) |
 | `CLOUDSDK_CONFIG` | unset | gcloud config directory for the Vertex credential mount (`/gcloud-credentials` in the chart) |
 | `PI_SIDECAR_AGENT_DIR` | unset | Sidecar agent dir for custom providers and settings (see below) |
+| `ROOTCOZ_BUILD_COMMIT`, `ROOTCOZ_BUILD_REF`, `ROOTCOZ_BUILD_BUILT_AT` | empty | Which build this image is — see [Build identity](#build-identity) |
+
+#### Build identity
+
+`ROOTCOZ_BUILD_COMMIT`, `ROOTCOZ_BUILD_REF` and `ROOTCOZ_BUILD_BUILT_AT` are facts about the image, not configuration: they cannot change at runtime, so they are read straight from the process environment and have no Server Setting — the same class as `PUBLIC_BASE_URL`. All three are optional; empty means the builder supplied nothing and every surface degrades to the bare version.
+
+The image exports them from three build args, which are the names the CI contract passes, so they are not a free choice:
+
+| Build arg | Exported as | Holds |
+| --- | --- | --- |
+| `GIT_COMMIT` | `ROOTCOZ_BUILD_COMMIT` | full commit sha |
+| `GIT_REF` | `ROOTCOZ_BUILD_REF` | the tag the image is published under |
+| `BUILT_AT` | `ROOTCOZ_BUILD_BUILT_AT` | build timestamp |
+
+They reach the image through whatever builds it:
+
+- **The CI publisher** — `container.build-args` in the webhook-server configuration, with the placeholders it substitutes: `GIT_COMMIT: "{revision}"`, `GIT_REF: "{tag}"`, `BUILT_AT: "{created}"`. `{tag}` is the tag the image is published under (a release tag, `latest` for a main build, `pr-<n>` for a PR build), which is why `latest` is displayed verbatim — it is literally what the deployment pulls, not a synonym for `main`. A `--build-arg` whose name the Dockerfile does not declare is silently dropped, so the names must match the table above.
+- **A local `docker build`** — `--build-arg GIT_COMMIT=$(git rev-parse HEAD) --build-arg GIT_REF=latest --build-arg BUILT_AT=$(date -u +%FT%TZ)`. The bundled `docker-compose.yaml` forwards the same three environment variables to its build.
+- **An OpenShift `--branch` build** — a BuildConfig has no git metadata in the image, so set them in `spec.strategy.dockerStrategy.env` as `GIT_COMMIT`, `GIT_REF` and `BUILT_AT` (build args, exactly as above). Without them the build carries no identity.
+
+The footer reads `v<version> · <ref>@<commit>` whenever the ref is not the release itself; a ref equal to the version (a release build) and an image with no args both render the bare `v<version>`.
 
 #### Transcript retention
 
