@@ -123,6 +123,44 @@ class TestGetSettings:
         # Its pre-clear result must not be what the process serves next.
         assert get_settings().jenkins_user == "after"
 
+    def test_build_hold_seam_is_inert_by_default(
+        self, mock_env_vars: dict[str, str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Unset or 0 ⇒ no sleep at all and the cache still memoises (#529 seam)."""
+        from rootcoz import config
+
+        slept: list[float] = []
+        monkeypatch.setattr(config.time, "sleep", slept.append)
+        for value in (None, "0"):
+            if value is None:
+                monkeypatch.delenv("ROOTCOZ_SETTINGS_BUILD_HOLD_MS", raising=False)
+            else:
+                monkeypatch.setenv("ROOTCOZ_SETTINGS_BUILD_HOLD_MS", value)
+            clear_settings_cache()
+            settings = get_settings()
+            assert get_settings() is settings
+            assert slept == []
+
+    def test_build_hold_seam_delays_the_publish(
+        self, mock_env_vars: dict[str, str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A set hold is read per call and slept once, before the publish."""
+        from rootcoz import config
+
+        slept: list[float] = []
+        monkeypatch.setattr(config.time, "sleep", slept.append)
+        monkeypatch.setenv("ROOTCOZ_SETTINGS_BUILD_HOLD_MS", "1500")
+        clear_settings_cache()
+        settings = get_settings()
+        # The documented delay, not a wall-clock measurement: the cached read
+        # must not hold again, and a fresh build after the env changes must.
+        assert slept == [1.5]
+        assert get_settings() is settings
+        monkeypatch.setenv("ROOTCOZ_SETTINGS_BUILD_HOLD_MS", "250")
+        clear_settings_cache()
+        get_settings()
+        assert slept == [1.5, 0.25]
+
 
 class TestJiraSettings:
     """Tests for Jira configuration fields."""

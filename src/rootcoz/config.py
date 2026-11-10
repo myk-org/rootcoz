@@ -3,6 +3,7 @@
 import os
 import re
 import threading
+import time
 from typing import Any, NamedTuple
 from urllib.parse import urlsplit, urlunsplit
 
@@ -1562,6 +1563,42 @@ def _build_settings() -> Settings:
         return base
 
 
+# Test seam, not a setting: hold a build between build and publish so a
+# ``clear_settings_cache()`` can land in that window (the #529 race). Env
+# only — deliberately absent from Settings and from ``_SETTINGS_CATEGORIES``,
+# so it can never be set through Server Settings or shown to a customer.
+_SETTINGS_BUILD_HOLD_ENV = "ROOTCOZ_SETTINGS_BUILD_HOLD_MS"
+
+
+def _settings_build_hold_seconds() -> float:
+    """Seconds to hold a settings build before publishing it (default 0).
+
+    Read from ``ROOTCOZ_SETTINGS_BUILD_HOLD_MS`` **on every call**, never
+    cached at import: a container started with it behaves that way without
+    reloading this module. Unset, empty or non-positive means ``0.0`` and
+    ``get_settings`` skips the sleep entirely — the product path is unchanged.
+
+    This exists only to make the #529 invariant reachable from a live test:
+    the hold opens the build→publish window, and an admin save that clears the
+    cache lands inside it. It is a test seam: env only, no Settings field, no
+    Server Settings entry, and it never appears in a user-facing message or a
+    metric.
+
+    shortcut: one env-gated sleep is the entire fault-injection framework — it
+    can hold the build and nothing else. Upgrade to a real injection seam if
+    another step needs to be held.
+    """
+    raw = os.environ.get(_SETTINGS_BUILD_HOLD_ENV, "").strip()
+    if not raw:
+        return 0.0
+    try:
+        hold_ms = int(raw)
+    except ValueError:
+        logger.warning("Ignoring non-integer %s=%r", _SETTINGS_BUILD_HOLD_ENV, raw)
+        return 0.0
+    return max(hold_ms, 0) / 1000.0
+
+
 def get_settings() -> Settings:
     """Get merged settings: env vars (base) + DB overrides.
 
@@ -1571,6 +1608,9 @@ def get_settings() -> Settings:
 
     The build runs outside the lock so a concurrent clear is never blocked;
     it publishes only if no clear happened since it captured the generation.
+    ``ROOTCOZ_SETTINGS_BUILD_HOLD_MS`` (test seam, default 0) pauses after the
+    build and before the publish to make that window reachable from a live
+    test.
     """
     global _cached_settings
     cached = _cached_settings
@@ -1581,6 +1621,9 @@ def get_settings() -> Settings:
             return _cached_settings
         generation = _settings_generation
     built = _build_settings()
+    hold_seconds = _settings_build_hold_seconds()
+    if hold_seconds:
+        time.sleep(hold_seconds)
     with _settings_lock:
         if generation != _settings_generation:
             logger.debug(
