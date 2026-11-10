@@ -47,9 +47,18 @@ import { useAuth } from '@/lib/auth'
 import { MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
 import { FilterPresetsMenu } from '@/components/shared/FilterPresetsMenu'
 import { FILTER_PRESET_KEYS } from '@/lib/filterPresets'
-import { applyFiltersToParams } from '@/lib/jobFilters'
+import {
+  applyFiltersToParams,
+  applyJobFiltersToParams,
+  DEFAULT_TEST_NAME_MODE,
+  EMPTY_JOB_FILTERS,
+  jobFiltersFromParams,
+  TEST_NAME_FILTER_KEYS,
+  type TestNameMode,
+} from '@/lib/jobFilters'
+import { TestNameFilter } from '@/components/shared/TestNameFilter'
 import { useMetadataOptions } from '@/components/shared/useMetadataOptions'
-import { useDashboardSubmitters } from '@/components/shared/useDashboardSubmitters'
+import { useSubmitters } from '@/components/shared/useSubmitters'
 import { SearchableMultiSelect } from '@/components/ui/searchable-multi-select'
 import { MetadataBadges } from '@/components/shared/MetadataBadges'
 import { WhatsNewDialog } from '@/components/shared/WhatsNewDialog'
@@ -233,7 +242,7 @@ export function DashboardPage() {
   const versionParam = searchParams.getAll('version').sort().join(',')
   const labelParam = searchParams.getAll('label').sort().join(',')
   const excludeLabelParam = searchParams.getAll('exclude_label').sort().join(',')
-  const { submitters, loading: submittersLoading } = useDashboardSubmitters()
+  const { submitters, loading: submittersLoading } = useSubmitters()
   const metaTeams = useMemo(() => new Set(teamParam ? teamParam.split(',') : []), [teamParam])
   const metaTiers = useMemo(() => new Set(tierParam ? tierParam.split(',') : []), [tierParam])
   const metaVersions = useMemo(() => new Set(versionParam ? versionParam.split(',') : []), [versionParam])
@@ -243,6 +252,27 @@ export function DashboardPage() {
     () => normalizeSubmitters(searchParams.getAll('submitted_by'), submitters),
     [searchParams, submitters],
   )
+
+  // The test-name pair is read through the shared contract, so an absent mode
+  // means the default and a mode without a name is never a filter (#546 B).
+  const { test_name: testName, test_name_mode: testNameMode } = useMemo(
+    () => jobFiltersFromParams(searchParams, TEST_NAME_FILTER_KEYS),
+    [searchParams],
+  )
+
+  const setTestName = useCallback((value: string, mode: TestNameMode) => {
+    // One writer for the pair: a mode with no name is dropped, and the clean URL
+    // carries `test_name` alone while the mode is the default.
+    setSearchParams(
+      (prev) =>
+        applyJobFiltersToParams(
+          prev,
+          { ...EMPTY_JOB_FILTERS, test_name: value, test_name_mode: mode },
+          TEST_NAME_FILTER_KEYS,
+        ),
+      { replace: true },
+    )
+  }, [setSearchParams])
 
   const setSubmittedBy = useCallback((values: string[]) => {
     setSearchParams((prev) => {
@@ -306,10 +336,12 @@ export function DashboardPage() {
       next.delete('review_status')
       next.delete('analysis_state')
       next.delete('submitted_by')
+      next.delete('test_name')
+      next.delete('test_name_mode')
       return next
     }, { replace: true })
   }, [setSearchParams])
-  const hasMetadataFilters = !!(metaTeams.size > 0 || metaTiers.size > 0 || metaVersions.size > 0 || metaLabels.length > 0 || metaExcludeLabels.length > 0 || submittedBy.length > 0 || selectedStatuses.size > 0 || reviewStatus !== 'all' || analysisState !== 'all')
+  const hasMetadataFilters = !!(metaTeams.size > 0 || metaTiers.size > 0 || metaVersions.size > 0 || metaLabels.length > 0 || metaExcludeLabels.length > 0 || submittedBy.length > 0 || selectedStatuses.size > 0 || reviewStatus !== 'all' || analysisState !== 'all' || testName.length > 0)
   const { options: metadataOptions } = useMetadataOptions()
   const setDateRange = useCallback((from: string, to: string) => {
     setSearchParams((prev) => {
@@ -369,6 +401,10 @@ export function DashboardPage() {
       if (dateTo) params.set('date_to', dateTo)
       if (reviewStatus !== 'all') params.set('review_status', reviewStatus)
       if (analysisState !== 'all') params.set('analysis_state', analysisState)
+      if (testName) {
+        params.set('test_name', testName)
+        if (testNameMode !== DEFAULT_TEST_NAME_MODE) params.set('test_name_mode', testNameMode)
+      }
       // Server-side pagination
       params.set('limit', String(perPage))
       params.set('offset', String((page - 1) * perPage))
@@ -389,7 +425,7 @@ export function DashboardPage() {
         setLoading(false)
       }
     }
-  }, [metaTeams, metaTiers, metaVersions, metaLabels, metaExcludeLabels, submittedBy, debouncedSearch, selectedStatuses, dateFrom, dateTo, reviewStatus, analysisState, perPage, page])
+  }, [metaTeams, metaTiers, metaVersions, metaLabels, metaExcludeLabels, submittedBy, debouncedSearch, selectedStatuses, dateFrom, dateTo, reviewStatus, analysisState, testName, testNameMode, perPage, page])
 
   const fetchJobsRef = useLatestRef(fetchJobs)
 
@@ -596,6 +632,7 @@ export function DashboardPage() {
             }
           />
           <SearchInput value={search} onChange={setSearch} placeholder="Filter jobs..." className="w-full sm:w-64" />
+          <TestNameFilter name={testName} mode={testNameMode} onChange={setTestName} />
           <SearchableMultiSelect
             label="Submitted by"
             values={submittedBy}

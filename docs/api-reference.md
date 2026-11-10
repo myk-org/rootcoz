@@ -140,8 +140,9 @@ The shared body accepts the server defaults as per-request overrides:
 | GET | `/api/failures/{failure_uuid}` | viewer | none |
 | GET | `/results/{job_id}/review-status` | viewer | none |
 | GET | `/api/dashboard` | viewer | `limit`, `offset` |
-| GET | `/api/dashboard/filtered` | viewer | `search`, `status`, `date_from`, `date_to`, `review_status`, `analysis_state`, `limit`, `offset`, plus metadata filters `team`, `tier`, `version`, `label`, `exclude_label` (each repeatable). `submitted_by` (repeatable) is also accepted: each value is trimmed and matched as a **case-insensitive substring** on the original submitter (`yuva` matches `yuval` and `yuvalb`), values OR together, and blanks are dropped. At most 50 values of 64 chars each (`400` above either limit); no values means no filter. Matching is case-insensitive for ASCII only — SQLite's `lower()` does not fold non-ASCII names, which then match case-sensitively |
+| GET | `/api/dashboard/filtered` | viewer | `search`, `status`, `date_from`, `date_to`, `review_status`, `analysis_state`, `limit`, `offset`, plus metadata filters `team`, `tier`, `version`, `label`, `exclude_label` (each repeatable). `submitted_by` (repeatable) is also accepted: each value is trimmed and matched as a **case-insensitive substring** on the original submitter (`yuva` matches `yuval` and `yuvalb`), values OR together, and blanks are dropped. At most 50 values of 64 chars each (`400` above either limit); no values means no filter. Matching is case-insensitive for ASCII only — SQLite's `lower()` does not fold non-ASCII names, which then match case-sensitively. `test_name` keeps only jobs holding a failing test whose name matches the text, and `test_name_mode` says how: `contains` (default), `exact`, `starts_with`, `ends_with`. The text is **literal** — `%`, `_` and backslash are escaped, and `*`/`?` are ordinary characters — so a wildcard-looking name is a name, and the mode alone expresses intent. The match is scoped to `status='failed'` test entries, so the query stays on the failing subset rather than scanning every stored test |
 | GET | `/api/dashboard/submitters` | viewer | none; returns `{"submitters": ["alice", ...]}` — the distinct names shown on the dashboard, sorted, deduped case-insensitively on the same ASCII rule, blank and over-64-char values dropped. Viewers already receive `submitted_by` on every dashboard row, so this endpoint discloses nothing new |
+| GET | `/api/dashboard/test-names` | viewer | `q` (name fragment, literal, case-insensitive, max 200 chars), `limit` (1–100, default 20). Returns `{"test_names": [{"test_name": "...", "failure_count": 42}, ...]}`, most frequent first, over `status='failed'` test entries only. Empty `q` returns the top failing names. This is the typeahead: a call never returns more than `limit` rows, so no request ships the whole name space. It is not the job filter — `/api/dashboard/filtered?test_name=` answers *which jobs had a failing test matching this name* |
 | GET | `/api/dashboard/active-count` | viewer | none |
 
 `fields` returns full values for allowlisted paths only and is never truncated. Unknown paths return `400`, so fetch `/api/results/fields` first when you build against it.
@@ -263,11 +264,11 @@ The two chat streams carry the answer itself. `event: chat-delta` with `data: {"
 
 | Method | Path | Min role | Query parameters |
 | --- | --- | --- | --- |
-| GET | `/api/reports/totals` | admin or `can_view_reports` | `team`, `tier`, `version`, `from`, `to`, `status`, `tags`, `exclude_tags`, `review_status`, `limit`, `offset` |
+| GET | `/api/reports/totals` | admin or `can_view_reports` | `team`, `tier`, `version`, `date_from`, `date_to`, `status`, `tags`, `exclude_tags`, `review_status`, `submitted_by`, `analysis_state`, `limit`, `offset` |
 | GET | `/api/reports/classification-overrides` | admin or `can_view_reports` | same filter set |
 | GET | `/api/reports/issues-created` | admin or `can_view_reports` | same filter set |
 
-Date bounds use the `from` and `to` query names. Without the flag you get `403 Reports access required`.
+Date bounds use the `date_from` and `date_to` query names. The legacy `from` and `to` names are still accepted and mean the same thing, so links and saved views written before the unified filter contract keep working; they are not advertised in the schema. `submitted_by` is repeatable with the same trimmed, case-insensitive substring match and the same 50-value / 64-char caps as the dashboard, and `analysis_state` takes `submitted` or `analyzed` (empty means both; anything else is a `400`). Without report access you get `403 Reports access required`.
 
 ### Metadata assignment
 

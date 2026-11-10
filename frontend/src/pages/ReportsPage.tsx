@@ -19,6 +19,9 @@ import { TooltipProvider } from '@/components/ui/tooltip'
 import { MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
 import { FilterPresetsMenu } from '@/components/shared/FilterPresetsMenu'
 import { useMetadataOptions } from '@/components/shared/useMetadataOptions'
+import { useSubmitters } from '@/components/shared/useSubmitters'
+import { SearchableMultiSelect } from '@/components/ui/searchable-multi-select'
+import { AnalysisStateFilterControl } from '@/components/shared/AnalysisStateFilter'
 import { DateRangePresetFilter } from '@/components/shared/DateRangePresetFilter'
 import { ClassificationBadge } from '@/components/shared/ClassificationBadge'
 import { MultiSelectFilter } from '@/components/shared/MultiSelectFilter'
@@ -27,6 +30,17 @@ import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons
 import { SearchInput } from '@/components/shared/SearchInput'
 import { ReviewStatusFilter } from '@/components/shared/ReviewStatusFilter'
 import { parseReviewStatus, type ReviewStatusFilter as ReviewStatusValue } from '@/lib/review-status'
+import { parseAnalysisState, type AnalysisStateFilter } from '@/lib/analysis-state'
+import { FILTER_PRESET_KEYS } from '@/lib/filterPresets'
+import {
+  applyFiltersToParams,
+  EMPTY_JOB_FILTERS,
+  jobFiltersFromFilters,
+  jobFiltersFromParams,
+  jobFiltersToApiQuery,
+  jobFiltersToFilters,
+  type JobFilterValues,
+} from '@/lib/jobFilters'
 import { BarChart3, ArrowRightLeft, Bug, ChevronDown, ChevronRight, ExternalLink } from 'lucide-react'
 
 // ─── Types ──────────────────────────────────────────────────────────
@@ -120,6 +134,8 @@ interface ReportsState {
   dateTo: string
   statuses: Set<string>
   reviewStatus: ReviewStatusValue
+  analysisState: AnalysisStateFilter
+  submitters: string[]
   labels: string[]
   excludeLabels: string[]
   totalsData: TotalsData | null
@@ -146,6 +162,8 @@ type ReportsAction =
   | { type: 'CLEAR_STATUSES' }
   | { type: 'TOGGLE_LABEL'; label: string; action: 'include' | 'exclude' | 'off' }
   | { type: 'SET_REVIEW_STATUS'; value: ReviewStatusValue }
+  | { type: 'SET_ANALYSIS_STATE'; value: AnalysisStateFilter }
+  | { type: 'SET_SUBMITTERS'; values: string[] }
   | { type: 'APPLY_FILTERS'; filters: Record<string, string | string[]> }
   | { type: 'TOGGLE_TOTALS_EXPANDED' }
   | { type: 'SET_TOTALS_EXPANDED'; value: boolean }
@@ -165,6 +183,8 @@ const INITIAL_STATE: ReportsState = {
   dateTo: '',
   statuses: new Set(),
   reviewStatus: 'all' as ReviewStatusValue,
+  analysisState: 'all' as AnalysisStateFilter,
+  submitters: [],
   labels: [],
   excludeLabels: [],
   totalsData: null,
@@ -176,16 +196,21 @@ const INITIAL_STATE: ReportsState = {
 
 function initStateFromParams(sp: URLSearchParams): ReportsState {
   const reportSlug = sp.get('report') ?? ''
+  // One reader for the shared contract: canonical `date_from`/`date_to` with the
+  // legacy `from`/`to` aliases still accepted.
+  const jobFilters = jobFiltersFromParams(sp, FILTER_PRESET_KEYS.reports)
   return {
     ...INITIAL_STATE,
     activeTab: URL_KEY_TO_TAB[reportSlug] ?? 'totals',
     teams: new Set(sp.getAll('team')),
     tiers: new Set(sp.getAll('tier')),
     versions: new Set(sp.getAll('version')),
-    dateFrom: sp.get('from') ?? '',
-    dateTo: sp.get('to') ?? '',
+    dateFrom: jobFilters.date_from,
+    dateTo: jobFilters.date_to,
     statuses: new Set(sp.getAll('status')),
     reviewStatus: parseReviewStatus(sp.get('review_status')),
+    analysisState: parseAnalysisState(sp.get('analysis_state')),
+    submitters: jobFilters.submitted_by,
     labels: sp.getAll('label'),
     excludeLabels: sp.getAll('exclude_label'),
     search: sp.get('search') ?? '',
@@ -235,7 +260,7 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
     case 'CLEAR_META':
       return { ...state, [action.field]: new Set<string>() }
     case 'CLEAR_ALL_META':
-      return { ...state, teams: new Set(), tiers: new Set(), versions: new Set(), statuses: new Set<string>(), reviewStatus: 'all' as ReviewStatusValue, labels: [], excludeLabels: [] }
+      return { ...state, teams: new Set(), tiers: new Set(), versions: new Set(), statuses: new Set<string>(), reviewStatus: 'all' as ReviewStatusValue, analysisState: 'all' as AnalysisStateFilter, submitters: [], labels: [], excludeLabels: [] }
     case 'SET_DATE_RANGE':
       return { ...state, dateFrom: action.from, dateTo: action.to }
     case 'TOGGLE_STATUS':
@@ -253,30 +278,27 @@ function reportsReducer(state: ReportsState, action: ReportsAction): ReportsStat
     }
     case 'SET_REVIEW_STATUS':
       return { ...state, reviewStatus: action.value }
+    case 'SET_ANALYSIS_STATE':
+      return { ...state, analysisState: action.value }
+    case 'SET_SUBMITTERS':
+      return { ...state, submitters: action.values }
     case 'APPLY_FILTERS': {
       // Apply a saved filter preset (#179): replace every filter field,
       // keeping tab, search, and already-fetched report data intact.
-      const f = action.filters
-      const listOf = (key: string): string[] => {
-        const v = f[key]
-        if (v === undefined) return []
-        return Array.isArray(v) ? v : [v]
-      }
-      const single = (key: string): string => {
-        const v = f[key]
-        return v === undefined ? '' : Array.isArray(v) ? (v[0] ?? '') : v
-      }
+      const f = jobFiltersFromFilters(action.filters)
       return {
         ...state,
-        teams: new Set(listOf('team')),
-        tiers: new Set(listOf('tier')),
-        versions: new Set(listOf('version')),
-        dateFrom: single('from'),
-        dateTo: single('to'),
-        statuses: new Set(listOf('status')),
-        reviewStatus: parseReviewStatus(single('review_status') || null),
-        labels: listOf('label'),
-        excludeLabels: listOf('exclude_label'),
+        teams: new Set(f.team),
+        tiers: new Set(f.tier),
+        versions: new Set(f.version),
+        dateFrom: f.date_from,
+        dateTo: f.date_to,
+        statuses: new Set(f.status),
+        reviewStatus: parseReviewStatus(f.review_status),
+        analysisState: parseAnalysisState(f.analysis_state),
+        submitters: f.submitted_by,
+        labels: f.label,
+        excludeLabels: f.exclude_label,
       }
     }
     case 'TOGGLE_TOTALS_EXPANDED':
@@ -617,7 +639,24 @@ function StatCard({ label, value, suffix, tone }: { label: string; value: number
 export function ReportsPage() {
   const [searchParams, setSearchParams] = useSearchParams()
   const [state, dispatch] = useReducer(reportsReducer, searchParams, initStateFromParams)
-  const { activeTab, loading, error, search, teams, tiers, versions, dateFrom, dateTo, statuses, reviewStatus, labels, excludeLabels, totalsData, overridesData, issuesData, totalsExpanded, overridesExpandedGroups } = state
+  const { activeTab, loading, error, search, teams, tiers, versions, dateFrom, dateTo, statuses, reviewStatus, analysisState, submitters, labels, excludeLabels, totalsData, overridesData, issuesData, totalsExpanded, overridesExpandedGroups } = state
+
+  // One typed view of the filters, so the URL writer and the API query cannot
+  // drift apart on a key name or a shape (#546).
+  const jobFilterValues = useMemo<JobFilterValues>(() => ({
+    ...EMPTY_JOB_FILTERS,
+    team: [...teams],
+    tier: [...tiers],
+    version: [...versions],
+    label: labels,
+    exclude_label: excludeLabels,
+    status: [...statuses],
+    review_status: reviewStatus,
+    analysis_state: analysisState,
+    submitted_by: submitters,
+    date_from: dateFrom,
+    date_to: dateTo,
+  }), [teams, tiers, versions, labels, excludeLabels, statuses, reviewStatus, analysisState, submitters, dateFrom, dateTo])
 
   // ─── URL → state sync (external navigation / shared links) ─────
   // Only dispatch when URL actually differs from current state — no flags, no races.
@@ -629,6 +668,8 @@ export function ReportsPage() {
       || !setsEqual(nextState.teams, teams) || !setsEqual(nextState.tiers, tiers)
       || !setsEqual(nextState.versions, versions) || !setsEqual(nextState.statuses, statuses)
       || nextState.reviewStatus !== reviewStatus
+      || nextState.analysisState !== analysisState
+      || JSON.stringify(nextState.submitters) !== JSON.stringify(submitters)
       || JSON.stringify(nextState.labels) !== JSON.stringify(labels)
       || JSON.stringify(nextState.excludeLabels) !== JSON.stringify(excludeLabels)
       || nextState.search !== search
@@ -647,46 +688,31 @@ export function ReportsPage() {
   useEffect(() => {
     const params = new URLSearchParams()
     if (activeTab !== 'totals') params.set('report', TAB_URL_KEY[activeTab])
-    for (const t of teams) params.append('team', t)
-    for (const t of tiers) params.append('tier', t)
-    for (const v of versions) params.append('version', v)
-    if (dateFrom) params.set('from', dateFrom)
-    if (dateTo) params.set('to', dateTo)
-    for (const s of statuses) params.append('status', s)
-    if (reviewStatus !== 'all') params.set('review_status', reviewStatus)
-    for (const l of labels) params.append('label', l)
-    for (const l of excludeLabels) params.append('exclude_label', l)
-    if (search) params.set('search', search)
-    if (params.toString() !== searchParams.toString()) {
-      setSearchParams(params, { replace: true })
+    // `report` and `search` are not filter dimensions; every filter key goes in
+    // through the shared writer, which drops `all`/empty and writes the
+    // canonical `date_from`/`date_to` pair instead of the legacy aliases.
+    const next = applyFiltersToParams(
+      params,
+      jobFiltersToFilters(jobFilterValues),
+      FILTER_PRESET_KEYS.reports,
+    )
+    if (search) next.set('search', search)
+    if (next.toString() !== searchParams.toString()) {
+      setSearchParams(next, { replace: true })
     }
-  }, [activeTab, teams, tiers, versions, dateFrom, dateTo, statuses, reviewStatus, labels, excludeLabels, search]) // eslint-disable-line react-hooks/exhaustive-deps -- searchParams/setSearchParams are read from closure on purpose: react-router gives them a fresh identity on every location change, so listing them re-runs this effect on external navigations and clobbers them
+  }, [activeTab, jobFilterValues, search]) // eslint-disable-line react-hooks/exhaustive-deps -- searchParams/setSearchParams are read from closure on purpose: react-router gives them a fresh identity on every location change, so listing them re-runs this effect on external navigations and clobbers them
 
   const { options: metadataOptions } = useMetadataOptions()
+  const { submitters: submitterOptions, loading: submittersLoading } = useSubmitters()
   const fetchSeqRef = useRef(0)
 
-  const hasMetadataFilters = teams.size > 0 || tiers.size > 0 || versions.size > 0 || statuses.size > 0 || reviewStatus !== 'all' || labels.length > 0 || excludeLabels.length > 0
+  const hasMetadataFilters = teams.size > 0 || tiers.size > 0 || versions.size > 0 || statuses.size > 0 || reviewStatus !== 'all' || analysisState !== 'all' || submitters.length > 0 || labels.length > 0 || excludeLabels.length > 0
 
   // Build query params shared by all endpoints
-  const queryString = useMemo(() => {
-    const params = new URLSearchParams()
-    const teamVal = [...teams].join(',')
-    const tierVal = [...tiers].join(',')
-    const versionVal = [...versions].join(',')
-    if (teamVal) params.set('team', teamVal)
-    if (tierVal) params.set('tier', tierVal)
-    if (versionVal) params.set('version', versionVal)
-    if (dateFrom) params.set('from', dateFrom)
-    if (dateTo) params.set('to', dateTo)
-    const statusVal = [...statuses].join(',')
-    if (statusVal) params.set('status', statusVal)
-    const tagsVal = labels.join(',')
-    if (tagsVal) params.set('tags', tagsVal)
-    const excludeVal = excludeLabels.join(',')
-    if (excludeVal) params.set('exclude_tags', excludeVal)
-    if (reviewStatus !== 'all') params.set('review_status', reviewStatus)
-    return params.toString()
-  }, [teams, tiers, versions, dateFrom, dateTo, statuses, labels, excludeLabels, reviewStatus])
+  const queryString = useMemo(
+    () => jobFiltersToApiQuery('reports', jobFilterValues).toString(),
+    [jobFilterValues],
+  )
 
   const fetchReport = useCallback(async () => {
     const seq = ++fetchSeqRef.current
@@ -775,7 +801,19 @@ export function ReportsPage() {
             onClear={() => dispatch({ type: 'CLEAR_STATUSES' })}
             className="w-full sm:w-40"
           />
+          <SearchableMultiSelect
+            label="Submitted by"
+            values={submitters}
+            options={submitterOptions.map((value) => ({ value }))}
+            loading={submittersLoading}
+            // Same control and same source as the dashboard: an enumerated name
+            // or a typed partial, which the server matches as a substring.
+            allowCustom
+            onChange={(values) => dispatch({ type: 'SET_SUBMITTERS', values })}
+            className="w-full sm:w-48"
+          />
           <ReviewStatusFilter value={reviewStatus} onChange={(v) => dispatch({ type: 'SET_REVIEW_STATUS', value: v })} />
+          <AnalysisStateFilterControl value={analysisState} onChange={(v) => dispatch({ type: 'SET_ANALYSIS_STATE', value: v })} />
           <DateRangePresetFilter
             from={dateFrom}
             to={dateTo}

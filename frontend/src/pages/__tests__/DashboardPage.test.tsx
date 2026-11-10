@@ -306,3 +306,48 @@ describe('DashboardPage submitter filter', () => {
     await waitFor(() => expect(requests.at(-1)?.get('submitted_by')).toBe('yuva'))
   })
 })
+
+describe('DashboardPage test-name filter', () => {
+  afterEach(() => {
+    apiGet.mockReset()
+  })
+
+  it('filters by test_name and writes a non-default mode beside it', async () => {
+    mockApi(5)
+    renderPage('/?test_name=checkout')
+
+    await waitFor(() => expect(requests.at(-1)?.get('test_name')).toBe('checkout'))
+    // Absent mode is the default one: the clean URL carries the name alone.
+    expect(requests.at(-1)?.get('test_name_mode')).toBeNull()
+
+    await userEvent.click(screen.getByRole('combobox', { name: 'Test name match mode' }))
+    await userEvent.click(await screen.findByRole('option', { name: 'ends with' }))
+
+    await waitFor(() => expect(requests.at(-1)?.get('test_name_mode')).toBe('ends_with'))
+    expect(requests.at(-1)?.get('test_name')).toBe('checkout')
+  })
+
+  it('writes no test_name_mode while there is no name', async () => {
+    mockApi(5)
+    renderPage()
+    await waitFor(() => expect(requests.length).toBeGreaterThan(0))
+
+    await userEvent.click(screen.getByRole('combobox', { name: 'Test name match mode' }))
+    await userEvent.click(await screen.findByRole('option', { name: 'exact' }))
+
+    await waitFor(() => expect(requests.length).toBeGreaterThan(0))
+    // A mode with nothing to match is not a filter: it stays out of the URL.
+    expect(requests.at(-1)?.get('test_name_mode')).toBeNull()
+    expect(requests.at(-1)?.get('test_name')).toBeNull()
+  })
+
+  it('sends the typed name once it settles', async () => {
+    mockApi(5)
+    renderPage()
+    await waitFor(() => expect(requests.length).toBeGreaterThan(0))
+
+    await userEvent.type(screen.getByPlaceholderText('Filter by failing test name'), 'checkout')
+
+    await waitFor(() => expect(requests.at(-1)?.get('test_name')).toBe('checkout'))
+  })
+})

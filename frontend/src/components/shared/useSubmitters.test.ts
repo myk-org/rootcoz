@@ -1,6 +1,6 @@
 import { renderHook, waitFor } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { useDashboardSubmitters } from '@/components/shared/useDashboardSubmitters'
+import { useSubmitters } from '@/components/shared/useSubmitters'
 
 const apiGet = vi.fn()
 vi.mock('@/lib/api', async (importOriginal) => {
@@ -8,7 +8,7 @@ vi.mock('@/lib/api', async (importOriginal) => {
   return { ...actual, api: { get: (...args: unknown[]) => apiGet(...args) } }
 })
 
-describe('useDashboardSubmitters', () => {
+describe('useSubmitters', () => {
   afterEach(() => {
     apiGet.mockReset()
   })
@@ -19,7 +19,7 @@ describe('useDashboardSubmitters', () => {
     // offer the dropped spelling.
     apiGet.mockResolvedValue({ submitters: ['Änne', 'änne', 'alice'] })
 
-    const { result } = renderHook(() => useDashboardSubmitters())
+    const { result } = renderHook(() => useSubmitters())
 
     await waitFor(() => expect(result.current.loading).toBe(false))
     expect(apiGet).toHaveBeenCalledWith('/api/dashboard/submitters')
@@ -28,12 +28,12 @@ describe('useDashboardSubmitters', () => {
 
   it('settles on an empty list for an empty or failed response', async () => {
     apiGet.mockResolvedValueOnce({ submitters: [] })
-    const empty = renderHook(() => useDashboardSubmitters())
+    const empty = renderHook(() => useSubmitters())
     await waitFor(() => expect(empty.result.current.loading).toBe(false))
     expect(empty.result.current.submitters).toEqual([])
 
     apiGet.mockRejectedValueOnce(new Error('API error 500: boom'))
-    const failed = renderHook(() => useDashboardSubmitters())
+    const failed = renderHook(() => useSubmitters())
     // No spinner loop: a failure ends the load with nothing to offer.
     await waitFor(() => expect(failed.result.current.loading).toBe(false))
     expect(failed.result.current.submitters).toEqual([])
