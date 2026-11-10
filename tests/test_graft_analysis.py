@@ -80,7 +80,9 @@ async def test_analysis_session_receives_the_graph_tools(
 ) -> None:
     """The six read-only graph tools reach analysis as custom tools."""
     monkeypatch.setattr(
-        graft_http, "graph_http_tools", lambda workspace, job_id: list(GRAPH_TOOLS)
+        graft_http,
+        "graph_http_tools",
+        lambda workspace, job_id, **_kwargs: list(GRAPH_TOOLS),
     )
     seen = await captured(tmp_path)
 
@@ -95,7 +97,9 @@ async def test_builtin_tools_are_unchanged(
 ) -> None:
     """The graph never widens the builtin list — no bash, no subagent."""
     monkeypatch.setattr(
-        graft_http, "graph_http_tools", lambda workspace, job_id: list(GRAPH_TOOLS)
+        graft_http,
+        "graph_http_tools",
+        lambda workspace, job_id, **_kwargs: list(GRAPH_TOOLS),
     )
     seen = await captured(tmp_path)
 
@@ -187,7 +191,9 @@ async def test_analysis_prompt_advertises_the_graph(
     monkeypatch.setattr(core, "call_ai_once", fake_call)
     monkeypatch.setattr(core, "update_progress_phase", AsyncMock())
     monkeypatch.setattr(
-        graft_http, "graph_http_tools", lambda workspace, job_id: list(GRAPH_TOOLS)
+        graft_http,
+        "graph_http_tools",
+        lambda workspace, job_id, **_kwargs: list(GRAPH_TOOLS),
     )
     monkeypatch.setattr(session_tools, "index_workspace_graph", AsyncMock())
     monkeypatch.setattr(

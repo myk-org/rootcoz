@@ -32,6 +32,9 @@ _MAX_CONFIG_MODE = 0o644
 _NEW_CONFIG_MODE = stat.S_IRUSR | stat.S_IWUSR
 _DUMP_MODE = stat.S_IRUSR | stat.S_IWUSR
 _UNRESOLVABLE_PATH = (OSError, RuntimeError)
+#: Longest an install waits for a workspace whose lock a graph build may hold.
+#: Another install releases in milliseconds; a build holds it for minutes.
+INSTALL_LOCK_SECONDS = 10.0
 _MCP_RELATIVES = (
     Path(".cursor") / "mcp.json",
     Path(".mcp.json"),
@@ -496,12 +499,25 @@ def _best_effort_install(
     workspace: Path | None,
     custom_tools: list[dict[str, Any]] | None,
 ) -> None:
-    """Run the installer under a per-workspace lock, logging failures."""
+    """Run the installer under a per-workspace lock, logging failures.
+
+    The wait is bounded: a graph build holds the same lock for its whole run (up
+    to ``BUILD_SECONDS`` per repository), and an unbounded wait here put that
+    build back on the turn it was moved off. A turn that cannot have its MCP
+    config this time runs without it — best effort, as the name says.
+    """
     if workspace is None:
         return
     try:
-        with _workspace_install_lock(workspace):
+        with _workspace_install_lock(
+            workspace, deadline=time.monotonic() + INSTALL_LOCK_SECONDS
+        ):
             install_http_tools_mcp(workspace, custom_tools)
+    except TimeoutError:
+        logger.warning(
+            "Workspace %s is busy (graph build); MCP install skipped for this call",
+            workspace,
+        )
     except Exception:
         logger.warning(
             "HTTP tools MCP install failed for %s; continuing without MCP",

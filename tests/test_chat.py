@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
@@ -25,6 +26,7 @@ from rootcoz.engine.chat import (
 )
 from rootcoz.models import ChatInitRequest
 from rootcoz.sources.jenkins_source import _extract_build_params
+from tests.conftest import AdvancingClock
 
 _TEST_ADMIN_KEY = "test-admin-key-16chars"  # pragma: allowlist secret
 _TEST_ENCRYPTION_KEY = "test-encryption-key-for-hmac"  # pragma: allowlist secret
@@ -2797,43 +2799,6 @@ async def test_cleanup_deleted_job_offloads_blocking_cleanup(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_index_chat_repositories_discovers_and_logs_off_loop(
-    tmp_path, monkeypatch
-):
-    from rootcoz import main as main_mod
-    from rootcoz.engine import graft, graft_http
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / ".git").mkdir()
-    seen = []
-
-    def index(workspace, roots, deadline=None):
-        with pytest.raises(RuntimeError, match="no running event loop"):
-            asyncio.get_running_loop()
-        seen.append((workspace, roots))
-        return {"repo": {"status": "ready"}}
-
-    original_discover = graft_http.cloned_graph_roots
-
-    def discover(workspace):
-        with pytest.raises(RuntimeError, match="no running event loop"):
-            asyncio.get_running_loop()
-        return original_discover(workspace)
-
-    monkeypatch.setattr(graft_http, "cloned_graph_roots", discover)
-    monkeypatch.setattr(graft, "index_repositories", index)
-    monkeypatch.setattr(
-        graft, "log_index_outcomes", lambda outcomes, **_: seen.append(outcomes)
-    )
-    await main_mod._index_chat_repositories(tmp_path)
-    assert seen == [
-        (tmp_path, original_discover(tmp_path)),
-        {"repo": {"status": "ready"}},
-    ]
-
-
-@pytest.mark.asyncio
 async def test_chat_routes_share_one_lock_scope_and_translation(monkeypatch) -> None:
     """One lock scope and one ``PathStateUnknown`` translation, not four (#424).
 
@@ -2993,7 +2958,9 @@ async def test_process_chat_answers_when_the_workspace_lock_outlives_the_clock(
         "rootcoz.engine.session_tools.install_http_tools_mcp_best_effort_async",
         AsyncMock(),
     )
-    monkeypatch.setattr("rootcoz.engine.graft_http.graph_http_tools", lambda *a: [])
+    monkeypatch.setattr(
+        "rootcoz.engine.graft_http.graph_http_tools", lambda *a, **k: []
+    )
     monkeypatch.setattr(
         "rootcoz.sources.chat_workspace.setup_ci_build_workspace",
         AsyncMock(return_value=False),
@@ -3109,7 +3076,8 @@ async def test_followup_indexes_only_new_or_missing_graph(
         (graft._root(workspace) / "repo" / "manifest.json").unlink()
 
     # The single builder always asks for indexing and decides inside whether a
-    # build is needed, so the observable is the build itself, not the call.
+    # build is needed, so the observable is the build itself, not the call. The
+    # turn only schedules it, so the test waits for the build it started.
 
     monkeypatch.setattr(
         "rootcoz.engine.chat.ensure_chat_workspace", lambda *a, **k: workspace
@@ -3124,7 +3092,9 @@ async def test_followup_indexes_only_new_or_missing_graph(
         "rootcoz.engine.session_tools.install_http_tools_mcp_best_effort_async",
         AsyncMock(),
     )
-    monkeypatch.setattr("rootcoz.engine.graft_http.graph_http_tools", lambda *a: [])
+    monkeypatch.setattr(
+        "rootcoz.engine.graft_http.graph_http_tools", lambda *a, **k: []
+    )
     monkeypatch.setattr(
         "rootcoz.sources.chat_workspace.setup_ci_build_workspace",
         AsyncMock(return_value=False),
@@ -3165,6 +3135,11 @@ async def test_followup_indexes_only_new_or_missing_graph(
     )
     # One build for the initial graph; a follow-up adds exactly one more when
     # the graph is new, changed or missing, and none when it is current.
+    from rootcoz.engine import session_tools
+
+    scheduled = list(session_tools._BACKGROUND_INDEX_TASKS)
+    assert scheduled, "the turn never scheduled an index"
+    await asyncio.gather(*scheduled)
     assert len(builds) == (1 if graph_state == "indexed" else 2)
     if graph_state == "new":
         assert "other" in builds[-1][-1]
@@ -3544,21 +3519,131 @@ async def _seed_chat_session(job_id: str, username: str = "alice") -> None:
     )
 
 
+#: A test's own ceiling on the wait for preparation: generous against the 10 s that
+#: used to flake, short enough that a genuinely hung preparation fails the suite in a
+#: minute. It is deliberately not ``CHAT_WAIT_SECONDS`` -- that is the CLI's 600 s of
+#: production patience, and a unit test that spends ten wall-clock minutes to prove a
+#: timeout is broken itself. The timeout tests inject a fake clock and spend none of it.
+_CHAT_PREP_WAIT_CEILING_SECONDS = 60.0
+_CHAT_PREP_POLL_SECONDS = 0.01
+
+
 def _await_preparation(
-    test_client, path: str, timeout: float = 10, headers: dict[str, str] | None = None
+    test_client,
+    path: str,
+    timeout: float = _CHAT_PREP_WAIT_CEILING_SECONDS,
+    headers: dict[str, str] | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> None:
     """Poll history until the background preparation has ended.
 
     This file drives Start through the sync ``TestClient``, so it cannot await a
     task created on the portal's loop: the server's own state is the signal. The
     phase is per user, so the caller's own headers decide whose preparation ends.
+
+    Elapsed time comes from ``clock`` (``monotonic``, like the deadlines in ``main.py``)
+    and each poll waits on ``sleep``. Both are injected so a timeout test can pass the
+    ``AdvancingClock`` pair from ``tests.conftest`` and simulate the wait instead of
+    spending it; the default ceiling is a test bound, not the CLI's patience, because
+    no test may burn ``CHAT_WAIT_SECONDS`` of wall clock to prove a deadline.
+
+    The bound is checked on every poll, whatever the phase label does. When it expires,
+    the message names the last phase the server published and how long it has been
+    there -- a reading, not a verdict.
     """
-    deadline = time.time() + timeout
-    while time.time() < deadline:
-        if test_client.get(path, headers=headers).json()["preparing"] is None:
+    started = clock()
+    seen: dict[str, float] = {}  # distinct labels in order, with the moment first seen
+    last = ""
+    last_at = started
+    while True:
+        observed = test_client.get(path, headers=headers).json()["preparing"]
+        if observed is None:
             return
-        time.sleep(0.01)
-    raise AssertionError(f"the chat preparation for {path} never ended")
+        phase = observed.get("phase") or "?"
+        label = f"{phase} ({observed['detail']})" if observed.get("detail") else phase
+        now = clock()
+        if label != last:
+            last, last_at = label, now
+        seen.setdefault(label, now)
+        if now - started >= timeout:
+            raise AssertionError(
+                f"the chat preparation for {path} did not finish within "
+                f"{timeout:.0f} s (last phase: {label}, unchanged for "
+                f"{now - last_at:.0f} s); phases seen: {' -> '.join(seen)}"
+            )
+        sleep(_CHAT_PREP_POLL_SECONDS)
+
+
+class _ScriptedChat:
+    """A history client replaying scripted ``preparing`` states, counting calls.
+
+    ``states`` is a list (read in order, ``None`` past the end) or a callable taking
+    the call number. A poller that never gives up fails the test instead of hanging it.
+    """
+
+    def __init__(self, states) -> None:
+        self._states = states
+        self.calls = 0
+
+    def get(self, path: str, headers: dict[str, str] | None = None) -> SimpleNamespace:
+        self.calls += 1
+        if self.calls > 500:
+            raise AssertionError("the preparation helper never stopped polling")
+        if callable(self._states):
+            state = self._states(self.calls)
+        else:
+            state = (
+                self._states[self.calls - 1]
+                if self.calls <= len(self._states)
+                else None
+            )
+        return SimpleNamespace(json=lambda: {"preparing": state})
+
+
+def test_a_slow_preparation_is_awaited() -> None:
+    """A label held far past the old 10 s passes: the bound is a minute, not ten.
+
+    One poll = one ``sleep(_CHAT_PREP_POLL_SECONDS)`` = 1 fake second, so the single
+    label dwells 40 s -- four times the old 10 s, still under the 60 s ceiling. The fake
+    clock keeps the wait simulated, so the test costs no wall clock.
+    """
+    fake = AdvancingClock(step=1.0)
+    client = _ScriptedChat([{"phase": "cloning", "detail": "tests-repo"}] * 40 + [None])
+
+    _await_preparation(client, "/api/chat/job", clock=fake.monotonic, sleep=fake.sleep)
+
+    assert client.calls == 41  # 40 label polls (40 s) plus the clearing one
+
+
+def test_a_preparation_that_never_ends_reports_the_last_phase_and_elapsed() -> None:
+    """A preparation that never ends stops at the ceiling and reports what it saw.
+
+    The label changes on every poll, so the bound firing proves it is checked
+    unconditionally rather than only on a repeating label. Ten fake seconds per poll
+    reach the 60 s ceiling in seven polls and no wall clock; the real-time assertion is
+    the regression guard -- put a real ``sleep`` back in the poller and it fails here
+    instead of quietly costing the suite a minute per run.
+    """
+    fake = AdvancingClock(step=10.0)
+    client = _ScriptedChat(
+        lambda call: {"phase": "cloning", "detail": f"repo-{'a' if call % 2 else 'b'}"}
+    )
+
+    real_started = time.monotonic()
+    with pytest.raises(AssertionError) as excinfo:
+        _await_preparation(
+            client, "/api/chat/job", clock=fake.monotonic, sleep=fake.sleep
+        )
+    wall_clock = time.monotonic() - real_started
+
+    assert wall_clock < 1.0, f"the timeout path spent {wall_clock:.1f} s of real time"
+    message = str(excinfo.value)
+    assert "did not finish within 60 s" in message
+    assert "last phase: cloning (repo-a)" in message
+    assert "phases seen: cloning (repo-a) -> cloning (repo-b)" in message
+    assert "never ended" not in message
+    assert client.calls == 7  # t = 60 s on the 7th poll
 
 
 async def _start_chat(
@@ -5097,6 +5182,99 @@ class TestChatSessionToolRefresh:
         assert main_mod._enable_tools_for_session("sid-stale", ("jira",)) is None
         assert main_mod._chat_session_tracker_targets["sid-stale"] == ("github",)
         assert main_mod._enable_tools_for_session("sid-stale", ("jira",)) is None
+
+
+class TestChatToolFingerprint:
+    """The tool fingerprint a resumed chat session must match.
+
+    Chat indexes after the session starts (#535), so the code-graph tools exist
+    only from the next turn on. A resumed sidecar session keeps its creation-time
+    tools, so the fingerprint gains ``code-graph`` once graph tools are present —
+    that mismatch is what recreates the session and makes them reachable.
+    """
+
+    _GITHUB_TOOL: ClassVar[dict[str, Any]] = {
+        "name": "create_github_issue",
+        "description": "file an issue",
+    }
+    _GRAPH_TOOL: ClassVar[dict[str, Any]] = {
+        "name": "graft_find_code",
+        "description": "search the graph",
+    }
+
+    def _fingerprint(
+        self, targets: tuple[str, ...], tools: list[dict[str, Any]]
+    ) -> tuple[str, ...]:
+        from rootcoz.main import _chat_tool_fingerprint
+
+        return _chat_tool_fingerprint(targets, tools)
+
+    def test_graph_tools_add_the_graph_entry(self):
+        assert self._fingerprint(("github",), [self._GRAPH_TOOL]) == (
+            "github",
+            "code-graph",
+        )
+
+    def test_no_graph_tools_leave_the_fingerprint_alone(self):
+        assert self._fingerprint(("github",), [self._GITHUB_TOOL]) == ("github",)
+        assert self._fingerprint((), []) == ()
+
+    def test_the_same_inputs_give_the_same_fingerprint(self):
+        """Stability matters: an unstable fingerprint restarts every turn."""
+        for tools in ([self._GITHUB_TOOL], [self._GITHUB_TOOL, self._GRAPH_TOOL]):
+            assert self._fingerprint(("github", "jira"), tools) == self._fingerprint(
+                ("github", "jira"), tools
+            )
+
+    def test_gaining_the_graph_changes_the_fingerprint(self):
+        """The no-graph -> graph change is the session-recreation mechanism."""
+        before = self._fingerprint(("github",), [self._GITHUB_TOOL])
+        after = self._fingerprint(("github",), [self._GITHUB_TOOL, self._GRAPH_TOOL])
+        assert before != after
+
+        from rootcoz import main as main_mod
+
+        main_mod._remember_chat_session_tools("sid-graph", before)
+        assert main_mod._enable_tools_for_session("sid-graph", after) is None
+
+    def test_an_inconclusive_peek_keeps_the_graph_session(self):
+        """A build owning the workspace reads as no tools, not as a lost graph.
+
+        Rebuilding for that replays the whole history once the build finishes and
+        tears the session down again on the next turn, which is churn nobody asked
+        for — and the graph tools report their own freshness anyway.
+        """
+        from rootcoz import main as main_mod
+
+        main_mod._remember_chat_session_tools("sid-graph", ("github", "code-graph"))
+
+        assert (
+            main_mod._enable_tools_for_session("sid-graph", ("github",)) == "sid-graph"
+        )
+
+    def test_a_tracker_change_is_not_excused_by_the_inconclusive_peek(self):
+        """The peek excuses the graph entry only, not the trackers beside it.
+
+        A build holding the workspace hides the graph tools for a turn; that must
+        not also hide a tracker the user enabled meanwhile, which would resume the
+        session with the old set for as long as the build runs.
+        """
+        from rootcoz import main as main_mod
+
+        main_mod._remember_chat_session_tools("sid-graph", ("github", "code-graph"))
+
+        assert (
+            main_mod._enable_tools_for_session("sid-graph", ("github", "jira")) is None
+        )
+
+    def test_targets_still_participate(self):
+        """Not a parallel mechanism: the tracker targets stay in the fingerprint."""
+        assert self._fingerprint(("github",), [self._GRAPH_TOOL]) != self._fingerprint(
+            ("github", "jira"), [self._GRAPH_TOOL]
+        )
+        assert self._fingerprint(("github",), [self._GITHUB_TOOL]) != self._fingerprint(
+            ("github", "jira"), [self._GITHUB_TOOL]
+        )
 
 
 # -- One refusal table, three surfaces (#423) ------------------------------

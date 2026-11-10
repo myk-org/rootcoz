@@ -15,8 +15,12 @@ const PopoverContent = React.forwardRef<
       ref={ref}
       align={align}
       sideOffset={sideOffset}
+      // Flip and shrink to the space the viewport actually leaves, then scroll:
+      // a tall popover near the bottom edge never runs off the page.
+      avoidCollisions
+      collisionPadding={8}
       className={cn(
-        "z-50 rounded-md border border-border-default bg-surface-card p-4 shadow-md outline-none data-[state=open]:animate-fade-in",
+        "z-50 max-h-[var(--radix-popover-content-available-height)] overflow-y-auto rounded-md border border-border-default bg-surface-card p-4 shadow-md outline-none data-[state=open]:animate-fade-in",
         className,
       )}
       {...props}

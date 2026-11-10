@@ -570,9 +570,8 @@ it('shows the server-reported workspace preparation phase while init runs', asyn
   await act(async () => { vi.mocked(useSSE).mock.lastCall![1]['chat-changed']('') })
   expect(screen.getByText('Cloning repositories: tests-repo...')).toBeInTheDocument()
   expect(screen.getByText('Preparing workspace')).toBeInTheDocument()
-  expect(screen.getByText('Indexing repositories for search')).toBeInTheDocument()
   await act(async () => { finishInit({ ready: true, session_id: 'session' }) })
-  expect(screen.queryByText('Indexing repositories for search')).not.toBeInTheDocument()
+  expect(screen.queryByText('Cloning repositories: tests-repo...')).not.toBeInTheDocument()
 })
 
 it('ignores an out-of-order history response instead of rewinding preparation', async () => {

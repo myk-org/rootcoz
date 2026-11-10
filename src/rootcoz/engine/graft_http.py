@@ -250,17 +250,24 @@ _TOOL_DESCRIPTIONS = {
 }
 
 
-def graph_http_tools(workspace: Path | None, job_id: str) -> list[dict[str, Any]]:
+def graph_http_tools(
+    workspace: Path | None, job_id: str, *, deadline: float | None = None
+) -> list[dict[str, Any]]:
     """HTTP graph tools for a workspace's already-indexed clones.
 
     Shared by chat and analysis sessions: the tools are read-only, so both get
-    the same six, built by one function so the lists cannot drift.
+    the same six, built by one function so the lists cannot drift. ``deadline``
+    bounds the wait for a build that owns the workspace: a turn that is not
+    waiting for the graph runs without these tools rather than behind them.
     """
     if workspace is None:
         return []
     from rootcoz.engine.graft import indexed_roots
 
-    roots = indexed_roots(workspace)
+    try:
+        roots = indexed_roots(workspace, deadline=deadline)
+    except TimeoutError:
+        return []
     return register_workspace(workspace, roots, job_id=job_id) if roots else []
 
 

@@ -9,8 +9,10 @@ and that the builtin lists are untouched.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
+import time
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -53,7 +55,7 @@ def stubbed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     )
     monkeypatch.setattr(
         "rootcoz.engine.graft_http.graph_http_tools",
-        lambda workspace, job_id: list(GRAPH_TOOLS),
+        lambda workspace, job_id, **_kwargs: list(GRAPH_TOOLS),
     )
     return indexed, installed
 
@@ -127,6 +129,48 @@ async def test_chat_keeps_its_builtins_and_gets_the_graph(
     assert {"chat_tool"} | {tool["name"] for tool in GRAPH_TOOLS} == {
         tool["name"] for tool in tools.custom
     }
+
+
+@pytest.mark.asyncio
+async def test_the_graph_peek_does_not_block_the_event_loop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The peek waits out a build's workspace lock — off the loop, not on it.
+
+    ``graph_http_tools`` polls a flock while a graph build owns the workspace.
+    Called on the loop it stalled every other request, SSE stream and background
+    task in the process for the whole wait, which is the turn this PR unblocked.
+    """
+    ticks = 0
+
+    def slow_peek(_workspace, _job_id, **_kwargs):
+        time.sleep(0.2)  # stands in for the lock wait a running build causes
+        return []
+
+    async def tick() -> None:
+        nonlocal ticks
+        while True:
+            ticks += 1
+            await asyncio.sleep(0.01)
+
+    monkeypatch.setattr("rootcoz.engine.graft_http.graph_http_tools", slow_peek)
+    monkeypatch.setattr(
+        session_tools, "install_http_tools_mcp_best_effort_async", AsyncMock()
+    )
+
+    beat = asyncio.create_task(tick())
+    try:
+        await session_tools.build_session_tools(
+            builtin=["read"],
+            custom_base=[],
+            workspace=tmp_path,
+            job_id="job",
+            wait_for_index=False,
+        )
+    finally:
+        beat.cancel()
+
+    assert ticks > 5, "the lock wait froze the event loop"
 
 
 @pytest.mark.asyncio
@@ -207,7 +251,7 @@ async def test_skill_is_installed_where_the_session_runs(
     )
     monkeypatch.setattr(
         "rootcoz.engine.graft_http.graph_http_tools",
-        lambda workspace, job_id: list(GRAPH_TOOLS),
+        lambda workspace, job_id, **_kwargs: list(GRAPH_TOOLS),
     )
     monkeypatch.setattr(
         "rootcoz.engine.graft_http.install_graph_skill",
