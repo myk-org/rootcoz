@@ -290,10 +290,15 @@ def test_a_capture_is_counted_once_despite_a_leaked_handler(
     try:
         with capture_main_logs(caplog, level=logging.WARNING):
             main_logger.warning(line)
+        # Asserted here, not after the cleanup below: the cleanup would perform the
+        # detach a broken helper skipped, and the count alone cannot see a leftover
+        # (``Logger.addHandler`` refuses a duplicate, so the second attach is a no-op).
+        assert caplog.handler not in main_logger.handlers, (
+            "capture left its handler attached"
+        )
+        assert caplog.messages.count(line) == 1
     finally:
-        main_logger.removeHandler(caplog.handler)
-
-    assert caplog.messages.count(line) == 1
+        main_logger.removeHandler(caplog.handler)  # never leak into the next test
 
 
 class TestDuplicateFilterExemption:
