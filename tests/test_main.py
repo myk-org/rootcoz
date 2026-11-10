@@ -20252,7 +20252,7 @@ class TestAnalysisReaperIsOneCopy:
                 "rootcoz.main._create_ai_auth_header",
                 new_callable=AsyncMock,
                 return_value="",
-            ),
+            ) as mint,
             patch(
                 "rootcoz.main._reap_analysis_workspace", new_callable=AsyncMock
             ) as reap,
@@ -20292,6 +20292,9 @@ class TestAnalysisReaperIsOneCopy:
         # repo_manager:` copy would at best drift again, at worst skip the reaper.
         assert kwargs["repo_manager"] is manager.return_value
         assert kwargs["repo_path"] == tmp_path / "workspace"
+        # A re-analysis run keeps the graceful default (#534): the refusal is for
+        # the job-chat preparation only, never for a background run.
+        assert mint.await_args.kwargs == {}
 
 
 def test_the_entrypoint_outlives_the_app_shutdown() -> None:

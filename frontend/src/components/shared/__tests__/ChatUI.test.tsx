@@ -1035,6 +1035,32 @@ it('a stale 202 cannot take Start back after the preparation already failed', as
   expect(screen.queryByText(/Preparing workspace/)).not.toBeInTheDocument()
 })
 
+it('re-enables Start when the preparation ended with no row at all', async () => {
+  // #534's docs sentence promises this: if the server cannot record its failure
+  // message either, no new message appears and Start is still ready to retry.
+  setup({ total: 0, messages: [] })
+  let finishInit: (v: unknown) => void = () => {}
+  post.mockImplementation((path: string) => path.endsWith('/init')
+    ? new Promise(resolve => { finishInit = resolve })
+    : Promise.resolve({}))
+  const user = userEvent.setup()
+  render(page())
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled())
+  await user.click(screen.getByRole('button', { name: 'Start Chat' }))
+  await act(async () => { finishInit({ ready: false, preparing: { phase: 'starting_session', detail: '' } }) })
+  expect(screen.getByRole('button', { name: 'Start Chat' })).toBeDisabled()
+  // The end of the preparation, with no row and no session: only `preparing: null`
+  // distinguishes it, and it must hand Start back.
+  get.mockImplementation((path: string) => Promise.resolve(path.startsWith('/api/ai-models')
+    ? catalog
+    : { messages: [], total: 0, active_session_version: 'no-session-version', preparing: null }))
+  act(() => {
+    const handlers = (useSSE as unknown as { mock: { calls: Array<[string, Record<string, () => void>]> } }).mock.calls
+    handlers[handlers.length - 1][1]['chat-changed']()
+  })
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled())
+})
+
 it('a reload during preparation shows the phase and enables the composer once the session appears', async () => {
   setup({ total: 0, messages: [], preparing: { phase: 'cloning', detail: 'openshift-origin' } } as never)
   const { rerender } = render(page())

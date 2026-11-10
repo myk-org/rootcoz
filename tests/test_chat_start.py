@@ -2,17 +2,21 @@
 
 import asyncio
 import contextlib
+import errno
+import inspect
 import logging
 import sqlite3
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
+import httpx
 import pytest
 from fastapi import BackgroundTasks, HTTPException
 
 from rootcoz import ai_client, main, storage
 from rootcoz.models import ChatInitRequest, ChatMessageRequest
+from tests.conftest import capture_main_logs, record_chat_pushes
 
 
 async def _settle(job_id: str = "job") -> None:
@@ -603,7 +607,9 @@ async def test_admin_chat_init_answers_a_transient_creation_status_with_retry(
     assert exc.value.detail == main._TRANSIENT_CHAT_START_DETAIL
 
 
-async def _contended_once(monkeypatch: pytest.MonkeyPatch, counter: dict) -> None:
+async def _contended_once(
+    monkeypatch: pytest.MonkeyPatch, counter: dict, message: str = "database is locked"
+) -> None:
     """Make the next chat-row write lose the lock once, then work normally."""
     real_connect = storage._connect_db
 
@@ -612,7 +618,7 @@ async def _contended_once(monkeypatch: pytest.MonkeyPatch, counter: dict) -> Non
         counter["connect"] = counter.get("connect", 0) + 1
         if counter["connect"] == 1:
             counter["contended"] = counter.get("contended", 0) + 1
-            raise sqlite3.OperationalError("database is locked")
+            raise sqlite3.OperationalError(message)
         async with real_connect(*args, **kwargs) as db:
             yield db
 
@@ -622,8 +628,9 @@ async def _contended_once(monkeypatch: pytest.MonkeyPatch, counter: dict) -> Non
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("write", ["message", "source"])
+@pytest.mark.parametrize("message", ["database is locked", "database is busy"])
 async def test_a_session_row_survives_one_contended_lock(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, write: str
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, write: str, message: str
 ):
     """A momentary lock must not cost the session a Start just created.
 
@@ -635,7 +642,7 @@ async def test_a_session_row_survives_one_contended_lock(
     await storage.init_db()
     await storage.create_admin_user("alice")
     counter: dict = {}
-    await _contended_once(monkeypatch, counter)
+    await _contended_once(monkeypatch, counter, message)
 
     if write == "message":
         msg_id = await storage.add_chat_message(
@@ -700,18 +707,66 @@ class _HeldLock:
     makes a preparation-level test cover the path instead of one named function.
     """
 
+    #: What a contended statement raises; the connection raises the holder's own.
+    exc = sqlite3.OperationalError("database is locked")
+
     def __init__(self) -> None:
         self.awaiting_retry: set[str] = set()
         self.contended = 0
 
     def wrap(self, db):
-        return _LockedConnection(db, self)
+        return _FaultedWrite(db, self)
+
+    def should_fail(self, sql: str) -> str:
+        if not _is_lock_statement(sql):
+            return "pass"
+        if sql in self.awaiting_retry:
+            self.awaiting_retry.discard(sql)
+            return "retry"
+        self.awaiting_retry.add(sql)
+        self.contended += 1
+        return "fail"
 
 
-class _LockedConnection:
-    def __init__(self, db, held: _HeldLock) -> None:
+class _FragmentFault:
+    """The other holder: fail one statement, matched by a fragment of its SQL.
+
+    ``sql`` is compared case-insensitively — the real statement is upper case
+    (``INSERT INTO sessions …``). ``times`` is the budget: ``None`` fails every
+    attempt (an exhausted retry), ``1`` fails the first and lets the retry
+    through. ``attempts`` counts the matches that reached the write, which is what
+    makes "a fault is not retried" and "a lock is retried four times" observable.
+    """
+
+    def __init__(self, sql: str, exc: BaseException, times: int | None = 1) -> None:
+        self.sql = sql.lower()
+        self.exc = exc
+        self.times = times
+        self.attempts = 0
+
+    def wrap(self, db):
+        return _FaultedWrite(db, self)
+
+    def should_fail(self, sql: str) -> str:
+        if self.sql not in sql.lower():
+            return "pass"
+        if self.times is not None and self.attempts >= self.times:
+            return "pass"
+        self.attempts += 1
+        return "fail"
+
+
+class _FaultedWrite:
+    """Wrap one live connection; ask the holder whether this statement fails.
+
+    The per-connection "this connection is a retry, let it through" flag lives
+    here. The per-statement decision belongs to the holder — that is the split
+    ``_HeldLock``'s once-per-connection / once-per-statement behaviour needs.
+    """
+
+    def __init__(self, db, holder) -> None:
         self._db = db
-        self._held = held
+        self._holder = holder
         #: This connection is a retry, so every write on it may commit.
         self._retried = False
 
@@ -719,28 +774,26 @@ class _LockedConnection:
         return getattr(self._db, name)
 
     async def execute(self, sql, *args, **kwargs):
-        self._contend(sql)
+        self._gate(sql)
         return await self._db.execute(sql, *args, **kwargs)
 
     async def executemany(self, sql, *args, **kwargs):
-        self._contend(sql)
+        self._gate(sql)
         return await self._db.executemany(sql, *args, **kwargs)
 
-    def _contend(self, sql: str) -> None:
-        if self._retried or not _is_lock_statement(sql):
+    def _gate(self, sql: str) -> None:
+        if self._retried:
             return
-        if sql in self._held.awaiting_retry:
-            self._held.awaiting_retry.discard(sql)
+        verdict = self._holder.should_fail(sql)
+        if verdict == "fail":
+            raise self._holder.exc
+        if verdict == "retry":
             self._retried = True
-            return
-        self._held.awaiting_retry.add(sql)
-        self._held.contended += 1
-        raise sqlite3.OperationalError("database is locked")
 
 
 @pytest.mark.asyncio
 async def test_the_whole_preparation_survives_a_lock_on_every_write(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    monkeypatch, tmp_path, install_start_rig
 ):
     """R5, closed as a class: prepare a chat while every write loses the lock once.
 
@@ -751,61 +804,15 @@ async def test_the_whole_preparation_survives_a_lock_on_every_write(
     welcome prune, welcome row) under one held lock and asserts it ends ready with
     its rows present. It fails if *any* write on that path stops being retried.
     """
-    from rootcoz.engine import chat, graft_http
-    from rootcoz.sources import chat_workspace
-
-    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "chat.db")
-    await storage.init_db()
-    await storage.create_admin_user("alice")
-    await storage.save_result(
-        "job", "", "completed", {"status": "completed", "result": {}}
+    created: list[dict] = []
+    headers, capture_header = _capture_header()
+    await install_start_rig(
+        credential_source="server",
+        client=_recording_sidecar(created),
+        job_id="job",
+        admin=False,
+        header=capture_header,
     )
-    monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *a, **k: tmp_path)
-    monkeypatch.setattr(chat, "clone_chat_repos", AsyncMock(return_value=False))
-    monkeypatch.setattr(graft_http, "cloned_graph_roots", lambda workspace: {})
-    monkeypatch.setattr(
-        chat_workspace, "setup_ci_build_workspace", AsyncMock(return_value=False)
-    )
-    monkeypatch.setattr(
-        main,
-        "_resolve_chat_credentials",
-        AsyncMock(return_value=("", "", None, "", "")),
-    )
-    monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
-    monkeypatch.setattr(
-        chat, "resolve_catalog_pair", AsyncMock(return_value=("openai", "m"))
-    )
-    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
-    monkeypatch.setattr(ai_client, "server_provider_key", AsyncMock(return_value=None))
-
-    async def create_session(**kwargs):
-        return "sess-1"
-
-    monkeypatch.setattr(
-        chat,
-        "get_sidecar_client",
-        lambda: SimpleNamespace(
-            create_session=create_session, delete_session=AsyncMock()
-        ),
-    )
-
-    async def validate(body, username):
-        ai_client._selected_credential_source.set("server")
-        return body.ai_provider, body.ai_model
-
-    monkeypatch.setattr(main, "_validate_chat_selection", validate)
-    # The internal tools token is a bare INSERT, and the preparation swallows its
-    # failure: a lock there costs the chat its tools without failing the Start, so
-    # record what it actually returned instead of only asserting readiness.
-    headers: list[str] = []
-    real_header = main._create_ai_auth_header
-
-    async def capture_header(username: str, is_admin: bool = False) -> str:
-        value = await real_header(username, is_admin)
-        headers.append(value)
-        return value
-
-    monkeypatch.setattr(main, "_create_ai_auth_header", capture_header)
 
     held = _HeldLock()
     real_connect = storage._connect_db
@@ -818,11 +825,10 @@ async def test_the_whole_preparation_survives_a_lock_on_every_write(
     monkeypatch.setattr(storage, "_connect_db", locked_connect)
     monkeypatch.setattr(storage, "_LOCK_RETRY_BACKOFF_SECONDS", 0)
 
-    request = SimpleNamespace(
-        state=SimpleNamespace(username="alice", is_admin=False, role="reviewer")
-    )
     started = await main.init_chat(
-        "job", request, ChatInitRequest(ai_provider="openai", ai_model="m")
+        "job",
+        _start_request(admin=False),
+        ChatInitRequest(ai_provider="openai", ai_model="undeclared"),
     )
     assert started["ready"] is False
     await _settle("job")
@@ -844,3 +850,557 @@ async def test_the_whole_preparation_survives_a_lock_on_every_write(
         "the preparation reported a failure row"
     )
     assert held.contended >= 5, "every write on the path must be exercised"
+
+
+# -- A genuine storage fault refuses the preparation (#534) ------------------
+#
+# A lock is transient: retried, then degraded for (#526). Anything else is a real
+# storage fault, and a chat that starts with no internal tools is a broken chat
+# dressed as a working one — so at the job-chat preparation the mint re-raises and
+# the existing failure surface tells the user. Every other caller keeps the
+# graceful-degradation ``""``.
+
+
+@contextlib.contextmanager
+def _wrapped_connections(monkeypatch, holder):
+    """Run every storage connection through a fault holder."""
+    real_connect = storage._connect_db
+
+    @contextlib.asynccontextmanager
+    async def wrapped(*args, **kwargs):  # type: ignore[no-untyped-def]
+        async with real_connect(*args, **kwargs) as db:
+            yield holder.wrap(db)
+
+    monkeypatch.setattr(storage, "_connect_db", wrapped)
+    monkeypatch.setattr(storage, "_LOCK_RETRY_BACKOFF_SECONDS", 0)
+    yield holder
+
+
+def _recording_sidecar(created: list[dict]) -> SimpleNamespace:
+    """A sidecar stand-in that records what the session create was asked for."""
+
+    class _Http:
+        async def post(self, url, json=None):  # type: ignore[no-untyped-def]
+            created.append(dict(json or {}))
+            return httpx.Response(
+                200,
+                json={"session_id": f"sess-{len(created)}"},
+                request=httpx.Request("POST", f"http://sidecar.test{url}"),
+            )
+
+    async def create_session(**kwargs):
+        created.append(kwargs)
+        return f"sess-{len(created)}"
+
+    return SimpleNamespace(
+        _client=_Http(), create_session=create_session, delete_session=AsyncMock()
+    )
+
+
+def _capture_header() -> tuple[list[str], object]:
+    """The real helper, wrapped so a test can see what the mint returned.
+
+    The internal tools token is required at this call site: a lock is retried and
+    degraded for, a non-transient storage fault fails the preparation instead of
+    costing the chat its tools silently, so the wrapper forwards ``**kwargs`` —
+    accepting and dropping ``refuse_storage_fault`` would leave the changed call
+    site unexercised.
+    """
+    headers: list[str] = []
+    real_header = main._create_ai_auth_header
+
+    async def capture(username: str, is_admin: bool = False, **kwargs: object) -> str:
+        value = await real_header(username, is_admin, **kwargs)
+        headers.append(value)
+        return value
+
+    return headers, capture
+
+
+@pytest.mark.asyncio
+async def test_a_storage_fault_minting_the_internal_tools_token_fails_the_preparation(
+    monkeypatch,
+    tmp_path,
+    caplog,
+    install_start_rig,
+):
+    """#534: a non-transient fault is not silent, and Start works afterwards.
+
+    The fault is injected at the statement (``INSERT INTO sessions``), so the
+    real retry is in the path — and it must not retry a fault the way it retries a
+    lock. What the user gets is the shared preparation-failure sentence and a
+    ``Start Chat`` that is ready to retry; what they must not get is a chat that
+    says ready with no internal tools.
+    """
+    created: list[dict] = []
+    headers, capture = _capture_header()
+    await install_start_rig(
+        credential_source="server",
+        client=_recording_sidecar(created),
+        job_id="job",
+        admin=False,
+        header=capture,
+    )
+    fault = _FragmentFault(
+        "insert into sessions",
+        sqlite3.OperationalError("no such table: sessions"),
+        times=1,
+    )
+
+    request = _start_request(admin=False)
+    body = ChatInitRequest(ai_provider="openai", ai_model="undeclared")
+    with _wrapped_connections(monkeypatch, fault):
+        with capture_main_logs(caplog), record_chat_pushes(monkeypatch) as pushes:
+            caplog.clear()
+            started = await main.init_chat("job", request, body)
+            # The refusal is reported in the transcript, not inline: init answered
+            # its ordinary 202 payload before the preparation ever reached the mint.
+            assert started["ready"] is False
+            assert started["preparing"]
+            await _settle("job")
+
+            rows = _error_rows(await storage.get_chat_messages("job", username="alice"))
+            assert [r["content"] for r in rows] == [main._CHAT_PREP_FAILED_DETAIL]
+            assert await storage.get_latest_chat_session("job", "alice") is None, (
+                "a refused preparation must leave no session row"
+            )
+            assert created == [], "a provider session was created for a refused Start"
+            assert fault.attempts == 1, "a genuine fault must not be retried"
+            assert any(gone for gone, _ in pushes), (
+                "the ending's push never arrived with the phase cleared"
+            )
+            assert (
+                "Chat preparation failed for job job, user alice: "
+                "OperationalError: no such table: sessions" in caplog.text
+            ), "the operator log does not name the fault and its job"
+
+            history = await main.get_chat_history("job", request, limit=200, offset=0)
+            assert history["preparing"] is None
+            assert [(m["content"], m["status"]) for m in history["messages"]] == [
+                (main._CHAT_PREP_FAILED_DETAIL, "failed")
+            ]
+
+        # The lock really let go before the retry: no session exists yet, so a
+        # turn answers its ordinary 409 rather than 425 or a hang.
+        with pytest.raises(HTTPException) as refused:
+            await asyncio.wait_for(
+                main.send_chat_message(
+                    "job",
+                    ChatMessageRequest(message="hi"),
+                    request,
+                    BackgroundTasks(),
+                ),
+                1,
+            )
+        assert refused.value.status_code == 409
+
+        assert main._chat_prep_tasks.get("job:alice") is None
+        assert main._chat_prep_phases.get("job:alice") is None
+        assert main._chat_lock_refs.get("job:alice") is None
+        assert main._chat_locks.get("job:alice") is None
+        assert main._chat_job_tasks.get("job") is None
+
+        # Start it again: the promise the transcript makes. The tools come back.
+        fault.times = 0
+        headers.clear()
+        retried = await main.init_chat("job", request, body)
+        assert retried["ready"] is False
+        await _settle("job")
+        active = await storage.get_latest_chat_session("job", "alice")
+        assert active is not None and active["session_id"] == "sess-1"
+        assert len(created) == 1
+        assert [t["name"] for t in created[0]["custom_tools"]] and (
+            "get_job_result" in [t["name"] for t in created[0]["custom_tools"]]
+        ), "the retry started the chat without its internal tools"
+        assert len(headers) == 1 and headers[0].startswith("Bearer ")
+        contents = [m["content"] for m in await storage.get_chat_messages("job")]
+        assert any(c.startswith("👋 Welcome!") for c in contents)
+        assert not _error_rows(
+            await storage.get_chat_messages("job", username="alice")
+        ), "the retried Start must prune the failure row"
+
+
+@pytest.mark.asyncio
+async def test_the_refuse_storage_fault_flag_is_keyword_only():
+    """#534: a positional third argument must be a TypeError, never a behaviour change.
+
+    Ten tests monkeypatch this helper with ``(username, is_admin=False)``-shaped
+    wrappers, so a positional third parameter would be silently absorbed instead
+    of failing loudly.
+    """
+    with pytest.raises(TypeError):
+        await main._create_ai_auth_header("alice", False, True)
+
+
+@pytest.mark.asyncio
+async def test_the_internal_tools_token_is_optional_except_for_storage_faults(
+    monkeypatch, tmp_path, caplog
+):
+    """#534: the default keeps degrading for every other caller.
+
+    Only a non-transient fault with the opt-in flag refuses; a lock is transient
+    and must never become a fatal Start, and the sanctioned ``""`` exits (no
+    username, a demoted admin) return before any exception exists.
+    """
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "chat.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+
+    # The empty username logs nothing at all: it returns before the try.
+    with capture_main_logs(caplog):
+        caplog.clear()
+        assert await main._create_ai_auth_header("", refuse_storage_fault=True) == ""
+        assert caplog.records == []
+
+    async def fail(exc: BaseException):
+        async def create_session(*args, **kwargs):
+            raise exc
+
+        monkeypatch.setattr(storage, "create_session", create_session)
+
+    lock = sqlite3.OperationalError("database is locked")
+    busy = sqlite3.OperationalError("database is busy")
+    fault = sqlite3.OperationalError("no such table: sessions")
+
+    for exc in (lock, busy):
+        # A lock is transient: it degrades with the flag, and warns either way.
+        for flag in (False, True):
+            await fail(exc)
+            with capture_main_logs(caplog):
+                caplog.clear()
+                assert (
+                    await main._create_ai_auth_header(
+                        "alice", refuse_storage_fault=flag
+                    )
+                    == ""
+                )
+                assert len(caplog.records) == 1, f"{exc} raised or logged nothing"
+
+    for flag, raises in ((False, False), (True, True)):
+        await fail(fault)
+        with capture_main_logs(caplog):
+            caplog.clear()
+            if raises:
+                with pytest.raises(sqlite3.OperationalError):
+                    await main._create_ai_auth_header(
+                        "alice", refuse_storage_fault=True
+                    )
+            else:
+                assert await main._create_ai_auth_header("alice") == ""
+            record = caplog.records[-1]
+            assert "Failed to create AI session" in record.getMessage()
+            assert "for history access" not in record.getMessage(), (
+                "the warning still names the wrong operation"
+            )
+
+    # ``OSError(EBUSY)`` says "busy" and is not a lock: the type gate refuses it.
+    await fail(OSError(errno.EBUSY, "Device or resource busy"))
+    with capture_main_logs(caplog), pytest.raises(OSError):
+        await main._create_ai_auth_header("alice", refuse_storage_fault=True)
+
+    # A demoted admin gets the sanctioned ``""`` before any exception exists, so
+    # the flag is a no-op on that path (the silent admin chat is #540, not this).
+    monkeypatch.setattr(main, "_ai_admin_role_current", AsyncMock(return_value=False))
+    await fail(fault)
+    assert (
+        await main._create_ai_auth_header(
+            "alice", is_admin=True, refuse_storage_fault=True
+        )
+        == ""
+    )
+
+
+def test_the_helper_classifies_through_the_shared_predicate():
+    """#534: the helper must call ``storage.is_lock_failure``, not a local test.
+
+    A second, inline spelling would pass every behavioural case here for a
+    ``locked`` message and still refuse a ``busy`` one.
+    """
+    source = inspect.getsource(main._create_ai_auth_header)
+    assert "storage.is_lock_failure" in source
+
+
+def test_is_lock_failure_matches_both_spellings():
+    """#534: the predicate is what the retry and the refusal both rest on."""
+    assert storage.is_lock_failure(sqlite3.OperationalError("database is locked"))
+    assert storage.is_lock_failure(sqlite3.OperationalError("database is busy"))
+    assert not storage.is_lock_failure(sqlite3.OperationalError("no such table: x"))
+    assert not storage.is_lock_failure(OSError(errno.EBUSY, "Device or resource busy"))
+    # The e2e row's injected fault: ``RAISE(ABORT)`` is an IntegrityError.
+    assert not storage.is_lock_failure(sqlite3.IntegrityError("e2e injected fault"))
+    assert "is_lock_failure" in inspect.getsource(storage._retry_contended)
+
+
+def test_only_the_job_chat_preparation_refuses_a_storage_fault():
+    """#534: exactly one call site opts in, so an analysis never hard-fails."""
+    assert inspect.getsource(main).count("refuse_storage_fault=True") == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message", ["database is locked", "database is busy"])
+async def test_an_exhausted_lock_still_starts_the_chat_without_internal_tools(
+    monkeypatch, tmp_path, caplog, install_start_rig, message
+):
+    """The surviving ``else`` branch: a lock that outlasts the retry degrades.
+
+    Injected at the connection, not by patching ``create_session`` — the retry
+    lives inside it, so a stub would bypass the very budget this asserts. Making
+    a lock fatal would turn a busy moment into a failed Start.
+    """
+    created: list[dict] = []
+    headers, capture_header = _capture_header()
+    await install_start_rig(
+        credential_source="server",
+        client=_recording_sidecar(created),
+        job_id="job",
+        admin=False,
+        header=capture_header,
+    )
+    lock = _FragmentFault(
+        "insert into sessions", sqlite3.OperationalError(message), times=None
+    )
+    with _wrapped_connections(monkeypatch, lock), capture_main_logs(caplog):
+        caplog.clear()
+        started = await main.init_chat(
+            "job",
+            _start_request(admin=False),
+            ChatInitRequest(ai_provider="openai", ai_model="undeclared"),
+        )
+        assert started["ready"] is False
+        await _settle("job")
+        assert "internal tools token unavailable for alice" in caplog.text, (
+            "the degradation is silent"
+        )
+
+    assert headers == [""], "the lock must degrade, never refuse"
+    assert lock.attempts == storage._LOCK_RETRY_ATTEMPTS, (
+        "the retry budget must run out"
+    )
+    assert not _error_rows(await storage.get_chat_messages("job", username="alice"))
+    active = await storage.get_latest_chat_session("job", "alice")
+    assert active is not None, "an exhausted lock must still start the chat"
+    assert "custom_tools" not in created[0], (
+        "the degraded session must not claim internal tools"
+    )
+
+
+@pytest.mark.asyncio
+async def test_a_restart_with_an_existing_session_ignores_the_internal_tools_fault(
+    monkeypatch, tmp_path, install_start_rig
+):
+    """The mint stays inside the "no usable session" guard (#534).
+
+    Hoisting it one line above that guard — the cheap version of "mint earlier" —
+    would make a storage fault kill a *healthy* re-Start, which is strictly worse
+    than the bug being fixed.
+    """
+    created: list[dict] = []
+    headers, capture_header = _capture_header()
+    await install_start_rig(
+        credential_source="server",
+        client=_recording_sidecar(created),
+        job_id="job",
+        admin=False,
+        header=capture_header,
+    )
+    request = _start_request(admin=False)
+    body = ChatInitRequest(ai_provider="openai", ai_model="undeclared")
+    await main.init_chat("job", request, body)
+    await _settle("job")
+    assert len(created) == 1
+    headers.clear()
+
+    fault = _FragmentFault(
+        "insert into sessions",
+        sqlite3.OperationalError("no such table: sessions"),
+        times=None,
+    )
+    with _wrapped_connections(monkeypatch, fault):
+        restarted = await main.init_chat("job", request, body)
+        assert restarted["ready"] is False, "the ordinary 202 payload"
+        await _settle("job")
+
+    active = await storage.get_latest_chat_session("job", "alice")
+    assert active is not None and active["session_id"] == "sess-1", (
+        "a healthy re-Start was killed by the fault"
+    )
+    assert fault.attempts == 0, "the mint ran for a session that already existed"
+    assert headers == [], "a re-Start must not mint a second internal tools token"
+    assert not _error_rows(await storage.get_chat_messages("job", username="alice"))
+
+
+@pytest.mark.asyncio
+async def test_admin_chat_init_still_starts_when_the_internal_tools_token_hits_a_storage_fault(
+    monkeypatch, tmp_path, caplog, install_start_rig
+):
+    """#534 excludes the admin chat on purpose: it keeps degrading, pinned here.
+
+    ``header="real"`` is the point — the rig's default stubs the mint to ``""``,
+    so a test keeping it could not see a stray ``refuse_storage_fault=True``.
+    The tool-less ``ready`` answer asserted below is the documented limitation
+    (``docs/use-server-chat-for-cross-job-analysis.md``), not an endorsement: the
+    issue names admin-role sessions as must-keep-degrading, and the fix that needs
+    its owners' agreement is tracked as #540.
+    """
+    created: list[dict] = []
+    await install_start_rig(
+        credential_source="server",
+        client=_recording_sidecar(created),
+        job_id=main.ADMIN_CHAT_JOB_ID,
+        admin=True,
+        header="real",
+    )
+    fault = _FragmentFault(
+        "insert into sessions",
+        sqlite3.OperationalError("no such table: sessions"),
+        times=1,
+    )
+    with _wrapped_connections(monkeypatch, fault), capture_main_logs(caplog):
+        caplog.clear()
+        answer = await main.init_admin_chat(
+            _start_request(admin=True),
+            ChatInitRequest(ai_provider="openai", ai_model="undeclared"),
+        )
+    assert answer["ready"] is True, "the admin chat must keep degrading"
+    assert fault.attempts == 1, "the injected fault never reached the mint"
+    lines = [r.getMessage() for r in caplog.records]
+    assert "Failed to create AI session" in lines
+    assert "for history access" not in " ".join(lines)
+    tool_names = [t["name"] for t in created[0].get("custom_tools") or []]
+    assert not {"db_schema", "db_query", "save_report"} & set(tool_names)
+
+
+@pytest.mark.asyncio
+async def test_a_failed_preparation_still_pushes_when_the_failed_row_cannot_be_written(
+    monkeypatch, tmp_path, caplog, install_start_rig
+):
+    """#534 routes faults into this handler, so the report must not fail.
+
+    A store that refuses the *failed row* too must still tell the browser: a bare
+    ``event.is_set()`` is unfalsifiable (every phase update notifies), so this
+    records whether the phase key was already gone at each push.
+    """
+
+    async def refuse(**_kwargs):
+        raise sqlite3.OperationalError("no such table: chat_messages")
+
+    monkeypatch.setattr(storage, "add_chat_message", refuse)
+    created: list[dict] = []
+    _headers, capture_header = _capture_header()
+    await install_start_rig(
+        credential_source="server",
+        client=_recording_sidecar(created),
+        job_id="job",
+        admin=False,
+        header=capture_header,
+    )
+    fault = _FragmentFault(
+        "insert into sessions",
+        sqlite3.OperationalError("no such table: sessions"),
+        times=1,
+    )
+    with _wrapped_connections(monkeypatch, fault):
+        with capture_main_logs(caplog), record_chat_pushes(monkeypatch) as pushes:
+            caplog.clear()
+            await main.init_chat(
+                "job",
+                _start_request(admin=False),
+                ChatInitRequest(ai_provider="openai", ai_model="undeclared"),
+            )
+            await _settle("job")
+        assert any(gone for gone, _ in pushes), (
+            "the ending's push never arrived with the phase cleared"
+        )
+        assert any(
+            "Chat preparation could not record its failed row for job job, user alice"
+            in record.getMessage()
+            for record in caplog.records
+        ), "the lost failed row was not logged"
+
+    assert main._chat_prep_tasks.get("job:alice") is None
+    assert main._chat_prep_phases.get("job:alice") is None
+    assert main._chat_lock_refs.get("job:alice") is None
+    assert main._chat_locks.get("job:alice") is None
+    assert main._chat_job_tasks.get("job") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("admin", [False, True])
+async def test_a_chat_turn_is_unaffected_by_a_failed_internal_tools_mint(
+    monkeypatch, tmp_path, install_turn_rig, admin
+):
+    """Both turn sites keep the default flag: a turn must still answer.
+
+    The order matters — the session exists first, then the fault is installed, then
+    the turn runs. Under the fault a Start would be refused by this very change,
+    so a turn driven without a session would assert the wrong thing.
+    """
+    from rootcoz.engine import chat
+
+    job_id = main.ADMIN_CHAT_JOB_ID if admin else "job"
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / f"{job_id}-turn.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    if not admin:
+        await storage.save_result(
+            job_id, "", "completed", {"status": "completed", "result": {}}
+        )
+    await storage.save_ai_session_source("sid", "alice", "openai", "server")
+    await storage.add_chat_message(
+        job_id,
+        "assistant",
+        "",
+        username="alice",
+        ai_provider="openai",
+        ai_model="m",
+        session_id="sid",
+    )
+    headers, capture_header = _capture_header()
+    await install_turn_rig(
+        admin=admin, header=capture_header, credential_source="server"
+    )
+    _user_id, assistant_id = await storage.add_chat_message_pair(
+        job_id, "hello", username="alice", ai_provider="openai", ai_model="m"
+    )
+
+    async def answer(**_kwargs):
+        return True, "the answer", "sid"
+
+    monkeypatch.setattr(chat, "admin_chat_with_ai" if admin else "chat_with_ai", answer)
+    fault = _FragmentFault(
+        "insert into sessions",
+        sqlite3.OperationalError("no such table: sessions"),
+        times=None,
+    )
+    with _wrapped_connections(monkeypatch, fault):
+        if admin:
+            await main._process_admin_chat_message(
+                user_msg_id=_user_id,
+                assistant_msg_id=assistant_id,
+                message="hello",
+                ai_provider_override="openai",
+                ai_model_override="m",
+                username="alice",
+                credential_source="server",
+            )
+        else:
+            await main._process_chat_message(
+                job_id=job_id,
+                user_msg_id=_user_id,
+                assistant_msg_id=assistant_id,
+                message="hello",
+                ai_provider_override="openai",
+                ai_model_override="m",
+                username="alice",
+                credential_source="server",
+            )
+
+    assert headers == [""], "the turn site must keep the graceful default"
+    assert fault.attempts == 1, "the injected fault never reached the mint"
+    answer_row = next(
+        m
+        for m in await storage.get_chat_messages(job_id, username="alice")
+        if m["id"] == assistant_id
+    )
+    assert answer_row["content"] == "the answer", "the turn did not complete"
+    assert answer_row["status"] == "completed"

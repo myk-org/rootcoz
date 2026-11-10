@@ -7,7 +7,6 @@ preparation holds for its whole body.
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import BackgroundTasks, HTTPException
@@ -145,44 +144,15 @@ async def test_refusal_comes_after_authorization(monkeypatch, tmp_path):
         _forget_preparation(task)
 
 
-def _wire_turn(monkeypatch, job_id, events, workspace):
-    """A chat turn down to fakes, recording when the clone and the AI are entered."""
-    from rootcoz.engine import chat, session_tools
-    from rootcoz.sources import chat_workspace
-
-    monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *a, **k: workspace)
-
-    async def clone(*_args, **_kwargs):
-        events.append("clone")
-
-    monkeypatch.setattr(chat, "clone_chat_repos", clone)
-    monkeypatch.setattr(
-        chat_workspace, "setup_ci_build_workspace", AsyncMock(return_value=False)
-    )
-    monkeypatch.setattr(
-        main,
-        "_resolve_chat_credentials",
-        AsyncMock(return_value=("", "", None, "", "")),
-    )
-    monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
-
-    async def tools(**_kwargs):
-        return SimpleNamespace(custom=[])
-
-    monkeypatch.setattr(session_tools, "build_session_tools", tools)
-    monkeypatch.setattr(main, "_schedule_chat_index", lambda *a, **k: None)
-
-    async def validate(provider, model):
-        from rootcoz import ai_client
-
-        ai_client._selected_credential_source.set("user")
-        return provider, model
-
-    monkeypatch.setattr(main, "_validate_catalog_pair", validate)
+async def _wire_turn(install_turn_rig, workspace):
+    """A chat turn down to fakes; the shared turn rig owns the wiring."""
+    await install_turn_rig(workspace=workspace)
 
 
 @pytest.mark.asyncio
-async def test_turn_and_preparation_never_interleave(monkeypatch, tmp_path):
+async def test_turn_and_preparation_never_interleave(
+    monkeypatch, tmp_path, install_turn_rig
+):
     """The lock orders the two in both directions; nothing else is claimed."""
     from rootcoz.engine import chat
 
@@ -193,7 +163,7 @@ async def test_turn_and_preparation_never_interleave(monkeypatch, tmp_path):
     clone_gate = asyncio.Event()
 
     await _job(monkeypatch, tmp_path, "lock-job")
-    _wire_turn(monkeypatch, "lock-job", events, workspace)
+    await _wire_turn(install_turn_rig, workspace)
 
     async def chat_with_ai(**_kwargs):
         events.append("chat_with_ai")
@@ -255,7 +225,7 @@ async def test_turn_and_preparation_never_interleave(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_abort_while_a_preparation_runs(monkeypatch, tmp_path):
+async def test_abort_while_a_preparation_runs(monkeypatch, tmp_path, install_turn_rig):
     """Abort still fails the placeholder, and the AI call never starts."""
     from rootcoz.engine import chat
 
@@ -263,7 +233,7 @@ async def test_abort_while_a_preparation_runs(monkeypatch, tmp_path):
     workspace.mkdir()
     events: list[str] = []
     await _job(monkeypatch, tmp_path, "abort-job")
-    _wire_turn(monkeypatch, "abort-job", events, workspace)
+    await _wire_turn(install_turn_rig, workspace)
 
     async def chat_with_ai(**_kwargs):
         events.append("chat_with_ai")
