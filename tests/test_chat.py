@@ -4862,6 +4862,21 @@ class TestChatToolFingerprint:
             main_mod._enable_tools_for_session("sid-graph", ("github",)) == "sid-graph"
         )
 
+    def test_a_tracker_change_is_not_excused_by_the_inconclusive_peek(self):
+        """The peek excuses the graph entry only, not the trackers beside it.
+
+        A build holding the workspace hides the graph tools for a turn; that must
+        not also hide a tracker the user enabled meanwhile, which would resume the
+        session with the old set for as long as the build runs.
+        """
+        from rootcoz import main as main_mod
+
+        main_mod._remember_chat_session_tools("sid-graph", ("github", "code-graph"))
+
+        assert (
+            main_mod._enable_tools_for_session("sid-graph", ("github", "jira")) is None
+        )
+
     def test_targets_still_participate(self):
         """Not a parallel mechanism: the tracker targets stay in the fingerprint."""
         assert self._fingerprint(("github",), [self._GRAPH_TOOL]) != self._fingerprint(

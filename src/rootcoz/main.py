@@ -11313,7 +11313,14 @@ def _enable_tools_for_session(
         return session_id
     if known == targets:
         return session_id
-    if _GRAPH_TOOL_FINGERPRINT in known and _GRAPH_TOOL_FINGERPRINT not in targets:
+    if (
+        _GRAPH_TOOL_FINGERPRINT in known
+        and _GRAPH_TOOL_FINGERPRINT not in targets
+        # Only the graph entry is unknowable, so the exception covers only it:
+        # the tracker targets beside it come from settings, and a change there
+        # is decisive even while a build holds the workspace.
+        and tuple(item for item in known if item != _GRAPH_TOOL_FINGERPRINT) == targets
+    ):
         # The graph entry comes from a bounded read of the workspace, which
         # cannot tell "no graph" from "a build holds the lock" — both return no
         # tools. Rebuilding on that replays the whole history the moment the
