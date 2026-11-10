@@ -228,12 +228,12 @@ Send `source="ai"` to attribute the classification to the reserved `rootcoz-ai` 
 
 | Method | Path | Min role | Notes |
 | --- | --- | --- | --- |
-| GET | `/api/chat/{job_id}` | viewer | `limit` (1–500), `offset` |
-| POST | `/api/chat/{job_id}` | reviewer | `message` plus optional AI overrides; returns `202`, answer arrives over SSE |
-| POST | `/api/chat/{job_id}/init` | reviewer | Explicit `ai_provider`, `ai_model`; `422` with an `AI session refused: …` detail when the sidecar will not open a session for that pair |
+| GET | `/api/chat/{job_id}` | viewer | `limit` (1–500), `offset`. While a workspace is being prepared, `preparing` is `{phase, detail}` with `phase` one of `preparing`, `cloning`, `indexing`, `fetching_build_data`, `starting_session`; it is `null` when nothing is being prepared |
+| POST | `/api/chat/{job_id}` | reviewer | `message` plus optional AI overrides; returns `202`, answer arrives over SSE. Answers `425` naming the preparation phase when the workspace is being prepared |
+| POST | `/api/chat/{job_id}/init` | reviewer | Explicit `ai_provider`, `ai_model`; returns `202` with `{"ready": false, "preparing": {phase, detail}}` — the workspace is prepared in the background and the session appears in `GET /api/chat/{job_id}`. Invalid preconditions still answer inline: `422` for an invalid pair or an unusable credential source, `400` for a deactivated server provider, `404` for a deleted job, `409` for an unusable workspace or a different provider/model already in session. A refused session no longer answers `422 AI session refused: …`: it appears as a failed message in the transcript. A preparation cancelled before it finished its checks answers `503` with a retry sentence, and `404` when the job is being deleted |
 | POST | `/api/chat/{job_id}/abort` | reviewer | Cancel the in-flight answer |
 | POST | `/api/chat/{job_id}/close` | reviewer | Close the AI session |
-| DELETE | `/api/chat/{job_id}` | reviewer | Clear chat history |
+| DELETE | `/api/chat/{job_id}` | reviewer | Clear chat history; `425` naming the preparation phase while the workspace is being prepared |
 | GET | `/api/chat/{job_id}/stream` | viewer | SSE stream of new messages **and the answer as it is written** (`chat-delta` frames) |
 
 An answer can become a tracker issue: the chat model files it through `POST /api/chat-issue` (see [Trackers, issues, and exporters](#trackers-issues-and-exporters)) when the user asks it to, via its `create_github_issue` / `create_jira_issue` tools. Admin chat (`/api/admin/chat/*`) has no tracker credential of its own; the endpoint uses the caller's account tokens in both chats, so an issue is always filed under the person who asked.
@@ -343,7 +343,7 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | POST | `/api/admin/db/query` | Read-only SQL for the admin chat |
 | GET | `/api/admin/chat` | Admin chat history |
 | POST | `/api/admin/chat` | Send an admin chat message; returns `202` |
-| POST | `/api/admin/chat/init`, `/close`, `/abort` | Admin chat session control; `/init` answers the same `422 AI session refused: …` as job chat |
+| POST | `/api/admin/chat/init`, `/close`, `/abort` | Admin chat session control; admin chat init stays synchronous and answers its own `422 AI session refused: …` (job chat reports a refusal as a transcript message instead) |
 | DELETE | `/api/admin/chat` | Clear admin chat history |
 | GET | `/api/admin/chat/stream` | Admin chat SSE: new messages **and the answer as it is written** (`chat-delta` frames) |
 | POST | `/api/admin-chat/artifacts` | Save a generated HTML report artifact |

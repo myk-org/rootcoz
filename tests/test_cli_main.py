@@ -7247,40 +7247,156 @@ class TestApiKeyOption:
             )
 
 
+def _preparing(session: bool = False) -> dict:
+    return {
+        "messages": [],
+        "total": 0,
+        "preparing": {"phase": "cloning", "detail": "repo"},
+        "active_session": (
+            {"ai_provider": "openai", "ai_model": "m", "credential_source": "user"}
+            if session
+            else None
+        ),
+    }
+
+
+def _ready(session: bool = True) -> dict:
+    return {**_preparing(session=session), "preparing": None}
+
+
 class TestChatCommands:
-    @pytest.mark.parametrize(
-        ("ready", "session_id"), [(True, "session-123"), (True, ""), (False, "sid")]
-    )
-    def test_chat_init_human_only_reports_active_session(
-        self, mock_client, ready, session_id
-    ):
+    def test_chat_init_waits_for_session(self, mock_client):
+        """A 202 is accepted, and readiness means no preparation *and* a session.
+
+        The re-used-session case is why ``active_session`` alone is not enough: a
+        second Start seeds the phase and then clones for minutes with a session
+        already present, so an early exit would make the next ``chat send`` collect
+        the new ``425``.
+        """
         mock_client.init_chat.return_value = {
-            "ready": ready,
-            "session_id": session_id,
-            "repo_names": ["repo-a"],
-            "api_key": "do-not-print",  # pragma: allowlist secret
+            "ready": False,
+            "preparing": {"phase": "preparing", "detail": ""},
         }
-        result = runner.invoke(
-            app, ["chat", "init", "job-1", "--provider", "openai", "--model", "m"]
-        )
+        mock_client.get_chat_history.side_effect = [
+            _preparing(session=True),
+            _preparing(session=True),
+            _ready(),
+        ]
+        with patch("time.sleep"):
+            result = runner.invoke(
+                app, ["chat", "init", "job-1", "--provider", "openai", "--model", "m"]
+            )
         assert result.exit_code == 0
         mock_client.init_chat.assert_called_once_with("job-1", "openai", "m")
-        assert ("Chat started" in result.output) is bool(session_id and ready)
-        assert ("Ready: True" in result.output) is bool(session_id and ready)
-        if not (session_id and ready):
-            assert "not started" in result.output.lower()
-        assert "repo-a" in result.output
-        assert "do-not-print" not in result.output
+        assert "Ready: True" in result.output
+        assert "Chat started" in result.output
+        assert "openai / m" in result.output
+        assert mock_client.get_chat_history.call_count == 3
+
+    def test_chat_init_human_only_reports_active_session(self, mock_client):
+        """Human output names the pair, and says so only when a session exists."""
+        mock_client.init_chat.return_value = {"ready": False, "preparing": {}}
+        mock_client.get_chat_history.return_value = _ready()
+        with patch("time.sleep"):
+            started = runner.invoke(
+                app, ["chat", "init", "job-1", "-p", "openai", "-m", "m"]
+            )
+        assert "Ready: True" in started.output
+        assert "Chat started (openai / m)" in started.output
+        assert "session-123" not in started.output
+
+        # A preparation that never becomes ready is not reported as started.
+        mock_client.get_chat_history.return_value = _preparing(session=False)
+        with patch("time.sleep"):
+            waiting = runner.invoke(
+                app, ["chat", "init", "job-2", "-p", "openai", "-m", "m"]
+            )
+        assert "Timed out" in waiting.stderr
+        assert "not started" in waiting.output.lower()
+
+    def test_chat_init_times_out_with_the_budget(self, mock_client):
+        """The wait is bounded by ``CHAT_WAIT_SECONDS``, fails, and says so."""
+        from rootcoz.cli import main as cli_main
+
+        mock_client.init_chat.return_value = {"ready": False, "preparing": {}}
+        mock_client.get_chat_history.return_value = _preparing(session=True)
+        with patch("time.sleep"):
+            result = runner.invoke(
+                app, ["chat", "init", "job-1", "-p", "openai", "-m", "m"]
+            )
+        assert result.exit_code == 1, "a chat that never became ready is a failure"
+        assert mock_client.get_chat_history.call_count == cli_main.CHAT_WAIT_SECONDS
+        # stderr, so a --json caller still gets one clean document on stdout.
+        assert "Timed out" in result.stderr
+        assert "Timed out" not in result.stdout
+        assert cli_main.CHAT_WAIT_SECONDS > 120
+
+    def test_chat_init_stops_waiting_on_a_revoked_grant(self, mock_client):
+        """A 403 while polling is the answer, not 600 retries of it."""
+
+        mock_client.init_chat.return_value = {"ready": False, "preparing": {}}
+        mock_client.get_chat_history.side_effect = RootCozError(
+            status_code=403, detail="Forbidden"
+        )
+        with patch("time.sleep"):
+            result = runner.invoke(
+                app, ["chat", "init", "job-1", "-p", "openai", "-m", "m"]
+            )
+        assert result.exit_code == 1
+        assert mock_client.get_chat_history.call_count == 1
+        assert "Forbidden" in result.stderr
+        assert "Timed out" not in result.stderr
+
+    def test_chat_init_reports_failure(self, mock_client):
+        """A preparation that ends with a failed row is a failure, not "not started"."""
+        mock_client.init_chat.return_value = {"ready": False, "preparing": {}}
+        mock_client.get_chat_history.return_value = {
+            "messages": [
+                {
+                    "role": "assistant",
+                    "content": "The chat workspace could not be prepared. Start it again.",
+                    "status": "failed",
+                }
+            ],
+            "total": 1,
+            "preparing": None,
+            "active_session": None,
+        }
+        with patch("time.sleep"):
+            result = runner.invoke(
+                app, ["chat", "init", "job-1", "-p", "openai", "-m", "m"]
+            )
+        assert result.exit_code == 1
+        assert "The chat workspace could not be prepared" in result.output
 
     def test_chat_init_json(self, mock_client):
-        mock_client.init_chat.return_value = {"ready": True, "session_id": "sid"}
-        result = runner.invoke(
-            app,
-            ["--json", "chat", "init", "job-1", "-p", "openai", "-m", "m"],
-        )
+        mock_client.init_chat.return_value = {"ready": False, "preparing": {}}
+        mock_client.get_chat_history.return_value = _ready()
+        with patch("time.sleep"):
+            result = runner.invoke(
+                app,
+                ["--json", "chat", "init", "job-1", "-p", "openai", "-m", "m"],
+            )
         assert result.exit_code == 0
-        assert json.loads(result.output)["session_id"] == "sid"
+        payload = json.loads(result.output)
+        assert payload["ready"] is True
+        assert payload["ai_provider"] == "openai"
+        assert payload["ai_model"] == "m"
+        assert payload["error"] is None
         mock_client.init_chat.assert_called_once_with("job-1", "openai", "m")
+
+    def test_chat_init_json_timeout_keeps_stdout_parseable(self, mock_client):
+        """The timeout sentence goes to stderr, so ``--json`` output stays one document."""
+        mock_client.init_chat.return_value = {"ready": False, "preparing": {}}
+        mock_client.get_chat_history.return_value = _preparing(session=True)
+        with patch("time.sleep"):
+            result = runner.invoke(
+                app,
+                ["--json", "chat", "init", "job-1", "-p", "openai", "-m", "m"],
+            )
+        assert result.exit_code == 1
+        assert json.loads(result.stdout)["ready"] is False
+        assert "Timed out" in result.stderr
 
     def test_chat_history(self, mock_client):
         mock_client.get_chat_history.return_value = {
@@ -7402,6 +7518,42 @@ class TestChatCommands:
             ai_model="opus-4",
         )
         assert "The error is caused by a missing import." in result.output
+
+    def test_chat_send_waits_past_the_old_cap_without_failing(self, mock_client):
+        """The send wait grew with the preparation: green after the old 120 s cap."""
+        from rootcoz.cli import main as cli_main
+
+        mock_client.send_chat_message.return_value = {
+            "user_message": {
+                "id": 1,
+                "role": "user",
+                "content": "q",
+                "status": "completed",
+            },
+        }
+        pending = {
+            "messages": [
+                {"id": 2, "role": "assistant", "content": "", "status": "pending"}
+            ],
+            "total": 1,
+        }
+        answered = {
+            "messages": [
+                {
+                    "id": 2,
+                    "role": "assistant",
+                    "content": "late answer",
+                    "status": "completed",
+                }
+            ],
+            "total": 1,
+        }
+        mock_client.get_chat_history.side_effect = [pending] * 130 + [answered]
+        with patch("time.sleep"):
+            result = runner.invoke(app, ["chat", "send", "job-1", "q"])
+        assert result.exit_code == 0
+        assert "late answer" in result.output
+        assert cli_main.CHAT_WAIT_SECONDS == 600
 
     def test_chat_send_json(self, mock_client):
         payload = {

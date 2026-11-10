@@ -252,6 +252,76 @@ def _remaining(deadline: float) -> float:
     return remaining
 
 
+def _deadline_fired(deadline: float | None) -> bool:
+    """Whether the index clock has run out.
+
+    The one classifier for the index deadline, asked at the catch site: a build
+    that overruns ``BUILD_SECONDS`` and a ``_sources`` that overruns
+    ``MAX_SECONDS`` raise the same ``TimeoutError``, so the clock — not the
+    exception type — decides whether the repository was refused or is broken.
+    """
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def budget_marker_reason(destination: Path) -> str | None:
+    """The reason of a live backoff marker under ``destination``, if any."""
+    marker = destination / "budget.json"
+    if marker.is_symlink() or destination.is_symlink():
+        return None
+    try:
+        payload = json.loads(marker.read_text())
+    except OSError, ValueError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    retry_after = payload.get("retry_after")
+    if isinstance(retry_after, (int, float)) and time.time() < retry_after:
+        # A marker written before ``reason`` existed means the budget: that was
+        # its only writer.
+        return str(payload.get("reason") or "workspace graph budget")
+    return None
+
+
+def _write_budget_marker(
+    destination: Path, used: int, reason: str, *, guard_size: bool
+) -> None:
+    """Write the one backoff marker every refusal shares.
+
+    A symlinked marker (or parent) is never written — the readers refuse those
+    too. ``guard_size`` is the admission rule and stays there: a marker that
+    would itself overflow the budget is not written. The post-build drop
+    deliberately does not guard, because its marker is the only residue of the
+    graph it just deleted and skipping it rebuilt that repository every session.
+    """
+    if destination.is_symlink() or destination.parent.is_symlink():
+        return
+    previous = destination / "budget.json"
+    if previous.is_symlink():
+        return
+    marker = json.dumps(
+        {
+            "budget_used": used,
+            "retry_after": time.time() + FAILED_RETRY_SECONDS,
+            "reason": reason,
+        }
+    )
+    if guard_size:
+        previous_size = (
+            previous.stat().st_size
+            if previous.is_file() and not previous.is_symlink()
+            else 0
+        )
+        if len(marker) - previous_size > max_workspace_graph_bytes():
+            return
+    try:
+        destination.mkdir(parents=True, exist_ok=True)
+        previous.write_text(marker)
+    except OSError:
+        logger.warning(
+            "graph indexing: could not record the refusal marker in %s", destination
+        )
+
+
 #: (path, mtime_ns, size) -> sha256. A query re-reads the manifest twice; without
 #: this cache every query hashed the entire clone twice, which for a 557 MB
 #: forklift snapshot is the whole query budget. Only changed files are re-hashed.
@@ -449,35 +519,43 @@ def _index_one(
     root: Path,
     name: str,
     repo_value: Path,
-    reserve: Callable[[Path], bool] | None = None,
+    reserve: Callable[[Path], str | None] | None = None,
     release: Callable[[Path], None] | None = None,
+    deadline: float | None = None,
 ) -> dict[str, Any]:
     repo = Path(repo_value)
     if not _valid_repo(workspace, name, repo):
         return {"status": "skipped", "reason": "invalid repository"}
     destination = root / name
     manifest = None
+    #: Whether this run began writing ``destination``. Only a partial build of
+    #: our own may be dropped when the clock fires: the graph that was there
+    #: before this run is not this run's to destroy.
+    building = False
     try:
         if root.is_symlink() or (root.exists() and not root.is_dir()):
             return {"status": "failed", "reason": "invalid graph root"}
         if destination.is_symlink():
             return {"status": "failed", "reason": "invalid graph directory"}
-        manifest = _sources(repo)
+        manifest = _sources(repo, deadline)
         if not manifest:
             if destination.exists():
                 shutil.rmtree(destination)
             return {"status": "skipped", "reason": "no eligible files"}
         if manifest == _manifest(destination):
             return {"status": "unchanged", "files": len(manifest)}
-        if reserve is not None and not reserve(destination):
-            return {"status": "skipped", "reason": "workspace graph budget"}
+        if reserve is not None and (refusal := reserve(destination)) is not None:
+            return {"status": "skipped", "reason": refusal}
         if destination.exists():
             shutil.rmtree(destination)
+        building = True
         snapshot = destination / "snapshot"
         graph = destination / "graph"
         snapshot.mkdir(parents=True, mode=0o700)
         total = 0
         for path, digest in manifest.items():
+            if deadline is not None:
+                _remaining(deadline)
             source = _safe_file(repo, _relative(path))
             if source is None:
                 raise ValueError("source changed")
@@ -508,35 +586,62 @@ def _index_one(
         _run(
             [TRAIL, "--dir", str(graph), "build", str(snapshot)],
             cwd=snapshot,
-            timeout=BUILD_SECONDS,
+            timeout=(
+                BUILD_SECONDS
+                if deadline is None
+                else min(BUILD_SECONDS, _remaining(deadline))
+            ),
             disk=destination,
             discard_output=True,
         )
         if not graph.is_dir() or graph.is_symlink():
             raise _Limit("graph disk limit")
-        if _sources(repo) != manifest:
+        if _sources(repo, deadline) != manifest:
             raise ValueError("source changed")
         (destination / "manifest.json").write_text(json.dumps(manifest))
         # The budget is a hard bound, not an admission hint: a build admitted
         # while under budget can finish over it. Drop this graph rather than
         # leave the workspace above the limit, and record why so the next run
-        # retries only after the backoff.
+        # retries only after the backoff. The check runs even when the clock
+        # fired during the build: an over-budget graph left in place is rejected
+        # by every query and its manifest still reads as current, so it would
+        # never be rebuilt.
         with _workspace_install_lock(_root(repo.parent)):
             workspace_used = _workspace_graph_size(_root(repo.parent))
         if workspace_used > max_workspace_graph_bytes():
             shutil.rmtree(destination, ignore_errors=True)
-            destination.mkdir(parents=True, exist_ok=True)
-            (destination / "budget.json").write_text(
-                json.dumps(
-                    {
-                        "budget_used": workspace_used,
-                        "retry_after": time.time() + FAILED_RETRY_SECONDS,
-                    }
-                )
+            _write_budget_marker(
+                destination,
+                workspace_used,
+                "workspace graph budget",
+                guard_size=False,
             )
             return {"status": "skipped", "reason": "workspace graph budget"}
         return {"status": "indexed", "files": len(manifest), "bytes": total}
     except (OSError, ValueError, TimeoutError, subprocess.SubprocessError) as exc:
+        if _deadline_fired(deadline):
+            # The clock ran out, not the repository: a deadline skip is not a
+            # failure, and a failed.json here would retry a healthy repo forever.
+            if building:
+                # Only our own partial build goes. A graph that was already
+                # complete stays where it is — the clock ran out while
+                # *verifying* it, and a query re-hashes the sources before it
+                # answers, so a possibly-stale graph is refused, not trusted.
+                shutil.rmtree(destination, ignore_errors=True)
+            if _manifest(destination) is None:
+                # Nothing usable is left here, so record the refusal: the funnel
+                # then backs off instead of re-hashing this repository every
+                # session, which is the cost that made the deadline a never-run.
+                # This repository's own tree, not a workspace scan: the clock
+                # is spent, and walking every graph here is what kept the
+                # preparation waiting. The field is informational.
+                _write_budget_marker(
+                    destination,
+                    _disk_size(destination, limit=0, reject_symlinks=False),
+                    "deadline",
+                    guard_size=True,
+                )
+            return {"status": "skipped", "reason": "deadline"}
         if not destination.is_symlink():
             shutil.rmtree(destination, ignore_errors=True)
             try:
@@ -567,17 +672,32 @@ def _index_one(
 
 
 def index_repositories(
-    workspace: Path, cloned_repos: dict[str, Path]
+    workspace: Path, cloned_repos: dict[str, Path], *, deadline: float | None = None
 ) -> dict[str, Any]:
-    """Build per-repo graphs while reserving aggregate workspace disk capacity."""
+    """Build per-repo graphs while reserving aggregate workspace disk capacity.
+
+    ``deadline`` bounds the whole run: no repository work starts past it, and an
+    admitted repository checks it at every stage. ``None`` keeps the analysis
+    callers unbounded, exactly as before.
+    """
     workspace = Path(workspace).resolve()
     root = _root(workspace)
     gate = threading.Lock()
     reservations: set[Path] = set()
 
-    def reserve(destination: Path) -> bool:
+    def reserve(destination: Path) -> str | None:
+        """Admit a graph, or refuse it and name why (first reason wins).
+
+        The reason is returned rather than re-derived: this is where both the
+        budget and the clock decision are made, and a bare ``bool`` forced the
+        caller to guess — which is how a spent deadline ended up with a
+        ``deadline`` marker and a ``workspace graph budget`` outcome line.
+        """
         with gate:
             used = _workspace_graph_size(root)
+            if _deadline_fired(deadline):
+                _write_budget_marker(destination, used, "deadline", guard_size=True)
+                return "deadline"
             old = _disk_size(destination, limit=0) if destination.exists() else 0
             budget = max_workspace_graph_bytes()
             # A graph already there is replaced, not added: subtract it. Charge
@@ -591,24 +711,12 @@ def index_repositories(
             )
             if used - old + inflight >= budget:
                 # Persist a bounded skip, without overwriting an existing graph.
-                marker = json.dumps(
-                    {
-                        "budget_used": used,
-                        "retry_after": time.time() + FAILED_RETRY_SECONDS,
-                    }
+                _write_budget_marker(
+                    destination, used, "workspace graph budget", guard_size=True
                 )
-                previous = destination / "budget.json"
-                previous_size = (
-                    previous.stat().st_size
-                    if previous.is_file() and not previous.is_symlink()
-                    else 0
-                )
-                if not previous.is_symlink() and len(marker) - previous_size <= budget:
-                    destination.mkdir(parents=True, exist_ok=True)
-                    previous.write_text(marker)
-                return False
+                return "workspace graph budget"
             reservations.add(destination)
-            return True
+            return None
 
     def release(destination: Path) -> None:
         with gate:
@@ -616,10 +724,20 @@ def index_repositories(
 
     # Analysis waits for this before its first AI call, so the width matters:
     # two at a time turned five clones into a ~6 minute pause per job.
-    with _workspace_install_lock(workspace), ThreadPoolExecutor(max_workers=4) as pool:
+    with (
+        _workspace_install_lock(workspace, deadline=deadline),
+        ThreadPoolExecutor(max_workers=4) as pool,
+    ):
         futures = {
             name: pool.submit(
-                _index_one, workspace, root, name, cloned_repos[name], reserve, release
+                _index_one,
+                workspace,
+                root,
+                name,
+                cloned_repos[name],
+                reserve,
+                release,
+                deadline,
             )
             for name in cloned_repos
         }
@@ -660,6 +778,7 @@ def log_index_outcomes(outcomes: dict[str, Any], *, job_id: str = "") -> str | N
             "invalid repository",
             "no eligible files",
             "workspace graph budget",
+            "deadline",
             "invalid graph root",
             "invalid graph directory",
             "TimeoutError",
@@ -905,14 +1024,24 @@ def _query_locked(
 
 
 def roots_needing_index(
-    workspace: Path, cloned_repos: dict[str, Path]
+    workspace: Path, cloned_repos: dict[str, Path], *, deadline: float | None = None
 ) -> dict[str, Path]:
-    """Find missing or changed graphs using the same content hashes as queries."""
+    """Find missing or changed graphs using the same content hashes as queries.
+
+    ``deadline`` stops the hashing and, for every repository the run never
+    reached that has no complete graph, writes the deadline marker. Without the
+    marker the next session would re-hash everything — which is exactly where a
+    chat index deadline runs out — and no build would ever be admitted.
+    """
     workspace = Path(workspace).resolve()
     root = _root(workspace)
-    with _workspace_install_lock(workspace):
+    with _workspace_install_lock(workspace, deadline=deadline):
         result = {}
-        for name, repo in cloned_repos.items():
+        names = list(cloned_repos.items())
+        for position, (name, repo) in enumerate(names):
+            if _deadline_fired(deadline):
+                _withhold_unreached(workspace, names[position:])
+                break
             if not _valid_repo(workspace, name, repo):
                 continue
             manifest = (
@@ -920,6 +1049,12 @@ def roots_needing_index(
                 if root.is_dir() and not root.is_symlink()
                 else None
             )
+            if budget_marker_reason(root / name) is not None:
+                # Respect the marker while it is live. It used to apply only when
+                # the *other* graphs already exceeded the budget, so a repo that
+                # itself pushed the workspace over was re-queued on every pass and
+                # rebuilt (full snapshot + 120s build) only to be dropped again.
+                continue
             try:
                 marker = root / name / "failed.json"
                 failed = (
@@ -932,25 +1067,9 @@ def roots_needing_index(
                 )
             except OSError, ValueError:
                 failed = None
-            budget = root / name / "budget.json"
-            try:
-                skipped = (
-                    json.loads(budget.read_text())
-                    if not budget.is_symlink() and not budget.parent.is_symlink()
-                    else None
-                )
-                if isinstance(skipped, dict) and time.time() < skipped["retry_after"]:
-                    # Respect the marker while it is live. It used to apply only
-                    # when the *other* graphs already exceeded the budget, so a
-                    # repo that itself pushed the workspace over was re-queued on
-                    # every pass and rebuilt (full snapshot + 120s build) only to
-                    # be dropped again.
-                    continue
-            except OSError, ValueError, KeyError, TypeError:
-                pass
             if manifest is not None:
                 try:
-                    if _sources(repo) != manifest:
+                    if _sources(repo, deadline) != manifest:
                         result[name] = repo
                 except OSError, ValueError, TimeoutError, subprocess.SubprocessError:
                     result[name] = repo  # Never expose a stale graph.
@@ -963,7 +1082,7 @@ def roots_needing_index(
             else:
                 try:
                     if (
-                        _sources(repo) != failed["manifest"]
+                        _sources(repo, deadline) != failed["manifest"]
                         if failed.get("manifest") is not None
                         else failed.get("stamp") is not None
                         and _source_stamp(repo) != failed["stamp"]
@@ -972,6 +1091,27 @@ def roots_needing_index(
                 except OSError, ValueError, TimeoutError, subprocess.SubprocessError:
                     pass  # Retry an unreadable source after the bounded backoff.
         return result
+
+
+def _withhold_unreached(workspace: Path, pending: list[tuple[str, Path]]) -> None:
+    """Mark every repository this run's clock never reached.
+
+    A complete graph is never marked, and a repository that already holds a live
+    marker keeps its own reason: the post-build drop leaves only ``budget.json``
+    behind, and relabelling it ``deadline`` would hide the cause this run has to
+    report.
+    """
+    root = _root(workspace)
+    used = _workspace_graph_size(root)
+    for name, repo in pending:
+        destination = root / name
+        if not _valid_repo(workspace, name, Path(repo)):
+            continue
+        if _manifest(destination) is not None:
+            continue
+        if budget_marker_reason(destination) is not None:
+            continue
+        _write_budget_marker(destination, used, "deadline", guard_size=True)
 
 
 def indexed_roots(workspace: Path) -> dict[str, Path]:

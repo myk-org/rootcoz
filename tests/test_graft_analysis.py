@@ -131,11 +131,11 @@ async def test_indexing_happens_once_per_workspace(
     )
     monkeypatch.setattr(
         "rootcoz.engine.graft.roots_needing_index",
-        lambda workspace, roots: dict(roots),
+        lambda workspace, roots, deadline=None: dict(roots),
     )
     monkeypatch.setattr(
         "rootcoz.engine.graft.index_repositories",
-        lambda workspace, roots: calls.append(roots) or {},
+        lambda workspace, roots, deadline=None: calls.append(roots) or {},
     )
     monkeypatch.setattr("rootcoz.engine.graft.log_index_outcomes", lambda outcome: None)
 

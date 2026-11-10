@@ -52,12 +52,18 @@ def graph_workspace_for(repos: dict[str, Path] | None) -> Path | None:
 
 
 async def index_workspace_graph(
-    workspace: Path, job_id: str = "", repos: dict[str, Path] | None = None
+    workspace: Path,
+    job_id: str = "",
+    repos: dict[str, Path] | None = None,
+    *,
+    deadline: float | None = None,
 ) -> None:
     """Index a workspace's clones once, waiting for an in-flight build.
 
     Only missing or stale graphs are built, and any failure is a warning: the
-    graph is an optimisation, never a gate on the analysis.
+    graph is an optimisation, never a gate on the analysis. ``deadline`` is the
+    caller's index clock; a joining caller waits for the build the creator
+    bounded, so the deadline belongs to whoever started it.
     """
     key = str(Path(workspace).resolve())
     task = _GRAPH_INDEX_TASKS.get(key)
@@ -66,7 +72,7 @@ async def index_workspace_graph(
         # across messages, so new clones, cleaned graphs and expired budget
         # markers have to be picked up on the next message.
         task = asyncio.create_task(
-            _index_workspace_graph_once(Path(workspace), repos=repos)
+            _index_workspace_graph_once(Path(workspace), repos=repos, deadline=deadline)
         )
         _GRAPH_INDEX_TASKS[key] = task
     # The outcome is logged here, per caller: a session that joined an existing
@@ -80,7 +86,10 @@ async def index_workspace_graph(
 
 
 async def _index_workspace_graph_once(
-    workspace: Path, *, repos: dict[str, Path] | None = None
+    workspace: Path,
+    *,
+    repos: dict[str, Path] | None = None,
+    deadline: float | None = None,
 ) -> dict[str, object] | None:
     from rootcoz.engine.graft import (
         index_repositories,
@@ -105,16 +114,18 @@ async def _index_workspace_graph_once(
                 workspace,
             )
             return None
-        pending = await asyncio.to_thread(roots_needing_index, workspace, roots)
+        pending = await asyncio.to_thread(
+            roots_needing_index, workspace, roots, deadline=deadline
+        )
         if not pending:
             withheld = await asyncio.to_thread(_budget_withheld, workspace, roots)
             if withheld:
                 # "already current" was a lie: these are deliberately withheld by
                 # a live budget marker, and no usable graph exists for them.
                 logger.warning(
-                    "graph indexing: %d repo(s) withheld by the workspace graph"
-                    " budget in %s: %s",
+                    "graph indexing: %d repo(s) withheld by the %s in %s: %s",
                     len(withheld),
+                    ", ".join(sorted(set(withheld.values()))),
                     workspace,
                     ", ".join(sorted(withheld)),
                 )
@@ -131,7 +142,9 @@ async def _index_workspace_graph_once(
             len(roots),
             ", ".join(sorted(pending)),
         )
-        return await asyncio.to_thread(index_repositories, workspace, pending)
+        return await asyncio.to_thread(
+            index_repositories, workspace, pending, deadline=deadline
+        )
     except Exception:
         logger.warning("Graph indexing skipped for %s", workspace, exc_info=True)
         return None
@@ -145,6 +158,7 @@ async def build_session_tools(
     job_id: str,
     repos: dict[str, Path] | None = None,
     graph: bool = True,
+    index_deadline: float | None = None,
 ) -> SessionTools:
     """Assemble every tool a session gets, and install the CLI MCP config.
 
@@ -156,6 +170,10 @@ async def build_session_tools(
         repos: Clone mapping when the caller knows it. Falls back to the
             workspace itself, which is where chat keeps its clones.
         graph: ``False`` disables the code graph entirely (tests, small jobs).
+        index_deadline: The caller's index clock. Chat passes the same value it
+            gave its own index call, so a spent budget starts the session
+            without a second window instead of rebuilding. Analysis passes
+            ``None`` and stays unbounded.
 
     Returns:
         ``SessionTools`` with the builtin list, the combined custom tools, and
@@ -165,7 +183,7 @@ async def build_session_tools(
     graph_root: Path | None = None
     if graph:
         graph_root = graph_workspace_for(repos) or Path(workspace)
-        await index_workspace_graph(graph_root, job_id=job_id)
+        await index_workspace_graph(graph_root, job_id=job_id, deadline=index_deadline)
         from rootcoz.engine.graft_http import graph_http_tools
 
         graph_tools = graph_http_tools(graph_root, job_id)
@@ -224,22 +242,14 @@ def graph_prompt_hint(tools: SessionTools) -> str:
     return ""
 
 
-def _budget_withheld(workspace: Path, roots: dict[str, Path]) -> list[str]:
-    """Repos whose graph is withheld by a live ``budget.json`` marker."""
-    import json
-    import time
-
-    from rootcoz.engine.graft import _root
+def _budget_withheld(workspace: Path, roots: dict[str, Path]) -> dict[str, str]:
+    """Repos whose graph is withheld, mapped to the reason their marker names."""
+    from rootcoz.engine.graft import _root, budget_marker_reason
 
     graph_root = _root(Path(workspace))
-    withheld: list[str] = []
+    withheld: dict[str, str] = {}
     for name in roots:
-        marker = graph_root / name / "budget.json"
-        try:
-            payload = json.loads(marker.read_text())
-        except OSError, ValueError:
-            continue
-        retry_after = payload.get("retry_after") if isinstance(payload, dict) else None
-        if isinstance(retry_after, (int, float)) and time.time() < retry_after:
-            withheld.append(name)
+        reason = budget_marker_reason(graph_root / name)
+        if reason is not None:
+            withheld[name] = reason
     return withheld

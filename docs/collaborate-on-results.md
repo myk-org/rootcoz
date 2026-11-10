@@ -20,7 +20,7 @@ rootcoz chat send JOB_ID "Which failures share the same error signature?"
 rootcoz comments add JOB_ID --test "tests.test_auth.test_login" -m "Reproduced locally, see PROJ-1234."
 ```
 
-`chat init` starts the session and is required: `chat send` needs a provider and model selected and returns `409 Start a new chat session first` until you do. Both `--provider` and `--model` are mandatory options on `chat init` — omitting either fails argument validation before the session is created. Both commands need at least the `reviewer` role.
+`chat init` starts the session and is required: `chat send` needs a provider and model selected and returns `409 Start a new chat session first` until you do. `chat init` waits for the workspace to be ready — up to ten minutes for a large repository set — and while a workspace is being prepared, `chat send` and `chat clear` answer `425` and name the phase being worked on; both work as soon as it finishes. Both `--provider` and `--model` are mandatory options on `chat init` — omitting either fails argument validation before the session is created. Both commands need at least the `reviewer` role.
 
 This asks the job's assistant for a cross-failure answer and leaves the evidence in the result's comment thread for the next reviewer.
 
@@ -30,13 +30,15 @@ This asks the job's assistant for a cross-failure answer and leaves the evidence
 
    From the report header, click `Chat`. The button is hidden for viewers, and the chat page opens at `/chat/{job_id}` for the job you came from. The header preselects the provider and model you last used on this account — check they are the ones you want, or pick another pair — then click `Start Chat`. There is no reset to the analysed pair here: both fields are required to start, and a session you already started keeps the pair it was started with. `Use server credentials` chooses whose AI key runs the session; the toggle is only available when your account may use server providers.
 
-   Starting a chat creates a per-user, per-job workspace and session. RootCoz clones the job's tests repo and any additional repositories, then copies CI build data into that workspace when the source provides it. RootCoz keeps that workspace — its sessions, clones and code graph — for as long as the job exists: `New Session` and `rootcoz chat clear` remove it (a clear that did not finish is completed by your next message in that job), and deleting the job removes it (a job removal that did not finish is reclaimed at the next server start). Whether it also outlives a server restart depends on where the server's temp root lives.
+   Starting a chat creates a per-user, per-job workspace and session. RootCoz clones the job's tests repo and any additional repositories, then copies CI build data into that workspace when the source provides it.
+
+   That preparation runs in the background: `Start Chat` returns at once and the page shows a step list — preparing, cloning each repository, indexing, fetching CI build data, starting the session — while the server works. The list is the server's own progress, so reloading the page mid-preparation shows the same steps instead of losing them, and the message box becomes usable when the session appears, without another click. Because nothing waits on a proxy timeout, a workspace with many repositories no longer fails to start. A failure is reported as a message in the transcript with `Start Chat` ready to retry — never as a silent no-op. If a repository could not be cloned, the transcript says which ones are missing and the chat still starts. RootCoz keeps that workspace — its sessions, clones and code graph — for as long as the job exists: `New Session` and `rootcoz chat clear` remove it (a clear that did not finish is completed by your next message in that job), and deleting the job removes it (a job removal that did not finish is reclaimed at the next server start). Whether it also outlives a server restart depends on where the server's temp root lives.
 
    > **Note:** Chat history and sessions are scoped to your own account on that job. Two reviewers opening the same result get two separate conversations, and RootCoz pins the provider, model, and credential source you started with for the life of the session.
 
 2. Check what the assistant can reach before you ask.
 
-   The welcome message at the top of a new session lists the resources available for that job, and the assistant's working context is this one job's result and comments. Its history tools are the exception: `get_failure_history` and `get_classification_history` query by test name across the server and exclude only the current job, so the assistant can pull how a test has failed in *other* jobs. It has read-only filesystem tools (`read`, `ls`, `find`, `grep`, `subagent`) plus authenticated HTTP tools:
+   The welcome message at the top of a new session lists the resources available for that job — and the transcript names any repository the server could not clone, so a partial workspace is never silent — and the assistant's working context is this one job's result and comments. Its history tools are the exception: `get_failure_history` and `get_classification_history` query by test name across the server and exclude only the current job, so the assistant can pull how a test has failed in *other* jobs. It has read-only filesystem tools (`read`, `ls`, `find`, `grep`, `subagent`) plus authenticated HTTP tools:
 
    | Tool | What it returns |
    | --- | --- |
@@ -72,7 +74,7 @@ This asks the job's assistant for a cross-failure answer and leaves the evidence
 
 5. Delete or clear when you are done.
 
-   Comments show a delete control to their author; admins can delete any comment. For chat, `New Session` clears your messages, session, and cloned repositories for that job so you can start again with a different model.
+   Comments show a delete control to their author; admins can delete any comment. For chat, `New Session` clears your messages, session, and cloned repositories for that job so you can start again with a different model. While a workspace is being prepared, `New Session` — like sending a message — answers `425` and names the phase; it works once the preparation finishes.
 
    > **Warning:** `New Session` deletes your chat history for that job. It is per-user, so it does not touch a colleague's conversation.
 
@@ -128,8 +130,11 @@ Use `--json` on any of these commands when you want machine-readable output. For
 - The `Chat` button is missing from the report header.  
   Chat requires `reviewer` access. Viewers can read results and comments but cannot start or use chat.
 
-- `Start Chat` fails with `Chat session unavailable.`  
-  The session could not be created. `Start Chat` can now answer `422 AI session refused`, and that detail names the cause: declare the model in that provider's `models.json`, or re-enter the key, or ask an administrator to check the server log — clearing the chat cannot fix a model the sidecar will not open a session with. See [Configuration Reference](configuration-reference.html#adding-a-custom-provider) for the `models.json` rule.
+- `Start Chat` shows a failure message in the transcript.  
+  An invalid provider/model selection still answers `422` immediately, before anything is prepared. A refused session no longer answers `422 AI session refused` — it appears in the transcript with that sentence, and `Start Chat` stays available to retry once the cause is fixed: declare the model in that provider's `models.json`, or re-enter the key, or ask an administrator to check the server log. Clearing the chat cannot fix a model the sidecar will not open a session with. See [Configuration Reference](configuration-reference.html#adding-a-custom-provider) for the `models.json` rule.
+
+- The transcript says some repositories are not in the workspace.  
+  Cloning those repositories failed, and the chat started without them: the transcript names them, so the assistant's answers about that code are limited to what is present. Start a new session once the repository can be cloned.
 
 - The assistant says Jira or GitHub search is not available.  
   Those tools are only registered when your account has the matching credentials. Add them on your profile settings page, then start a new chat session so the new tool list is picked up. See [Managing Your Account and Notifications](manage-account-and-notifications.html) for details.
