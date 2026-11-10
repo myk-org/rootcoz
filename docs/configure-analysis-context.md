@@ -109,7 +109,7 @@ This clones the tests repository plus both extra repositories into the analysis 
    | `candidates` | Raw candidates the tracker returned |
    | `matches` | Candidates that survived relevance filtering and were attached |
 
-   `searched: true` with `candidates: 0` means *looked and found nothing*; `searched: false` with a `reason` means *could not look* — no token, no repository in scope, the tracker disabled, or every search failing. A missing `tracker_search` key means "not recorded" (a result written before this field existed, or an analysis that failed before enrichment), never "nothing found".
+   `searched: true` with `candidates: 0` means *looked and found nothing*; `searched: false` with a `reason` means *could not look* — no token, no repository in scope, the tracker disabled, or every search failing. A missing `tracker_search` key means "not recorded" (a result written before this field existed, or an analysis that failed before enrichment), never "nothing found". On a deployment with no AI provider and model configured the relevance filter does not run at all, so every candidate is attached and `matches` there is "whatever the tracker returned", not "judged relevant".
 
 6. **Collect build artifacts when text output is not enough.**
 
