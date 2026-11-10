@@ -6293,6 +6293,11 @@ class TestChatIssueEndpoint:
             "title": draft["title"],
             "body": draft["body"],
             "target": target,
+            # The create call must name the destination the proposal did. A repo
+            # given here would otherwise be dropped, and the create would resolve
+            # the destination from TESTS_REPO_URL and the process-global settings
+            # cache instead of from the draft (#527).
+            **({"repo": text["repo"]} if text.get("repo") else {}),
         }
 
     @staticmethod
@@ -7732,7 +7737,9 @@ class TestChatIssueEndpoint:
         from rootcoz import main as main_mod
 
         headers = await self._admin("chat-buried", github_token="ghp_row_token")
-        draft = await self._propose(test_client, "github", headers)
+        # The repo is named, so neither step falls back to TESTS_REPO_URL: this
+        # test is about the buried confirmation, not about the settings chain.
+        draft = await self._propose(test_client, "github", headers, repo="org/repo")
         for _ in range(main_mod._CONFIRM_SCAN_MESSAGES + 5):
             await self._user_reply(headers, "no code in this one")
         with patch("rootcoz.main.create_github_issue") as mock_create:
@@ -7740,10 +7747,7 @@ class TestChatIssueEndpoint:
                 "url": "https://github.com/org/repo/issues/23",
                 "number": 23,
             }
-            with _with_github_issue_config():
-                response = test_client.post(
-                    "/api/chat-issue", json=draft, headers=headers
-                )
+            response = test_client.post("/api/chat-issue", json=draft, headers=headers)
         assert response.status_code == 201, response.text
 
     @pytest.mark.asyncio
