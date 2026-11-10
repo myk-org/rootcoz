@@ -1328,6 +1328,34 @@ def atlassian_cloud_id_error(value: str | None) -> str | None:
     return None
 
 
+def jira_site_url_error(value: str | None) -> str | None:
+    """Error message when ``jira_site_url`` cannot serve as a browse base.
+
+    Browse links are ``{jira_site_url}/browse/KEY``, so the value must be
+    the Jira site URL. The scoped ``api.atlassian.com`` gateway is a
+    frequent mistake — links built from it resolve to no ticket (#496).
+    Returns None for a usable site URL (or empty).
+    """
+    site = (value or "").strip()
+    if not site:
+        return None
+    parts = urlsplit(site)
+    if parts.scheme not in ("http", "https") or not parts.hostname:
+        return (
+            "jira_site_url must be an absolute http(s) site URL "
+            "(e.g. https://<site>.atlassian.net) — Jira browse links are built "
+            "from it"
+        )
+    if parts.hostname.lower() == "api.atlassian.com":
+        return (
+            "jira_site_url is the Atlassian API gateway, not a site URL — "
+            "browse links built from it resolve to no ticket; use the site "
+            "URL (e.g. https://<site>.atlassian.net), not "
+            "https://api.atlassian.com/ex/jira/<cloudId>"
+        )
+    return None
+
+
 def normalize_jira_auth_mode(value: str | None) -> str:
     """Canonical ``jira_auth_mode`` value; ``""`` when unset or invalid.
 

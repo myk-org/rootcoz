@@ -20,6 +20,7 @@ from rootcoz import get_child_logger
 from rootcoz.config import (
     Settings,
     get_settings,
+    jira_site_url_error,
     jira_unavailable_reason,
     normalize_jira_auth_mode,
 )
@@ -96,6 +97,26 @@ class JiraConnection:
     sa_client_secret: str = field(default="", repr=False)
 
 
+def _jira_site(url: str | None) -> str:
+    """Site URL usable for ``/browse/KEY`` links ("" when there is none).
+
+    The scoped ``api.atlassian.com`` gateway is an API base, not a site:
+    browse links built from it render ``.../ex/jira/<cloudId>/browse/KEY``,
+    a URL that resolves to no ticket (#496). Returning "" makes the link
+    absent instead of broken.
+    """
+    site = (url or "").strip().rstrip("/")
+    if not site:
+        logger.warning("JIRA_SITE_URL is unset — Jira browse links cannot be built")
+        return ""
+    # Omitted, not rejected: stored request params are replayed verbatim on
+    # re-analysis, so an old bad value must not fail the run.
+    if error := jira_site_url_error(site):
+        logger.warning("%s — Jira browse links cannot be built", error)
+        return ""
+    return site
+
+
 def _is_atlassian_cloud_host(url: str) -> bool:
     """True when the URL's hostname is atlassian.net or a subdomain of it.
 
@@ -157,9 +178,7 @@ def resolve_jira_connection(settings: Settings) -> JiraConnection:
         # the scoped gateway. Browse links must still point at the site;
         # the site URL cannot be derived from the scoped URL, so it comes
         # from the shared JIRA_SITE_URL.
-        site = (settings.jira_site_url or "").rstrip("/")
-        if not site:
-            logger.warning("JIRA_SITE_URL is unset — Jira browse links cannot be built")
+        site = _jira_site(settings.jira_site_url)
         cloud_id = (settings.atlassian_oauth_cloud_id or "").strip()
         api_base = f"{ATLASSIAN_API_GATEWAY}/{cloud_id}" if cloud_id else ""
         return JiraConnection(
@@ -183,9 +202,7 @@ def resolve_jira_connection(settings: Settings) -> JiraConnection:
         # Bearer straight to the gateway, nothing to exchange. Like SA
         # mode the cloud ID is the sole API locator and browse links come
         # from the shared JIRA_SITE_URL (not derivable from the gateway).
-        site = (settings.jira_site_url or "").rstrip("/")
-        if not site:
-            logger.warning("JIRA_SITE_URL is unset — Jira browse links cannot be built")
+        site = _jira_site(settings.jira_site_url)
         cloud_id = (settings.atlassian_oauth_cloud_id or "").strip()
         return JiraConnection(
             mode="atst",

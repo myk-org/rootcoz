@@ -190,7 +190,10 @@ _JiraSiteUrlOpt = Annotated[
     typer.Option(
         "--jira-site-url",
         envvar="JIRA_SITE_URL",
-        help="Atlassian site URL for Jira browse links.",
+        help=(
+            "Atlassian site URL for Jira browse links "
+            "(e.g. https://<site>.atlassian.net — never the api.atlassian.com gateway)."
+        ),
     ),
 ]
 _JiraProjectKeyOpt = Annotated[

@@ -1290,6 +1290,46 @@ class TestExplicitJiraAuthMode:
         assert conn.api_base == ""
         assert conn.headers["Authorization"] == "Bearer ATST-test-token"
 
+    @pytest.mark.parametrize("mode,conn_mode", [("oauth", "sa"), ("atst", "atst")])
+    def test_gateway_site_url_is_not_a_browse_base(
+        self, mode: str, conn_mode: str
+    ) -> None:
+        """A JIRA_SITE_URL holding the scoped gateway yields no browse base (#496).
+
+        The gateway is an API base: browsing it renders
+        ``.../ex/jira/<cloudId>/browse/KEY``, which resolves to no ticket.
+        Omitting the browse base makes the link absent instead of broken.
+        """
+        cloud_id = "2b9e35e3-6bd3-4cec-b838-f4249ee02432"
+        gateway = f"https://api.atlassian.com/ex/jira/{cloud_id}"
+        settings = self._settings(
+            JIRA_AUTH_MODE=mode,
+            ATLASSIAN_OAUTH_CLOUD_ID=cloud_id,
+            JIRA_SITE_URL=gateway,
+            **(
+                {
+                    "JIRA_OAUTH_CLIENT_SECRET": "ATOA-test-secret",  # pragma: allowlist secret
+                    "ATLASSIAN_OAUTH_CLIENT_ID": "test-client-id",
+                }
+                if mode == "oauth"
+                else {"JIRA_ATST_TOKEN": "ATST-test-token"}  # pragma: allowlist secret
+            ),
+        )
+        conn = resolve_jira_connection(settings)
+        assert conn.mode == conn_mode
+        assert conn.api_base == gateway
+        assert conn.browse_base == ""
+
+    def test_scheme_less_site_url_is_not_a_browse_base(self) -> None:
+        """A site URL without a scheme cannot be browsed — no browse base."""
+        settings = self._settings(
+            JIRA_AUTH_MODE="atst",
+            JIRA_ATST_TOKEN="ATST-test-token",  # pragma: allowlist secret
+            ATLASSIAN_OAUTH_CLOUD_ID="2b9e35e3-6bd3-4cec-b838-f4249ee02432",
+            JIRA_SITE_URL="myorg.atlassian.net",
+        )
+        assert resolve_jira_connection(settings).browse_base == ""
+
 
 class TestJiraClientAtst:
     """JiraClient behavior with an ATST service-account scoped token."""

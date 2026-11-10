@@ -119,6 +119,7 @@ from rootcoz.config import (
     duplicate_additional_repo_names,
     get_settings,
     jira_method_missing_fields,
+    jira_site_url_error,
     jira_unavailable_reason,
     normalize_jira_auth_mode,
     parse_additional_repos,
@@ -20776,6 +20777,14 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
     cloud_id = settings_updates.get("atlassian_oauth_cloud_id")
     if cloud_id and (cloud_id_error := atlassian_cloud_id_error(str(cloud_id))):
         raise HTTPException(status_code=422, detail=cloud_id_error)
+
+    # ``jira_site_url`` is the base of every Jira browse link, so a value that
+    # is an API base (the scoped api.atlassian.com gateway) or not a URL at
+    # all would render links that resolve to no ticket (#496). Refuse it
+    # here, before it reaches the resolve path that omits the link silently.
+    site_url = settings_updates.get("jira_site_url")
+    if site_url and (site_error := jira_site_url_error(str(site_url))):
+        raise HTTPException(status_code=422, detail=site_error)
 
     for key, value in settings_updates.items():
         if key not in valid_keys:
