@@ -11,6 +11,7 @@ from rootcoz.config import (
     clear_settings_cache,
     duplicate_additional_repo_names,
     get_settings,
+    jira_availability,
     jira_method_missing_fields,
     jira_unavailable_reason,
     parse_additional_repos,
@@ -373,7 +374,13 @@ class TestJiraSettings:
 
 
 class TestJiraUnavailableReason:
-    """Tests for jira_unavailable_reason — one sentence per refusal (D6)."""
+    """Tests for jira_unavailable_reason — one reason per refusal.
+
+    The connection reason makes NO claim about the deployment: it also runs on
+    per-request (merged) settings, where the caller's own override can be what
+    removed the connection, and the string is persisted and replayed on
+    re-analysis (#536).
+    """
 
     def _settings(self, **env: str) -> Settings:
         with patch.dict(os.environ, _build_env(**env), clear=True):
@@ -411,7 +418,13 @@ class TestJiraUnavailableReason:
 
     def test_names_missing_auth_mode(self) -> None:
         settings = self._settings()
-        assert "auth method" in jira_unavailable_reason(settings)
+        reason = jira_unavailable_reason(settings)
+        # Cause-free and deployment-free: the field detail is availability's
+        # DEBUG line, never this persisted string.
+        assert reason
+        assert "auth method" not in reason
+        assert "selected" not in reason
+        assert "Server Settings" not in reason
         assert settings.jira_enabled is False
 
     def test_names_missing_method_field(self) -> None:
@@ -425,7 +438,11 @@ class TestJiraUnavailableReason:
         ):
             settings = Settings(_env_file=None, jira_auth_mode="pat")
         reason = jira_unavailable_reason(settings)
-        assert "jira_server_url" in reason
+        # The missing locator is not named here (it would claim the deployment
+        # is unconfigured even on a configured one) — availability's DEBUG line
+        # names it.
+        assert "jira_server_url" not in reason
+        assert "jira_server_url is unset" in jira_availability(settings)[1]
         assert settings.jira_enabled is False
 
     def test_names_missing_project_key(self) -> None:

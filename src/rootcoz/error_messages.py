@@ -142,6 +142,76 @@ def tracker_credential_message(kind: str, *, has_profile: bool = True) -> str:
     )
 
 
+def jira_api_base_unresolved_message() -> str:
+    """The one refusal for a Jira connection whose API base did not resolve.
+
+    Deliberately makes no cause claim: the state is reached both when a
+    gateway cloud-ID lookup failed on a configured deployment and when a
+    method's URL is unset. No auth method, no setting and no advice — the
+    cause goes to the caller's own DEBUG/WARNING line, and the actor who can
+    act is the administrator.
+    """
+    return (
+        "Jira cannot be used right now. An administrator has to check the Jira "
+        "configuration in Server Settings."
+    )
+
+
+def unavailable_sentence(tracker: str, reason: str) -> str:
+    """The server's own sentence for a tracker that cannot file, naming who acts.
+
+    One sentence per reason, and the *actor* is the point: an administrator
+    setting (a disabled tracker, no usable server configuration, a missing
+    server repository), the run (a job chat that names no repository), or the
+    account (a missing or rejected credential, fixed in Profile Settings). No
+    sentence names an auth method or a setting the reader cannot change.
+
+    Args:
+        tracker: ``"github"`` or ``"jira"``.
+        reason: The reason code from the chat tracker state.
+    """
+    kind = "GitHub" if tracker == "github" else "Jira"
+    if reason == "server_unconfigured":
+        return (
+            f"{kind} is not configured on this server. An administrator has to "
+            "set it up in Server Settings."
+        )
+    if reason == "server_disabled":
+        return (
+            f"{kind} issue creation is disabled on this server. An administrator "
+            "has to enable it in Server Settings."
+        )
+    if reason == "no_repository":
+        return (
+            "Nowhere to file this issue: this chat has no GitHub repository it "
+            "may use. Name a repository the run may file in, or ask an "
+            "administrator to configure a server test repository."
+        )
+    if reason == "no_run_repository":
+        return (
+            "Nowhere to file this issue: this run has no GitHub test repository "
+            "and no additional repo, and an issue from job chat may only go to "
+            "them. A token cannot add one."
+        )
+    if reason == "no_token":
+        return (
+            f"No {kind} issue can be filed from this chat. Add your {kind} API "
+            "token in Profile Settings."
+        )
+    if reason == "no_token_no_profile":
+        return tracker_credential_message(kind, has_profile=False)
+    if reason == "unusable_credential":
+        return (
+            f"Your saved {kind} credential was rejected. Re-save it in Profile "
+            "Settings."
+        )
+    # Never silent: an unknown reason still names the actor who can act.
+    return (
+        f"{kind} filing is unavailable on this server. An administrator has to "
+        "check Server Settings."
+    )
+
+
 def deployment_credential_message() -> str:
     """The refusal for a tracker write that presented the server's own token.
 

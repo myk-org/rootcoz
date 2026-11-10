@@ -5539,7 +5539,7 @@ async def find_matching_previous_analysis(
         Includes keys: job_id, build_number, build_id, error_signature,
         error_signature_v2, error_message, classification, pattern, analyzed_at.
         Compare the pair with :func:`previous_analysis_matches`, never field by
-        field -- error_message is selected so that comparison can normalize the
+        field -- error_message is read so that comparison can normalize the
         message of a row stored before the v2 rules.
     """
     async with _connect_db() as db:
@@ -11148,7 +11148,7 @@ async def get_usage_context_for_sessions(
     call_type, provider, model) so the transcript list can show what the
     session was for. Chat sessions additionally carry ``chat_messages`` rows.
 
-    The latest row is selected SQL-side per session with a deterministic
+    The latest row is read SQL-side per session with a deterministic
     rowid tie-break (SQLite's created_at has one-second resolution, so ties
     are real); ids are chunked under SQLite's bound-variable limit.
     """
@@ -11176,7 +11176,7 @@ async def get_chat_context_for_sessions(
 ) -> dict[str, dict[str, Any]]:
     """Latest chat message context per session id (chat sessions only).
 
-    The latest message is selected SQL-side per session with a deterministic
+    The latest message is read SQL-side per session with a deterministic
     rowid tie-break — a bare-column GROUP BY would return username/job_id
     from an arbitrary row among same-second messages.
     """

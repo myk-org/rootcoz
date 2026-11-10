@@ -713,7 +713,12 @@ class TestEnrichWithJiraMatches:
         assert product_bug_failure.analysis.product_bug_report.jira_matches == []
 
     async def test_records_reason_when_disabled(self, product_bug_failure) -> None:
-        """A refusal is recorded with the setting that caused it (D6)."""
+        """A refusal is recorded with a cause-free reason (#536).
+
+        The string is persisted on the result and replayed on re-analysis, and
+        the same function runs on per-request settings where the deployment may
+        be configured — so it names no method, no field and no page.
+        """
         env = {
             "JENKINS_URL": "https://jenkins.example.com",
             "JENKINS_USER": "testuser",
@@ -726,7 +731,9 @@ class TestEnrichWithJiraMatches:
             record = await enrich_with_jira_matches([product_bug_failure], settings)
 
         assert record["searched"] is False
-        assert "auth" in record["reason"]
+        assert record["reason"]
+        assert "auth" not in record["reason"]
+        assert "Server Settings" not in record["reason"]
         mock_client_cls.assert_not_called()
 
     async def test_no_project_key_records_empty_scope(
@@ -1586,7 +1593,7 @@ class TestJiraClientServiceAccount:
             mock_instance.__aexit__ = AsyncMock(return_value=False)
             mock_client.return_value = mock_instance
             client = JiraClient(settings)
-            with pytest.raises(ValueError, match="cloud ID"):
+            with pytest.raises(ValueError, match="administrator"):
                 await client.__aenter__()
 
 
@@ -1757,3 +1764,245 @@ class TestAtlassianTokenMinting:
         )
         assert conn.mode == "atst"
         assert conn.headers["Authorization"] == "Bearer ATST-test-token"
+
+
+class TestJiraAvailability:
+    """One availability answer, derived from the connection (#536, defect A).
+
+    ``jira_availability`` replaces every hand-rolled "is Jira configured?"
+    check. It is sync, network-free, and never accepts a per-request
+    ``jira_site_url`` as a locator.
+    """
+
+    def _settings(self, **env: str) -> Settings:
+        return next(_jira_settings_from_env(env))
+
+    @pytest.mark.parametrize(
+        ("mode", "env"),
+        [
+            (
+                "basic",
+                {
+                    "JIRA_CLOUD_URL": "https://myorg.atlassian.net",
+                    "JIRA_EMAIL": "me@example.com",
+                    "JIRA_API_TOKEN": "api-token",  # pragma: allowlist secret
+                },
+            ),
+            (
+                "pat",
+                {
+                    "JIRA_SERVER_URL": "https://jira.example.com",
+                    "JIRA_PAT": "pat-token",  # pragma: allowlist secret
+                },
+            ),
+            (
+                "oauth",
+                {
+                    "ATLASSIAN_OAUTH_CLOUD_ID": "cloud-1",
+                    "ATLASSIAN_OAUTH_CLIENT_ID": "client-1",
+                    "JIRA_OAUTH_CLIENT_SECRET": "ATOA-secret",  # pragma: allowlist secret
+                },
+            ),
+            (
+                "atst",
+                {
+                    "ATLASSIAN_OAUTH_CLOUD_ID": "cloud-1",
+                    "JIRA_ATST_TOKEN": "ATST-token",  # pragma: allowlist secret
+                },
+            ),
+        ],
+    )
+    def test_a_fully_configured_method_is_available(self, mode, env) -> None:
+        from rootcoz.config import jira_availability
+
+        with patch.dict(os.environ, {**_BASE_JIRA_ENV, **env}, clear=True):
+            settings = Settings(_env_file=None, jira_auth_mode=mode)
+        assert jira_availability(settings) == (True, "")
+
+    @pytest.mark.parametrize(
+        ("mode", "env", "field"),
+        [
+            (
+                "basic",
+                {
+                    "JIRA_EMAIL": "me@example.com",
+                    "JIRA_CLOUD_URL": "https://myorg.atlassian.net",
+                },
+                "jira_api_token",
+            ),
+            ("pat", {"JIRA_SERVER_URL": "https://jira.example.com"}, "jira_pat"),
+            (
+                "oauth",
+                {
+                    "ATLASSIAN_OAUTH_CLOUD_ID": "cloud-1",
+                    "ATLASSIAN_OAUTH_CLIENT_ID": "client-1",
+                },
+                "jira_oauth_client_secret",
+            ),
+            (
+                "atst",
+                {"ATLASSIAN_OAUTH_CLOUD_ID": "cloud-1"},
+                "jira_atst_token",
+            ),
+        ],
+    )
+    def test_a_missing_credential_names_the_method_and_the_field(
+        self, mode, env, field, caplog
+    ) -> None:
+        """The detail is OPERATOR text: it names the method and the field, and
+        never a page or advice a user could be sent to."""
+        from rootcoz.config import jira_availability
+
+        with patch.dict(os.environ, {**_BASE_JIRA_ENV, **env}, clear=True):
+            settings = Settings(_env_file=None, jira_auth_mode=mode)
+        available, detail = jira_availability(settings)
+        assert available is False
+        assert f"'{mode}'" in detail
+        assert field in detail
+        assert "Settings" not in detail
+
+    @pytest.mark.parametrize(
+        ("mode", "env", "locator"),
+        [
+            (
+                "basic",
+                {"JIRA_EMAIL": "me@example.com", "JIRA_API_TOKEN": "t"},
+                "jira_cloud_url is unset",
+            ),
+            (
+                "pat",
+                {"JIRA_PAT": "t"},
+                "jira_server_url is unset",
+            ),
+        ],
+    )
+    def test_a_missing_locator_is_reported_by_its_own_name(
+        self, mode, env, locator
+    ) -> None:
+        """Credentials present, locator unset: the resolver returns a method
+        with an empty API base, which is rule 3's own case."""
+        from rootcoz.config import jira_availability
+
+        with patch.dict(
+            os.environ,
+            {**_BASE_JIRA_ENV, **env, "JIRA_SITE_URL": "https://myorg.atlassian.net"},
+            clear=True,
+        ):
+            settings = Settings(_env_file=None, jira_auth_mode=mode)
+        available, detail = jira_availability(settings)
+        assert available is False
+        assert locator in detail
+
+    @pytest.mark.parametrize("mode", ["oauth", "atst"])
+    def test_the_gateway_cloud_id_is_required_and_a_site_url_cannot_replace_it(
+        self, mode
+    ) -> None:
+        """The r12 security case: ``jira_site_url`` is a per-request field, so
+        accepting it as a locator would let any ``/analyze`` caller make Jira
+        look available. Available with the cloud ID, unavailable with only the
+        site URL."""
+        from rootcoz.config import jira_availability, jira_unavailable_reason
+
+        env = {
+            "ATLASSIAN_OAUTH_CLOUD_ID": "cloud-1",
+            "ATLASSIAN_OAUTH_CLIENT_ID": "client-1",
+            "JIRA_OAUTH_CLIENT_SECRET": "ATOA-secret",  # pragma: allowlist secret
+            "JIRA_ATST_TOKEN": "ATST-token",  # pragma: allowlist secret
+            "JIRA_PROJECT_KEY": "TEST",
+        }
+        with patch.dict(os.environ, {**_BASE_JIRA_ENV, **env}, clear=True):
+            settings = Settings(_env_file=None, jira_auth_mode=mode)
+        assert jira_availability(settings) == (True, "")
+        assert jira_unavailable_reason(settings) == ""
+        assert settings.jira_enabled is True
+
+        without = {k: v for k, v in env.items() if k != "ATLASSIAN_OAUTH_CLOUD_ID"}
+        without["JIRA_SITE_URL"] = "https://myorg.atlassian.net"
+        with patch.dict(os.environ, {**_BASE_JIRA_ENV, **without}, clear=True):
+            settings = Settings(_env_file=None, jira_auth_mode=mode)
+        available, detail = jira_availability(settings)
+        assert available is False
+        assert "atlassian_oauth_cloud_id is unset" in detail
+        assert jira_unavailable_reason(settings)
+
+    def test_no_method_is_its_own_detail(self) -> None:
+        from rootcoz.config import jira_availability
+
+        settings = self._settings(
+            JIRA_CLOUD_URL="https://myorg.atlassian.net",
+            JIRA_EMAIL="me@example.com",
+            JIRA_API_TOKEN="t",
+            JIRA_PAT="p",
+        )
+        assert jira_availability(settings) == (
+            False,
+            "no Jira auth method is configured",
+        )
+
+    def test_the_feature_switch_is_not_a_connection_fact(self) -> None:
+        """``ENABLE_JIRA`` is a feature switch: it does not make the connection
+        unavailable, and it keeps its own reason (D7's exception)."""
+        from rootcoz.config import jira_availability, jira_unavailable_reason
+
+        settings = self._settings(
+            JIRA_SERVER_URL="https://jira.example.com",
+            JIRA_PAT="p",
+            JIRA_PROJECT_KEY="TEST",
+            ENABLE_JIRA="false",
+        )
+        with patch.dict(os.environ, {}, clear=False):
+            settings = settings.model_copy(update={"jira_auth_mode": "pat"})
+        assert jira_availability(settings) == (True, "")
+        assert "ENABLE_JIRA" in jira_unavailable_reason(settings)
+
+    def test_is_selected_nowhere_in_src(self) -> None:
+        """The rule that no method is "selected" for a user: source files only.
+
+        Binaries (gitignored ``__pycache__/*.pyc``) are skipped — a compiled
+        cache must not fail, or silently pass, a source-text rule.
+        """
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[1] / "src"
+        hits = [
+            str(path)
+            for path in src.rglob("*.py")
+            if "is selected" in path.read_text(encoding="utf-8", errors="replace")
+        ]
+        assert hits == []
+
+    def test_both_site_warnings_are_once_per_process(self, monkeypatch) -> None:
+        """One WARNING per branch per process: this runs on every resolution
+        (every request), and a per-request WARNING carrying a server setting is
+        log noise. The refusal that follows still logs per request."""
+        import rootcoz.jira as jira_module
+        from rootcoz.config import jira_availability
+
+        monkeypatch.setattr(jira_module, "_site_unset_warned", False)
+        monkeypatch.setattr(jira_module, "_site_invalid_warned", False)
+        # Only the gateway methods consult JIRA_SITE_URL (their API base is the
+        # scoped gateway, not a site).
+        settings = self._settings(
+            ATLASSIAN_OAUTH_CLOUD_ID="cloud-1",
+            ATLASSIAN_OAUTH_CLIENT_ID="client-1",
+            JIRA_OAUTH_CLIENT_SECRET="ATOA-secret",  # pragma: allowlist secret
+        ).model_copy(update={"jira_auth_mode": "oauth"})
+        bad = settings.model_copy(update={"jira_site_url": "not-a-url"})
+        with patch.object(jira_module.logger, "warning") as warn:
+            for _ in range(5):
+                assert jira_availability(settings) == (True, "")
+            assert warn.call_count == 1
+            for _ in range(2):
+                assert jira_availability(bad) == (True, "")
+            # A second *branch* warns once too, and only once.
+            assert warn.call_count == 2
+
+    def test_the_resolver_is_imported_deferred(self) -> None:
+        """``config`` must not import ``jira`` at module level (that would be a
+        cycle): the resolver is imported inside the function."""
+        import rootcoz.config as config_module
+        from rootcoz.config import jira_availability
+
+        assert not hasattr(config_module, "resolve_jira_connection")
+        settings = self._settings(JIRA_SERVER_URL="https://jira.example.com")
+        assert jira_availability(settings)

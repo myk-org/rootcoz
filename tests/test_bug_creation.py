@@ -8,6 +8,7 @@ from pi_sidecar_client import AIResult
 
 from rootcoz.attribution import AiProvenance, apply_ai_attribution, read_provenance
 from rootcoz.bug_creation import create_github_issue
+from rootcoz.error_messages import jira_api_base_unresolved_message
 from rootcoz.jira import resolve_jira_connection_from_params
 from rootcoz.models import (
     AnalysisDetail,
@@ -1039,7 +1040,7 @@ class TestAiFooterNotDoubled:
             assert MockClient.call_args.kwargs["auth"] is None
 
     async def test_sa_token_without_cloud_id_raises(self):
-        """An unresolvable SA cloud ID fails fast with a clear message."""
+        """An unresolvable SA cloud ID fails fast with the one actor sentence."""
         from rootcoz.bug_creation import create_jira_bug
 
         connection = _oauth_connection(atlassian_oauth_cloud_id="", jira_site_url="")
@@ -1051,7 +1052,9 @@ class TestAiFooterNotDoubled:
             mock_client.__aexit__ = AsyncMock(return_value=False)
             MockClient.return_value = mock_client
 
-            with pytest.raises(ValueError, match="cloud ID"):
+            with pytest.raises(
+                ValueError, match="administrator has to check the Jira configuration"
+            ):
                 await create_jira_bug(
                     title="SA bug",
                     body="body",
@@ -1059,8 +1062,12 @@ class TestAiFooterNotDoubled:
                     project_key="PROJ",
                 )
 
-    async def test_basic_mode_without_cloud_url_error_names_jira_cloud_url(self):
-        """Basic auth with no cloud URL points at jira_cloud_url, not the SA cloud ID."""
+    async def test_basic_mode_without_cloud_url_answers_the_cause_free_sentence(self):
+        """Basic auth with no cloud URL: one sentence, no field, no method.
+
+        The cause (``jira_cloud_url`` is unset) is a DEBUG line; the user is
+        told who can act, and nothing claims the server is unconfigured.
+        """
         from rootcoz.bug_creation import create_jira_bug
 
         connection = resolve_jira_connection_from_params(
@@ -1069,26 +1076,30 @@ class TestAiFooterNotDoubled:
             jira_token="token123",
         )
 
-        with pytest.raises(ValueError, match="jira_cloud_url"):
+        with pytest.raises(ValueError) as excinfo:
             await create_jira_bug(
                 title="basic bug",
                 body="body",
                 connection=connection,
                 project_key="PROJ",
             )
+        assert str(excinfo.value) == jira_api_base_unresolved_message()
+        assert "jira_cloud_url" not in str(excinfo.value)
 
-    async def test_pat_mode_without_server_url_error_names_jira_server_url(self):
-        """PAT with no server URL points at jira_server_url, not the SA cloud ID."""
+    async def test_pat_mode_without_server_url_answers_the_cause_free_sentence(self):
+        """PAT with no server URL: the same sentence, no field name."""
         from rootcoz.bug_creation import create_jira_bug
 
         connection = resolve_jira_connection_from_params(
             jira_server_url="", jira_pat="pat-token"
         )
 
-        with pytest.raises(ValueError, match="jira_server_url"):
+        with pytest.raises(ValueError) as excinfo:
             await create_jira_bug(
                 title="pat bug", body="body", connection=connection, project_key="PROJ"
             )
+        assert str(excinfo.value) == jira_api_base_unresolved_message()
+        assert "jira_server_url" not in str(excinfo.value)
 
     async def test_sa_description_is_adf_document(self):
         """SA mode (REST v3) wraps the description in an ADF document."""
@@ -1131,16 +1142,27 @@ class TestAiFooterNotDoubled:
             # (Covered by the cloud/server tests asserting no ADF.)
 
     async def test_sa_token_without_site_url_raises(self):
-        """A scoped URL without a site URL fails fast — no broken links."""
+        """A scoped URL without a site URL fails fast — no broken links.
+
+        And it logs on EVERY refusal, not once per process: the deduplicated
+        site warning must not silence the second occurrence.
+        """
         from rootcoz.bug_creation import create_jira_bug
 
         connection = _oauth_connection(jira_site_url="")
 
         _seed_minted_token()
-        with pytest.raises(ValueError, match="JIRA_SITE_URL"):
-            await create_jira_bug(
-                title="SA bug", body="body", connection=connection, project_key="PROJ"
-            )
+        with patch("rootcoz.bug_creation.logger") as log:
+            for _ in range(2):
+                with pytest.raises(ValueError) as excinfo:
+                    await create_jira_bug(
+                        title="SA bug",
+                        body="body",
+                        connection=connection,
+                        project_key="PROJ",
+                    )
+                assert str(excinfo.value) == jira_api_base_unresolved_message()
+        assert log.warning.call_count == 2
 
     async def test_text_to_adf_translates_wiki_markup(self):
         """Fallback wiki markup renders as structured ADF, not literal text."""
