@@ -14,6 +14,7 @@ import pytest
 from pi_sidecar_client import AIResult
 
 from rootcoz import storage
+from rootcoz.config import Settings
 from rootcoz.engine.chat import (
     build_admin_custom_tools,
     build_admin_system_prompt,
@@ -892,7 +893,8 @@ class TestChatTrackerTargets:
         )
         assert reason == "no_repository"
         assert refusal is not None and refusal.status_code == 400
-        assert "TESTS_REPO_URL" in refusal.detail
+        assert "TESTS_REPO_URL" not in refusal.detail
+        assert "ask an administrator" in refusal.detail
 
     def test_a_job_chat_with_no_run_repo_does_not_send_users_to_tests_repo_url(
         self,
@@ -1004,6 +1006,23 @@ class TestChatTrackerTargets:
         prompt = _issue_create_rules({"jira": "unusable_credential"})
         assert "re-save the Jira credential" in prompt
         assert "Server Settings" not in prompt
+
+    def test_a_legacy_sa_token_on_an_unconfigured_server_names_the_admin(self):
+        """A legacy service-account value is refused, but its own sentence
+        points at Profile Settings — which cannot fix a deployment that serves
+        no Jira credential. The deployment is asked first, so the answer names
+        the administrator and never the account."""
+        from rootcoz.error_messages import unavailable_sentence
+        from rootcoz.main import _chat_tracker_gate
+
+        settings = _unconfigured_jira_settings()
+        reason, refusal = _chat_tracker_gate(
+            "jira", settings, {"jira_sa_token": "legacy-not-atoa"}
+        )
+        assert reason == "server_unconfigured"
+        assert refusal is not None
+        assert refusal.detail == unavailable_sentence("jira", "server_unconfigured")
+        assert "Profile Settings" not in refusal.detail
 
     def test_jira_flag_off_offers_nothing(self):
         assert (
@@ -1468,54 +1487,101 @@ class TestAskedIssueTracker:
 
 
 class TestCredentialBlockedIssueNotice:
-    """The text the server posts: the cause and the fix, never "tooling"."""
+    """The text the server posts: the cause, the fix and WHO must act."""
 
-    def test_it_names_the_token_and_the_page_that_adds_it(self):
+    def test_a_missing_token_names_the_account_and_the_page(self):
         from rootcoz.engine.chat import credential_blocked_issue_notice
 
-        assert credential_blocked_issue_notice(
-            "jira", "no_token", token_would_file=True
-        ) == (
-            "No Jira issue can be filed from this chat. This account has no Jira "
-            "token saved; the fix is Profile Settings → add the Jira token."
+        assert credential_blocked_issue_notice("jira", "no_token") == (
+            "No Jira issue can be filed from this chat. Add your Jira API token "
+            "in Profile Settings."
         )
 
-    def test_a_token_that_would_not_file_is_not_the_fix(self):
-        """The gate reads the token before the repository, so ``no_token`` alone
-        does not mean a token fixes it: a deployment with no repository (or no
-        Jira method) files nothing even after the user saves one."""
+    def test_a_rejected_credential_names_the_re_save(self):
         from rootcoz.engine.chat import credential_blocked_issue_notice
 
-        for tracker, reason in (
-            ("github", "no_token"),
-            ("jira", "no_token"),
-            ("github", "no_token_no_profile"),
-        ):
-            assert (
-                credential_blocked_issue_notice(tracker, reason, token_would_file=False)
-                == ""
-            )
+        assert credential_blocked_issue_notice("jira", "unusable_credential") == (
+            "Your saved Jira credential was rejected. Re-save it in Profile Settings."
+        )
 
-    def test_only_a_credential_reason_posts(self):
-        """A disabled tracker or a missing repo is not fixed by adding a token."""
+    def test_an_unconfigured_server_names_the_administrator(self):
+        """Issue #536: the account's tokens were saved, the SERVER was
+        unconfigured, and the notice said nothing at all — so the model told the
+        user to fix his own settings."""
         from rootcoz.engine.chat import credential_blocked_issue_notice
 
-        for reason in (
-            "",
+        assert credential_blocked_issue_notice("jira", "server_unconfigured") == (
+            "Jira is not configured on this server — an administrator has to set "
+            "it up in Server Settings."
+        )
+
+    @pytest.mark.parametrize(
+        "reason",
+        [
             "server_disabled",
             "no_repository",
             "no_run_repository",
             "server_unconfigured",
             "unusable_credential",
-        ):
-            assert (
-                credential_blocked_issue_notice("github", reason, token_would_file=True)
-                == ""
-            )
+            "no_token",
+            "no_token_no_profile",
+            "some_future_reason",
+        ],
+    )
+    def test_no_unavailable_state_is_silent(self, reason):
+        """Never silent: every reason a tracker is absent answers with a line."""
+        from rootcoz.engine.chat import credential_blocked_issue_notice
+
+        for tracker in ("github", "jira"):
+            assert credential_blocked_issue_notice(tracker, reason)
+
+    def test_only_an_available_tracker_or_an_unknown_one_is_silent(self):
+        from rootcoz.engine.chat import credential_blocked_issue_notice
+
+        # No reason means the tracker is available: nothing to correct.
+        assert credential_blocked_issue_notice("jira", "") == ""
         # An unknown tracker has no kind to name.
-        assert (
-            credential_blocked_issue_notice("", "no_token", token_would_file=True) == ""
+        assert credential_blocked_issue_notice("", "no_token") == ""
+
+    def test_the_server_side_sentences_never_send_the_user_to_a_page(self):
+        """A server-side cause is fixed by an administrator: the text must not
+        name any settings page, auth method or setting field."""
+        from rootcoz.error_messages import unavailable_sentence
+
+        forbidden = (
+            "User Settings",
+            "Profile Settings",
+            "your settings",
+            "basic",
+            "pat",
+            "oauth",
+            "atst",
+            "jira_cloud_url",
+            "jira_server_url",
+            "atlassian_oauth_client_id",
+            "jira_email",
+            "TESTS_REPO_URL",
         )
+        for tracker in ("github", "jira"):
+            for reason in (
+                "server_unconfigured",
+                "server_disabled",
+                "no_repository",
+                "no_run_repository",
+                "some_future_reason",
+            ):
+                sentence = unavailable_sentence(tracker, reason)
+                for word in forbidden:
+                    assert word not in sentence, (reason, word)
+
+    def test_the_account_side_sentences_name_profile_settings(self):
+        from rootcoz.error_messages import unavailable_sentence
+
+        for tracker in ("github", "jira"):
+            for reason in ("no_token", "unusable_credential", "no_token_no_profile"):
+                sentence = unavailable_sentence(tracker, reason)
+                assert "Profile Settings" in sentence
+                assert "your" in sentence.lower()
 
 
 class TestTheServerWritesTheNoCredentialAnswer:
@@ -1552,7 +1618,7 @@ class TestTheServerWritesTheNoCredentialAnswer:
 
     async def test_a_github_request_with_no_token_names_profile_settings(self):
         notice = await self._notice("can you open a GitHub issue for this failure?", {})
-        assert "Profile Settings → add the GitHub token" in notice
+        assert "Profile Settings" in notice
         assert "No GitHub issue can be filed" in notice
         # The cause is the account, so nothing may blame the tools.
         assert "tooling" not in notice.lower()
@@ -1560,7 +1626,7 @@ class TestTheServerWritesTheNoCredentialAnswer:
     async def test_a_saved_token_writes_nothing(self):
         assert await self._notice("open a GitHub issue", {"github_token": "tok"}) == ""
         # A token for the OTHER tracker does not make this one file either.
-        assert "GitHub token" in await self._notice(
+        assert "GitHub API token" in await self._notice(
             "open a GitHub issue", {"jira_token": "tok"}
         )
 
@@ -1568,14 +1634,23 @@ class TestTheServerWritesTheNoCredentialAnswer:
         assert await self._notice("why did this fail?", {}) == ""
         assert await self._notice("open the console log", {}) == ""
 
-    async def test_a_tracker_the_server_disabled_gets_no_token_advice(self):
-        assert await self._notice("open a GitHub issue", {}, enabled=False) == ""
+    async def test_a_tracker_the_server_disabled_names_the_administrator(self):
+        """Never silent (#536): a disabled tracker is an administrator setting,
+        so the notice names the administrator instead of saying nothing."""
+        notice = await self._notice("open a GitHub issue", {}, enabled=False)
+        assert "GitHub issue creation is disabled on this server" in notice
+        assert "An administrator has to enable it in Server Settings" in notice
+        assert "Profile Settings" not in notice
 
-    async def test_no_repository_configured_promises_no_token_fix(self):
+    async def test_no_repository_configured_names_the_missing_repository(self):
         """The gate reads the token BEFORE the destination, so it answers
         ``no_token`` on a deployment with no repository to file in either —
-        where a token in Profile Settings would fix nothing at all."""
-        assert await self._notice("open a GitHub issue", {}, repo=False) == ""
+        where a token in Profile Settings would fix nothing at all. The notice
+        now names that cause instead of staying silent."""
+        notice = await self._notice("open a GitHub issue", {}, repo=False)
+        assert "Nowhere to file this issue" in notice
+        assert "TESTS_REPO_URL" not in notice
+        assert "Profile Settings" not in notice
         # With a repository that would receive the issue, the token IS the fix.
         assert "Profile Settings" in await self._notice("open a GitHub issue", {})
 
@@ -1602,7 +1677,7 @@ class TestTheServerWritesTheNoCredentialAnswer:
                 settings=settings,
                 github_repo_available=True,
             )
-        assert "Profile Settings → add the Jira token" in notice
+        assert "Add your Jira API token in Profile Settings" in notice
 
     @pytest.mark.parametrize(
         "settings_kwargs",
@@ -1640,7 +1715,7 @@ class TestTheServerWritesTheNoCredentialAnswer:
                 settings=Settings(**settings_kwargs),
                 github_repo_available=True,
             )
-        assert "Profile Settings → add the Jira token" in notice
+        assert "Add your Jira API token in Profile Settings" in notice
 
     async def test_the_bootstrap_admin_is_told_to_sign_in(self):
         """No ``users`` row means ``PUT /api/user/tokens`` answers 404 for it."""
@@ -1648,7 +1723,7 @@ class TestTheServerWritesTheNoCredentialAnswer:
             "please file a GitHub issue for this", {}, profile=False
         )
         assert "Sign in with your own account" in notice
-        assert "Profile Settings → add" not in notice
+        assert "Add your GitHub API token" not in notice
         assert "tooling" not in notice.lower()
 
     async def test_a_failed_lookup_costs_the_notice_not_the_turn(self):
@@ -1669,6 +1744,141 @@ class TestTheServerWritesTheNoCredentialAnswer:
                 )
                 == ""
             )
+
+
+def _unconfigured_jira_settings(**overrides) -> Settings:
+    """A deployment with no Jira configuration, whatever the host exports.
+
+    ``Settings`` reads ``JIRA_URL``/``JIRA_CLOUD_ID``/``ATLASSIAN_*`` from the
+    environment (a dev box has them), so every Jira field this module reasons
+    about is pinned explicitly.
+    """
+    base: dict[str, object] = {
+        "jira_auth_mode": "",
+        "jira_cloud_url": "",
+        "jira_server_url": "",
+        "jira_site_url": "",
+        "jira_email": "",
+        "jira_api_token": None,
+        "jira_pat": None,
+        "jira_oauth_client_secret": None,
+        "jira_atst_token": None,
+        "atlassian_oauth_client_id": "",
+        "atlassian_oauth_cloud_id": "",
+    }
+    base.update(overrides)
+    return Settings(**base)
+
+
+class TestOneJiraStateOneAnswer:
+    """Issue #536: one test per Jira state, through the real gate.
+
+    The defect was a silent server: the notice returned "" exactly when the
+    deployment was the cause, so the model improvised the fix and named the
+    user's own settings while his tokens were saved.
+    """
+
+    async def _notice(self, settings, tokens, *, profile=True) -> str:
+        from unittest.mock import AsyncMock, patch
+
+        from rootcoz.main import _issue_blocked_notice
+
+        with (
+            patch("rootcoz.storage.get_user_tokens", AsyncMock(return_value=tokens)),
+            patch("rootcoz.main._account_has_profile", AsyncMock(return_value=profile)),
+        ):
+            return await _issue_blocked_notice(
+                message="please file a Jira issue for this failure",
+                username="alice",
+                settings=settings,
+                github_repo_available=True,
+            )
+
+    async def test_an_unconfigured_server_answers_with_the_administrator(self):
+        """The reporter's state: Jira unset on the server, the account's tokens
+        saved. The server answers, and it names the administrator."""
+        notice = await self._notice(
+            _unconfigured_jira_settings(), {"jira_token": "tok"}
+        )
+        assert notice == (
+            "Jira is not configured on this server — an administrator has to set "
+            "it up in Server Settings."
+        )
+        assert "Profile Settings" not in notice
+        assert "User Settings" not in notice
+
+    async def test_a_working_deployment_with_no_token_answers_with_the_account(self):
+        """A deployment that can file is the account's turn: adding the token is
+        the fix, and nothing may send the user to the server settings."""
+        settings = _unconfigured_jira_settings(
+            jira_auth_mode="pat", jira_server_url="https://jira.example.com"
+        )
+        notice = await self._notice(settings, {})
+        assert notice == (
+            "No Jira issue can be filed from this chat. Add your Jira API token "
+            "in Profile Settings."
+        )
+        assert "Server Settings" not in notice
+
+    async def test_a_credential_the_deployment_cannot_serve_asks_for_a_re_save(self):
+        """Partially configured: a PAT files, this account's saved credential
+        does not pin anything the settings can serve."""
+        settings = _unconfigured_jira_settings(
+            jira_auth_mode="pat", jira_server_url="https://jira.example.com"
+        )
+        notice = await self._notice(
+            settings, {"jira_token": "tok", "jira_email": "a@example.com"}
+        )
+        assert notice == (
+            "Your saved Jira credential was rejected. Re-save it in Profile Settings."
+        )
+
+    async def test_the_bootstrap_admin_on_an_unconfigured_deployment(self):
+        """No ``users`` row, and the cause is the server: the administrator
+        sentence wins over the "sign in" one."""
+        notice = await self._notice(_unconfigured_jira_settings(), {}, profile=False)
+        assert "an administrator has to set it up in Server Settings" in notice
+        assert "Sign in" not in notice
+
+    async def test_a_job_chat_with_no_run_repository_names_the_run(self):
+        from unittest.mock import AsyncMock, patch
+
+        from rootcoz.config import Settings
+        from rootcoz.main import _issue_blocked_notice
+
+        with (
+            patch("rootcoz.storage.get_user_tokens", AsyncMock(return_value={})),
+            patch("rootcoz.main._account_has_profile", AsyncMock(return_value=True)),
+        ):
+            notice = await _issue_blocked_notice(
+                message="open a GitHub issue for this failure",
+                username="alice",
+                settings=Settings(enable_github_issues=True),
+                github_repo_available=False,
+                job_chat=True,
+            )
+        assert "this run has no GitHub test repository" in notice
+        assert "A token cannot add one" in notice
+
+    async def test_an_admin_chat_without_a_server_repository_names_the_server(self):
+        from unittest.mock import AsyncMock, patch
+
+        from rootcoz.config import Settings
+        from rootcoz.main import _issue_blocked_notice
+
+        with (
+            patch("rootcoz.storage.get_user_tokens", AsyncMock(return_value={})),
+            patch("rootcoz.main._account_has_profile", AsyncMock(return_value=True)),
+        ):
+            notice = await _issue_blocked_notice(
+                message="open a GitHub issue for this failure",
+                username="alice",
+                settings=Settings(enable_github_issues=True),
+                github_repo_available=False,
+                job_chat=False,
+            )
+        assert "this chat has no GitHub repository it may use" in notice
+        assert "ask an administrator" in notice
 
 
 class TestTheNoticeRendersAboveTheAnswer:
@@ -1745,7 +1955,86 @@ class TestTheNoticeRendersAboveTheAnswer:
         # The row the model never writes comes before the placeholder it fills.
         assert notice["id"] < sent["assistant_message_id"]
         assert notice["id"] > rows[0]["id"]
-        assert "Profile Settings → add the GitHub token" in notice["content"]
+        assert "Add your GitHub API token in Profile Settings" in notice["content"]
+
+    @pytest.mark.parametrize(
+        ("tokens", "settings_kwargs", "expected"),
+        [
+            # The reporter's state: unconfigured server, tokens saved.
+            ({"jira_token": "tok"}, {}, "an administrator"),
+            # A deployment that can file, no token on the account.
+            (
+                {"jira_token": ""},
+                {"jira_auth_mode": "pat", "jira_server_url": "https://j.example.com"},
+                "Add your Jira API token",
+            ),
+            # And a credential the deployment cannot serve.
+            (
+                {"jira_token": "tok", "jira_email": "a@example.com"},
+                {"jira_auth_mode": "pat", "jira_server_url": "https://j.example.com"},
+                "Re-save it in Profile Settings",
+            ),
+        ],
+    )
+    async def test_every_jira_state_stores_a_system_row(
+        self, tokens, settings_kwargs, expected, monkeypatch, tmp_path
+    ):
+        """All three states answer, in the role the model never writes."""
+        from types import SimpleNamespace
+
+        from fastapi import BackgroundTasks
+
+        from rootcoz import main
+        from rootcoz.models import ChatMessageRequest
+
+        monkeypatch.setattr(storage, "DB_PATH", tmp_path / "notice-states.db")
+        await storage.init_db()
+        await storage.create_admin_user("alice")
+        await storage.save_result(
+            "job",
+            "",
+            "completed",
+            {"status": "completed", "result": {}, "request_params": {}},
+        )
+        monkeypatch.setattr(
+            main, "get_settings", lambda: _unconfigured_jira_settings(**settings_kwargs)
+        )
+        monkeypatch.setattr(
+            main, "_settings_github_repo_available", lambda _settings: True
+        )
+        monkeypatch.setattr(
+            main,
+            "_job_issue_repo_slugs",
+            lambda _params: ("org/repo", frozenset({"org/repo"})),
+        )
+        monkeypatch.setattr(
+            main,
+            "_current_chat_choice",
+            AsyncMock(
+                return_value=({"ai_provider": "openai", "ai_model": "m"}, "user")
+            ),
+        )
+        monkeypatch.setattr(
+            main,
+            "_normalize_and_validate_ai_params",
+            AsyncMock(return_value=("openai", "m")),
+        )
+        monkeypatch.setattr(
+            main, "_check_chat_session_choice", AsyncMock(return_value=("sid", "user"))
+        )
+        monkeypatch.setattr(
+            "rootcoz.storage.get_user_tokens", AsyncMock(return_value=tokens)
+        )
+        request = SimpleNamespace(
+            state=SimpleNamespace(username="alice", is_admin=False, role="admin")
+        )
+        body = ChatMessageRequest(message="please file a Jira issue for this failure")
+        await main.send_chat_message("job", body, request, BackgroundTasks())
+
+        rows = await storage.get_chat_messages("job", username="alice")
+        assert [row["role"] for row in rows] == ["user", "system", "assistant"]
+        assert expected in rows[1]["content"]
+        assert "User Settings" not in rows[1]["content"]
 
 
 class TestBuildSystemPrompt:
@@ -1877,7 +2166,11 @@ class TestBuildSystemPrompt:
         )
         assert "Unavailable Tools" in prompt
         assert "Jira search" in prompt
-        assert "User Settings" in prompt
+        # Both actors, and never a page that cannot fix a server-side cause.
+        assert "Profile Settings" in prompt
+        assert "Server Settings" in prompt
+        assert "User Settings" not in prompt
+        assert "(URL, email, and API token)" not in prompt
         assert "GitHub search" not in prompt  # GitHub IS configured
 
     def test_unavailable_github_notice(self):
@@ -1891,8 +2184,10 @@ class TestBuildSystemPrompt:
         )
         assert "Unavailable Tools" in prompt
         assert "GitHub search" in prompt
-        assert "User Settings" in prompt
-        assert "Jira search" not in prompt  # Jira IS configured
+        assert "Profile Settings" in prompt
+        assert "administrator" in prompt
+        assert "User Settings" not in prompt
+        assert "Jira search" not in prompt  # Jira is configured
 
     def test_both_unavailable_notices(self):
         """When neither jira nor github configured, both notices appear."""

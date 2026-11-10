@@ -23,7 +23,10 @@ from rootcoz.config import (
     jira_unavailable_reason,
     normalize_jira_auth_mode,
 )
-from rootcoz.error_messages import deployment_credential_message
+from rootcoz.error_messages import (
+    deployment_credential_message,
+    jira_api_base_unresolved_message,
+)
 from rootcoz.issue_matching import (
     TrackerSearch,
     TrackerSearchSpec,
@@ -103,17 +106,35 @@ def _jira_site(url: str | None) -> str:
     browse links built from it render ``.../ex/jira/<cloudId>/browse/KEY``,
     a URL that resolves to no ticket (#496). Returning "" makes the link
     absent instead of broken.
+
+    A warning fires once per distinct bad value, not once per process: this
+    runs on every resolution (every request), so repeating the same bad value
+    must stay quiet, but ``jira_site_url`` is a per-request field and this now
+    also runs from ``Settings.jira_enabled`` via :func:`jira_availability` — on
+    search and analysis paths, where no refusal logs — so a value introduced
+    after an admin fix must warn again. A good value clears the memory.
     """
+    global _site_warned_for
     site = (url or "").strip().rstrip("/")
     if not site:
-        logger.warning("JIRA_SITE_URL is unset — Jira browse links cannot be built")
+        if _site_warned_for != "unset":
+            _site_warned_for = "unset"
+            logger.warning("JIRA_SITE_URL is unset — Jira browse links cannot be built")
         return ""
     # Omitted, not rejected: stored request params are replayed verbatim on
     # re-analysis, so an old bad value must not fail the run.
     if error := jira_site_url_error(site):
-        logger.warning("%s — Jira browse links cannot be built", error)
+        if _site_warned_for != f"invalid:{site}":
+            _site_warned_for = f"invalid:{site}"
+            logger.warning("%s — Jira browse links cannot be built", error)
         return ""
+    _site_warned_for = ""
     return site
+
+
+#: The value ``_jira_site`` last warned for (see its docstring); "" when the
+#: last value seen was good, so a new fault warns again.
+_site_warned_for = ""
 
 
 def _is_atlassian_cloud_host(url: str) -> bool:
@@ -272,7 +293,7 @@ def jira_method_url(settings: Settings) -> str:
     ``oauth`` → the scoped gateway URL derived from the cloud ID;
     ``basic`` → ``jira_cloud_url``; ``pat`` → ``jira_server_url``;
     ``atst`` → the scoped gateway URL derived from the cloud ID.
-    Empty when no method is selected or the method's locator is unset.
+    Empty when no method is configured or the method's locator is unset.
     """
     mode = normalize_jira_auth_mode(settings.jira_auth_mode)
     if mode in ("oauth", "atst"):
@@ -462,31 +483,6 @@ def require_caller_connection(connection: JiraConnection) -> None:
             connection.mode,
         )
         raise JiraDeploymentCredentialRefused(deployment_credential_message())
-
-
-def jira_missing_api_base_error(connection: JiraConnection) -> ValueError:
-    """Mode-aware error for a connection whose API base could not resolve.
-
-    Shared by every call site that needs a controlled failure when a
-    resolved connection has an empty ``api_base`` — the message points at
-    the missing field of the connection's OWN method instead of a
-    generic (or wrong-method) configuration hint.
-    """
-    if connection.mode == "sa":
-        return ValueError(
-            "Jira service account mode could not resolve the Atlassian cloud "
-            "ID: set ATLASSIAN_OAUTH_CLOUD_ID or JIRA_SITE_URL"
-        )
-    if connection.mode == "atst":
-        return ValueError(
-            "Jira atst mode could not resolve the Atlassian cloud ID: "
-            "set ATLASSIAN_OAUTH_CLOUD_ID or JIRA_SITE_URL"
-        )
-    if connection.mode == "cloud":
-        return ValueError("jira_cloud_url is not configured for the basic auth method")
-    if connection.mode == "server":
-        return ValueError("jira_server_url is not configured for the pat auth method")
-    return ValueError("No Jira auth method selected — choose one in Server Settings")
 
 
 # Cloud IDs resolved via tenant_info, cached in-process per site URL
@@ -710,10 +706,7 @@ class JiraClient:
             # __aexit__ never runs when __aenter__ raises — close the client
             # created in __init__ before surfacing the configuration error.
             await self._client.aclose()
-            raise ValueError(
-                "Jira service account mode could not resolve the Atlassian "
-                "cloud ID: set ATLASSIAN_OAUTH_CLOUD_ID or JIRA_SITE_URL"
-            )
+            raise ValueError(jira_api_base_unresolved_message())
         return self
 
     async def __aexit__(self, *exc: object) -> None:

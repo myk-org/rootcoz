@@ -137,7 +137,7 @@ Use `--json` on any of these commands when you want machine-readable output. For
   Cloning those repositories failed, and the chat started without them: the transcript names them, so the assistant's answers about that code are limited to what is present. Start a new session once the repository can be cloned.
 
 - The assistant says Jira or GitHub search is not available.  
-  Those tools are only registered when your account has the matching credentials. Add them on your profile settings page, then start a new chat session so the new tool list is picked up. See [Managing Your Account and Notifications](manage-account-and-notifications.html) for details.
+  Those tools need BOTH halves: your own credential (add it on your profile settings page, then start a new chat session so the new tool list is picked up) AND a Jira/GitHub configuration on the server. For GitHub, a job chat additionally needs the run itself to name a repository — a token cannot add one. If saving your credential does not enable it, the cause is one of those two: a run that names no repository (analyse a different run) or a server configuration an administrator has to fix in Server Settings. See [Managing Your Account and Notifications](manage-account-and-notifications.html) for details.
 
 - The assistant refuses to answer your question.  
   Job chat is scoped to that one analysis. Off-topic questions are rejected by design. For cross-job or server-wide questions, use [Use Server Chat for Cross-Job Analysis](use-server-chat-for-cross-job-analysis.html) for details.

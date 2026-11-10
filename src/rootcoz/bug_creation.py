@@ -13,11 +13,11 @@ from rootcoz import get_child_logger
 from rootcoz.ai_client import call_ai_once
 from rootcoz.attribution import AiProvenance, apply_ai_attribution, build_ai_attribution
 from rootcoz.config import Settings
+from rootcoz.error_messages import jira_api_base_unresolved_message
 from rootcoz.jira import (
     JiraClient,
     JiraConnection,
     complete_jira_connection,
-    jira_missing_api_base_error,
     require_caller_connection,
 )
 from rootcoz.models import (
@@ -902,17 +902,17 @@ async def create_jira_bug(
     require_caller_connection(connection)
     connection = await complete_jira_connection(connection)
     if not connection.api_base:
-        # Mode-aware message: basic/pat connections also have an empty base
-        # when their method URL is unset — they must not surface the SA
-        # cloud-ID error.
-        raise jira_missing_api_base_error(connection)
+        # One cause-free sentence for every mode: the cause (an unresolved
+        # cloud ID, or a method URL that is unset) is already in the log.
+        raise ValueError(jira_api_base_unresolved_message())
     if not connection.browse_base:
-        raise ValueError(
-            "Jira service account mode cannot build issue links: JIRA_SITE_URL "
-            "must be set to the Jira site URL (e.g. "
-            "https://<site>.atlassian.net) — never the api.atlassian.com "
-            "gateway — because browse links are built from it"
+        # Logged on every failure, not once per process: this is the request
+        # that is refused, so a deduplicated warning would hide the second one.
+        logger.warning(
+            "Refusing to file a Jira issue: the connection has no site URL to "
+            "build the issue link from"
         )
+        raise ValueError(jira_api_base_unresolved_message())
 
     headers: dict[str, str] = {"Content-Type": "application/json", **connection.headers}
     # Issue creation: existing modes keep REST v2; gateway connections

@@ -26,7 +26,7 @@ from rootcoz.engine.http_mcp import (
     cleanup_http_tools_mcp,
     install_http_tools_mcp_best_effort_async,
 )
-from rootcoz.error_messages import tracker_credential_message
+from rootcoz.error_messages import tracker_credential_message, unavailable_sentence
 from rootcoz.jira import (
     JiraConnection,
     classify_jira_secret,
@@ -1347,7 +1347,14 @@ def _build_tools_section(custom_tools: list[dict[str, Any]]) -> str:
 
 
 def _build_unavailable_section(custom_tools: list[dict[str, Any]]) -> str:
-    """Build notice about unavailable tools (Jira/GitHub not configured)."""
+    """Build notice about unavailable tools (Jira/GitHub search not registered).
+
+    A search tool is absent for two different reasons — this account has not
+    saved the credential, or the deployment/run cannot use one — and this
+    function only sees the tool list, so each sentence names BOTH actors and
+    the order they try. It must never send a user to a page that cannot fix a
+    server-side cause (issue #536).
+    """
     tool_names = {t["name"] for t in custom_tools}
     jira_configured = "search_jira" in tool_names
     github_configured = "search_github_issues" in tool_names
@@ -1355,17 +1362,22 @@ def _build_unavailable_section(custom_tools: list[dict[str, Any]]) -> str:
     lines = []
     if not jira_configured:
         lines.append(
-            "- **Jira search** is not available. If the user asks about Jira tickets, "
-            'tell them: "Jira search is not available for your account. To enable it, '
-            "go to your [User Settings](/settings) page and configure your Jira credentials "
-            '(URL, email, and API token), then start a new chat session."'
+            "- **Jira search** is not available in this session. If the user asks "
+            "about Jira tickets, tell them: "
+            '"Jira search is not available in this session. It needs a Jira '
+            "credential saved in Profile Settings and a Jira configuration on the "
+            "server — if saving your credential does not enable it, an "
+            'administrator has to configure Jira in Server Settings."'
         )
     if not github_configured:
         lines.append(
-            "- **GitHub search** is not available. If the user asks about GitHub issues or PRs, "
-            'tell them: "GitHub search is not available. To enable it, '
-            "configure your GitHub token on the [User Settings](/settings) page, "
-            'then start a new chat session."'
+            "- **GitHub search** is not available in this session. If the user asks "
+            "about GitHub issues or PRs, tell them: "
+            '"GitHub search is not available in this session. It needs a GitHub '
+            "token saved in Profile Settings and a repository to search; if saving "
+            "the token does not enable it, either this run names no GitHub "
+            "repository — then a different run can be analysed — or an "
+            'administrator has to configure GitHub on the server."'
         )
 
     if not lines:
@@ -1412,15 +1424,16 @@ def build_welcome_message(
 _COMMON_RULES = """- Do NOT modify any data — read-only. The one exception is a tracker issue tool in your tool list (`propose_tracker_issue` plus `create_github_issue` / `create_jira_issue`), and only once the user has approved the draft you proposed
 - Do NOT run arbitrary curl commands — use the provided tools"""
 
-#: Where a user adds a tracker token. The prompt reason below and the notice
-#: the server posts itself (:func:`credential_blocked_issue_notice`) read it, so
-#: the page they name cannot drift apart.
+#: Where a user adds a tracker token. Only the prompt reason below reads it —
+#: the sentence the server posts itself is
+#: :func:`~rootcoz.error_messages.unavailable_sentence`'s, which owns the page a
+#: user is sent to; this one only instructs the model.
 _TRACKER_TOKEN_FIX = "Profile Settings → add the {kind} token."
 
 #: What to tell the user for each reason a tracker tool is missing from the list.
-#: `{kind}` is the tracker name. Only the missing-token case is fixed in Profile
-#: Settings — a disabled tracker or a missing repository is not, and an account
-#: with no ``users`` row has nowhere to save one at all.
+#: `{kind}` is the tracker name. This map INSTRUCTS THE MODEL; the sentence the
+#: server itself posts is :func:`~rootcoz.error_messages.unavailable_sentence`,
+#: which owns the page a user is sent to — the two must name the same actor.
 _TRACKER_UNAVAILABLE_REASONS = {
     "server_disabled": (
         "issue creation is disabled on this server, so no token can enable it — "
@@ -1446,8 +1459,7 @@ _TRACKER_UNAVAILABLE_REASONS = {
         + tracker_credential_message("{kind}", has_profile=False)
     ),
     "server_unconfigured": (
-        "this server has no usable {kind} auth method configured (no site/cloud "
-        "URL or no method selected in Server Settings), so no saved credential "
+        "this server has no usable {kind} configuration, so no saved credential "
         "can file. Tell the user an administrator has to configure it in Server "
         "Settings, and that re-saving the {kind} credential will not help"
     ),
@@ -1457,12 +1469,6 @@ _TRACKER_UNAVAILABLE_REASONS = {
         "user the fix: Profile Settings → re-save the {kind} credential."
     ),
 }
-
-#: The reasons a tracker is missing because THIS account never set it up — the
-#: only ones a token in Profile Settings can fix. A disabled tracker, a missing
-#: repository, a deployment with no auth method configured or an unusable saved
-#: credential is not one of them, so no token advice is posted for it.
-_CREDENTIAL_UNAVAILABLE_REASONS = ("no_token", "no_token_no_profile")
 
 #: The forms people write "file an issue" in: a filing verb (any tense)
 #: before the noun, or the participle after it ("a GitHub issue filed for this").
@@ -1551,53 +1557,29 @@ def asked_issue_tracker(message: str) -> Literal["", "github", "jira"]:
     return min(named)[2] if named else ""
 
 
-def credential_blocked_issue_notice(
-    tracker: str, reason: str, *, token_would_file: bool
-) -> str:
+def credential_blocked_issue_notice(tracker: str, reason: str) -> str:
     """The server's own answer when this account cannot file the asked-for issue.
 
     The caller stores this as a ``system`` chat row (the role the model never
     writes), above the model's answer, so the cause and the fix reach the user
     even when the model improvises around the system prompt's instruction — it
     claimed it would file, then blamed a "session-level tooling gap" instead of
-    the account (issue #446).
+    the account (issue #446), and when the cause was the SERVER it told the user
+    to fix his own settings (issue #536).
 
-    Only :data:`_CREDENTIAL_UNAVAILABLE_REASONS` produce text: a tracker an
-    administrator disabled, a server with no repository, a deployment with no
-    usable tracker auth method or an unusable saved credential is not fixed in
-    Profile Settings by adding a token. Returns ``""`` for those, and for a
-    caller whose tool list already has the tracker.
+    Every unavailable state answers: :func:`~rootcoz.error_messages.
+    unavailable_sentence` names the actor who must act, so a server-side cause
+    never reads as the account's fault and a tracker that is simply available is
+    the only silent case (an empty ``reason``). ``""`` is returned only for an
+    unnameable tracker or an empty reason.
 
     Args:
         tracker: ``"github"`` or ``"jira"`` — the one the user asked for.
         reason: Its code from the chat tracker state.
-        token_would_file: Would a token this account could save make it file?
-            The gate reads the credential BEFORE the destination, so it also
-            answers ``no_token`` on a deployment with no repository (or no Jira
-            method) configured — a blocker no token fixes. Promising the token
-            there sends the user to Profile Settings to fix nothing, so the
-            notice stays silent instead.
     """
-    if (
-        not token_would_file
-        or tracker not in {"github", "jira"}
-        or reason not in _CREDENTIAL_UNAVAILABLE_REASONS
-    ):
+    if tracker not in {"github", "jira"} or not reason:
         return ""
-    kind = "GitHub" if tracker == "github" else "Jira"
-    if reason == "no_token":
-        return (
-            f"No {kind} issue can be filed from this chat. This account has no "
-            f"{kind} token saved; the fix is {_TRACKER_TOKEN_FIX.format(kind=kind)}"
-        )
-    if reason == "no_token_no_profile":
-        # The bootstrap ``admin`` has no ``users`` row, so ``PUT /api/user/tokens``
-        # answers 404 for it: the fix is signing in as an account that has one.
-        return (
-            f"No {kind} issue can be filed from this chat. "
-            + tracker_credential_message(kind, has_profile=False)
-        )
-    return ""
+    return unavailable_sentence(tracker, reason)
 
 
 def _issue_repo_param(issue_repos: tuple[str, ...]) -> dict[str, Any]:

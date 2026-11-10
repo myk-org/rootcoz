@@ -123,7 +123,7 @@ from rootcoz.config import (
     atlassian_cloud_id_error,
     duplicate_additional_repo_names,
     get_settings,
-    jira_method_missing_fields,
+    jira_availability,
     jira_site_url_error,
     jira_unavailable_reason,
     normalize_jira_auth_mode,
@@ -157,8 +157,10 @@ from rootcoz.engine.core import (
     set_progress_callback,
 )
 from rootcoz.error_messages import (
+    jira_api_base_unresolved_message,
     make_user_friendly_error,
     tracker_credential_message,
+    unavailable_sentence,
 )
 from rootcoz.exporters.base import (
     JOB_METADATA_DIMENSIONS,
@@ -10283,10 +10285,7 @@ async def preview_github_issue(
         f"POST /results/{job_id}/preview-github-issue: test_name={body.test_name}"
     )
     if settings.enable_github_issues is False:
-        raise HTTPException(
-            status_code=403,
-            detail="GitHub issue creation is disabled on this server",
-        )
+        raise _tracker_refusal("github", "server_disabled")
     failure, result_data, matched_child = await _load_effective_failure(
         job_id, body.test_name, body.child_job_name, body.child_build_number
     )
@@ -10364,17 +10363,13 @@ async def preview_jira_bug(
     _check_allow_list(request)
     logger.debug(f"POST /results/{job_id}/preview-jira-bug: test_name={body.test_name}")
     if not _jira_issue_creation_enabled(settings):
-        raise HTTPException(
-            status_code=403,
-            detail="Jira issue creation is disabled on this server",
-        )
+        raise _tracker_refusal("jira", "server_disabled")
     # A legacy (non-ATOA) service-account secret must be rejected, not
     # silently dropped (which would fall back to the server credentials).
     user_tokens = await _read_user_tokens_for_preview(request.state.username, job_id)
     user_jira_token = (user_tokens.get("jira_token", "") or "").strip()
     user_jira_sa_token = (user_tokens.get("jira_sa_token", "") or "").strip()
     _debug_credential_source("jira", bool(user_jira_token or user_jira_sa_token))
-    _require_usable_jira_sa_token(user_jira_token, user_jira_sa_token)
     # Effective settings first (Finding 9): the caller's credential pins the
     # auth method, so the method-configured check must run against the
     # EFFECTIVE settings — a stored credential can satisfy a method
@@ -10386,7 +10381,16 @@ async def preview_jira_bug(
         body.jira_project_key,
         user_jira_sa_token=user_jira_sa_token,
     )
-    _require_jira_method_configured(effective_jira_settings)
+    _require_jira_available(
+        settings,
+        effective_jira_settings,
+        caller_has_credential=bool(user_jira_token or user_jira_sa_token),
+        has_profile=await _account_has_profile(request.state.username),
+    )
+    # The deployment's answer precedes any verdict on this caller's credential:
+    # the legacy service-account sentence points at Profile Settings, which
+    # cannot fix a server that serves no Jira credential.
+    _require_usable_jira_sa_token(user_jira_token, user_jira_sa_token)
     failure, result_data, matched_child = await _load_effective_failure(
         job_id, body.test_name, body.child_job_name, body.child_build_number
     )
@@ -10428,7 +10432,7 @@ async def preview_jira_bug(
     similar: list[dict[str, Any]] = []
     if (
         (user_jira_token or user_jira_sa_token)
-        and _has_jira_credentials(effective_jira_settings)
+        and jira_availability(effective_jira_settings)[0]
         and jira_method_url(effective_jira_settings)
         and effective_jira_settings.jira_project_key
     ):
@@ -10506,42 +10510,35 @@ async def preview_jira_bug(
     }
 
 
-def _has_jira_credentials(settings: Settings) -> bool:
-    """True when an explicitly selected Jira auth method is fully configured.
+def _require_jira_available(
+    settings: Settings,
+    effective: Settings,
+    *,
+    caller_has_credential: bool,
+    has_profile: bool = True,
+) -> None:
+    """400/403 unless *effective* can carry a Jira draft.
 
-    Mirrors the resolver: with ``jira_auth_mode`` set, any non-empty token
-    for the selected method is usable (no value sniffing), and an unset
-    mode disables Jira entirely regardless of stored credentials.
+    A draft needs no credential of its own: the deployment's own credential
+    carries it (only the duplicate search needs this caller's). So the
+    availability answer decides first, and *effective* — the caller's
+    credential pinned onto the deployment's settings — is what is asked.
+
+    When it is unavailable, the refusal names the actor exactly as filing does
+    (:func:`_jira_unavailable`): an administrator for a deployment that can
+    serve no credential, the account for one that can (re-save a rejected
+    credential, or add the missing one).
     """
-    return bool(
-        normalize_jira_auth_mode(settings.jira_auth_mode)
-        and not jira_method_missing_fields(settings)
+    if jira_availability(effective)[0]:
+        return
+    answer = _jira_unavailable(
+        settings,
+        effective,
+        caller_has_credential=caller_has_credential,
+        has_profile=has_profile,
     )
-
-
-def _require_jira_method_configured(settings: Settings) -> None:
-    """400 unless a Jira auth method is selected with all its fields.
-
-    Replaces the old generic "Jira URL is not configured" gate: each
-    method is self-contained, so the per-method missing-fields check is
-    the only pre-check (URLs included — basic needs ``jira_cloud_url``,
-    pat needs ``jira_server_url``, oauth needs the cloud ID).
-    """
-    mode = normalize_jira_auth_mode(settings.jira_auth_mode)
-    if not mode:
-        raise HTTPException(
-            status_code=400,
-            detail="No Jira auth method selected — choose one in Server Settings",
-        )
-    missing = jira_method_missing_fields(settings)
-    if missing:
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                f"Jira auth method '{mode}' is selected but missing: "
-                f"{', '.join(missing)}"
-            ),
-        )
+    if answer is not None:
+        raise answer[1]
 
 
 def _jira_issue_creation_enabled(settings: Settings) -> bool:
@@ -10900,24 +10897,6 @@ async def _add_tracker_comment(
 #: Profile Settings (see :func:`tracker_credential_message`).
 _CHAT_NO_PROFILE_REASON = "no_token_no_profile"
 
-#: The draft-time refusal when this caller has nowhere to file a GitHub issue.
-#: Both steps resolve the destination (the proposal shows it, the create files
-#: only what was shown), so both answer with this one wording.
-_CHAT_NO_REPO_DETAIL = (
-    "Nowhere to file this issue: this chat has no GitHub repository it may use. "
-    "Name a repository the run may file in, or ask an administrator to set "
-    "TESTS_REPO_URL."
-)
-
-#: The same refusal for a JOB chat, which never falls back to ``TESTS_REPO_URL``:
-#: only the run's own test repo and additional repos may receive its issue, so
-#: pointing at that setting sends the user somewhere that cannot enable it.
-_CHAT_NO_RUN_REPO_DETAIL = (
-    "Nowhere to file this issue: this run has no GitHub test repository and no "
-    "additional repo, and an issue from job chat may only go to them. A token "
-    "cannot add one."
-)
-
 
 async def _account_has_profile(username: str) -> bool:
     """Whether this caller has a ``users`` row — false only for the bootstrap
@@ -11045,16 +11024,65 @@ def _require_tracker_enabled(
     """
     if target == "github":
         if settings.enable_github_issues is False:
-            raise HTTPException(
-                status_code=403,
-                detail="GitHub issue creation is disabled on this server",
-            )
+            raise _tracker_refusal(target, "server_disabled")
         return
     if not _jira_issue_creation_enabled(settings):
-        raise HTTPException(
-            status_code=403,
-            detail="Jira issue creation is disabled on this server",
+        raise _tracker_refusal(target, "server_disabled")
+
+
+def _tracker_refusal(target: Literal["github", "jira"], reason: str) -> HTTPException:
+    """The refusal a reason code answers with: 403 for a disabled tracker, else 400.
+
+    One constructor for the ``(reason, refusal)`` pair the gate and the Jira
+    split both return, so the sentence a user reads for a code lives in one
+    place (:func:`~rootcoz.error_messages.unavailable_sentence`).
+    """
+    return HTTPException(
+        status_code=403 if reason == "server_disabled" else 400,
+        detail=unavailable_sentence(target, reason),
+    )
+
+
+def _jira_unavailable(
+    settings: Settings,
+    effective: Settings,
+    *,
+    caller_has_credential: bool,
+    has_profile: bool = True,
+) -> tuple[str, HTTPException] | None:
+    """``None`` when Jira can file with *effective*; else ``(reason, refusal)``.
+
+    The order is the actor's, and it is the point of this function:
+
+    1. the deployment first — can ANY credential this account could save file
+       here (:func:`_jira_server_can_serve_a_credential`)? No ⇒
+       ``server_unconfigured``, the administrator sentence. Asked before
+       anything else so a tokenless caller on an unusable deployment is never
+       told to add a token that cannot file.
+    2. then this caller: no credential supplied ⇒ ``no_token``, the account-side
+       sentence (re-saving is the fix). The deployment's own secret is NOT a
+       fallback — filing always uses the caller's credential.
+    3. ``effective`` resolves a usable connection ⇒ nothing to say.
+    4. otherwise the caller's credential does not resolve here ⇒
+       ``unusable_credential``, the re-save sentence.
+
+    Args:
+        settings: The deployment's own settings — what it can serve.
+        effective: ``settings`` with the caller's credential pinned on it.
+        caller_has_credential: Did this caller supply a credential at all?
+        has_profile: False for a caller with no ``users`` row (see
+            :func:`tracker_credential_message`).
+    """
+    if not _jira_server_can_serve_a_credential(settings):
+        return "server_unconfigured", _tracker_refusal("jira", "server_unconfigured")
+    if not caller_has_credential:
+        return "no_token", HTTPException(
+            status_code=400,
+            detail=tracker_credential_message("Jira", has_profile=has_profile),
         )
+    if jira_availability(effective)[0]:
+        return None
+    return "unusable_credential", _tracker_refusal("jira", "unusable_credential")
 
 
 def _chat_tracker_gate(
@@ -11068,21 +11096,51 @@ def _chat_tracker_gate(
     """``(reason, refusal)``: why chat cannot file in ``target``, else ``('', None)``.
 
     The ONE tracker gate: the chat tool list (:func:`_chat_tracker_state`) and
-    the create endpoint (:func:`_chat_issue_tracker_tokens`) both read it, so a
+    the create endpoints (:func:`_require_tracker_can_file`) both read it, so a
     tool is advertised exactly when the endpoint would file.
 
-    The order is the endpoint's: the deployment switch first (a disabled
-    tracker answers 403 even for an account with no token for it, because
-    adding one cannot turn it on), then the caller's own credential, then
-    whether that credential can actually file — the GitHub destination, or the
-    Jira auth method the saved credential pins.
+    A GitHub ``no_token`` is corrected here: the credential is read before the
+    destination, so the pair (no token, no repository) says nothing about the
+    token — the blocker is the deployment's repository set (or the run's own),
+    which no token can add. Jira never needs that correction: its answer comes
+    from :func:`_jira_unavailable`, which asks what the deployment can serve
+    before it asks what this caller supplied.
 
-    A Jira credential the settings cannot serve has two causes, and the fix
-    differs: when the deployment itself configures no usable method (no site or
-    cloud URL, no auth mode) the reason is ``server_unconfigured`` — an
-    administrator setting, so re-saving the credential cannot help; when the
-    deployment has a method and only the saved credential pins one it cannot
-    serve, the reason stays ``unusable_credential`` (Profile Settings).
+    Never silent: a reason from here always has a server-authored sentence.
+    """
+    reason, refusal = _chat_tracker_gate_uncorrected(
+        target,
+        settings,
+        user_tokens,
+        github_repo_available=github_repo_available,
+        job_chat=job_chat,
+    )
+    if target == "github" and reason == "no_token" and not github_repo_available:
+        reason = "no_run_repository" if job_chat else "no_repository"
+        return reason, _tracker_refusal(target, reason)
+    return reason, refusal
+
+
+def _chat_tracker_gate_uncorrected(
+    target: Literal["github", "jira"],
+    settings: Settings,
+    user_tokens: dict[str, str],
+    *,
+    github_repo_available: bool = True,
+    job_chat: bool = False,
+) -> tuple[str, HTTPException | None]:
+    """The endpoint's own order, without :func:`_chat_tracker_gate`'s correction.
+
+    Two different orders, because the two trackers ask different questions:
+
+    - GitHub: the deployment switch, then the caller's own token, then the
+      destination. That is why :func:`_chat_tracker_gate` corrects the pair
+      (no token, no repository) — nothing in it is the token's fault.
+    - Jira: the deployment switch, then the legacy service-account refusal,
+      then :func:`_jira_unavailable`, which asks what the DEPLOYMENT can serve
+      before it asks what this caller supplied. A Jira ``no_token`` therefore
+      already means a credential this account could save would file, so
+      :func:`_chat_tracker_gate` never re-classifies one.
 
     ``github_repo_available`` answers "is there a repository this caller may
     file in?". The tool list knows its run's repos and says so; a create request
@@ -11099,24 +11157,26 @@ def _chat_tracker_gate(
         if not user_tokens.get("github_token"):
             return "no_token", None
         if not github_repo_available:
-            if job_chat:
-                return "no_run_repository", HTTPException(
-                    status_code=400, detail=_CHAT_NO_RUN_REPO_DETAIL
-                )
-            return "no_repository", HTTPException(
-                status_code=400, detail=_CHAT_NO_REPO_DETAIL
-            )
+            reason = "no_run_repository" if job_chat else "no_repository"
+            return reason, _tracker_refusal("github", reason)
         return "", None
     jira_token = user_tokens.get("jira_token", "")
     jira_sa_token = user_tokens.get("jira_sa_token", "")
-    if not (jira_token or jira_sa_token):
-        return "no_token", None
     try:
-        # A legacy (non-ATOA) service-account secret, or a credential that pins
-        # an auth method the effective settings cannot serve, is refused by the
-        # create call — so it must not read as usable here either.
+        # A legacy (non-ATOA) service-account secret is refused by the create
+        # call, so it must not read as usable here either. Its own sentence
+        # names the field to fix, so it is passed through rather than replaced
+        # by the generic re-save one.
         _require_usable_jira_sa_token(jira_token, jira_sa_token)
     except HTTPException as exc:
+        # That sentence points at Profile Settings, which cannot fix a
+        # deployment that serves no Jira credential at all. Ask the deployment
+        # first, exactly as :func:`_jira_unavailable` does, so a legacy token on
+        # an unconfigured server names the administrator, not the account.
+        if not _jira_server_can_serve_a_credential(settings):
+            return "server_unconfigured", _tracker_refusal(
+                "jira", "server_unconfigured"
+            )
         return "unusable_credential", exc
     effective = _build_effective_jira_settings(
         settings,
@@ -11124,26 +11184,11 @@ def _chat_tracker_gate(
         user_tokens.get("jira_email", ""),
         user_jira_sa_token=jira_sa_token,
     )
-    try:
-        _require_jira_method_configured(effective)
-    except HTTPException as exc:
-        # Only a credential the settings could serve is fixed by re-saving it.
-        if _jira_server_can_serve_a_credential(settings):
-            return "unusable_credential", exc
-        logger.debug(
-            "Chat: Jira reads as unconfigured on this server (%s); no saved "
-            "credential can file",
-            exc.detail,
-        )
-        return "server_unconfigured", HTTPException(
-            status_code=400,
-            detail=(
-                f"Jira is not configured on this server: {exc.detail}. An "
-                "administrator has to configure it in Server Settings — a "
-                "saved credential cannot help."
-            ),
-        )
-    return "", None
+    return _jira_unavailable(
+        settings,
+        effective,
+        caller_has_credential=bool(jira_token or jira_sa_token),
+    ) or ("", None)
 
 
 #: Placeholder credentials the gate accepts, per tracker: the probe below asks
@@ -11166,58 +11211,66 @@ _PROBE_TOKENS: dict[str, tuple[dict[str, str], ...]] = {
 def _jira_server_can_serve_a_credential(settings: Settings) -> bool:
     """Could ANY Jira credential this account can save file on this deployment?
 
-    The split :func:`_chat_tracker_gate` needs: when the caller's saved
-    credential cannot be used, ask whether a re-save in Profile Settings could
-    produce one that can. Each shape :data:`_PROBE_TOKENS` lists is resolved
-    against the settings the same way the create call resolves it, so a
-    deployment missing the site/cloud URL (or the ids) every method needs
-    answers ``False`` — the reason an administrator setting fixes, not the user.
+    The split :func:`_jira_unavailable` needs: when no connection resolves, ask
+    whether a re-save in Profile Settings could produce one that does. Each
+    shape :data:`_PROBE_TOKENS` lists is resolved against the settings the same
+    way the create call resolves it — through :func:`jira_availability`, the one
+    availability answer — so a deployment with no usable Jira configuration
+    answers ``False``: the reason an administrator setting fixes, not the user.
     """
     for probe in _PROBE_TOKENS["jira"]:
         try:
             _require_usable_jira_sa_token(
                 probe.get("jira_token", ""), probe.get("jira_sa_token", "")
             )
-            _require_jira_method_configured(
-                _build_effective_jira_settings(
-                    settings,
-                    probe.get("jira_token", ""),
-                    probe.get("jira_email", ""),
-                    user_jira_sa_token=probe.get("jira_sa_token", ""),
-                )
-            )
         except HTTPException:
             continue
-        return True
-    return False
-
-
-def _token_would_enable_filing(
-    tracker: Literal["github", "jira"],
-    settings: Settings,
-    *,
-    github_repo_available: bool,
-    job_chat: bool = False,
-) -> bool:
-    """Would a token this account can save make ``tracker`` file at all?
-
-    :func:`_chat_tracker_gate` reads the credential BEFORE the destination, so
-    it answers ``no_token`` on a deployment with no repository (or no Jira auth
-    method) configured too — a blocker no token fixes. The same gate answers it
-    with each probe credential (:data:`_PROBE_TOKENS`), so the notice promises a
-    token only where the create path would then accept one.
-    """
-    for probe in _PROBE_TOKENS[tracker]:
-        reason, _refusal = _chat_tracker_gate(
-            tracker,
-            settings,
-            probe,
-            github_repo_available=github_repo_available,
-            job_chat=job_chat,
-        )
-        if not reason:
+        if jira_availability(
+            _build_effective_jira_settings(
+                settings,
+                probe.get("jira_token", ""),
+                probe.get("jira_email", ""),
+                user_jira_sa_token=probe.get("jira_sa_token", ""),
+            )
+        )[0]:
             return True
     return False
+
+
+async def _require_tracker_can_file(
+    tracker: Literal["github", "jira"],
+    settings: Settings,
+    user_tokens: dict[str, str],
+    *,
+    username: str = "",
+    github_repo_available: bool = True,
+    job_chat: bool = False,
+) -> dict[str, str]:
+    """Raise the refusal ``tracker`` cannot file with, else return *user_tokens*.
+
+    Both API paths (``POST /api/chat-issue`` and the report endpoints' shared
+    create) read the gate through here, so a server-side cause is answered with
+    the administrator sentence and only a genuine account-side ``no_token`` is
+    answered with :func:`_require_user_tracker_credential` — the one 400 whose
+    wording is profile-aware.
+    """
+    reason, refusal = _chat_tracker_gate(
+        tracker,
+        settings,
+        user_tokens,
+        github_repo_available=github_repo_available,
+        job_chat=job_chat,
+    )
+    if reason == "no_token":
+        raise HTTPException(
+            status_code=400,
+            detail=await _require_user_tracker_credential(
+                username, "GitHub" if tracker == "github" else "Jira"
+            ),
+        )
+    if refusal is not None:
+        raise refusal
+    return user_tokens
 
 
 def _chat_tracker_state(
@@ -11730,11 +11783,12 @@ async def _issue_blocked_notice(
     """Why the issue this message asks for cannot be filed, ``""`` when it can.
 
     The narrow trigger: the message itself asks to file an issue in a named
-    tracker (:func:`asked_issue_tracker`), that tracker is enabled for this
-    server but absent from the tool list for a CREDENTIAL reason — so the cause
-    and the fix are the account's, and naming them here is the answer. Anything
-    else (no request, a disabled tracker, no repository, a usable token) yields
-    ``""``.
+    tracker (:func:`asked_issue_tracker`) and that tracker is unavailable to
+    this caller. Every unavailable state answers — the sentence names the actor
+    who fixes it (an administrator for a server-side cause, the run for its own
+    empty repository set, the account for a credential), so a server-side cause
+    can never be read as the account's fault. ``""`` only for no request, or a
+    tracker that is available.
 
     The caller stores the text with the turn, BEFORE the assistant placeholder,
     so the cause renders above the model's answer rather than after it: the
@@ -11758,16 +11812,7 @@ async def _issue_blocked_notice(
             job_chat=job_chat,
         )
         reason = unavailable.get(tracker, "")
-        notice = credential_blocked_issue_notice(
-            tracker,
-            reason,
-            token_would_file=_token_would_enable_filing(
-                tracker,
-                settings,
-                github_repo_available=github_repo_available,
-                job_chat=job_chat,
-            ),
-        )
+        notice = credential_blocked_issue_notice(tracker, reason)
         if notice:
             logger.info(
                 "Chat: the server answers the %s filing request for %s (reason=%s)",
@@ -12206,27 +12251,30 @@ async def _create_issue_from_text(
     """
     github = target == "github"
     label = "GitHub" if github else "Jira"
-    _require_tracker_enabled(target, settings)
-    if github:
-        if not (github_token or "").strip():
-            raise HTTPException(
-                status_code=400,
-                detail=await _require_user_tracker_credential(username, label),
-            )
-    else:
-        if not (jira_token or "").strip() and not (jira_sa_token or "").strip():
-            raise HTTPException(
-                status_code=400,
-                detail=await _require_user_tracker_credential(username, label),
-            )
-        # A legacy (non-ATOA) service-account secret must be rejected, not
-        # silently dropped (which would file the bug under the SERVER's Jira
-        # identity).
-        _require_usable_jira_sa_token(jira_token, jira_sa_token)
+    # The shared gate answers: the enable 403, the administrator sentence for a
+    # server-side cause, the re-save sentence for this caller's rejected
+    # credential, and the account-side 400 only for a genuine missing token.
+    # ``github_repo_available`` stays True here: this function resolves its
+    # destination itself, a step later, and its own refusal names it.
+    await _require_tracker_can_file(
+        target,
+        settings,
+        {
+            "github_token": github_token,
+            "jira_token": jira_token,
+            # The email must be carried: it is what pins ``basic`` for a Cloud
+            # caller, and without it that caller's credential would be answered
+            # "re-save it" on a deployment that files it correctly.
+            "jira_email": jira_email,
+            "jira_sa_token": jira_sa_token,
+        },
+        username=username,
+    )
+    if not github:
         # Effective settings first: the user's credential pins the auth method,
-        # so the method-configured check must run against the EFFECTIVE
-        # settings — a user credential can satisfy a method the server's own
-        # secret cannot.
+        # so the connection and the project key are resolved against the
+        # EFFECTIVE settings — a user credential can satisfy a method the
+        # server's own secret cannot.
         effective_jira_settings = _build_effective_jira_settings(
             settings,
             jira_token,
@@ -12234,7 +12282,6 @@ async def _create_issue_from_text(
             jira_project_key,
             user_jira_sa_token=jira_sa_token,
         )
-        _require_jira_method_configured(effective_jira_settings)
 
     if pre_check is not None:
         await pre_check()
@@ -12555,17 +12602,9 @@ async def _chat_issue_tracker_tokens(
     ``TESTS_REPO_URL``, which a yes/no could not.
     """
     user_tokens = await storage.get_user_tokens(username)
-    reason, refusal = _chat_tracker_gate(tracker, settings, user_tokens)
-    if reason == "no_token":
-        raise HTTPException(
-            status_code=400,
-            detail=await _require_user_tracker_credential(
-                username, "GitHub" if tracker == "github" else "Jira"
-            ),
-        )
-    if refusal is not None:
-        raise refusal
-    return user_tokens
+    return await _require_tracker_can_file(
+        tracker, settings, user_tokens, username=username
+    )
 
 
 async def _chat_issue_resolved_destination(
@@ -12594,7 +12633,7 @@ async def _chat_issue_resolved_destination(
         # repository in play and can name it.
         slug = _github_repo_slug(repo_url or _resolve_github_repo_url(settings))
         if not slug:
-            raise HTTPException(status_code=400, detail=_CHAT_NO_REPO_DETAIL)
+            raise _tracker_refusal("github", "no_repository")
         return (
             _issue_destination(target="github", repo=slug, job_id=body.job_id),
             repo_url,
@@ -15282,39 +15321,31 @@ async def validate_token(
             jira_oauth_ssl_verify=settings.jira_oauth_ssl_verify,
         )
         if is_sa_secret:
-            if not settings.atlassian_oauth_client_id:
-                return _invalid(
-                    "Server has no atlassian_oauth_client_id configured — "
-                    "it is required to use an OAuth 2.0 credential secret"
-                )
             try:
                 connection = await complete_jira_connection(connection)
             except JiraOAuthMintError as exc:
-                return _invalid(str(exc))
+                return _invalid(f"Jira connection failed: {exc}")
             if not connection.api_base:
-                return _invalid(
-                    "Could not resolve the Atlassian cloud ID for the OAuth "
-                    "2.0 credential (set atlassian_oauth_cloud_id or "
-                    "jira_site_url on the server)"
-                )
+                return _invalid(jira_api_base_unresolved_message())
         elif is_atst_token:
             # No minting — the ATST token is already an access token; only
             # the cloud ID may still need resolving from the site URL.
             connection = await complete_jira_connection(connection)
             if not connection.api_base:
-                return _invalid(
-                    "Could not resolve the Atlassian cloud ID for the ATST "
-                    "token (set atlassian_oauth_cloud_id or jira_site_url "
-                    "on the server)"
-                )
+                return _invalid(jira_api_base_unresolved_message())
         elif not connection.api_base:
-            if email:
-                return _invalid(
-                    "Jira Cloud URL (jira_cloud_url) not configured on server"
-                )
-            return _invalid(
-                "Jira Server URL (jira_server_url) not configured on server"
+            # One text per state, whatever shape the submitted token has: this
+            # endpoint sees a token, not the deployment, so it cannot know
+            # which side is missing — and a *submitted* token is not the
+            # caller's saved credential, so it must not say "your saved
+            # credential". The cause goes to the log.
+            logger.debug(
+                "validate-token: the deployment cannot resolve a Jira API base "
+                "for this token shape (email=%s, kind=%s)",
+                bool(email),
+                kind or "none",
             )
+            return _invalid(jira_api_base_unresolved_message())
         # OAuth 2.0 credentials carry read:jira-work only — /myself needs
         # read:jira-users and 401s — so SA connections probe project
         # visibility instead of the current-user endpoint. ATST scoped
@@ -21761,24 +21792,16 @@ async def _test_jira_connection(
     write that state, and must never be told how to change server
     configuration a non-admin cannot change.
     """
-    if admin:
-        if not normalize_jira_auth_mode(settings.jira_auth_mode):
-            return _test_result(
-                False,
-                "No Jira auth method selected — choose one in Server Settings",
-            )
-        missing = jira_method_missing_fields(settings)
-        if missing:
-            return _test_result(
-                False,
-                f"Jira auth method '{settings.jira_auth_mode}' is selected "
-                f"but missing: {', '.join(missing)}",
-            )
+    if admin and not jira_availability(settings)[0]:
+        # The same sentence an end user reads: the method-and-field detail is
+        # operator output (``jira_availability``'s DEBUG line), never this
+        # endpoint's answer.
+        return _test_result(False, unavailable_sentence("jira", "server_unconfigured"))
     connection = resolve_jira_connection(settings)
     if connection.mode == "none":
-        # Unreachable for the admin route (its pre-flight above reports the
-        # exact missing fields) and for a user row with a saved credential —
-        # a guard so no probe is attempted against an empty API base.
+        # Unreachable for the admin route (its pre-flight above answered) and
+        # for a user row with a saved credential — a guard so no probe is
+        # attempted against an empty API base.
         return _test_result(
             False, "Jira connection failed: no usable credential was resolved"
         )
@@ -21802,8 +21825,9 @@ async def _test_jira_connection(
             )
         return _test_result(
             False,
-            "Jira service account mode could not resolve the Atlassian "
-            "cloud ID (set atlassian_oauth_cloud_id or jira_site_url)",
+            # No cause claim: the pre-flight passed, so this is a cloud-ID
+            # lookup that did not resolve — not a method or a field.
+            jira_api_base_unresolved_message(),
         )
     if connection.mode in ("sa", "atst"):
         # OAuth 2.0 credentials carry read:jira-work only — /myself needs
