@@ -718,7 +718,6 @@ def install_start_rig(monkeypatch, tmp_path):
 
     async def _install(*, credential_source, client, job_id, admin, header=None):
         from rootcoz.engine import chat, graft_http
-        from rootcoz.sources import chat_workspace
 
         monkeypatch.setattr(storage, "DB_PATH", tmp_path / f"{job_id}-refusal.db")
         await storage.init_db()
@@ -728,33 +727,22 @@ def install_start_rig(monkeypatch, tmp_path):
                 job_id, "", "completed", {"status": "completed", "result": {}}
             )
         monkeypatch.setattr(main, "get_settings", lambda: Settings(ai_call_timeout=30))
-        monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *a, **k: tmp_path)
-        monkeypatch.setattr(chat, "clone_chat_repos", AsyncMock(return_value=False))
-        monkeypatch.setattr(graft_http, "cloned_graph_roots", lambda workspace: {})
-        monkeypatch.setattr(
-            chat_workspace, "setup_ci_build_workspace", AsyncMock(return_value=False)
+        _install_common_chat_stubs(
+            monkeypatch,
+            workspace=tmp_path,
+            header=header,
+            credential_source=credential_source,
         )
+        monkeypatch.setattr(graft_http, "cloned_graph_roots", lambda workspace: {})
         monkeypatch.setattr(
             chat, "install_http_tools_mcp_best_effort_async", AsyncMock()
         )
-        monkeypatch.setattr(
-            main,
-            "_resolve_chat_credentials",
-            AsyncMock(return_value=("", "", None, "", "")),
-        )
-        _install_header(monkeypatch, header)
         monkeypatch.setattr(chat, "get_sidecar_client", lambda: client)
         monkeypatch.setattr(
             chat,
             "resolve_catalog_pair",
             AsyncMock(return_value=("openai", "undeclared")),
         )
-
-        async def validate(provider, model):
-            ai_client._selected_credential_source.set(credential_source)
-            return provider, model
-
-        monkeypatch.setattr(main, "_validate_catalog_pair", validate)
         monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
         if credential_source == "user":
             await storage.update_user_ai_credential(
@@ -796,6 +784,37 @@ def _install_header(monkeypatch, header) -> None:
         monkeypatch.setattr(main, "_create_ai_auth_header", header)
 
 
+def _install_common_chat_stubs(
+    monkeypatch, *, workspace, header, credential_source
+) -> None:
+    """Stub what every chat rig needs: no clone, no CI build, no credential lookup.
+
+    Shared by ``install_start_rig`` and ``install_turn_rig`` so one edit reaches
+    both; each rig adds only what its own path calls.
+    """
+    from rootcoz import ai_client, main
+    from rootcoz.engine import chat
+    from rootcoz.sources import chat_workspace
+
+    monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *a, **k: workspace)
+    monkeypatch.setattr(chat, "clone_chat_repos", AsyncMock(return_value=False))
+    monkeypatch.setattr(
+        chat_workspace, "setup_ci_build_workspace", AsyncMock(return_value=False)
+    )
+    monkeypatch.setattr(
+        main,
+        "_resolve_chat_credentials",
+        AsyncMock(return_value=("", "", None, "", "")),
+    )
+    _install_header(monkeypatch, header)
+
+    async def validate(provider, model):
+        ai_client._selected_credential_source.set(credential_source)
+        return provider, model
+
+    monkeypatch.setattr(main, "_validate_catalog_pair", validate)
+
+
 @contextmanager
 def record_chat_pushes(
     monkeypatch: pytest.MonkeyPatch,
@@ -834,37 +853,25 @@ def install_turn_rig(monkeypatch, tmp_path):
     async def _install(
         *, admin: bool = False, header=None, workspace=None, credential_source="user"
     ):
-        from rootcoz import ai_client, main
-        from rootcoz.engine import chat, session_tools
-        from rootcoz.sources import chat_workspace
+        from rootcoz import main
+        from rootcoz.engine import session_tools
 
         root = workspace
         if root is None:
             root = tmp_path / "workspace"
             root.mkdir(exist_ok=True)
-        monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *a, **k: root)
-        monkeypatch.setattr(chat, "clone_chat_repos", AsyncMock(return_value=False))
-        monkeypatch.setattr(
-            chat_workspace, "setup_ci_build_workspace", AsyncMock(return_value=False)
+        _install_common_chat_stubs(
+            monkeypatch,
+            workspace=root,
+            header=header,
+            credential_source=credential_source,
         )
-        monkeypatch.setattr(
-            main,
-            "_resolve_chat_credentials",
-            AsyncMock(return_value=("", "", None, "", "")),
-        )
-        _install_header(monkeypatch, header)
         monkeypatch.setattr(
             session_tools,
             "build_session_tools",
             AsyncMock(return_value=SimpleNamespace(custom=[])),
         )
         monkeypatch.setattr(main, "_schedule_chat_index", lambda *a, **k: None)
-
-        async def validate(provider, model):
-            ai_client._selected_credential_source.set(credential_source)
-            return provider, model
-
-        monkeypatch.setattr(main, "_validate_catalog_pair", validate)
         return root
 
     return _install
