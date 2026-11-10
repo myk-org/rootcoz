@@ -5306,6 +5306,10 @@ def metadata_preview(
 # -- Chat ---------------------------------------------------------------------
 
 
+#: Chat history statuses that end the wait instead of being retried: unauthorized,
+#: forbidden and a job that is gone are answers, not hiccups.
+_CHAT_FATAL_STATUSES = frozenset({401, 403, 404})
+
 #: How long the CLI waits for a chat to become ready, or for a reply. Derived
 #: from clone headroom for a 17-repository workspace plus
 #: ``CHAT_INDEX_DEADLINE_SECONDS + graft.BUILD_SECONDS`` plus session creation.
@@ -5347,12 +5351,17 @@ def _await_chat(
         time.sleep(1)
         try:
             history = fetch()
-        except RootCozError:
+        except RootCozError as exc:
+            if exc.status_code in _CHAT_FATAL_STATUSES:
+                # A revoked grant or a deleted job does not heal by waiting, and
+                # a timeout sentence would name the wrong cause.
+                _handle_error(exc)
             continue
         payload = predicate(history)
         if payload is not None:
             return payload
-    typer.echo(timeout_message)
+    # stderr: ``chat init --json`` still prints a JSON document on stdout.
+    typer.echo(timeout_message, err=True)
     return None
 
 
@@ -5446,8 +5455,9 @@ def chat_init(
         print_output(payload, columns=[], as_json=True)
     else:
         _echo_chat_start(payload, "Chat", started=bool(payload["ready"]))
-    if payload["error"]:
-        # A preparation that ended with a reported failure is a failed command.
+    if not payload["ready"]:
+        # A reported failure and a spent budget both mean no chat was started,
+        # and a script chaining `chat init && chat send` must stop here.
         raise typer.Exit(code=1)
 
 

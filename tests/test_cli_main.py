@@ -7311,11 +7311,11 @@ class TestChatCommands:
             waiting = runner.invoke(
                 app, ["chat", "init", "job-2", "-p", "openai", "-m", "m"]
             )
-        assert "Timed out" in waiting.output
+        assert "Timed out" in waiting.stderr
         assert "not started" in waiting.output.lower()
 
     def test_chat_init_times_out_with_the_budget(self, mock_client):
-        """The wait is bounded by ``CHAT_WAIT_SECONDS``, and says so."""
+        """The wait is bounded by ``CHAT_WAIT_SECONDS``, fails, and says so."""
         from rootcoz.cli import main as cli_main
 
         mock_client.init_chat.return_value = {"ready": False, "preparing": {}}
@@ -7324,10 +7324,28 @@ class TestChatCommands:
             result = runner.invoke(
                 app, ["chat", "init", "job-1", "-p", "openai", "-m", "m"]
             )
-        assert result.exit_code == 0
+        assert result.exit_code == 1, "a chat that never became ready is a failure"
         assert mock_client.get_chat_history.call_count == cli_main.CHAT_WAIT_SECONDS
-        assert "Timed out" in result.output
+        # stderr, so a --json caller still gets one clean document on stdout.
+        assert "Timed out" in result.stderr
+        assert "Timed out" not in result.stdout
         assert cli_main.CHAT_WAIT_SECONDS > 120
+
+    def test_chat_init_stops_waiting_on_a_revoked_grant(self, mock_client):
+        """A 403 while polling is the answer, not 600 retries of it."""
+
+        mock_client.init_chat.return_value = {"ready": False, "preparing": {}}
+        mock_client.get_chat_history.side_effect = RootCozError(
+            status_code=403, detail="Forbidden"
+        )
+        with patch("time.sleep"):
+            result = runner.invoke(
+                app, ["chat", "init", "job-1", "-p", "openai", "-m", "m"]
+            )
+        assert result.exit_code == 1
+        assert mock_client.get_chat_history.call_count == 1
+        assert "Forbidden" in result.stderr
+        assert "Timed out" not in result.stderr
 
     def test_chat_init_reports_failure(self, mock_client):
         """A preparation that ends with a failed row is a failure, not "not started"."""
@@ -7366,6 +7384,19 @@ class TestChatCommands:
         assert payload["ai_model"] == "m"
         assert payload["error"] is None
         mock_client.init_chat.assert_called_once_with("job-1", "openai", "m")
+
+    def test_chat_init_json_timeout_keeps_stdout_parseable(self, mock_client):
+        """The timeout sentence goes to stderr, so ``--json`` output stays one document."""
+        mock_client.init_chat.return_value = {"ready": False, "preparing": {}}
+        mock_client.get_chat_history.return_value = _preparing(session=True)
+        with patch("time.sleep"):
+            result = runner.invoke(
+                app,
+                ["--json", "chat", "init", "job-1", "-p", "openai", "-m", "m"],
+            )
+        assert result.exit_code == 1
+        assert json.loads(result.stdout)["ready"] is False
+        assert "Timed out" in result.stderr
 
     def test_chat_history(self, mock_client):
         mock_client.get_chat_history.return_value = {

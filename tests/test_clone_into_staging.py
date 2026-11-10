@@ -37,6 +37,9 @@ def test_clone_into_stages_then_renames(tmp_path) -> None:
     assert seen == [str(_clone_into_staging(workspace, "repo"))]
     assert target.is_dir() and (target / ".git").is_dir()
     assert not _clone_into_staging(workspace, "repo").exists()
+    # No empty ``.staging`` left either: analysis workspaces are trees the agent
+    # reads, and chat purges the whole staging tree on its own.
+    assert not (workspace / ".staging").exists()
 
 
 def test_a_failed_clone_leaves_no_target_and_no_residue(tmp_path) -> None:

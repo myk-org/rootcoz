@@ -2685,6 +2685,81 @@ async def test_process_chat_cancel_while_waiting_barrier_marks_failed(
 
 
 @pytest.mark.asyncio
+async def test_process_chat_answers_when_the_workspace_lock_outlives_the_clock(
+    setup_test_db, tmp_path, monkeypatch
+):
+    """A contended graph lock costs the map, not the reply (#511)."""
+    from rootcoz import main as main_mod
+    from rootcoz.engine import graft
+
+    workspace = tmp_path / "chat-workspace"
+    (workspace / "repo" / ".git").mkdir(parents=True)
+
+    def contended(*_args, **_kwargs):
+        raise TimeoutError("workspace lock deadline")
+
+    monkeypatch.setattr(graft, "roots_needing_index", contended)
+    monkeypatch.setattr(
+        "rootcoz.engine.chat.ensure_chat_workspace", lambda *a, **k: workspace
+    )
+    monkeypatch.setattr(
+        "rootcoz.engine.core.copy_rootcoz_pi_resources", lambda *a: None
+    )
+    monkeypatch.setattr(
+        "rootcoz.engine.chat.clone_chat_repos", AsyncMock(return_value=False)
+    )
+    monkeypatch.setattr(
+        "rootcoz.engine.chat.chat_with_ai", AsyncMock(return_value=(True, "ok", "sess"))
+    )
+    monkeypatch.setattr(
+        "rootcoz.engine.session_tools.install_http_tools_mcp_best_effort_async",
+        AsyncMock(),
+    )
+    monkeypatch.setattr("rootcoz.engine.graft_http.graph_http_tools", lambda *a: [])
+    monkeypatch.setattr(
+        "rootcoz.sources.chat_workspace.setup_ci_build_workspace",
+        AsyncMock(return_value=False),
+    )
+    monkeypatch.setattr(
+        main_mod,
+        "_resolve_chat_credentials",
+        AsyncMock(return_value=("", "", None, "", "")),
+    )
+    monkeypatch.setattr(main_mod, "_create_ai_auth_header", AsyncMock(return_value=""))
+    job_id = "chat-lock-deadline"
+    await storage.create_user("alice", role="reviewer", can_use_server_providers=True)
+    await storage.save_result(
+        job_id,
+        "",
+        "completed",
+        {
+            "status": "completed",
+            "summary": "t",
+            "failures": [],
+            "ai_provider": "claude",
+            "ai_model": "sonnet-4",
+            "request_params": {},
+        },
+    )
+    await _seed_chat_session(job_id)
+    user_id, assistant_id = await storage.add_chat_message_pair(
+        job_id, "hello", username="alice", ai_provider="claude", ai_model="sonnet-4"
+    )
+
+    await main_mod._process_chat_message(
+        job_id=job_id,
+        user_msg_id=user_id,
+        assistant_msg_id=assistant_id,
+        message="hello",
+        ai_provider_override="claude",
+        ai_model_override="sonnet-4",
+        username="alice",
+    )
+
+    assert await storage.get_chat_message_status(assistant_id) == "completed"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "graph_state, expected_indexes",
     [("indexed", 0), ("changed", 1), ("new", 1), ("missing", 1)],

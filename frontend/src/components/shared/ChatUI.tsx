@@ -412,6 +412,12 @@ export function ChatUI({
     setPrepPhase(null)
     setError('')
     console.info('[ChatUI] Starting chat session')
+    // A 202 hands the wait to `settlePreparation`: `starting` must survive this
+    // function's `finally` or Start becomes clickable again mid-preparation.
+    let handedOff = false
+    // A history sync that lands while this request is in flight already knows
+    // whether the preparation ended; its answer is the newer one.
+    const startGeneration = historyGenerationRef.current
     try {
       const result = await api.post<{
         ready: boolean
@@ -425,7 +431,9 @@ export function ChatUI({
         // A 202 means the server is preparing the workspace: there is nothing to
         // report as unavailable, and the phase list is the progress.
         if (result.preparing) {
+          if (historyGenerationRef.current !== startGeneration) return
           prepRunningRef.current = true
+          handedOff = true
           setPrepPhase(result.preparing)
           setInitStepIndex(0)
           console.info('[ChatUI] Chat preparation started in the background')
@@ -462,7 +470,7 @@ export function ChatUI({
       console.warn('[ChatUI] Chat start failed')
     } finally {
       startInFlightRef.current = false
-      if (mountedRef.current) setStarting(false)
+      if (mountedRef.current && !handedOff) setStarting(false)
     }
   }
 
@@ -719,7 +727,12 @@ export function ChatUI({
               <div className="flex items-center gap-3">
                 <div className="w-[160px]"><AnalysisProviderSelect value={aiProvider} onChange={(v) => setAiPair(v, '')} forceServer={false} /></div>
                 <div className="w-[240px]"><AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={(model) => setAiPair(aiProvider, model, { commit: false })} onCommit={(model) => setAiPair(aiProvider, model)} forceServer={false} hideNotice /></div>
-                <Button size="sm" onClick={handleStart} disabled={!validPair || starting || clearing || loadingHistory || historyFailed}>
+                <Button
+                  size="sm"
+                  onClick={handleStart}
+                  disabled={!validPair || starting || clearing || loadingHistory || historyFailed}
+                  aria-label="Start Chat"
+                >
                   {starting ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Start Chat'}
                 </Button>
               </div>

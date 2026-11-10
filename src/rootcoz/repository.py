@@ -357,6 +357,13 @@ class RepositoryManager:
         except OSError:
             delete_tree(staging)
             raise
+        try:
+            # Only when no sibling clone is still staged there. Analysis workspaces
+            # are read by the agent, and an empty ``.staging`` there is a directory
+            # that looks like leftover state; chat purges the whole tree itself.
+            staging.parent.rmdir()
+        except OSError:
+            pass
         return target_dir
 
     def create_workspace(self) -> Path:

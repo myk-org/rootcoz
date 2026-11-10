@@ -24796,12 +24796,25 @@ async def _process_chat_message(
                         # reused for the session build's funnel: the deadline
                         # belongs to whoever starts the build.
                         index_deadline = _time.monotonic() + CHAT_INDEX_DEADLINE_SECONDS
-                        stale_roots = await asyncio.to_thread(
-                            roots_needing_index,
-                            workspace,
-                            cloned_roots,
-                            deadline=index_deadline,
-                        )
+                        try:
+                            stale_roots = await asyncio.to_thread(
+                                roots_needing_index,
+                                workspace,
+                                cloned_roots,
+                                deadline=index_deadline,
+                            )
+                        except TimeoutError:
+                            # Something else held the workspace lock past the index
+                            # clock. The answer this message wants is a reply, not
+                            # a graph: it runs without one, as a busy graph build
+                            # would have made it anyway.
+                            logger.info(
+                                "Chat: workspace lock outlived the index clock for "
+                                "job %s, user %s — answering without a graph",
+                                job_id,
+                                username,
+                            )
+                            stale_roots = {}
                         if stale_roots:
                             await _index_chat_repositories(
                                 workspace,

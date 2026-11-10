@@ -43,11 +43,35 @@ def _marker(destination: Path) -> dict[str, object]:
     return json.loads((destination / "budget.json").read_text())
 
 
+#: A deadline far enough ahead that the workspace lock can be taken under it.
+NOT_YET = 3600.0
+
+
+def _later() -> float:
+    return time.monotonic() + NOT_YET
+
+
+def _spent_clock(monkeypatch) -> dict[str, bool]:
+    """Report the index clock as spent, and return the switch that unsets it.
+
+    A wall-clock deadline in the past is spent *before* the lock is asked for, and
+    the lock file is shared by every process on the machine: a sibling test holding
+    the directory gate for a moment would answer ``TimeoutError`` instead of the
+    outcome under test. ``_deadline_fired`` is the one classifier the code asks.
+    """
+    spent = {"on": True}
+    monkeypatch.setattr(
+        graft, "_deadline_fired", lambda deadline: spent["on"] and deadline is not None
+    )
+    return spent
+
+
 def test_no_repo_is_admitted_after_the_deadline(tmp_path, monkeypatch):
     """A spent deadline refuses at admission and says so in the outcome."""
     workspace = tmp_path / "workspace"
     repo, manifest = _repo(workspace)
-    deadline = time.monotonic() - 1
+    _spent_clock(monkeypatch)
+    deadline = _later()
 
     def fake_run(*_args, **_kwargs):
         raise AssertionError("a build started after the deadline")
@@ -121,13 +145,13 @@ def test_deadline_is_not_a_failure(tmp_path, monkeypatch):
     monkeypatch.setattr(graft, "_sources", aborting_sources)
     monkeypatch.setattr(graft, "_disk_size", lambda *a, **k: 0)
 
-    past = graft.index_repositories(
-        workspace, {"repo": repo}, deadline=time.monotonic() - 1
-    )
+    spent = _spent_clock(monkeypatch)
+    past = graft.index_repositories(workspace, {"repo": repo}, deadline=_later())
     assert past["repo"] == {"status": "skipped", "reason": "deadline"}
     assert _marker(destination)["reason"] == "deadline"
     assert not (destination / "failed.json").exists(), "a skip is not a failure"
 
+    spent["on"] = False
     future = graft.index_repositories(
         workspace, {"repo": repo}, deadline=time.monotonic() + 60
     )
@@ -135,6 +159,51 @@ def test_deadline_is_not_a_failure(tmp_path, monkeypatch):
     assert future["repo"]["reason"] == "TimeoutError"
     assert (destination / "failed.json").exists()
     assert not (destination / "budget.json").exists()
+
+
+def test_a_lock_wait_is_bounded_by_the_deadline(tmp_path):
+    """The clock bounds the wait for the workspace lock, not only the work.
+
+    A preparation that queues behind a held workspace lock used to wait there
+    with no clock at all, so the deadline never got to refuse anything.
+    """
+    from rootcoz.engine import http_mcp
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _repo(workspace)
+
+    with http_mcp._workspace_install_lock(workspace):
+        for call in (
+            lambda deadline: graft.roots_needing_index(
+                workspace, {}, deadline=deadline
+            ),
+            lambda deadline: graft.index_repositories(workspace, {}, deadline=deadline),
+        ):
+            started = time.monotonic()
+            with pytest.raises(TimeoutError):
+                call(time.monotonic() + 0.2)
+            assert time.monotonic() - started < 5, "the wait outlived its deadline"
+
+
+def test_a_deadline_never_deletes_a_graph_that_was_already_there(tmp_path, monkeypatch):
+    """A spent clock skips the repository, it does not destroy its working graph."""
+    workspace = tmp_path / "workspace"
+    repo, _hashes = _repo(workspace)
+    destination = _built_graph(workspace)
+
+    def timed_out(_path, deadline=None):
+        raise TimeoutError("source scan timed out")
+
+    monkeypatch.setattr(graft, "_sources", timed_out)
+    monkeypatch.setattr(graft, "_disk_size", lambda *a, **k: 0)
+    _spent_clock(monkeypatch)
+
+    outcomes = graft.index_repositories(workspace, {"repo": repo}, deadline=_later())
+
+    assert outcomes["repo"] == {"status": "skipped", "reason": "deadline"}
+    assert (destination / "manifest.json").exists(), "an intact graph was deleted"
+    assert not (destination / "budget.json").exists(), "a usable graph was withheld"
 
 
 def test_a_symlinked_marker_is_never_written(tmp_path, monkeypatch):
@@ -149,7 +218,8 @@ def test_a_symlinked_marker_is_never_written(tmp_path, monkeypatch):
 
     monkeypatch.setattr(graft, "_sources", lambda path, deadline=None: dict(manifest))
     monkeypatch.setattr(graft, "_disk_size", lambda *a, **k: 0)
-    graft.index_repositories(workspace, {"repo": repo}, deadline=time.monotonic() - 1)
+    _spent_clock(monkeypatch)
+    graft.index_repositories(workspace, {"repo": repo}, deadline=_later())
 
     assert outside.read_text() == "untouched"
 
@@ -162,8 +232,9 @@ def test_an_over_budget_marker_is_not_written_at_admission(tmp_path, monkeypatch
     monkeypatch.setattr(graft, "_sources", lambda path, deadline=None: dict(manifest))
     monkeypatch.setattr(graft, "_disk_size", lambda *a, **k: 0)
     monkeypatch.setattr(graft, "max_workspace_graph_bytes", lambda: 1)
+    _spent_clock(monkeypatch)
 
-    graft.index_repositories(workspace, {"repo": repo}, deadline=time.monotonic() - 1)
+    graft.index_repositories(workspace, {"repo": repo}, deadline=_later())
 
     assert not (graft._root(workspace) / "repo" / "budget.json").exists()
 
@@ -186,7 +257,8 @@ def test_all_three_marker_writers_name_a_reason(tmp_path, monkeypatch):
     graft.index_repositories(workspace, {"repo": repo})
     # admission refusal (deadline)
     monkeypatch.setattr(graft, "max_workspace_graph_bytes", lambda: 10**9)
-    graft.index_repositories(workspace, {"repo": repo}, deadline=time.monotonic() - 1)
+    _spent_clock(monkeypatch)
+    graft.index_repositories(workspace, {"repo": repo}, deadline=_later())
 
     # post-build drop
     def fake_run(argv, *, cwd, **_kwargs):
@@ -240,9 +312,8 @@ def test_marker_survives_a_new_session(tmp_path, monkeypatch):
     monkeypatch.setattr(graft, "_sources", lambda path, deadline=None: dict(manifest))
     monkeypatch.setattr(graft, "_disk_size", lambda *a, **k: 0)
 
-    first = graft.index_repositories(
-        workspace, {"repo": repo}, deadline=time.monotonic() - 1
-    )
+    _spent_clock(monkeypatch)
+    first = graft.index_repositories(workspace, {"repo": repo}, deadline=_later())
     assert first["repo"] == {"status": "skipped", "reason": "deadline"}
 
     def forbidden(*_args, **_kwargs):
@@ -274,12 +345,8 @@ def test_a_reached_and_built_repo_is_never_marked(tmp_path, monkeypatch):
 
     # A second funnel with an already-spent clock reaches nothing, and the graph
     # that exists is not relabelled as withheld.
-    assert (
-        graft.roots_needing_index(
-            workspace, {"repo": repo}, deadline=time.monotonic() - 1
-        )
-        == {}
-    )
+    _spent_clock(monkeypatch)
+    assert graft.roots_needing_index(workspace, {"repo": repo}, deadline=_later()) == {}
     assert not (graft._root(workspace) / "repo" / "budget.json").exists()
 
 

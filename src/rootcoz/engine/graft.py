@@ -528,6 +528,10 @@ def _index_one(
         return {"status": "skipped", "reason": "invalid repository"}
     destination = root / name
     manifest = None
+    #: Whether this run began writing ``destination``. Only a partial build of
+    #: our own may be dropped when the clock fires: the graph that was there
+    #: before this run is not this run's to destroy.
+    building = False
     try:
         if root.is_symlink() or (root.exists() and not root.is_dir()):
             return {"status": "failed", "reason": "invalid graph root"}
@@ -544,6 +548,7 @@ def _index_one(
             return {"status": "skipped", "reason": refusal}
         if destination.exists():
             shutil.rmtree(destination)
+        building = True
         snapshot = destination / "snapshot"
         graph = destination / "graph"
         snapshot.mkdir(parents=True, mode=0o700)
@@ -618,13 +623,22 @@ def _index_one(
         if _deadline_fired(deadline):
             # The clock ran out, not the repository: a deadline skip is not a
             # failure, and a failed.json here would retry a healthy repo forever.
-            shutil.rmtree(destination, ignore_errors=True)
-            _write_budget_marker(
-                destination,
-                _workspace_graph_size(_root(repo.parent)),
-                "deadline",
-                guard_size=True,
-            )
+            if building:
+                # Only our own partial build goes. A graph that was already
+                # complete stays where it is — the clock ran out while
+                # *verifying* it, and a query re-hashes the sources before it
+                # answers, so a possibly-stale graph is refused, not trusted.
+                shutil.rmtree(destination, ignore_errors=True)
+            if _manifest(destination) is None:
+                # Nothing usable is left here, so record the refusal: the funnel
+                # then backs off instead of re-hashing this repository every
+                # session, which is the cost that made the deadline a never-run.
+                _write_budget_marker(
+                    destination,
+                    _workspace_graph_size(_root(repo.parent)),
+                    "deadline",
+                    guard_size=True,
+                )
             return {"status": "skipped", "reason": "deadline"}
         if not destination.is_symlink():
             shutil.rmtree(destination, ignore_errors=True)
@@ -708,7 +722,10 @@ def index_repositories(
 
     # Analysis waits for this before its first AI call, so the width matters:
     # two at a time turned five clones into a ~6 minute pause per job.
-    with _workspace_install_lock(workspace), ThreadPoolExecutor(max_workers=4) as pool:
+    with (
+        _workspace_install_lock(workspace, deadline=deadline),
+        ThreadPoolExecutor(max_workers=4) as pool,
+    ):
         futures = {
             name: pool.submit(
                 _index_one,
@@ -1016,7 +1033,7 @@ def roots_needing_index(
     """
     workspace = Path(workspace).resolve()
     root = _root(workspace)
-    with _workspace_install_lock(workspace):
+    with _workspace_install_lock(workspace, deadline=deadline):
         result = {}
         names = list(cloned_repos.items())
         for position, (name, repo) in enumerate(names):

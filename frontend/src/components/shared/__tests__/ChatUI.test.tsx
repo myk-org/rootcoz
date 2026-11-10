@@ -940,9 +940,36 @@ it('keeps the preparation indicator after the init response', async () => {
   expect(await screen.findByText(/Preparing workspace\.\.\./)).toBeInTheDocument()
   expect(screen.queryByRole('alert')).not.toBeInTheDocument()
   expect(screen.getByPlaceholderText(/Ask a question/)).toBeDisabled()
+  // Start stays disabled until the server settles the preparation: a second
+  // click mid-preparation only gets a 409 for a changed pair.
+  expect(screen.getByRole('button', { name: 'Start Chat' })).toBeDisabled()
   // New Session stays pressable so a preparation can be refused (425) rather
   // than leaving the control unreachable.
   expect(screen.getByRole('button', { name: 'New Session' })).toBeEnabled()
+})
+
+it('a 202 that lands after the preparation ended does not resurrect it', async () => {
+  setup({ total: 0, messages: [] })
+  let finishInit: (v: unknown) => void = () => {}
+  post.mockImplementation((path: string) => path.endsWith('/init')
+    ? new Promise(resolve => { finishInit = resolve })
+    : Promise.resolve({}))
+  const user = userEvent.setup()
+  render(page())
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled())
+  await user.click(screen.getByRole('button', { name: 'Start Chat' }))
+  // The server pushes the end of the preparation (a failed row, no phase) before
+  // the POST response the browser has not read yet; that newer answer wins.
+  act(() => {
+    const handlers = (useSSE as unknown as { mock: { calls: Array<[string, Record<string, () => void>]> } }).mock.calls
+    handlers[handlers.length - 1][1]['chat-changed']()
+  })
+  // Let that sync settle first: the sequence we are testing is "history arrived,
+  // then the stale 202 it was already answered by".
+  await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
+  await act(async () => { finishInit({ ready: false, preparing: { phase: 'preparing', detail: '' } }) })
+  expect(screen.queryByText(/Preparing workspace/)).not.toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled()
 })
 
 it('a reload during preparation shows the phase and enables the composer once the session appears', async () => {
