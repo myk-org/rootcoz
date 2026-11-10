@@ -157,7 +157,16 @@ def capture_main_logs(
     caplog: pytest.LogCaptureFixture, level: int = logging.WARNING
 ) -> Generator[None]:
     """Capture ``rootcoz.main`` logs (python-simple-logger sets propagate=False)."""
+    from simple_logger.logger import DuplicateFilter
+
     logger = logging.getLogger("rootcoz.main")
+    # A worker that already ran a lifecycle test with an empty job table has left
+    # that exact line in the dedup filter, and the filter drops the repeat before
+    # it reaches caplog. Every capture starts with no remembered line.
+    for dedup in logger.filters:
+        if isinstance(dedup, DuplicateFilter):
+            dedup.last_log = None
+            dedup.repeated_number = 0
     with caplog.at_level(level, logger="rootcoz.main"):
         logger.propagate = True
         try:

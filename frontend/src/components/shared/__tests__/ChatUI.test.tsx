@@ -1005,3 +1005,20 @@ it('renders a 425 by its detail, not the bare API error', async () => {
   await user.click(screen.getByRole('button', { name: 'Send message' }))
   expect(await screen.findByRole('alert')).toHaveTextContent('Chat is being prepared (cloning repo). Wait for it to be ready.')
 })
+
+it('does not clear while the initial Start request is in flight', async () => {
+  setup()
+  let finishInit: (v: unknown) => void = () => {}
+  post.mockImplementation((path: string) => path.endsWith('/init')
+    ? new Promise(resolve => { finishInit = resolve })
+    : Promise.resolve({}))
+  const user = userEvent.setup()
+  render(page())
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled())
+  await user.click(screen.getByRole('button', { name: 'Start Chat' }))
+  // Before the 202 the server has no preparation to refuse, so a DELETE here
+  // would complete and then the session this Start creates would appear anyway.
+  await user.click(screen.getByRole('button', { name: 'New Session' }))
+  expect(remove).not.toHaveBeenCalled()
+  await act(async () => { finishInit({ ready: false, preparing: { phase: 'preparing', detail: '' } }) })
+})

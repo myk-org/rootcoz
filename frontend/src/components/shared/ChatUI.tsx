@@ -635,7 +635,10 @@ export function ChatUI({
   }, [messages])
 
   const handleNewSession = useCallback(async () => {
-    if (clearingRef.current || clearing || sendInFlightRef.current) return
+    // A clear must not overtake the Start request it cannot see yet: before
+    // the 202, the server has no preparation to answer 425, so a DELETE here
+    // would be followed by the session this Start is about to create.
+    if (startInFlightRef.current || clearingRef.current || clearing || sendInFlightRef.current) return
     clearingRef.current = true
     historyGenerationRef.current++
     setClearing(true)

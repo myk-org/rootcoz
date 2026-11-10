@@ -599,14 +599,13 @@ def _index_one(
         if _sources(repo, deadline) != manifest:
             raise ValueError("source changed")
         (destination / "manifest.json").write_text(json.dumps(manifest))
-        if _deadline_fired(deadline):
-            # Out of time: the graph is complete and stays, but the budget
-            # accounting that decides whether to drop it is not paid for.
-            return {"status": "indexed", "files": len(manifest), "bytes": total}
         # The budget is a hard bound, not an admission hint: a build admitted
         # while under budget can finish over it. Drop this graph rather than
         # leave the workspace above the limit, and record why so the next run
-        # retries only after the backoff.
+        # retries only after the backoff. The check runs even when the clock
+        # fired during the build: an over-budget graph left in place is rejected
+        # by every query and its manifest still reads as current, so it would
+        # never be rebuilt.
         with _workspace_install_lock(_root(repo.parent)):
             workspace_used = _workspace_graph_size(_root(repo.parent))
         if workspace_used > max_workspace_graph_bytes():
@@ -633,9 +632,12 @@ def _index_one(
                 # Nothing usable is left here, so record the refusal: the funnel
                 # then backs off instead of re-hashing this repository every
                 # session, which is the cost that made the deadline a never-run.
+                # This repository's own tree, not a workspace scan: the clock
+                # is spent, and walking every graph here is what kept the
+                # preparation waiting. The field is informational.
                 _write_budget_marker(
                     destination,
-                    _workspace_graph_size(_root(repo.parent)),
+                    _disk_size(destination, limit=0, reject_symlinks=False),
                     "deadline",
                     guard_size=True,
                 )

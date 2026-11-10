@@ -380,3 +380,70 @@ async def test_session_tools_without_graph_keep_file_tools(tmp_path, monkeypatch
     assert not [t for t in tools.custom if t.get("name", "").startswith("graft_")]
     assert session_tools.graph_prompt_hint(tools) == ""
     assert {"read", "ls", "find", "grep"} <= set(CHAT_BUILTIN_TOOLS)
+
+
+def test_a_deadline_marker_does_not_scan_the_workspace(tmp_path, monkeypatch):
+    """A spent clock must not walk every graph to fill an informational field.
+
+    The refusal marker is the only thing a timed-out preparation writes, and the
+    workspace scan that used to feed its budget number was the one piece of work
+    still running after the clock fired.
+    """
+    workspace = tmp_path / "workspace"
+    repo, _manifest_hashes = _repo(workspace)
+    destination = graft._root(workspace) / "repo"
+
+    def forbidden(_root):
+        raise AssertionError("scanned the workspace after the deadline")
+
+    def timed_out(_path, deadline=None):
+        raise TimeoutError("source scan timed out")
+
+    monkeypatch.setattr(graft, "_workspace_graph_size", forbidden)
+    monkeypatch.setattr(graft, "_sources", timed_out)
+    monkeypatch.setattr(graft, "_disk_size", lambda *a, **k: 0)
+    _spent_clock(monkeypatch)
+
+    outcomes = graft.index_repositories(workspace, {"repo": repo}, deadline=_later())
+
+    assert outcomes["repo"] == {"status": "skipped", "reason": "deadline"}
+    assert _marker(destination)["reason"] == "deadline"
+
+
+def test_a_graph_built_under_a_spent_clock_is_still_budget_checked(
+    tmp_path, monkeypatch
+):
+    """The deadline must not smuggle an over-budget graph onto disk.
+
+    An ``indexed`` early return on a spent clock left the graph in place with a
+    current manifest: every query refused it on size while the next run treated
+    it as unchanged, so nothing ever rebuilt or dropped it.
+    """
+    workspace = tmp_path / "workspace"
+    repo, manifest = _repo(workspace)
+    destination = graft._root(workspace) / "repo"
+    used = {"bytes": 0}
+    clock = {"calls": 0}
+
+    def spent_after_admission(deadline):
+        clock["calls"] += 1
+        return deadline is not None and clock["calls"] > 1
+
+    def fake_run(argv, *, cwd, **_kwargs):
+        graph = Path(cwd).parent / "graph"
+        graph.mkdir(exist_ok=True)
+        used["bytes"] = 10**9
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(graft, "_deadline_fired", spent_after_admission)
+    monkeypatch.setattr(graft, "_sources", lambda path, deadline=None: dict(manifest))
+    monkeypatch.setattr(graft, "_run", fake_run)
+    monkeypatch.setattr(graft, "_disk_size", lambda *a, **k: 0)
+    monkeypatch.setattr(graft, "_workspace_graph_size", lambda _root: used["bytes"])
+    monkeypatch.setattr(graft, "max_workspace_graph_bytes", lambda: 10**6)
+
+    outcomes = graft.index_repositories(workspace, {"repo": repo}, deadline=_later())
+
+    assert outcomes["repo"] == {"status": "skipped", "reason": "workspace graph budget"}
+    assert not (destination / "manifest.json").exists(), "an over-budget graph stayed"
+    assert _marker(destination)["reason"] == "workspace graph budget"
