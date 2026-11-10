@@ -166,7 +166,9 @@ async def clone_chat_repos(
 
     Skips repos already present in the workspace.
     Returns True only when a repository was newly cloned.
-    ``on_repo`` is called with each repo name right before it is cloned.
+    ``on_repo`` is called with each repo name right before it is cloned, and
+    again as each clone ends -- with a repo still in flight, or with "" once the
+    batch is done -- so the name never outlives the clone it names.
     ``failed`` collects the names that could not be cloned: a chat still starts
     without them, so the caller is what tells the user they are missing.
 
@@ -264,10 +266,21 @@ async def clone_chat_repos(
             getattr(repo, "token", None) or "",
         )
 
+    # Overlapping clones mean the detail has to be republished when one ends:
+    # naming only the last-admitted repo kept a finished clone on screen until
+    # the whole batch was done.
+    in_flight: list[str] = []
+
     async def started(request: CloneRequest) -> None:
         logger.info("Chat: cloning repo %s into %s", request.name, request.target)
+        in_flight.append(request.name)
         if on_repo:
             on_repo(request.name)
+
+    async def finished(request: CloneRequest, _outcome: str) -> None:
+        in_flight.remove(request.name)
+        if on_repo:
+            on_repo(in_flight[0] if in_flight else "")
 
     cloned_any = False
     try:
@@ -275,6 +288,7 @@ async def clone_chat_repos(
             RepositoryManager(),
             requests,
             on_start=started,
+            on_finish=finished,
             on_error=report_failure,
         )
         cloned_any = any(error is None for _request, error in outcomes)

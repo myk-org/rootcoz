@@ -152,10 +152,43 @@ async def test_on_repo_names_each_repo_before_its_clone_starts(
         on_repo=reported.append,
     )
 
-    # Once per repo actually cloned, in the order the clones started.
-    assert reported == ["repo0", "repo1", "repo2"]
-    assert sorted(cloned) == reported
+    # Each repo is named before its own clone starts, in the order they started.
+    assert reported[:3] == ["repo0", "repo1", "repo2"]
+    assert sorted(cloned) == ["repo0", "repo1", "repo2"]
     assert unnamed == [], f"clone started before on_repo named it: {unnamed}"
+    # A finished batch names no repo at all: the last publication is the clear.
+    assert reported[-1] == ""
+
+
+@pytest.mark.asyncio
+async def test_a_finished_clone_stops_being_named(
+    monkeypatch, tmp_path: Path, clone_settings
+) -> None:
+    """The detail only ever names a clone that is still running.
+
+    ``repo1`` finishes first and its completion must move the detail back to the
+    clone still in flight, not leave ``repo1`` on screen.
+    """
+    published: list[str] = []
+    release_repo0 = threading.Event()
+
+    def on_repo(detail: str) -> None:
+        published.append(detail)
+        if detail == "repo0" and "repo1" in published:
+            # repo1's completion was published; let repo0 finish now.
+            release_repo0.set()
+
+    def clone_into(_self, _url, target, **_kwargs):
+        if target.name == "repo0":
+            assert release_repo0.wait(5), "sibling clone never finished"
+
+    monkeypatch.setattr(RepositoryManager, "clone_into", clone_into)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    await clone_chat_repos(workspace, {"additional_repos": _repos(2)}, on_repo=on_repo)
+
+    assert published == ["repo0", "repo1", "repo0", ""]
 
 
 async def test_unsafe_name_is_skipped_and_the_others_clone(
