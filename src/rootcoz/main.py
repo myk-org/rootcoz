@@ -10736,6 +10736,36 @@ def _build_effective_jira_settings(
     return settings.model_copy(update=overrides)
 
 
+#: Why an unrecognized service-account value is refused. The same wording
+#: serves the 400 from a tracker action and the ``ok: false`` result of a
+#: user token test — the remedy is the caller's own profile either way.
+_JIRA_SA_TOKEN_UNRECOGNIZED = (
+    "The saved Jira service account token is not a recognized "
+    "Atlassian service-account credential (client secrets start "
+    "with 'ATOA', scoped tokens with 'ATST'). Re-enter your "
+    "token in Profile Settings."
+)
+
+
+def _unusable_jira_sa_token(jira_token: str, jira_sa_token: str) -> bool:
+    """True when an unrecognized service-account value is supplied.
+
+    Shared with ``_require_usable_jira_sa_token`` so the always-200 test
+    route fails closed by the same rule as every endpoint that acts on
+    ``jira_sa_token``. Dropping such a value instead would leave the probe
+    running as the SERVER's Jira identity.
+    """
+    token = (jira_token or "").strip()
+    sa_token = (jira_sa_token or "").strip()
+    if not (sa_token and classify_jira_secret(sa_token) is None):
+        return False
+    logger.info(
+        "Rejecting request with an unrecognized Jira service account token%s",
+        " alongside a regular token" if token else "",
+    )
+    return True
+
+
 def _require_usable_jira_sa_token(jira_token: str, jira_sa_token: str) -> None:
     """400 when an unrecognized SA token is supplied — fail closed.
 
@@ -10752,22 +10782,8 @@ def _require_usable_jira_sa_token(jira_token: str, jira_sa_token: str) -> None:
         HTTPException: 400 when the SA token is set but neither
             ATOA- nor ATST-prefixed, regardless of any regular token.
     """
-    token = (jira_token or "").strip()
-    sa_token = (jira_sa_token or "").strip()
-    if sa_token and classify_jira_secret(sa_token) is None:
-        logger.info(
-            "Rejecting request with an unrecognized Jira service account token%s",
-            " alongside a regular token" if token else "",
-        )
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "The saved Jira service account token is not a recognized "
-                "Atlassian service-account credential (client secrets start "
-                "with 'ATOA', scoped tokens with 'ATST'). Re-enter your "
-                "token in Profile Settings."
-            ),
-        )
+    if _unusable_jira_sa_token(jira_token, jira_sa_token):
+        raise HTTPException(status_code=400, detail=_JIRA_SA_TOKEN_UNRECOGNIZED)
 
 
 def _require_tracker_url(result: dict[str, Any], tracker_name: str) -> str:
@@ -21679,30 +21695,61 @@ def _jira_settings_fingerprint(settings: Settings) -> str:
     return hashlib.sha256("\x00".join(parts).encode()).hexdigest()
 
 
-async def _test_jira_connection(settings: Settings) -> dict[str, Any]:
-    """Current-user ping against the effective Jira connection resolution."""
-    if not normalize_jira_auth_mode(settings.jira_auth_mode):
-        return _test_result(
-            False,
-            "No Jira auth method selected — choose one in Server Settings",
-        )
-    missing = jira_method_missing_fields(settings)
-    if missing:
-        return _test_result(
-            False,
-            f"Jira auth method '{settings.jira_auth_mode}' is selected "
-            f"but missing: {', '.join(missing)}",
-        )
+async def _test_jira_connection(
+    settings: Settings, *, admin: bool = False
+) -> dict[str, Any]:
+    """Current-user ping against the effective Jira connection resolution.
+
+    *settings* carries the credentials this test probes: the admin route
+    passes the server's own settings, the user route the caller's saved row
+    merged onto the server's non-secrets (``_build_effective_jira_settings``)
+    — one probe, two callers.
+
+    ``admin`` enables what only an admin may have: the pre-flight that names
+    server-side settings, the settings fingerprint and the
+    ``jira_verified_method`` record. A user-scoped test must neither read nor
+    write that state, and must never be told how to change server
+    configuration a non-admin cannot change.
+    """
+    if admin:
+        if not normalize_jira_auth_mode(settings.jira_auth_mode):
+            return _test_result(
+                False,
+                "No Jira auth method selected — choose one in Server Settings",
+            )
+        missing = jira_method_missing_fields(settings)
+        if missing:
+            return _test_result(
+                False,
+                f"Jira auth method '{settings.jira_auth_mode}' is selected "
+                f"but missing: {', '.join(missing)}",
+            )
     connection = resolve_jira_connection(settings)
+    if connection.mode == "none":
+        # Unreachable for the admin route (its pre-flight above reports the
+        # exact missing fields) and for a user row with a saved credential —
+        # a guard so no probe is attempted against an empty API base.
+        return _test_result(
+            False, "Jira connection failed: no usable credential was resolved"
+        )
     # Snapshot of the Jira settings this test exercises — compared after
     # the network call so a mid-flight admin update cannot leave a
     # verification record for the untested configuration.
-    tested_fingerprint = _jira_settings_fingerprint(settings)
+    tested_fingerprint = _jira_settings_fingerprint(settings) if admin else ""
     try:
         connection = await complete_jira_connection(connection)
     except JiraOAuthMintError as exc:
         return _test_result(False, f"Jira connection failed: {exc}")
     if not connection.api_base:
+        if not admin:
+            # Say the server cannot serve the saved credential without naming
+            # a setting or the auth method a non-admin cannot see or change.
+            return _test_result(
+                False,
+                "The server's Jira configuration does not cover the "
+                "credential you saved — ask a server administrator to "
+                "configure Jira",
+            )
         return _test_result(
             False,
             "Jira service account mode could not resolve the Atlassian "
@@ -21751,6 +21798,10 @@ async def _test_jira_connection(settings: Settings) -> dict[str, Any]:
     auth_mode = {"sa": "oauth", "cloud": "basic", "server": "pat", "atst": "atst"}[
         connection.mode
     ]
+    if not admin:
+        return _test_result(
+            True, "Jira connection successful", auth_mode=auth_mode, user=user
+        )
     # A method counts as configured only once its test succeeded — record
     # the tested (selected) method as an internal DB row. Not cleared on
     # failure: the record reflects the last success, not the latest attempt.
@@ -21792,11 +21843,14 @@ async def _test_jira_connection(settings: Settings) -> dict[str, Any]:
     )
 
 
-async def _test_github_connection(settings: Settings) -> dict[str, Any]:
-    """Current-user ping against api.github.com with the effective token."""
-    if not settings.github_token:
+async def _test_github_connection(token: str) -> dict[str, Any]:
+    """Current-user ping against api.github.com with *token*.
+
+    Takes the token itself so the admin route can pass the server's own and
+    the user route the caller's saved one — one probe, two callers.
+    """
+    if not token:
         return _test_result(False, "GitHub token is not configured")
-    token = settings.github_token.get_secret_value()
     try:
         data = await _integration_test_get_json(
             "https://api.github.com/user",
@@ -21945,14 +21999,66 @@ async def _test_prow_connection(settings: Settings) -> dict[str, Any]:
     return _test_result(True, message, prow_http_status=deck_response.status_code)
 
 
+async def _test_jira_settings_connection(settings: Settings) -> dict[str, Any]:
+    """Admin entry for Jira: the server's own settings, and the admin-only
+    fingerprint + verified-method record."""
+    return await _test_jira_connection(settings, admin=True)
+
+
+async def _test_github_settings_connection(settings: Settings) -> dict[str, Any]:
+    """Admin entry for GitHub: the server's own configured token."""
+    token = settings.github_token.get_secret_value() if settings.github_token else ""
+    return await _test_github_connection(token)
+
+
 _INTEGRATION_TESTERS: dict[str, Callable[[Settings], Awaitable[dict[str, Any]]]] = {
     "jenkins": _test_jenkins_connection,
-    "jira": _test_jira_connection,
-    "github": _test_github_connection,
+    "jira": _test_jira_settings_connection,
+    "github": _test_github_settings_connection,
     "reportportal": _test_reportportal_connection,
     "datadog": _test_datadog_connection,
     "prow": _test_prow_connection,
 }
+
+
+async def _finish_integration_test(
+    key: str, username: str, probe: Awaitable[dict[str, Any]]
+) -> JSONResponse:
+    """Run one connection probe under the shared contract.
+
+    Always returns HTTP 200 with ``{ok, message, details?}`` — a failed
+    connection is a test result, not a transport error — and logs one line
+    naming the integration, the outcome and the caller. A token value is
+    never part of the result or that line.
+    """
+    try:
+        # Overall deadline: testers may make several sequential requests
+        # (Prow deck + GCS, Jira cloud-ID resolution), each with its own
+        # timeout — one click must never consume several timeout periods.
+        result = await asyncio.wait_for(probe, timeout=_INTEGRATION_TEST_TIMEOUT)
+    except TimeoutError:
+        result = _test_result(
+            False,
+            f"Connection test timed out after {_INTEGRATION_TEST_TIMEOUT:.0f} seconds",
+        )
+    except Exception as exc:  # noqa: BLE001 - a broken integration must never 500
+        message = redact_urls_in_text(
+            f"Connection test failed unexpectedly: {type(exc).__name__}: {exc}"
+        )
+        logger.warning(
+            "Integration connection test crashed for %s: %s: %s",
+            key,
+            type(exc).__name__,
+            message,
+        )
+        result = _test_result(False, message)
+    logger.info(
+        "Integration connection test: integration=%s ok=%s by=%s",
+        key,
+        result["ok"],
+        username,
+    )
+    return JSONResponse(content=result)
 
 
 @app.post(
@@ -21974,37 +22080,87 @@ async def test_integration_connection(
         raise HTTPException(
             status_code=400, detail=f"Unknown integration: {integration}"
         )
-    settings = get_settings()
-    try:
-        # Overall deadline: testers may make several sequential requests
-        # (Prow deck + GCS, Jira cloud-ID resolution), each with its own
-        # timeout — one click must never consume several timeout periods.
-        result = await asyncio.wait_for(
-            tester(settings), timeout=_INTEGRATION_TEST_TIMEOUT
-        )
-    except TimeoutError:
-        result = _test_result(
-            False,
-            f"Connection test timed out after {_INTEGRATION_TEST_TIMEOUT:.0f} seconds",
-        )
-    except Exception as exc:  # noqa: BLE001 - a broken integration must never 500
-        message = redact_urls_in_text(
-            f"Connection test failed unexpectedly: {type(exc).__name__}: {exc}"
-        )
-        logger.warning(
-            "Integration connection test crashed for %s: %s: %s",
-            key,
-            type(exc).__name__,
-            message,
-        )
-        result = _test_result(False, message)
-    logger.info(
-        "Integration connection test: integration=%s ok=%s by=%s",
-        key,
-        result["ok"],
-        request.state.username,
+    return await _finish_integration_test(
+        key, request.state.username, tester(get_settings())
     )
-    return JSONResponse(content=result)
+
+
+#: Integrations a caller may test against their OWN saved credential row.
+#: Restricted on purpose: the other testers probe server-side transports
+#: (Jenkins, Prow, Datadog…) that a user's row says nothing about.
+_USER_TOKEN_TEST_INTEGRATIONS: tuple[str, ...] = ("github", "jira")
+
+
+async def _rejected_jira_sa_token() -> dict[str, Any]:
+    """A test result for an unrecognized saved service-account token."""
+    return _test_result(False, _JIRA_SA_TOKEN_UNRECOGNIZED)
+
+
+async def _no_saved_credential(username: str, kind: str) -> dict[str, Any]:
+    """A test result for a caller with no saved *kind* credential.
+
+    The same actionable wording every other tracker path uses (#519/#500),
+    so the bootstrap ``admin`` — which has no ``users`` row to save one in —
+    reads where to go instead of a dead end.
+    """
+    return _test_result(False, await _require_user_tracker_credential(username, kind))
+
+
+@app.post("/api/user/tokens/test/{integration}", operation_id="testUserTokenConnection")
+async def test_user_token_connection(
+    request: Request, integration: str
+) -> JSONResponse:
+    """Test the tracker credential saved in the caller's own account.
+
+    Mirrors ``/api/admin/settings/test/{integration}``: always HTTP 200 with
+    ``{ok, message, details?}``, the same deadline and the same redaction, so
+    the UI renders one banner. The credential is read from storage only —
+    never the request body — so the answer describes what is SAVED, and the
+    username comes from the session, so a caller can only test their own row.
+    """
+    _require_reviewer(request)
+    _check_allow_list(request)
+    key = integration.lower().strip()
+    if key not in _USER_TOKEN_TEST_INTEGRATIONS:
+        raise HTTPException(
+            status_code=400, detail=f"Unknown integration: {integration}"
+        )
+    username = request.state.username
+    tokens = await storage.get_user_tokens(username)
+    if key == "github":
+        token = (tokens.get("github_token") or "").strip()
+        probe = (
+            _test_github_connection(token)
+            if token
+            else _no_saved_credential(username, "GitHub")
+        )
+    else:
+        jira_token = (tokens.get("jira_token") or "").strip()
+        sa_token = (tokens.get("jira_sa_token") or "").strip()
+        if not (jira_token or sa_token):
+            probe = _no_saved_credential(username, "Jira")
+        elif _unusable_jira_sa_token(jira_token, sa_token):
+            # Same rule the tracker actions apply, for the same reason: an
+            # unrecognized service-account value must be reported, never
+            # silently dropped — dropped, the probe runs as the SERVER's
+            # Jira identity and reports a success the caller cannot reproduce.
+            probe = _rejected_jira_sa_token()
+        else:
+            # The server's URLs, cloud ID, client ID and TLS flags are the
+            # non-secrets a real tracker action pairs with this saved
+            # credential — testing anything else would test a connection the
+            # caller's tokens never take. Only the credential comes from the
+            # row, and the admin-only fingerprint/record stays off.
+            probe = _test_jira_connection(
+                _build_effective_jira_settings(
+                    get_settings(),
+                    jira_token,
+                    tokens.get("jira_email") or "",
+                    "",
+                    sa_token,
+                )
+            )
+    return await _finish_integration_test(key, username, probe)
 
 
 # -- Job Metadata Endpoints ---------------------------------------------------

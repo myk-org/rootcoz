@@ -67,6 +67,10 @@ AUDIT_EXEMPT: dict[tuple[str, str], str] = {
         "POST",
         "/api/admin/settings/test/{integration}",
     ): "connectivity probe, stores nothing",
+    (
+        "POST",
+        "/api/user/tokens/test/{integration}",
+    ): "connectivity probe, stores nothing",
 }
 
 

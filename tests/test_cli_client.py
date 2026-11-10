@@ -3416,6 +3416,36 @@ class TestRootCozClientSaveUserTokens:
         assert captured["json"] == {"jira_sa_token": "ATST-tok"}
 
 
+class TestRootCozClientTestUserToken:
+    """Tests for test_user_token — the route takes no credential."""
+
+    def test_posts_to_the_user_scoped_route(self):
+        captured = {}
+
+        def handler(request):
+            captured["method"] = request.method
+            captured["path"] = request.url.path
+            captured["body"] = request.content
+            return httpx.Response(
+                200, json={"ok": True, "message": "GitHub connection successful"}
+            )
+
+        client = _make_client(handler)
+        result = client.test_user_token("github")
+        assert captured["method"] == "POST"
+        assert captured["path"] == "/api/user/tokens/test/github"
+        # Nothing is sent: the server tests the SAVED row only.
+        assert captured["body"] == b""
+        assert result["ok"] is True
+
+    def test_jira_integration_path(self):
+        def handler(request):
+            assert request.url.path == "/api/user/tokens/test/jira"
+            return httpx.Response(200, json={"ok": False, "message": "nope"})
+
+        assert _make_client(handler).test_user_token("jira")["ok"] is False
+
+
 class TestRootCozClientTranscripts:
     """Tests for admin transcript client methods."""
 

@@ -49,6 +49,7 @@ import type { PeerConfigWithId } from '@/components/shared/PeerConfigList'
 import { ProviderSelect } from '@/components/shared/ProviderSelect'
 import { ModelCombobox } from '@/components/shared/ModelCombobox'
 import { CursorAuthBanner } from '@/components/shared/CursorAuthBanner'
+import { TestResultBanner } from '@/components/shared/TestResultBanner'
 import { useProviderModels } from '@/hooks/useProviderModels'
 import { useCursorAuthStatus } from '@/lib/useProviderOptions'
 import { ServerProvidersCard } from '@/components/shared/ServerProvidersCard'
@@ -2712,31 +2713,6 @@ function JiraAuthMethodControl({
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
-    </div>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Test connection result banner
-// ---------------------------------------------------------------------------
-
-function TestResultBanner({ result }: { result: TestIntegrationResult }) {
-  return (
-    <div
-      role="status"
-      className={`mx-4 mb-3 rounded-md border px-3 py-2 text-sm ${
-        result.ok
-          ? 'border-signal-green/30 bg-signal-green/10 text-signal-green'
-          : 'border-signal-red/30 bg-signal-red/10 text-signal-red'
-      }`}
-    >
-      <p className="font-medium">{result.ok ? 'Connection successful' : 'Connection failed'}</p>
-      {result.message && <p className="mt-0.5">{result.message}</p>}
-      {result.details && Object.keys(result.details).length > 0 && (
-        <pre className="mt-1 overflow-x-auto rounded bg-surface-card p-2 text-xs text-text-secondary">
-          {JSON.stringify(result.details, null, 2)}
-        </pre>
-      )}
     </div>
   )
 }

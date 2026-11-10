@@ -58,6 +58,10 @@ filter_presets_app = typer.Typer(
 )
 auth_app = typer.Typer(help="Authentication commands.", no_args_is_help=True)
 ai_keys_app = typer.Typer(help="Manage your AI provider keys.", no_args_is_help=True)
+user_app = typer.Typer(help="Manage your own account.", no_args_is_help=True)
+user_tokens_app = typer.Typer(
+    help="Test the tracker tokens saved in your account.", no_args_is_help=True
+)
 admin_app = typer.Typer(help="Admin management commands.", no_args_is_help=True)
 admin_users_app = typer.Typer(help="Manage admin users.", no_args_is_help=True)
 admin_settings_app = typer.Typer(help="Manage server settings.", no_args_is_help=True)
@@ -88,6 +92,8 @@ app.add_typer(config_app, name="config")
 config_app.add_typer(filter_presets_app, name="filter-presets")
 app.add_typer(auth_app, name="auth")
 auth_app.add_typer(ai_keys_app, name="ai-keys")
+app.add_typer(user_app, name="user")
+user_app.add_typer(user_tokens_app, name="tokens")
 app.add_typer(admin_app, name="admin")
 admin_app.add_typer(admin_users_app, name="users")
 admin_app.add_typer(admin_settings_app, name="settings")
@@ -3556,6 +3562,32 @@ def ai_keys_delete(
     print_output(
         {"status": "deleted"}, columns=["status"], as_json=_state.get("json", False)
     )
+
+
+@user_tokens_app.command("test")
+def user_tokens_test(
+    integration: str = typer.Argument(help="Integration to test (github, jira)."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Test the tracker token saved in your account (tests what is SAVED)."""
+    integration = integration.lower()
+    data = _run_client_command(
+        json_output,
+        lambda c: c.test_user_token(integration),
+        emit_output=False,
+    )
+    logging.getLogger(__name__).info(
+        "Tested saved %s credential: ok=%s", integration, data.get("ok")
+    )
+    if not _state.get("json", False):
+        status = "OK" if data.get("ok") else "FAILED"
+        typer.echo(f"{integration}: {status} - {data.get('message', '')}")
+        for detail_key, value in (data.get("details") or {}).items():
+            typer.echo(f"  {detail_key}: {value}")
+    if not data.get("ok"):
+        # The endpoint always returns HTTP 200 — a nonzero exit is the only
+        # machine-readable failure signal for scripts.
+        raise typer.Exit(code=1)
 
 
 @auth_app.command("login")
