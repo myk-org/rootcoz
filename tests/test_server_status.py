@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 
 from rootcoz import server_status, storage
 from rootcoz.config import clear_settings_cache
+from tests.conftest import AdvancingClock
 
 # ---------------------------------------------------------------------------
 # Fake cgroup / proc trees
@@ -66,19 +67,6 @@ def _fake_roots(
     return cgroup, proc
 
 
-class _Clock:
-    """Stand-in for ``server_status.time``: sleeping advances a fake clock."""
-
-    def __init__(self) -> None:
-        self.now = 0.0
-
-    def monotonic(self) -> float:
-        return self.now
-
-    def sleep(self, seconds: float) -> None:
-        self.now += seconds
-
-
 # ---------------------------------------------------------------------------
 # CPU
 # ---------------------------------------------------------------------------
@@ -95,7 +83,7 @@ class TestCpu:
     def test_process_percent_from_two_samples(self, tmp_path, monkeypatch) -> None:
         cgroup, proc = _fake_roots(tmp_path)
         samples = iter([10.0, 10.05])
-        monkeypatch.setattr(server_status, "time", _Clock())
+        monkeypatch.setattr(server_status, "time", AdvancingClock())
 
         with patch.object(
             server_status,
@@ -118,12 +106,8 @@ class TestCpu:
         cgroup, proc = _fake_roots(tmp_path)
         samples = iter([10.0, 10.1])
 
-        class _SlowClock(_Clock):
-            def sleep(self, seconds: float) -> None:
-                # The thread slept twice as long as asked.
-                self.now += seconds * 2
-
-        monkeypatch.setattr(server_status, "time", _SlowClock())
+        # The thread slept twice as long as asked.
+        monkeypatch.setattr(server_status, "time", AdvancingClock(step=0.2))
         with patch.object(
             server_status, "_parse_proc_stat_cpu", lambda _text: next(samples)
         ):
@@ -145,7 +129,7 @@ class TestCpu:
     def test_missing_cpu_max_keeps_percent(self, tmp_path, monkeypatch) -> None:
         cgroup, proc = _fake_roots(tmp_path, cpu_max=None)
         samples = iter([1.0, 1.1])
-        monkeypatch.setattr(server_status, "time", _Clock())
+        monkeypatch.setattr(server_status, "time", AdvancingClock())
         with patch.object(
             server_status, "_parse_proc_stat_cpu", lambda _text: next(samples)
         ):
@@ -159,7 +143,7 @@ class TestCpu:
     def test_unlimited_cpu_max_is_unlimited(self, tmp_path, monkeypatch) -> None:
         cgroup, proc = _fake_roots(tmp_path, cpu_max="max 100000")
         samples = iter([1.0, 1.1])
-        monkeypatch.setattr(server_status, "time", _Clock())
+        monkeypatch.setattr(server_status, "time", AdvancingClock())
         with patch.object(
             server_status, "_parse_proc_stat_cpu", lambda _text: next(samples)
         ):

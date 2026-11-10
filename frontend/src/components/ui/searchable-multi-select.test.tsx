@@ -159,6 +159,16 @@ describe('SearchableMultiSelect', () => {
     expect(options()).toEqual(['admin', 'badminton'])
   })
 
+  it('caps the list on the popover space left over by the search field', () => {
+    render(<Harness />)
+    open()
+    // Radix measures what the viewport leaves; the input above the list keeps
+    // its 3rem, so a long list scrolls instead of pushing the input off screen.
+    expect(screen.getByRole('listbox')).toHaveClass(
+      'max-h-[min(16rem,calc(var(--radix-popover-content-available-height)-3rem))]',
+    )
+  })
+
   it('selects the highlighted option with Enter and keeps the menu open for the next pick', () => {
     render(<Harness />)
     open()
