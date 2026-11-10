@@ -6765,6 +6765,47 @@ class TestAdminSettingsCommand:
         assert parsed["details"] == {"login": "octocat"}
 
 
+class TestUserTokensTestCommand:
+    """Tests for `rootcoz user tokens test` (#537)."""
+
+    def test_success_prints_the_result(self, mock_client):
+        mock_client.test_user_token.return_value = {
+            "ok": True,
+            "message": "GitHub connection successful",
+            "details": {"login": "octocat"},
+        }
+        result = runner.invoke(app, ["user", "tokens", "test", "GITHUB"])
+        assert result.exit_code == 0
+        assert "OK" in result.output
+        assert "GitHub connection successful" in result.output
+        assert "login: octocat" in result.output
+        # The integration is lowercased before it reaches the client.
+        mock_client.test_user_token.assert_called_once_with("github")
+
+    def test_failure_exits_nonzero(self, mock_client):
+        """The endpoint answers HTTP 200 — the exit code carries the failure."""
+        mock_client.test_user_token.return_value = {
+            "ok": False,
+            "message": "GitHub connection failed: authentication failed (HTTP 401)",
+        }
+        result = runner.invoke(app, ["user", "tokens", "test", "github"])
+        assert result.exit_code == 1
+        assert "FAILED" in result.output
+        assert "authentication failed" in result.output
+
+    def test_json_failure_exits_nonzero(self, mock_client):
+        mock_client.test_user_token.return_value = {
+            "ok": False,
+            "message": "Jira token is required. Set up your token in Profile Settings.",
+        }
+        result = runner.invoke(app, ["--json", "user", "tokens", "test", "jira"])
+        assert result.exit_code == 1
+        parsed = json.loads(result.output)
+        assert parsed["ok"] is False
+        assert "Profile Settings" in parsed["message"]
+        mock_client.test_user_token.assert_called_once_with("jira")
+
+
 class TestTokenUsageCommand:
     def test_token_usage_summary_default(self, mock_client):
         """No flags → summary mode."""

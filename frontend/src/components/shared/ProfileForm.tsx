@@ -301,6 +301,8 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
             </>
           )}
 
+          {/* An unsaved edit disables the test button: the endpoint only reads
+              the saved row, so testing would silently answer for the old token. */}
           {!isViewer && <TrackerTokensFields
             githubToken={githubToken}
             onGithubTokenChange={(v) => { setGithubTokenValue(v); setGithubValidation(null) }}
@@ -314,6 +316,14 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
             githubValidation={githubValidation}
             jiraValidation={jiraValidation}
             newPasswordAutoComplete
+            testable
+            unsaved={{
+              github: githubToken.trim() !== baseline.gh,
+              jira:
+                jiraEmail.trim() !== baseline.je ||
+                jiraToken.trim() !== baseline.jt ||
+                jiraSaToken.trim() !== baseline.jst,
+            }}
           />}
 
           {!isViewer && tokensError && (

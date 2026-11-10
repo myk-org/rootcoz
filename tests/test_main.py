@@ -17400,6 +17400,169 @@ class TestIntegrationConnectionEndpoints:
         assert "not listable" in data["message"]
 
 
+class TestUserTokenTestEndpoint:
+    """Tests for POST /api/user/tokens/test/{integration} (#537).
+
+    The route probes the caller's OWN saved row through the same testers the
+    admin route uses: same always-200 ``{ok, message, details?}`` contract,
+    different credential source.
+    """
+
+    _FAKE_GITHUB_TOKEN = "ghp_own_saved_token_4731"  # pragma: allowlist secret
+    _FAKE_JIRA_TOKEN = "jira_own_saved_token_9182"  # pragma: allowlist secret
+
+    async def test_saved_github_token_passes(self, test_client, temp_db_path):
+        """A passing probe answers ok: true with HTTP 200."""
+        headers = await _tracker_user("own-gh", github_token=self._FAKE_GITHUB_TOKEN)
+        probe = AsyncMock(return_value={"login": "octocat"})
+        with patch("rootcoz.main._integration_test_get_json", probe):
+            response = test_client.post("/api/user/tokens/test/github", headers=headers)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["message"] == "GitHub connection successful"
+        assert data["details"]["login"] == "octocat"
+        # The SAVED token is what was probed.
+        assert probe.call_args.kwargs["headers"]["Authorization"] == (
+            f"Bearer {self._FAKE_GITHUB_TOKEN}"
+        )
+
+    async def test_failing_probe_is_a_200_result(self, test_client, temp_db_path):
+        """A failing probe answers ok: false with a message, still HTTP 200."""
+        headers = await _tracker_user("own-gh-bad", github_token="ghp_rejected")
+        from rootcoz.main import _IntegrationTestError
+
+        probe = AsyncMock(
+            side_effect=_IntegrationTestError("authentication failed (HTTP 401)")
+        )
+        with patch("rootcoz.main._integration_test_get_json", probe):
+            response = test_client.post("/api/user/tokens/test/github", headers=headers)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "GitHub connection failed" in data["message"]
+
+    async def test_saved_jira_credential_passes(self, test_client, temp_db_path):
+        """The Jira probe uses the row's email+token and records nothing."""
+        email = "own@example.com"
+        headers = await _tracker_user(
+            "own-jira", jira_email=email, jira_token=self._FAKE_JIRA_TOKEN
+        )
+        probe = AsyncMock(return_value={"displayName": "Own Jira User"})
+        with (
+            _enable_feature("jira_enabled"),
+            patch("rootcoz.main._integration_test_get_json", probe),
+        ):
+            response = test_client.post("/api/user/tokens/test/jira", headers=headers)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is True
+        assert data["details"] == {"auth_mode": "basic", "user": "Own Jira User"}
+        assert probe.call_args.kwargs["auth"] == (email, self._FAKE_JIRA_TOKEN)
+        # The admin-only verification record is server state the user route
+        # must not read or write.
+        assert await storage.get_server_setting("jira_verified_method") is None
+
+    async def test_viewer_is_forbidden(self, test_client, temp_db_path):
+        """Roles below reviewer cannot test, even their own tokens."""
+        _, viewer_key = await storage.create_user("token-viewer", role="viewer")
+        response = test_client.post(
+            "/api/user/tokens/test/github",
+            headers={"Authorization": f"Bearer {viewer_key}"},
+        )
+        assert response.status_code == 403
+
+    def test_bootstrap_admin_gets_the_actionable_message(self, test_client) -> None:
+        """The bootstrap admin has no users row — never a crash or a bare 500."""
+        probe = AsyncMock(return_value={"login": "never"})
+        with patch("rootcoz.main._integration_test_get_json", probe):
+            response = test_client.post("/api/user/tokens/test/github")
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "no profile to store one" in data["message"]
+        probe.assert_not_called()
+
+    async def test_no_saved_jira_credential(self, test_client, temp_db_path):
+        """Nothing saved is a result with the actionable wording, not a probe."""
+        headers = await _tracker_user("own-jira-empty")
+        probe = AsyncMock(return_value={"displayName": "never"})
+        with patch("rootcoz.main._integration_test_get_json", probe):
+            response = test_client.post("/api/user/tokens/test/jira", headers=headers)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "Profile Settings" in data["message"]
+        probe.assert_not_called()
+
+    async def test_unknown_integration_is_a_400(self, test_client, temp_db_path):
+        """Only github and jira are testable against a user's row."""
+        headers = await _tracker_user("own-unknown")
+        response = test_client.post("/api/user/tokens/test/jenkins", headers=headers)
+        assert response.status_code == 400
+        assert response.json() == {"detail": "Unknown integration: jenkins"}
+
+    async def test_cannot_be_pointed_at_another_user(
+        self, test_client, temp_db_path
+    ) -> None:
+        """A username in the body or the query is ignored — the session wins."""
+        await _tracker_user("other-user", github_token="ghp_other_users_token")
+        headers = await _tracker_user("own-gh-2", github_token=self._FAKE_GITHUB_TOKEN)
+        probe = AsyncMock(return_value={"login": "octocat"})
+        with patch("rootcoz.main._integration_test_get_json", probe):
+            response = test_client.post(
+                "/api/user/tokens/test/github?username=other-user",
+                headers=headers,
+                json={"username": "other-user"},
+            )
+        assert response.status_code == 200
+        assert probe.call_args.kwargs["headers"]["Authorization"] == (
+            f"Bearer {self._FAKE_GITHUB_TOKEN}"
+        )
+
+    async def test_no_token_value_in_the_response_or_the_logs(
+        self, test_client, temp_db_path, caplog
+    ) -> None:
+        """A distinctive saved token appears in neither the body nor a log record."""
+        gh_headers = await _tracker_user(
+            "own-gh-leak", github_token=self._FAKE_GITHUB_TOKEN
+        )
+        jira_headers = await _tracker_user(
+            "own-jira-leak",
+            jira_email="leak@example.com",
+            jira_token=self._FAKE_JIRA_TOKEN,
+        )
+        # A crash inside the probe is the harshest case: the route's catch-all
+        # builds the message from the exception.
+        from rootcoz.main import _IntegrationTestError
+
+        probe = AsyncMock(
+            side_effect=_IntegrationTestError("authentication failed (HTTP 401)")
+        )
+        with (
+            caplog.at_level(logging.DEBUG, logger="rootcoz.main"),
+            patch("rootcoz.main._integration_test_get_json", probe),
+        ):
+            logging.getLogger("rootcoz.main").propagate = True
+            try:
+                bodies = [
+                    test_client.post(
+                        "/api/user/tokens/test/github", headers=gh_headers
+                    ).text,
+                    test_client.post(
+                        "/api/user/tokens/test/jira", headers=jira_headers
+                    ).text,
+                ]
+            finally:
+                logging.getLogger("rootcoz.main").propagate = False
+        logged = "\n".join(record.getMessage() for record in caplog.records)
+        for token in (self._FAKE_GITHUB_TOKEN, self._FAKE_JIRA_TOKEN):
+            assert all(token not in body for body in bodies)
+            assert token not in logged
+        assert "integration=github ok=False" in logged
+        assert "integration=jira ok=False" in logged
+
+
 class TestSubmitterAutoTag:
     """Tests for auto-tagging analyses with the submitter username."""
 
