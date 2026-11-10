@@ -31,6 +31,14 @@ PROW_ARTIFACTS_MAX_OBJECTS = 5_000
 # Valid values for the explicit ``jira_auth_mode`` setting.
 JIRA_AUTH_MODES = ("oauth", "basic", "pat", "atst")
 
+#: The recorded reason when no Jira connection can be resolved. Cause-free on
+#: purpose: it is persisted on a result and replayed on re-analysis, and it is
+#: also computed on per-request settings, where the deployment may well be
+#: configured — the field detail belongs to ``jira_availability``'s DEBUG line.
+_JIRA_NO_CONNECTION_REASON = (
+    "Jira search cannot run: no Jira connection can be resolved from these settings"
+)
+
 # Roles a new registration may default to (``admin`` is granted, never default).
 DEFAULT_USER_ROLES = ("viewer", "reviewer", "operator")
 
@@ -482,7 +490,7 @@ class Settings(BaseSettings):
     ) -> tuple[PydanticBaseSettingsSource, ...]:
         """Drop ``jira_auth_mode`` from the env/dotenv sources.
 
-        The auth method is selected ONLY in Server Settings (DB); the
+        The auth method can be chosen only in Server Settings (DB); the
         ``JIRA_AUTH_MODE`` environment variable is deliberately ignored.
         Init kwargs (DB-override merge in ``get_settings()``, admin PUT
         validation) and ``model_copy`` pinning are unaffected.
@@ -1389,7 +1397,7 @@ def jira_method_missing_fields(settings: Settings) -> list[str]:
 
     Returns [] when ``jira_auth_mode`` is unset (Jira is disabled then —
     ``jira_enabled`` short-circuits before field checks) or when the
-    selected method's fields are all configured.
+    configured method's fields are all present.
     """
     mode = normalize_jira_auth_mode(settings.jira_auth_mode)
     if not mode:
@@ -1417,24 +1425,88 @@ def jira_method_missing_fields(settings: Settings) -> list[str]:
     return [name for name, value in required[mode] if not value]
 
 
+def jira_availability(settings: Settings) -> tuple[bool, str]:
+    """``(can this deployment use Jira, the operator's detail when it cannot)``.
+
+    The ONE availability answer: available exactly when
+    :func:`~rootcoz.jira.resolve_jira_connection` resolves a usable method
+    (its credential material is present — for ``oauth``/``atst`` that is the
+    cloud ID, the only thing that builds the gateway base) AND the connection
+    carries an API base. The "usable auth after ``complete_jira_connection``"
+    half of that requirement is satisfied by construction: the resolver is
+    asked on the *pre-completion* connection, where the cloud ID really is
+    the sole source of a gateway base.
+
+    No ``jira_site_url`` fallback, deliberately: that value is a per-request
+    field (``BaseAnalysisRequest``), so accepting it here would let an
+    ordinary ``/analyze`` caller make Jira look available and turn the
+    connector into an outbound tenant-info request to a caller-supplied URL.
+    Availability therefore means "the deployment itself has an API base".
+
+    Synchronous and network-free — no probe, no mint. A gateway deployment
+    that is available still fails at request time when minting fails; this is
+    a configuration answer, not a connectivity one.
+
+    Returns:
+        ``(True, "")`` when usable, else ``(False, detail)`` where *detail* is
+        one lowercase operator clause naming the method and the missing field
+        — never a page name, never advice, never shown to a user.
+    """
+    # Deferred import: ``rootcoz.jira`` imports from this module, so a
+    # module-level import here would form a cycle.
+    from rootcoz.jira import resolve_jira_connection
+
+    connection = resolve_jira_connection(settings)
+    if connection.mode != "none" and connection.api_base:
+        return True, ""
+    mode = normalize_jira_auth_mode(settings.jira_auth_mode)
+    if not mode:
+        detail = "no Jira auth method is configured"
+    elif connection.mode == "none":
+        # The method is chosen but the resolver could not use it: its
+        # credential material is incomplete. The list is the method's own
+        # fields, and it may include the locator too when that is missing as
+        # well — rule 3 below is what covers a locator-only miss.
+        detail = f"the '{mode}' Jira auth method needs " + (
+            ", ".join(jira_method_missing_fields(settings)) or "its fields"
+        )
+    else:
+        locator = {
+            "basic": "jira_cloud_url",
+            "pat": "jira_server_url",
+            "oauth": "atlassian_oauth_cloud_id",
+            "atst": "atlassian_oauth_cloud_id",
+        }[mode]
+        detail = (
+            f"the '{mode}' Jira auth method cannot resolve an API base "
+            f"({locator} is unset)"
+        )
+    logger.debug("Jira is not available on this deployment: %s", detail)
+    return False, detail
+
+
 def jira_unavailable_reason(settings: Settings) -> str:
     """Why analysis-time Jira search cannot run; ``""`` when it can.
 
     The single source of truth for ``Settings.jira_enabled`` and for the
-    ``tracker_search.jira.reason`` recorded on a result: one sentence naming
-    the exact setting an administrator has to fix.
+    ``tracker_search.jira.reason`` recorded on a result.
 
-    Pure on purpose — it returns text and logs nothing, so a caller recording
-    the reason never duplicates ``jira_enabled``'s warning.
+    The connection sentence makes no claim about the deployment, on purpose:
+    this also runs on per-request settings (``_merge_settings``), where a
+    caller's own override can be what removed the connection — saying "this
+    server has no Jira configuration" there would be false, and the string is
+    persisted and replayed on re-analysis. The cause-free reason is enough;
+    the field detail lives on :func:`jira_availability`'s DEBUG line.
+
+    Returns text without network I/O. It does log: :func:`jira_availability`
+    writes one DEBUG line per unavailable call, and the resolver behind it can
+    warn about ``jira_site_url``. A caller recording the reason therefore adds
+    no line of its own — that is the contract, not "nothing is logged".
     """
     if settings.enable_jira is False:
         return "Jira is disabled on this deployment (ENABLE_JIRA is false)"
-    mode = normalize_jira_auth_mode(settings.jira_auth_mode)
-    if not mode:
-        return "no Jira auth method is selected in Server Settings"
-    missing = jira_method_missing_fields(settings)
-    if missing:
-        return f"the '{mode}' Jira auth method is missing: {', '.join(missing)}"
+    if not jira_availability(settings)[0]:
+        return _JIRA_NO_CONNECTION_REASON
     if not settings.jira_project_key:
         return "JIRA_PROJECT_KEY is not configured"
     return ""

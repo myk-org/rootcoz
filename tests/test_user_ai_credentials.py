@@ -1558,7 +1558,10 @@ async def test_preview_binds_user_for_content_and_resets(
     monkeypatch.setattr(main, "_build_report_context", lambda **kwargs: ("", ""))
     monkeypatch.setattr(main, "_resolve_github_repo_url", lambda settings: "")
     monkeypatch.setattr(main, "_jira_issue_creation_enabled", lambda settings: True)
-    monkeypatch.setattr(main, "_require_jira_method_configured", lambda settings: None)
+    # The gate is renamed AND takes the effective settings plus the caller's
+    # credential state, so the stub has to accept them.
+    monkeypatch.setattr(main, "_require_jira_available", lambda *a, **k: None)
+    monkeypatch.setattr(main, "_account_has_profile", AsyncMock(return_value=True))
 
     async def generate(**_kwargs):
         assert ai_client.ai_username.get() == "alice"

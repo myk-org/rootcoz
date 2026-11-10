@@ -434,11 +434,14 @@ async def test_pipeline_jira_and_saving_stages(
             new_callable=AsyncMock,
             return_value=("claude", "model"),
         ),
+        # The non-chat sites keep the graceful default (#534): a stray
+        # ``refuse_storage_fault=True`` here would turn one failed mint into a
+        # failed analysis, so the awaited kwargs are asserted below.
         patch(
             "rootcoz.main._create_ai_auth_header",
             new_callable=AsyncMock,
             return_value="",
-        ),
+        ) as mint,
         patch(
             "rootcoz.main.run_orchestrated_analysis",
             new_callable=AsyncMock,
@@ -526,6 +529,7 @@ async def test_pipeline_jira_and_saving_stages(
         )
         assert history.await_count == int(not all_failed)
         assert review.await_count == int(not all_failed)
+        assert mint.await_args.kwargs == {}, "an analysis run must keep degrading"
 
 
 @pytest.mark.asyncio

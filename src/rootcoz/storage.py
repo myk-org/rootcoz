@@ -235,12 +235,24 @@ async def _retry_contended[T](operation: Callable[[], Awaitable[T]]) -> T:
         try:
             return await operation()
         except sqlite3.OperationalError as exc:
-            message = str(exc).lower()
-            contended = "locked" in message or "busy" in message
-            if not contended or attempt == _LOCK_RETRY_ATTEMPTS - 1:
+            if not is_lock_failure(exc) or attempt == _LOCK_RETRY_ATTEMPTS - 1:
                 raise
             await asyncio.sleep(_LOCK_RETRY_BACKOFF_SECONDS * (2**attempt))
     raise AssertionError("unreachable: the retry loop returns or raises")
+
+
+def is_lock_failure(exc: BaseException) -> bool:
+    """Whether a failure is the lock, not the write.
+
+    A lock is transient and worth retrying or degrading for; anything else is a
+    real storage fault and the caller decides what it means. The type gate is
+    part of the predicate: ``OSError(errno.EBUSY)`` says "resource busy" too and
+    is not a SQLite lock.
+    """
+    if not isinstance(exc, sqlite3.OperationalError):
+        return False
+    message = str(exc).lower()
+    return "locked" in message or "busy" in message
 
 
 def _db_uri(path: Path) -> str:
@@ -5599,7 +5611,7 @@ async def find_matching_previous_analysis(
         Includes keys: job_id, build_number, build_id, error_signature,
         error_signature_v2, error_message, classification, pattern, analyzed_at.
         Compare the pair with :func:`previous_analysis_matches`, never field by
-        field -- error_message is selected so that comparison can normalize the
+        field -- error_message is read so that comparison can normalize the
         message of a row stored before the v2 rules.
     """
     async with _connect_db() as db:
@@ -9647,8 +9659,9 @@ async def create_session(
             )
             await db.commit()
 
-    # Chat Start mints one of these for its internal tools and swallows the
-    # failure, so a momentary lock silently started the chat without tools.
+    # The retry exists so a transient lock never reaches chat preparation's
+    # refusal: what a refused Start reports is a storage fault the server could
+    # not retry past.
     await _retry_contended(_insert)
     return token
 
@@ -11247,7 +11260,7 @@ async def get_usage_context_for_sessions(
     call_type, provider, model) so the transcript list can show what the
     session was for. Chat sessions additionally carry ``chat_messages`` rows.
 
-    The latest row is selected SQL-side per session with a deterministic
+    The latest row is read SQL-side per session with a deterministic
     rowid tie-break (SQLite's created_at has one-second resolution, so ties
     are real); ids are chunked under SQLite's bound-variable limit.
     """
@@ -11275,7 +11288,7 @@ async def get_chat_context_for_sessions(
 ) -> dict[str, dict[str, Any]]:
     """Latest chat message context per session id (chat sessions only).
 
-    The latest message is selected SQL-side per session with a deterministic
+    The latest message is read SQL-side per session with a deterministic
     rowid tie-break — a bare-column GROUP BY would return username/job_id
     from an arbitrary row among same-second messages.
     """

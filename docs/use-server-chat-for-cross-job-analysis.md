@@ -67,7 +67,7 @@ This confirms the CLI is using an admin identity, then asks a server-wide questi
 
    > **Tip:** Use the web UI when you want the clearest live experience. It shows the busy state from the moment you send, tells you how long the turn has been running, and gives you a `Stop` button while the assistant is still working.
 
-   > **From an answer to a ticket:** ask the assistant to file it — "create a GitHub issue for this" or "open a Jira ticket" — and it drafts the title and body from the conversation. The server posts the preview to the chat itself, and nothing is filed until you reply there with the six-character code it shows. Server Chat itself resolves no tracker credential — the issue is filed with the token saved in *your* account, so add one in Profile Settings first, or the assistant relays the `400` that says none is available. A `400` naming the server's own Jira credential is relayed verbatim too, so a token that is really the deployment's is answered with what to change. The same gate from the CLI, in the same two steps and with no token flags (the proposal files nothing and prints the code to confirm with):
+   > **From an answer to a ticket:** ask the assistant to file it — "create a GitHub issue for this" or "open a Jira ticket" — and it drafts the title and body from the conversation. The server posts the preview to the chat itself, and nothing is filed until you reply there with the six-character code it shows. Server Chat itself resolves no tracker credential — the issue is filed with the token saved in *your* account, so add one in Profile Settings first; the server itself then posts the line naming who must act when the cause is its own configuration (an administrator, in Server Settings) rather than the account's. A `400` naming the server's own Jira credential is relayed verbatim too, so a token that is really the deployment's is answered with what to change. The same gate from the CLI, in the same two steps and with no token flags (the proposal files nothing and prints the code to confirm with):
 
    ```bash
    rootcoz propose-chat-issue --target jira \
@@ -158,6 +158,9 @@ For every available command and flag, see [CLI Command Reference](cli-reference.
 
 - `A saved artifact link returns 404.`  
   You started a new session or ran `rootcoz admin-chat clear`, which deletes saved artifacts for your account.
+
+- `The admin assistant cannot read results or the database, though Server Chat started normally.`  
+  Admin chat starts even when the server cannot mint the internal tools token — `get_job_result`, `db_schema`, `db_query` and `save_report` are then missing from its tool list and the server log carries `Failed to create AI session`. Job chat refuses that preparation and shows the failure message instead; admin chat is deliberately kept available, so start a new admin session once the storage fault is fixed to pick the tools up. The residual is tracked as issue #540.
 
 - `The CLI did not show a final answer.`  
   `admin-chat send` waits up to about two minutes. Check the result later with `rootcoz admin-chat history --limit 20`. For the raw endpoints, see [API Endpoint Reference](api-reference.html) for details.

@@ -23,6 +23,10 @@ from rootcoz import storage
 from rootcoz.config import Settings
 from rootcoz.encryption import encrypt_sensitive_fields
 from rootcoz.engine.core import AnalysisIncompleteError
+from rootcoz.error_messages import (
+    jira_api_base_unresolved_message,
+    unavailable_sentence,
+)
 from rootcoz.models import (
     AiConfigEntry,
     AnalysisDetail,
@@ -195,6 +199,28 @@ def _build_wait_settings(**overrides) -> Settings:
     settings_dict = Settings().model_dump(mode="python")
     settings_dict.update(overrides)
     return Settings.model_validate(settings_dict)
+
+
+def _unconfigured_jira_settings() -> Settings:
+    """A deployment with no Jira connection at all (issue #536's reporter state).
+
+    Every Jira field is pinned empty: the host's ``JIRA_URL``/``JIRA_CLOUD_ID``
+    aliases must not configure the deployment under test.
+    """
+    return _build_wait_settings(
+        jira_auth_mode="",
+        jira_cloud_url="",
+        jira_server_url="",
+        jira_site_url="",
+        jira_email="",
+        jira_api_token=None,
+        jira_pat=None,
+        jira_oauth_client_secret=None,
+        jira_atst_token=None,
+        atlassian_oauth_client_id="",
+        atlassian_oauth_cloud_id="",
+        jira_project_key="PROJ",
+    )
 
 
 _TEST_ADMIN_KEY = "test-admin-key-16chars"  # pragma: allowlist secret
@@ -5390,7 +5416,12 @@ class TestJiraMethodConfiguredUsesEffectiveSettings:
 
     @pytest.mark.asyncio
     async def test_preview_without_any_credential_returns_400(self, test_client):
-        """No user credential and no server secret → 400 (method incomplete)."""
+        """No user credential and no server secret → 400.
+
+        The deployment can serve a PAT, so the fix is the account's: the 400
+        names Profile Settings instead of an auth method and a field that a
+        non-admin cannot see or change (#536).
+        """
         from rootcoz.main import app, get_settings
 
         await storage.save_result(
@@ -5407,7 +5438,66 @@ class TestJiraMethodConfiguredUsesEffectiveSettings:
         finally:
             app.dependency_overrides.pop(get_settings, None)
         assert response.status_code == 400
-        assert "jira_pat" in response.json()["detail"]
+        detail = response.json()["detail"]
+        assert "Profile Settings" in detail
+        assert "jira_pat" not in detail
+        assert "auth method" not in detail
+
+    @pytest.mark.asyncio
+    async def test_preview_on_an_unconfigured_deployment_names_the_administrator(
+        self, test_client
+    ):
+        """No Jira connection at all → the administrator sentence (#536)."""
+        from rootcoz.main import app, get_settings
+
+        await storage.save_result(
+            "job-jira-prev-unconfigured", "http://j", "completed", self._RESULT_DATA
+        )
+        app.dependency_overrides[get_settings] = _unconfigured_jira_settings
+        try:
+            response = test_client.post(
+                "/results/job-jira-prev-unconfigured/preview-jira-bug",
+                json={"test_name": "test_eff"},
+            )
+        finally:
+            app.dependency_overrides.pop(get_settings, None)
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail == unavailable_sentence("jira", "server_unconfigured")
+        assert "Profile Settings" not in detail
+
+    @pytest.mark.asyncio
+    async def test_preview_names_the_re_save_when_the_deployment_cannot_serve_it(
+        self, test_client
+    ):
+        """Partially configured: the deployment files a PAT, this account's saved
+        credential pins a shape it cannot serve → re-save, never "the server is
+        unconfigured" and never a field name."""
+        from rootcoz.main import app, get_settings
+
+        await storage.save_result(
+            "job-jira-prev-partial", "http://j", "completed", self._RESULT_DATA
+        )
+        app.dependency_overrides[get_settings] = (
+            self._pat_settings_without_server_secret
+        )
+        # A basic-shaped credential (token + email) on a pat-only deployment.
+        headers = await _tracker_user(
+            "prev-partial", jira_token="user_token", jira_email="me@example.com"
+        )
+        try:
+            response = test_client.post(
+                "/results/job-jira-prev-partial/preview-jira-bug",
+                json={"test_name": "test_eff"},
+                headers=headers,
+            )
+        finally:
+            app.dependency_overrides.pop(get_settings, None)
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail == unavailable_sentence("jira", "unusable_credential")
+        assert "Server Settings" not in detail
+        assert "auth method" not in detail
 
     @pytest.mark.asyncio
     async def test_create_without_any_credential_returns_400(self, test_client):
@@ -6854,6 +6944,55 @@ class TestChatIssueEndpoint:
             "Jira token is required. Set up your token in Profile Settings."
         )
         mock_create.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_an_unconfigured_deployment_answers_with_the_administrator(
+        self, test_client
+    ):
+        """Issue #536, the API surface: Jira unset on the server, no saved token.
+
+        The 400 names the administrator — a token in Profile Settings cannot
+        enable a tracker the deployment has no connection for.
+        """
+        from rootcoz.main import app, get_settings
+
+        headers = await self._user("chat-jira-unconfigured")
+        app.dependency_overrides[get_settings] = _unconfigured_jira_settings
+        try:
+            response = test_client.post(
+                "/api/chat-issue",
+                json={**self._CHAT, "target": "jira"},
+                headers=headers,
+            )
+        finally:
+            app.dependency_overrides.pop(get_settings, None)
+        assert response.status_code == 400
+        detail = response.json()["detail"]
+        assert detail == unavailable_sentence("jira", "server_unconfigured")
+        assert "Profile Settings" not in detail
+        assert "User Settings" not in detail
+
+    @pytest.mark.asyncio
+    async def test_an_unconfigured_deployment_answers_the_same_with_a_saved_token(
+        self, test_client
+    ):
+        """A saved token on an unconfigured deployment is not the cause either."""
+        from rootcoz.main import app, get_settings
+
+        headers = await self._user("chat-jira-unconfigured-tok", jira_token="tok")
+        app.dependency_overrides[get_settings] = _unconfigured_jira_settings
+        try:
+            response = test_client.post(
+                "/api/chat-issue",
+                json={**self._CHAT, "target": "jira"},
+                headers=headers,
+            )
+        finally:
+            app.dependency_overrides.pop(get_settings, None)
+        assert response.status_code == 400
+        assert response.json()["detail"] == unavailable_sentence(
+            "jira", "server_unconfigured"
+        )
 
     @pytest.mark.asyncio
     async def test_jira_disabled_returns_403(self, test_client):
@@ -13464,68 +13603,6 @@ class TestReAnalyzeFailure:
         assert result.jira_email is None
 
 
-class TestHasJiraCredentials:
-    """_has_jira_credentials is driven by the selected auth mode."""
-
-    def test_oauth_mode_non_atoa_secret_counts(self):
-        """Oauth mode with any non-empty secret (not just ATOA) has credentials."""
-        from rootcoz.main import _has_jira_credentials
-
-        settings = Settings(
-            atlassian_oauth_cloud_id="cloud-id",
-            jira_auth_mode="oauth",
-            jira_oauth_client_secret=SecretStr("not-atoa"),
-            atlassian_oauth_client_id="test-client-id",
-        )
-        assert _has_jira_credentials(settings) is True
-
-    def test_oauth_mode_missing_client_id_no_credentials(self):
-        """Oauth mode without a client ID has no usable credentials."""
-        from rootcoz.main import _has_jira_credentials
-
-        settings = Settings(
-            jira_cloud_url="https://jira.example.com",
-            jira_auth_mode="oauth",
-            jira_oauth_client_secret=SecretStr("not-atoa"),
-        )
-        assert _has_jira_credentials(settings) is False
-
-    def test_unset_mode_false_even_with_credentials(self):
-        """No selected mode → Jira disabled → no credentials, ATOA or not."""
-        from rootcoz.main import _has_jira_credentials
-
-        settings = Settings(
-            jira_cloud_url="https://jira.example.com",
-            jira_oauth_client_secret=SecretStr("ATOA-token"),
-            jira_email="user@example.com",
-            jira_api_token=SecretStr("token"),
-            jira_pat=SecretStr("pat"),
-        )
-        assert _has_jira_credentials(settings) is False
-
-    def test_selected_mode_with_missing_field_false(self):
-        """A selected mode with an unconfigured required field → False."""
-        from rootcoz.main import _has_jira_credentials
-
-        settings = Settings(
-            jira_cloud_url="https://jira.example.com",
-            jira_auth_mode="basic",
-            jira_email="user@example.com",
-        )
-        assert _has_jira_credentials(settings) is False
-
-    def test_api_token_with_selected_mode_counts(self):
-        from rootcoz.main import _has_jira_credentials
-
-        settings = Settings(
-            jira_cloud_url="https://jira.example.com",
-            jira_auth_mode="basic",
-            jira_email="user@example.com",
-            jira_api_token=SecretStr("token"),
-        )
-        assert _has_jira_credentials(settings) is True
-
-
 class TestValidateToken:
     """Tests for POST /api/validate-token."""
 
@@ -13595,7 +13672,46 @@ class TestValidateToken:
         assert response.status_code == 200
         data = response.json()
         assert data["valid"] is False
-        assert "not configured" in data["message"]
+        # One text per state for every token shape: cause-free, and the actor
+        # who can act is the administrator. No method, no field (#536).
+        assert data["message"] == jira_api_base_unresolved_message()
+        assert "auth method" not in data["message"]
+
+    @pytest.mark.asyncio
+    async def test_a_working_deployment_given_another_shape_answers_the_same(
+        self, test_client
+    ):
+        """One text per state: a fully configured PAT deployment handed a
+        basic-shaped token answers the same cause-free sentence as an
+        unconfigured one — this endpoint sees the token, not the deployment."""
+        from rootcoz.main import app, get_settings
+
+        configured = _build_wait_settings(
+            jira_auth_mode="pat",
+            jira_server_url="https://jira.example.com",
+            jira_pat=SecretStr("server-pat"),
+            jira_project_key="PROJ",
+        )
+        app.dependency_overrides[get_settings] = lambda: configured
+        try:
+            response = test_client.post(
+                "/api/validate-token",
+                json={
+                    "token_type": "jira",
+                    "token": "basic-shaped-token",
+                    "email": "me@example.com",
+                },
+                headers=_ADMIN_AUTH_HEADERS,
+            )
+        finally:
+            app.dependency_overrides.pop(get_settings, None)
+        assert response.status_code == 200
+        data = response.json()
+        # The token is the caller's submitted one, so nothing may call it a
+        # saved credential; the cause is the deployment's, so no field name.
+        assert data["message"] == jira_api_base_unresolved_message()
+        assert "saved" not in data["message"]
+        assert "jira_server_url" not in data["message"]
 
     @pytest.mark.asyncio
     async def test_jira_sa_secret_validates_against_gateway(self, test_client):
@@ -13713,7 +13829,8 @@ class TestValidateToken:
             assert response.status_code == 200
             data = response.json()
             assert data["valid"] is False
-            assert "atlassian_oauth_client_id" in data["message"]
+            assert data["message"] == jira_api_base_unresolved_message()
+            assert "atlassian_oauth_client_id" not in data["message"]
         finally:
             app.dependency_overrides.pop(get_settings, None)
 
@@ -13744,7 +13861,8 @@ class TestValidateToken:
             assert response.status_code == 200
             data = response.json()
             assert data["valid"] is False
-            assert "cloud ID" in data["message"]
+            assert data["message"] == jira_api_base_unresolved_message()
+            assert "cloud ID" not in data["message"]
         finally:
             app.dependency_overrides.pop(get_settings, None)
             jira_module._cloud_id_cache.clear()
@@ -16686,7 +16804,12 @@ class TestIntegrationConnectionEndpoints:
     def test_jira_oauth_missing_client_id_reports_missing_field(
         self, test_client
     ) -> None:
-        """oauth without a client ID names the exact missing field."""
+        """oauth without a client ID answers the actor sentence.
+
+        The missing fields are operator output (``jira_availability``'s DEBUG
+        line): a method name and a field name must not reach any user-facing
+        answer, this one included (#536).
+        """
         settings = Settings(
             jira_cloud_url="https://jira.example.com",
             jira_auth_mode="oauth",
@@ -16697,10 +16820,8 @@ class TestIntegrationConnectionEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["ok"] is False
-        assert data["message"] == (
-            "Jira auth method 'oauth' is selected but missing: "
-            "atlassian_oauth_client_id, atlassian_oauth_cloud_id"
-        )
+        assert data["message"] == unavailable_sentence("jira", "server_unconfigured")
+        assert "atlassian_oauth_client_id" not in data["message"]
 
     def test_jira_success_persists_verified_method_selected(self, test_client) -> None:
         """A successful test persists the selected method as verified."""
@@ -16968,7 +17089,7 @@ class TestIntegrationConnectionEndpoints:
         )
 
     def test_jira_selected_method_missing_fields(self, test_client) -> None:
-        """A selected method with missing fields names the method and fields."""
+        """A configured method with missing fields answers the actor sentence."""
         # jira_cloud_url="" pins the field empty — the deprecated JIRA_URL
         # env alias must not silently satisfy it.
         settings = Settings(
@@ -16980,13 +17101,11 @@ class TestIntegrationConnectionEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["ok"] is False
-        assert data["message"] == (
-            "Jira auth method 'basic' is selected but missing: "
-            "jira_email, jira_api_token, jira_cloud_url"
-        )
+        assert data["message"] == unavailable_sentence("jira", "server_unconfigured")
+        assert "jira_cloud_url" not in data["message"]
 
     def test_jira_selected_method_partial_fields(self, test_client) -> None:
-        """Only the actually-missing fields are named, not every field."""
+        """A partially configured method answers the same actor sentence."""
         settings = Settings(
             jira_cloud_url="",
             jira_auth_mode="basic",
@@ -16997,13 +17116,11 @@ class TestIntegrationConnectionEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["ok"] is False
-        assert data["message"] == (
-            "Jira auth method 'basic' is selected but missing: "
-            "jira_api_token, jira_cloud_url"
-        )
+        assert data["message"] == unavailable_sentence("jira", "server_unconfigured")
+        assert "jira_api_token" not in data["message"]
 
     def test_jira_unset_mode_reports_method_required(self, test_client) -> None:
-        """Unset mode (even with full credentials) reports the method-required error."""
+        """Unset mode (even with full credentials) reports the actor sentence."""
         settings = Settings(
             jira_cloud_url="https://jira.example.com",
             jira_email="user@example.com",
@@ -17017,10 +17134,9 @@ class TestIntegrationConnectionEndpoints:
         assert response.status_code == 200
         data = response.json()
         assert data["ok"] is False
-        assert (
-            data["message"]
-            == "No Jira auth method selected — choose one in Server Settings"
-        )
+        # The method-and-field detail is operator output (a DEBUG line); the
+        # endpoint answers with the one actor sentence (#536).
+        assert data["message"] == unavailable_sentence("jira", "server_unconfigured")
 
     def test_github_success(self, test_client) -> None:
         """GitHub test hits api.github.com/user with the effective token."""
@@ -20252,7 +20368,7 @@ class TestAnalysisReaperIsOneCopy:
                 "rootcoz.main._create_ai_auth_header",
                 new_callable=AsyncMock,
                 return_value="",
-            ),
+            ) as mint,
             patch(
                 "rootcoz.main._reap_analysis_workspace", new_callable=AsyncMock
             ) as reap,
@@ -20292,6 +20408,9 @@ class TestAnalysisReaperIsOneCopy:
         # repo_manager:` copy would at best drift again, at worst skip the reaper.
         assert kwargs["repo_manager"] is manager.return_value
         assert kwargs["repo_path"] == tmp_path / "workspace"
+        # A re-analysis run keeps the graceful default (#534): the refusal is for
+        # the job-chat preparation only, never for a background run.
+        assert mint.await_args.kwargs == {}
 
 
 def test_the_entrypoint_outlives_the_app_shutdown() -> None:
