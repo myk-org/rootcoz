@@ -16,6 +16,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Textarea } from '@/components/ui/textarea'
 import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@/components/ui/select'
+import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { TokenRequiredBanner } from '@/components/shared/TokenRequiredBanner'
 import { CheckCircle2, ExternalLink, AlertTriangle } from 'lucide-react'
@@ -429,32 +430,48 @@ export function BugCreationDialog({
             {target === 'jira' && (
               <div className="space-y-2">
                 <label htmlFor="bug-jira-project" className="text-xs font-display uppercase tracking-widest text-text-tertiary">Jira Project</label>
-                <div className="relative">
-                  <Input
-                    id="bug-jira-project"
-                    type="text"
-                    value={jiraProjectKey}
-                    onChange={(e) => {
-                      const val = e.target.value
-                      setJiraProjectKey(val)
-                      setShowProjectDropdown(true)
-                      if (val !== confirmedProjectKey) {
-                        setConfirmedProjectKey('')
-                        setJiraSecurityLevel('')
-                        setSecurityLevelResult(null)
-                      }
-                    }}
-                    onFocus={() => setShowProjectDropdown(true)}
-                    onBlur={() => setTimeout(() => setShowProjectDropdown(false), 200)}
-                    placeholder="Type to search projects..."
-                    autoComplete="off"
-                    className="px-2"
-                  />
-                  {showProjectDropdown && jiraProjects.length > 0 && (
-                    <div className="absolute z-50 mt-1 max-h-48 w-full overflow-y-auto rounded-md border border-border-default bg-surface-card shadow-lg">
+                {/* Shared popover: it flips and caps to the space left on screen,
+                    which the hand-rolled absolute menu could not. */}
+                <Popover open={showProjectDropdown && jiraProjects.length > 0} onOpenChange={setShowProjectDropdown}>
+                  <PopoverAnchor asChild>
+                    <Input
+                      id="bug-jira-project"
+                      type="text"
+                      value={jiraProjectKey}
+                      onChange={(e) => {
+                        const val = e.target.value
+                        setJiraProjectKey(val)
+                        setShowProjectDropdown(true)
+                        if (val !== confirmedProjectKey) {
+                          setConfirmedProjectKey('')
+                          setJiraSecurityLevel('')
+                          setSecurityLevelResult(null)
+                        }
+                      }}
+                      onFocus={() => setShowProjectDropdown(true)}
+                      placeholder="Type to search projects..."
+                      autoComplete="off"
+                      role="combobox"
+                      aria-expanded={showProjectDropdown && jiraProjects.length > 0}
+                      aria-controls="bug-jira-project-options"
+                      className="px-2"
+                    />
+                  </PopoverAnchor>
+                  <PopoverContent
+                    align="start"
+                    sideOffset={4}
+                    className="w-[var(--radix-popover-trigger-width)] p-1"
+                    onOpenAutoFocus={(event) => event.preventDefault()}
+                  >
+                    <ul
+                      id="bug-jira-project-options"
+                      role="listbox"
+                      aria-label="Jira projects"
+                      className="max-h-[min(12rem,calc(var(--radix-popover-content-available-height)-1rem))] overflow-y-auto"
+                    >
                       {jiraProjects.map((p) => (
+                        <li key={p.key}>
                           <button
-                            key={p.key}
                             type="button"
                             onMouseDown={(e) => e.preventDefault()}
                             onClick={() => {
@@ -462,15 +479,16 @@ export function BugCreationDialog({
                               setConfirmedProjectKey(p.key)
                               setShowProjectDropdown(false)
                             }}
-                            className="flex w-full items-center gap-2 px-2 py-1.5 text-left text-sm hover:bg-surface-hover"
+                            className="flex w-full items-center gap-2 rounded-lg px-2 py-1.5 text-left text-sm hover:bg-surface-hover"
                           >
                             <span className="font-mono text-text-primary">{p.key}</span>
                             <span className="text-text-tertiary">{p.name}</span>
                           </button>
-                        ))}
-                    </div>
-                  )}
-                </div>
+                        </li>
+                      ))}
+                    </ul>
+                  </PopoverContent>
+                </Popover>
               </div>
             )}
             {target === 'jira' && (
@@ -502,51 +520,68 @@ export function BugCreationDialog({
             {target === 'jira' && (
               <div className="space-y-2">
                 <label htmlFor="bug-security-level" className="text-xs font-display uppercase tracking-widest text-text-tertiary">Security Level</label>
-                <div className="relative">
-                  <Input
-                    id="bug-security-level"
-                    type="text"
-                    value={jiraSecurityLevel}
-                    onChange={(e) => {
-                      setJiraSecurityLevel(e.target.value)
-                      setShowSecurityDropdown(true)
-                    }}
-                    onFocus={() => setShowSecurityDropdown(true)}
-                    onBlur={() => setTimeout(() => setShowSecurityDropdown(false), 200)}
-                    placeholder="None (public)"
-                    autoComplete="off"
-                    className="px-2"
-                  />
-                  {showSecurityDropdown && securityLevels.length > 0 && (
-                    <div className="absolute z-50 mt-1 max-h-48 w-full overflow-y-auto rounded-md border border-border-default bg-surface-card shadow-lg">
-                      <button
-                        type="button"
-                        onMouseDown={(e) => e.preventDefault()}
-                        onClick={() => { setJiraSecurityLevel(''); setShowSecurityDropdown(false) }}
-                        className="flex w-full items-center px-2 py-1.5 text-left text-sm hover:bg-surface-hover text-text-tertiary"
-                      >
-                        None (public)
-                      </button>
+                <Popover open={showSecurityDropdown && securityLevels.length > 0} onOpenChange={setShowSecurityDropdown}>
+                  <PopoverAnchor asChild>
+                    <Input
+                      id="bug-security-level"
+                      type="text"
+                      value={jiraSecurityLevel}
+                      onChange={(e) => {
+                        setJiraSecurityLevel(e.target.value)
+                        setShowSecurityDropdown(true)
+                      }}
+                      onFocus={() => setShowSecurityDropdown(true)}
+                      placeholder="None (public)"
+                      autoComplete="off"
+                      role="combobox"
+                      aria-expanded={showSecurityDropdown && securityLevels.length > 0}
+                      aria-controls="bug-security-level-options"
+                      className="px-2"
+                    />
+                  </PopoverAnchor>
+                  <PopoverContent
+                    align="start"
+                    sideOffset={4}
+                    className="w-[var(--radix-popover-trigger-width)] p-1"
+                    onOpenAutoFocus={(event) => event.preventDefault()}
+                  >
+                    <ul
+                      id="bug-security-level-options"
+                      role="listbox"
+                      aria-label="Jira security levels"
+                      className="max-h-[min(12rem,calc(var(--radix-popover-content-available-height)-1rem))] overflow-y-auto"
+                    >
+                      <li>
+                        <button
+                          type="button"
+                          onMouseDown={(e) => e.preventDefault()}
+                          onClick={() => { setJiraSecurityLevel(''); setShowSecurityDropdown(false) }}
+                          className="flex w-full items-center rounded-lg px-2 py-1.5 text-left text-sm hover:bg-surface-hover text-text-tertiary"
+                        >
+                          None (public)
+                        </button>
+                      </li>
                       {securityLevels
                         .filter((lv) => {
                           const q = jiraSecurityLevel.toLowerCase()
                           return !q || lv.name.toLowerCase().includes(q) || lv.description.toLowerCase().includes(q)
                         })
                         .map((lv) => (
-                          <button
-                            key={lv.id}
-                            type="button"
-                            onMouseDown={(e) => e.preventDefault()}
-                            onClick={() => { setJiraSecurityLevel(lv.name); setShowSecurityDropdown(false) }}
-                            className="flex w-full flex-col px-2 py-1.5 text-left text-sm hover:bg-surface-hover"
-                          >
-                            <span className="text-text-primary">{lv.name}</span>
-                            {lv.description && <span className="text-xs text-text-tertiary">{lv.description}</span>}
-                          </button>
+                          <li key={lv.id}>
+                            <button
+                              type="button"
+                              onMouseDown={(e) => e.preventDefault()}
+                              onClick={() => { setJiraSecurityLevel(lv.name); setShowSecurityDropdown(false) }}
+                              className="flex w-full flex-col rounded-lg px-2 py-1.5 text-left text-sm hover:bg-surface-hover"
+                            >
+                              <span className="text-text-primary">{lv.name}</span>
+                              {lv.description && <span className="text-xs text-text-tertiary">{lv.description}</span>}
+                            </button>
+                          </li>
                         ))}
-                    </div>
-                  )}
-                </div>
+                    </ul>
+                  </PopoverContent>
+                </Popover>
               </div>
             )}
             {similar.length > 0 && (

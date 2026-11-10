@@ -198,6 +198,27 @@ describe('BugCreationDialog AI picker', () => {
   })
 })
 
+describe('BugCreationDialog Jira pickers', () => {
+  it('picks a project from the shared popover list', async () => {
+    const user = userEvent.setup()
+    post.mockImplementation(async (path: string) => {
+      if (path === previewPathFor('jira')) return { title: 'Issue title', body: 'Issue body', similar_issues: [] }
+      if (path === '/api/jira-projects') return [{ key: 'MTV', name: 'Migration Toolkit for Virtualization' }]
+      if (path === '/api/jira-security-levels') return []
+      return {}
+    })
+    await openGeneratedPreview(user, 'jira')
+
+    await user.type(screen.getByLabelText('Jira Project'), 'mt')
+    const list = await screen.findByRole('listbox', { name: 'Jira projects' })
+    expect(list).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: /MTV/ }))
+
+    expect(screen.queryByRole('listbox')).toBeNull()
+    expect(screen.getByLabelText('Jira Project')).toHaveValue('MTV')
+  })
+})
+
 /** Opens the dialog, generates the preview, and leaves it on the Create button. */
 async function openGeneratedPreview(user: ReturnType<typeof userEvent.setup>, target: 'github' | 'jira' = 'github') {
   render(

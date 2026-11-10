@@ -50,10 +50,18 @@ interface ModelComboboxProps {
 }
 
 interface DropdownCoords {
-  top: number
+  /** Fixed-position line to hang from; the list fills the space on that side. */
+  top?: number
+  bottom?: number
   left: number
   minWidth: number
+  maxHeight: number
 }
+
+/** The list never grows past this (14rem, what it always was), and never past the
+ *  room the viewport leaves on the side it opens on. */
+const MAX_LIST_HEIGHT = 224
+const EDGE_GAP = 4
 
 export function ModelCombobox({
   value,
@@ -115,15 +123,21 @@ export function ModelCombobox({
   )
 
   // Position dropdown from trigger (portal to body — outside dialog transform /
-  // RemoveScroll) and keep it aligned on scroll/resize.
+  // RemoveScroll) and keep it aligned on scroll/resize. A list near the bottom of
+  // the window opens upward and caps on that side's room, so it is never clipped.
   useLayoutEffect(() => {
     if (!showDropdown || !containerRef.current) return
     const update = () => {
       const rect = containerRef.current!.getBoundingClientRect()
+      const below = window.innerHeight - rect.bottom - EDGE_GAP * 2
+      const above = rect.top - EDGE_GAP * 2
+      const openUp = below < MAX_LIST_HEIGHT && above > below
+      const room = openUp ? above : below
       setCoords({
-        top: rect.bottom + 4,
+        ...(openUp ? { bottom: window.innerHeight - rect.top + EDGE_GAP } : { top: rect.bottom + EDGE_GAP }),
         left: rect.left,
         minWidth: rect.width,
+        maxHeight: Math.max(0, Math.min(MAX_LIST_HEIGHT, room)),
       })
     }
     update()
@@ -252,13 +266,15 @@ export function ModelCombobox({
             style={{
               position: 'fixed',
               top: activeCoords.top,
+              bottom: activeCoords.bottom,
               left: activeCoords.left,
               minWidth: activeCoords.minWidth,
+              maxHeight: activeCoords.maxHeight,
               pointerEvents: 'auto',
             }}
             // w-max: grow to full model id text; max-w keeps it on-screen.
             // Portaled so it does not stretch the dialog / create a page scrollbar.
-            className="z-[200] max-h-56 w-max max-w-[min(90vw,48rem)] overflow-y-auto overflow-x-hidden rounded-xl border border-border-default bg-surface-card shadow-lg backdrop-blur-sm animate-fade-in"
+            className="z-[200] w-max max-w-[min(90vw,48rem)] overflow-y-auto overflow-x-hidden rounded-xl border border-border-default bg-surface-card shadow-lg backdrop-blur-sm animate-fade-in"
           >
             {filtered.map((model, i) => {
               const locked = isLocked(model, disableUnsessionable)
