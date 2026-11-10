@@ -1026,7 +1026,13 @@ def test_boolean_is_refused_for_any_integer_setting(client):
     """
     clear_settings_cache()
     baseline = get_settings()
-    for key in ("max_concurrent_repo_clones", "results_retention_days"):
+    for key in (
+        "chat_clone_depth",
+        "max_concurrent_repo_clones",
+        "results_retention_days",
+        "max_concurrent_ai_calls",
+        "session_ttl_hours",
+    ):
         refused = client.put(
             "/api/admin/settings",
             headers=_admin_headers(),
@@ -1037,7 +1043,14 @@ def test_boolean_is_refused_for_any_integer_setting(client):
         clear_settings_cache()
         assert getattr(get_settings(), key) == getattr(baseline, key), key
 
-    update_db_settings_cache({"chat_clone_depth": "2", "results_retention_days": "45"})
+    # Through the save path, not the cache: that is where the bug wrote "True".
+    for key, value in (("chat_clone_depth", 2), ("results_retention_days", 45)):
+        saved = client.put(
+            "/api/admin/settings",
+            headers=_admin_headers(),
+            json={"settings": {key: value}},
+        )
+        assert saved.status_code == 200, key
     clear_settings_cache()
     merged = get_settings()
     assert (merged.chat_clone_depth, merged.results_retention_days) == (2, 45)
