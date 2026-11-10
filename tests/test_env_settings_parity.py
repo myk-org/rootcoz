@@ -15,6 +15,7 @@ from rootcoz.config import (
     Settings,
     clear_db_settings_cache,
     clear_settings_cache,
+    db_setting_is_set,
     get_settings,
     update_db_settings_cache,
 )
@@ -1013,3 +1014,30 @@ def test_chat_clone_depth_is_a_server_setting(client, monkeypatch):
     assert saved.status_code == 200
     clear_settings_cache()
     assert get_settings().chat_clone_depth == 2
+
+
+def test_boolean_is_refused_for_any_integer_setting(client):
+    """The guard is in the shared integer validator, not on ``chat_clone_depth``.
+
+    ``int(True)`` passes every bound, and the save path persisted ``"True"``,
+    which made ``_build_settings`` fall back and drop *every* DB override — so
+    the rejection must be key-agnostic, must store nothing, and a saved integer
+    must leave the other overrides in effect.
+    """
+    clear_settings_cache()
+    baseline = get_settings()
+    for key in ("max_concurrent_repo_clones", "results_retention_days"):
+        refused = client.put(
+            "/api/admin/settings",
+            headers=_admin_headers(),
+            json={"settings": {key: True}},
+        )
+        assert refused.status_code == 400, key
+        assert not db_setting_is_set(key), key
+        clear_settings_cache()
+        assert getattr(get_settings(), key) == getattr(baseline, key), key
+
+    update_db_settings_cache({"chat_clone_depth": "2", "results_retention_days": "45"})
+    clear_settings_cache()
+    merged = get_settings()
+    assert (merged.chat_clone_depth, merged.results_retention_days) == (2, 45)
