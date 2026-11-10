@@ -1,12 +1,17 @@
 """Shared AI relevance filtering for issue matching (Jira, GitHub, etc.).
 
 Provides the common logic for using AI to evaluate whether candidate
-issues from any tracker match a given bug/failure description, plus the
-per-tracker search record (``TrackerSearch``) both tracker paths fill in.
+issues from any tracker match a given bug/failure description, the
+per-tracker search record (``TrackerSearch``) both tracker paths fill in,
+and the one search loop both trackers run (``run_tracker_search``): one
+loop, three adapters — Jira duplicates, GitHub duplicates and the GitHub
+tests-repo question.
 """
 
+import asyncio
 import json
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
+from dataclasses import dataclass
 from typing import Any, TypedDict
 
 from rootcoz import get_child_logger
@@ -100,6 +105,209 @@ def search_failure_reason(
     if filter_failures:
         reasons.append(f"{filter_failures} {filter_label} call(s) failed")
     return "; ".join(reasons)
+
+
+def group_targets_by_keywords[T](
+    items: Sequence[T], keywords_of: Callable[[T], Sequence[str]]
+) -> dict[tuple[str, ...], list[T]]:
+    """Group items by their sorted keyword set — same keywords = one search.
+
+    Items without keywords are skipped: they carry nothing to search for.
+    First-appearance order is kept so the fan-out order is deterministic.
+
+    Args:
+        items: The reports/code-fixes to group.
+        keywords_of: How to read an item's keywords.
+
+    Returns:
+        The sorted keyword tuple of each set mapped to its items.
+    """
+    grouped: dict[tuple[str, ...], list[T]] = {}
+    for item in items:
+        keywords = keywords_of(item)
+        if not keywords:
+            continue
+        grouped.setdefault(tuple(sorted(keywords)), []).append(item)
+    return grouped
+
+
+@dataclass(frozen=True)
+class TrackerSearchSpec:
+    """What one tracker search differs in; the loop owns everything else.
+
+    ``search_targets`` is the fan-out unit (GitHub repositories, or a single
+    opaque unit for Jira) and is deliberately independent of ``scope`` — what
+    a record says was searched. ``filter_matches`` is ``None`` when no AI
+    provider/model is configured: the filter does not run and ``all_matches``
+    converts every candidate instead.
+    """
+
+    label: str
+    search_label: str
+    filter_label: str
+    scope: Sequence[str]
+    search_targets: Sequence[str]
+    search_one: Callable[[tuple[str, ...], str], Awaitable[list[dict[str, Any]] | None]]
+    namespace: Callable[[list[dict[str, Any]], str], list[dict[str, Any]]]
+    bug_context: Callable[[Any], tuple[str, str]]
+    filter_matches: Callable[[str, str, list[dict[str, Any]]], Awaitable[Any]] | None
+    all_matches: Callable[[list[dict[str, Any]]], Any]
+    attach: Callable[[Any, Any], None]
+
+
+async def run_tracker_search(
+    targets_by_keywords: dict[tuple[str, ...], list[Any]],
+    spec: TrackerSearchSpec,
+    job_id: str = "",
+) -> TrackerSearch:
+    """Search every unit per keyword set, filter, attach, record.
+
+    The single loop behind every tracker search: the record must keep three
+    outcomes apart. ``searched: True`` with ``matches: 0`` is a completed
+    judgement; a refused or failed lookup is ``searched: False`` (or a
+    ``reason``) and never reads as "nothing matched"; an oversized prompt is
+    "not run", never a failed filter call.
+
+    Never raises on a tracker failure — a failed search and a failed filter
+    are counted, not propagated. Callers pass a non-empty
+    ``targets_by_keywords`` and ``spec.search_targets`` (their preflight
+    already refused otherwise) and keep their own outer guard.
+
+    Args:
+        targets_by_keywords: Targets grouped by sorted keyword set.
+        spec: The tracker-specific callbacks and labels.
+        job_id: Job identifier for logging and token tracking.
+
+    Returns:
+        The record to stamp on the result.
+    """
+    keyword_sets = len(targets_by_keywords)
+    total_searches = keyword_sets * len(spec.search_targets)
+
+    async def _search_safe(
+        keywords: tuple[str, ...], target: str
+    ) -> list[dict[str, Any]] | None:
+        """One search; ``None`` marks a failure (distinct from an empty list)."""
+        try:
+            return await spec.search_one(keywords, target)
+        except Exception:
+            logger.exception(
+                "%s failed%s with keywords: %s",
+                spec.label,
+                f" for {target}" if target else "",
+                list(keywords),
+            )
+            return None
+
+    search_results = await asyncio.gather(
+        *(
+            _search_safe(keywords, target)
+            for keywords in targets_by_keywords
+            for target in spec.search_targets
+        )
+    )
+
+    failed_searches = 0
+    filter_failures = 0
+    oversized_filters = 0
+    total_candidates = 0
+    total_matches = 0
+    for index, (keywords, targets) in enumerate(targets_by_keywords.items()):
+        candidates: list[dict[str, Any]] = []
+        for offset, target in enumerate(spec.search_targets):
+            found = search_results[index * len(spec.search_targets) + offset]
+            if found is None:
+                failed_searches += 1
+                continue
+            candidates.extend(spec.namespace(found, target))
+        total_candidates += len(candidates)
+        if not candidates:
+            continue
+
+        bug_title, bug_description = spec.bug_context(targets[0])
+        if spec.filter_matches is not None:
+            prompt_chars = len(
+                build_filter_prompt(bug_title, bug_description, candidates)
+            )
+            if prompt_chars > MAX_FILTER_PROMPT_CHARS:
+                # Not sent: the overflow would come back as "no verdict" and be
+                # recorded as a failed filter call instead of an unrun one.
+                logger.warning(
+                    "%s relevance filter not run for %d candidate(s) for job=%s: "
+                    "prompt is %d chars, over the %d char limit",
+                    spec.label,
+                    len(candidates),
+                    job_id,
+                    prompt_chars,
+                    MAX_FILTER_PROMPT_CHARS,
+                )
+                oversized_filters += 1
+                continue
+            try:
+                matches = await spec.filter_matches(
+                    bug_title, bug_description, candidates
+                )
+            except Exception:
+                # One failed filter must not discard the keyword sets after it:
+                logger.exception(
+                    "%s relevance filtering failed for %d candidate(s) for job=%s",
+                    spec.label,
+                    len(candidates),
+                    job_id,
+                )
+                filter_failures += 1
+                continue
+            if matches is None:
+                # The filter could not judge — not the same as judging every
+                # candidate irrelevant.
+                logger.warning(
+                    "%s relevance filter returned no verdict for %d candidate(s) "
+                    "for job=%s",
+                    spec.label,
+                    len(candidates),
+                    job_id,
+                )
+                filter_failures += 1
+                continue
+        else:
+            # No AI config — fall back to returning all candidates as matches
+            logger.debug(
+                "No AI provider configured for %s relevance filtering, "
+                "returning all candidates",
+                spec.label,
+            )
+            matches = spec.all_matches(candidates)
+
+        for target in targets:
+            spec.attach(target, matches)
+        total_matches += len(matches)
+
+    reason = search_failure_reason(
+        search_label=spec.search_label,
+        filter_label=spec.filter_label,
+        failed_searches=failed_searches,
+        total_searches=total_searches,
+        filter_failures=filter_failures,
+        prompt_overflows=oversized_filters,
+    )
+    if reason:
+        logger.warning("%s: %s for job=%s", spec.label, reason, job_id)
+    logger.info(
+        "%s complete for job=%s: %d keyword set(s), %d candidate(s), %d match(es)",
+        spec.label,
+        job_id,
+        keyword_sets,
+        total_candidates,
+        total_matches,
+    )
+    return tracker_search(
+        searched=failed_searches < total_searches,
+        reason=reason,
+        scope=list(spec.scope),
+        keyword_sets=keyword_sets,
+        candidates=total_candidates,
+        matches=total_matches,
+    )
 
 
 def collect_product_bug_reports(

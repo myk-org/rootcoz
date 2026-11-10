@@ -7,14 +7,14 @@ Two questions, two destinations:
 - **duplicate** — searches the run's own repositories for an already-filed
   issue matching a ``PRODUCT BUG`` (``ProductBugReport.github_matches``).
 
-Both use the same transport (:func:`search_github_issues`) and the same shared
-AI relevance filter (``issue_matching.filter_issue_matches_with_ai``).
+Both use the same transport (:func:`search_github_issues`), the same shared
+AI relevance filter (``issue_matching.filter_issue_matches_with_ai``) and the
+same search loop (``issue_matching.run_tracker_search``).
 
 Mirrors the Jira integration pattern in ``jira.py``.
 """
 
-import asyncio
-from collections.abc import Callable, Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any
 
 import httpx
@@ -23,12 +23,12 @@ from rootcoz import get_child_logger
 from rootcoz.bug_creation import parse_github_repo_url
 from rootcoz.config import Settings, parse_repo_ref
 from rootcoz.issue_matching import (
-    MAX_FILTER_PROMPT_CHARS,
     TrackerSearch,
-    build_filter_prompt,
+    TrackerSearchSpec,
     collect_product_bug_reports,
     filter_issue_matches_with_ai,
-    search_failure_reason,
+    group_targets_by_keywords,
+    run_tracker_search,
     tracker_search,
 )
 from rootcoz.models import (
@@ -271,175 +271,39 @@ def _namespace_candidates(
     ]
 
 
-async def _search_and_filter(
-    targets_by_keywords: dict[tuple[str, ...], list[Any]],
-    *,
-    repo_urls: Sequence[str],
-    github_token: str,
-    bug_context: Callable[[Any], tuple[str, str]],
-    attach: Callable[[Any, list[SimilarIssue]], None],
+def _github_filter(
     call_type: str,
     ai_provider: str,
     ai_model: str,
     ai_call_timeout: int | None,
     job_id: str,
-) -> TrackerSearch:
-    """Search every repository per keyword set, filter, attach, record.
+) -> Callable[[str, str, list[dict[str, Any]]], Awaitable[list[SimilarIssue] | None]]:
+    """The relevance filter for one GitHub question, ready for the shared loop.
 
-    Shared by both questions; the callers differ only in the keyword source,
-    the repositories, the AI bug context, the ``call_type`` and where the
-    matches land. Never raises: a failed search is counted, not propagated.
+    Closes over the per-call AI facts (provider, model, timeout, ``job_id``
+    and the question's ``call_type``) so the adapters pass one value. The
+    conversion to ``SimilarIssue`` is inside the closure, so a malformed AI
+    key costs its keyword set instead of abandoning the record.
     """
-    if not repo_urls:
-        return tracker_search(
-            reason=(
-                "GitHub duplicate search cannot run: no GitHub repository is in scope"
-            )
+
+    async def _filter(
+        bug_title: str, bug_description: str, candidates: list[dict[str, Any]]
+    ) -> list[SimilarIssue] | None:
+        evaluations = await filter_issue_matches_with_ai(
+            bug_title=bug_title,
+            bug_description=bug_description,
+            candidates=candidates,
+            ai_provider=ai_provider,
+            ai_model=ai_model,
+            ai_call_timeout=ai_call_timeout,
+            job_id=job_id,
+            call_type=call_type,
         )
-    if not targets_by_keywords:
-        return tracker_search(reason="no failure carried search keywords")
-
-    keyword_sets = len(targets_by_keywords)
-    total_searches = keyword_sets * len(repo_urls)
-
-    async def _search_safe(
-        keywords: tuple[str, ...], repo_url: str
-    ) -> list[dict[str, Any]] | None:
-        """One search; ``None`` marks a failure (distinct from an empty list)."""
-        try:
-            return await search_github_issues(list(keywords), repo_url, github_token)
-        except Exception:
-            logger.exception(
-                "GitHub Issues search failed for %s with keywords: %s",
-                repo_url,
-                list(keywords),
-            )
+        if evaluations is None:
             return None
+        return _evaluations_to_similar_issues(evaluations, candidates)
 
-    search_results = await asyncio.gather(
-        *(
-            _search_safe(keywords, repo_url)
-            for keywords in targets_by_keywords
-            for repo_url in repo_urls
-        )
-    )
-
-    failed_searches = 0
-    filter_failures = 0
-    oversized_filters = 0
-    total_candidates = 0
-    total_matches = 0
-    for index, (keywords, targets) in enumerate(targets_by_keywords.items()):
-        candidates: list[dict[str, Any]] = []
-        for offset, repo_url in enumerate(repo_urls):
-            found = search_results[index * len(repo_urls) + offset]
-            if found is None:
-                failed_searches += 1
-                continue
-            candidates.extend(_namespace_candidates(found, repo_url))
-        total_candidates += len(candidates)
-        if not candidates:
-            continue
-
-        bug_title, bug_description = bug_context(targets[0])
-        if ai_provider and ai_model:
-            prompt_chars = len(
-                build_filter_prompt(bug_title, bug_description, candidates)
-            )
-            if prompt_chars > MAX_FILTER_PROMPT_CHARS:
-                # Not sent: the overflow would come back as "no verdict" and be
-                # recorded as a failed verdict instead of an unrun one.
-                logger.warning(
-                    "GitHub %s relevance filter not run for %d candidate(s) "
-                    "for job=%s: prompt is %d chars, over the %d char limit",
-                    call_type,
-                    len(candidates),
-                    job_id,
-                    prompt_chars,
-                    MAX_FILTER_PROMPT_CHARS,
-                )
-                oversized_filters += 1
-                continue
-            try:
-                evaluations = await filter_issue_matches_with_ai(
-                    bug_title=bug_title,
-                    bug_description=bug_description,
-                    candidates=candidates,
-                    ai_provider=ai_provider,
-                    ai_model=ai_model,
-                    ai_call_timeout=ai_call_timeout,
-                    job_id=job_id,
-                    call_type=call_type,
-                )
-                # Conversion is inside the guard too: a malformed AI key must
-                # cost this keyword set, not abandon the whole record.
-                if evaluations is not None:
-                    matches = _evaluations_to_similar_issues(evaluations, candidates)
-            except Exception:
-                # One failed filter must not discard the keyword sets after it:
-                # their searches already succeeded.
-                logger.exception(
-                    "GitHub %s relevance filtering failed for %d candidate(s) "
-                    "for job=%s",
-                    call_type,
-                    len(candidates),
-                    job_id,
-                )
-                filter_failures += 1
-                continue
-            if evaluations is None:
-                # The filter could not judge — not the same as judging every
-                # candidate irrelevant.
-                logger.warning(
-                    "GitHub %s relevance filter returned no verdict for %d "
-                    "candidate(s) for job=%s",
-                    call_type,
-                    len(candidates),
-                    job_id,
-                )
-                filter_failures += 1
-                continue
-        else:
-            # No AI config — fall back to returning all candidates as matches
-            logger.debug(
-                "No AI provider configured for %s relevance filtering, "
-                "returning all candidates",
-                call_type,
-            )
-            matches = _to_similar_issues(candidates)
-
-        for target in targets:
-            attach(target, matches)
-        total_matches += len(matches)
-
-    # A failed search is a warning, a configuration reason is not.
-    reason = search_failure_reason(
-        search_label="GitHub issue search(es)",
-        filter_label="GitHub relevance filter",
-        failed_searches=failed_searches,
-        total_searches=total_searches,
-        filter_failures=filter_failures,
-        prompt_overflows=oversized_filters,
-    )
-    if reason:
-        logger.warning("GitHub %s: %s for job=%s", call_type, reason, job_id)
-    logger.info(
-        "GitHub %s complete for job=%s: %d keyword set(s), %d candidate(s), "
-        "%d match(es)",
-        call_type,
-        job_id,
-        keyword_sets,
-        total_candidates,
-        total_matches,
-    )
-    return tracker_search(
-        searched=failed_searches < total_searches,
-        reason=reason,
-        scope=list(repo_urls),
-        keyword_sets=keyword_sets,
-        candidates=total_candidates,
-        matches=total_matches,
-    )
+    return _filter
 
 
 def _collect_code_fix_reports(
@@ -487,9 +351,9 @@ async def enrich_with_tests_repo_matches(
     """Search GitHub Issues for matching issues and attach results in-place.
 
     Collects CODE ISSUE failures with tests_repo_search_keywords,
-    deduplicates by keyword set, searches the tests repository in parallel,
-    uses AI to filter relevant matches, and attaches results to
-    each ``CodeFix.tests_repo_matches``.
+    deduplicates by keyword set, and runs the shared search loop
+    (:func:`~rootcoz.issue_matching.run_tracker_search`), which attaches
+    results to each ``CodeFix.tests_repo_matches``.
 
     This function never raises — all errors are logged and swallowed
     so the analysis pipeline is never interrupted.
@@ -513,13 +377,9 @@ async def enrich_with_tests_repo_matches(
     if not code_fix_pairs:
         return
 
-    # Deduplicate by keyword set — same keywords = one GitHub search
-    keyword_to_pairs: dict[tuple[str, ...], list[tuple[FailureAnalysis, CodeFix]]] = {}
-    for failure, code_fix in code_fix_pairs:
-        if not code_fix.tests_repo_search_keywords:
-            continue
-        key = tuple(sorted(code_fix.tests_repo_search_keywords))
-        keyword_to_pairs.setdefault(key, []).append((failure, code_fix))
+    keyword_to_pairs = group_targets_by_keywords(
+        code_fix_pairs, lambda pair: pair[1].tests_repo_search_keywords
+    )
 
     if not keyword_to_pairs:
         logger.debug(
@@ -534,26 +394,45 @@ async def enrich_with_tests_repo_matches(
         len(code_fix_pairs),
     )
 
-    def attach(
+    async def _search_one(
+        keywords: tuple[str, ...], target: str
+    ) -> list[dict[str, Any]] | None:
+        return await search_github_issues(list(keywords), target, github_token)
+
+    def _attach(
         pair: tuple[FailureAnalysis, CodeFix], matches: list[SimilarIssue]
     ) -> None:
         pair[1].tests_repo_matches = matches
 
+    repo_url = str(tests_repo_url)
+    spec = TrackerSearchSpec(
+        label="GitHub tests-repo search",
+        search_label="GitHub issue search(es)",
+        filter_label="GitHub relevance filter",
+        scope=[repo_url],
+        search_targets=(repo_url,),
+        search_one=_search_one,
+        namespace=_namespace_candidates,
+        bug_context=_code_fix_bug_context,
+        filter_matches=(
+            _github_filter(
+                _CODE_FIX_CALL_TYPE,
+                ai_provider,
+                ai_model,
+                settings.ai_call_timeout,
+                job_id,
+            )
+            if ai_provider and ai_model
+            else None
+        ),
+        all_matches=_to_similar_issues,
+        attach=_attach,
+    )
+
     try:
-        # This search answers the code-fix question, so it is not part of the
-        # per-tracker duplicate record the caller stamps on the result.
-        await _search_and_filter(
-            keyword_to_pairs,
-            repo_urls=[str(tests_repo_url)],
-            github_token=github_token,
-            bug_context=_code_fix_bug_context,
-            attach=attach,
-            call_type=_CODE_FIX_CALL_TYPE,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            ai_call_timeout=settings.ai_call_timeout,
-            job_id=job_id,
-        )
+        # This search answers the code-fix question, so its record is not one
+        # of the two the caller stamps on the result.
+        await run_tracker_search(keyword_to_pairs, spec, job_id=job_id)
     except Exception:
         logger.exception("GitHub Issues enrichment failed unexpectedly")
 
@@ -594,12 +473,10 @@ async def enrich_with_github_duplicate_matches(
         logger.info("GitHub duplicate search not run for job=%s: %s", job_id, blocker)
         return tracker_search(reason=blocker, scope=scope)
 
-    keyword_to_reports: dict[tuple[str, ...], list[ProductBugReport]] = {}
-    for report in collect_product_bug_reports(failures):
-        if not report.jira_search_keywords:
-            continue
-        key = tuple(sorted(report.jira_search_keywords))
-        keyword_to_reports.setdefault(key, []).append(report)
+    keyword_to_reports = group_targets_by_keywords(
+        collect_product_bug_reports(failures),
+        lambda report: report.jira_search_keywords,
+    )
 
     if not keyword_to_reports:
         reason = "no PRODUCT BUG failure carried search keywords"
@@ -614,22 +491,40 @@ async def enrich_with_github_duplicate_matches(
         job_id,
     )
 
-    def attach(report: ProductBugReport, matches: list[SimilarIssue]) -> None:
+    async def _search_one(
+        keywords: tuple[str, ...], target: str
+    ) -> list[dict[str, Any]] | None:
+        return await search_github_issues(list(keywords), target, github_token)
+
+    def _attach(report: ProductBugReport, matches: list[SimilarIssue]) -> None:
         report.github_matches = matches
 
+    spec = TrackerSearchSpec(
+        label="GitHub duplicate search",
+        search_label="GitHub issue search(es)",
+        filter_label="GitHub relevance filter",
+        scope=scope,
+        search_targets=scope,
+        search_one=_search_one,
+        namespace=_namespace_candidates,
+        bug_context=lambda report: (report.title, report.description),
+        filter_matches=(
+            _github_filter(
+                _DUPLICATE_CALL_TYPE,
+                ai_provider,
+                ai_model,
+                settings.ai_call_timeout,
+                job_id,
+            )
+            if ai_provider and ai_model
+            else None
+        ),
+        all_matches=_to_similar_issues,
+        attach=_attach,
+    )
+
     try:
-        return await _search_and_filter(
-            keyword_to_reports,
-            repo_urls=scope,
-            github_token=github_token,
-            bug_context=lambda report: (report.title, report.description),
-            attach=attach,
-            call_type=_DUPLICATE_CALL_TYPE,
-            ai_provider=ai_provider,
-            ai_model=ai_model,
-            ai_call_timeout=settings.ai_call_timeout,
-            job_id=job_id,
-        )
+        return await run_tracker_search(keyword_to_reports, spec, job_id=job_id)
     except Exception:
         logger.exception("GitHub duplicate enrichment failed unexpectedly")
         return tracker_search(

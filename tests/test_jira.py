@@ -943,6 +943,39 @@ class TestEnrichWithJiraMatches:
         assert record["scope"] == ["PROJ"]
         assert record["searched"] is True
 
+    async def test_filter_sees_raw_jira_keys(
+        self, product_bug_failure, jira_settings
+    ) -> None:
+        """Jira keys are globally unique, so the shared loop namespaces nothing."""
+        mock_candidates = [
+            {
+                "key": "PROJ-600",
+                "summary": "Login fails",
+                "description": "500",
+                "status": "Open",
+                "priority": "High",
+                "url": "https://jira.example.com/browse/PROJ-600",
+            },
+        ]
+        with patch("rootcoz.jira.JiraClient") as mock_client_cls:
+            mock_instance = AsyncMock()
+            mock_instance.search = AsyncMock(return_value=mock_candidates)
+            mock_instance.__aenter__ = AsyncMock(return_value=mock_instance)
+            mock_instance.__aexit__ = AsyncMock(return_value=False)
+            mock_client_cls.return_value = mock_instance
+
+            with patch(
+                "rootcoz.jira.filter_matches_with_ai",
+                new_callable=AsyncMock,
+                return_value=[],
+            ) as mock_filter:
+                await enrich_with_jira_matches(
+                    [product_bug_failure], jira_settings, "claude", "test-model"
+                )
+
+        candidates = mock_filter.call_args.kwargs["candidates"]
+        assert [c["key"] for c in candidates] == ["PROJ-600"]
+
 
 class TestJiraConnectionResolver:
     """Tests for the shared JiraConnection resolver (service account mode)."""
