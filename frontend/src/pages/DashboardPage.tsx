@@ -54,6 +54,7 @@ import {
   type TestNameMode,
 } from '@/lib/jobFilters'
 import { MetadataLabelChips } from '@/components/shared/MetadataFilterBar'
+import { ConnectSignInMethodBanner } from '@/components/shared/ConnectSignInMethodBanner'
 import { useMetadataOptions } from '@/components/shared/useMetadataOptions'
 import { useFilterFacets } from '@/components/shared/useFilterFacets'
 import { useSubmitters } from '@/components/shared/useSubmitters'
@@ -720,6 +721,8 @@ export function DashboardPage() {
   return (
     <TooltipProvider delayDuration={200}>
       <div className="space-y-6">
+        {/* A nudge, not a notification: only when SSO is offered and unused. */}
+        <ConnectSignInMethodBanner />
         {/* Filters — one shared bar, so both pages carry the same row (#546 A) */}
         <JobFilterBar
           page="dashboard"

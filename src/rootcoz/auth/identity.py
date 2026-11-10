@@ -38,8 +38,9 @@ logger = get_child_logger(__name__)
 
 #: Same shape the register path enforces (one definition lives in storage).
 
-#: Prefix reserved for system identities (``rootcoz-ai`` and friends).
-_RESERVED_PREFIX = "rootcoz"
+#: Prefix reserved for system identities (``rootcoz-ai`` and friends). Storage
+#: enforces the same constant at the creation choke point.
+_RESERVED_PREFIX = storage.RESERVED_USERNAME_PREFIX
 
 
 def is_reserved_username(candidate: str) -> bool:
@@ -67,11 +68,15 @@ class IdentityResolution:
         username: Local username.
         created: True when this login created the account.
         status: The account's approval status after resolution.
+        api_key: The raw API key of an account created here, shown to the person
+            once. Empty for a login that resolved an existing account — no key is
+            ever re-readable.
     """
 
     username: str
     created: bool
     status: str
+    api_key: str = ""
 
 
 @dataclass(frozen=True)
@@ -376,7 +381,7 @@ async def create_new(
     candidate = username.strip().lower()
     status = "pending" if settings.require_approval else "active"
     try:
-        await storage.create_user_with_identity(
+        api_key = await storage.create_user_with_identity(
             candidate,
             provider=provider,
             subject=subject,
@@ -390,4 +395,6 @@ async def create_new(
             "identity_conflict" if "already linked" in str(exc) else "invalid_username"
         )
         raise AuthError(reason, str(exc), subject=candidate) from exc
-    return IdentityResolution(username=candidate, created=True, status=status)
+    return IdentityResolution(
+        username=candidate, created=True, status=status, api_key=api_key
+    )
