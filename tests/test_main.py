@@ -15115,6 +15115,22 @@ class TestAdminSettingsEndpoints:
         assert "gateway" in detail
         assert "atlassian.net" in detail
 
+    def test_put_settings_malformed_site_url_rejected(self, test_client) -> None:
+        """A malformed authority is a 422 naming the field, not a crash (#496).
+
+        ``urlsplit`` raises on ``https://[::1``, so the validator must answer
+        with the same refusal instead of letting the exception escape the
+        settings write.
+        """
+        response = test_client.put(
+            "/api/admin/settings",
+            json={"settings": {"jira_site_url": "https://[::1"}},
+        )
+        assert response.status_code == 422
+        detail = response.json()["detail"]
+        assert "jira_site_url" in detail
+        assert "absolute http(s)" in detail
+
     def test_put_settings_plain_uuid_cloud_id_accepted(self, test_client) -> None:
         """PUT accepts a plain-UUID cloud ID and it round-trips."""
         response = test_client.put(

@@ -9,6 +9,7 @@ const CLOUD_ID = '2b9e35e3-6bd3-4cec-b838-f4249ee02432'
 const BROKEN: [string, string][] = [
   ['no URL', ''],
   ['a scoped API gateway URL', `https://api.atlassian.com/ex/jira/${CLOUD_ID}/browse/CNV-1`],
+  ['a dotted API gateway URL', `https://api.atlassian.com./ex/jira/${CLOUD_ID}/browse/CNV-1`],
   ['a relative URL', '/browse/CNV-1'],
   ['a non-http scheme', 'javascript:alert(1)'],
 ]

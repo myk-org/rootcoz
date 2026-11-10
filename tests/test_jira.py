@@ -1330,6 +1330,29 @@ class TestExplicitJiraAuthMode:
         )
         assert resolve_jira_connection(settings).browse_base == ""
 
+    @pytest.mark.parametrize(
+        "site_url,why",
+        [
+            (
+                "https://api.atlassian.com./ex/jira/2b9e35e3-6bd3-4cec-b838-f4249ee02432",
+                "the dotted gateway spelling is the same DNS name",
+            ),
+            ("https://[::1", "a malformed authority is not a URL to browse"),
+        ],
+        ids=["dotted-gateway", "malformed-authority"],
+    )
+    def test_unusable_site_url_is_not_a_browse_base(
+        self, site_url: str, why: str
+    ) -> None:
+        """An unusable JIRA_SITE_URL yields no browse base, never an exception (#496)."""
+        settings = self._settings(
+            JIRA_AUTH_MODE="atst",
+            JIRA_ATST_TOKEN="ATST-test-token",  # pragma: allowlist secret
+            ATLASSIAN_OAUTH_CLOUD_ID="2b9e35e3-6bd3-4cec-b838-f4249ee02432",
+            JIRA_SITE_URL=site_url,
+        )
+        assert resolve_jira_connection(settings).browse_base == "", why
+
 
 class TestJiraClientAtst:
     """JiraClient behavior with an ATST service-account scoped token."""

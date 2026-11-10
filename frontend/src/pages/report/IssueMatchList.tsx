@@ -17,7 +17,9 @@ function matchHref(url: string): string {
   try {
     const parsed = new URL(url) // throws for '' and for a relative URL
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return ''
-    return parsed.hostname.toLowerCase() === 'api.atlassian.com' ? '' : url
+    // A trailing dot is the same DNS name, so the gateway is the gateway either way.
+    const host = parsed.hostname.toLowerCase().replace(/\.$/, '')
+    return host === 'api.atlassian.com' ? '' : url
   } catch {
     return ''
   }
