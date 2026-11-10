@@ -675,3 +675,172 @@ async def test_a_welcome_prune_survives_one_contended_lock(
         "the stale welcome must be gone"
     )
     assert counter["contended"] == 1, "the lock was retried, not surfaced"
+
+
+#: Statements that take the write lock: the first one on a connection is where a
+#: held lock answers ``database is locked``.
+_WRITE_KEYWORDS = ("insert", "update", "delete", "replace")
+
+
+def _is_lock_statement(sql: str) -> bool:
+    words = sql.lstrip().split(None, 2)
+    keyword = words[0].lower() if words else ""
+    return keyword in _WRITE_KEYWORDS or (
+        keyword == "begin" and len(words) > 1 and words[1].lower() == "immediate"
+    )
+
+
+class _HeldLock:
+    """A lock held across the first attempt of *every* write, for one whole run.
+
+    A real held lock is not repeatable in a unit test, so this hands out the same
+    answer deterministically: the first attempt of a statement loses the lock, and
+    the connection a retry opens for that same statement is let through. A write
+    nothing retries therefore fails exactly as the R5 run failed, which is what
+    makes a preparation-level test cover the path instead of one named function.
+    """
+
+    def __init__(self) -> None:
+        self.awaiting_retry: set[str] = set()
+        self.contended = 0
+
+    def wrap(self, db):
+        return _LockedConnection(db, self)
+
+
+class _LockedConnection:
+    def __init__(self, db, held: _HeldLock) -> None:
+        self._db = db
+        self._held = held
+        #: This connection is a retry, so every write on it may commit.
+        self._retried = False
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+    async def execute(self, sql, *args, **kwargs):
+        self._contend(sql)
+        return await self._db.execute(sql, *args, **kwargs)
+
+    async def executemany(self, sql, *args, **kwargs):
+        self._contend(sql)
+        return await self._db.executemany(sql, *args, **kwargs)
+
+    def _contend(self, sql: str) -> None:
+        if self._retried or not _is_lock_statement(sql):
+            return
+        if sql in self._held.awaiting_retry:
+            self._held.awaiting_retry.discard(sql)
+            self._retried = True
+            return
+        self._held.awaiting_retry.add(sql)
+        self._held.contended += 1
+        raise sqlite3.OperationalError("database is locked")
+
+
+@pytest.mark.asyncio
+async def test_the_whole_preparation_survives_a_lock_on_every_write(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """R5, closed as a class: prepare a chat while every write loses the lock once.
+
+    Two rounds pinned one write each and the run then failed on the next write
+    along — ``create_ai_session_with_source``, which the preparation reaches
+    before either of them. So this drives the real preparation end to end
+    (``/init`` preflight, session create with its provenance row, session marker,
+    welcome prune, welcome row) under one held lock and asserts it ends ready with
+    its rows present. It fails if *any* write on that path stops being retried.
+    """
+    from rootcoz.engine import chat, graft_http
+    from rootcoz.sources import chat_workspace
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "chat.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    await storage.save_result(
+        "job", "", "completed", {"status": "completed", "result": {}}
+    )
+    monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *a, **k: tmp_path)
+    monkeypatch.setattr(chat, "clone_chat_repos", AsyncMock(return_value=False))
+    monkeypatch.setattr(graft_http, "cloned_graph_roots", lambda workspace: {})
+    monkeypatch.setattr(
+        chat_workspace, "setup_ci_build_workspace", AsyncMock(return_value=False)
+    )
+    monkeypatch.setattr(
+        main,
+        "_resolve_chat_credentials",
+        AsyncMock(return_value=("", "", None, "", "")),
+    )
+    monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
+    monkeypatch.setattr(
+        chat, "resolve_catalog_pair", AsyncMock(return_value=("openai", "m"))
+    )
+    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(ai_client, "server_provider_key", AsyncMock(return_value=None))
+
+    async def create_session(**kwargs):
+        return "sess-1"
+
+    monkeypatch.setattr(
+        chat,
+        "get_sidecar_client",
+        lambda: SimpleNamespace(
+            create_session=create_session, delete_session=AsyncMock()
+        ),
+    )
+
+    async def validate(body, username):
+        ai_client._selected_credential_source.set("server")
+        return body.ai_provider, body.ai_model
+
+    monkeypatch.setattr(main, "_validate_chat_selection", validate)
+    # The internal tools token is a bare INSERT, and the preparation swallows its
+    # failure: a lock there costs the chat its tools without failing the Start, so
+    # record what it actually returned instead of only asserting readiness.
+    headers: list[str] = []
+    real_header = main._create_ai_auth_header
+
+    async def capture_header(username: str, is_admin: bool = False) -> str:
+        value = await real_header(username, is_admin)
+        headers.append(value)
+        return value
+
+    monkeypatch.setattr(main, "_create_ai_auth_header", capture_header)
+
+    held = _HeldLock()
+    real_connect = storage._connect_db
+
+    @contextlib.asynccontextmanager
+    async def locked_connect(*args, **kwargs):  # type: ignore[no-untyped-def]
+        async with real_connect(*args, **kwargs) as db:
+            yield held.wrap(db)
+
+    monkeypatch.setattr(storage, "_connect_db", locked_connect)
+    monkeypatch.setattr(storage, "_LOCK_RETRY_BACKOFF_SECONDS", 0)
+
+    request = SimpleNamespace(
+        state=SimpleNamespace(username="alice", is_admin=False, role="reviewer")
+    )
+    started = await main.init_chat(
+        "job", request, ChatInitRequest(ai_provider="openai", ai_model="m")
+    )
+    assert started["ready"] is False
+    await _settle("job")
+
+    active = await storage.get_latest_chat_session("job", "alice")
+    assert active is not None, "the preparation ended without its session row"
+    assert active["session_id"] == "sess-1"
+    assert headers and headers[0].startswith("Bearer "), (
+        "the internal tools token was lost to the lock"
+    )
+    assert (
+        await storage.get_ai_session_source("sess-1", "alice", "openai") == "server"
+    ), "the session has no provenance row"
+    contents = [m["content"] for m in await storage.get_chat_messages("job")]
+    assert any(c.startswith("👋 Welcome!") for c in contents), (
+        "the preparation ended without its welcome row"
+    )
+    assert not _error_rows(await storage.get_chat_messages("job", username="alice")), (
+        "the preparation reported a failure row"
+    )
+    assert held.contended >= 5, "every write on the path must be exercised"

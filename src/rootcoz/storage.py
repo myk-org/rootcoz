@@ -9538,13 +9538,19 @@ async def create_session(
     token_hash = _hash_session_token(token)
     expires_at = datetime.now(UTC) + timedelta(hours=ttl_hours)
     expires_str = expires_at.strftime("%Y-%m-%d %H:%M:%S")
-    async with _connect_db() as db:
-        await db.execute(
-            "INSERT INTO sessions (token, username, is_admin, expires_at, role)"
-            " VALUES (?, ?, ?, ?, ?)",
-            (token_hash, username, 1 if is_admin else 0, expires_str, role),
-        )
-        await db.commit()
+
+    async def _insert() -> None:
+        async with _connect_db() as db:
+            await db.execute(
+                "INSERT INTO sessions (token, username, is_admin, expires_at, role)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (token_hash, username, 1 if is_admin else 0, expires_str, role),
+            )
+            await db.commit()
+
+    # Chat Start mints one of these for its internal tools and swallows the
+    # failure, so a momentary lock silently started the chat without tools.
+    await _retry_contended(_insert)
     return token
 
 
@@ -10416,7 +10422,9 @@ async def create_ai_session_with_source(
         ).fetchone()
     session_id = await create()
     active_collision = False
-    try:
+
+    async def _insert() -> None:
+        nonlocal active_collision
         async with _connect_db() as db:
             await db.execute("BEGIN IMMEDIATE")
             if await (
@@ -10458,6 +10466,12 @@ async def create_ai_session_with_source(
                 active_collision = True
                 raise ValueError("AI session ID already active")
             await db.commit()
+
+    try:
+        # The first write a chat Start performs. A contended lock here used to
+        # take the whole preparation down — and with it the sidecar session just
+        # created — so the lock is retried instead of the session reported lost.
+        await _retry_contended(_insert)
     except Exception:
         if not active_collision:
             from pi_sidecar_client import get_sidecar_client
