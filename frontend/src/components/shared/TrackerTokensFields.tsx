@@ -34,6 +34,10 @@ interface TrackerTokensFieldsProps {
   /** A field of this connection was edited and not saved yet, so the button
    *  must not silently test the previously saved token. */
   unsaved?: Partial<Record<Tracker, boolean>>
+  /** The saved row is known. Until the server has answered — and after a read
+   *  that failed — the fields are empty rather than describing what is stored,
+   *  so a test would answer for nothing. */
+  tokensHydrated?: boolean
 }
 
 export function TrackerTokensFields({
@@ -52,6 +56,7 @@ export function TrackerTokensFields({
   newPasswordAutoComplete = false,
   testable = false,
   unsaved = {},
+  tokensHydrated = false,
 }: TrackerTokensFieldsProps) {
   const [showGithubToken, setShowGithubToken] = useState(false)
   const [showJiraToken, setShowJiraToken] = useState(false)
@@ -60,22 +65,30 @@ export function TrackerTokensFields({
   const [testResult, setTestResult] = useState<{ tracker: Tracker; result: TestIntegrationResult } | null>(null)
   // A ref, not the state above: two clicks inside one render must still be one request.
   const inFlight = useRef(false)
+  /** Bumped by every edit of a tracker's fields. A response that arrives after
+   *  an edit describes a value the form no longer shows, so it is dropped. */
+  const editGeneration = useRef<Partial<Record<Tracker, number>>>({})
 
   const prefix = idPrefix ? `${idPrefix}-` : ''
 
   async function handleTest(tracker: Tracker) {
     if (inFlight.current) return
     inFlight.current = true
+    const generation = editGeneration.current[tracker] ?? 0
     setTesting(tracker)
     setTestResult(null)
+    // An edit made while this request runs invalidates it: the answer describes
+    // the token that was saved when it started, not the edited fields.
+    const publish = (result: TestIntegrationResult) => {
+      if ((editGeneration.current[tracker] ?? 0) === generation) {
+        setTestResult({ tracker, result })
+      }
+    }
     try {
       // No body: the endpoint tests the caller's saved tokens, never these fields.
-      setTestResult({ tracker, result: await api.testUserTokens(tracker) })
+      publish(await api.testUserTokens(tracker))
     } catch (err) {
-      setTestResult({
-        tracker,
-        result: { ok: false, message: err instanceof Error ? err.message : 'Test failed' },
-      })
+      publish({ ok: false, message: err instanceof Error ? err.message : 'Test failed' })
     } finally {
       inFlight.current = false
       setTesting(null)
@@ -84,12 +97,14 @@ export function TrackerTokensFields({
 
   /** An edit invalidates a result that described the saved token. */
   function dropResult(tracker: Tracker) {
+    editGeneration.current[tracker] = (editGeneration.current[tracker] ?? 0) + 1
     setTestResult((prev) => (prev?.tracker === tracker ? null : prev))
   }
 
   function testControls(tracker: Tracker, label: string) {
     if (!testable) return null
     const needsSave = unsaved[tracker] === true
+    const blocked = needsSave || !tokensHydrated
     return (
       <div className="space-y-2">
         <TooltipProvider delayDuration={200}>
@@ -103,7 +118,7 @@ export function TrackerTokensFields({
                   className="h-7 text-xs"
                   aria-label={`Test ${label} connection`}
                   onClick={() => void handleTest(tracker)}
-                  disabled={testing !== null || needsSave}
+                  disabled={testing !== null || blocked}
                 >
                   {testing === tracker ? (
                     <><Loader2 className="mr-1 h-3 w-3 animate-spin" />Testing…</>
@@ -116,7 +131,9 @@ export function TrackerTokensFields({
             <TooltipContent>
               {needsSave
                 ? 'Save changes before testing — this tests the saved token'
-                : 'Tests the saved token, not changes you have not saved'}
+                : !tokensHydrated
+                  ? 'Your saved tokens have not loaded yet, so there is nothing to test'
+                  : 'Tests the saved token, not changes you have not saved'}
             </TooltipContent>
           </Tooltip>
         </TooltipProvider>

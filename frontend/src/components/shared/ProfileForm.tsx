@@ -317,6 +317,7 @@ export function ProfileForm({ onSaved, readOnlyUsername }: ProfileFormProps) {
             jiraValidation={jiraValidation}
             newPasswordAutoComplete
             testable
+            tokensHydrated={tokensHydrated}
             unsaved={{
               github: githubToken.trim() !== baseline.gh,
               jira:

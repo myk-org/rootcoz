@@ -17562,6 +17562,50 @@ class TestUserTokenTestEndpoint:
         assert "integration=github ok=False" in logged
         assert "integration=jira ok=False" in logged
 
+    async def test_unrecognized_sa_token_never_probes_the_server(
+        self, test_client, temp_db_path
+    ) -> None:
+        """A legacy SA value is refused, never dropped in favour of the server.
+
+        Without this the probe falls back to the server settings (the helper
+        leaves them untouched for an unclassifiable value), so a user would
+        get a success that names the SERVER's Jira identity.
+        """
+        headers = await _tracker_user("own-jira-legacy-sa", jira_sa_token="legacy-pat")
+        probe = AsyncMock(return_value={"displayName": "Server Identity"})
+        with (
+            _enable_feature("jira_enabled"),
+            patch("rootcoz.main._integration_test_get_json", probe),
+        ):
+            response = test_client.post("/api/user/tokens/test/jira", headers=headers)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "not a recognized" in data["message"]
+        probe.assert_not_called()
+
+    async def test_unrecognized_sa_token_rejected_even_with_a_regular_token(
+        self, test_client, temp_db_path
+    ) -> None:
+        """A regular token does not buy the invalid SA value a pass."""
+        headers = await _tracker_user(
+            "own-jira-legacy-sa-both",
+            jira_email="both@example.com",
+            jira_token=self._FAKE_JIRA_TOKEN,
+            jira_sa_token="legacy-pat",
+        )
+        probe = AsyncMock(return_value={"displayName": "never"})
+        with (
+            _enable_feature("jira_enabled"),
+            patch("rootcoz.main._integration_test_get_json", probe),
+        ):
+            response = test_client.post("/api/user/tokens/test/jira", headers=headers)
+        assert response.status_code == 200
+        data = response.json()
+        assert data["ok"] is False
+        assert "service account token" in data["message"]
+        probe.assert_not_called()
+
 
 class TestSubmitterAutoTag:
     """Tests for auto-tagging analyses with the submitter username."""

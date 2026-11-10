@@ -10736,6 +10736,36 @@ def _build_effective_jira_settings(
     return settings.model_copy(update=overrides)
 
 
+#: Why an unrecognized service-account value is refused. The same wording
+#: serves the 400 from a tracker action and the ``ok: false`` result of a
+#: user token test — the remedy is the caller's own profile either way.
+_JIRA_SA_TOKEN_UNRECOGNIZED = (
+    "The saved Jira service account token is not a recognized "
+    "Atlassian service-account credential (client secrets start "
+    "with 'ATOA', scoped tokens with 'ATST'). Re-enter your "
+    "token in Profile Settings."
+)
+
+
+def _unusable_jira_sa_token(jira_token: str, jira_sa_token: str) -> bool:
+    """True when an unrecognized service-account value is supplied.
+
+    Shared with ``_require_usable_jira_sa_token`` so the always-200 test
+    route fails closed by the same rule as every endpoint that acts on
+    ``jira_sa_token``. Dropping such a value instead would leave the probe
+    running as the SERVER's Jira identity.
+    """
+    token = (jira_token or "").strip()
+    sa_token = (jira_sa_token or "").strip()
+    if not (sa_token and classify_jira_secret(sa_token) is None):
+        return False
+    logger.info(
+        "Rejecting request with an unrecognized Jira service account token%s",
+        " alongside a regular token" if token else "",
+    )
+    return True
+
+
 def _require_usable_jira_sa_token(jira_token: str, jira_sa_token: str) -> None:
     """400 when an unrecognized SA token is supplied — fail closed.
 
@@ -10752,22 +10782,8 @@ def _require_usable_jira_sa_token(jira_token: str, jira_sa_token: str) -> None:
         HTTPException: 400 when the SA token is set but neither
             ATOA- nor ATST-prefixed, regardless of any regular token.
     """
-    token = (jira_token or "").strip()
-    sa_token = (jira_sa_token or "").strip()
-    if sa_token and classify_jira_secret(sa_token) is None:
-        logger.info(
-            "Rejecting request with an unrecognized Jira service account token%s",
-            " alongside a regular token" if token else "",
-        )
-        raise HTTPException(
-            status_code=400,
-            detail=(
-                "The saved Jira service account token is not a recognized "
-                "Atlassian service-account credential (client secrets start "
-                "with 'ATOA', scoped tokens with 'ATST'). Re-enter your "
-                "token in Profile Settings."
-            ),
-        )
+    if _unusable_jira_sa_token(jira_token, jira_sa_token):
+        raise HTTPException(status_code=400, detail=_JIRA_SA_TOKEN_UNRECOGNIZED)
 
 
 def _require_tracker_url(result: dict[str, Any], tracker_name: str) -> str:
@@ -22075,6 +22091,11 @@ async def test_integration_connection(
 _USER_TOKEN_TEST_INTEGRATIONS: tuple[str, ...] = ("github", "jira")
 
 
+async def _rejected_jira_sa_token() -> dict[str, Any]:
+    """A test result for an unrecognized saved service-account token."""
+    return _test_result(False, _JIRA_SA_TOKEN_UNRECOGNIZED)
+
+
 async def _no_saved_credential(username: str, kind: str) -> dict[str, Any]:
     """A test result for a caller with no saved *kind* credential.
 
@@ -22118,6 +22139,12 @@ async def test_user_token_connection(
         sa_token = (tokens.get("jira_sa_token") or "").strip()
         if not (jira_token or sa_token):
             probe = _no_saved_credential(username, "Jira")
+        elif _unusable_jira_sa_token(jira_token, sa_token):
+            # Same rule the tracker actions apply, for the same reason: an
+            # unrecognized service-account value must be reported, never
+            # silently dropped — dropped, the probe runs as the SERVER's
+            # Jira identity and reports a success the caller cannot reproduce.
+            probe = _rejected_jira_sa_token()
         else:
             # The server's URLs, cloud ID, client ID and TLS flags are the
             # non-secrets a real tracker action pairs with this saved
