@@ -2519,43 +2519,6 @@ async def test_cleanup_deleted_job_offloads_blocking_cleanup(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_index_chat_repositories_discovers_and_logs_off_loop(
-    tmp_path, monkeypatch
-):
-    from rootcoz import main as main_mod
-    from rootcoz.engine import graft, graft_http
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / ".git").mkdir()
-    seen = []
-
-    def index(workspace, roots, deadline=None):
-        with pytest.raises(RuntimeError, match="no running event loop"):
-            asyncio.get_running_loop()
-        seen.append((workspace, roots))
-        return {"repo": {"status": "ready"}}
-
-    original_discover = graft_http.cloned_graph_roots
-
-    def discover(workspace):
-        with pytest.raises(RuntimeError, match="no running event loop"):
-            asyncio.get_running_loop()
-        return original_discover(workspace)
-
-    monkeypatch.setattr(graft_http, "cloned_graph_roots", discover)
-    monkeypatch.setattr(graft, "index_repositories", index)
-    monkeypatch.setattr(
-        graft, "log_index_outcomes", lambda outcomes, **_: seen.append(outcomes)
-    )
-    await main_mod._index_chat_repositories(tmp_path)
-    assert seen == [
-        (tmp_path, original_discover(tmp_path)),
-        {"repo": {"status": "ready"}},
-    ]
-
-
-@pytest.mark.asyncio
 async def test_chat_routes_share_one_lock_scope_and_translation(monkeypatch) -> None:
     """One lock scope and one ``PathStateUnknown`` translation, not four (#424).
 
@@ -2715,7 +2678,9 @@ async def test_process_chat_answers_when_the_workspace_lock_outlives_the_clock(
         "rootcoz.engine.session_tools.install_http_tools_mcp_best_effort_async",
         AsyncMock(),
     )
-    monkeypatch.setattr("rootcoz.engine.graft_http.graph_http_tools", lambda *a: [])
+    monkeypatch.setattr(
+        "rootcoz.engine.graft_http.graph_http_tools", lambda *a, **k: []
+    )
     monkeypatch.setattr(
         "rootcoz.sources.chat_workspace.setup_ci_build_workspace",
         AsyncMock(return_value=False),
@@ -2831,7 +2796,8 @@ async def test_followup_indexes_only_new_or_missing_graph(
         (graft._root(workspace) / "repo" / "manifest.json").unlink()
 
     # The single builder always asks for indexing and decides inside whether a
-    # build is needed, so the observable is the build itself, not the call.
+    # build is needed, so the observable is the build itself, not the call. The
+    # turn only schedules it, so the test waits for the build it started.
 
     monkeypatch.setattr(
         "rootcoz.engine.chat.ensure_chat_workspace", lambda *a, **k: workspace
@@ -2846,7 +2812,9 @@ async def test_followup_indexes_only_new_or_missing_graph(
         "rootcoz.engine.session_tools.install_http_tools_mcp_best_effort_async",
         AsyncMock(),
     )
-    monkeypatch.setattr("rootcoz.engine.graft_http.graph_http_tools", lambda *a: [])
+    monkeypatch.setattr(
+        "rootcoz.engine.graft_http.graph_http_tools", lambda *a, **k: []
+    )
     monkeypatch.setattr(
         "rootcoz.sources.chat_workspace.setup_ci_build_workspace",
         AsyncMock(return_value=False),
@@ -2887,6 +2855,11 @@ async def test_followup_indexes_only_new_or_missing_graph(
     )
     # One build for the initial graph; a follow-up adds exactly one more when
     # the graph is new, changed or missing, and none when it is current.
+    from rootcoz.engine import session_tools
+
+    scheduled = list(session_tools._BACKGROUND_INDEX_TASKS)
+    assert scheduled, "the turn never scheduled an index"
+    await asyncio.gather(*scheduled)
     assert len(builds) == (1 if graph_state == "indexed" else 2)
     if graph_state == "new":
         assert "other" in builds[-1][-1]

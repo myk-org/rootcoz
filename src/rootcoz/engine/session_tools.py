@@ -14,6 +14,7 @@ every path by construction.
 from __future__ import annotations
 
 import asyncio
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,37 @@ class SessionTools:
 #: failure group (and peer sessions do the same concurrently), so a second
 #: caller waits for the build instead of skipping it and seeing no graph.
 _GRAPH_INDEX_TASKS: dict[str, asyncio.Task[dict[str, object] | None]] = {}
+
+#: Fire-and-forget index runs, held so the loop does not collect them mid-build.
+_BACKGROUND_INDEX_TASKS: set[asyncio.Task[None]] = set()
+
+#: How long a turn that is not waiting for its graph waits for the workspace
+#: lock a build holds. The graphs on disk are read in milliseconds; anything
+#: slower means a build owns the workspace, and the turn answers without them.
+GRAPH_TOOL_WAIT_SECONDS = 2.0
+
+
+def schedule_workspace_index(
+    workspace: Path,
+    job_id: str = "",
+    repos: dict[str, Path] | None = None,
+    *,
+    deadline: float | None = None,
+) -> None:
+    """Start a workspace's graph build in the background; never wait for it.
+
+    Chat indexes after it has answered the user. Waiting turned a 5 s model call
+    into a 137 s turn: twelve clones were indexed first, nine of them refused by
+    the budget after the build, and every message behind it queued on the same
+    workspace lock. The graphs this produces reach the next turn's tool build,
+    which does not wait either, and a session that gains them is started fresh
+    (a resumed session keeps the tools it was created with).
+    """
+    task = asyncio.create_task(
+        index_workspace_graph(workspace, job_id=job_id, repos=repos, deadline=deadline)
+    )
+    _BACKGROUND_INDEX_TASKS.add(task)
+    task.add_done_callback(_BACKGROUND_INDEX_TASKS.discard)
 
 
 def graph_workspace_for(repos: dict[str, Path] | None) -> Path | None:
@@ -159,6 +191,7 @@ async def build_session_tools(
     repos: dict[str, Path] | None = None,
     graph: bool = True,
     index_deadline: float | None = None,
+    wait_for_index: bool = True,
 ) -> SessionTools:
     """Assemble every tool a session gets, and install the CLI MCP config.
 
@@ -170,10 +203,11 @@ async def build_session_tools(
         repos: Clone mapping when the caller knows it. Falls back to the
             workspace itself, which is where chat keeps its clones.
         graph: ``False`` disables the code graph entirely (tests, small jobs).
-        index_deadline: The caller's index clock. Chat passes the same value it
-            gave its own index call, so a spent budget starts the session
-            without a second window instead of rebuilding. Analysis passes
-            ``None`` and stays unbounded.
+        index_deadline: The caller's index clock, used only when this call does
+            the indexing. Analysis passes ``None`` and stays unbounded.
+        wait_for_index: ``True`` builds the graph first and offers what it
+            built (analysis). ``False`` offers the graphs that already exist and
+            returns at once; chat schedules the build itself, off the turn.
 
     Returns:
         ``SessionTools`` with the builtin list, the combined custom tools, and
@@ -183,11 +217,20 @@ async def build_session_tools(
     graph_root: Path | None = None
     if graph:
         graph_root = graph_workspace_for(repos) or Path(workspace)
-        await index_workspace_graph(graph_root, job_id=job_id, deadline=index_deadline)
+        if wait_for_index:
+            await index_workspace_graph(
+                graph_root, job_id=job_id, deadline=index_deadline
+            )
         from rootcoz.engine.graft_http import graph_http_tools
 
-        graph_tools = graph_http_tools(graph_root, job_id)
-        if not graph_tools:
+        graph_tools = graph_http_tools(
+            graph_root,
+            job_id,
+            deadline=None
+            if wait_for_index
+            else time.monotonic() + GRAPH_TOOL_WAIT_SECONDS,
+        )
+        if not graph_tools and wait_for_index:
             # A job with clones but no graph is a defect, not a quiet default:
             # the container ships the indexer, so silence here is what made
             # "tools never offered" indistinguishable from "model ignored them".
@@ -199,6 +242,12 @@ async def build_session_tools(
                     " no graph registered; analysis runs without a map",
                     graph_root,
                 )
+        elif not graph_tools:
+            logger.info(
+                "No code graph ready for %s — chat builds it off the turn, so this"
+                " session starts without a map",
+                graph_root,
+            )
         if graph_tools:
             # register_workspace installs the skill under the clone workspace,
             # but a session runs in its own cwd (often an artifacts dir), where

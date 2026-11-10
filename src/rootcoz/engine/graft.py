@@ -454,6 +454,29 @@ def _sources(repo: Path, deadline: float | None = None) -> dict[str, str]:
     return result
 
 
+def _estimated_graph_bytes(
+    repo: Path, manifest: dict[str, str], deadline: float | None
+) -> int:
+    """Rough size of the graph this manifest would build, before building it.
+
+    The snapshot is a byte copy of every manifest file, so the source bytes are
+    exact and the trail index adds ~10% (forklift measured 557 MB + 48 MB). The
+    admission gate needs this *before* the build: a repository that cannot fit
+    used to be admitted, built for up to ``BUILD_SECONDS`` and only then measured
+    and dropped, which is most of the two minutes one chat waited for its first
+    answer. Counting stops at the caller's clock; the build re-checks anyway.
+    """
+    total = 0
+    for path in manifest:
+        if deadline is not None and time.monotonic() >= deadline:
+            break
+        try:
+            total += (repo / path).lstat().st_size
+        except OSError:
+            continue  # A vanished file is the post-build check's problem.
+    return total + total // 10
+
+
 def _source_stamp(repo: Path) -> str:
     """Cheap bounded change signal for sources too large to hash normally."""
     listing = _bounded(
@@ -519,7 +542,7 @@ def _index_one(
     root: Path,
     name: str,
     repo_value: Path,
-    reserve: Callable[[Path], str | None] | None = None,
+    reserve: Callable[[Path, int], str | None] | None = None,
     release: Callable[[Path], None] | None = None,
     deadline: float | None = None,
 ) -> dict[str, Any]:
@@ -544,7 +567,15 @@ def _index_one(
             return {"status": "skipped", "reason": "no eligible files"}
         if manifest == _manifest(destination):
             return {"status": "unchanged", "files": len(manifest)}
-        if reserve is not None and (refusal := reserve(destination)) is not None:
+        if (
+            reserve is not None
+            and (
+                refusal := reserve(
+                    destination, _estimated_graph_bytes(repo, manifest, deadline)
+                )
+            )
+            is not None
+        ):
             return {"status": "skipped", "reason": refusal}
         if destination.exists():
             shutil.rmtree(destination)
@@ -679,19 +710,28 @@ def index_repositories(
     ``deadline`` bounds the whole run: no repository work starts past it, and an
     admitted repository checks it at every stage. ``None`` keeps the analysis
     callers unbounded, exactly as before.
+
+    shortcut: graphs live under their own workspace (``_root``), so the same
+    repository at an unchanged HEAD is rebuilt once per workspace — a job and a
+    chat that clone the same 557 MB upstream pay for it twice. Upgrade to a
+    commit-keyed store shared by all workspaces (with its own eviction and
+    budget) when that duplication starts costing more than one build.
     """
     workspace = Path(workspace).resolve()
     root = _root(workspace)
     gate = threading.Lock()
     reservations: set[Path] = set()
 
-    def reserve(destination: Path) -> str | None:
+    def reserve(destination: Path, estimate: int) -> str | None:
         """Admit a graph, or refuse it and name why (first reason wins).
 
         The reason is returned rather than re-derived: this is where both the
         budget and the clock decision are made, and a bare ``bool`` forced the
         caller to guess — which is how a spent deadline ended up with a
         ``deadline`` marker and a ``workspace graph budget`` outcome line.
+
+        ``estimate`` is what the graph will need, so a repository that cannot fit
+        is refused here, before its build, instead of being built and discarded.
         """
         with gate:
             used = _workspace_graph_size(root)
@@ -709,7 +749,7 @@ def index_repositories(
                 for item in reservations
                 if item.exists() and not item.is_symlink()
             )
-            if used - old + inflight >= budget:
+            if used - old + inflight + estimate >= budget:
                 # Persist a bounded skip, without overwriting an existing graph.
                 _write_budget_marker(
                     destination, used, "workspace graph budget", guard_size=True
@@ -1114,11 +1154,16 @@ def _withhold_unreached(workspace: Path, pending: list[tuple[str, Path]]) -> Non
         _write_budget_marker(destination, used, "deadline", guard_size=True)
 
 
-def indexed_roots(workspace: Path) -> dict[str, Path]:
-    """Return direct cloned roots with completed graphs; queries recheck freshness."""
+def indexed_roots(workspace: Path, *, deadline: float | None = None) -> dict[str, Path]:
+    """Return direct cloned roots with completed graphs; queries recheck freshness.
+
+    ``deadline`` bounds the wait for the workspace lock, which a graph build
+    holds for its whole run: a chat turn that is not waiting for the build reads
+    what is already there and carries on instead of queueing behind it.
+    """
     workspace = Path(workspace)
     root = _root(workspace)
-    with _workspace_install_lock(workspace.resolve()):
+    with _workspace_install_lock(workspace.resolve(), deadline=deadline):
         if not root.is_dir() or root.is_symlink() or not workspace.is_dir():
             return {}
         return {

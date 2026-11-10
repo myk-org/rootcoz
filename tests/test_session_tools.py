@@ -53,7 +53,7 @@ def stubbed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     )
     monkeypatch.setattr(
         "rootcoz.engine.graft_http.graph_http_tools",
-        lambda workspace, job_id: list(GRAPH_TOOLS),
+        lambda workspace, job_id, **_kwargs: list(GRAPH_TOOLS),
     )
     return indexed, installed
 
@@ -207,7 +207,7 @@ async def test_skill_is_installed_where_the_session_runs(
     )
     monkeypatch.setattr(
         "rootcoz.engine.graft_http.graph_http_tools",
-        lambda workspace, job_id: list(GRAPH_TOOLS),
+        lambda workspace, job_id, **_kwargs: list(GRAPH_TOOLS),
     )
     monkeypatch.setattr(
         "rootcoz.engine.graft_http.install_graph_skill",

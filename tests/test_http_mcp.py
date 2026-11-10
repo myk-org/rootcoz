@@ -562,12 +562,11 @@ def test_analysis_does_not_index_unusable_graphs() -> None:
     ):
         assert "index_repositories" not in inspect.getsource(analysis)
         assert "copy_rootcoz_pi_resources" in inspect.getsource(analysis)
-    # Indexing now has one guarded entry point for every session kind.
-    assert "index_workspace_graph" in inspect.getsource(main._index_chat_repositories)
-    assert "_index_chat_repositories" in inspect.getsource(
-        main._init_chat_under_barrier
-    )
-    assert "_index_chat_repositories" in inspect.getsource(main._process_chat_message)
+    # Indexing now has one guarded entry point for every session kind, and the
+    # chat entry point only schedules it: the turn never waits for the graph.
+    assert "schedule_workspace_index" in inspect.getsource(main._schedule_chat_index)
+    assert "_schedule_chat_index" in inspect.getsource(main._init_chat_under_barrier)
+    assert "_schedule_chat_index" in inspect.getsource(main._process_chat_message)
 
 
 def test_install_lock_reaps_short_lived_workspaces(tmp_path: Path, monkeypatch) -> None:

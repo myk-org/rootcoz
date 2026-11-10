@@ -170,7 +170,7 @@ def _wire_turn(monkeypatch, job_id, events, workspace):
         return SimpleNamespace(custom=[])
 
     monkeypatch.setattr(session_tools, "build_session_tools", tools)
-    monkeypatch.setattr(main, "_index_chat_repositories", AsyncMock())
+    monkeypatch.setattr(main, "_schedule_chat_index", lambda *a, **k: None)
 
     async def validate(provider, model):
         from rootcoz import ai_client

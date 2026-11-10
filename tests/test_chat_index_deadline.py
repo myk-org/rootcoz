@@ -447,3 +447,59 @@ def test_a_graph_built_under_a_spent_clock_is_still_budget_checked(
     assert outcomes["repo"] == {"status": "skipped", "reason": "workspace graph budget"}
     assert not (destination / "manifest.json").exists(), "an over-budget graph stayed"
     assert _marker(destination)["reason"] == "workspace graph budget"
+
+
+def test_a_repo_that_cannot_fit_is_never_built(tmp_path, monkeypatch):
+    """The budget refuses at admission, before the build it would throw away.
+
+    Chat paid for the whole build and only then measured the workspace, so nine
+    of twelve repositories were built to completion (up to ``BUILD_SECONDS``
+    each, four at a time) and deleted. The estimate is the snapshot's exact cost
+    plus a tenth for the index: the graph cannot be smaller than the sources it
+    copies, so a repository refused here could not have fitted either.
+    """
+    workspace = tmp_path / "workspace"
+    repo, _manifest_hashes = _repo(workspace, files={"big.py": b"x" * 5000})
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    built: list[str] = []
+
+    def forbidden_run(argv, **_kwargs):
+        built.append(argv[0])
+        raise AssertionError("built a graph the workspace budget cannot hold")
+
+    monkeypatch.setattr(graft, "_run", forbidden_run)
+    monkeypatch.setattr(graft, "max_workspace_graph_bytes", lambda: 2048)
+
+    outcomes = graft.index_repositories(workspace, {"repo": repo})
+
+    assert outcomes["repo"] == {"status": "skipped", "reason": "workspace graph budget"}
+    assert built == [], "the build ran for a repository that could not fit"
+    marker = _marker(graft._root(workspace) / "repo")
+    assert marker["reason"] == "workspace graph budget"
+    assert marker["retry_after"] > time.time()
+
+
+@pytest.mark.asyncio
+async def test_analysis_sessions_still_wait_for_their_graph(tmp_path, monkeypatch):
+    """Analysis keeps the blocking index and its unbounded clock, unchanged."""
+    from rootcoz.engine import session_tools
+
+    seen: list[float | None] = []
+
+    async def index(_workspace, job_id="", repos=None, *, deadline=None):
+        seen.append(deadline)
+
+    async def noop(*_args, **_kwargs):
+        return None
+
+    monkeypatch.setattr(session_tools, "index_workspace_graph", index)
+    monkeypatch.setattr(session_tools, "install_http_tools_mcp_best_effort_async", noop)
+    monkeypatch.setattr(
+        "rootcoz.engine.graft_http.graph_http_tools", lambda *_a, **_k: []
+    )
+
+    await session_tools.build_session_tools(
+        builtin=["read"], custom_base=[], workspace=tmp_path, job_id="job"
+    )
+
+    assert seen == [None], "analysis indexes before its tools, with no deadline"

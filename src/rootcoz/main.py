@@ -11252,6 +11252,22 @@ def _chat_tracker_targets(
 _chat_session_tracker_targets: dict[str, tuple[str, ...]] = {}
 
 
+#: The fingerprint entry a session carries when it was created with the code
+#: graph. Chat indexes after the first turn, so a session started before the
+#: graph existed can never see it — this is what makes it stale and lets the
+#: next turn start one that can.
+_GRAPH_TOOL_FINGERPRINT = "code-graph"
+
+
+def _chat_tool_fingerprint(
+    targets: tuple[str, ...], tools: list[dict[str, Any]]
+) -> tuple[str, ...]:
+    """The creation-time tool set a resumed chat session has to match."""
+    if any(tool.get("name", "").startswith("graft_") for tool in tools):
+        return (*targets, _GRAPH_TOOL_FINGERPRINT)
+    return targets
+
+
 def _enable_tools_for_session(
     session_id: str | None, targets: tuple[str, ...]
 ) -> str | None:
@@ -23553,24 +23569,24 @@ async def get_chat_history(
     )
 
 
-async def _index_chat_repositories(
+def _schedule_chat_index(
     workspace: Path,
     repos: dict[str, Path] | None = None,
     job_id: str = "",
     deadline: float | None = None,
 ) -> None:
-    """Index cloned chat roots through the one guarded entry point.
+    """Start a chat's graph build in the background and return at once.
 
-    Chat used to build graphs here directly, so a later session build scanned
-    the workspace a second time. Both now go through
-    ``session_tools.index_workspace_graph``, which builds once per workspace and
-    makes concurrent callers wait instead of repeating the work.
+    A chat turn is not a place to wait for a graph: twelve clones were indexed
+    before the first answer, which took 132 s against 5 s for the model call
+    that followed, and every message queued behind the build's workspace lock.
+    The build goes through ``session_tools.schedule_workspace_index``, the one
+    guarded entry point, so a later session build joins it instead of repeating
+    the work.
     """
-    from rootcoz.engine.session_tools import index_workspace_graph
+    from rootcoz.engine.session_tools import schedule_workspace_index
 
-    await index_workspace_graph(
-        workspace, job_id=job_id, repos=repos, deadline=deadline
-    )
+    schedule_workspace_index(workspace, job_id=job_id, repos=repos, deadline=deadline)
 
 
 def _chat_workspace_unknown_message(job_id: str, username: str) -> str:
@@ -23705,15 +23721,6 @@ async def _init_chat_under_barrier(
             failed=failed_repos,
         )
         repos_available = bool(await asyncio.to_thread(cloned_graph_roots, workspace))
-        # The clock starts at the index step, not at the start of the preparation,
-        # and it is the same float the session build's funnel gets below: a spent
-        # budget must not open a second window there.
-        index_deadline = _time.monotonic() + CHAT_INDEX_DEADLINE_SECONDS
-        if repos_available:
-            set_chat_prep_phase(job_id, username, "indexing")
-            await _index_chat_repositories(
-                workspace, job_id=job_id, deadline=index_deadline
-            )
         _raise_if_chat_job_deleted(job_id)
         set_chat_prep_phase(job_id, username, "fetching_build_data")
         ci_build_data_available = await setup_ci_build_workspace(
@@ -23766,7 +23773,10 @@ async def _init_chat_under_barrier(
                 custom_base=custom_tools,
                 workspace=workspace,
                 job_id=job_id,
-                index_deadline=index_deadline,
+                # The graph is built after this preparation, not before it: the
+                # session starts with whatever graphs exist and the next turn
+                # gets the rest once the background build lands.
+                wait_for_index=False,
             )
             custom_tools = session.custom
             credential_generation = (
@@ -23802,7 +23812,9 @@ async def _init_chat_under_barrier(
                 await _discard_unsaved_ai_session(session_id, username, ai_provider)
             _raise_if_chat_job_deleted(job_id)
             if session_id:
-                _remember_chat_session_tools(session_id, tracker_targets)
+                _remember_chat_session_tools(
+                    session_id, _chat_tool_fingerprint(tracker_targets, custom_tools)
+                )
                 saved = await storage.add_chat_message(
                     job_id=job_id,
                     role="assistant",
@@ -23839,6 +23851,16 @@ async def _init_chat_under_barrier(
                     username=username,
                     status="completed",
                 )
+
+    if repos_available:
+        # Only now, with the session created and its tools installed: the build
+        # takes the workspace lock for its whole run, so starting it earlier put
+        # the preparation — and the message waiting on it — back behind it.
+        _schedule_chat_index(
+            workspace,
+            job_id=job_id,
+            deadline=_time.monotonic() + CHAT_INDEX_DEADLINE_SECONDS,
+        )
 
     if session_id and failed_repos:
         # A chat starts without a repository it could not clone, so the
@@ -24795,42 +24817,6 @@ async def _process_chat_message(
                         repos_available = await clone_chat_repos(
                             workspace, decrypted_params, user_repo_token=github_token
                         )
-                        from rootcoz.engine.graft import roots_needing_index
-                        from rootcoz.engine.graft_http import cloned_graph_roots
-
-                        cloned_roots = await asyncio.to_thread(
-                            cloned_graph_roots, workspace
-                        )
-                        # Its own clock, immediately before its index calls and
-                        # reused for the session build's funnel: the deadline
-                        # belongs to whoever starts the build.
-                        index_deadline = _time.monotonic() + CHAT_INDEX_DEADLINE_SECONDS
-                        try:
-                            stale_roots = await asyncio.to_thread(
-                                roots_needing_index,
-                                workspace,
-                                cloned_roots,
-                                deadline=index_deadline,
-                            )
-                        except TimeoutError:
-                            # Something else held the workspace lock past the index
-                            # clock. The answer this message wants is a reply, not
-                            # a graph: it runs without one, as a busy graph build
-                            # would have made it anyway.
-                            logger.info(
-                                "Chat: workspace lock outlived the index clock for "
-                                "job %s, user %s — answering without a graph",
-                                job_id,
-                                username,
-                            )
-                            stale_roots = {}
-                        if stale_roots:
-                            await _index_chat_repositories(
-                                workspace,
-                                stale_roots,
-                                job_id=job_id,
-                                deadline=index_deadline,
-                            )
 
                         settings = get_settings()
 
@@ -24853,13 +24839,6 @@ async def _process_chat_message(
                             has_profile=await _account_has_profile(username),
                             job_chat=True,
                         )
-                        # A resumed session keeps its creation-time tools, so a
-                        # token saved or a tracker toggled mid-chat only reaches
-                        # the model through a fresh session.
-                        last_session_id = _enable_tools_for_session(
-                            last_session_id, tracker_targets
-                        )
-
                         custom_tools: list[dict[str, Any]] = []
                         if auth_header:
                             custom_tools = build_chat_custom_tools(
@@ -24889,9 +24868,20 @@ async def _process_chat_message(
                             custom_base=custom_tools,
                             workspace=workspace,
                             job_id=job_id,
-                            index_deadline=index_deadline,
+                            # Never build a graph on the turn: it was 132 s of
+                            # indexing before a 5 s answer. This turn uses the
+                            # graphs already on disk and the build runs after it.
+                            wait_for_index=False,
                         )
                         custom_tools = session.custom
+                        # A resumed session keeps its creation-time tools, so a
+                        # token saved, a tracker toggled mid-chat, or a code graph
+                        # that finished building after the session started only
+                        # reaches the model through a fresh session.
+                        last_session_id = _enable_tools_for_session(
+                            last_session_id,
+                            _chat_tool_fingerprint(tracker_targets, custom_tools),
+                        )
 
                         abort_key = f"{job_id}:{username}"
                         abort_signal = _get_chat_abort_signal(abort_key)
@@ -25011,7 +25001,10 @@ async def _process_chat_message(
                         )
                         return
 
-                    _remember_chat_session_tools(new_session_id, tracker_targets)
+                    _remember_chat_session_tools(
+                        new_session_id,
+                        _chat_tool_fingerprint(tracker_targets, custom_tools),
+                    )
                     saved = await storage.complete_chat_message_if_generation(
                         assistant_msg_id,
                         content=response_text,
@@ -25038,6 +25031,16 @@ async def _process_chat_message(
                         assistant_msg_id,
                         job_id,
                         new_session_id,
+                    )
+                    # The answer is stored and pushed; the graph is built from
+                    # here on, off the turn. Nothing the user waits for queues
+                    # behind it, and the next turn finds the tools. Scheduled
+                    # unconditionally: the build itself is what knows whether
+                    # this workspace has anything to index.
+                    _schedule_chat_index(
+                        workspace,
+                        job_id=job_id,
+                        deadline=_time.monotonic() + CHAT_INDEX_DEADLINE_SECONDS,
                     )
                     notify_chat_changed(job_id, username=username)
 
