@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, type ReactNode } from 'react'
+import { Children, cloneElement, isValidElement, useEffect, useRef, useState, type ReactElement, type ReactNode } from 'react'
 import { api, extractApiDetail } from '@/lib/api'
 import { createIssueFailureMessage, createOutcomeUnknown } from '@/lib/issueCreateError'
 import { IssueCreateError } from '@/components/shared/IssueCreateError'
@@ -662,21 +662,45 @@ function JiraPickerPopover({
   children: ReactNode
 }) {
   const inputRef = useRef<HTMLInputElement>(null)
+  const listRef = useRef<HTMLUListElement>(null)
+  const [active, setActive] = useState(-1)
+  const optionCount = Children.count(children)
+  const activeId = active >= 0 && active < optionCount ? `${listId}-option-${active}` : undefined
+  const move = (delta: number) => {
+    if (optionCount === 0) return
+    const next = Math.min(Math.max(active + delta, 0), optionCount - 1)
+    setActive(next)
+    ;(listRef.current?.children[next] as HTMLElement | undefined)?.scrollIntoView({ block: 'nearest' })
+  }
   return (
-    <Popover open={open} onOpenChange={onOpenChange}>
+    <Popover open={open} onOpenChange={(next) => { if (!next) setActive(-1); onOpenChange(next) }}>
       <PopoverAnchor asChild>
         <Input
           ref={inputRef}
           id={inputId}
           type="text"
           value={value}
-          onChange={(e) => onValueChange(e.target.value)}
+          onChange={(e) => { setActive(-1); onValueChange(e.target.value) }}
           onFocus={onFieldFocus}
+          onKeyDown={(event) => {
+            if (!open) return
+            if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+              event.preventDefault()
+              move(event.key === 'ArrowDown' ? 1 : -1)
+            } else if (event.key === 'Enter') {
+              const option = listRef.current?.children[active] as HTMLElement | undefined
+              if (!option) return
+              event.preventDefault()
+              option.querySelector<HTMLButtonElement>('button')?.click()
+            }
+          }}
           placeholder={placeholder}
           autoComplete="off"
           role="combobox"
           aria-expanded={open}
           aria-controls={listId}
+          aria-autocomplete="list"
+          aria-activedescendant={activeId}
           className="px-2"
         />
       </PopoverAnchor>
@@ -693,12 +717,23 @@ function JiraPickerPopover({
         }}
       >
         <ul
+          ref={listRef}
           id={listId}
           role="listbox"
           aria-label={listLabel}
           className="max-h-[min(12rem,calc(var(--radix-popover-content-available-height)-1rem))] overflow-y-auto overscroll-contain"
         >
-          {children}
+          {/* Keyboard users keep focus in the field and pick with the arrows; the
+              options are portaled, so a Tab would leave the dialog instead. */}
+          {Children.toArray(children).map((child, index) =>
+            isValidElement(child)
+              ? cloneElement(child as ReactElement<{ id?: string; role?: string; 'aria-selected'?: boolean }>, {
+                  id: `${listId}-option-${index}`,
+                  role: 'option',
+                  'aria-selected': index === active,
+                })
+              : child,
+          )}
         </ul>
       </PopoverContent>
     </Popover>

@@ -237,6 +237,62 @@ describe('BugCreationDialog Jira pickers', () => {
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(screen.getByRole('listbox', { name: 'Jira projects' })).toBeInTheDocument()
   })
+
+  // The options are portaled away from the field, so Tab leaves the dialog: the
+  // arrows have to reach them, and Enter has to pick the highlighted one.
+  it('picks a project with the keyboard while focus stays in the field', async () => {
+    const user = userEvent.setup()
+    post.mockImplementation(async (path: string) => {
+      if (path === previewPathFor('jira')) return { title: 'Issue title', body: 'Issue body', similar_issues: [] }
+      if (path === '/api/jira-projects') return [
+        { key: 'MTV', name: 'Migration Toolkit for Virtualization' },
+        { key: 'MTA', name: 'Migration Toolkit for Applications' },
+      ]
+      if (path === '/api/jira-security-levels') return []
+      return {}
+    })
+    await openGeneratedPreview(user, 'jira')
+
+    const input = screen.getByLabelText('Jira Project')
+    await user.type(input, 'mt')
+    await screen.findByRole('listbox', { name: 'Jira projects' })
+
+    await user.keyboard('{ArrowDown}')
+    expect(input).toHaveAttribute('aria-activedescendant', 'bug-jira-project-options-option-0')
+    await user.keyboard('{ArrowDown}')
+    expect(input).toHaveAttribute('aria-activedescendant', 'bug-jira-project-options-option-1')
+    await user.keyboard('{ArrowUp}')
+    await user.keyboard('{Enter}')
+
+    expect(input).toHaveValue('MTV')
+    expect(screen.queryByRole('listbox')).toBeNull()
+  })
+
+  it('picks a security level with the keyboard', async () => {
+    const user = userEvent.setup()
+    post.mockImplementation(async (path: string) => {
+      if (path === previewPathFor('jira')) return { title: 'Issue title', body: 'Issue body', similar_issues: [] }
+      if (path === '/api/jira-projects') return [{ key: 'MTV', name: 'Migration Toolkit for Virtualization' }]
+      if (path === '/api/jira-security-levels') return [
+        { id: '1', name: 'Restricted', description: 'Internal only' },
+        { id: '2', name: 'Confidential', description: 'Sensitive' },
+      ]
+      return {}
+    })
+    await openGeneratedPreview(user, 'jira')
+
+    await user.type(screen.getByLabelText('Jira Project'), 'mt')
+    await screen.findByRole('listbox', { name: 'Jira projects' })
+    await user.click(screen.getByRole('button', { name: /MTV/ }))
+
+    const security = screen.getByLabelText('Security Level')
+    await user.type(security, 'restr')
+    await screen.findByRole('listbox', { name: 'Jira security levels' })
+    // The first row is "None (public)", so one arrow down is the first real level.
+    await user.keyboard('{ArrowDown}{ArrowDown}{Enter}')
+
+    expect(security).toHaveValue('Restricted')
+  })
 })
 
 /** Opens the dialog, generates the preview, and leaves it on the Create button. */
