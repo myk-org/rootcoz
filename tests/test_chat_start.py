@@ -1237,6 +1237,10 @@ async def test_admin_chat_init_still_starts_when_the_internal_tools_token_hits_a
 
     ``header="real"`` is the point — the rig's default stubs the mint to ``""``,
     so a test keeping it could not see a stray ``refuse_storage_fault=True``.
+    The tool-less ``ready`` answer asserted below is the documented limitation
+    (``docs/use-server-chat-for-cross-job-analysis.md``), not an endorsement: the
+    issue names admin-role sessions as must-keep-degrading, and the fix that needs
+    its owners' agreement is tracked as #540.
     """
     created: list[dict] = []
     await install_start_rig(
