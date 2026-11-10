@@ -107,32 +107,34 @@ def _jira_site(url: str | None) -> str:
     a URL that resolves to no ticket (#496). Returning "" makes the link
     absent instead of broken.
 
-    Both warnings are once per process: this runs on every resolution
-    (every request), and a per-message WARNING carrying a server setting is
-    log noise. The refusal that follows a missing site logs per request
-    itself (``bug_creation``'s browse-link error), so the signal is never
-    lost.
+    A warning fires once per distinct bad value, not once per process: this
+    runs on every resolution (every request), so repeating the same bad value
+    must stay quiet, but ``jira_site_url`` is a per-request field and this now
+    also runs from ``Settings.jira_enabled`` via :func:`jira_availability` — on
+    search and analysis paths, where no refusal logs — so a value introduced
+    after an admin fix must warn again. A good value clears the memory.
     """
-    global _site_unset_warned, _site_invalid_warned
+    global _site_warned_for
     site = (url or "").strip().rstrip("/")
     if not site:
-        if not _site_unset_warned:
-            _site_unset_warned = True
+        if _site_warned_for != "unset":
+            _site_warned_for = "unset"
             logger.warning("JIRA_SITE_URL is unset — Jira browse links cannot be built")
         return ""
     # Omitted, not rejected: stored request params are replayed verbatim on
     # re-analysis, so an old bad value must not fail the run.
     if error := jira_site_url_error(site):
-        if not _site_invalid_warned:
-            _site_invalid_warned = True
+        if _site_warned_for != f"invalid:{site}":
+            _site_warned_for = f"invalid:{site}"
             logger.warning("%s — Jira browse links cannot be built", error)
         return ""
+    _site_warned_for = ""
     return site
 
 
-#: One WARNING per process for each ``_jira_site`` branch (see its docstring).
-_site_unset_warned = False
-_site_invalid_warned = False
+#: The value ``_jira_site`` last warned for (see its docstring); "" when the
+#: last value seen was good, so a new fault warns again.
+_site_warned_for = ""
 
 
 def _is_atlassian_cloud_host(url: str) -> bool:

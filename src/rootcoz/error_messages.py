@@ -172,8 +172,10 @@ def unavailable_sentence(tracker: str, reason: str) -> str:
     """
     kind = "GitHub" if tracker == "github" else "Jira"
     if reason == "server_unconfigured":
+        # Verbatim the sentence #536 requirement 4 mandates: em dash, lowercase
+        # "an". Pinned by tests and docs, so it is one string, not a style call.
         return (
-            f"{kind} is not configured on this server. An administrator has to "
+            f"{kind} is not configured on this server — an administrator has to "
             "set it up in Server Settings."
         )
     if reason == "server_disabled":

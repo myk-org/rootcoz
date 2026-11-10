@@ -1861,6 +1861,54 @@ class TestJiraAvailability:
         assert field in detail
         assert "Settings" not in detail
 
+    #: The sentence #536 requirement 4 mandates, verbatim.
+    MANDATED_SENTENCE = (
+        "Jira is not configured on this server — an administrator has to set it "
+        "up in Server Settings."
+    )
+
+    @pytest.mark.parametrize(
+        ("mode", "env", "field"),
+        [
+            (
+                "basic",
+                {
+                    "JIRA_EMAIL": "me@example.com",
+                    "JIRA_CLOUD_URL": "https://myorg.atlassian.net",
+                },
+                "jira_api_token",
+            ),
+            ("pat", {"JIRA_SERVER_URL": "https://jira.example.com"}, "jira_pat"),
+            (
+                "oauth",
+                {
+                    "ATLASSIAN_OAUTH_CLOUD_ID": "cloud-1",
+                    "ATLASSIAN_OAUTH_CLIENT_ID": "client-1",
+                },
+                "jira_oauth_client_secret",
+            ),
+            ("atst", {"ATLASSIAN_OAUTH_CLOUD_ID": "cloud-1"}, "jira_atst_token"),
+        ],
+    )
+    def test_every_method_gives_the_same_method_free_user_sentence(
+        self, mode, env, field
+    ) -> None:
+        """The user answer is the mandated sentence and nothing else (#536 done
+        §3/§4): unavailable under any of the four methods, and the text a user
+        meets names neither the method nor the field that differs per method."""
+        from rootcoz.config import jira_availability
+        from rootcoz.error_messages import unavailable_sentence
+
+        with patch.dict(os.environ, {**_BASE_JIRA_ENV, **env}, clear=True):
+            settings = Settings(_env_file=None, jira_auth_mode=mode)
+        assert jira_availability(settings)[0] is False
+
+        sentence = unavailable_sentence("jira", "server_unconfigured")
+        assert sentence == self.MANDATED_SENTENCE
+        assert mode not in sentence
+        assert field not in sentence
+        assert "auth method" not in sentence
+
     @pytest.mark.parametrize(
         ("mode", "env", "locator"),
         [
@@ -1971,15 +2019,16 @@ class TestJiraAvailability:
         ]
         assert hits == []
 
-    def test_both_site_warnings_are_once_per_process(self, monkeypatch) -> None:
-        """One WARNING per branch per process: this runs on every resolution
-        (every request), and a per-request WARNING carrying a server setting is
-        log noise. The refusal that follows still logs per request."""
+    def test_site_warnings_fire_once_per_distinct_bad_value(self, monkeypatch) -> None:
+        """One WARNING per distinct bad value, not per process: repeating the
+        same bad value on every request is log noise, but JIRA_SITE_URL is a
+        per-request field and this now also runs from ``Settings.jira_enabled``
+        via :func:`jira_availability` — where no refusal logs — so a value
+        introduced after an admin fix must warn again."""
         import rootcoz.jira as jira_module
         from rootcoz.config import jira_availability
 
-        monkeypatch.setattr(jira_module, "_site_unset_warned", False)
-        monkeypatch.setattr(jira_module, "_site_invalid_warned", False)
+        monkeypatch.setattr(jira_module, "_site_warned_for", "")
         # Only the gateway methods consult JIRA_SITE_URL (their API base is the
         # scoped gateway, not a site).
         settings = self._settings(
@@ -1988,6 +2037,7 @@ class TestJiraAvailability:
             JIRA_OAUTH_CLIENT_SECRET="ATOA-secret",  # pragma: allowlist secret
         ).model_copy(update={"jira_auth_mode": "oauth"})
         bad = settings.model_copy(update={"jira_site_url": "not-a-url"})
+        other_bad = settings.model_copy(update={"jira_site_url": "also-not-a-url"})
         with patch.object(jira_module.logger, "warning") as warn:
             for _ in range(5):
                 assert jira_availability(settings) == (True, "")
@@ -1996,6 +2046,17 @@ class TestJiraAvailability:
                 assert jira_availability(bad) == (True, "")
             # A second *branch* warns once too, and only once.
             assert warn.call_count == 2
+            # A DIFFERENT bad value is a new fault: it warns again.
+            assert jira_availability(other_bad) == (True, "")
+            assert warn.call_count == 3
+            # A good value clears the memory, so the fix-then-break cycle is
+            # never silent.
+            good = bad.model_copy(
+                update={"jira_site_url": "https://myorg.atlassian.net"}
+            )
+            assert jira_availability(good) == (True, "")
+            assert jira_availability(bad) == (True, "")
+            assert warn.call_count == 4
 
     def test_the_resolver_is_imported_deferred(self) -> None:
         """``config`` must not import ``jira`` at module level (that would be a

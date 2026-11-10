@@ -1007,6 +1007,23 @@ class TestChatTrackerTargets:
         assert "re-save the Jira credential" in prompt
         assert "Server Settings" not in prompt
 
+    def test_a_legacy_sa_token_on_an_unconfigured_server_names_the_admin(self):
+        """A legacy service-account value is refused, but its own sentence
+        points at Profile Settings — which cannot fix a deployment that serves
+        no Jira credential. The deployment is asked first, so the answer names
+        the administrator and never the account."""
+        from rootcoz.error_messages import unavailable_sentence
+        from rootcoz.main import _chat_tracker_gate
+
+        settings = _unconfigured_jira_settings()
+        reason, refusal = _chat_tracker_gate(
+            "jira", settings, {"jira_sa_token": "legacy-not-atoa"}
+        )
+        assert reason == "server_unconfigured"
+        assert refusal is not None
+        assert refusal.detail == unavailable_sentence("jira", "server_unconfigured")
+        assert "Profile Settings" not in refusal.detail
+
     def test_jira_flag_off_offers_nothing(self):
         assert (
             self._targets(self._settings(enable_jira_issues=False), jira_token="jira")
@@ -1494,7 +1511,7 @@ class TestCredentialBlockedIssueNotice:
         from rootcoz.engine.chat import credential_blocked_issue_notice
 
         assert credential_blocked_issue_notice("jira", "server_unconfigured") == (
-            "Jira is not configured on this server. An administrator has to set "
+            "Jira is not configured on this server — an administrator has to set "
             "it up in Server Settings."
         )
 
@@ -1784,7 +1801,7 @@ class TestOneJiraStateOneAnswer:
             _unconfigured_jira_settings(), {"jira_token": "tok"}
         )
         assert notice == (
-            "Jira is not configured on this server. An administrator has to set "
+            "Jira is not configured on this server — an administrator has to set "
             "it up in Server Settings."
         )
         assert "Profile Settings" not in notice
@@ -1820,7 +1837,7 @@ class TestOneJiraStateOneAnswer:
         """No ``users`` row, and the cause is the server: the administrator
         sentence wins over the "sign in" one."""
         notice = await self._notice(_unconfigured_jira_settings(), {}, profile=False)
-        assert "An administrator has to set it up in Server Settings" in notice
+        assert "an administrator has to set it up in Server Settings" in notice
         assert "Sign in" not in notice
 
     async def test_a_job_chat_with_no_run_repository_names_the_run(self):
@@ -1944,7 +1961,7 @@ class TestTheNoticeRendersAboveTheAnswer:
         ("tokens", "settings_kwargs", "expected"),
         [
             # The reporter's state: unconfigured server, tokens saved.
-            ({"jira_token": "tok"}, {}, "An administrator"),
+            ({"jira_token": "tok"}, {}, "an administrator"),
             # A deployment that can file, no token on the account.
             (
                 {"jira_token": ""},

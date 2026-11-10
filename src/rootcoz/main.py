@@ -10358,7 +10358,6 @@ async def preview_jira_bug(
     user_jira_token = (user_tokens.get("jira_token", "") or "").strip()
     user_jira_sa_token = (user_tokens.get("jira_sa_token", "") or "").strip()
     _debug_credential_source("jira", bool(user_jira_token or user_jira_sa_token))
-    _require_usable_jira_sa_token(user_jira_token, user_jira_sa_token)
     # Effective settings first (Finding 9): the caller's credential pins the
     # auth method, so the method-configured check must run against the
     # EFFECTIVE settings — a stored credential can satisfy a method
@@ -10376,6 +10375,10 @@ async def preview_jira_bug(
         caller_has_credential=bool(user_jira_token or user_jira_sa_token),
         has_profile=await _account_has_profile(request.state.username),
     )
+    # The deployment's answer precedes any verdict on this caller's credential:
+    # the legacy service-account sentence points at Profile Settings, which
+    # cannot fix a server that serves no Jira credential.
+    _require_usable_jira_sa_token(user_jira_token, user_jira_sa_token)
     failure, result_data, matched_child = await _load_effective_failure(
         job_id, body.test_name, body.child_job_name, body.child_build_number
     )
@@ -11154,6 +11157,14 @@ def _chat_tracker_gate_uncorrected(
         # by the generic re-save one.
         _require_usable_jira_sa_token(jira_token, jira_sa_token)
     except HTTPException as exc:
+        # That sentence points at Profile Settings, which cannot fix a
+        # deployment that serves no Jira credential at all. Ask the deployment
+        # first, exactly as :func:`_jira_unavailable` does, so a legacy token on
+        # an unconfigured server names the administrator, not the account.
+        if not _jira_server_can_serve_a_credential(settings):
+            return "server_unconfigured", _tracker_refusal(
+                "jira", "server_unconfigured"
+            )
         return "unusable_credential", exc
     effective = _build_effective_jira_settings(
         settings,

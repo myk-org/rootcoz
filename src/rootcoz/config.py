@@ -1498,8 +1498,10 @@ def jira_unavailable_reason(settings: Settings) -> str:
     persisted and replayed on re-analysis. The cause-free reason is enough;
     the field detail lives on :func:`jira_availability`'s DEBUG line.
 
-    Returns text without network I/O and logs nothing, so a caller recording
-    the reason never duplicates ``jira_enabled``'s warning.
+    Returns text without network I/O. It does log: :func:`jira_availability`
+    writes one DEBUG line per unavailable call, and the resolver behind it can
+    warn about ``jira_site_url``. A caller recording the reason therefore adds
+    no line of its own — that is the contract, not "nothing is logged".
     """
     if settings.enable_jira is False:
         return "Jira is disabled on this deployment (ENABLE_JIRA is false)"
