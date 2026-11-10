@@ -170,9 +170,10 @@ describe('per-page API encoding', () => {
     expect(q.get('tags')).toBe('nightly')
     expect(q.get('exclude_tags')).toBe('flaky')
     expect(q.getAll('team')).toEqual(['a,b'])
-    // Reports has no test-name filter: the dimension is dashboard-only.
-    expect(q.get('test_name')).toBeNull()
-    expect(q.get('test_name_mode')).toBeNull()
+    // The job-list dimension travels the same way on both pages: the reports
+    // aggregate filters jobs by a failing test too.
+    expect(q.get('test_name')).toBe('login')
+    expect(q.get('test_name_mode')).toBe('exact')
   })
 
   it('omits the parked selectors from both pages', () => {

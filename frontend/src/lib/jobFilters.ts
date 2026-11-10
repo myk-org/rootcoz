@@ -41,8 +41,15 @@ export const JOB_FILTER_KEYS = [
   'date_to',
 ] as const
 
-/** Dashboard-only: filtering *jobs* by the name of a failing test (#546 B). */
+/** Filtering *jobs* by the name of a failing test (#546 B), on both pages. */
 export const TEST_NAME_FILTER_KEYS = ['test_name', 'test_name_mode'] as const
+
+/**
+ * The pair plus the canonical dates: the keys the test-name writer replaces, and
+ * the ones the dashboard reads, so dropping the legacy aliases it read a date
+ * from never drops that date.
+ */
+export const TEST_NAME_WRITE_KEYS = ['date_from', 'date_to', ...TEST_NAME_FILTER_KEYS] as const
 
 /** Read-only legacy date keys: accepted, never written. */
 export const JOB_FILTER_READ_ALIASES = ['from', 'to'] as const
@@ -292,7 +299,7 @@ export function jobFiltersToApiQuery(page: FilterPage, values: JobFilterValues):
   if (values.analysis_state !== 'all') params.set('analysis_state', values.analysis_state)
   if (values.date_from) params.set('date_from', values.date_from)
   if (values.date_to) params.set('date_to', values.date_to)
-  if (page === 'dashboard' && values.test_name) {
+  if (values.test_name) {
     params.set('test_name', values.test_name)
     if (values.test_name_mode !== DEFAULT_TEST_NAME_MODE) {
       params.set('test_name_mode', values.test_name_mode)

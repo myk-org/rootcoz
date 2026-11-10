@@ -25,7 +25,7 @@ export interface FilterPreset {
 // lib/jobFilters.ts (#546), which also owns the helpers below.
 export const FILTER_PRESET_KEYS: Record<FilterPresetPage, readonly string[]> = {
   dashboard: [...JOB_FILTER_KEYS, ...TEST_NAME_FILTER_KEYS],
-  reports: [...JOB_FILTER_KEYS],
+  reports: [...JOB_FILTER_KEYS, ...TEST_NAME_FILTER_KEYS],
 }
 
 // ─── Cross-component notifications ─────────────────────────────────

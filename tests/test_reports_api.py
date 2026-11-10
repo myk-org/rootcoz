@@ -219,6 +219,11 @@ class TestClassificationOverrideFilters:
                             (job_id,),
                         )
                         await db.execute(
+                            "INSERT INTO test_entries (job_id, test_name, status)"
+                            " VALUES (?, 'test_login', 'failed')",
+                            (job_id,),
+                        )
+                        await db.execute(
                             "INSERT INTO test_classifications (job_id, job_name,"
                             " test_name, child_build_number, classification,"
                             " pattern, original_classification, original_pattern,"
@@ -245,3 +250,15 @@ class TestClassificationOverrideFilters:
     async def test_unfiltered_returns_both(self, overrides) -> None:
         rows = await overrides.get_report_classification_overrides()
         assert {row["job_id"] for row in rows["details"]} == {"ov-alpha", "ov-beta"}
+
+    async def test_test_name_filter_narrows_on_the_classification_row(
+        self, overrides
+    ) -> None:
+        """The overrides query has no ``results`` alias: its EXISTS is on its own row."""
+        rows = await overrides.get_report_classification_overrides(test_name="test_log")
+        assert {row["job_id"] for row in rows["details"]} == {"ov-alpha", "ov-beta"}
+
+        rows = await overrides.get_report_classification_overrides(
+            test_name="other_test"
+        )
+        assert rows["details"] == []

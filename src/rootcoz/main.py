@@ -17294,6 +17294,8 @@ _FILTER_PRESET_KEYS: dict[str, set[str]] = {
         "submitted_by",
         "date_from",
         "date_to",
+        "test_name",
+        "test_name_mode",
         # Legacy date keys stay accepted on read so presets saved before the
         # unified contract still replay; the UI writes the canonical pair.
         "from",
@@ -22687,6 +22689,8 @@ class ReportFilters:
         "submitters",
         "tags",
         "team",
+        "test_name",
+        "test_name_mode",
         "tier",
         "version",
     )
@@ -22705,6 +22709,8 @@ class ReportFilters:
         review_status: str,
         submitters: set[str] | None,
         analysis_state: str,
+        test_name: str,
+        test_name_mode: str,
     ) -> None:
         self.team = team
         self.tier = tier
@@ -22717,6 +22723,8 @@ class ReportFilters:
         self.review_status = review_status
         self.submitters = submitters
         self.analysis_state = analysis_state
+        self.test_name = test_name
+        self.test_name_mode = test_name_mode
 
 
 def _report_filters(
@@ -22731,6 +22739,8 @@ def _report_filters(
     review_status: Annotated[str, Query()] = "",
     submitted_by: Annotated[list[str] | None, Query()] = None,
     analysis_state: Annotated[str, Query()] = "",
+    test_name: Annotated[str, Query(max_length=storage.MAX_TEST_NAME_LENGTH)] = "",
+    test_name_mode: Annotated[str, Query()] = "contains",
     legacy_from: Annotated[str, Query(alias="from", include_in_schema=False)] = "",
     legacy_to: Annotated[str, Query(alias="to", include_in_schema=False)] = "",
 ) -> ReportFilters:
@@ -22742,6 +22752,14 @@ def _report_filters(
             detail=(
                 f"Invalid analysis_state '{analysis_state}'. "
                 f"Must be {', '.join(sorted(storage.VALID_ANALYSIS_STATES))}."
+            ),
+        )
+    if test_name_mode not in storage.TEST_NAME_MODES:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Invalid test_name_mode '{test_name_mode}'. "
+                f"Must be one of: {', '.join(storage.TEST_NAME_MODES)}."
             ),
         )
     team_list, tier_list, version_list = _parse_report_metadata(team, tier, version)
@@ -22757,6 +22775,8 @@ def _report_filters(
         review_status=review_status,
         submitters=_normalize_submitters(submitted_by),
         analysis_state=analysis_state,
+        test_name=test_name,
+        test_name_mode=test_name_mode,
     )
 
 
@@ -22780,7 +22800,7 @@ async def reports_totals(
     logger.debug(
         "GET /api/reports/totals: team=%r, tier=%r, version=%r, from=%r, to=%r,"
         " status=%r, tags=%r, exclude_tags=%r, review_status=%r, submitted_by=%r,"
-        " analysis_state=%r",
+        " analysis_state=%r, test_name=%r, test_name_mode=%r",
         filters.team,
         filters.tier,
         filters.version,
@@ -22792,6 +22812,8 @@ async def reports_totals(
         filters.review_status,
         sorted(filters.submitters or ()),
         filters.analysis_state,
+        filters.test_name,
+        filters.test_name_mode,
     )
     return await storage.get_report_totals(
         team=filters.team,
@@ -22805,6 +22827,8 @@ async def reports_totals(
         review_status=filters.review_status,
         submitters=filters.submitters,
         analysis_state=filters.analysis_state,
+        test_name=filters.test_name,
+        test_name_mode=filters.test_name_mode,
         limit=limit,
         offset=offset,
     )
@@ -22828,7 +22852,7 @@ async def reports_classification_overrides(
     logger.debug(
         "GET /api/reports/classification-overrides: team=%r, tier=%r, version=%r,"
         " from=%r, to=%r, status=%r, tags=%r, exclude_tags=%r, review_status=%r,"
-        " submitted_by=%r, analysis_state=%r",
+        " submitted_by=%r, analysis_state=%r, test_name=%r, test_name_mode=%r",
         filters.team,
         filters.tier,
         filters.version,
@@ -22840,6 +22864,8 @@ async def reports_classification_overrides(
         filters.review_status,
         sorted(filters.submitters or ()),
         filters.analysis_state,
+        filters.test_name,
+        filters.test_name_mode,
     )
     return await storage.get_report_classification_overrides(
         team=filters.team,
@@ -22853,6 +22879,8 @@ async def reports_classification_overrides(
         review_status=filters.review_status,
         submitters=filters.submitters,
         analysis_state=filters.analysis_state,
+        test_name=filters.test_name,
+        test_name_mode=filters.test_name_mode,
         limit=limit,
         offset=offset,
     )
@@ -22873,7 +22901,7 @@ async def reports_issues_created(
     logger.debug(
         "GET /api/reports/issues-created: team=%r, tier=%r, version=%r, from=%r,"
         " to=%r, status=%r, tags=%r, exclude_tags=%r, review_status=%r,"
-        " submitted_by=%r, analysis_state=%r",
+        " submitted_by=%r, analysis_state=%r, test_name=%r, test_name_mode=%r",
         filters.team,
         filters.tier,
         filters.version,
@@ -22885,6 +22913,8 @@ async def reports_issues_created(
         filters.review_status,
         sorted(filters.submitters or ()),
         filters.analysis_state,
+        filters.test_name,
+        filters.test_name_mode,
     )
     return await storage.get_report_issues_created(
         team=filters.team,
@@ -22898,6 +22928,8 @@ async def reports_issues_created(
         review_status=filters.review_status,
         submitters=filters.submitters,
         analysis_state=filters.analysis_state,
+        test_name=filters.test_name,
+        test_name_mode=filters.test_name_mode,
         limit=limit,
         offset=offset,
     )

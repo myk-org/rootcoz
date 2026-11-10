@@ -8016,6 +8016,30 @@ class TestReportsCommands:
         assert "Total jobs: 5" in result.output
         mock_client.report_totals.assert_called_once()
 
+    def test_reports_pass_the_test_name_filter(self, mock_client):
+        mock_client.report_totals.return_value = {
+            "total_jobs": 1,
+            "total_failures": 0,
+            "total_reviewed": 0,
+            "total_details": 1,
+            "jobs": [],
+        }
+        result = runner.invoke(
+            app,
+            [
+                "reports",
+                "totals",
+                "--test-name",
+                "prefix_needle_suffix",
+                "--test-name-mode",
+                "exact",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        kwargs = mock_client.report_totals.call_args.kwargs
+        assert kwargs["test_name"] == "prefix_needle_suffix"
+        assert kwargs["test_name_mode"] == "exact"
+
     def test_reports_totals_json(self, mock_client):
         mock_client.report_totals.return_value = {
             "total_jobs": 2,
@@ -8054,6 +8078,8 @@ class TestReportsCommands:
             review_status="",
             submitted_by=None,
             analysis_state="",
+            test_name="",
+            test_name_mode="contains",
         )
 
     def test_reports_totals_with_status_and_tags(self, mock_client):
@@ -8081,6 +8107,8 @@ class TestReportsCommands:
             review_status="",
             submitted_by=None,
             analysis_state="",
+            test_name="",
+            test_name_mode="contains",
         )
 
     def test_reports_totals_with_exclude_tags(self, mock_client):
@@ -8108,6 +8136,8 @@ class TestReportsCommands:
             review_status="",
             submitted_by=None,
             analysis_state="",
+            test_name="",
+            test_name_mode="contains",
         )
 
     def test_reports_totals_with_review_status(self, mock_client):
@@ -8135,6 +8165,8 @@ class TestReportsCommands:
             review_status="reviewed",
             submitted_by=None,
             analysis_state="",
+            test_name="",
+            test_name_mode="contains",
         )
 
     def test_reports_overrides(self, mock_client):

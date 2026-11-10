@@ -2074,6 +2074,8 @@ class RootCozClient:
         review_status: str = "",
         submitted_by: list[str] | None = None,
         analysis_state: str = "",
+        test_name: str = "",
+        test_name_mode: str = "contains",
         limit: int = 0,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -2101,6 +2103,10 @@ class RootCozClient:
             params["exclude_tags"] = ",".join(exclude_tags)
         if review_status:
             params["review_status"] = review_status
+        if test_name:
+            params["test_name"] = test_name
+            if test_name_mode and test_name_mode != "contains":
+                params["test_name_mode"] = test_name_mode
         if limit > 0:
             params["limit"] = limit
         if offset > 0:
@@ -2120,6 +2126,8 @@ class RootCozClient:
         review_status: str = "",
         submitted_by: list[str] | None = None,
         analysis_state: str = "",
+        test_name: str = "",
+        test_name_mode: str = "contains",
         limit: int = 0,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -2136,6 +2144,8 @@ class RootCozClient:
             review_status,
             submitted_by,
             analysis_state,
+            test_name,
+            test_name_mode,
             limit,
             offset,
         )
@@ -2154,6 +2164,8 @@ class RootCozClient:
         review_status: str = "",
         submitted_by: list[str] | None = None,
         analysis_state: str = "",
+        test_name: str = "",
+        test_name_mode: str = "contains",
         limit: int = 0,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -2170,6 +2182,8 @@ class RootCozClient:
             review_status,
             submitted_by,
             analysis_state,
+            test_name,
+            test_name_mode,
             limit,
             offset,
         )
@@ -2190,6 +2204,8 @@ class RootCozClient:
         review_status: str = "",
         submitted_by: list[str] | None = None,
         analysis_state: str = "",
+        test_name: str = "",
+        test_name_mode: str = "contains",
         limit: int = 0,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -2206,6 +2222,8 @@ class RootCozClient:
             review_status,
             submitted_by,
             analysis_state,
+            test_name,
+            test_name_mode,
             limit,
             offset,
         )

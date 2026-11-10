@@ -4964,18 +4964,21 @@ def _test_name_pattern(mode: str, text: str) -> str:
     )
 
 
-def _failed_test_name_predicate(mode: str, text: str) -> tuple[str, list[str]]:
+def _failed_test_name_predicate(
+    mode: str, text: str, *, job_column: str = "r.job_id"
+) -> tuple[str, list[str]]:
     """EXISTS clause selecting jobs with a **failing** test matching *text*.
 
     ``status = 'failed'`` is a SQL constant, not a parameter, so the scope is by
     construction and serves nothing but the partial index
-    ``idx_test_entries_failed_name``.
+    ``idx_test_entries_failed_name``. *job_column* names the job id column of the
+    calling query (the reports aggregates do not all alias ``results`` as ``r``).
     """
     if not text:
         return "", []
     pattern = _test_name_pattern(mode, text)
     clause = (
-        "EXISTS (SELECT 1 FROM test_entries te WHERE te.job_id = r.job_id"
+        f"EXISTS (SELECT 1 FROM test_entries te WHERE te.job_id = {job_column}"
         " AND te.status = 'failed'"
         " AND lower(te.test_name) LIKE lower(?) ESCAPE '\\')"
     )
@@ -12539,6 +12542,8 @@ async def get_report_totals(
     review_status: str = "",
     submitters: set[str] | None = None,
     analysis_state: str = "",
+    test_name: str = "",
+    test_name_mode: str = "contains",
     limit: int = 0,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -12565,6 +12570,10 @@ async def get_report_totals(
     clause, extra = _analysis_state_filter_sql(
         analysis_state, column="r.analysis_state"
     )
+    if clause:
+        conditions.append(clause)
+        params.extend(extra)
+    clause, extra = _failed_test_name_predicate(test_name_mode, test_name)
     if clause:
         conditions.append(clause)
         params.extend(extra)
@@ -12729,6 +12738,8 @@ async def get_report_classification_overrides(
     review_status: str = "",
     submitters: set[str] | None = None,
     analysis_state: str = "",
+    test_name: str = "",
+    test_name_mode: str = "contains",
     limit: int = 0,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -12773,6 +12784,13 @@ async def get_report_classification_overrides(
         status_join = " JOIN results r_filter ON r_filter.job_id = tc.job_id"
         conditions.extend(result_conditions)
         params.extend(result_params)
+
+    clause, extra = _failed_test_name_predicate(
+        test_name_mode, test_name, job_column="tc.job_id"
+    )
+    if clause:
+        conditions.append(clause)
+        params.extend(extra)
 
     if review_status == "reviewed":
         conditions.append(
@@ -12958,6 +12976,8 @@ async def get_report_issues_created(
     review_status: str = "",
     submitters: set[str] | None = None,
     analysis_state: str = "",
+    test_name: str = "",
+    test_name_mode: str = "contains",
     limit: int = 0,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -12993,6 +13013,11 @@ async def get_report_issues_created(
     clause, extra = _analysis_state_filter_sql(
         analysis_state, column="r.analysis_state"
     )
+    if clause:
+        conditions.append(clause)
+        params.extend(extra)
+
+    clause, extra = _failed_test_name_predicate(test_name_mode, test_name)
     if clause:
         conditions.append(clause)
         params.extend(extra)

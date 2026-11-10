@@ -264,9 +264,11 @@ The two chat streams carry the answer itself. `event: chat-delta` with `data: {"
 
 | Method | Path | Min role | Query parameters |
 | --- | --- | --- | --- |
-| GET | `/api/reports/totals` | admin or `can_view_reports` | `team`, `tier`, `version`, `date_from`, `date_to`, `status`, `tags`, `exclude_tags`, `review_status`, `submitted_by`, `analysis_state`, `limit`, `offset` |
+| GET | `/api/reports/totals` | admin or `can_view_reports` | `team`, `tier`, `version`, `date_from`, `date_to`, `status`, `tags`, `exclude_tags`, `review_status`, `submitted_by`, `analysis_state`, `test_name`, `test_name_mode`, `limit`, `offset` |
 | GET | `/api/reports/classification-overrides` | admin or `can_view_reports` | same filter set |
 | GET | `/api/reports/issues-created` | admin or `can_view_reports` | same filter set |
+
+`test_name`/`test_name_mode` on these three carry the same meaning as on `/api/dashboard/filtered` — the literal text, the four modes, and the `status='failed'` scope — so a reports view answers "every job where this test failed" the way the job list does.
 
 Date bounds use the `date_from` and `date_to` query names. The legacy `from` and `to` names are still accepted and mean the same thing, so links and saved views written before the unified filter contract keep working; they are not advertised in the schema. `submitted_by` is repeatable with the same trimmed, case-insensitive substring match and the same 50-value / 64-char caps as the dashboard, and `analysis_state` takes `submitted` or `analyzed` (empty means both; anything else is a `400`). Without report access you get `403 Reports access required`.
 

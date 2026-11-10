@@ -131,6 +131,35 @@ describe('ReportsPage filters', () => {
     expect(screen.getByTestId('location-probe').textContent).toContain('analysis_state=submitted')
   })
 
+  it('folds a shared link onto the server spelling, so one name is one pick', async () => {
+    // The link was written with a different case; the endpoint matches
+    // case-insensitively, so two chips here would be one filter twice.
+    renderReports('/reports?submitted_by=ALICE')
+
+    await waitFor(() => expect(reportRequests.at(-1)?.getAll('submitted_by')).toEqual(['alice']))
+    expect(screen.getByRole('button', { name: 'Remove alice' })).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Remove ALICE' })).toBeNull()
+  })
+
+  it('drops a submitter the endpoint would reject instead of failing the request', async () => {
+    // Over the 64-character cap the reports endpoint answers 400: the shared
+    // normalizer bounds the value here instead of shipping a broken request.
+    const tooLong = 'a'.repeat(65)
+    renderReports(`/reports?submitted_by=${tooLong}`)
+
+    await waitFor(() => expect(reportRequests.length).toBeGreaterThan(0))
+    expect(reportRequests.at(-1)?.getAll('submitted_by')).toEqual([])
+  })
+
+  it('narrows the report by failing test name, like the dashboard', async () => {
+    renderReports('/reports?test_name=needle&test_name_mode=exact')
+
+    await waitFor(() => expect(reportRequests.at(-1)?.get('test_name')).toBe('needle'))
+    expect(reportRequests.at(-1)?.get('test_name_mode')).toBe('exact')
+    // The pick is visible, not applied behind the user's back.
+    expect(screen.getByRole('combobox', { name: 'Select Test name' })).toHaveTextContent('needle')
+  })
+
   it('honours a link that already carries both new filters', async () => {
     renderReports('/reports?submitted_by=yuval&analysis_state=analyzed')
 

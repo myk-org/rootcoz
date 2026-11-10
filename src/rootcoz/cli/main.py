@@ -5838,6 +5838,16 @@ _REPORT_SUBMITTED_BY_OPTION = typer.Option(
 _REPORT_ANALYSIS_STATE_OPTION = typer.Option(
     "", "--analysis-state", help="Filter: submitted, analyzed."
 )
+_REPORT_TEST_NAME_OPTION = typer.Option(
+    "",
+    "--test-name",
+    help="Keep only jobs with a failing test whose name matches this text.",
+)
+_REPORT_TEST_NAME_MODE_OPTION = typer.Option(
+    "contains",
+    "--test-name-mode",
+    help="How --test-name matches: contains, exact, starts_with, ends_with.",
+)
 
 
 @reports_app.command("totals")
@@ -5853,6 +5863,8 @@ def reports_totals(
     review_status: str = _REPORT_REVIEW_STATUS_OPTION,
     submitted_by: list[str] = _REPORT_SUBMITTED_BY_OPTION,
     analysis_state: str = _REPORT_ANALYSIS_STATE_OPTION,
+    test_name: str = _REPORT_TEST_NAME_OPTION,
+    test_name_mode: str = _REPORT_TEST_NAME_MODE_OPTION,
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Show aggregate totals: jobs, failures, reviewed."""
@@ -5873,6 +5885,8 @@ def reports_totals(
             review_status=review_status,
             submitted_by=submitted_by or None,
             analysis_state=analysis_state,
+            test_name=test_name,
+            test_name_mode=test_name_mode,
         )
     except RootCozError as err:
         _handle_error(err)
@@ -5918,6 +5932,8 @@ def reports_overrides(
     review_status: str = _REPORT_REVIEW_STATUS_OPTION,
     submitted_by: list[str] = _REPORT_SUBMITTED_BY_OPTION,
     analysis_state: str = _REPORT_ANALYSIS_STATE_OPTION,
+    test_name: str = _REPORT_TEST_NAME_OPTION,
+    test_name_mode: str = _REPORT_TEST_NAME_MODE_OPTION,
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Show classification overrides grouped by from->to."""
@@ -5938,6 +5954,8 @@ def reports_overrides(
             review_status=review_status,
             submitted_by=submitted_by or None,
             analysis_state=analysis_state,
+            test_name=test_name,
+            test_name_mode=test_name_mode,
         )
     except RootCozError as err:
         _handle_error(err)
@@ -5983,6 +6001,8 @@ def reports_issues(
     review_status: str = _REPORT_REVIEW_STATUS_OPTION,
     submitted_by: list[str] = _REPORT_SUBMITTED_BY_OPTION,
     analysis_state: str = _REPORT_ANALYSIS_STATE_OPTION,
+    test_name: str = _REPORT_TEST_NAME_OPTION,
+    test_name_mode: str = _REPORT_TEST_NAME_MODE_OPTION,
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Show GitHub/Jira issues created from analyses."""
@@ -6003,6 +6023,8 @@ def reports_issues(
             review_status=review_status,
             submitted_by=submitted_by or None,
             analysis_state=analysis_state,
+            test_name=test_name,
+            test_name_mode=test_name_mode,
         )
     except RootCozError as err:
         _handle_error(err)

@@ -27,6 +27,11 @@ interface SearchableMultiSelectProps {
   loading?: boolean
   /** Free entry: an SSO user the user table does not list yet. */
   allowCustom?: boolean
+  /**
+   * Server-side options: the typed query, so the caller can refetch (debounced)
+   * instead of holding a list it cannot enumerate.
+   */
+  onQueryChange?: (query: string) => void
   disabled?: boolean
   placeholder?: string
   /** Trigger width override (long labels); the default fits a short value. */
@@ -88,6 +93,7 @@ export function SearchableMultiSelect({
   multiple = true,
   loading = false,
   allowCustom = false,
+  onQueryChange,
   disabled = false,
   placeholder,
   className,
@@ -252,6 +258,7 @@ export function SearchableMultiSelect({
           onChange={event => {
             setQuery(event.target.value)
             setHighlight(0)
+            onQueryChange?.(event.target.value)
           }}
           onKeyDown={handleKeyDown}
           placeholder="Type to filter…"
