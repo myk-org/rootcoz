@@ -1,4 +1,8 @@
-"""Chat /init reports workspace-preparation phases while it runs (issue #279)."""
+"""Chat /init reports workspace-preparation phases while it prepares (#279, #511).
+
+Preparation is a background task now, so the phase is still observable *after* the
+request has answered — which is the stronger claim the original test made.
+"""
 
 import asyncio
 from types import SimpleNamespace
@@ -33,7 +37,9 @@ async def _setup_job(
 
     seen: list[str] = []
 
-    async def fake_clone(workspace, params, user_repo_token="", on_repo=None):
+    async def fake_clone(
+        workspace, params, user_repo_token="", on_repo=None, *, failed=None
+    ):
         if on_repo:
             on_repo("tests-repo")
         seen.append("cloning")
@@ -74,6 +80,17 @@ def _request():
     )
 
 
+async def _settle(job_id: str = "job") -> None:
+    """Wait for the spawned preparation, then let its teardown finish."""
+    entry = main._chat_prep_tasks.get(f"{job_id}:alice")
+    if entry is None:
+        return
+    try:
+        await entry.task
+    except asyncio.CancelledError:
+        pass
+
+
 @pytest.mark.asyncio
 async def test_history_reports_phase_while_init_runs_and_clears_after(
     monkeypatch, tmp_path
@@ -83,8 +100,13 @@ async def test_history_reports_phase_while_init_runs_and_clears_after(
     await _setup_job(monkeypatch, tmp_path, gate=gate, cloning_started=cloning_started)
     body = ChatInitRequest(ai_provider="openai", ai_model="chosen")
 
-    init = asyncio.create_task(main.init_chat("job", _request(), body))
-    # Blocked inside clone_chat_repos: history must still answer with the phase.
+    response = await asyncio.wait_for(main.init_chat("job", _request(), body), 2)
+    assert response == {
+        "ready": False,
+        "preparing": {"phase": "preparing", "detail": ""},
+    }
+    # Blocked inside clone_chat_repos *after* the request answered: the phase is
+    # observable while the workspace is still being prepared.
     await asyncio.wait_for(cloning_started.wait(), 5)
     history = await asyncio.wait_for(
         main.get_chat_history("job", _request(), limit=200, offset=0), 2
@@ -92,13 +114,14 @@ async def test_history_reports_phase_while_init_runs_and_clears_after(
     assert history["preparing"] == {"phase": "cloning", "detail": "tests-repo"}
 
     gate.set()
-    assert (await init)["session_id"] == "sid"
+    await _settle()
     after = await main.get_chat_history("job", _request(), limit=200, offset=0)
     assert after["preparing"] is None
 
 
 @pytest.mark.asyncio
 async def test_phase_cleared_when_init_fails(monkeypatch, tmp_path):
+    """A failure *after* the 202 is a failed row, and the phase still clears."""
     from fastapi import HTTPException
 
     from rootcoz.engine import chat
@@ -109,14 +132,18 @@ async def test_phase_cleared_when_init_fails(monkeypatch, tmp_path):
         raise HTTPException(status_code=409, detail="nope")
 
     monkeypatch.setattr(chat, "clone_chat_repos", boom)
-    with pytest.raises(HTTPException):
-        await main.init_chat(
-            "job",
-            _request(),
-            ChatInitRequest(ai_provider="openai", ai_model="chosen"),
-        )
+    response = await main.init_chat(
+        "job",
+        _request(),
+        ChatInitRequest(ai_provider="openai", ai_model="chosen"),
+    )
+    assert response["ready"] is False
+    await _settle()
+
     history = await main.get_chat_history("job", _request(), limit=200, offset=0)
     assert history["preparing"] is None
+    failed = [m for m in history["messages"] if m["status"] == "failed"]
+    assert [m["content"] for m in failed] == [main._CHAT_PREP_FAILED_DETAIL]
 
 
 @pytest.mark.asyncio

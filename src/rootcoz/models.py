@@ -205,7 +205,11 @@ class BaseAnalysisRequest(BaseModel):
     )
     jira_site_url: str | None = Field(
         default=None,
-        description="Atlassian site URL for Jira browse links (overrides JIRA_SITE_URL env var)",
+        description=(
+            "Atlassian site URL for Jira browse links, e.g. "
+            "https://<site>.atlassian.net — never the api.atlassian.com "
+            "gateway (overrides JIRA_SITE_URL env var)"
+        ),
     )
     jira_project_key: str | None = Field(
         default=None,

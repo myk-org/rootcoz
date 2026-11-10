@@ -66,6 +66,14 @@ async def test_repeated_start_reuses_session_without_duplicate_welcome(
     )
     body = ChatInitRequest(ai_provider="openai", ai_model="m")
 
+    async def settle() -> None:
+        entry = main._chat_prep_tasks.get(f"{job_id}:alice")
+        if entry is not None:
+            try:
+                await entry.task
+            except asyncio.CancelledError:
+                pass
+
     async def start():
         if admin:
             return await main.init_admin_chat(request, body)
@@ -83,8 +91,13 @@ async def test_repeated_start_reuses_session_without_duplicate_welcome(
         main, "notify_chat_changed", wraps=main.notify_chat_changed
     ) as notify:
         first = await start()
-        assert first["ready"] is True
-        assert first["session_id"] == "session-123"
+        if admin:
+            assert first["ready"] is True
+            assert first["session_id"] == "session-123"
+        else:
+            # Job chat answers 202 and prepares in the background.
+            assert first["ready"] is False
+            await settle()
         assert alice_event.is_set()
         assert not bob_event.is_set()
         assert not broadcast_event.is_set()
@@ -97,12 +110,17 @@ async def test_repeated_start_reuses_session_without_duplicate_welcome(
         alice_event.clear()
         notifies_before_retry = notify.call_count
         retry = await start()
+        if not admin:
+            await settle()
         assert alice_event.is_set()
         assert not bob_event.is_set()
         assert not broadcast_event.is_set()
         assert notify.call_count > notifies_before_retry
-    assert retry["ready"] is True
-    assert retry["session_id"] == first["session_id"]
+    if admin:
+        assert retry["ready"] is True
+        assert retry["session_id"] == first["session_id"]
+    else:
+        assert retry["ready"] is False
     new_session.assert_awaited_once()
     messages = await storage.get_chat_messages(job_id, username="alice")
     assert len(messages) == (1 if admin else 2)
@@ -124,15 +142,43 @@ def test_cli_reports_reused_session_as_ready(admin, monkeypatch):
     ):
         client = MagicMock()
         get_client.return_value = client
-        getattr(client, "init_admin_chat" if admin else "init_chat").return_value = {
-            "ready": True,
-            "session_id": "session-123",
-        }
-        result = CliRunner().invoke(app, args)
-        assert result.exit_code == 0
-        assert f"{label} started" in result.output
-        assert "Ready: True" in result.output
-        assert "session-123" not in result.output
-        json_result = CliRunner().invoke(app, ["--json", *args])
+        if admin:
+            client.init_admin_chat.return_value = {
+                "ready": True,
+                "session_id": "session-123",
+            }
+        else:
+            # Job chat answers 202 and the session shows up in history; a fresh
+            # Start and a re-used session must both report ready.
+            client.init_chat.return_value = {
+                "ready": False,
+                "preparing": {"phase": "preparing", "detail": ""},
+            }
+            client.get_chat_history.return_value = {
+                "messages": [],
+                "total": 0,
+                "preparing": None,
+                "active_session": {
+                    "ai_provider": "openai",
+                    "ai_model": "m",
+                    "credential_source": "server",
+                },
+            }
+        with patch("time.sleep"):
+            result = CliRunner().invoke(app, args)
+            assert result.exit_code == 0
+            assert f"{label} started" in result.output
+            assert "Ready: True" in result.output
+            assert "session-123" not in result.output
+            json_result = CliRunner().invoke(app, ["--json", *args])
         assert json_result.exit_code == 0
-        assert json.loads(json_result.output)["session_id"] == "session-123"
+        payload = json.loads(json_result.output)
+        assert payload["ready"] is True
+        if admin:
+            # Admin chat init is synchronous and unchanged: `--json` prints its
+            # own response, which carries the session id.
+            assert payload["session_id"] == "session-123"
+        else:
+            assert (payload["ai_provider"], payload["ai_model"]) == ("openai", "m")
+            assert payload["error"] is None
+            assert "session-123" not in json_result.output

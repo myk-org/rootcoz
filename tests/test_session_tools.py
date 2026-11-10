@@ -39,7 +39,9 @@ def stubbed(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     indexed: list[Path] = []
     installed: list[tuple[Path, list[dict]]] = []
 
-    async def fake_index(workspace: Path, job_id: str = "") -> None:
+    async def fake_index(
+        workspace: Path, job_id: str = "", *, deadline: float | None = None
+    ) -> None:
         indexed.append(workspace)
 
     async def fake_install(workspace: Path, tools: list[dict]) -> None:
@@ -194,7 +196,9 @@ async def test_skill_is_installed_where_the_session_runs(
     session_cwd = tmp_path / "artifacts"
     session_cwd.mkdir()
 
-    async def fake_index(workspace: Path, job_id: str = "") -> None:
+    async def fake_index(
+        workspace: Path, job_id: str = "", *, deadline: float | None = None
+    ) -> None:
         return None
 
     monkeypatch.setattr(session_tools, "index_workspace_graph", fake_index)
@@ -241,11 +245,11 @@ async def test_indexing_logs_the_job_on_its_outcome_line(
     )
     monkeypatch.setattr(
         "rootcoz.engine.graft.roots_needing_index",
-        lambda workspace, roots: dict(roots),
+        lambda workspace, roots, deadline=None: dict(roots),
     )
     monkeypatch.setattr(
         "rootcoz.engine.graft.index_repositories",
-        lambda workspace, roots: {"repo": {"status": "indexed"}},
+        lambda workspace, roots, deadline=None: {"repo": {"status": "indexed"}},
     )
     monkeypatch.setattr(
         "rootcoz.engine.graft.log_index_outcomes",
