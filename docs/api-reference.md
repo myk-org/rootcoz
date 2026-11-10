@@ -96,6 +96,8 @@ Registration returns the raw API key exactly once and sends `Cache-Control: no-s
 
 All of these continue in the background and return `202 Accepted`, except `POST /results/{job_id}/abort`, which returns `200 OK`. `POST /submit` ingests only and stops before cloning or AI work; `POST /analyze` runs the full pipeline.
 
+A submission above `max_concurrent_analyses` (default `10`) is still accepted: it returns `202`, its job row reports `status: "pending"`, and it starts when a running analysis finishes — oldest queued job first. A queued job is never rejected and never failed. `POST /submit` and a job with no failures hold no analysis slot and never queue, and neither does the auto-review pass that follows a completed analysis.
+
 | Method | Path | Min role | Body highlights |
 | --- | --- | --- | --- |
 | POST | `/analyze` | operator | `type` (`jenkins`, `file`, `raw`, `prow`) plus source-specific fields |
@@ -145,6 +147,19 @@ The shared body accepts the server defaults as per-request overrides:
 | GET | `/api/dashboard/active-count` | viewer | none |
 
 `fields` returns full values for allowlisted paths only and is never truncated. Unknown paths return `400`, so fetch `/api/results/fields` first when you build against it.
+
+`GET /results/{job_id}` carries a `queue` object **only while the job is genuinely waiting for a free analysis slot** — an admitted job, an ingest-only `submit` and a job that skipped AI never carry it, and `pending` alone is not the marker because it is every job's first status:
+
+```json
+"queue": {
+  "position": 3,
+  "running": 10,
+  "limit": 10,
+  "message": "waiting for a free analysis slot (10 running, limit 10)"
+}
+```
+
+`position` is 1-based in the queue, `running` and `limit` are live numbers read when you ask (the object is computed, never stored, so it cannot go stale), and `message` is the sentence the report page prints. It discloses no other job's identity. `queue` is an allowlisted path, so `?fields=queue` returns just it; a `GET` for a job that is not queued has no `queue` key at all.
 
 `GET /results/{job_id}` always sets `result.incomplete_count`: the number of failures whose effective classification is empty — no `analysis.classification`, or an analysis stored as plain text by an older run. `analysis_error` only explains why there is no analysis; it is not what makes a row incomplete. It counts failures across `failures`, `child_job_analyses`, and nested `failed_children`, and it is computed from the effective classifications, so an override that sets one removes that failure from the count. It is an allowlisted `fields` path, so `?fields=result.incomplete_count` returns just it; dashboard rows carry the same key only when it is above zero.
 

@@ -9430,6 +9430,162 @@ class TestResumeWaitingJobs:
             assert process.call_args.kwargs["job_id"] == "next"
 
 
+class TestResumableQueueAfterRestart:
+    """``pending`` resumed at startup: as a queue wait, as ingest, or as an analyse."""
+
+    @staticmethod
+    def _jenkins_params(monkeypatch, *, wait_started_at: float | None = None) -> dict:
+        monkeypatch.setattr(
+            storage, "can_user_use_server_providers", AsyncMock(return_value=True)
+        )
+        monkeypatch.setattr(
+            storage, "get_user_ai_credentials", AsyncMock(return_value={})
+        )
+        from rootcoz.config import get_settings
+        from rootcoz.models import AnalyzeRequest
+
+        body = AnalyzeRequest(
+            job_name="my-job",
+            build_number=1,
+            ai_provider="gemini",
+            ai_model="m",
+            wait_for_completion=True,
+            max_wait_minutes=1,
+        )
+        params = _build_jenkins_request_params(body, get_settings(), "gemini", "m")
+        params["submitted_by"] = "admin"
+        params["max_wait_minutes"] = 1
+        if wait_started_at is not None:
+            params["wait_started_at"] = wait_started_at
+        return params
+
+    @pytest.mark.parametrize("status", ["pending", "waiting"])
+    async def test_only_a_waiting_job_is_timed_out_by_a_passed_deadline(
+        self, status, mock_settings, temp_db_path: Path, monkeypatch
+    ) -> None:
+        """T14c: a queued job's Jenkins deadline already served its purpose."""
+        import time as _time
+
+        from rootcoz.main import _resume_waiting_jobs
+
+        params = self._jenkins_params(
+            monkeypatch, wait_started_at=_time.time() - 3 * 60 * 60
+        )
+        job = {
+            "job_id": "resumed",
+            "result_data": {
+                "job_name": "my-job",
+                "build_number": 1,
+                "request_params": params,
+            },
+            "status": status,
+            "analysis_state": "analyzed",
+            "analysis_started_at": "2026-01-01 10:00:00",
+        }
+        with (
+            patch.object(storage, "DB_PATH", temp_db_path),
+            patch(
+                "rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock
+            ) as process,
+        ):
+            await storage.init_db()
+            await storage.save_result(
+                "resumed", "http://j/1", status, job["result_data"]
+            )
+            await _resume_waiting_jobs([job])
+            await asyncio.sleep(0)
+            if status == "pending":
+                process.assert_called_once()
+                assert (await storage.get_result("resumed"))["status"] == status
+            else:
+                process.assert_not_called()
+                failed = await storage.get_result("resumed")
+                assert failed["status"] == "failed"
+                assert "Timed out" in failed["result"]["error"]
+
+    async def test_an_interrupted_ingest_resumes_as_ingest_without_ai(
+        self, mock_settings, temp_db_path: Path, monkeypatch
+    ) -> None:
+        """T14d: ``/submit`` may run with no AI configured, so resume must not need it."""
+        from rootcoz.main import _resume_waiting_jobs
+
+        params = self._jenkins_params(monkeypatch)
+        result_data = {
+            "job_name": "my-job",
+            "build_number": 1,
+            "analysis_state": "submitted",
+            "request_params": params,
+        }
+        job = {
+            "job_id": "ingest",
+            "result_data": result_data,
+            "status": "pending",
+            "analysis_state": "submitted",
+            "analysis_started_at": None,
+        }
+        resolve = AsyncMock(side_effect=AssertionError("AI must not be resolved"))
+        peers = AsyncMock(side_effect=AssertionError("peers must not be resolved"))
+        with (
+            patch.object(storage, "DB_PATH", temp_db_path),
+            patch(
+                "rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock
+            ) as process,
+            patch("rootcoz.main._resolve_ai_config_allow_defer", resolve),
+            patch("rootcoz.main._validate_peer_configs", peers),
+        ):
+            await storage.init_db()
+            await storage.save_result("ingest", "http://j/1", "pending", result_data)
+            await _resume_waiting_jobs([job])
+            await asyncio.sleep(0)
+
+        kwargs = process.call_args.kwargs
+        assert kwargs["ingest_only"] is True
+        assert (kwargs["ai_provider"], kwargs["ai_model"]) == ("", "")
+        assert kwargs["peer_ai_configs"] is None
+        assert resolve.await_count == 0
+        assert peers.await_count == 0
+
+    async def test_a_claimed_in_place_analyse_resumes_as_an_analysis(
+        self, mock_settings, temp_db_path: Path, monkeypatch
+    ) -> None:
+        """T14e: ``analysis_started_at`` is what tells the claim from an ingest."""
+        from rootcoz.main import _resume_waiting_jobs
+
+        params = self._jenkins_params(monkeypatch)
+        result_data = {
+            "job_name": "my-job",
+            "build_number": 1,
+            "analysis_state": "submitted",
+            "request_params": params,
+        }
+        with (
+            patch.object(storage, "DB_PATH", temp_db_path),
+            patch(
+                "rootcoz.main._process_ci_source_analysis", new_callable=AsyncMock
+            ) as process,
+            patch(
+                "rootcoz.main._resolve_ai_config_allow_defer",
+                AsyncMock(return_value=("gemini", "m")),
+            ),
+            patch("rootcoz.main._validate_peer_configs", AsyncMock(return_value=None)),
+        ):
+            await storage.init_db()
+            await storage.save_result("claimed", "http://j/1", "completed", result_data)
+            claim = await storage.claim_submitted_job_for_analyze("claimed")
+            assert claim is not None
+            row = await storage.get_result("claimed")
+            # The stored row is what the boot reads, so build the entry from it.
+            cursor = await storage.mark_stale_results_failed()
+            resumable, _recovered = cursor
+            assert [job["job_id"] for job in resumable] == ["claimed"]
+            assert resumable[0]["analysis_started_at"] is not None
+            await _resume_waiting_jobs(resumable)
+            await asyncio.sleep(0)
+
+        assert process.call_args.kwargs["ingest_only"] is False
+        assert row["status"] == "pending"
+
+
 class TestLifespanResumesWaitingJobs:
     """Tests for waiting job resumption during lifespan startup."""
 
@@ -12854,7 +13010,11 @@ class TestReAnalyzeFailure:
             set_progress_callback(lambda _job: None)
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("status", ["completed", "failed", "aborted"])
+    # ``aborted`` is deliberately absent: since #544 a per-failure re-analysis
+    # admitted after its job was aborted does no work and only records that it
+    # never started, which ``test_a_per_failure_re_analysis_of_an_aborted_job_does_no_work``
+    # asserts.
+    @pytest.mark.parametrize("status", ["completed", "failed"])
     @pytest.mark.parametrize("clone_fails", [False, True])
     async def test_reanalyze_test_repo_records_clone_outcome(
         self, test_client, tmp_path, monkeypatch, clone_fails, status

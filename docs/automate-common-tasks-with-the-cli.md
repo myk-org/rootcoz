@@ -30,12 +30,13 @@ That submits a Jenkins analysis, waits for it to finish, and prints a two-field 
 STATUS=$(rootcoz --json status "$JOB_ID" | jq -r .status)
 case "$STATUS" in
   completed) rootcoz --json results show "$JOB_ID" --fields result.summary,result.failed_count ;;
+  pending|waiting|running) echo "analysis $JOB_ID is still $STATUS" >&2; exit 1 ;;
   failed|aborted|error) echo "analysis $JOB_ID ended as $STATUS" >&2; exit 1 ;;
   *) echo "unexpected status $STATUS" >&2; exit 1 ;;
 esac
 ```
 
-Bound the wait as well (for example `for i in $(seq 1 240)`) so a job stuck in `pending` or `running` cannot hang the pipeline. See [Tracking Analysis Progress](track-analysis-progress.html) for every status value.
+Bound the wait as well (for example `for i in $(seq 1 240)`) so a job that is still `running` cannot hang the pipeline. A job sitting in `pending` is normally not stuck: it is waiting for a free analysis slot (see `max_concurrent_analyses`), and it will start on its own — but a bounded loop still has to exit **non-zero** when the bound is reached instead of reporting a result it does not have. See [Tracking Analysis Progress](track-analysis-progress.html) for every status value.
 
 ## Step-by-Step
 
@@ -106,25 +107,33 @@ Bound the wait as well (for example `for i in $(seq 1 240)`) so a job stuck in `
      STATE=$(rootcoz --json status "$JOB_ID" | jq -r .status)
      case "$STATE" in
        completed) echo "done: $JOB_ID"; break ;;
+       pending|waiting|running) sleep 15 ;;
        failed|error|aborted) echo "analysis did not complete: $JOB_ID ($STATE)"; exit 1 ;;
+       *) echo "unexpected status $STATE" >&2; exit 1 ;;
      esac
-     sleep 15
    done
    ```
 
-   Cap the loop in real automation so a stuck job does not spin forever:
+   Cap the loop in real automation so a job that never finishes does not spin forever — and exit
+   non-zero when the cap is reached:
 
    ```bash
    for _ in $(seq 1 80); do
-     case "$(rootcoz --json status "$JOB_ID" | jq -r .status)" in
+     STATE=$(rootcoz --json status "$JOB_ID" | jq -r .status)
+     case "$STATE" in
        completed) break ;;
-       failed|aborted) echo "analysis did not complete"; exit 1 ;;
+       failed|aborted) echo "analysis did not complete" >&2; exit 1 ;;
      esac
      sleep 15
    done
+   [ "$STATE" = "completed" ] || { echo "still $STATE after 20m" >&2; exit 1; }
    ```
 
-   Handle the terminal status explicitly: a loop that only breaks on `completed` will fall through to the result-fetch step for a job that failed, was aborted, or is still running once the iterations run out, and the script will read as though the analysis succeeded. Check the status after the loop and treat `failed` and `aborted` as errors.
+   Handle every non-terminal status explicitly: `pending` is a normal state — the job is queued for a
+   free analysis slot — so it must keep polling, and a loop that only breaks on `completed` will fall
+   through to the result-fetch step for a job that is still `pending`, was aborted, or is still running
+   once the iterations run out, and the script will read as though the analysis succeeded. Check the
+   status after the loop and treat every non-`completed` value as an error.
 
    `rootcoz abort JOB_ID` cancels a run you no longer want.
 
@@ -245,9 +254,10 @@ Bound the wait as well (for example `for i in $(seq 1 240)`) so a job stuck in `
    for _ in $(seq 1 80); do
      STATE=$(rootcoz --json status "$JOB_ID" | jq -r '.status')
      [ "$STATE" = "completed" ] && break
-     [ "$STATE" = "failed" ] && { echo "analysis failed" >&2; exit 1; }
+     [ "$STATE" = "failed" ] || [ "$STATE" = "aborted" ] && { echo "analysis ended as $STATE" >&2; exit 1; }
      sleep 15
    done
+   [ "$STATE" = "completed" ] || { echo "still $STATE after 20m" >&2; exit 1; }
 
    SUMMARY=$(rootcoz --json results show "$JOB_ID" \
      --fields result.summary,result.failed_count | jq -c '.result')

@@ -485,7 +485,7 @@ export function StatusPage() {
                     {msg.title}
                   </h2>
                   <p className="mt-1 text-sm text-text-tertiary">
-                    {getPhaseLabel(progressPhase, data?.result?.cloning_repos) ?? progressPhase ?? msg.subtitle}
+                    {data?.queue?.message ?? getPhaseLabel(progressPhase, data?.result?.cloning_repos) ?? progressPhase ?? msg.subtitle}
                   </p>
                 </>
               )}

@@ -117,7 +117,10 @@ resources:
   # pod once). 12Gi is a judgement from the configured ceilings (~3 GiB graph
   # indexes + ~5.5 GiB concurrent clones + ~0.6 GiB artifacts + ~1 GiB writable
   # layer ≈ 10 GiB, rounded up), not a measurement — the arithmetic is in
-  # chart/README.md. It is deliberately below the production profile's 16Gi so the
+  # chart/README.md. The graph term is over the ~3 analyses these defaults host,
+  # not over max_concurrent_analyses, whose default is 10: running that cap here
+  # needs ~10 GiB of graph indexes and ~21 GiB of memory, so lower the cap or
+  # raise these values (#544). It is deliberately below the production profile's 16Gi so the
   # overlay still means something and a default pod still schedules on a
   # CRC-sized node. #402 C1 requires this cap by default.
   # "" drops a key, but a cleared request is not "no floor": Kubernetes copies the

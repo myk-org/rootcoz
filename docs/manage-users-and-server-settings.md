@@ -125,7 +125,7 @@ That creates an active operator who can submit analyses, and one server setting 
    | `Datadog` | `datadog_api_key`, `datadog_app_key`, `datadog_site`, `datadog_service`, `datadog_env`, `enable_datadog`, `dd_push_classifications`, `dd_push_rootcoz_url`, `dd_push_tracker_links`, `dd_allow_unreviewed_push` |
    | `Auth & Security` | `admin_key` (displayed masked, read-only), `secure_cookies`, `trust_proxy_headers`, `require_approval`, `admin_wait_approve_msg`, `allowed_users`, `default_user_role`, `login_lockout_enabled`, `login_lockout_threshold`, `audit_retention_days`, `audit_max_rows`, `audit_auth_failure_max_per_minute` |
    | `Prow` | `prow_url`, `gcs_bucket` |
-   | `Server` | `public_base_url`, `additional_repos`, `max_concurrent_repo_clones`, `wait_for_completion`, `poll_interval_minutes`, `max_wait_minutes`, `metadata_rules_file`, `enable_auto_review`, `auto_push_exporters` |
+   | `Server` | `public_base_url`, `additional_repos`, `max_concurrent_repo_clones`, `max_concurrent_analyses`, `wait_for_completion`, `poll_interval_minutes`, `max_wait_minutes`, `metadata_rules_file`, `enable_auto_review`, `auto_push_exporters` |
    | `Web Push` | `vapid_public_key`, `vapid_private_key`, `vapid_claim_email` |
    | `Notifications` | `smtp_host`, `smtp_port`, `smtp_user`, `smtp_password`, `smtp_from`, `alert_email_to`, `slack_webhook_url`, `enable_health_monitor`, `health_monitor_interval_seconds`, `health_alert_unhealthy_seconds`, `health_alert_error_rate_percent`, `health_alert_error_rate_seconds`, `health_alert_stuck_analysis_seconds` |
    | `Storage` | `results_retention_days`, `results_max_rows` |

@@ -2199,6 +2199,9 @@ def status(
                 else origin_id
             )
             typer.echo(f"Reanalyzed from: {label}")
+        queue = data.get("queue")
+        if queue:
+            typer.echo(f"Queue: {queue.get('message', '')}")
 
 
 # -- History ------------------------------------------------------------------

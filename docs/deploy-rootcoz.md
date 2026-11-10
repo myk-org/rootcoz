@@ -228,8 +228,14 @@ chart's default `12Gi` rather than adding to it.
 | Resource | Value | Basis |
 |---|---|---|
 | CPU | `4` | The live deployment's limit is `4000m`; CPU throttling stays under 1% of periods. |
-| Memory | `32Gi` | Peak usage is ~6 GiB. Size a smaller pod with **~1 GiB baseline + ~2 GiB per concurrent analysis** (default `max_concurrent_ai_calls` is 3). |
-| ephemeral-storage | `16Gi` | A judgement from the configured ceilings, not a measurement: 1 GiB graph index per analysis workspace × concurrency 3, up to 10 concurrent repo clones, plus CI artifacts and the writable layer. Keep it at or below the node's ephemeral allocatable. |
+| Memory | `32Gi` | Peak usage is ~6 GiB. Size a smaller pod with **~1 GiB baseline + ~2 GiB per submitted analysis** (fetch + wait + run), multiplied by `max_concurrent_analyses`: at the default `10` that is `10 × ~2 GiB ≈ 21 GiB`. `max_concurrent_ai_calls` (default 3) is the width of *one* analysis and does not change this product. |
+| ephemeral-storage | `16Gi` | A judgement from the configured ceilings, not a measurement: one 1 GiB graph index (`max_workspace_graph_mb` default `1024`) per analysis workspace × `max_concurrent_analyses`, up to 10 concurrent repo clones, plus CI artifacts and the writable layer. At the default cap of 10 that is ~10 GiB before clone workspaces. Keep it at or below the node's ephemeral allocatable. |
+
+**The shipped defaults host roughly 3 analyses.** The chart's default `2 CPU / 8Gi / 12Gi` limit fits
+about three analyses at the ~2 GiB each above, while `max_concurrent_analyses` defaults to `10`. An
+operator staying on those defaults should set `max_concurrent_analyses` to `3` or lower, or raise
+`resources` and/or lower `max_workspace_graph_mb`. The cap is the AI concurrency lever; memory is the
+first thing to watch when it is raised.
 
 **Guaranteed versus Burstable.** `requests == limits` gives Guaranteed QoS (computed from cpu and
 memory only) and raises the scheduling floor to 32Gi memory + 16Gi ephemeral, so the node must have
@@ -244,7 +250,8 @@ and `terminationGracePeriodSeconds` went from `30` to `60` — any pod-template 
 5 s to exit. With one replica on `Recreate`, an analysis in flight when the pod goes is marked failed
 for a server restart before the process exits (`GET /results/{job_id}` returns
 `failure_reason: "server_restart"`); it still has to be re-submitted, because the analysis itself is
-gone. Installs that set `sidecar.agentDir` had a second reason to roll earlier — the
+gone. A job still queued as `pending` is different: it is resumed by the next boot and runs, because
+it never held a workspace. Installs that set `sidecar.agentDir` had a second reason to roll earlier — the
 `copy-sidecar-agent` init container's request and limit are now equal (`10m/32Mi`) where they were
 `10m/16Mi` and `100m/128Mi`, and that equality is what keeps a Guaranteed pod Guaranteed.
 
@@ -304,7 +311,8 @@ two warnings are the only explanation you get for a chat tree that will never be
 
 **Single replica consequence.** One replica on a ReadWriteOnce PVC, `Recreate` strategy, no HA: any
 restart — eviction, upgrade, node drain — interrupts running analyses. Track them on the dashboard
-and re-submit after the rollout.
+and re-submit after the rollout. A job still queued as `pending` is the exception: the next boot
+resumes it, and only a `running` analysis is failed and has to be re-submitted.
 
 Extended resources (`nvidia.com/gpu`, `hugepages-*`) are supported in `resources.requests` / `limits`.
 `memory` and `ephemeral-storage` need a unit (`4Gi`); a bare number is read as bytes. `cpu` takes a

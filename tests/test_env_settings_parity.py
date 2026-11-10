@@ -963,3 +963,82 @@ def test_results_retention_bounds_are_single_sourced():
     row_limits = {meta.le for meta in rows_field.metadata if hasattr(meta, "le")}
     assert SQLITE_INT_MAX in row_limits
     assert storage.SQLITE_INT_MAX is SQLITE_INT_MAX
+
+
+# --- the analysis concurrency cap (#544) -----------------------------------
+
+
+def test_max_concurrent_analyses_metadata(client):
+    """T16: one Server-category integer, env-backed and runtime-applied."""
+    response = client.get("/api/admin/settings", headers=_admin_headers())
+    assert response.status_code == 200
+    item = {row["key"]: row for row in response.json()}["max_concurrent_analyses"]
+
+    assert item["category"] == "Server"
+    assert item["default"] == "10"
+    assert item["type"] == "integer"
+    assert item["sensitive"] is False
+    assert item["restart_required"] is False
+    assert item["server_only"] is False
+    assert item["env_var"] == "MAX_CONCURRENT_ANALYSES"
+    assert item["label"] == "Max concurrent analyses"
+    # Beside the other concurrency limits, not on a page of its own.
+    assert list(main._SETTINGS_CATEGORIES).index("Server") < list(
+        main._SETTINGS_CATEGORIES
+    ).index("Web Push")
+
+
+def test_max_concurrent_analyses_rejects_zero_and_applies_a_db_override(client):
+    refused = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"max_concurrent_analyses": 0}},
+    )
+    assert refused.status_code == 400
+    assert "max_concurrent_analyses: must be > 0" in refused.json()["detail"]
+
+    saved = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"max_concurrent_analyses": 3}},
+    )
+    assert saved.status_code == 200, saved.text
+    clear_settings_cache()
+    assert get_settings().max_concurrent_analyses == 3
+
+
+def test_max_concurrent_analyses_change_is_audited_once(client):
+    """T16b: the successful PUT is audited; the refused one is not."""
+    import asyncio
+
+    assert (
+        client.get("/api/admin/settings", headers=_admin_headers()).status_code == 200
+    )
+
+    refused = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"max_concurrent_analyses": 0}},
+    )
+    assert refused.status_code == 400
+    accepted = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"max_concurrent_analyses": 2}},
+    )
+    assert accepted.status_code == 200, accepted.text
+
+    events = asyncio.run(storage.list_audit_events(action="settings.update"))["events"]
+    assert len(events) == 1
+    assert events[0]["details"]["changed_keys"] == ["max_concurrent_analyses"]
+    assert events[0]["target_type"] == "setting"
+
+
+def test_queue_is_an_advertised_sparse_field(client):
+    """T16c: the CLI can select it, so it must be in the allowlist."""
+    from rootcoz.result_fields import RESULT_FIELD_PATHS
+
+    response = client.get("/api/results/fields", headers=_admin_headers())
+    assert response.status_code == 200
+    assert "queue" in response.json()["fields"]
+    assert "queue" in RESULT_FIELD_PATHS

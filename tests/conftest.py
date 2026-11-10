@@ -134,6 +134,23 @@ def _capture_reaper_logs(caplog: pytest.LogCaptureFixture) -> Iterator[None]:
 
 
 @pytest.fixture(autouse=True)
+def _reset_analysis_slots() -> Iterator[None]:
+    """Leave no analysis slot or waiter behind for the next test (#544).
+
+    Autouse suite-wide, not only in the limiter's own tests: a test that ends with
+    a job still queued would otherwise hang the next one that needs a slot, and
+    there is no per-test timeout to turn that into a failure.
+    """
+    from rootcoz import analysis_slots
+
+    analysis_slots.reset()
+    try:
+        yield
+    finally:
+        analysis_slots.reset()
+
+
+@pytest.fixture(autouse=True)
 def _no_host_temp_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     """Aim the startup reclaim at ``tmp_path``, never at the host temp root.
 

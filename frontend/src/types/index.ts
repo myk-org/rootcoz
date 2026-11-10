@@ -456,6 +456,15 @@ export interface TrackedInEntry {
   tracked_in_by: string
 }
 
+/** Present only while the job waits for a free analysis slot (#544). */
+export interface AnalysisQueue {
+  /** 1-based place in the queue. */
+  position: number
+  running: number
+  limit: number
+  message: string
+}
+
 export interface ResultResponse {
   job_id: string
   graft_estimated_tokens_saved?: number
@@ -473,6 +482,8 @@ export interface ResultResponse {
   /** IDs of re-analyses of this job, in enqueue order. */
   reanalyzed_to_job_ids?: string[]
   origin_job_name?: string
+  /** Present only while this job waits for a free analysis slot. */
+  queue?: AnalysisQueue
   /** Per-test tracked-in links (composite key → list of links). */
   tracked_in?: Record<string, TrackedInEntry[]>
   capabilities?: {
