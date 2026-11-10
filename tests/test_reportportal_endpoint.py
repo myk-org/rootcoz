@@ -116,11 +116,11 @@ def _rp_disabled_env():
         "REQUIRE_APPROVAL": "false",
     }
     with patch.dict(os.environ, env, clear=True):
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache
 
-        get_settings.cache_clear()
+        clear_settings_cache()
         yield
-        get_settings.cache_clear()
+        clear_settings_cache()
 
 
 _BASE_RP_ENABLED_ENV = {
@@ -143,11 +143,11 @@ _BASE_RP_ENABLED_ENV = {
 def _rp_enabled_env():
     """Environment with RP enabled."""
     with patch.dict(os.environ, _BASE_RP_ENABLED_ENV, clear=True):
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache
 
-        get_settings.cache_clear()
+        clear_settings_cache()
         yield
-        get_settings.cache_clear()
+        clear_settings_cache()
 
 
 @pytest.fixture
@@ -160,11 +160,11 @@ def _rp_enabled_all_push_disabled_env():
         "RP_PUSH_TRACKER_LINKS": "false",
     }
     with patch.dict(os.environ, env, clear=True):
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache
 
-        get_settings.cache_clear()
+        clear_settings_cache()
         yield
-        get_settings.cache_clear()
+        clear_settings_cache()
 
 
 @pytest.fixture
@@ -177,11 +177,11 @@ def _rp_enabled_partial_push_env():
         "RP_PUSH_TRACKER_LINKS": "true",
     }
     with patch.dict(os.environ, env, clear=True):
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache
 
-        get_settings.cache_clear()
+        clear_settings_cache()
         yield
-        get_settings.cache_clear()
+        clear_settings_cache()
 
 
 class TestPushReportPortalEndpoint:
@@ -474,9 +474,9 @@ class TestPushReportPortalEndpoint:
     ):
         """REPORTPORTAL_VERIFY_SSL is forwarded to the ReportPortalClient."""
         with patch.dict(os.environ, {"REPORTPORTAL_VERIFY_SSL": "false"}):
-            from rootcoz.config import get_settings
+            from rootcoz.config import clear_settings_cache
 
-            get_settings.cache_clear()
+            clear_settings_cache()
             mock_get_result.return_value = {
                 "result": {
                     "job_name": "test-job",
@@ -516,7 +516,7 @@ class TestPushReportPortalEndpoint:
             mock_rp_class.assert_called_once()
             call_kwargs = mock_rp_class.call_args[1]
             assert call_kwargs["verify_ssl"] is False
-            get_settings.cache_clear()
+            clear_settings_cache()
 
     @patch("rootcoz.main.get_history_classification", new_callable=AsyncMock)
     @patch("rootcoz.main.get_result")
@@ -2694,11 +2694,11 @@ def _rp_enabled_unreviewed_push_env():
     """Environment with RP enabled and unreviewed RP pushes allowed."""
     env = {**_BASE_RP_ENABLED_ENV, "RP_ALLOW_UNREVIEWED_PUSH": "true"}
     with patch.dict(os.environ, env, clear=True):
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache
 
-        get_settings.cache_clear()
+        clear_settings_cache()
         yield
-        get_settings.cache_clear()
+        clear_settings_cache()
 
 
 _STORED_ONE_FAILURE = {

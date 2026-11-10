@@ -17,7 +17,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from rootcoz import server_status, storage
-from rootcoz.config import get_settings
+from rootcoz.config import clear_settings_cache
 
 # ---------------------------------------------------------------------------
 # Fake cgroup / proc trees
@@ -924,13 +924,13 @@ def client(temp_db_path):
         ),
         patch.object(storage, "DB_PATH", temp_db_path),
     ):
-        get_settings.cache_clear()
+        clear_settings_cache()
         asyncio.run(storage.init_db())
         from rootcoz.main import app
 
         with TestClient(app) as test_client:
             yield test_client
-        get_settings.cache_clear()
+        clear_settings_cache()
 
 
 @pytest.fixture

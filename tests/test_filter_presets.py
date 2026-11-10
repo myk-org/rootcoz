@@ -28,14 +28,14 @@ def client(_init_db, temp_db_path):
         mp.setenv("SECURE_COOKIES", "false")
         mp.setenv("DB_PATH", str(temp_db_path))
         mp.setenv("REQUIRE_APPROVAL", "false")
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache
 
-        get_settings.cache_clear()
+        clear_settings_cache()
         from rootcoz.main import app
 
         with TestClient(app) as c:
             yield c
-        get_settings.cache_clear()
+        clear_settings_cache()
 
 
 def _register(client: TestClient, username: str) -> dict[str, str]:

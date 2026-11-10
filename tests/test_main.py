@@ -56,7 +56,7 @@ def _patch_preflight():
 @contextmanager
 def _with_github_issue_config():
     """Temporarily enable GitHub issue creation settings for tests."""
-    from rootcoz.config import get_settings
+    from rootcoz.config import clear_settings_cache
 
     with patch.dict(
         os.environ,
@@ -65,11 +65,11 @@ def _with_github_issue_config():
             "GITHUB_TOKEN": "ghp_test",  # pragma: allowlist secret
         },
     ):
-        get_settings.cache_clear()
+        clear_settings_cache()
         try:
             yield
         finally:
-            get_settings.cache_clear()
+            clear_settings_cache()
 
 
 @contextmanager
@@ -89,7 +89,7 @@ def _enable_feature(prop_name: str):
     from contextlib import ExitStack
 
     from rootcoz import config
-    from rootcoz.config import get_settings
+    from rootcoz.config import clear_settings_cache
 
     # Map computed properties to the env vars that endpoint guards check
     raw_env_patches: dict[str, dict[str, str]] = {
@@ -131,11 +131,11 @@ def _enable_feature(prop_name: str):
         pins = db_pins.get(prop_name, {})
         if pins:
             stack.enter_context(patch.dict(config._db_settings_cache, pins))
-        get_settings.cache_clear()
+        clear_settings_cache()
         try:
             yield
         finally:
-            get_settings.cache_clear()
+            clear_settings_cache()
 
 
 def _build_jenkins_request_params(
@@ -215,7 +215,7 @@ def mock_settings(temp_db_path: Path):
         "REQUIRE_APPROVAL": "false",
     }
     with patch.dict(os.environ, env, clear=True):
-        # Clear the lru_cache and DB settings cache
+        # Clear the settings memo and DB settings cache
         from rootcoz.config import clear_db_settings_cache
 
         clear_db_settings_cache()
@@ -1075,10 +1075,10 @@ class TestBaseUrlDetection:
 
     def test_base_url_from_public_base_url(self, mock_settings, temp_db_path) -> None:
         """PUBLIC_BASE_URL takes precedence over any request header."""
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache
 
         os.environ["PUBLIC_BASE_URL"] = "https://myapp.example.com"
-        get_settings.cache_clear()
+        clear_settings_cache()
         try:
             with patch.object(storage, "DB_PATH", temp_db_path):
                 from starlette.testclient import TestClient
@@ -1105,16 +1105,16 @@ class TestBaseUrlDetection:
                     )
         finally:
             os.environ.pop("PUBLIC_BASE_URL", None)
-            get_settings.cache_clear()
+            clear_settings_cache()
 
     def test_base_url_from_public_base_url_strips_trailing_slash(
         self, mock_settings, temp_db_path
     ) -> None:
         """PUBLIC_BASE_URL trailing slash is stripped."""
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache
 
         os.environ["PUBLIC_BASE_URL"] = "https://myapp.example.com:8443/"
-        get_settings.cache_clear()
+        clear_settings_cache()
         try:
             with patch.object(storage, "DB_PATH", temp_db_path):
                 from starlette.testclient import TestClient
@@ -1134,7 +1134,7 @@ class TestBaseUrlDetection:
                     assert data["base_url"] == "https://myapp.example.com:8443"
         finally:
             os.environ.pop("PUBLIC_BASE_URL", None)
-            get_settings.cache_clear()
+            clear_settings_cache()
 
     def test_base_url_empty_without_public_base_url(self, test_client) -> None:
         """Without PUBLIC_BASE_URL, base_url is empty (relative paths)."""
@@ -3623,7 +3623,7 @@ class TestPreviewGithubIssue:
     @pytest.mark.asyncio
     async def test_preview_disabled_returns_403(self, test_client):
         """Preview returns 403 when GitHub issues are disabled."""
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache
 
         with patch.dict(
             os.environ,
@@ -3633,7 +3633,7 @@ class TestPreviewGithubIssue:
                 "GITHUB_TOKEN": "ghp_test_token",
             },
         ):
-            get_settings.cache_clear()
+            clear_settings_cache()
             try:
                 response = test_client.post(
                     "/results/any-job/preview-github-issue",
@@ -3644,7 +3644,7 @@ class TestPreviewGithubIssue:
                     },
                 )
             finally:
-                get_settings.cache_clear()
+                clear_settings_cache()
         assert response.status_code == 403
         assert "disabled" in response.json()["detail"].lower()
 
@@ -3845,7 +3845,7 @@ class TestPreviewJiraBug:
     @pytest.mark.asyncio
     async def test_preview_disabled_returns_403(self, test_client):
         """Preview returns 403 when Jira is disabled."""
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache
 
         with patch.dict(
             os.environ,
@@ -3856,7 +3856,7 @@ class TestPreviewJiraBug:
                 "JIRA_API_TOKEN": "test_jira_token",
             },
         ):
-            get_settings.cache_clear()
+            clear_settings_cache()
             try:
                 response = test_client.post(
                     "/results/any-job/preview-jira-bug",
@@ -3867,7 +3867,7 @@ class TestPreviewJiraBug:
                     },
                 )
             finally:
-                get_settings.cache_clear()
+                clear_settings_cache()
         assert response.status_code == 403
         assert "disabled" in response.json()["detail"].lower()
 
@@ -4248,7 +4248,7 @@ class TestCreateGithubIssue:
     @pytest.mark.asyncio
     async def test_create_disabled_returns_403(self, test_client):
         """Creating a GitHub issue when disabled returns 403."""
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache
 
         result_data = {
             "status": "completed",
@@ -4272,7 +4272,7 @@ class TestCreateGithubIssue:
                 "GITHUB_TOKEN": "ghp_test_token",
             },
         ):
-            get_settings.cache_clear()
+            clear_settings_cache()
             try:
                 response = test_client.post(
                     "/results/job-create-gh-noconfig/create-github-issue",
@@ -4283,7 +4283,7 @@ class TestCreateGithubIssue:
                     },
                 )
             finally:
-                get_settings.cache_clear()
+                clear_settings_cache()
         assert response.status_code == 403
         assert "disabled" in response.json()["detail"].lower()
 
@@ -4445,7 +4445,7 @@ class TestCreateJiraBug:
     @pytest.mark.asyncio
     async def test_create_jira_disabled_returns_403(self, test_client):
         """Creating a Jira bug when Jira is disabled returns 403."""
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache
 
         result_data = {
             "status": "completed",
@@ -4470,7 +4470,7 @@ class TestCreateJiraBug:
                 "JIRA_API_TOKEN": "test_jira_token",
             },
         ):
-            get_settings.cache_clear()
+            clear_settings_cache()
             try:
                 response = test_client.post(
                     "/results/job-create-jira-noconfig/create-jira-bug",
@@ -4481,7 +4481,7 @@ class TestCreateJiraBug:
                     },
                 )
             finally:
-                get_settings.cache_clear()
+                clear_settings_cache()
         assert response.status_code == 403
         assert "disabled" in response.json()["detail"].lower()
 
@@ -6657,7 +6657,7 @@ class TestChatIssueEndpoint:
     @pytest.mark.asyncio
     async def test_github_disabled_returns_403(self, test_client):
         headers = await self._user("chat-gh-disabled", github_token="ghp_row_token")
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache
 
         with patch.dict(
             os.environ,
@@ -6666,7 +6666,7 @@ class TestChatIssueEndpoint:
                 "TESTS_REPO_URL": "https://github.com/test-org/test-repo",
             },
         ):
-            get_settings.cache_clear()
+            clear_settings_cache()
             try:
                 response = test_client.post(
                     "/api/chat-issue",
@@ -6674,7 +6674,7 @@ class TestChatIssueEndpoint:
                     headers=headers,
                 )
             finally:
-                get_settings.cache_clear()
+                clear_settings_cache()
         assert response.status_code == 403
         assert "disabled" in response.json()["detail"].lower()
 
@@ -6683,7 +6683,7 @@ class TestChatIssueEndpoint:
         self, test_client
     ):
         """A disabled tracker answers 403, not a token error the user cannot fix."""
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache
 
         headers = await self._user("chat-gh-disabled-notoken")
         with patch.dict(
@@ -6693,7 +6693,7 @@ class TestChatIssueEndpoint:
                 "TESTS_REPO_URL": "https://github.com/test-org/test-repo",
             },
         ):
-            get_settings.cache_clear()
+            clear_settings_cache()
             try:
                 response = test_client.post(
                     "/api/chat-issue",
@@ -6701,7 +6701,7 @@ class TestChatIssueEndpoint:
                     headers=headers,
                 )
             finally:
-                get_settings.cache_clear()
+                clear_settings_cache()
         assert response.status_code == 403
         assert "disabled" in response.json()["detail"].lower()
 
@@ -6853,10 +6853,10 @@ class TestChatIssueEndpoint:
     @pytest.mark.asyncio
     async def test_jira_disabled_returns_403(self, test_client):
         headers = await self._user("chat-jira-off", jira_token="user_jira_token")
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache
 
         with patch.dict(os.environ, {"ENABLE_JIRA_ISSUES": "false"}):
-            get_settings.cache_clear()
+            clear_settings_cache()
             try:
                 response = test_client.post(
                     "/api/chat-issue",
@@ -6864,7 +6864,7 @@ class TestChatIssueEndpoint:
                     headers=headers,
                 )
             finally:
-                get_settings.cache_clear()
+                clear_settings_cache()
         assert response.status_code == 403
         assert "disabled" in response.json()["detail"].lower()
 
@@ -14752,10 +14752,10 @@ class TestAdminSettingsEndpoints:
 
     def test_jira_auth_mode_env_var_ignored(self, test_client, monkeypatch) -> None:
         """A JIRA_AUTH_MODE env var has no effect — Server Settings only."""
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache, get_settings
 
         monkeypatch.setenv("JIRA_AUTH_MODE", "basic")
-        get_settings.cache_clear()
+        clear_settings_cache()
         item = _settings_item(test_client, "jira_auth_mode")
         assert (item["value"], item["source"], item["env_var"]) == (
             "",
@@ -15217,10 +15217,14 @@ class TestAdminSettingsEndpoints:
     def test_put_empty_ai_model_overrides_env(self, test_client, monkeypatch) -> None:
         """Empty ai_model is an explicit DB override that beats AI_MODEL env (#352)."""
         monkeypatch.setenv("AI_MODEL", "claude-opus-4-6-1m")
-        from rootcoz.config import clear_db_settings_cache, get_settings
+        from rootcoz.config import (
+            clear_db_settings_cache,
+            clear_settings_cache,
+            get_settings,
+        )
 
         clear_db_settings_cache()
-        get_settings.cache_clear()
+        clear_settings_cache()
 
         # Set provider + model first
         test_client.put(
@@ -15247,10 +15251,14 @@ class TestAdminSettingsEndpoints:
     def test_reset_ai_model_restores_env(self, test_client, monkeypatch) -> None:
         """DELETE removes the override so the AI_MODEL env governs again."""
         monkeypatch.setenv("AI_MODEL", "claude-opus-4-6-1m")
-        from rootcoz.config import clear_db_settings_cache, get_settings
+        from rootcoz.config import (
+            clear_db_settings_cache,
+            clear_settings_cache,
+            get_settings,
+        )
 
         clear_db_settings_cache()
-        get_settings.cache_clear()
+        clear_settings_cache()
 
         test_client.put(
             "/api/admin/settings",
@@ -15270,10 +15278,14 @@ class TestAdminSettingsEndpoints:
     ) -> None:
         """Empty ai_provider is an explicit override that beats AI_PROVIDER env."""
         monkeypatch.setenv("AI_PROVIDER", "claude")
-        from rootcoz.config import clear_db_settings_cache, get_settings
+        from rootcoz.config import (
+            clear_db_settings_cache,
+            clear_settings_cache,
+            get_settings,
+        )
 
         clear_db_settings_cache()
-        get_settings.cache_clear()
+        clear_settings_cache()
 
         test_client.put(
             "/api/admin/settings",

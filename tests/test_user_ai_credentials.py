@@ -1739,8 +1739,8 @@ def _override_ambient_providers(monkeypatch: pytest.MonkeyPatch, value: str) -> 
     """Point ``rootcoz.config.get_settings`` at a copy with the ambient list set.
 
     ``supported_key_providers()`` imports ``get_settings`` at call time, so
-    patching the module attribute reaches it without touching the global
-    lru_cache or process env (other consumers keep the real settings).
+    patching the module attribute reaches it without touching the settings
+    memo or process env (other consumers keep the real settings).
     """
     from rootcoz.config import get_settings
 
@@ -1881,9 +1881,9 @@ class TestAmbientAuthProviderExclusion:
         """
         monkeypatch.setattr(storage, "DB_PATH", tmp_path / "ambient-chat.db")
         monkeypatch.setenv("DB_PATH", str(tmp_path / "ambient-chat.db"))
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache
 
-        get_settings.cache_clear()
+        clear_settings_cache()
         await storage.init_db()
         await storage.create_user("chatter")
 

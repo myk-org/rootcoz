@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from rootcoz import storage
-from rootcoz.config import get_settings
+from rootcoz.config import clear_settings_cache, get_settings
 
 
 @pytest.fixture
@@ -34,13 +34,13 @@ def client_approval_on(_init_db, temp_db_path):
             "REQUIRE_APPROVAL": "true",
         },
     ):
-        get_settings.cache_clear()
+        clear_settings_cache()
         with patch.object(storage, "DB_PATH", temp_db_path):
             from rootcoz.main import app
 
             with TestClient(app) as c:
                 yield c
-        get_settings.cache_clear()
+        clear_settings_cache()
 
 
 @pytest.fixture
@@ -56,13 +56,13 @@ def client_approval_off(_init_db, temp_db_path):
             "REQUIRE_APPROVAL": "false",
         },
     ):
-        get_settings.cache_clear()
+        clear_settings_cache()
         with patch.object(storage, "DB_PATH", temp_db_path):
             from rootcoz.main import app
 
             with TestClient(app) as c:
                 yield c
-        get_settings.cache_clear()
+        clear_settings_cache()
 
 
 def _admin_headers():
@@ -375,13 +375,13 @@ class TestAdminWaitApproveMsg:
                 "ADMIN_WAIT_APPROVE_MSG": "Contact @admin in Slack",
             },
         ):
-            get_settings.cache_clear()
+            clear_settings_cache()
             with patch.object(storage, "DB_PATH", temp_db_path):
                 from rootcoz.main import app
 
                 with TestClient(app) as c:
                     yield c
-            get_settings.cache_clear()
+            clear_settings_cache()
 
     @pytest.fixture
     def client_without_custom_msg(self, _init_db, temp_db_path):
@@ -397,13 +397,13 @@ class TestAdminWaitApproveMsg:
                 "ADMIN_WAIT_APPROVE_MSG": "",
             },
         ):
-            get_settings.cache_clear()
+            clear_settings_cache()
             with patch.object(storage, "DB_PATH", temp_db_path):
                 from rootcoz.main import app
 
                 with TestClient(app) as c:
                     yield c
-            get_settings.cache_clear()
+            clear_settings_cache()
 
     def test_pending_status_returns_custom_message(self, client_with_custom_msg):
         """GET /api/auth/pending-status includes custom_message when ADMIN_WAIT_APPROVE_MSG is set."""
@@ -457,12 +457,12 @@ class TestConfigSetting:
             },
             clear=False,
         ):
-            get_settings.cache_clear()
+            clear_settings_cache()
             try:
                 settings = get_settings()
                 assert settings.require_approval is True
             finally:
-                get_settings.cache_clear()
+                clear_settings_cache()
 
     def test_can_set_false(self):
         """REQUIRE_APPROVAL can be set to False via env var."""
@@ -474,12 +474,12 @@ class TestConfigSetting:
             },
             clear=False,
         ):
-            get_settings.cache_clear()
+            clear_settings_cache()
             try:
                 settings = get_settings()
                 assert settings.require_approval is False
             finally:
-                get_settings.cache_clear()
+                clear_settings_cache()
 
 
 class _StubRequest:

@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from rootcoz import storage
-from rootcoz.config import Settings, get_settings
+from rootcoz.config import Settings, clear_settings_cache
 from rootcoz.storage import generate_api_key, hash_api_key
 from tests.conftest import host_env
 
@@ -80,13 +80,13 @@ def _make_client(temp_db_path, allowed_users: str = "", admin_key: str = ""):
         **({"ALLOWED_USERS": allowed_users} if allowed_users else {}),
     )
     with patch.dict(os.environ, env, clear=True):
-        get_settings.cache_clear()
+        clear_settings_cache()
         with patch.object(storage, "DB_PATH", temp_db_path):
             from rootcoz.main import app
 
             with TestClient(app) as c:
                 yield c
-        get_settings.cache_clear()
+        clear_settings_cache()
 
 
 @pytest.fixture
@@ -109,34 +109,34 @@ class TestAllowListConfig:
 
     def test_empty_allowed_users(self):
         with patch.dict(os.environ, {"ALLOWED_USERS": ""}, clear=False):
-            get_settings.cache_clear()
+            clear_settings_cache()
             s = Settings()
             assert s.allowed_users_set == frozenset()
-        get_settings.cache_clear()
+        clear_settings_cache()
 
     def test_single_user(self):
         with patch.dict(os.environ, {"ALLOWED_USERS": "alice"}, clear=False):
-            get_settings.cache_clear()
+            clear_settings_cache()
             s = Settings()
             assert s.allowed_users_set == frozenset({"alice"})
-        get_settings.cache_clear()
+        clear_settings_cache()
 
     def test_multiple_users(self):
         with patch.dict(
             os.environ, {"ALLOWED_USERS": "alice, Bob, Charlie"}, clear=False
         ):
-            get_settings.cache_clear()
+            clear_settings_cache()
             s = Settings()
             # Case-insensitive (lowercased)
             assert s.allowed_users_set == frozenset({"alice", "bob", "charlie"})
-        get_settings.cache_clear()
+        clear_settings_cache()
 
     def test_whitespace_only(self):
         with patch.dict(os.environ, {"ALLOWED_USERS": "  ,  , "}, clear=False):
-            get_settings.cache_clear()
+            clear_settings_cache()
             s = Settings()
             assert s.allowed_users_set == frozenset()
-        get_settings.cache_clear()
+        clear_settings_cache()
 
 
 class TestOpenAccess:

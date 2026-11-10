@@ -8,6 +8,7 @@ from pydantic import SecretStr
 
 from rootcoz.config import (
     Settings,
+    clear_settings_cache,
     duplicate_additional_repo_names,
     get_settings,
     jira_method_missing_fields,
@@ -72,17 +73,55 @@ class TestGetSettings:
         self, mock_env_vars: dict[str, str]
     ) -> None:
         """Test that get_settings returns a Settings instance."""
-        # Clear the lru_cache before testing
-        get_settings.cache_clear()
+        clear_settings_cache()
         settings = get_settings()
         assert isinstance(settings, Settings)
 
     def test_get_settings_cached(self, mock_env_vars: dict[str, str]) -> None:
         """Test that get_settings returns cached instance."""
-        get_settings.cache_clear()
+        clear_settings_cache()
         settings1 = get_settings()
         settings2 = get_settings()
         assert settings1 is settings2
+
+    def test_build_started_before_a_clear_is_not_published(
+        self, mock_env_vars: dict[str, str], monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """A build in flight across a clear never lands in the cache (#529)."""
+        import threading
+
+        from rootcoz import config
+
+        started = threading.Event()
+        release = threading.Event()
+        real_build = config._build_settings
+
+        def paused_build() -> Settings:
+            # Build from the current env, then hold the result before publish.
+            completed = real_build()
+            started.set()
+            assert release.wait(10)
+            return completed
+
+        monkeypatch.setattr(config, "_build_settings", paused_build)
+        monkeypatch.setenv("JENKINS_USER", "before")
+        clear_settings_cache()
+
+        built: list[Settings] = []
+        builder = threading.Thread(target=lambda: built.append(get_settings()))
+        builder.start()
+        assert started.wait(10)
+
+        # The admin save #529 describes: change the value, clear, mid-build.
+        monkeypatch.setenv("JENKINS_USER", "after")
+        clear_settings_cache()
+        release.set()
+        builder.join(10)
+
+        assert not builder.is_alive()
+        assert built[0].jenkins_user == "before"
+        # Its pre-clear result must not be what the process serves next.
+        assert get_settings().jenkins_user == "after"
 
 
 class TestJiraSettings:

@@ -8,7 +8,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from rootcoz import storage
-from rootcoz.config import get_settings
+from rootcoz.config import clear_settings_cache
 
 
 @pytest.fixture
@@ -32,13 +32,13 @@ def client(_init_db, temp_db_path):
             "REQUIRE_APPROVAL": "false",
         },
     ):
-        get_settings.cache_clear()
+        clear_settings_cache()
         with patch.object(storage, "DB_PATH", temp_db_path):
             from rootcoz.main import app
 
             with TestClient(app) as c:
                 yield c
-        get_settings.cache_clear()
+        clear_settings_cache()
 
 
 def _admin_login(

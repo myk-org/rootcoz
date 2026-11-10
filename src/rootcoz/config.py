@@ -2,7 +2,7 @@
 
 import os
 import re
-from functools import lru_cache
+import threading
 from typing import Any, NamedTuple
 from urllib.parse import urlsplit, urlunsplit
 
@@ -1412,6 +1412,27 @@ def jira_unavailable_reason(settings: Settings) -> str:
 # Populated at startup by load_db_settings() and updated by admin settings endpoints.
 _db_settings_cache: dict[str, str] = {}
 
+# Memoised Settings. A plain lru_cache cannot express this: its insert is
+# automatic, so a build that began before a clear would store its pre-clear
+# result in the freshly cleared cache and the process would serve those stale
+# settings to every later request. A generation counter lets such a build
+# refuse to publish.
+_settings_lock = threading.Lock()
+_cached_settings: Settings | None = None
+_settings_generation = 0
+
+
+def clear_settings_cache() -> None:
+    """Drop the memoised Settings so the next caller rebuilds it.
+
+    A build already running under an older generation will not publish its
+    result (see ``get_settings``), so the cleared value is never resurrected.
+    """
+    global _cached_settings, _settings_generation
+    with _settings_lock:
+        _cached_settings = None
+        _settings_generation += 1
+
 
 async def load_db_settings() -> None:
     """Load server_settings DB overrides into in-memory cache.
@@ -1445,7 +1466,8 @@ async def load_db_settings() -> None:
             _db_settings_cache[key] = value
 
         if _db_settings_cache:
-            get_settings.cache_clear()
+            # Only the Settings memo — the overrides just loaded must survive.
+            clear_settings_cache()
             logger.info(
                 "[startup] Loaded %d server setting(s) from DB",
                 len(_db_settings_cache),
@@ -1471,30 +1493,23 @@ def get_db_setting(key: str) -> str:
 def update_db_settings_cache(updates: dict[str, str]) -> None:
     """Update in-memory cache when admin changes settings via the API."""
     _db_settings_cache.update(updates)
-    get_settings.cache_clear()
+    clear_settings_cache()
 
 
 def remove_from_db_settings_cache(keys: list[str]) -> None:
     """Remove keys from cache when admin deletes settings via the API."""
     for key in keys:
         _db_settings_cache.pop(key, None)
-    get_settings.cache_clear()
+    clear_settings_cache()
 
 
 def clear_db_settings_cache() -> None:
     """Clear the entire DB settings cache. Used by tests for isolation."""
     _db_settings_cache.clear()
-    get_settings.cache_clear()
+    clear_settings_cache()
 
 
-@lru_cache
-def get_settings() -> Settings:
-    """Get merged settings: env vars (base) + DB overrides.
-
-    DB cache values are strings (same format as env vars).  Using
-    ``Settings(**merged_data)`` triggers full pydantic validation and
-    type coercion (str→int, str→bool, str→SecretStr, etc.).
-    """
+def _build_settings() -> Settings:
     base = Settings()
     if not _db_settings_cache:
         return base
@@ -1508,3 +1523,34 @@ def get_settings() -> Settings:
             exc_info=True,
         )
         return base
+
+
+def get_settings() -> Settings:
+    """Get merged settings: env vars (base) + DB overrides.
+
+    DB cache values are strings (same format as env vars).  Using
+    ``Settings(**merged_data)`` triggers full pydantic validation and
+    type coercion (str→int, str→bool, str→SecretStr, etc.).
+
+    The build runs outside the lock so a concurrent clear is never blocked;
+    it publishes only if no clear happened since it captured the generation.
+    """
+    global _cached_settings
+    cached = _cached_settings
+    if cached is not None:
+        return cached
+    with _settings_lock:
+        if _cached_settings is not None:
+            return _cached_settings
+        generation = _settings_generation
+    built = _build_settings()
+    with _settings_lock:
+        if generation != _settings_generation:
+            logger.debug(
+                "Discarding settings built under generation %d (now %d)",
+                generation,
+                _settings_generation,
+            )
+            return built
+        _cached_settings = built
+        return built
