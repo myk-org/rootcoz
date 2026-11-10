@@ -340,7 +340,24 @@ After any completed analysis, each failure is checked against previous analyses 
 
 Signature comparison goes through `storage.signatures_match()`, never a raw column comparison. Failures carry two hashes: `error_signature` is the frozen **anchor** (the pre-v2 normalization rules, written once and never rewritten — every row ever stored carries it), and `error_signature_v2` is the **current-rules** hash used for grouping. Rows written before the v2 rules exist have no v2 hash. Matching is over both columns of both rows, so a failure analysed today still matches its own history from before the rules changed. Changing the rules never requires rewriting stored rows: there is no backfill, and there is no deploy boundary where old and new stop matching. Use `storage.resolve_signature(row)` when a single canonical signature is needed (grouping/dedup keys, labels). `signatures_match()` is hashes only and is the universal comparison. The one wider rule — the same normalized message as a last resort, for a pre-v2 history row meeting a noisier rerun — belongs to `storage.previous_analysis_matches()` and to the history lookup alone, because a human confirms that chain on the report while every other match is a decision nobody sees.
 
+### Credentials: Reads May Use the Deployment, Writes Never Do (MANDATORY — every integration)
+
+**Every external call is either a read or a write, and the credential rule follows from that — not from which integration it is, and not from which code path it sits in.** This applies to GitHub, Jira, Report Portal, Datadog, and to every integration added later.
+
+**Reads may use the deployment credential.** Cloning a repository, searching issues, fetching a ticket, listing repos, resolving a user — none of them change external state, so they may run on the server/deployment credential or on a per-repo token. Concretely: **cloning is a read, so chat and analysis use the same token rules there** — the per-repo token goes to that repository's own URL, the run/server token where analysis puts it, and no path needs a "this credential is only for GitHub" restriction to be safe. A read that is guarded like a write is a bug in the other direction: it silently removes capability (a private non-GitHub repo in chat, for instance) to protect against something that cannot happen.
+
+**Writes always use the requesting user's own credential. There is never a fallback to a server or deployment credential.** Creating an issue, commenting, transitioning a ticket, uploading an attachment — the credential is read from the caller only; server settings supply *configuration* (project key, site URL, repo URL) and never identity. A caller with no credential gets a clear, actionable error and the action is blocked (`400` naming what to add), never a silent retry under someone else's identity.
+
+Requirements this places on new code:
+
+1. **Classify the operation when you add it.** Read or write — and if a helper could do both, it is two helpers. A read must never be upgradable to a write by configuration.
+2. **Shape the write helper so it cannot resolve a deployment credential**: it takes the credential as a required parameter, has no `Settings` argument to resolve one from, and guards against the deployment's own secret at the top (see `bug_creation.create_jira_bug` / `create_github_issue`).
+3. **Do not "harden" a read by removing the deployment credential from it.** If the concern is that the deployment token could be misused, the fix is on the write path, where the rule lives — not on the clone, the search, or the lookup.
+4. **Say which is which in the docs and the issue** for any new integration, so the next person does not have to guess from the call site.
+
 ### Issue Creation Uses the User's Own Credentials (MANDATORY)
+
+This is the **write** half of the rule above, spelled out for issue creation.
 
 **Creating an issue always uses the requesting user's credentials. There is never a fallback to a server or deployment credential** — not for feedback, not for `POST /results/{job_id}/create-github-issue`, not for `create-jira-bug`. `github_token`, `tests_repo_token` and every Jira credential are read from the caller only; server settings supply *configuration* (project key, site URL, tests repo URL) and never identity.
 
