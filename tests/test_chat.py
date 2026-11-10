@@ -2519,43 +2519,6 @@ async def test_cleanup_deleted_job_offloads_blocking_cleanup(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_index_chat_repositories_discovers_and_logs_off_loop(
-    tmp_path, monkeypatch
-):
-    from rootcoz import main as main_mod
-    from rootcoz.engine import graft, graft_http
-
-    repo = tmp_path / "repo"
-    repo.mkdir()
-    (repo / ".git").mkdir()
-    seen = []
-
-    def index(workspace, roots, deadline=None):
-        with pytest.raises(RuntimeError, match="no running event loop"):
-            asyncio.get_running_loop()
-        seen.append((workspace, roots))
-        return {"repo": {"status": "ready"}}
-
-    original_discover = graft_http.cloned_graph_roots
-
-    def discover(workspace):
-        with pytest.raises(RuntimeError, match="no running event loop"):
-            asyncio.get_running_loop()
-        return original_discover(workspace)
-
-    monkeypatch.setattr(graft_http, "cloned_graph_roots", discover)
-    monkeypatch.setattr(graft, "index_repositories", index)
-    monkeypatch.setattr(
-        graft, "log_index_outcomes", lambda outcomes, **_: seen.append(outcomes)
-    )
-    await main_mod._index_chat_repositories(tmp_path)
-    assert seen == [
-        (tmp_path, original_discover(tmp_path)),
-        {"repo": {"status": "ready"}},
-    ]
-
-
-@pytest.mark.asyncio
 async def test_chat_routes_share_one_lock_scope_and_translation(monkeypatch) -> None:
     """One lock scope and one ``PathStateUnknown`` translation, not four (#424).
 
@@ -2715,7 +2678,9 @@ async def test_process_chat_answers_when_the_workspace_lock_outlives_the_clock(
         "rootcoz.engine.session_tools.install_http_tools_mcp_best_effort_async",
         AsyncMock(),
     )
-    monkeypatch.setattr("rootcoz.engine.graft_http.graph_http_tools", lambda *a: [])
+    monkeypatch.setattr(
+        "rootcoz.engine.graft_http.graph_http_tools", lambda *a, **k: []
+    )
     monkeypatch.setattr(
         "rootcoz.sources.chat_workspace.setup_ci_build_workspace",
         AsyncMock(return_value=False),
@@ -2831,7 +2796,8 @@ async def test_followup_indexes_only_new_or_missing_graph(
         (graft._root(workspace) / "repo" / "manifest.json").unlink()
 
     # The single builder always asks for indexing and decides inside whether a
-    # build is needed, so the observable is the build itself, not the call.
+    # build is needed, so the observable is the build itself, not the call. The
+    # turn only schedules it, so the test waits for the build it started.
 
     monkeypatch.setattr(
         "rootcoz.engine.chat.ensure_chat_workspace", lambda *a, **k: workspace
@@ -2846,7 +2812,9 @@ async def test_followup_indexes_only_new_or_missing_graph(
         "rootcoz.engine.session_tools.install_http_tools_mcp_best_effort_async",
         AsyncMock(),
     )
-    monkeypatch.setattr("rootcoz.engine.graft_http.graph_http_tools", lambda *a: [])
+    monkeypatch.setattr(
+        "rootcoz.engine.graft_http.graph_http_tools", lambda *a, **k: []
+    )
     monkeypatch.setattr(
         "rootcoz.sources.chat_workspace.setup_ci_build_workspace",
         AsyncMock(return_value=False),
@@ -2887,6 +2855,11 @@ async def test_followup_indexes_only_new_or_missing_graph(
     )
     # One build for the initial graph; a follow-up adds exactly one more when
     # the graph is new, changed or missing, and none when it is current.
+    from rootcoz.engine import session_tools
+
+    scheduled = list(session_tools._BACKGROUND_INDEX_TASKS)
+    assert scheduled, "the turn never scheduled an index"
+    await asyncio.gather(*scheduled)
     assert len(builds) == (1 if graph_state == "indexed" else 2)
     if graph_state == "new":
         assert "other" in builds[-1][-1]
@@ -4819,6 +4792,99 @@ class TestChatSessionToolRefresh:
         assert main_mod._enable_tools_for_session("sid-stale", ("jira",)) is None
         assert main_mod._chat_session_tracker_targets["sid-stale"] == ("github",)
         assert main_mod._enable_tools_for_session("sid-stale", ("jira",)) is None
+
+
+class TestChatToolFingerprint:
+    """The tool fingerprint a resumed chat session must match.
+
+    Chat indexes after the session starts (#535), so the code-graph tools exist
+    only from the next turn on. A resumed sidecar session keeps its creation-time
+    tools, so the fingerprint gains ``code-graph`` once graph tools are present —
+    that mismatch is what recreates the session and makes them reachable.
+    """
+
+    _GITHUB_TOOL: ClassVar[dict[str, Any]] = {
+        "name": "create_github_issue",
+        "description": "file an issue",
+    }
+    _GRAPH_TOOL: ClassVar[dict[str, Any]] = {
+        "name": "graft_find_code",
+        "description": "search the graph",
+    }
+
+    def _fingerprint(
+        self, targets: tuple[str, ...], tools: list[dict[str, Any]]
+    ) -> tuple[str, ...]:
+        from rootcoz.main import _chat_tool_fingerprint
+
+        return _chat_tool_fingerprint(targets, tools)
+
+    def test_graph_tools_add_the_graph_entry(self):
+        assert self._fingerprint(("github",), [self._GRAPH_TOOL]) == (
+            "github",
+            "code-graph",
+        )
+
+    def test_no_graph_tools_leave_the_fingerprint_alone(self):
+        assert self._fingerprint(("github",), [self._GITHUB_TOOL]) == ("github",)
+        assert self._fingerprint((), []) == ()
+
+    def test_the_same_inputs_give_the_same_fingerprint(self):
+        """Stability matters: an unstable fingerprint restarts every turn."""
+        for tools in ([self._GITHUB_TOOL], [self._GITHUB_TOOL, self._GRAPH_TOOL]):
+            assert self._fingerprint(("github", "jira"), tools) == self._fingerprint(
+                ("github", "jira"), tools
+            )
+
+    def test_gaining_the_graph_changes_the_fingerprint(self):
+        """The no-graph -> graph change is the session-recreation mechanism."""
+        before = self._fingerprint(("github",), [self._GITHUB_TOOL])
+        after = self._fingerprint(("github",), [self._GITHUB_TOOL, self._GRAPH_TOOL])
+        assert before != after
+
+        from rootcoz import main as main_mod
+
+        main_mod._remember_chat_session_tools("sid-graph", before)
+        assert main_mod._enable_tools_for_session("sid-graph", after) is None
+
+    def test_an_inconclusive_peek_keeps_the_graph_session(self):
+        """A build owning the workspace reads as no tools, not as a lost graph.
+
+        Rebuilding for that replays the whole history once the build finishes and
+        tears the session down again on the next turn, which is churn nobody asked
+        for — and the graph tools report their own freshness anyway.
+        """
+        from rootcoz import main as main_mod
+
+        main_mod._remember_chat_session_tools("sid-graph", ("github", "code-graph"))
+
+        assert (
+            main_mod._enable_tools_for_session("sid-graph", ("github",)) == "sid-graph"
+        )
+
+    def test_a_tracker_change_is_not_excused_by_the_inconclusive_peek(self):
+        """The peek excuses the graph entry only, not the trackers beside it.
+
+        A build holding the workspace hides the graph tools for a turn; that must
+        not also hide a tracker the user enabled meanwhile, which would resume the
+        session with the old set for as long as the build runs.
+        """
+        from rootcoz import main as main_mod
+
+        main_mod._remember_chat_session_tools("sid-graph", ("github", "code-graph"))
+
+        assert (
+            main_mod._enable_tools_for_session("sid-graph", ("github", "jira")) is None
+        )
+
+    def test_targets_still_participate(self):
+        """Not a parallel mechanism: the tracker targets stay in the fingerprint."""
+        assert self._fingerprint(("github",), [self._GRAPH_TOOL]) != self._fingerprint(
+            ("github", "jira"), [self._GRAPH_TOOL]
+        )
+        assert self._fingerprint(("github",), [self._GITHUB_TOOL]) != self._fingerprint(
+            ("github", "jira"), [self._GITHUB_TOOL]
+        )
 
 
 # -- One refusal table, three surfaces (#423) ------------------------------
