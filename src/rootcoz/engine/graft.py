@@ -720,7 +720,8 @@ def index_repositories(
     workspace = Path(workspace).resolve()
     root = _root(workspace)
     gate = threading.Lock()
-    reservations: set[Path] = set()
+    #: Destination -> the bytes it was admitted for, held until its build ends.
+    reservations: dict[Path, int] = {}
 
     def reserve(destination: Path, estimate: int) -> str | None:
         """Admit a graph, or refuse it and name why (first reason wins).
@@ -741,13 +742,15 @@ def index_repositories(
             old = _disk_size(destination, limit=0) if destination.exists() else 0
             budget = max_workspace_graph_bytes()
             # A graph already there is replaced, not added: subtract it. Charge
-            # the peers that are mid-build too — their partial snapshots already
-            # occupy disk, and ignoring them let four workers overshoot the
-            # budget and then drop graphs that would have fitted.
+            # the peers that are mid-build their admitted estimate, less what
+            # their snapshot already occupies (``used`` counts that): their
+            # written bytes are zero until they start writing, so charging only
+            # those let four workers each pass this check and then build graphs
+            # the post-build measure dropped.
             inflight = sum(
-                _disk_size(item, limit=0, reject_symlinks=False)
-                for item in reservations
-                if item.exists() and not item.is_symlink()
+                max(0, granted - _disk_size(item, limit=0, reject_symlinks=False))
+                for item, granted in reservations.items()
+                if not item.is_symlink()
             )
             if used - old + inflight + estimate >= budget:
                 # Persist a bounded skip, without overwriting an existing graph.
@@ -755,12 +758,12 @@ def index_repositories(
                     destination, used, "workspace graph budget", guard_size=True
                 )
                 return "workspace graph budget"
-            reservations.add(destination)
+            reservations[destination] = estimate
             return None
 
     def release(destination: Path) -> None:
         with gate:
-            reservations.discard(destination)
+            reservations.pop(destination, None)
 
     # Analysis waits for this before its first AI call, so the width matters:
     # two at a time turned five clones into a ~6 minute pause per job.

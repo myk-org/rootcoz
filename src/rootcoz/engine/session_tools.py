@@ -223,7 +223,11 @@ async def build_session_tools(
             )
         from rootcoz.engine.graft_http import graph_http_tools
 
-        graph_tools = graph_http_tools(
+        # Off the loop: the peek waits for the workspace lock a graph build holds,
+        # and its wait is a poll loop — on the loop that froze every other request,
+        # SSE stream and background task in the process for the whole wait.
+        graph_tools = await asyncio.to_thread(
+            graph_http_tools,
             graph_root,
             job_id,
             deadline=None

@@ -8,6 +8,7 @@ backoff marker so the next session does not rebuild it.
 import hashlib
 import json
 import subprocess
+import threading
 import time
 from pathlib import Path
 
@@ -477,6 +478,47 @@ def test_a_repo_that_cannot_fit_is_never_built(tmp_path, monkeypatch):
     marker = _marker(graft._root(workspace) / "repo")
     assert marker["reason"] == "workspace graph budget"
     assert marker["retry_after"] > time.time()
+
+
+def test_an_in_flight_reservation_is_charged_its_estimate(tmp_path, monkeypatch):
+    """Four workers used to each pass admission and then be dropped.
+
+    Only the bytes a peer had already written were charged, so a worker that had
+    reserved but not started writing cost nothing: every worker passed the check,
+    every worker built, and the post-build measure removed what did not fit.
+    """
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    first_reserved = threading.Event()
+    second_tried = threading.Event()
+
+    def controlled_build(
+        _workspace, root, name, _repo, reserve, release, _deadline=None
+    ):
+        destination = root / name
+        if name == "a":
+            assert reserve(destination, 5000) is None, "the first job must fit"
+            first_reserved.set()
+            second_tried.wait(5)
+            release(destination)
+            return {"status": "indexed"}
+        first_reserved.wait(5)
+        refusal = reserve(destination, 5000)
+        second_tried.set()
+        if refusal is None:
+            return {"status": "indexed"}
+        return {"status": "skipped", "reason": refusal}
+
+    monkeypatch.setattr(graft, "_index_one", controlled_build)
+    monkeypatch.setattr(graft, "_workspace_graph_size", lambda _root: 0)
+    monkeypatch.setattr(graft, "max_workspace_graph_bytes", lambda: 9000)
+
+    outcomes = graft.index_repositories(
+        workspace, {"a": tmp_path / "a", "b": tmp_path / "b"}
+    )
+
+    assert outcomes["a"] == {"status": "indexed"}
+    assert outcomes["b"] == {"status": "skipped", "reason": "workspace graph budget"}
 
 
 @pytest.mark.asyncio

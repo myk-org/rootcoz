@@ -4794,6 +4794,84 @@ class TestChatSessionToolRefresh:
         assert main_mod._enable_tools_for_session("sid-stale", ("jira",)) is None
 
 
+class TestChatToolFingerprint:
+    """The tool fingerprint a resumed chat session must match.
+
+    Chat indexes after the session starts (#535), so the code-graph tools exist
+    only from the next turn on. A resumed sidecar session keeps its creation-time
+    tools, so the fingerprint gains ``code-graph`` once graph tools are present —
+    that mismatch is what recreates the session and makes them reachable.
+    """
+
+    _GITHUB_TOOL: ClassVar[dict[str, Any]] = {
+        "name": "create_github_issue",
+        "description": "file an issue",
+    }
+    _GRAPH_TOOL: ClassVar[dict[str, Any]] = {
+        "name": "graft_find_code",
+        "description": "search the graph",
+    }
+
+    def _fingerprint(
+        self, targets: tuple[str, ...], tools: list[dict[str, Any]]
+    ) -> tuple[str, ...]:
+        from rootcoz.main import _chat_tool_fingerprint
+
+        return _chat_tool_fingerprint(targets, tools)
+
+    def test_graph_tools_add_the_graph_entry(self):
+        assert self._fingerprint(("github",), [self._GRAPH_TOOL]) == (
+            "github",
+            "code-graph",
+        )
+
+    def test_no_graph_tools_leave_the_fingerprint_alone(self):
+        assert self._fingerprint(("github",), [self._GITHUB_TOOL]) == ("github",)
+        assert self._fingerprint((), []) == ()
+
+    def test_the_same_inputs_give_the_same_fingerprint(self):
+        """Stability matters: an unstable fingerprint restarts every turn."""
+        for tools in ([self._GITHUB_TOOL], [self._GITHUB_TOOL, self._GRAPH_TOOL]):
+            assert self._fingerprint(("github", "jira"), tools) == self._fingerprint(
+                ("github", "jira"), tools
+            )
+
+    def test_gaining_the_graph_changes_the_fingerprint(self):
+        """The no-graph -> graph change is the session-recreation mechanism."""
+        before = self._fingerprint(("github",), [self._GITHUB_TOOL])
+        after = self._fingerprint(("github",), [self._GITHUB_TOOL, self._GRAPH_TOOL])
+        assert before != after
+
+        from rootcoz import main as main_mod
+
+        main_mod._remember_chat_session_tools("sid-graph", before)
+        assert main_mod._enable_tools_for_session("sid-graph", after) is None
+
+    def test_an_inconclusive_peek_keeps_the_graph_session(self):
+        """A build owning the workspace reads as no tools, not as a lost graph.
+
+        Rebuilding for that replays the whole history once the build finishes and
+        tears the session down again on the next turn, which is churn nobody asked
+        for — and the graph tools report their own freshness anyway.
+        """
+        from rootcoz import main as main_mod
+
+        main_mod._remember_chat_session_tools("sid-graph", ("github", "code-graph"))
+
+        assert (
+            main_mod._enable_tools_for_session("sid-graph", ("github",)) == "sid-graph"
+        )
+
+    def test_targets_still_participate(self):
+        """Not a parallel mechanism: the tracker targets stay in the fingerprint."""
+        assert self._fingerprint(("github",), [self._GRAPH_TOOL]) != self._fingerprint(
+            ("github", "jira"), [self._GRAPH_TOOL]
+        )
+        assert self._fingerprint(("github",), [self._GITHUB_TOOL]) != self._fingerprint(
+            ("github", "jira"), [self._GITHUB_TOOL]
+        )
+
+
 # -- One refusal table, three surfaces (#423) ------------------------------
 #
 # A session refusal is a sentence rootcoz constructs, from the sidecar's three

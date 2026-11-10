@@ -11278,7 +11278,9 @@ def _enable_tools_for_session(
     started never reaches the model in it. Rather than resume with a stale tool
     list, hand back ``None`` so the caller builds a fresh session from the
     current tools — the conversation itself comes from stored history either
-    way.
+    way. The one asymmetry: an entry already present is never dropped for a
+    turn whose graph read came back empty, because that read is inconclusive
+    while a build holds the workspace.
 
     The creation-time set lives in memory: after a restart it is unknown, so the
     session is adopted at its current targets (no forced session churn) and a
@@ -11294,6 +11296,19 @@ def _enable_tools_for_session(
         _chat_session_tracker_targets[session_id] = targets
         return session_id
     if known == targets:
+        return session_id
+    if _GRAPH_TOOL_FINGERPRINT in known and _GRAPH_TOOL_FINGERPRINT not in targets:
+        # The graph entry comes from a bounded read of the workspace, which
+        # cannot tell "no graph" from "a build holds the lock" — both return no
+        # tools. Rebuilding on that replays the whole history the moment the
+        # build finishes, and tears it down again on the next turn, so a session
+        # that has the graph keeps it; the graph tools report their own freshness.
+        logger.info(
+            "Chat: no graph tools this turn (%s); keeping session %s rather than "
+            "rebuilding it — the graph read is inconclusive while a build runs",
+            targets,
+            session_id,
+        )
         return session_id
     logger.info(
         "Chat: tool set changed (%s -> %s); starting a fresh session instead of "
