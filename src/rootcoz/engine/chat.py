@@ -141,17 +141,35 @@ def _is_github_url(url: str) -> bool:
         return False
 
 
+def purge_chat_staging(workspace: Path) -> None:
+    """Drop a killed clone's staging residue from a chat workspace.
+
+    ``clone_into`` stages under ``.staging`` and scrubs the token before it
+    renames, but a hard kill (no ``finally``) leaves the tree — and its
+    ``.git/config`` — behind, in a directory the agent can read.
+    """
+    from rootcoz.temp_paths import delete_tree
+
+    staging = workspace / ".staging"
+    if staging.is_symlink() or staging.exists():
+        delete_tree(staging)
+
+
 async def clone_chat_repos(
     workspace: Path,
     request_params: dict[str, Any],
     user_repo_token: str = "",
     on_repo: Callable[[str], None] | None = None,
+    *,
+    failed: list[str] | None = None,
 ) -> bool:
     """Clone repos into the chat workspace.
 
     Skips repos already present in the workspace.
     Returns True only when a repository was newly cloned.
     ``on_repo`` is called with each repo name right before it is cloned.
+    ``failed`` collects the names that could not be cloned: a chat still starts
+    without them, so the caller is what tells the user they are missing.
 
     Note:
         Repo tokens may be embedded in git remote URLs within the workspace.
@@ -160,7 +178,11 @@ async def clone_chat_repos(
     """
     from rootcoz.config import parse_repo_ref
     from rootcoz.models import AdditionalRepo
-    from rootcoz.repository import RepositoryManager, derive_test_repo_name
+    from rootcoz.repository import (
+        RepositoryManager,
+        derive_test_repo_name,
+        repo_name_from_url,
+    )
 
     tests_repo_url = request_params.get("tests_repo_url", "")
     additional_repos = request_params.get("additional_repos") or []
@@ -171,8 +193,22 @@ async def clone_chat_repos(
     if not tests_repo_url and not additional_repos:
         return False
 
+    purge_chat_staging(workspace)
     repo_manager = RepositoryManager()
     cloned_any = False
+
+    def report_failure(name: str, exc: BaseException) -> None:
+        """One redacted line: the message carries a token-bearing remote."""
+        from rootcoz.url_utils import strip_url_userinfo_in_text
+
+        if failed is not None:
+            failed.append(name)
+        logger.warning(
+            "Chat: failed to clone repo %s for %s: %s",
+            name,
+            workspace,
+            strip_url_userinfo_in_text(f"{type(exc).__name__}: {exc}"),
+        )
 
     try:
         if tests_repo_url:
@@ -207,8 +243,12 @@ async def clone_chat_repos(
                             token=token or None,
                         )
                         cloned_any = True
-            except Exception:
-                logger.warning("Failed to clone test repo for chat", exc_info=True)
+            except Exception as exc:  # noqa: BLE001 - a repo that fails is reported
+                report_failure(
+                    _sanitize_path_part(repo_name_from_url(str(tests_repo_url)))
+                    or "tests-repo",
+                    exc,
+                )
 
         if additional_repos:
             repos = [
@@ -242,12 +282,10 @@ async def clone_chat_repos(
                         token=token or None,
                     )
                     cloned_any = True
-                except Exception:
-                    logger.warning(
-                        f"Failed to clone repo {repo.name} for chat", exc_info=True
-                    )
-    except Exception:
-        logger.warning("Chat repo cloning failed", exc_info=True)
+                except Exception as exc:  # noqa: BLE001 - reported per repo
+                    report_failure(repo.name, exc)
+    except Exception as exc:  # noqa: BLE001 - the clone loop must not escape
+        report_failure("workspace", exc)
 
     # Copy .rootcoz/{agents,skills,extensions}/ to workspace .pi/
     if cloned_any:
@@ -1203,7 +1241,14 @@ def cleanup_chat_repos(job_id: str, username: str = "") -> DeleteResult | _Aband
     if not workspace.exists():
         return total
 
-    # Delete everything except hidden dirs (which contain session data)
+    # Delete everything except hidden dirs (which contain session data). The
+    # staging tree is not session data: a cleared chat drops its clones, and a
+    # hard-killed clone's residue can still hold a token in .git/config.
+    staging = workspace / ".staging"
+    if staging.is_symlink():
+        total = total.plus(_safe_remove_symlink(staging))
+    elif staging.exists():
+        total = total.plus(delete_tree(staging))
     for item in workspace.iterdir():
         if item.name.startswith("."):
             continue  # Keep .claude/, .cursor/ etc (session data)

@@ -3035,25 +3035,21 @@ class TestRootCozClientApiKeyHeader:
 
 class TestRootCozClientChat:
     def test_init_chat(self):
-        """Test init_chat method."""
+        """A 202 is the success answer: preparation is a background task."""
         response_data = {
-            "ready": True,
-            "repos_cloned": True,
-            "repo_names": ["test-repo"],
-            "job_name": "test-job",
-            "build_number": 1,
+            "ready": False,
+            "preparing": {"phase": "preparing", "detail": ""},
         }
 
         def handler(request):
             assert request.method == "POST"
             assert "/api/chat/test-job-id/init" in str(request.url)
-            return httpx.Response(200, json=response_data)
+            return httpx.Response(202, json=response_data)
 
         client = _make_client(handler)
         result = client.init_chat("test-job-id", "openai", "m")
-        assert result["ready"] is True
-        assert result["repos_cloned"] is True
-        assert result["repo_names"] == ["test-repo"]
+        assert result["ready"] is False
+        assert result["preparing"] == {"phase": "preparing", "detail": ""}
 
     def test_get_chat_history(self):
         sample = {
@@ -3180,6 +3176,7 @@ class TestRootCozClientAdminChat:
                 "POST",
                 "/api/chat/job/init",
                 json={"ai_provider": "openai", "ai_model": "m"},
+                accept_statuses=(202,),
             )
 
     def test_init_admin_chat_explicit_selection(self):

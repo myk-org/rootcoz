@@ -33,6 +33,11 @@ from collections.abc import (
 )
 from compression import zstd
 from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
+
+# `field` is also a loop variable in three request-param helpers below, so the
+# dataclasses helper is imported under a name of its own.
+from dataclasses import dataclass
+from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
@@ -2684,6 +2689,13 @@ _job_tasks: dict[str, asyncio.Task[Any]] = {}
 #: it, because a second copy under a "must match" comment is a number nothing
 #: checks.
 SHUTDOWN_DRAIN_SECONDS = 40
+
+#: How long one chat preparation may spend indexing. Chat only: an analysis
+#: workspace is indexed with no deadline, and a graph is an optimisation either
+#: way. ``graft.BUILD_SECONDS`` is 120 s per repository, so 180 s admits about one
+#: and a half builds — past that the marginal graph is worth less than another
+#: minute without a session.
+CHAT_INDEX_DEADLINE_SECONDS = 180
 
 
 def _remove_job_task(job_id: str) -> Callable[[asyncio.Task[object]], None]:
@@ -23328,7 +23340,10 @@ async def get_chat_history(
 
 
 async def _index_chat_repositories(
-    workspace: Path, repos: dict[str, Path] | None = None, job_id: str = ""
+    workspace: Path,
+    repos: dict[str, Path] | None = None,
+    job_id: str = "",
+    deadline: float | None = None,
 ) -> None:
     """Index cloned chat roots through the one guarded entry point.
 
@@ -23339,7 +23354,9 @@ async def _index_chat_repositories(
     """
     from rootcoz.engine.session_tools import index_workspace_graph
 
-    await index_workspace_graph(workspace, job_id=job_id, repos=repos)
+    await index_workspace_graph(
+        workspace, job_id=job_id, repos=repos, deadline=deadline
+    )
 
 
 def _chat_workspace_unknown_message(job_id: str, username: str) -> str:
@@ -23386,13 +23403,21 @@ async def _enter_chat_workspace(job_id: str, username: str, what: str) -> Path |
 
 
 async def _init_chat_under_barrier(
-    job_id: str, username: str, body: ChatInitRequest
+    job_id: str,
+    username: str,
+    body: ChatInitRequest,
+    *,
+    handshake: _ChatInitHandshake | None = None,
 ) -> dict[str, Any]:
-    """Initialize chat workspace; hold the lifecycle barrier only for short checks.
+    """Run the chat preflight inline and the preparation under the chat lock.
 
-    Slow clone/session work runs without the barrier so job deletion can cancel
-    this task instead of waiting for I/O. Recheck deletion before filesystem
-    commits so a late init cannot recreate MCP state after cleanup.
+    The preflight is the only part that can answer a 4xx, so it stays on the
+    caller's path and signals ``handshake`` the moment the slow work is about to
+    start. Everything after that — clone, index, CI data, session — runs under
+    the per-user chat lock, which is what keeps a turn and a preparation from
+    interleaving over one workspace. It takes no job barrier: a turn holds that
+    barrier across its own clone phase, so waiting for it here would put the
+    router timeout back on the Start request.
     """
     from rootcoz.engine.chat import (
         build_chat_custom_tools,
@@ -23403,32 +23428,28 @@ async def _init_chat_under_barrier(
     from rootcoz.engine.graft_http import cloned_graph_roots
     from rootcoz.sources.chat_workspace import setup_ci_build_workspace
 
-    async with _get_chat_job_barrier(job_id):
-        _raise_if_chat_job_deleted(job_id)
-        stored = await get_result(job_id, strip_sensitive=False)
-        if not stored or not stored.get("result"):
-            raise HTTPException(status_code=404, detail="Job not found")
-        result_data = stored["result"]
-        params = result_data.get("request_params", {})
-        ai_provider, ai_model = await _validate_chat_selection(body, username)
-        from rootcoz.ai_client import _selected_credential_source
+    _raise_if_chat_job_deleted(job_id)
+    stored = await get_result(job_id, strip_sensitive=False)
+    if not stored or not stored.get("result"):
+        raise HTTPException(status_code=404, detail="Job not found")
+    result_data = stored["result"]
+    params = result_data.get("request_params", {})
+    ai_provider, ai_model = await _validate_chat_selection(body, username)
+    from rootcoz.ai_client import _selected_credential_source
 
-        credential_source = _selected_credential_source.get()
-        existing_session_id, _ = await _check_chat_session_choice(
-            job_id,
-            username,
-            ai_provider,
-            ai_model,
-            credential_source,
-            allow_empty=True,
-        )
+    credential_source = _selected_credential_source.get()
+    existing_session_id, _ = await _check_chat_session_choice(
+        job_id,
+        username,
+        ai_provider,
+        ai_model,
+        credential_source,
+        allow_empty=True,
+    )
 
-    # Outside the barrier: a marked workspace queues the recovery delete on the
-    # single reaper (``reap_graph``/``reap_reusable_path`` wait up to
-    # GRAPH_LOCK_SECONDS), and this barrier is shared by every init for the job
-    # and by job deletion — holding it across that wait stalls all of them. The
-    # workspace's own per-path lock already orders this against deletion's
-    # cleanup, and deletion cancels this task before it takes the barrier.
+    # The four reads above write nothing, so they need no barrier: deletion sets
+    # ``_chat_jobs_deleting`` before it cancels, and the checks around them give
+    # the same ordering guarantee.
     _raise_if_chat_job_deleted(job_id)
     workspace = await _enter_chat_workspace(job_id, username, "Chat init")
     if workspace is None:
@@ -23453,141 +23474,173 @@ async def _init_chat_under_barrier(
         github_repo,
     ) = await _resolve_chat_credentials(decrypted_params, username)
 
-    session_id: str | None = existing_session_id
-    _raise_if_chat_job_deleted(job_id)
-    set_chat_prep_phase(job_id, username, "preparing")
-    await clone_chat_repos(
-        workspace,
-        decrypted_params,
-        user_repo_token=github_token,
-        on_repo=lambda name: set_chat_prep_phase(job_id, username, "cloning", name),
-    )
-    repos_available = bool(await asyncio.to_thread(cloned_graph_roots, workspace))
-    if repos_available:
-        set_chat_prep_phase(job_id, username, "indexing")
-        await _index_chat_repositories(workspace, job_id=job_id)
-    _raise_if_chat_job_deleted(job_id)
-    set_chat_prep_phase(job_id, username, "fetching_build_data")
-    ci_build_data_available = await setup_ci_build_workspace(
-        workspace,
-        _build_ci_workspace_params(decrypted_params, result_data),
-        github_token=github_token,
-        settings=_settings,
-    )
-    _raise_if_chat_job_deleted(job_id)
-    if not await _available_chat_session(job_id, username):
-        custom_tools: list[dict[str, Any]] = []
-        issue_repos = _job_issue_repo_slugs(decrypted_params)[1]
-        tracker_targets, tracker_unavailable = _chat_tracker_state(
-            _settings,
-            await storage.get_user_tokens(username),
-            # This run's own repos are a destination too: a deployment with no
-            # TESTS_REPO_URL can still file into the job's test repo.
-            github_repo_available=bool(issue_repos),
-            has_profile=await _account_has_profile(username),
-            job_chat=True,
-        )
-        auth_header = await _create_ai_auth_header(username)
-        if auth_header:
-            server_url = _build_internal_server_url()
-            custom_tools = build_chat_custom_tools(
-                server_url=server_url,
-                auth_token=auth_header.removeprefix("Bearer ").strip(),
-                job_id=job_id,
-                jira_cloud_url=_settings.jira_cloud_url,
-                jira_server_url=_settings.jira_server_url,
-                jira_email=jira_email,
-                jira_token=jira_token,
-                github_token=github_token,
-                github_repo=github_repo,
-                jira_connection=jira_connection,
-                tracker_targets=tracker_targets,
-                issue_repos=tuple(sorted(issue_repos)),
-            )
-        else:
-            logger.warning(
-                "Chat init: no auth token for %s — tools unavailable in system prompt",
-                username,
-            )
+    # The preflight is over: the caller can answer, everything below is slow.
+    if handshake is not None:
+        handshake.started = True
+        handshake.settled.set()
 
+    async with _hold_chat_lock(f"{job_id}:{username}"):
+        session_id: str | None = existing_session_id
         _raise_if_chat_job_deleted(job_id)
-        from rootcoz.engine.session_tools import build_session_tools
-
-        session = await build_session_tools(
-            builtin=list(CHAT_BUILTIN_TOOLS),
-            custom_base=custom_tools,
-            workspace=workspace,
-            job_id=job_id,
+        failed_repos: list[str] = []
+        await clone_chat_repos(
+            workspace,
+            decrypted_params,
+            user_repo_token=github_token,
+            on_repo=lambda name: set_chat_prep_phase(job_id, username, "cloning", name),
+            failed=failed_repos,
         )
-        custom_tools = session.custom
-        credential_generation = (
-            None
-            if credential_source == "server"
-            else await storage.get_user_ai_credential_generation(username, ai_provider)
+        repos_available = bool(await asyncio.to_thread(cloned_graph_roots, workspace))
+        # The clock starts at the index step, not at the start of the preparation,
+        # and it is the same float the session build's funnel gets below: a spent
+        # budget must not open a second window there.
+        index_deadline = _time.monotonic() + CHAT_INDEX_DEADLINE_SECONDS
+        if repos_available:
+            set_chat_prep_phase(job_id, username, "indexing")
+            await _index_chat_repositories(
+                workspace, job_id=job_id, deadline=index_deadline
+            )
+        _raise_if_chat_job_deleted(job_id)
+        set_chat_prep_phase(job_id, username, "fetching_build_data")
+        ci_build_data_available = await setup_ci_build_workspace(
+            workspace,
+            _build_ci_workspace_params(decrypted_params, result_data),
+            github_token=github_token,
+            settings=_settings,
         )
-        from rootcoz.ai_client import chat_session_source
+        _raise_if_chat_job_deleted(job_id)
+        if not await _available_chat_session(job_id, username):
+            custom_tools: list[dict[str, Any]] = []
+            issue_repos = _job_issue_repo_slugs(decrypted_params)[1]
+            tracker_targets, tracker_unavailable = _chat_tracker_state(
+                _settings,
+                await storage.get_user_tokens(username),
+                # This run's own repos are a destination too: a deployment with no
+                # TESTS_REPO_URL can still file into the job's test repo.
+                github_repo_available=bool(issue_repos),
+                has_profile=await _account_has_profile(username),
+                job_chat=True,
+            )
+            auth_header = await _create_ai_auth_header(username)
+            if auth_header:
+                server_url = _build_internal_server_url()
+                custom_tools = build_chat_custom_tools(
+                    server_url=server_url,
+                    auth_token=auth_header.removeprefix("Bearer ").strip(),
+                    job_id=job_id,
+                    jira_cloud_url=_settings.jira_cloud_url,
+                    jira_server_url=_settings.jira_server_url,
+                    jira_email=jira_email,
+                    jira_token=jira_token,
+                    github_token=github_token,
+                    github_repo=github_repo,
+                    jira_connection=jira_connection,
+                    tracker_targets=tracker_targets,
+                    issue_repos=tuple(sorted(issue_repos)),
+                )
+            else:
+                logger.warning(
+                    "Chat init: no auth token for %s — tools unavailable in system prompt",
+                    username,
+                )
 
-        token = ai_username.set(username)
-        source_token = chat_session_source.set(credential_source)
-        set_chat_prep_phase(job_id, username, "starting_session")
-        try:
-            session_id = await init_chat_session(
+            _raise_if_chat_job_deleted(job_id)
+            from rootcoz.engine.session_tools import build_session_tools
+
+            session = await build_session_tools(
+                builtin=list(CHAT_BUILTIN_TOOLS),
+                custom_base=custom_tools,
+                workspace=workspace,
                 job_id=job_id,
+                index_deadline=index_deadline,
+            )
+            custom_tools = session.custom
+            credential_generation = (
+                None
+                if credential_source == "server"
+                else await storage.get_user_ai_credential_generation(
+                    username, ai_provider
+                )
+            )
+            from rootcoz.ai_client import chat_session_source
+
+            token = ai_username.set(username)
+            source_token = chat_session_source.set(credential_source)
+            set_chat_prep_phase(job_id, username, "starting_session")
+            try:
+                session_id = await init_chat_session(
+                    job_id=job_id,
+                    job_name=result_data.get("job_name", "unknown"),
+                    build_number=resolve_display_build_id(result_data),
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
+                    repo_path=workspace,
+                    custom_tools=custom_tools,
+                    repos_available=repos_available,
+                    ci_build_data_available=ci_build_data_available,
+                    issue_repos=tuple(sorted(issue_repos)),
+                    tracker_unavailable=tracker_unavailable,
+                )
+            finally:
+                chat_session_source.reset(source_token)
+                ai_username.reset(token)
+            if job_id in _chat_jobs_deleting and session_id:
+                await _discard_unsaved_ai_session(session_id, username, ai_provider)
+            _raise_if_chat_job_deleted(job_id)
+            if session_id:
+                _remember_chat_session_tools(session_id, tracker_targets)
+                saved = await storage.add_chat_message(
+                    job_id=job_id,
+                    role="assistant",
+                    content="",
+                    username=username,
+                    ai_provider=ai_provider,
+                    ai_model=ai_model,
+                    session_id=session_id,
+                    status="completed",
+                    credential_generation=credential_generation,
+                )
+                if not saved:
+                    await _discard_unsaved_ai_session(session_id, username, ai_provider)
+                    session_id = None
+            welcome_text = build_welcome_message(
                 job_name=result_data.get("job_name", "unknown"),
                 build_number=resolve_display_build_id(result_data),
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                repo_path=workspace,
-                custom_tools=custom_tools,
                 repos_available=repos_available,
                 ci_build_data_available=ci_build_data_available,
-                issue_repos=tuple(sorted(issue_repos)),
-                tracker_unavailable=tracker_unavailable,
+                jira_available=bool(jira_connection),
+                github_available=bool(github_token and github_repo),
             )
-        finally:
-            chat_session_source.reset(source_token)
-            ai_username.reset(token)
-        if job_id in _chat_jobs_deleting and session_id:
-            await _discard_unsaved_ai_session(session_id, username, ai_provider)
-        _raise_if_chat_job_deleted(job_id)
-        if session_id:
-            _remember_chat_session_tools(session_id, tracker_targets)
-            saved = await storage.add_chat_message(
-                job_id=job_id,
-                role="assistant",
-                content="",
-                username=username,
-                ai_provider=ai_provider,
-                ai_model=ai_model,
-                session_id=session_id,
-                status="completed",
-                credential_generation=credential_generation,
-            )
-            if not saved:
-                await _discard_unsaved_ai_session(session_id, username, ai_provider)
-                session_id = None
-        welcome_text = build_welcome_message(
-            job_name=result_data.get("job_name", "unknown"),
-            build_number=resolve_display_build_id(result_data),
-            repos_available=repos_available,
-            ci_build_data_available=ci_build_data_available,
-            jira_available=bool(jira_connection),
-            github_available=bool(github_token and github_repo),
+            if session_id:
+                # The previous session is gone, so its welcome is stale chrome.
+                # A dead session's welcome would otherwise accumulate in history on
+                # every credential or grant change. No session_id here: the init
+                # placeholder above is the session marker, and a welcome carrying one
+                # would take over as the latest Start.
+                await storage.delete_chat_welcome_messages(job_id, username)
+                await storage.add_chat_message(
+                    job_id=job_id,
+                    role="assistant",
+                    content=welcome_text,
+                    username=username,
+                    status="completed",
+                )
+
+    if session_id and failed_repos:
+        # A chat starts without a repository it could not clone, so the
+        # transcript is what says which one is missing — for a new session and a
+        # re-used one alike.
+        await storage.add_chat_message(
+            job_id=job_id,
+            role="system",
+            content=(
+                "Not in this workspace: "
+                + ", ".join(sorted(failed_repos))
+                + ". The chat still works; start a new session once it can be cloned."
+            ),
+            username=username,
+            status="completed",
         )
-        if session_id:
-            # The previous session is gone, so its welcome is stale chrome.
-            # A dead session's welcome would otherwise accumulate in history on
-            # every credential or grant change. No session_id here: the init
-            # placeholder above is the session marker, and a welcome carrying one
-            # would take over as the latest Start.
-            await storage.delete_chat_welcome_messages(job_id, username)
-            await storage.add_chat_message(
-                job_id=job_id,
-                role="assistant",
-                content=welcome_text,
-                username=username,
-                status="completed",
-            )
 
     logger.info(
         "Chat init for job %s: workspace=%s, repos=%s, session=%s",
@@ -23596,20 +23649,7 @@ async def _init_chat_under_barrier(
         repos_available,
         session_id,
     )
-    repo_names = []
-    if workspace.exists():
-        for item in workspace.iterdir():
-            if item.is_dir() and not item.name.startswith("."):
-                repo_names.append(item.name)
-    return {
-        "ready": True,
-        "repos_cloned": repos_available,
-        "repo_names": repo_names,
-        "ci_build_data_available": ci_build_data_available,
-        "job_name": result_data.get("job_name", ""),
-        "build_number": resolve_display_build_id(result_data),
-        "session_id": session_id or "",
-    }
+    return {"session_id": session_id or ""}
 
 
 _TRANSIENT_CHAT_START_DETAIL = "The AI service is rate limited or timed out. Try again."
@@ -23635,11 +23675,242 @@ def _chat_start_sidecar_error(exc: httpx.HTTPStatusError) -> HTTPException:
     return HTTPException(status_code=503, detail=_TRANSIENT_CHAT_START_DETAIL)
 
 
-@app.post("/api/chat/{job_id}/init", operation_id="initChat")
+@dataclass
+class _ChatInitHandshake:
+    """What a Start request waits on: the slow phase, or the end of the task."""
+
+    settled: asyncio.Event = dataclass_field(default_factory=asyncio.Event)
+    error: BaseException | None = None
+    #: The preflight finished and the slow work began — the one state in which
+    #: the route answers ``202``. Without it, "settled without a signal" and
+    #: "signalled and finished" would be the same observation.
+    started: bool = False
+
+
+@dataclass
+class _ChatPreparation:
+    """One live preparation per job+user, as the refusals and dedupe see it."""
+
+    pair: tuple[str, str]
+    task: asyncio.Task[Any]
+
+
+#: Live preparations, keyed ``<job_id>:<username>``. Written by the route before
+#: the task exists, so there is no window in which a preparation runs invisible.
+_chat_prep_tasks: dict[str, _ChatPreparation] = {}
+
+_CHAT_PAIR_CONFLICT_DETAIL = (
+    "Clear chat and Start a new session to change model or credentials"
+)
+_CHAT_PREP_FAILED_DETAIL = "The chat workspace could not be prepared. Start it again."
+_CHAT_PREP_CANCELLED_DETAIL = (
+    "Chat preparation was interrupted before it started. Try again."
+)
+_CHAT_PREPARING_DETAIL = "Chat is being prepared ({phase}). Wait for it to be ready."
+
+
+def _live_chat_prep_phase(key: str) -> dict[str, Any]:
+    """The phase a client may act on; a live preparation always has one."""
+    return _chat_prep_phases.get(key) or {"phase": "preparing", "detail": ""}
+
+
+def _end_chat_preparation(
+    job_id: str, username: str, task: asyncio.Task[Any] | None
+) -> None:
+    """Drop a finished preparation's registry entry and phase — only its own.
+
+    Both the coroutine's ``finally`` and the task's done-callback call this, and
+    it acts only when the stored entry is *this* task. Without the guard, a late
+    callback for preparation A would drop the entry of a runnable preparation B
+    for the same key: B then has no dedupe, Clear deletes a workspace a live
+    clone is writing, and the phase disappears while B still prepares.
+    """
+    key = f"{job_id}:{username}"
+    entry = _chat_prep_tasks.get(key)
+    if entry is None or entry.task is not task:
+        return
+    _chat_prep_tasks.pop(key, None)
+    clear_chat_prep_phase(job_id, username)
+
+
+def _settle_chat_preparation(
+    job_id: str, username: str, handshake: _ChatInitHandshake, task: asyncio.Task[Any]
+) -> None:
+    """Settle every exit a preparation can take, then end it.
+
+    Settlement is driven by task state, not by coroutine unwind: a task cancelled
+    before its first step never enters the body, so its ``finally`` never runs and
+    this callback is the only thing that can answer the route and clear the phase.
+    ``task.exception()`` also *raises* for a cancelled task, hence the guard.
+    """
+    if not handshake.settled.is_set() and not task.cancelled():
+        handshake.error = task.exception()
+    handshake.settled.set()
+    _end_chat_preparation(job_id, username, task)
+
+
+def _redacted_error(exc: BaseException) -> str:
+    """Class, errno and a credential-free message — never a raw traceback."""
+    from rootcoz.url_utils import strip_url_userinfo_in_text
+
+    errno_value = getattr(exc, "errno", None)
+    suffix = f" (errno {errno_value})" if errno_value else ""
+    return f"{type(exc).__name__}{suffix}: {strip_url_userinfo_in_text(str(exc))}"
+
+
+async def _chat_prep_failure_row(job_id: str, username: str, sentence: str) -> None:
+    """One failed assistant row carrying a constant, redacted sentence."""
+    await storage.add_chat_message(
+        job_id=job_id,
+        role="assistant",
+        content=sentence,
+        username=username,
+        status="failed",
+    )
+
+
+async def _run_chat_preparation(
+    job_id: str,
+    username: str,
+    body: ChatInitRequest,
+    handshake: _ChatInitHandshake,
+) -> None:
+    """Prepare one chat workspace off the request, and report how it ended.
+
+    ``_track_chat_job_task`` opens *inside* this coroutine on purpose: it registers
+    ``asyncio.current_task()``, so wrapping the spawn in the route would register
+    the route's own task and leave the preparation invisible to job deletion.
+    """
+    notify = False
+    async with _track_chat_job_task(job_id):
+        try:
+            try:
+                prepared = await _init_chat_under_barrier(
+                    job_id, username, body, handshake=handshake
+                )
+                session_id = prepared["session_id"]
+            except asyncio.CancelledError:
+                # #458: the drain needs the cancellation to keep propagating, and
+                # an operator needs to know which preparation it interrupted.
+                logger.info(
+                    "Chat preparation cancelled for job %s, user %s (phase=%s)",
+                    job_id,
+                    username,
+                    _chat_prep_phases.get(f"{job_id}:{username}", {}).get(
+                        "phase", "none"
+                    ),
+                )
+                raise
+            except HTTPException as exc:
+                if not handshake.settled.is_set():
+                    # A precondition the caller can fix: the route answers it, and
+                    # the job must not gain a chat row it never asked for. Logged
+                    # because when nothing reads the handshake this exit is the
+                    # preparation's whole story — it used to leave no trace at all.
+                    logger.info(
+                        "Chat preparation refused before it started for job %s, "
+                        "user %s: %s",
+                        job_id,
+                        username,
+                        exc.status_code,
+                    )
+                    handshake.error = exc
+                    handshake.settled.set()
+                elif job_id in _chat_jobs_deleting:
+                    # Deleted mid-preparation: never resurrect its transcript.
+                    logger.info(
+                        "Chat preparation stopped for deleted job %s, user %s",
+                        job_id,
+                        username,
+                    )
+                else:
+                    logger.warning(
+                        "Chat preparation failed for job %s, user %s: %s",
+                        job_id,
+                        username,
+                        exc.status_code,
+                    )
+                    await _chat_prep_failure_row(
+                        job_id, username, _CHAT_PREP_FAILED_DETAIL
+                    )
+                    notify = True
+            except SessionCreationRefused as exc:
+                # Written for the user: its sentence passes through unchanged.
+                await _chat_prep_failure_row(job_id, username, str(exc))
+                notify = True
+            except httpx.HTTPStatusError as exc:
+                # A transient sidecar status is a retry, and the session is what
+                # the agent needs; it lands in the transcript, not as a 5xx.
+                await _chat_prep_failure_row(
+                    job_id, username, _chat_start_sidecar_error(exc).detail
+                )
+                notify = True
+            except Exception as exc:  # noqa: BLE001 - report, never escape silently
+                if not handshake.settled.is_set():
+                    handshake.error = exc
+                    handshake.settled.set()
+                else:
+                    # Never ``str(exc)``: it can carry a token-bearing remote.
+                    logger.warning(
+                        "Chat preparation failed for job %s, user %s: %s",
+                        job_id,
+                        username,
+                        _redacted_error(exc),
+                    )
+                    await _chat_prep_failure_row(
+                        job_id, username, _CHAT_PREP_FAILED_DETAIL
+                    )
+                    notify = True
+            else:
+                if not session_id:
+                    # No exception and no session: "nothing to notify" is how a
+                    # Start that produced nothing looked successful.
+                    logger.warning(
+                        "Chat preparation for job %s, user %s produced no session",
+                        job_id,
+                        username,
+                    )
+                    await _chat_prep_failure_row(
+                        job_id, username, _CHAT_PREP_FAILED_DETAIL
+                    )
+                # A session — newly created or re-used — is what enables the
+                # composer, and the push is the only thing that tells the browser.
+                notify = True
+        finally:
+            _end_chat_preparation(job_id, username, asyncio.current_task())
+    if notify:
+        notify_chat_changed(job_id, username=username)
+
+
+def _refuse_while_preparing(job_id: str, username: str) -> None:
+    """Answer ``425`` while a preparation owns this job's workspace.
+
+    One owner for the check, the sentence and its order: callers run it after
+    authorization and the job-existence ``404`` and before they take the chat
+    lock, so a denied caller never sees an availability answer naming a
+    repository, and a send never waits behind a clone.
+    """
+    key = f"{job_id}:{username}"
+    if _chat_prep_tasks.get(key) is None:
+        return
+    phase = _live_chat_prep_phase(key)
+    label = phase["phase"] + (f" {phase['detail']}" if phase.get("detail") else "")
+    raise HTTPException(
+        status_code=425, detail=_CHAT_PREPARING_DETAIL.format(phase=label)
+    )
+
+
+@app.post("/api/chat/{job_id}/init", status_code=202, operation_id="initChat")
 async def init_chat(
     job_id: str, request: Request, body: ChatInitRequest | None = None
 ) -> dict[str, Any]:
-    """Initialize chat workspace: create directory, clone repos, and start AI session."""
+    """Start preparing a chat workspace; the workspace work runs in the background.
+
+    The request waits only for the preflight — the checks that can answer a
+    ``4xx`` — so a workspace that legitimately takes minutes to clone is no longer
+    a router timeout. Progress is reported by ``GET /api/chat/{job_id}``, and the
+    browser is pushed when the preparation ends.
+    """
     _check_allow_list(request)
     _require_reviewer(request)
     if body is None:
@@ -23647,23 +23918,49 @@ async def init_chat(
             status_code=422, detail="Select provider, model and credential source"
         )
     username = getattr(request.state, "username", "")
-    try:
-        async with (
-            _track_chat_job_task(job_id),
-            _hold_chat_lock(f"{job_id}:{username}"),
-        ):
-            result = await _init_chat_under_barrier(job_id, username, body)
-    except SessionCreationRefused as exc:
-        # A refused session is the caller's to fix: a 4xx with the reason and
-        # the fix, never a 500.
-        raise HTTPException(status_code=422, detail=str(exc)) from None
-    except httpx.HTTPStatusError as exc:
-        raise _chat_start_sidecar_error(exc) from None
-    finally:
-        clear_chat_prep_phase(job_id, username)
-    if result["session_id"]:
-        notify_chat_changed(job_id, username=username)
-    return result
+    key = f"{job_id}:{username}"
+    from rootcoz.ai_client import public_provider_name
+
+    pair = (public_provider_name(body.ai_provider), body.ai_model)
+    live = _chat_prep_tasks.get(key)
+    if live is not None and not live.task.done():
+        if live.pair != pair:
+            raise HTTPException(status_code=409, detail=_CHAT_PAIR_CONFLICT_DETAIL)
+        # Same request, already running: idempotent, and it starts nothing.
+        return {"ready": False, "preparing": _live_chat_prep_phase(key)}
+
+    set_chat_prep_phase(job_id, username, "preparing")
+    # The body carries the phase this route seeded, not whatever the preparation
+    # has reached by the time it answers: the phase is replaced, never mutated, so
+    # this is a snapshot and the assertion is not a scheduling race.
+    seeded = _live_chat_prep_phase(key)
+    handshake = _ChatInitHandshake()
+    task = _spawn_background(_run_chat_preparation(job_id, username, body, handshake))
+    _chat_prep_tasks[key] = _ChatPreparation(pair=pair, task=task)
+    task.add_done_callback(
+        partial(_settle_chat_preparation, job_id, username, handshake)
+    )
+
+    await handshake.settled.wait()
+    if handshake.error is not None:
+        if isinstance(handshake.error, HTTPException):
+            raise handshake.error
+        # Today's 500, with the cause logged and redacted: a disk-full Start must
+        # not be reported as a retryable cancellation with the cause consumed.
+        logger.warning(
+            "Chat init failed before preparation for job %s, user %s: %s",
+            job_id,
+            username,
+            _redacted_error(handshake.error),
+        )
+        raise HTTPException(status_code=500, detail=_CHAT_PREP_FAILED_DETAIL)
+    if not handshake.started:
+        # It ended without ever reaching its slow phase: cancelled under the
+        # preflight. A deleted job answers 404, not a retry that must fail.
+        if job_id in _chat_jobs_deleting:
+            raise HTTPException(status_code=404, detail="Job not found")
+        raise HTTPException(status_code=503, detail=_CHAT_PREP_CANCELLED_DETAIL)
+    return {"ready": False, "preparing": seeded}
 
 
 @app.post("/api/chat/{job_id}/close", operation_id="closeChat")
@@ -24068,6 +24365,7 @@ async def send_chat_message(
     stored = await get_result(job_id, strip_sensitive=False)
     if not stored or not stored.get("result"):
         raise HTTPException(status_code=404, detail="Job not found")
+    _refuse_while_preparing(job_id, request.state.username)
     async with _hold_chat_lock(f"{job_id}:{request.state.username}"):
         if bool(body.ai_provider) != bool(body.ai_model):
             raise HTTPException(
@@ -24289,12 +24587,22 @@ async def _process_chat_message(
                         cloned_roots = await asyncio.to_thread(
                             cloned_graph_roots, workspace
                         )
+                        # Its own clock, immediately before its index calls and
+                        # reused for the session build's funnel: the deadline
+                        # belongs to whoever starts the build.
+                        index_deadline = _time.monotonic() + CHAT_INDEX_DEADLINE_SECONDS
                         stale_roots = await asyncio.to_thread(
-                            roots_needing_index, workspace, cloned_roots
+                            roots_needing_index,
+                            workspace,
+                            cloned_roots,
+                            deadline=index_deadline,
                         )
                         if stale_roots:
                             await _index_chat_repositories(
-                                workspace, stale_roots, job_id=job_id
+                                workspace,
+                                stale_roots,
+                                job_id=job_id,
+                                deadline=index_deadline,
                             )
 
                         settings = get_settings()
@@ -24354,6 +24662,7 @@ async def _process_chat_message(
                             custom_base=custom_tools,
                             workspace=workspace,
                             job_id=job_id,
+                            index_deadline=index_deadline,
                         )
                         custom_tools = session.custom
 
@@ -24546,6 +24855,7 @@ async def clear_chat_history(job_id: str, request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail="Job not found")
 
     username = request.state.username
+    _refuse_while_preparing(job_id, username)
 
     # Acquire the per-user chat lock to prevent tearing down workspace
     # while a background worker is still processing

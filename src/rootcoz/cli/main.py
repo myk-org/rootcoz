@@ -5404,15 +5404,106 @@ def metadata_preview(
 # -- Chat ---------------------------------------------------------------------
 
 
-def _echo_chat_start(data: dict[str, Any], label: str) -> None:
-    """Report whether an init response actually established a session."""
-    started = bool(data.get("session_id")) and bool(data.get("ready"))
+#: How long the CLI waits for a chat to become ready, or for a reply. Derived
+#: from clone headroom for a 17-repository workspace plus
+#: ``CHAT_INDEX_DEADLINE_SECONDS + graft.BUILD_SECONDS`` plus session creation.
+#: It was 120 s per command before preparation moved off the request.
+CHAT_WAIT_SECONDS = 600
+
+
+def _echo_chat_start(data: dict[str, Any], label: str, *, started: bool) -> None:
+    """Report the terminal payload of a chat start."""
     logging.getLogger(__name__).info("%s init completed: started=%s", label, started)
+    if data.get("error"):
+        typer.echo(f"{label} failed: {data['error']}", err=True)
+        return
     if started:
         typer.echo("Ready: True")
-        typer.echo(f"{label} started. You can now send messages.")
+        typer.echo(
+            f"{label} started ({data.get('ai_provider')} / {data.get('ai_model')}). "
+            "You can now send messages."
+        )
     else:
         typer.echo(f"{label} not started (no active session).")
+
+
+def _await_chat(
+    fetch: Callable[[], dict[str, Any]],
+    predicate: Callable[[dict[str, Any]], dict[str, Any] | None],
+    *,
+    budget: int,
+    timeout_message: str,
+) -> dict[str, Any] | None:
+    """Poll chat history until ``predicate`` returns a terminal payload.
+
+    One waiter for ``chat init``, ``chat send`` and ``admin-chat send``: they
+    differ only in what "terminal" means and how long they may wait.
+    """
+    import time
+
+    for _ in range(budget):
+        time.sleep(1)
+        try:
+            history = fetch()
+        except RootCozError:
+            continue
+        payload = predicate(history)
+        if payload is not None:
+            return payload
+    typer.echo(timeout_message)
+    return None
+
+
+def _last_page(
+    fetch: Callable[[int], dict[str, Any]], history: dict[str, Any]
+) -> dict[str, Any]:
+    """The last 200 messages, so a long conversation still shows the newest row."""
+    total = history.get("total", 0)
+    return fetch(max(total - 200, 0)) if total > 200 else history
+
+
+def _init_terminal(history: dict[str, Any]) -> dict[str, Any] | None:
+    """``preparing is None`` **and** a session, or a failed row, or keep waiting."""
+    if history.get("preparing"):
+        return None
+    session = history.get("active_session")
+    if session:
+        return {"ready": True, "error": None}
+    failed = [
+        m
+        for m in history.get("messages", [])
+        if m.get("role") == "assistant" and m.get("status") == "failed"
+    ]
+    if failed:
+        return {"ready": False, "error": failed[-1].get("content", "")}
+    return None
+
+
+def _reply_terminal(
+    user_msg_id: int | None,
+) -> Callable[[dict[str, Any]], dict[str, Any] | None]:
+    """The assistant row after ``user_msg_id`` that stopped being pending."""
+
+    def predicate(history: dict[str, Any]) -> dict[str, Any] | None:
+        for message in reversed(history.get("messages", [])):
+            if (
+                message.get("role") == "assistant"
+                and user_msg_id
+                and message.get("id", 0) > user_msg_id
+            ):
+                if message.get("status") in ("completed", "failed"):
+                    return message
+                return None
+        return None
+
+    return predicate
+
+
+def _echo_chat_reply(message: dict[str, Any]) -> None:
+    if message.get("status") == "failed":
+        typer.echo(f"\nError: {message.get('content', '')}", err=True)
+    else:
+        typer.echo(f"\n{message.get('content', '')}")
 
 
 @chat_app.command("init")
@@ -5422,19 +5513,40 @@ def chat_init(
     ai_model: str = typer.Option(..., "--model", "-m", help="AI model."),
     json_output: bool = _JSON_OPTION,
 ) -> None:
-    """Start chat with an explicit model."""
-    data = _run_client_command(
+    """Start chat with an explicit model, and wait for it to be ready."""
+    _run_client_command(
         json_output,
         lambda c: c.init_chat(job_id, ai_provider, ai_model),
         emit_output=False,
+        quiet=True,
     )
-    if not _state.get("json", False):
-        _echo_chat_start(data, "Chat")
-        repos = data.get("repo_names", [])
-        if repos:
-            typer.echo(f"Repos: {', '.join(repos)}")
-        else:
-            typer.echo("No repos cloned.")
+    # The POST answers 202: the workspace is prepared in the background and
+    # "ready" means no preparation is running *and* a session exists — a re-used
+    # session keeps its row while a second Start still clones for minutes.
+    client = _get_client()
+    payload = _await_chat(
+        lambda: _last_page(
+            lambda offset: client.get_chat_history(job_id, offset=offset),
+            client.get_chat_history(job_id),
+        ),
+        _init_terminal,
+        budget=CHAT_WAIT_SECONDS,
+        timeout_message=(
+            "Timed out waiting for the chat to become ready. "
+            "Use 'rootcoz chat history' to check later."
+        ),
+    ) or {
+        "ready": False,
+        "error": None,
+    }
+    payload = {"ai_provider": ai_provider, "ai_model": ai_model, **payload}
+    if _state.get("json", False):
+        print_output(payload, columns=[], as_json=True)
+    else:
+        _echo_chat_start(payload, "Chat", started=bool(payload["ready"]))
+    if payload["error"]:
+        # A preparation that ended with a reported failure is a failed command.
+        raise typer.Exit(code=1)
 
 
 @chat_app.command("history")
@@ -5475,7 +5587,6 @@ def chat_send(
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Send a chat message and queue AI processing."""
-    import time
 
     data = _run_client_command(
         json_output,
@@ -5490,40 +5601,21 @@ def chat_send(
     if not _state.get("json", False):
         user_msg_id = data.get("user_message", {}).get("id")
         typer.echo("Message queued. Waiting for AI response...")
-        # Poll for the assistant response (created in background)
         client = _get_client()
-        for _ in range(120):  # up to ~2 minutes
-            time.sleep(1)
-            try:
-                history = client.get_chat_history(job_id)
-                total = history.get("total", 0)
-                # Fetch last page to ensure we see the latest messages
-                if total > 200:
-                    history = client.get_chat_history(
-                        job_id, offset=max(total - 200, 0)
-                    )
-                messages = history.get("messages", [])
-                # Find the assistant message right after our user message
-                for msg in reversed(messages):
-                    if (
-                        msg.get("role") == "assistant"
-                        and user_msg_id
-                        and msg.get("id", 0) > user_msg_id
-                    ):
-                        if msg.get("status") in ("completed", "failed"):
-                            content = msg.get("content", "")
-                            if msg.get("status") == "failed":
-                                typer.echo(f"\nError: {content}", err=True)
-                            else:
-                                typer.echo(f"\n{content}")
-                            return
-                        break
-            except RootCozError:
-                continue
-        typer.echo(
-            "\nTimed out waiting for response. "
-            "Use 'rootcoz chat history' to check later."
+        reply = _await_chat(
+            lambda: _last_page(
+                lambda offset: client.get_chat_history(job_id, offset=offset),
+                client.get_chat_history(job_id),
+            ),
+            _reply_terminal(user_msg_id),
+            budget=CHAT_WAIT_SECONDS,
+            timeout_message=(
+                "\nTimed out waiting for response. "
+                "Use 'rootcoz chat history' to check later."
+            ),
         )
+        if reply is not None:
+            _echo_chat_reply(reply)
 
 
 @chat_app.command("abort")
@@ -5591,7 +5683,11 @@ def admin_chat_init(
         emit_output=False,
     )
     if not _state.get("json", False):
-        _echo_chat_start(data, "Admin chat")
+        _echo_chat_start(
+            data,
+            "Admin chat",
+            started=bool(data.get("session_id")) and bool(data.get("ready")),
+        )
 
 
 @admin_chat_app.command("send")
@@ -5602,7 +5698,6 @@ def admin_chat_send(
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Send a message to the admin server chat."""
-    import time
 
     client = _get_client()
     data = _run_client_command(
@@ -5617,34 +5712,21 @@ def admin_chat_send(
     if not _state.get("json", False):
         user_msg_id = data.get("user_message", {}).get("id")
         typer.echo("Message queued. Waiting for AI response...")
-        for _ in range(120):  # up to ~2 minutes
-            time.sleep(1)
-            try:
-                history = client.get_admin_chat_history()
-                total = history.get("total", 0)
-                if total > 200:
-                    history = client.get_admin_chat_history(offset=max(total - 200, 0))
-                messages = history.get("messages", [])
-                for msg in reversed(messages):
-                    if (
-                        msg.get("role") == "assistant"
-                        and user_msg_id
-                        and msg.get("id", 0) > user_msg_id
-                    ):
-                        if msg.get("status") in ("completed", "failed"):
-                            content = msg.get("content", "")
-                            if msg.get("status") == "failed":
-                                typer.echo(f"\nError: {content}", err=True)
-                            else:
-                                typer.echo(f"\n{content}")
-                            return
-                        break
-            except RootCozError:
-                continue
-        typer.echo(
-            "\nTimed out waiting for response. "
-            "Use 'rootcoz admin-chat history' to check later."
+        # Admin chat has no preparation to wait for, so its budget stays at 120 s.
+        reply = _await_chat(
+            lambda: _last_page(
+                lambda offset: client.get_admin_chat_history(offset=offset),
+                client.get_admin_chat_history(),
+            ),
+            _reply_terminal(user_msg_id),
+            budget=120,
+            timeout_message=(
+                "\nTimed out waiting for response. "
+                "Use 'rootcoz admin-chat history' to check later."
+            ),
         )
+        if reply is not None:
+            _echo_chat_reply(reply)
 
 
 @admin_chat_app.command("history")

@@ -925,3 +925,56 @@ it('opens no delta stream when nothing is pending', async () => {
   expect(await screen.findByText('answer')).toBeInTheDocument()
   expect(MockEventSource.instances).toHaveLength(0)
 })
+
+it('keeps the preparation indicator after the init response', async () => {
+  setup()
+  // A 202: the workspace is prepared in the background, so the response carries
+  // no session — that is "started", not "Chat session unavailable".
+  post.mockImplementation(async (path: string) => path.endsWith('/init')
+    ? { ready: false, preparing: { phase: 'preparing', detail: '' } }
+    : {})
+  const user = userEvent.setup()
+  render(page())
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled())
+  await user.click(screen.getByRole('button', { name: 'Start Chat' }))
+  expect(await screen.findByText(/Preparing workspace\.\.\./)).toBeInTheDocument()
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  expect(screen.getByPlaceholderText(/Ask a question/)).toBeDisabled()
+  // New Session stays pressable so a preparation can be refused (425) rather
+  // than leaving the control unreachable.
+  expect(screen.getByRole('button', { name: 'New Session' })).toBeEnabled()
+})
+
+it('a reload during preparation shows the phase and enables the composer once the session appears', async () => {
+  setup({ total: 0, messages: [], preparing: { phase: 'cloning', detail: 'openshift-origin' } } as never)
+  const { rerender } = render(page())
+  expect(await screen.findByText(/Cloning repositories: openshift-origin/)).toBeInTheDocument()
+  expect(screen.getByPlaceholderText(/Ask a question/)).toBeDisabled()
+
+  // The server pushes `chat-changed` when the session exists; the same GET now
+  // reports it, and the composer enables without another click.
+  setup({ total: 0, messages: [], active_session: { ai_provider: 'openai', ai_model: 'gpt', credential_source: 'user' } })
+  rerender(page())
+  act(() => {
+    const handlers = (useSSE as unknown as { mock: { calls: Array<[string, Record<string, () => void>]> } }).mock.calls
+    handlers[handlers.length - 1][1]['chat-changed']()
+  })
+  await waitFor(() => expect(screen.getByPlaceholderText(/Ask a question/)).toBeEnabled())
+  expect(screen.queryByText(/Cloning repositories/)).not.toBeInTheDocument()
+})
+
+it('renders a 425 by its detail, not the bare API error', async () => {
+  setup({ total: 0, messages: [], active_session: { ai_provider: 'openai', ai_model: 'gpt', credential_source: 'user' } })
+  post.mockImplementation(async (path: string) => {
+    if (path === '/api/chat/job') {
+      throw new ApiError(425, 'Too Early', { detail: 'Chat is being prepared (cloning repo). Wait for it to be ready.' })
+    }
+    return {}
+  })
+  const user = userEvent.setup()
+  render(page())
+  await waitFor(() => expect(screen.getByPlaceholderText(/Ask a question/)).toBeEnabled())
+  await user.type(screen.getByPlaceholderText(/Ask a question/), 'hello')
+  await user.click(screen.getByRole('button', { name: 'Send message' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('Chat is being prepared (cloning repo). Wait for it to be ready.')
+})

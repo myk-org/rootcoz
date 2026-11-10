@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import os
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
@@ -2529,7 +2530,7 @@ async def test_index_chat_repositories_discovers_and_logs_off_loop(
     (repo / ".git").mkdir()
     seen = []
 
-    def index(workspace, roots):
+    def index(workspace, roots, deadline=None):
         with pytest.raises(RuntimeError, match="no running event loop"):
             asyncio.get_running_loop()
         seen.append((workspace, roots))
@@ -2586,51 +2587,6 @@ async def test_chat_routes_share_one_lock_scope_and_translation(monkeypatch) -> 
 
     monkeypatch.setattr("rootcoz.engine.chat.chat_workspace_lock", unknown)
     assert await main_mod._enter_chat_workspace("job-1", "alice", "Chat init") is None
-
-
-@pytest.mark.asyncio
-async def test_chat_init_workspace_recovery_runs_outside_the_job_barrier(
-    monkeypatch,
-) -> None:
-    """Workspace reuse can queue a recovery delete on the single reaper.
-
-    That wait is bounded by ``GRAPH_LOCK_SECONDS`` and the barrier is shared by
-    every init for the job and by job deletion, so holding it there stalls all of
-    them (#424).
-    """
-    from rootcoz import main as main_mod
-
-    class _Stop(Exception):
-        pass
-
-    held: list[bool] = []
-
-    async def fake_enter(job_id, username, what):
-        held.append(main_mod._get_chat_job_barrier(job_id).locked())
-        raise _Stop
-
-    async def fake_validate(body, username):
-        return "claude", "sonnet-4"
-
-    async def fake_choice(*args, **kwargs):
-        return None, None
-
-    async def fake_result(job_id, **kwargs):
-        return {"result": {"request_params": {}}}
-
-    monkeypatch.setattr(main_mod, "get_result", fake_result)
-    monkeypatch.setattr(main_mod, "_validate_chat_selection", fake_validate)
-    monkeypatch.setattr(main_mod, "_check_chat_session_choice", fake_choice)
-    monkeypatch.setattr(main_mod, "_enter_chat_workspace", fake_enter)
-
-    with pytest.raises(_Stop):
-        await main_mod._init_chat_under_barrier(
-            "job-barrier",
-            "alice",
-            ChatInitRequest(ai_provider="claude", ai_model="sonnet-4"),
-        )
-
-    assert held == [False], "chat init held the job barrier across workspace recovery"
 
 
 @pytest.mark.asyncio
@@ -2995,8 +2951,13 @@ async def test_cleanup_cancels_in_flight_chat_task(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_chat_init_releases_barrier_before_clone(setup_test_db, monkeypatch):
-    """Job deletion must not wait behind clone/session initialization I/O."""
+async def test_chat_init_prepares_outside_the_job_barrier(setup_test_db, monkeypatch):
+    """Init never holds the job barrier; deletion reaches it by cancellation.
+
+    The barrier is held by a message turn across its own clone phase, so init
+    taking it would put the router timeout back on Start. Deletion cancels the
+    preparation instead of waiting for a barrier it does not hold.
+    """
     from rootcoz import main as main_mod
 
     job_id = "chat-init-barrier-job"
@@ -3230,6 +3191,23 @@ async def _seed_chat_session(job_id: str, username: str = "alice") -> None:
     )
 
 
+def _await_preparation(
+    test_client, path: str, timeout: float = 10, headers: dict[str, str] | None = None
+) -> None:
+    """Poll history until the background preparation has ended.
+
+    This file drives Start through the sync ``TestClient``, so it cannot await a
+    task created on the portal's loop: the server's own state is the signal. The
+    phase is per user, so the caller's own headers decide whose preparation ends.
+    """
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if test_client.get(path, headers=headers).json()["preparing"] is None:
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"the chat preparation for {path} never ended")
+
+
 async def _start_chat(
     test_client, job_id: str, provider: str = "claude", model: str = "sonnet-4"
 ) -> None:
@@ -3270,8 +3248,13 @@ async def _start_chat(
             f"/api/chat/{job_id}/init",
             json={"ai_provider": provider, "ai_model": model},
         )
-    assert response.status_code == 200, response.text
-    assert response.json()["session_id"] == f"session-{job_id}"
+    assert response.status_code == 202, response.text
+    body = response.json()
+    assert body["ready"] is False
+    assert body["preparing"]["phase"] == "preparing"
+    assert "session_id" not in body
+    _await_preparation(test_client, f"/api/chat/{job_id}")
+    assert test_client.get(f"/api/chat/{job_id}").json()["active_session"] is not None
 
 
 async def _save_job(temp_db_path: Path, job_id: str, result: dict | None = None):
@@ -3867,7 +3850,9 @@ async def test_rotation_does_not_reactivate_older_server_chat(
             json={"ai_provider": "claude", "ai_model": "sonnet-4"},
             headers=headers,
         )
-    assert response.status_code == 200, response.text
+    assert response.status_code == (200 if admin else 202), response.text
+    if not admin:
+        _await_preparation(test_client, path, headers=headers)
     assert (
         test_client.get(path, headers=headers).json()["active_session"][
             "credential_source"
@@ -3878,13 +3863,15 @@ async def test_rotation_does_not_reactivate_older_server_chat(
 
 @pytest.mark.parametrize("admin", [False, True])
 @pytest.mark.parametrize("raises", [False, True])
-async def test_init_without_session_does_not_notify(
+async def test_init_without_session_is_a_failed_row(
     test_client, temp_db_path, admin, raises
 ):
     job_id = "failed-start-job" if not admin else "__admin_chat__"
     path = "/api/admin/chat" if admin else f"/api/chat/{job_id}"
     if not admin:
         await _save_job(temp_db_path, job_id)
+    from rootcoz import main as main_mod
+
     with (
         patch(
             "rootcoz.main._validate_chat_selection",
@@ -3915,30 +3902,39 @@ async def test_init_without_session_does_not_notify(
             side_effect=RuntimeError("session init failed") if raises else None,
             return_value=None,
         ),
-        # Preparation phases notify their own progress; this asserts the
-        # completion contract — no session means no "chat changed" broadcast.
-        patch("rootcoz.main.set_chat_prep_phase"),
-        patch("rootcoz.main.clear_chat_prep_phase"),
         patch("rootcoz.main.notify_chat_changed") as notify,
     ):
-        if raises:
-            with pytest.raises(RuntimeError, match="session init failed"):
-                test_client.post(
+        if admin:
+            # Admin chat init is still synchronous: its own contract is unchanged.
+            if raises:
+                with pytest.raises(RuntimeError, match="session init failed"):
+                    test_client.post(
+                        f"{path}/init",
+                        json={"ai_provider": "claude", "ai_model": "sonnet-4"},
+                    )
+            else:
+                response = test_client.post(
                     f"{path}/init",
-                    json={
-                        "ai_provider": "claude",
-                        "ai_model": "sonnet-4",
-                    },
+                    json={"ai_provider": "claude", "ai_model": "sonnet-4"},
                 )
+                assert response.status_code == 200, response.text
+                assert response.json()["session_id"] == ""
+            notify.assert_not_called()
         else:
+            # A background preparation never answers with an exception: a Start
+            # that produced nothing is one failed row, and the browser is told.
             response = test_client.post(
                 f"{path}/init",
                 json={"ai_provider": "claude", "ai_model": "sonnet-4"},
             )
-            assert response.status_code == 200, response.text
-            assert response.json()["session_id"] == ""
-        notify.assert_not_called()
-    assert test_client.get(path).json()["active_session"] is None
+            assert response.status_code == 202, response.text
+            _await_preparation(test_client, path)
+            notify.assert_called()
+    history_dbg = test_client.get(path).json()
+    assert history_dbg["active_session"] is None
+    if not admin:
+        failed = [m for m in history_dbg["messages"] if m["status"] == "failed"]
+        assert [m["content"] for m in failed] == [main_mod._CHAT_PREP_FAILED_DETAIL]
 
 
 @pytest.mark.parametrize("admin", [False, True])
@@ -4008,16 +4004,19 @@ async def test_orphan_history_can_start_without_losing_messages(
     ):
         body = {"ai_provider": "claude", "ai_model": "sonnet-4"}
         first = test_client.post(f"{path}/init", json=body)
-        assert first.status_code == 200, first.text
-        assert first.json()["session_id"] == "new-orphan-session"
+        assert first.status_code == (200 if admin else 202), first.text
+        assert first.json()["ready"] is bool(admin)
+        if not admin:
+            _await_preparation(test_client, path)
         # Preparation phases notify too; every notify stays scoped to the user.
         assert notify.call_args_list
         assert all(c == call(job_id, username="admin") for c in notify.call_args_list)
         assert await storage.get_latest_chat_session(job_id, "admin") is not None
         notifies_before_retry = notify.call_count
         second = test_client.post(f"{path}/init", json=body)
-        assert second.status_code == 200, second.text
-        assert second.json()["session_id"] == first.json()["session_id"]
+        assert second.status_code == (200 if admin else 202), second.text
+        if not admin:
+            _await_preparation(test_client, path)
         assert notify.call_count > notifies_before_retry
         assert all(c == call(job_id, username="admin") for c in notify.call_args_list)
         assert init.call_count == 1
@@ -4787,22 +4786,34 @@ def _chat_init_request():
 async def _refused_init(
     install_start_rig, refusing_sidecar, *, status_code, json_body=None, raw_text=""
 ):
-    """Drive POST /api/chat/{job}/init with a sidecar that refuses."""
-    from fastapi import HTTPException
+    """Drive POST /api/chat/{job}/init with a sidecar that refuses.
 
+    The start-time sentence used to be a ``422`` detail. Preparation is a
+    background task now, so the same bytes reach the user as one failed chat row —
+    the surface moved, the single owner of the sentence did not.
+    """
     from rootcoz import main
 
     client = refusing_sidecar(status_code, json_body=json_body, raw_text=raw_text)
     await install_start_rig(
         credential_source="server", client=client, job_id="refusal-job", admin=False
     )
-    with pytest.raises(HTTPException) as exc:
-        await main.init_chat(
-            "refusal-job",
-            _chat_init_request(),
-            ChatInitRequest(ai_provider="openai", ai_model="undeclared"),
-        )
-    return exc.value
+    response = await main.init_chat(
+        "refusal-job",
+        _chat_init_request(),
+        ChatInitRequest(ai_provider="openai", ai_model="undeclared"),
+    )
+    assert response["ready"] is False
+    entry = main._chat_prep_tasks.get("refusal-job:alice")
+    if entry is not None:
+        await asyncio.gather(entry.task, return_exceptions=True)
+    rows = [
+        m
+        for m in await storage.get_chat_messages("refusal-job", username="alice")
+        if m["status"] == "failed"
+    ]
+    assert len(rows) == 1, rows
+    return rows[0]["content"]
 
 
 @pytest.mark.asyncio
@@ -4821,10 +4832,9 @@ async def test_non_limit_4xx_gets_its_own_sentence(
         status_code=400,
         json_body={"error": literal},
     )
-    assert refusal.status_code == 422
-    assert refusal.detail == f"AI session refused: {literal}"
-    assert refusal.detail != f"AI session refused: {_LIMITS_LITERAL}"
-    assert "models.json" not in refusal.detail
+    assert refusal == f"AI session refused: {literal}"
+    assert refusal != f"AI session refused: {_LIMITS_LITERAL}"
+    assert "models.json" not in refusal
 
 
 @pytest.mark.asyncio
@@ -4872,8 +4882,7 @@ async def test_401_and_403_get_the_source_neutral_sentence(
     refusal = await _refused_init(
         install_start_rig, refusing_sidecar, status_code=status_code, raw_text=body
     )
-    assert refusal.status_code == 422
-    sentence = refusal.detail
+    sentence = refusal
     if expected == "generic":
         assert sentence == _generic_sentence(status_code)
     else:
@@ -4970,13 +4979,13 @@ def test_send_after_lost_session_names_the_fix(fixture_text):
 
 
 @pytest.mark.asyncio
-async def test_send_time_sentence_is_byte_equal_to_the_422_detail(
+async def test_send_time_sentence_is_byte_equal_to_the_refusal_message(
     install_start_rig, refusing_sidecar, test_client, temp_db_path
 ):
     """The same cause on all three surfaces carries the same bytes.
 
     (a) the assistant message content the send route persists, (b) the mapper's
-    returned string, and (c) the start-time ``422`` detail — one drive each,
+    returned string, and (c) the start-time failed row — one drive each,
     because ``init`` stores no message and ``chat_with_ai`` drops the result.
     """
     from rootcoz import ai_client
@@ -5009,7 +5018,7 @@ async def test_send_time_sentence_is_byte_equal_to_the_422_detail(
         status_code=400,
         json_body={"error": _LIMITS_LITERAL},
     )
-    assert refusal.detail == _LIMITS_SENTENCE
+    assert refusal == _LIMITS_SENTENCE
 
 
 def test_prompt_4xx_keeps_its_own_wording_and_stays_retryable():

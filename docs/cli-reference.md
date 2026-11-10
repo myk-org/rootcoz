@@ -211,11 +211,11 @@ Sparse field paths include `result.summary`, `result.failed_count`, `result.fail
 
 | Command | Flags | Purpose |
 | --- | --- | --- |
-| `rootcoz chat init JOB_ID` | `--provider`/`-p`, `--model`/`-m` (both required), `--server-credentials` | Start a job-scoped chat and clone its repos. |
-| `rootcoz chat send JOB_ID MESSAGE` | `--provider`/`-p`, `--model`/`-m`, `--server-credentials` | Send a message and wait up to about two minutes for the reply. |
+| `rootcoz chat init JOB_ID` | `--provider`/`-p`, `--model`/`-m` (both required), `--server-credentials` | Start a job-scoped chat and wait up to ten minutes for its workspace and session to be ready. |
+| `rootcoz chat send JOB_ID MESSAGE` | `--provider`/`-p`, `--model`/`-m`, `--server-credentials` | Send a message and wait up to ten minutes for the reply; a message sent while the workspace is being prepared answers `425` naming the phase. |
 | `rootcoz chat history JOB_ID` | `--limit`/`-l` (200) | Full transcript. |
 | `rootcoz chat abort JOB_ID` | — | Stop the message being processed. |
-| `rootcoz chat clear JOB_ID` | — | Delete job chat history. |
+| `rootcoz chat clear JOB_ID` | — | Delete job chat history; refused with `425` while the workspace is being prepared. |
 | `rootcoz chat close JOB_ID` | — | Signal you left the chat view. |
 | `rootcoz admin-chat init` | `--provider`/`-p`, `--model`/`-m` (both required), `--server-credentials` | Start a server-wide admin chat. |
 | `rootcoz admin-chat send MESSAGE` | `--provider`/`-p`, `--model`/`-m`, `--server-credentials` | Ask a cross-job question. |
