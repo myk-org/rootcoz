@@ -12892,6 +12892,8 @@ async def get_report_classification_overrides(
             tags=tags,
             exclude_tags=exclude_tags,
             review_status=review_status,
+            submitters=submitters,
+            analysis_state=analysis_state,
         )
 
     # Group by from->to
