@@ -24,7 +24,7 @@ from rootcoz.auth.api_key import ApiKeyStrategy
 from rootcoz.auth.base import AuthContext, AuthIdentity, matches_bootstrap_admin
 from rootcoz.auth.proxy import ProxyStrategy
 from rootcoz.auth.session import SessionStrategy
-from rootcoz.config import Settings, get_settings
+from rootcoz.config import Settings, clear_settings_cache, get_settings
 from tests.conftest import build_test_env, make_app_client
 
 #: The refusal body, spelled out on purpose: importing
@@ -64,9 +64,9 @@ def auth_settings(temp_db_path: Path) -> Iterator[Settings]:
     """Settings from the shared test baseline; the chain reads no DB here."""
     env = build_test_env(SECURE_COOKIES="false", DB_PATH=str(temp_db_path))
     with patch.dict(os.environ, env, clear=True):
-        get_settings.cache_clear()
+        clear_settings_cache()
         yield get_settings()
-    get_settings.cache_clear()
+    clear_settings_cache()
 
 
 def _register(client, username: str) -> str:

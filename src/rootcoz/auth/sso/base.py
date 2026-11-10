@@ -73,10 +73,51 @@ class SSOProvider(ABC):
     Class attributes:
         name: Machine name (``google``), used in URLs, identities and audit rows.
         display_name: Button label.
+        settings_fields: The Settings field names this provider reads, in
+            display order. Server Settings, the sensitive-value list and the
+            restart-required list are all derived from these — a provider that
+            declares them needs no edit in ``main.py``.
+        sensitive_settings: The subset of ``settings_fields`` that holds a
+            secret. Values are masked in the settings API and never returned.
+        restart_required_settings: The subset that needs a restart to take
+            effect. Every built-in provider is runtime-configurable, so this is
+            empty by default — but a future provider that binds a socket at
+            startup can say so without touching the settings metadata.
+        can_provision_user: Whether a login through this provider may create an
+            account. True for every interactive provider: the approval gate, not
+            the provider, decides when the account may act.
     """
 
     name: ClassVar[str] = ""
     display_name: ClassVar[str] = ""
+    settings_fields: ClassVar[tuple[str, ...]] = ()
+    sensitive_settings: ClassVar[tuple[str, ...]] = ()
+    restart_required_settings: ClassVar[tuple[str, ...]] = ()
+    can_provision_user: ClassVar[bool] = True
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        """Fill in ``settings_fields``/``sensitive_settings`` for a new provider.
+
+        A provider already names its Settings fields (``client_id_setting`` and
+        friends); deriving the declared lists here means Server Settings, the
+        sensitive-value list and the restart list are all computed from that one
+        description. A provider that wants to be explicit can still set them.
+        """
+        super().__init_subclass__(**kwargs)
+        if "settings_fields" not in cls.__dict__:
+            declared = tuple(
+                getattr(cls, attribute, "")
+                for attribute in (
+                    # The order the settings rows have always appeared in.
+                    "client_id_setting",
+                    "client_secret_setting",
+                    "issuer_setting",
+                )
+            )
+            cls.settings_fields = tuple(name for name in declared if name)
+        if "sensitive_settings" not in cls.__dict__:
+            secret = getattr(cls, "client_secret_setting", "")
+            cls.sensitive_settings = (secret,) if secret else ()
 
     @classmethod
     @abstractmethod

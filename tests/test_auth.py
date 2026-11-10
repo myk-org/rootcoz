@@ -1167,6 +1167,79 @@ class TestProxyHeaders:
                     yield c
             clear_settings_cache()
 
+    @pytest.fixture
+    def approval_client(self, _init_db, temp_db_path):
+        """A proxy deployment that requires approval (#197 Stage 5)."""
+        with patch.dict(
+            os.environ,
+            {
+                "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
+                "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+                "SECURE_COOKIES": "false",
+                "DB_PATH": str(temp_db_path),
+                "TRUST_PROXY_HEADERS": "true",
+                "REQUIRE_APPROVAL": "true",
+            },
+        ):
+            clear_settings_cache()
+            with patch.object(storage, "DB_PATH", temp_db_path):
+                from rootcoz.main import app
+
+                with TestClient(app) as c:
+                    yield c
+            clear_settings_cache()
+
+    def test_a_provisioned_proxy_account_is_pending_under_approval(
+        self, approval_client
+    ):
+        """The bypass the issue names: a proxy identity must still wait for approval."""
+        resp = approval_client.get(
+            "/api/auth/me", headers={"X-Forwarded-User": "sso-pending"}
+        )
+        assert resp.status_code == 403
+        assert self._user_row("sso-pending") == {
+            "status": "pending",
+            "role": "reviewer",
+            "created_via": "proxy",
+        }
+
+        async def details():
+            async with storage._connect_db() as db:
+                cursor = await db.execute(
+                    "SELECT details FROM audit_events"
+                    " WHERE action = 'auth.proxy_provisioned'"
+                )
+                return [row["details"] for row in await cursor.fetchall()]
+
+        assert json.loads(asyncio.run(details())[0])["status"] == "pending"
+
+    def test_parallel_first_requests_all_authenticate(self, proxy_client):
+        """A browser fires several requests at once on its first page load.
+
+        Only one of them wins the insert; the rest used to be refused with 401
+        because they read the race's ValueError as "this name cannot be used".
+        """
+        import concurrent.futures
+
+        def call(_: int) -> int:
+            return proxy_client.get(
+                "/api/auth/me", headers={"X-Forwarded-User": "race-user"}
+            ).status_code
+
+        with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
+            codes = list(pool.map(call, range(4)))
+
+        assert codes == [200, 200, 200, 200]
+
+        async def count():
+            async with storage._connect_db() as db:
+                cursor = await db.execute(
+                    "SELECT COUNT(*) AS n FROM users WHERE username = 'race-user'"
+                )
+                return (await cursor.fetchone())["n"]
+
+        assert asyncio.run(count()) == 1
+
     def test_header_ignored_when_disabled(self, client):
         """X-Forwarded-User is ignored when TRUST_PROXY_HEADERS is false (default)."""
         resp = client.get(
@@ -1220,6 +1293,188 @@ class TestProxyHeaders:
             cookies={"rootcoz_username": "cookie-user"},
         )
         assert resp.status_code == 401
+
+    @staticmethod
+    def _user_row(username: str) -> dict:
+        """Read the provisioning columns the lookup projection omits."""
+
+        async def fetch():
+            async with storage._connect_db() as db:
+                cursor = await db.execute(
+                    "SELECT status, role, created_via FROM users WHERE username = ?",
+                    (username,),
+                )
+                row = await cursor.fetchone()
+                return dict(row) if row else None
+
+        return asyncio.run(fetch())
+
+    def test_a_proxy_account_is_provisioned_on_first_request(self, proxy_client):
+        """The row records who the proxy vouched for; approval still gates access."""
+        resp = proxy_client.get(
+            "/api/auth/me", headers={"X-Forwarded-User": "sso-newcomer"}
+        )
+        assert resp.status_code == 200
+        # REQUIRE_APPROVAL is off in this fixture, so the account starts active.
+        assert self._user_row("sso-newcomer") == {
+            "status": "active",
+            "role": "reviewer",
+            "created_via": "proxy",
+        }
+
+    def test_a_provisioned_proxy_account_is_audited(self, proxy_client):
+        """One row per provisioning, naming the account and the status."""
+        proxy_client.get("/api/auth/me", headers={"X-Forwarded-User": "sso-audited"})
+
+        async def fetch():
+            async with storage._connect_db() as db:
+                cursor = await db.execute(
+                    "SELECT actor, details FROM audit_events"
+                    " WHERE action = 'auth.proxy_provisioned'"
+                )
+                return [tuple(row) for row in await cursor.fetchall()]
+
+        rows = asyncio.run(fetch())
+        assert rows and rows[0][0] == "sso-audited"
+        assert json.loads(rows[0][1]) == {
+            "status": "active",
+            "created_via": "proxy",
+            "role": "reviewer",
+        }
+
+    def test_a_refused_provisioning_is_audited(self, _init_db, temp_db_path):
+        """A name the deployment will not create stays visible in the trail."""
+        with patch.dict(
+            os.environ,
+            {
+                "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
+                "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+                "SECURE_COOKIES": "false",
+                "DB_PATH": str(temp_db_path),
+                "TRUST_PROXY_HEADERS": "true",
+                "REQUIRE_APPROVAL": "false",
+                "ALLOWED_USERS": "alice",
+            },
+        ):
+            clear_settings_cache()
+            with patch.object(storage, "DB_PATH", temp_db_path):
+                from rootcoz.main import app
+
+                with TestClient(app) as c:
+                    assert (
+                        c.get(
+                            "/api/auth/me", headers={"X-Forwarded-User": "mallory"}
+                        ).status_code
+                        == 401
+                    )
+
+                    async def rows():
+                        async with storage._connect_db() as db:
+                            cursor = await db.execute(
+                                "SELECT actor, outcome, details FROM audit_events"
+                                " WHERE action = 'auth.proxy_provision_refused'"
+                            )
+                            return [tuple(r) for r in await cursor.fetchall()]
+
+                    found = asyncio.run(rows())
+                    assert found and found[0][0] == "mallory"
+                    assert found[0][1] == "denied"
+                    assert json.loads(found[0][2])["reason"] == "not_allowed"
+            clear_settings_cache()
+
+    def test_an_existing_proxy_account_is_not_reprovisioned(self, proxy_client):
+        """A second request must not reset status, role or provenance."""
+        proxy_client.post(
+            "/api/admin/users/create",
+            json={"username": "sso-existing", "role": "operator"},
+            headers={"Authorization": "Bearer test-admin-key-16chars"},
+        )
+        resp = proxy_client.get(
+            "/api/auth/me", headers={"X-Forwarded-User": "sso-existing"}
+        )
+        assert resp.json()["role"] == "operator"
+        assert self._user_row("sso-existing")["created_via"] == "admin"
+
+    def test_the_provisioning_row_records_the_real_role(self, proxy_client):
+        """The row is written before request.state.role is set, so the role travels."""
+        proxy_client.get("/api/auth/me", headers={"X-Forwarded-User": "sso-roled"})
+
+        async def fetch():
+            async with storage._connect_db() as db:
+                cursor = await db.execute(
+                    "SELECT actor_role, details FROM audit_events"
+                    " WHERE action = 'auth.proxy_provisioned'"
+                )
+                return [tuple(row) for row in await cursor.fetchall()]
+
+        rows = asyncio.run(fetch())
+        assert rows and rows[0][0] == "reviewer"
+        assert json.loads(rows[0][1])["role"] == "reviewer"
+
+    def test_a_malformed_name_is_refused_not_authenticated(self, approval_client):
+        """A row-less identity would be past the approval gate this stage closes."""
+        # Too short for USERNAME_PATTERN, so storage refuses it and the request
+        # must be unauthenticated rather than granted a row-less identity.
+        resp = approval_client.get("/api/auth/me", headers={"X-Forwarded-User": "x"})
+        assert resp.status_code == 401
+
+        async def count():
+            async with storage._connect_db() as db:
+                cursor = await db.execute(
+                    "SELECT COUNT(*) AS n FROM users WHERE username = 'x'"
+                )
+                return (await cursor.fetchone())["n"]
+
+        assert asyncio.run(count()) == 0
+
+    def test_an_off_list_name_is_not_provisioned(self, _init_db, temp_db_path):
+        """The write allow-list bounds creation on every path, proxy included."""
+        with patch.dict(
+            os.environ,
+            {
+                "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
+                "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+                "SECURE_COOKIES": "false",
+                "DB_PATH": str(temp_db_path),
+                "TRUST_PROXY_HEADERS": "true",
+                "REQUIRE_APPROVAL": "false",
+                "ALLOWED_USERS": "alice,bob",
+            },
+        ):
+            clear_settings_cache()
+            with patch.object(storage, "DB_PATH", temp_db_path):
+                from rootcoz.main import app
+
+                with TestClient(app) as c:
+                    resp = c.get(
+                        "/api/auth/me", headers={"X-Forwarded-User": "mallory"}
+                    )
+                    assert resp.status_code == 401
+
+                    async def count():
+                        async with storage._connect_db() as db:
+                            cursor = await db.execute(
+                                "SELECT COUNT(*) AS n FROM users WHERE username = 'mallory'"
+                            )
+                            return (await cursor.fetchone())["n"]
+
+                    assert asyncio.run(count()) == 0
+            clear_settings_cache()
+
+    def test_a_reserved_name_is_never_provisioned(self, proxy_client):
+        """A proxy forwarding a system identity is not naming a person."""
+        for name in ("rootcoz-ai", "admin", "rootcoz-something"):
+            resp = proxy_client.get("/api/auth/me", headers={"X-Forwarded-User": name})
+            assert resp.status_code == 401, name
+
+        async def count():
+            async with storage._connect_db() as db:
+                cursor = await db.execute(
+                    "SELECT COUNT(*) AS n FROM users WHERE username LIKE 'rootcoz%'"
+                )
+                return (await cursor.fetchone())["n"]
+
+        assert asyncio.run(count()) == 0
 
     def test_header_admin_reserved(self, proxy_client):
         """X-Forwarded-User with 'admin' is rejected (reserved username) — gets 401."""
