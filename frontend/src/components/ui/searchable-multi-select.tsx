@@ -270,7 +270,7 @@ export function SearchableMultiSelect({
           aria-label={`${label} choices`}
           // The search field above it stays visible: the list only takes the
           // space left over, so the popover never has to be clipped.
-          className="max-h-[min(16rem,calc(var(--radix-popover-content-available-height)-3rem))] overflow-y-auto"
+          className="max-h-[min(16rem,calc(var(--radix-popover-content-available-height)-3rem))] overflow-y-auto overscroll-contain"
         >
           {loading && rows.length === 0 ? (
             <li className="px-3 py-2 text-xs italic text-text-tertiary">Loading choices…</li>

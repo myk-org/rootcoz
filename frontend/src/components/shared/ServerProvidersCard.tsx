@@ -517,7 +517,7 @@ function ProviderModels({ provider, models }: { provider: string; models: Server
               className="h-8 text-sm"
             />
           </div>
-          <div className="max-h-64 overflow-y-auto p-1">
+          <div className="max-h-64 overflow-y-auto overscroll-contain p-1">
             <label className="flex items-center gap-2 rounded px-2 py-1.5 text-xs font-medium text-text-primary hover:bg-surface-hover">
               <input
                 type="checkbox"
