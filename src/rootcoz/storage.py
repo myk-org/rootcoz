@@ -4981,10 +4981,12 @@ def _failed_test_name_predicate(
 ) -> tuple[str, list[str]]:
     """EXISTS clause selecting jobs with a **failing** test matching *text*.
 
-    ``status = 'failed'`` is a SQL constant, not a parameter, so the scope is by
-    construction and serves nothing but the partial index
-    ``idx_test_entries_failed_name``. *job_column* names the job id column of the
-    calling query (the reports aggregates do not all alias ``results`` as ``r``).
+    ``status = 'failed'`` is a SQL constant, not a parameter, so the scan scope
+    is by construction and never drifts with caller input; the typeahead
+    aggregate over the same scope is served by the partial index
+    ``idx_test_entries_failed_name`` (#546: 15,566 of 1,329,209 entries failed).
+    *job_column* names the job id column of the calling query (the reports
+    aggregates do not all alias ``results`` as ``r``).
     """
     if not text:
         return "", []

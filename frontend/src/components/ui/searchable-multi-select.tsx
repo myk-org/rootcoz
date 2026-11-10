@@ -32,6 +32,11 @@ interface SearchableMultiSelectProps {
    * instead of holding a list it cannot enumerate.
    */
   onQueryChange?: (query: string) => void
+  /**
+   * Free entry sorts before the ranked options, so Enter commits the typed
+   * text instead of the top suggestion: the literal filter wants the fragment.
+   */
+  customFirst?: boolean
   disabled?: boolean
   placeholder?: string
   /** Trigger width override (long labels); the default fits a short value. */
@@ -94,6 +99,7 @@ export function SearchableMultiSelect({
   loading = false,
   allowCustom = false,
   onQueryChange,
+  customFirst = false,
   disabled = false,
   placeholder,
   className,
@@ -117,7 +123,11 @@ export function SearchableMultiSelect({
 
   const exact = options.some(option => option.value.toLowerCase() === trimmed.toLowerCase())
   const rows: Row[] = ranked
-  if (allowCustom && trimmed && !exact) rows.push({ value: trimmed, custom: true })
+  if (allowCustom && trimmed && !exact) {
+    const custom: Row = { value: trimmed, custom: true }
+    if (customFirst) rows.unshift(custom)
+    else rows.push(custom)
+  }
 
   // The highlight is a plain index into the current rows; a shorter list (the
   // admin kept typing) clamps it instead of pointing at nothing, and a disabled
@@ -130,6 +140,9 @@ export function SearchableMultiSelect({
     setOpen(next)
     setHighlight(0)
     if (!next) {
+      // Clearing the query is a query change: without this the caller keeps the
+      // suggestions it loaded for the fragment the user has just closed.
+      if (query) onQueryChange?.("")
       setQuery("")
       // Escape/outside click drops focus with the menu: hand it back.
       triggerRef.current?.focus()
@@ -148,6 +161,7 @@ export function SearchableMultiSelect({
       values.includes(row.value) ? values.filter(value => value !== row.value) : [...values, row.value],
     )
     // The menu stays open for the next pick, starting from a clean query.
+    if (query) onQueryChange?.("")
     setQuery("")
     setHighlight(0)
     inputRef.current?.focus()

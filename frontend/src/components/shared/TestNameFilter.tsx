@@ -41,6 +41,17 @@ export function TestNameFilter({ name, mode, onChange }: TestNameFilterProps) {
   // A mode picked before there is a name to carry: a mode alone is not a filter,
   // so the URL drops it and the pick waits here for the next name.
   const [pendingMode, setPendingMode] = useState<TestNameMode | null>(null)
+  // The pick belongs to the filter state it was made under: a preset, navigation
+  // or Clear all changes the props, and the waiting mode goes with them instead
+  // of resurfacing on the next name. Adjusting during render is how React
+  // resets state on a prop change — an effect here would also trip
+  // react-hooks/set-state-in-effect.
+  const filterState = `${name}\u0000${mode}`
+  const [seenState, setSeenState] = useState(filterState)
+  if (seenState !== filterState) {
+    setSeenState(filterState)
+    if (pendingMode) setPendingMode(null)
+  }
   const shownMode = name ? mode : pendingMode ?? mode
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const lookup = useRef(0)
@@ -98,6 +109,9 @@ export function TestNameFilter({ name, mode, onChange }: TestNameFilterProps) {
         options={options}
         loading={loading}
         allowCustom
+        // The other modes want the fragment the user typed, not the full name
+        // that happens to rank first: free entry leads the list.
+        customFirst
         onQueryChange={load}
         onChange={(values) => commit(values[0] ?? '')}
         placeholder="Filter by failing test name"
@@ -136,6 +150,13 @@ export function TestNameFilter({ name, mode, onChange }: TestNameFilterProps) {
           ))}
         </SelectContent>
       </Select>
+      {name.includes('*') && (
+        // Literal text (#546 B.2): a `*` is a character, the mode is how a
+        // pattern is expressed. Say so rather than guess at a wildcard.
+        <span data-testid="test-name-literal-hint" className="text-xs text-text-tertiary">
+          {'“*” is a literal character — pick a match mode instead'}
+        </span>
+      )}
     </div>
   )
 }

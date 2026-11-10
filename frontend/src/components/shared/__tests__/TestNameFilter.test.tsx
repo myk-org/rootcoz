@@ -106,6 +106,65 @@ describe('TestNameFilter', () => {
     expect(props.onChange).toHaveBeenCalledWith('checkout', 'contains')
   })
 
+  it('commits the typed fragment on Enter, not the top suggestion', async () => {
+    // `network` in contains mode means "any failing test with that substring";
+    // Enter must not silently narrow the page to the first ranked full name.
+    apiGet.mockResolvedValue({
+      test_names: [{ test_name: 'test_network_setup', failure_count: 9 }],
+    })
+    const { props } = renderFilter()
+
+    await typeQuery('network')
+    await screen.findByRole('listbox')
+    await userEvent.keyboard('{Enter}')
+
+    expect(props.onChange).toHaveBeenCalledWith('network', 'contains')
+  })
+
+  it('refreshes the top names when the menu reopens after a search', async () => {
+    renderFilter()
+    // The mount lookup is the unfiltered "top failing names" listing.
+    await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(1))
+
+    await typeQuery('checkout')
+    await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(2))
+
+    // Closing clears the query, and the caller hears it: reopening shows the
+    // top names again instead of the fragment's capped results.
+    await userEvent.keyboard('{Escape}')
+    await waitFor(() => expect(apiGet).toHaveBeenCalledTimes(3))
+    expect(apiGet.mock.calls[2][0]).toBe('/api/dashboard/test-names?q=&limit=20')
+  })
+
+  it('says a wildcard character is literal instead of guessing at a pattern', () => {
+    const { unmount } = render(
+      <TestNameFilter name="test_*_fail" mode="contains" onChange={vi.fn()} />,
+    )
+    expect(screen.getByTestId('test-name-literal-hint')).toHaveTextContent('literal character')
+    unmount()
+
+    render(<TestNameFilter name="test_checkout" mode="contains" onChange={vi.fn()} />)
+    expect(screen.queryByTestId('test-name-literal-hint')).toBeNull()
+  })
+
+  it('drops a mode picked before a name when the filter changes from outside', async () => {
+    const onChange = vi.fn()
+    const { rerender } = render(<TestNameFilter name="" mode="contains" onChange={onChange} />)
+    const modeBox = () => screen.getByRole('combobox', { name: 'Test name match mode' })
+
+    await userEvent.click(modeBox())
+    await userEvent.click(await screen.findByRole('option', { name: 'exact' }))
+    expect(modeBox()).toHaveTextContent('exact')
+
+    // A preset fills the name with its own mode, then Clear all empties it: the
+    // waiting pick belongs to the state it was made under, and is gone.
+    rerender(<TestNameFilter name="test_payment" mode="contains" onChange={onChange} />)
+    rerender(<TestNameFilter name="" mode="contains" onChange={onChange} />)
+
+    expect(modeBox()).toHaveTextContent('contains')
+    expect(onChange).not.toHaveBeenCalled()
+  })
+
   it('shows the name a link carried, and clears it on demand', async () => {
     const props = { name: 'test_checkout', mode: 'contains' as const, onChange: vi.fn() }
     render(<TestNameFilter {...props} />)

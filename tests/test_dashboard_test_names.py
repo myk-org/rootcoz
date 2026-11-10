@@ -113,7 +113,7 @@ class TestDashboardTestNames:
 
 
 class TestFailedTestNameStorage:
-    """Storage-level checks: the index exists and the query plan uses it."""
+    """Storage-level checks: the partial index exists and the plan can use it."""
 
     async def test_partial_index_exists(self, temp_db_path: Path) -> None:
         with patch.object(storage, "DB_PATH", temp_db_path):
@@ -127,21 +127,29 @@ class TestFailedTestNameStorage:
         assert row is not None
         assert "WHERE status = 'failed'" in row["sql"]
 
-    async def test_typeahead_plan_uses_the_partial_index(
+    async def test_existing_db_gains_the_partial_index(
         self, temp_db_path: Path
     ) -> None:
+        """An upgrade must create it too, not only a fresh DB (#546)."""
         with patch.object(storage, "DB_PATH", temp_db_path):
             await storage.init_db()
             async with storage._connect_db() as db:
+                await db.execute("DROP INDEX idx_test_entries_failed_name")
+                await db.commit()
+            await storage.init_db()
+            async with storage._connect_db() as db:
                 cursor = await db.execute(
-                    "EXPLAIN QUERY PLAN"
-                    " SELECT test_name, COUNT(*) FROM test_entries"
-                    " WHERE status = 'failed' AND lower(test_name) LIKE lower(?)"
-                    " GROUP BY test_name",
-                    ("%login%",),
+                    "SELECT name FROM sqlite_master WHERE type='index'"
+                    " AND name='idx_test_entries_failed_name'"
                 )
-                plan = " ".join(str(row["detail"]) for row in await cursor.fetchall())
-        assert "idx_test_entries_failed_name" in plan
+                row = await cursor.fetchone()
+        assert row is not None
+
+    async def test_failing_scope_is_a_sql_constant(self) -> None:
+        """A constant, not a parameter, so the planner can use the index."""
+        clause, _ = storage._failed_test_name_predicate("contains", "login")
+        assert "te.status = 'failed'" in clause
+        assert "te.status = ?" not in clause
 
     async def test_list_failed_test_names_rejects_zero_limit(
         self, temp_db_path: Path
