@@ -700,8 +700,8 @@ def install_start_rig(monkeypatch, tmp_path):
     from rootcoz import ai_client, main, storage
     from rootcoz.config import Settings
 
-    async def _install(*, credential_source, client, job_id, admin):
-        from rootcoz.engine import chat
+    async def _install(*, credential_source, client, job_id, admin, header=None):
+        from rootcoz.engine import chat, graft_http
         from rootcoz.sources import chat_workspace
 
         monkeypatch.setattr(storage, "DB_PATH", tmp_path / f"{job_id}-refusal.db")
@@ -714,15 +714,19 @@ def install_start_rig(monkeypatch, tmp_path):
         monkeypatch.setattr(main, "get_settings", lambda: Settings(ai_call_timeout=30))
         monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *a, **k: tmp_path)
         monkeypatch.setattr(chat, "clone_chat_repos", AsyncMock(return_value=False))
+        monkeypatch.setattr(graft_http, "cloned_graph_roots", lambda workspace: {})
         monkeypatch.setattr(
             chat_workspace, "setup_ci_build_workspace", AsyncMock(return_value=False)
+        )
+        monkeypatch.setattr(
+            chat, "install_http_tools_mcp_best_effort_async", AsyncMock()
         )
         monkeypatch.setattr(
             main,
             "_resolve_chat_credentials",
             AsyncMock(return_value=("", "", None, "", "")),
         )
-        monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
+        _install_header(monkeypatch, header)
         monkeypatch.setattr(chat, "get_sidecar_client", lambda: client)
         monkeypatch.setattr(
             chat,
@@ -754,5 +758,97 @@ def install_start_rig(monkeypatch, tmp_path):
                 "server_provider_key",
                 AsyncMock(return_value=REFUSAL_SECRET_KEY),
             )
+
+    return _install
+
+
+def _install_header(monkeypatch, header) -> None:
+    """Choose what the internal-tools mint does inside a chat rig.
+
+    ``None`` is today's stub — the mint answers ``""`` so a test about something
+    else never reaches storage. ``"real"`` leaves the real helper in place, and a
+    callable replaces it (a recording wrapper around the real helper, for a test
+    that asserts what the mint returned).
+    """
+    from rootcoz import main
+
+    if header is None:
+        monkeypatch.setattr(main, "_create_ai_auth_header", AsyncMock(return_value=""))
+    elif header == "real":
+        return
+    else:
+        monkeypatch.setattr(main, "_create_ai_auth_header", header)
+
+
+@contextmanager
+def record_chat_pushes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> Generator[list[tuple[bool, None]]]:
+    """Record, per ``notify_chat_changed`` call, whether the phase key was gone.
+
+    ``set_chat_prep_phase`` notifies on every update, so "the listener fired" is
+    true before the preparation does anything; the ending's push is the one that
+    arrives with the phase already cleared. ``True`` marks that push.
+    """
+    from rootcoz import main
+
+    seen: list[tuple[bool, None]] = []
+    original = main.notify_chat_changed
+
+    def record(job_id: str, username: str = "") -> None:
+        seen.append((main._chat_prep_phases.get(f"{job_id}:{username}") is None, None))
+        original(job_id, username=username)
+
+    monkeypatch.setattr(main, "notify_chat_changed", record)
+    try:
+        yield seen
+    finally:
+        monkeypatch.setattr(main, "notify_chat_changed", original)
+
+
+@pytest.fixture
+def install_turn_rig(monkeypatch, tmp_path):
+    """Wire one chat turn down to fakes, job chat or admin chat.
+
+    ``header`` is the same knob ``install_start_rig`` takes (``None`` = the mint
+    answers ``""``, ``"real"`` = the real helper, a callable = replace it), so a
+    test can install the real mint and inject a storage fault behind it.
+    """
+
+    async def _install(
+        *, admin: bool = False, header=None, workspace=None, credential_source="user"
+    ):
+        from rootcoz import ai_client, main
+        from rootcoz.engine import chat, session_tools
+        from rootcoz.sources import chat_workspace
+
+        root = workspace
+        if root is None:
+            root = tmp_path / "workspace"
+            root.mkdir(exist_ok=True)
+        monkeypatch.setattr(chat, "ensure_chat_workspace", lambda *a, **k: root)
+        monkeypatch.setattr(chat, "clone_chat_repos", AsyncMock(return_value=False))
+        monkeypatch.setattr(
+            chat_workspace, "setup_ci_build_workspace", AsyncMock(return_value=False)
+        )
+        monkeypatch.setattr(
+            main,
+            "_resolve_chat_credentials",
+            AsyncMock(return_value=("", "", None, "", "")),
+        )
+        _install_header(monkeypatch, header)
+        monkeypatch.setattr(
+            session_tools,
+            "build_session_tools",
+            AsyncMock(return_value=SimpleNamespace(custom=[])),
+        )
+        monkeypatch.setattr(main, "_schedule_chat_index", lambda *a, **k: None)
+
+        async def validate(provider, model):
+            ai_client._selected_credential_source.set(credential_source)
+            return provider, model
+
+        monkeypatch.setattr(main, "_validate_catalog_pair", validate)
+        return root
 
     return _install
