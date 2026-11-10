@@ -6,12 +6,12 @@ import { cn } from '@/lib/utils'
 import { useAuth } from '@/lib/auth'
 import {
   fetchFilterPresets,
-  filtersToQueryString,
   notifyPresetApplied,
   PRESETS_CHANGED_EVENT,
   type FilterPreset,
   type FilterPresetPage,
 } from '@/lib/filterPresets'
+import { filtersToQueryString } from '@/lib/jobFilters'
 
 // ─── Sidebar "Saved filters" section (#179) ─────────────────────────
 

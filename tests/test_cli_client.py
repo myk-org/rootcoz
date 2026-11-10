@@ -379,6 +379,27 @@ class TestRootCozClientDashboard:
         client = _make_client(handler)
         assert client.dashboard_submitters() == ["Yuli", "myakove"]
 
+    def test_failed_test_names(self):
+        """GET /api/dashboard/test-names returns the counted rows."""
+
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/dashboard/test-names"
+            assert request.url.params["q"] == "login"
+            assert request.url.params["limit"] == "5"
+            return httpx.Response(
+                200,
+                json={
+                    "test_names": [
+                        {"test_name": "tests.login.test_one", "failure_count": 3}
+                    ]
+                },
+            )
+
+        client = _make_client(handler)
+        rows = client.failed_test_names(q="login", limit=5)
+        assert rows == [{"test_name": "tests.login.test_one", "failure_count": 3}]
+
     def test_dashboard_filtered_submitted_by_repeatable(self):
         """Each submitted_by value is sent as its own query param."""
 
@@ -3273,8 +3294,8 @@ class TestReports:
             "team": "a",
             "tier": "1",
             "version": "v1",
-            "from": "2025-01-01",
-            "to": "2025-12-31",
+            "date_from": "2025-01-01",
+            "date_to": "2025-12-31",
         }
 
     def test_build_report_params_with_status_and_tags(self):

@@ -33,7 +33,7 @@ from rootcoz.config import (
     parse_additional_repos,
     parse_peer_configs,
 )
-from rootcoz.storage import MAX_INCOMPLETE_LIST_LIMIT, VALID_ROLES
+from rootcoz.storage import MAX_INCOMPLETE_LIST_LIMIT, TEST_NAME_MODES, VALID_ROLES
 
 # -- App and sub-command groups -----------------------------------------------
 
@@ -905,6 +905,16 @@ def dashboard(
         "--analysis-state",
         help="Filter: submitted, analyzed.",
     ),
+    test_name: str = typer.Option(
+        "",
+        "--test-name",
+        help="Only jobs with a failing test whose name matches this text.",
+    ),
+    test_name_mode: str = typer.Option(
+        "contains",
+        "--test-name-mode",
+        help="Match mode: " + ", ".join(TEST_NAME_MODES) + ".",
+    ),
     limit: int = typer.Option(500, "--limit", help="Max results (0 = no limit)."),
     json_output: bool = _JSON_OPTION,
 ) -> None:
@@ -916,6 +926,7 @@ def dashboard(
         or search
         or review_status != "all"
         or analysis_state
+        or test_name
         or limit != 500
     )
 
@@ -928,6 +939,8 @@ def dashboard(
                 review_status=review_status,
                 analysis_state=analysis_state,
                 submitted_by=submitted_by or None,
+                test_name=test_name,
+                test_name_mode=test_name_mode,
                 limit=limit,
             )
             # dashboard_filtered returns {jobs, total}
@@ -1095,6 +1108,25 @@ def results_submitters(
     if not _state.get("json", False):
         for name in data:
             typer.echo(name)
+
+
+@results_app.command("test-names")
+def results_test_names(
+    query: str = typer.Option(
+        "", "--query", "-q", help="Filter by name fragment (literal, case-insensitive)."
+    ),
+    limit: int = typer.Option(20, "--limit", help="Max names to return (1-100)."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """List the most frequent failing test names matching a query."""
+    data = _run_client_command(
+        json_output,
+        lambda c: c.failed_test_names(q=query, limit=limit),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        for row in data:
+            typer.echo(f"{row['failure_count']}\t{row['test_name']}")
 
 
 @results_app.command("delete")
@@ -5786,8 +5818,10 @@ def admin_chat_download_artifact(
 _REPORT_TEAM_OPTION = typer.Option("", "--team", help="Filter by team.")
 _REPORT_TIER_OPTION = typer.Option("", "--tier", help="Filter by tier.")
 _REPORT_VERSION_OPTION = typer.Option("", "--version", help="Filter by version.")
-_REPORT_FROM_OPTION = typer.Option("", "--from", help="From date (YYYY-MM-DD).")
-_REPORT_TO_OPTION = typer.Option("", "--to", help="To date (YYYY-MM-DD).")
+_REPORT_FROM_OPTION = typer.Option(
+    "", "--from", "--date-from", help="From date (YYYY-MM-DD)."
+)
+_REPORT_TO_OPTION = typer.Option("", "--to", "--date-to", help="To date (YYYY-MM-DD).")
 _REPORT_STATUS_OPTION = typer.Option("", "--status", help="Filter by job status.")
 _REPORT_TAGS_OPTION = typer.Option("", "--tags", help="Comma-separated tags filter.")
 _REPORT_EXCLUDE_TAGS_OPTION = typer.Option(
@@ -5797,6 +5831,12 @@ _REPORT_REVIEW_STATUS_OPTION = typer.Option(
     "",
     "--review-status",
     help="Filter by review status: 'reviewed' or 'not_reviewed'.",
+)
+_REPORT_SUBMITTED_BY_OPTION = typer.Option(
+    [], "--submitted-by", help="Filter by submitter (can repeat, substring match)."
+)
+_REPORT_ANALYSIS_STATE_OPTION = typer.Option(
+    "", "--analysis-state", help="Filter: submitted, analyzed."
 )
 
 
@@ -5811,6 +5851,8 @@ def reports_totals(
     tags: str = _REPORT_TAGS_OPTION,
     exclude_tags: str = _REPORT_EXCLUDE_TAGS_OPTION,
     review_status: str = _REPORT_REVIEW_STATUS_OPTION,
+    submitted_by: list[str] = _REPORT_SUBMITTED_BY_OPTION,
+    analysis_state: str = _REPORT_ANALYSIS_STATE_OPTION,
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Show aggregate totals: jobs, failures, reviewed."""
@@ -5829,6 +5871,8 @@ def reports_totals(
             tags=tag_list,
             exclude_tags=exclude_tag_list,
             review_status=review_status,
+            submitted_by=submitted_by or None,
+            analysis_state=analysis_state,
         )
     except RootCozError as err:
         _handle_error(err)
@@ -5872,6 +5916,8 @@ def reports_overrides(
     tags: str = _REPORT_TAGS_OPTION,
     exclude_tags: str = _REPORT_EXCLUDE_TAGS_OPTION,
     review_status: str = _REPORT_REVIEW_STATUS_OPTION,
+    submitted_by: list[str] = _REPORT_SUBMITTED_BY_OPTION,
+    analysis_state: str = _REPORT_ANALYSIS_STATE_OPTION,
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Show classification overrides grouped by from->to."""
@@ -5890,6 +5936,8 @@ def reports_overrides(
             tags=tag_list,
             exclude_tags=exclude_tag_list,
             review_status=review_status,
+            submitted_by=submitted_by or None,
+            analysis_state=analysis_state,
         )
     except RootCozError as err:
         _handle_error(err)
@@ -5933,6 +5981,8 @@ def reports_issues(
     tags: str = _REPORT_TAGS_OPTION,
     exclude_tags: str = _REPORT_EXCLUDE_TAGS_OPTION,
     review_status: str = _REPORT_REVIEW_STATUS_OPTION,
+    submitted_by: list[str] = _REPORT_SUBMITTED_BY_OPTION,
+    analysis_state: str = _REPORT_ANALYSIS_STATE_OPTION,
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Show GitHub/Jira issues created from analyses."""
@@ -5951,6 +6001,8 @@ def reports_issues(
             tags=tag_list,
             exclude_tags=exclude_tag_list,
             review_status=review_status,
+            submitted_by=submitted_by or None,
+            analysis_state=analysis_state,
         )
     except RootCozError as err:
         _handle_error(err)

@@ -1166,6 +1166,8 @@ class TestDashboardSubmittersCommand:
             review_status="all",
             analysis_state="",
             submitted_by=["Yuli"],
+            test_name="",
+            test_name_mode="contains",
             limit=500,
         )
 
@@ -1201,6 +1203,46 @@ class TestDashboardCommand:
         assert result.exit_code == 0
         mock_client.dashboard.assert_called_once_with(limit=500)
 
+    def test_dashboard_test_name_uses_filtered(self, mock_client):
+        """--test-name flips the filtered endpoint and reaches it (#546)."""
+        mock_client.dashboard_filtered.return_value = {"jobs": [], "total": 0}
+        result = runner.invoke(
+            app,
+            [
+                "results",
+                "dashboard",
+                "--test-name",
+                "login",
+                "--test-name-mode",
+                "exact",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        kwargs = mock_client.dashboard_filtered.call_args.kwargs
+        assert kwargs["test_name"] == "login"
+        assert kwargs["test_name_mode"] == "exact"
+
+    def test_dashboard_test_name_mode_alone_keeps_unfiltered(self, mock_client):
+        """A mode with no name is not a filter and must not flip the gate."""
+        mock_client.dashboard.return_value = {"jobs": [], "total": 0}
+        result = runner.invoke(
+            app, ["results", "dashboard", "--test-name-mode", "exact"]
+        )
+        assert result.exit_code == 0, result.output
+        mock_client.dashboard_filtered.assert_not_called()
+        mock_client.dashboard.assert_called_once()
+
+    def test_results_test_names(self, mock_client):
+        """results test-names prints name + count rows."""
+        mock_client.failed_test_names.return_value = [
+            {"test_name": "tests.login.test_one", "failure_count": 3}
+        ]
+        result = runner.invoke(app, ["results", "test-names", "--query", "login"])
+        assert result.exit_code == 0, result.output
+        assert "tests.login.test_one" in result.output
+        assert "3" in result.output
+        mock_client.failed_test_names.assert_called_once_with(q="login", limit=20)
+
     def test_dashboard_exclude_tag(self, mock_client):
         mock_client.dashboard_filtered.return_value = {
             "jobs": [
@@ -1227,6 +1269,8 @@ class TestDashboardCommand:
             review_status="all",
             analysis_state="",
             submitted_by=None,
+            test_name="",
+            test_name_mode="contains",
             limit=500,
         )
         assert "pr-check-job" in result.output
@@ -1265,6 +1309,8 @@ class TestDashboardCommand:
             review_status="all",
             analysis_state="",
             submitted_by=None,
+            test_name="",
+            test_name_mode="contains",
             limit=500,
         )
         assert "unit-test-job" in result.output
@@ -8006,6 +8052,8 @@ class TestReportsCommands:
             tags=None,
             exclude_tags=None,
             review_status="",
+            submitted_by=None,
+            analysis_state="",
         )
 
     def test_reports_totals_with_status_and_tags(self, mock_client):
@@ -8031,6 +8079,8 @@ class TestReportsCommands:
             tags=["nightly", "smoke"],
             exclude_tags=None,
             review_status="",
+            submitted_by=None,
+            analysis_state="",
         )
 
     def test_reports_totals_with_exclude_tags(self, mock_client):
@@ -8056,6 +8106,8 @@ class TestReportsCommands:
             tags=["nightly"],
             exclude_tags=["flaky", "wip"],
             review_status="",
+            submitted_by=None,
+            analysis_state="",
         )
 
     def test_reports_totals_with_review_status(self, mock_client):
@@ -8081,6 +8133,8 @@ class TestReportsCommands:
             tags=None,
             exclude_tags=None,
             review_status="reviewed",
+            submitted_by=None,
+            analysis_state="",
         )
 
     def test_reports_overrides(self, mock_client):
