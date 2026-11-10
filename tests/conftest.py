@@ -193,6 +193,9 @@ def capture_main_logs(
     finally:
         logger.removeHandler(caplog.handler)
         logger.propagate = original_propagate
+        # Entry alone is half the job: a line left remembered here would be
+        # dropped for the next test on this worker, the same #522 symptom.
+        forget_duplicate_history(logger)
 
 
 def make_test_client(

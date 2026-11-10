@@ -301,6 +301,33 @@ def test_a_capture_is_counted_once_despite_a_leaked_handler(
         main_logger.removeHandler(caplog.handler)  # never leak into the next test
 
 
+def test_a_capture_does_not_leave_its_line_remembered(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Clearing on entry is half the job; the exit must not leave a line either.
+
+    A later test on the same worker logs the same line straight on
+    ``rootcoz.main``, without this helper, so nothing clears the filter for it —
+    the line is dropped before any handler sees it, which is the #522 symptom
+    moved one test later.
+    """
+    main_logger = logging.getLogger("rootcoz.main")
+    line = "a line a capture already emitted"
+    with capture_main_logs(caplog, level=logging.WARNING):
+        main_logger.warning(line)
+    assert caplog.messages == [line], "the capture never remembered the line"
+    caplog.clear()
+
+    sink = _RecordingHandler()
+    main_logger.addHandler(sink)
+    try:
+        main_logger.warning(line)
+    finally:
+        main_logger.removeHandler(sink)
+
+    assert sink.messages == [line], "the capture left its line remembered"
+
+
 class TestDuplicateFilterExemption:
     """An audit record is never deduped; an ordinary repeat still is."""
 
