@@ -991,6 +991,17 @@ def test_chat_clone_depth_is_a_server_setting(client, monkeypatch):
     )
     assert rejected.status_code == 400
 
+    # A JSON boolean is not a depth: int(True) passes the bound, and "True"
+    # persisted would fail the merged-settings build and drop every DB override.
+    boolean = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"chat_clone_depth": True}},
+    )
+    assert boolean.status_code == 400
+    clear_settings_cache()
+    assert get_settings().chat_clone_depth == 1
+
     monkeypatch.setenv("CHAT_CLONE_DEPTH", "4")
     clear_settings_cache()
     assert get_settings().chat_clone_depth == 4
