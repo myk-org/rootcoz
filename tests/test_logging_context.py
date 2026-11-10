@@ -90,9 +90,9 @@ def _from_logger_name(line: str) -> str:
 def file_logging(tmp_path: Path, monkeypatch) -> Path:
     """Clear the wiring before and after, with DB_PATH pointed at tmp_path.
 
-    The settings cache is cleared too: ``get_settings()`` is ``@lru_cache``d, so
-    a test that changes an env var would otherwise read (and leak) a stale
-    snapshot of the log-file settings.
+    The settings cache is cleared too: ``get_settings()`` memoises, so a test
+    that changes an env var would otherwise read (and leak) a stale snapshot
+    of the log-file settings.
     """
     _clear_file_logging_state()
     monkeypatch.setenv("DB_PATH", str(tmp_path / "results.db"))

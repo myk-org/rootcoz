@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from rootcoz import storage
-from rootcoz.config import get_settings
+from rootcoz.config import clear_settings_cache
 from rootcoz.vapid import _generate_vapid_keys
 
 
@@ -46,7 +46,7 @@ def _make_client(
     if vapid_env:
         env.update(vapid_env)
     with patch.dict(os.environ, env, clear=True):
-        get_settings.cache_clear()
+        clear_settings_cache()
         with patch.object(storage, "DB_PATH", temp_db_path):
             ctx = (
                 patch("rootcoz.config.get_vapid_config", return_value={})
@@ -60,7 +60,7 @@ def _make_client(
                     try:
                         yield c
                     finally:
-                        get_settings.cache_clear()
+                        clear_settings_cache()
 
 
 # A real P-256 pair: rootcoz always serves the public key derived from the
@@ -332,7 +332,7 @@ class TestCommentMentionNotification:
             patch.dict(os.environ, _comment_env, clear=True),
             patch.object(storage, "DB_PATH", temp_db_path),
         ):
-            get_settings.cache_clear()
+            clear_settings_cache()
             with (
                 patch(
                     "rootcoz.main.send_mention_notifications",
@@ -373,7 +373,7 @@ class TestCommentMentionNotification:
                 assert call_kwargs["comment_author"] == "alice"
                 assert call_kwargs["job_id"] == "job-mention"
                 assert call_kwargs["test_name"] == "test_foo"
-            get_settings.cache_clear()
+            clear_settings_cache()
 
     def test_comment_without_mention_no_notification(self, _seed_result, temp_db_path):
         """A comment without @mentions does not trigger notifications."""
@@ -392,7 +392,7 @@ class TestCommentMentionNotification:
             patch.dict(os.environ, _comment_env, clear=True),
             patch.object(storage, "DB_PATH", temp_db_path),
         ):
-            get_settings.cache_clear()
+            clear_settings_cache()
             with (
                 patch(
                     "rootcoz.main.send_mention_notifications",
@@ -424,4 +424,4 @@ class TestCommentMentionNotification:
                     time.sleep(0.3)  # Brief wait — then assert not called
 
                 mock_send.assert_not_called()
-            get_settings.cache_clear()
+            clear_settings_cache()

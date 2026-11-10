@@ -7,7 +7,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from rootcoz import storage
-from rootcoz.config import get_settings
+from rootcoz.config import clear_settings_cache
 from rootcoz.main import app
 
 
@@ -17,10 +17,10 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("ADMIN_KEY", "grant-bootstrap-key")
     monkeypatch.setenv("SECURE_COOKIES", "false")
     monkeypatch.setenv("DB_PATH", str(tmp_path / "server-grant.db"))
-    get_settings.cache_clear()
+    clear_settings_cache()
     with TestClient(app) as client:
         yield client
-    get_settings.cache_clear()
+    clear_settings_cache()
 
 
 def test_admin_grant_revoke_and_strict_payload(client):

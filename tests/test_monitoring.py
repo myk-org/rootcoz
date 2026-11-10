@@ -235,29 +235,29 @@ class TestHealthChecks:
         assert result["provider"] == "claude"
 
     async def test_check_ai_provider_missing(self):
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache
 
         with self._env_without_ai():
-            get_settings.cache_clear()
+            clear_settings_cache()
             try:
                 with self._mock_sidecar():
                     result = await check_ai_provider()
             finally:
-                get_settings.cache_clear()
+                clear_settings_cache()
         assert result["status"] == "not_configured"
         assert "AI_PROVIDER" in result["detail"]
         assert "AI_MODEL" in result["detail"]
 
     async def test_check_ai_provider_sidecar_unreachable_and_env_missing(self):
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache
 
         with self._env_without_ai():
-            get_settings.cache_clear()
+            clear_settings_cache()
             try:
                 with self._mock_sidecar(side_effect=OSError("Connection refused")):
                     result = await check_ai_provider()
             finally:
-                get_settings.cache_clear()
+                clear_settings_cache()
         assert result["status"] == "error"
         assert "AI_PROVIDER" in result["detail"]
         assert "AI_MODEL" in result["detail"]
@@ -489,14 +489,14 @@ class TestStartupConfigValidation:
         assert len(result.errors) == 0
 
     def test_missing_ai_provider(self):
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache
 
         with patch.dict(os.environ, {}, clear=True):
-            get_settings.cache_clear()
+            clear_settings_cache()
             try:
                 result = validate_startup_config()
             finally:
-                get_settings.cache_clear()
+                clear_settings_cache()
         assert any("AI_PROVIDER" in w for w in result.warnings)
 
     def test_missing_encryption_key(self):
@@ -868,9 +868,9 @@ class TestHealthEndpointIntegration:
             "DB_PATH": str(temp_db_path),
         }
         with mock_patch.dict(os.environ, env, clear=True):
-            from rootcoz.config import get_settings
+            from rootcoz.config import clear_settings_cache
 
-            get_settings.cache_clear()
+            clear_settings_cache()
             try:
                 with (
                     mock_patch.object(storage, "DB_PATH", temp_db_path),
@@ -896,7 +896,7 @@ class TestHealthEndpointIntegration:
                     with TestClient(app) as client:
                         yield client
             finally:
-                get_settings.cache_clear()
+                clear_settings_cache()
 
     def test_api_health_returns_status(self, test_client):
         response = test_client.get("/api/health")
@@ -1141,9 +1141,9 @@ class TestComponentVersionsEndpoint:
             "REQUIRE_APPROVAL": "false",
         }
         with patch.dict(os.environ, env, clear=True):
-            from rootcoz.config import get_settings
+            from rootcoz.config import clear_settings_cache
 
-            get_settings.cache_clear()
+            clear_settings_cache()
             try:
                 with patch.object(storage, "DB_PATH", temp_db_path):
                     from starlette.testclient import TestClient
@@ -1153,7 +1153,7 @@ class TestComponentVersionsEndpoint:
                     with TestClient(app) as test_client:
                         yield test_client
             finally:
-                get_settings.cache_clear()
+                clear_settings_cache()
 
     def _admin_login(self, client):
         resp = client.post(
@@ -1266,16 +1266,16 @@ async def test_the_instantaneous_trigger_is_untouched(monkeypatch) -> None:
         "JENKINS_PASSWORD": "p",
     }
     with patch.dict(os.environ, env, clear=True):
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache, get_settings
 
-        get_settings.cache_clear()
+        clear_settings_cache()
         try:
             assert get_settings().enable_health_monitor is True
             middleware = main_module.ErrorTrackingMiddleware(_noop_app)
             middleware._schedule_high_error_rate_alert()
             await asyncio.gather(*list(main_module._background_tasks))
         finally:
-            get_settings.cache_clear()
+            clear_settings_cache()
 
     dispatched.assert_awaited_once()
     event_type, message = dispatched.await_args.args

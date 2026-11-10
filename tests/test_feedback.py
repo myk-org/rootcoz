@@ -13,7 +13,7 @@ from pi_sidecar_client import AIResult
 
 from rootcoz import storage
 from rootcoz.attribution import AiProvenance, read_provenance
-from rootcoz.config import get_settings
+from rootcoz.config import clear_settings_cache, get_settings
 from rootcoz.encryption import get_hmac_secret
 from rootcoz.feedback import (
     _PEM_WINDOW,
@@ -100,9 +100,9 @@ def settings():
         "ROOTCOZ_ENCRYPTION_KEY": _TEST_HMAC_KEY,
     }
     with patch.dict(os.environ, env, clear=True):
-        get_settings.cache_clear()
+        clear_settings_cache()
         s = get_settings()
-        get_settings.cache_clear()
+        clear_settings_cache()
         yield s
 
 
@@ -689,9 +689,9 @@ class TestFormatFeedbackWithAi:
             "JENKINS_PASSWORD": "pass",  # pragma: allowlist secret
         }
         with patch.dict(os.environ, env, clear=True):
-            get_settings.cache_clear()
+            clear_settings_cache()
             s = get_settings()
-            get_settings.cache_clear()
+            clear_settings_cache()
             return s
 
     async def test_ai_success(self, settings):
@@ -884,9 +884,9 @@ class TestGenerateFeedbackPreview:
             "JENKINS_PASSWORD": "pass",  # pragma: allowlist secret
         }
         with patch.dict(os.environ, env, clear=True):
-            get_settings.cache_clear()
+            clear_settings_cache()
             s = get_settings()
-            get_settings.cache_clear()
+            clear_settings_cache()
             return s
 
     async def test_bug_preview_returns_correct_labels(self, settings):
@@ -1064,9 +1064,9 @@ class TestCreateFeedbackIssue:
             "GITHUB_TOKEN": _TEST_GITHUB_TOKEN,
         }
         with patch.dict(os.environ, env, clear=True):
-            get_settings.cache_clear()
+            clear_settings_cache()
             s = get_settings()
-            get_settings.cache_clear()
+            clear_settings_cache()
             return s
 
     @staticmethod

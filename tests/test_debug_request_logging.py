@@ -186,13 +186,13 @@ def _mock_settings(temp_db_path):
         "REQUIRE_APPROVAL": "false",
     }
     with patch.dict(os.environ, env, clear=True):
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache
 
-        get_settings.cache_clear()
+        clear_settings_cache()
         try:
             yield
         finally:
-            get_settings.cache_clear()
+            clear_settings_cache()
 
 
 @pytest.fixture

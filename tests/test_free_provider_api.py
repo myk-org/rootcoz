@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from rootcoz import storage
-from rootcoz.config import get_settings
+from rootcoz.config import clear_settings_cache
 from rootcoz.main import app
 
 
@@ -20,10 +20,10 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setenv("ADMIN_KEY", "free-bootstrap-key")
     monkeypatch.setenv("SECURE_COOKIES", "false")
     monkeypatch.setenv("DB_PATH", str(tmp_path / "free-grant.db"))
-    get_settings.cache_clear()
+    clear_settings_cache()
     with TestClient(app) as client:
         yield client
-    get_settings.cache_clear()
+    clear_settings_cache()
 
 
 def _admin_headers():
@@ -236,7 +236,7 @@ def test_role_admin_implies_free_access(client):
 async def test_deleted_user_has_no_free_access(tmp_path, monkeypatch):
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "deleted-user.db")
     monkeypatch.setenv("DB_PATH", str(tmp_path / "deleted-user.db"))
-    get_settings.cache_clear()
+    clear_settings_cache()
     with TestClient(app) as _:
         pass
     from rootcoz.storage import can_user_use_free_providers
@@ -376,7 +376,7 @@ async def test_removed_free_pair_retires_server_chat_session(tmp_path, monkeypat
 
     monkeypatch.setattr(storage, "DB_PATH", tmp_path / "retire.db")
     monkeypatch.setenv("DB_PATH", str(tmp_path / "retire.db"))
-    get_settings.cache_clear()
+    clear_settings_cache()
     await storage.init_db()
     await storage.create_user("freechatter")
     await storage.set_free_ai_models([("EnMaaS", "glm-5-3")], "admin")

@@ -20,7 +20,7 @@ from rootcoz import ai_client, storage
 from rootcoz import main as rootcoz_main
 from rootcoz.ai_client import call_ai as real_call_ai
 from rootcoz.ai_client import call_ai_once as real_call_ai_once
-from rootcoz.config import get_settings
+from rootcoz.config import clear_settings_cache
 from rootcoz.main import app
 
 SECRET = "server-test-key-123"  # pragma: allowlist secret
@@ -48,10 +48,10 @@ def client(tmp_path, monkeypatch):
     monkeypatch.delenv("PI_SIDECAR_AGENT_DIR", raising=False)
     monkeypatch.setattr("rootcoz.main._deployment_listing_state", None)
     monkeypatch.setattr("rootcoz.main._safe_preload_cursor_models", AsyncMock())
-    get_settings.cache_clear()
+    clear_settings_cache()
     with TestClient(app) as client:
         yield client
-    get_settings.cache_clear()
+    clear_settings_cache()
 
 
 @pytest.fixture(autouse=True)

@@ -47,13 +47,13 @@ def mock_settings(temp_db_path: Path):
         "ROOTCOZ_ENCRYPTION_KEY": _TEST_ENCRYPTION_KEY,  # pragma: allowlist secret
     }
     with patch.dict(os.environ, env, clear=True):
-        from rootcoz.config import get_settings
+        from rootcoz.config import clear_settings_cache
 
-        get_settings.cache_clear()
+        clear_settings_cache()
         try:
             yield
         finally:
-            get_settings.cache_clear()
+            clear_settings_cache()
 
 
 @pytest.fixture
@@ -798,7 +798,7 @@ class TestBuildAdminSystemPrompt:
 @pytest.fixture
 def github_issue_config():
     """Enable GitHub issue creation (the server-side repo config) for a test."""
-    from rootcoz.config import get_settings
+    from rootcoz.config import clear_settings_cache
 
     with patch.dict(
         os.environ,
@@ -807,9 +807,9 @@ def github_issue_config():
             "GITHUB_TOKEN": "ghp_test",  # pragma: allowlist secret
         },
     ):
-        get_settings.cache_clear()
+        clear_settings_cache()
         yield
-        get_settings.cache_clear()
+        clear_settings_cache()
 
 
 class TestChatTrackerTargets:
