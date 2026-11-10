@@ -651,3 +651,27 @@ async def test_a_session_row_survives_one_contended_lock(
             await storage.get_ai_session_source("sess-1", "alice", "claude") == "server"
         )
     assert counter["contended"] == 1, "the lock was retried, not surfaced"
+
+
+@pytest.mark.asyncio
+async def test_a_welcome_prune_survives_one_contended_lock(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+):
+    """The welcome prune is a write on the preparation path, so it is retried too.
+
+    R5: the session row landed and the preparation still reported "could not be
+    prepared" one busy_timeout later, because this DELETE was the one write the
+    retry did not cover — the user kept the session and lost the welcome row.
+    """
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "chat.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    await storage.add_chat_message("job", "assistant", "welcome", username="alice")
+    counter: dict = {}
+    await _contended_once(monkeypatch, counter)
+
+    assert await storage.delete_chat_welcome_messages("job", "alice") == 1
+    assert await storage.get_chat_messages("job", username="alice") == [], (
+        "the stale welcome must be gone"
+    )
+    assert counter["contended"] == 1, "the lock was retried, not surfaced"

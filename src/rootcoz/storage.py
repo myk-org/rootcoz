@@ -12109,14 +12109,21 @@ async def delete_chat_welcome_messages(job_id: str, username: str) -> int:
     Start writes a fresh welcome, and the dead session's copy would otherwise
     sit in history forever. Only rows that no AI call ever filled are touched.
     """
-    async with _connect_db() as db:
-        cursor = await db.execute(
-            "DELETE FROM chat_messages WHERE job_id = ? AND username = ? "
-            "AND role = 'assistant' AND COALESCE(ai_provider, '') = ''",
-            (job_id, username),
-        )
-        await db.commit()
-        return cursor.rowcount
+
+    async def _delete() -> int:
+        async with _connect_db() as db:
+            cursor = await db.execute(
+                "DELETE FROM chat_messages WHERE job_id = ? AND username = ? "
+                "AND role = 'assistant' AND COALESCE(ai_provider, '') = ''",
+                (job_id, username),
+            )
+            await db.commit()
+            return cursor.rowcount
+
+    # A prune that loses the lock takes the whole preparation down with it (the
+    # caller only deletes the stale welcome before writing a fresh one), so this
+    # write is retried like the welcome row that replaces it.
+    return await _retry_contended(_delete)
 
 
 async def get_pending_chat_messages(

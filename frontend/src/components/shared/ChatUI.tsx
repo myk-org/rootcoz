@@ -414,9 +414,6 @@ export function ChatUI({
     console.info('[ChatUI] Starting chat session')
     // A 202 hands the wait to `settlePreparation`: `starting` must survive this
     // function's `finally` or Start becomes clickable again mid-preparation.
-    let handedOff = false
-    // A history sync that lands while this request is in flight already knows
-    // whether the preparation ended; its answer is the newer one.
     const startGeneration = historyGenerationRef.current
     try {
       const result = await api.post<{
@@ -431,11 +428,16 @@ export function ChatUI({
         // A 202 means the server is preparing the workspace: there is nothing to
         // report as unavailable, and the phase list is the progress.
         if (result.preparing) {
-          if (historyGenerationRef.current !== startGeneration) return
+          // The 202 is the server saying a preparation is running, and it owns
+          // `starting` before any generation check: a sync that raced this
+          // request was answered before the server registered the preparation,
+          // so its "no preparing" cannot be read as "already ended". Only the
+          // phase text is generation-gated — a newer one must not be rewound.
           prepRunningRef.current = true
-          handedOff = true
-          setPrepPhase(result.preparing)
-          setInitStepIndex(0)
+          if (historyGenerationRef.current === startGeneration) {
+            setPrepPhase(result.preparing)
+            setInitStepIndex(0)
+          }
           console.info('[ChatUI] Chat preparation started in the background')
           return
         }
@@ -470,7 +472,9 @@ export function ChatUI({
       console.warn('[ChatUI] Chat start failed')
     } finally {
       startInFlightRef.current = false
-      if (mountedRef.current && !handedOff) setStarting(false)
+      // A handed-off preparation still owns the spinner: `settlePreparation` is
+      // the only thing that ends one, and it clears this ref first.
+      if (mountedRef.current && !prepRunningRef.current) setStarting(false)
     }
   }
 

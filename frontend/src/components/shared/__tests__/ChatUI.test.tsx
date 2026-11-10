@@ -948,7 +948,35 @@ it('keeps the preparation indicator after the init response', async () => {
   expect(screen.getByRole('button', { name: 'New Session' })).toBeEnabled()
 })
 
-it('a 202 that lands after the preparation ended does not resurrect it', async () => {
+it('keeps Start disabled when a sync lands while the init request is in flight', async () => {
+  setup()
+  let finishInit: (v: unknown) => void = () => {}
+  post.mockImplementation((path: string) => path.endsWith('/init')
+    ? new Promise(resolve => { finishInit = resolve })
+    : Promise.resolve({}))
+  const user = userEvent.setup()
+  render(page())
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled())
+  // A sync now reports the clone the server is already running — the state the
+  // browser sees while the POST it just sent has not been answered yet.
+  get.mockImplementation((path: string) => Promise.resolve(path.startsWith('/api/ai-models')
+    ? catalog
+    : { messages: [], total: 0, active_session_version: 'no-session-version', preparing: { phase: 'cloning', detail: 'tests-repo' } }))
+  await user.click(screen.getByRole('button', { name: 'Start Chat' }))
+  act(() => {
+    const handlers = (useSSE as unknown as { mock: { calls: Array<[string, Record<string, () => void>]> } }).mock.calls
+    handlers[handlers.length - 1][1]['chat-changed']()
+  })
+  expect(await screen.findByText(/Cloning repositories: tests-repo/)).toBeInTheDocument()
+  // The 202 answers for a preparation that sync could not have seen: it owns
+  // Start for the rest of the preparation, whatever the history decided.
+  await act(async () => { finishInit({ ready: false, preparing: { phase: 'preparing', detail: '' } }) })
+  expect(screen.getByRole('button', { name: 'Start Chat' })).toBeDisabled()
+  fireEvent.click(screen.getByRole('button', { name: 'Start Chat' }))
+  expect(post.mock.calls.filter(([path]) => String(path).endsWith('/init'))).toHaveLength(1)
+})
+
+it('a 202 keeps Start owned until the server reports the preparation ended', async () => {
   setup({ total: 0, messages: [] })
   let finishInit: (v: unknown) => void = () => {}
   post.mockImplementation((path: string) => path.endsWith('/init')
@@ -958,18 +986,26 @@ it('a 202 that lands after the preparation ended does not resurrect it', async (
   render(page())
   await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled())
   await user.click(screen.getByRole('button', { name: 'Start Chat' }))
-  // The server pushes the end of the preparation (a failed row, no phase) before
-  // the POST response the browser has not read yet; that newer answer wins.
+  // This sync was answered before the server registered the preparation, so its
+  // "no preparing" cannot be read as "the preparation ended".
   act(() => {
     const handlers = (useSSE as unknown as { mock: { calls: Array<[string, Record<string, () => void>]> } }).mock.calls
     handlers[handlers.length - 1][1]['chat-changed']()
   })
-  // Let that sync settle first: the sequence we are testing is "history arrived,
-  // then the stale 202 it was already answered by".
   await act(async () => { await new Promise(resolve => setTimeout(resolve, 0)) })
   await act(async () => { finishInit({ ready: false, preparing: { phase: 'preparing', detail: '' } }) })
-  expect(screen.queryByText(/Preparing workspace/)).not.toBeInTheDocument()
-  expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled()
+  expect(screen.getByText(/Preparing workspace/)).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Start Chat' })).toBeDisabled()
+  // The end of the preparation is what hands it back — a failed row and no
+  // phase — so Start answers the server's own refusal instead of staying inert.
+  get.mockImplementation((path: string) => Promise.resolve(path.startsWith('/api/ai-models')
+    ? catalog
+    : { messages: [{ id: 1, job_id: 'job', role: 'assistant', content: 'The chat workspace could not be prepared. Start it again.', username: 'alice', ai_provider: '', ai_model: '', status: 'failed', created_at: '' }], total: 1, active_session_version: 'no-session-version' }))
+  act(() => {
+    const handlers = (useSSE as unknown as { mock: { calls: Array<[string, Record<string, () => void>]> } }).mock.calls
+    handlers[handlers.length - 1][1]['chat-changed']()
+  })
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Start Chat' })).toBeEnabled())
 })
 
 it('a reload during preparation shows the phase and enables the composer once the session appears', async () => {
