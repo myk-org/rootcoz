@@ -152,27 +152,50 @@ def _no_host_temp_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return base
 
 
+def forget_duplicate_history(logger: logging.Logger) -> None:
+    """Clear the session-wide state the duplicate filter keeps per instance.
+
+    The state outlives a test (one filter instance per logger and per handler,
+    for the whole session), so a later test's identical line would be dropped.
+    """
+    for target in (logger, *logger.handlers):
+        for log_filter in target.filters:
+            vars(log_filter).pop("last_log", None)
+            vars(log_filter).pop("repeated_number", None)
+
+
 @contextmanager
 def capture_main_logs(
     caplog: pytest.LogCaptureFixture, level: int = logging.WARNING
 ) -> Generator[None]:
-    """Capture ``rootcoz.main`` logs (python-simple-logger sets propagate=False)."""
-    from simple_logger.logger import DuplicateFilter
+    """Capture ``rootcoz.main`` logs on a handler attached to that logger.
 
+    python-simple-logger sets ``propagate=False``, so caplog's root handler never
+    sees these records; it is attached here instead and detached in the
+    ``finally``, because ``caplog.handler`` is one session-wide instance: a test
+    that leaves it attached to this logger would make every later capture here
+    emit, and count, the same record twice (#513). ``propagate`` stays False for
+    the same reason.
+
+    The duplicate filter also remembers the last rendered line for the whole
+    session and drops a repeat before any handler sees it, so an identical line
+    another test logged would leave the capture empty and the assertion failing
+    as if the product had not logged at all (#522).
+    """
     logger = logging.getLogger("rootcoz.main")
-    # A worker that already ran a lifecycle test with an empty job table has left
-    # that exact line in the dedup filter, and the filter drops the repeat before
-    # it reaches caplog. Every capture starts with no remembered line.
-    for dedup in logger.filters:
-        if isinstance(dedup, DuplicateFilter):
-            dedup.last_log = None
-            dedup.repeated_number = 0
-    with caplog.at_level(level, logger="rootcoz.main"):
-        logger.propagate = True
-        try:
+    forget_duplicate_history(logger)
+    original_propagate = logger.propagate
+    logger.propagate = False
+    logger.addHandler(caplog.handler)
+    try:
+        with caplog.at_level(level, logger="rootcoz.main"):
             yield
-        finally:
-            logger.propagate = False
+    finally:
+        logger.removeHandler(caplog.handler)
+        logger.propagate = original_propagate
+        # Entry alone is half the job: a line left remembered here would be
+        # dropped for the next test on this worker, the same #522 symptom.
+        forget_duplicate_history(logger)
 
 
 def make_test_client(
