@@ -218,6 +218,17 @@ def test_exemptions_are_not_stale() -> None:
         "auth.sso_device_started",
         "auth.sso_device_approved",
         "auth.sso_device_redeemed",
+        # §Linking another provider (Stage 6c): the attach, and the detach by
+        # the account owner and by an admin.
+        "auth.identity_linked",
+        "auth.identity_unlinked",
+        "admin.identity_unlinked",
+        # §Proxy auto-provision (Stage 5): the first request of a proxy-vouched
+        # account creates its row, and that is the only record of when it appeared.
+        "auth.proxy_provisioned",
+        # A proxy identity the deployment refuses to create an account for is not
+        # authenticated at all, so the refusal is the only trace of the attempt.
+        "auth.proxy_provision_refused",
     ],
 )
 def test_contract_action_is_implemented(action: str) -> None:

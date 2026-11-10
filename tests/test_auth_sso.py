@@ -26,7 +26,7 @@ from rootcoz.auth import identity as auth_identity
 from rootcoz.auth.sso import AuthError, ClaimSet, configured_providers, get_provider
 from rootcoz.auth.sso import state as sso_state
 from rootcoz.auth.sso.google import GoogleProvider
-from rootcoz.config import get_settings, normalize_domain_list
+from rootcoz.config import clear_settings_cache, get_settings, normalize_domain_list
 from rootcoz.encryption import encrypt_value
 from tests.conftest import build_test_env, make_app_client
 
@@ -57,10 +57,19 @@ def _claims(
     )
 
 
-def _sealed(provider: str = "google", next_path: str = "/report/1") -> tuple[str, str]:
-    """Seal a login attempt and return (sealed cookie, state value)."""
+def _sealed(
+    provider: str = "google",
+    next_path: str = "/report/1",
+    mode: str = sso_state.MODE_LOGIN,
+    link_to: str = "",
+) -> tuple[str, str]:
+    """Seal a login or link attempt and return (sealed cookie, state value)."""
     attempt, sealed, _challenge = sso_state.new_attempt(
-        provider=provider, next_path=next_path, ttl_seconds=600
+        provider=provider,
+        next_path=next_path,
+        ttl_seconds=600,
+        mode=mode,
+        link_to=link_to,
     )
     return sealed, attempt.state
 
@@ -128,7 +137,7 @@ def test_a_provider_is_offered_only_when_it_is_configured() -> None:
     import os
 
     with patch.dict(os.environ, build_test_env(), clear=True):
-        get_settings.cache_clear()
+        clear_settings_cache()
         assert configured_providers(get_settings()) == []
         assert get_provider("google", get_settings()) is None
         assert get_provider("nope", get_settings()) is None
@@ -141,12 +150,12 @@ def test_a_provider_is_offered_only_when_it_is_configured() -> None:
         ),
         clear=True,
     ):
-        get_settings.cache_clear()
+        clear_settings_cache()
         assert [p.name for p in configured_providers(get_settings())] == ["google"]
         assert get_provider("google", get_settings()) is not None
         assert get_provider("github", get_settings()) is None
 
-    get_settings.cache_clear()
+    clear_settings_cache()
 
 
 @pytest.mark.parametrize(
@@ -203,7 +212,7 @@ def test_each_provider_is_offered_only_when_fully_configured() -> None:
         SSO_REDHAT_ISSUER="https://sso.redhat.com/auth/realms/redhat-external",
     )
     with patch.dict(os.environ, full, clear=True):
-        get_settings.cache_clear()
+        clear_settings_cache()
         names = [provider.name for provider in configured_providers(get_settings())]
         assert names == ["github", "openshift", "redhat"]
         # The per-deployment issuers are what the OIDC flow will discover from.
@@ -220,7 +229,7 @@ def test_each_provider_is_offered_only_when_fully_configured() -> None:
         SSO_OPENSHIFT_CLIENT_SECRET="ocp-secret",  # pragma: allowlist secret
     )
     with patch.dict(os.environ, missing_issuer, clear=True):
-        get_settings.cache_clear()
+        clear_settings_cache()
         assert configured_providers(get_settings()) == []
         assert get_provider("openshift", get_settings()) is None
         assert OpenShiftProvider.from_settings(get_settings()) is None
@@ -236,17 +245,17 @@ def test_each_provider_is_offered_only_when_fully_configured() -> None:
     from pydantic import ValidationError
 
     with patch.dict(os.environ, scheme_less, clear=True):
-        get_settings.cache_clear()
+        clear_settings_cache()
         with pytest.raises(ValidationError, match="http"):
             get_settings()
 
     # GitHub needs both credentials and nothing else.
     github_only = build_test_env(SSO_GITHUB_CLIENT_ID="gh-id")
     with patch.dict(os.environ, github_only, clear=True):
-        get_settings.cache_clear()
+        clear_settings_cache()
         assert GitHubProvider.from_settings(get_settings()) is None
 
-    get_settings.cache_clear()
+    clear_settings_cache()
     assert RedHatSSOProvider.name == "redhat"
 
 
@@ -1040,12 +1049,16 @@ async def test_creating_an_account_with_the_chosen_name(temp_db_path: Path) -> N
         )
 
         assert response.status_code == 200, response.text
-        assert response.json() == {
+        body = response.json()
+        assert {k: v for k, v in body.items() if k != "api_key"} == {
             "username": "ruthn",
             "status": "active",
             # The ticket's destination rides back so the SPA does not guess it.
             "next": "/",
         }
+        # The account's only credential its owner has ever seen: shown once.
+        assert body["api_key"].startswith("rootcoz_")
+        assert response.headers["cache-control"] == "no-store"
         assert response.cookies.get("rootcoz_session")
         identity = await storage.get_user_identity("google", "sub-1")
         assert identity is not None
@@ -2152,6 +2165,554 @@ async def test_a_token_signed_by_a_foreign_key_is_refused() -> None:
     with pytest.raises(AuthError) as excinfo:
         await _verify(token, other_keys)
     assert excinfo.value.reason == "id_token_invalid"
+
+
+# -- Linking another provider to a signed-in account --------------------------
+
+
+async def test_link_mode_attaches_the_identity_to_the_signed_in_account(
+    temp_db_path: Path,
+) -> None:
+    """``mode=link`` never creates or claims an account: it attaches one."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("ruthn")
+        session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+        sealed, state = _sealed(
+            next_path="/settings", mode=sso_state.MODE_LINK, link_to="ruthn"
+        )
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+
+        with patch.object(
+            GoogleProvider, "exchange", return_value=_claims(), autospec=True
+        ):
+            response = client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 303
+        assert response.headers["location"] == "/settings?sso_linked=google"
+        # The sealed attempt is single-use: a finished link clears it, while a
+        # refused one keeps it so a transient provider error can be retried.
+        assert response.cookies.get(sso_state.STATE_COOKIE) in (None, "")
+        identities = await storage.list_user_identities("ruthn")
+        assert [identity["provider"] for identity in identities] == ["google"]
+        # The account it attached to is the one that was signed in.
+        assert identities[0]["username"] == "ruthn"
+
+
+async def test_link_mode_refuses_a_session_that_ended_mid_flow(
+    temp_db_path: Path,
+) -> None:
+    """No session at the callback means nothing to link to — never a login."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("ruthn")
+        sealed, state = _sealed(mode=sso_state.MODE_LINK, link_to="ruthn")
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+
+        with patch.object(
+            GoogleProvider, "exchange", return_value=_claims(), autospec=True
+        ):
+            response = client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 303
+        assert response.headers["location"] == "/login?sso_error=link_requires_session"
+        assert await storage.list_user_identities("ruthn") == []
+
+
+async def test_link_mode_refuses_an_identity_that_belongs_to_someone_else(
+    temp_db_path: Path,
+) -> None:
+    """The answer must not confirm that an address already has an account."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        await storage.create_user("ruthn")
+        await storage.add_user_identity(
+            "alice", "google", "sub-1", email="alice@example.com"
+        )
+        session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+        sealed, state = _sealed(
+            mode=sso_state.MODE_LINK, link_to="ruthn", next_path="/settings"
+        )
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+
+        with patch.object(
+            GoogleProvider, "exchange", return_value=_claims(), autospec=True
+        ):
+            response = client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+        assert response.headers["location"] == "/settings?sso_error=identity_conflict"
+        assert [
+            i["provider"] for i in await storage.list_user_identities("ruthn")
+        ] == []
+        assert len(await storage.list_user_identities("alice")) == 1
+
+
+async def test_a_refused_start_is_recorded_as_a_refusal(temp_db_path: Path) -> None:
+    """A start that never started must not appear as a start.
+
+    The start route is public and its action is volume-guarded; a refusal that
+    reused the "started" action would both mislead the trail and escape the guard.
+    """
+    from rootcoz.auth.sso.base import AuthError
+
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        with patch.object(
+            GoogleProvider,
+            "authorization_url",
+            side_effect=AuthError("login_start_failed", "boom"),
+            autospec=True,
+        ):
+            response = client.get("/api/auth/sso/google/login", follow_redirects=False)
+        assert response.status_code == 303
+
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT action, outcome FROM audit_events"
+                " WHERE action LIKE 'auth.sso_login%' ORDER BY id DESC LIMIT 1"
+            )
+            row = await cursor.fetchone()
+        assert row["action"] == "auth.sso_login_failed"
+        assert row["outcome"] == "denied"
+
+
+async def test_a_signed_in_person_can_start_a_link(temp_db_path: Path) -> None:
+    """The start route is public by shape, so the session must be read explicitly.
+
+    Reading ``request.state.username`` there always yields "" — the middleware
+    never resolves a public path — which would refuse every link, signed in or
+    not.
+    """
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("ruthn")
+        session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+
+        with patch.object(
+            GoogleProvider,
+            "authorization_url",
+            return_value="https://accounts.google.com/o/oauth2/v2/auth?state=xyz",
+            autospec=True,
+        ):
+            response = client.get(
+                "/api/auth/sso/google/login?mode=link&next=/settings",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 303
+        assert response.headers["location"].startswith("https://accounts.google.com/")
+        assert response.cookies.get(sso_state.STATE_COOKIE)
+
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT actor, details FROM audit_events"
+                " WHERE action = 'auth.sso_login_start' ORDER BY id DESC LIMIT 1"
+            )
+            row = await cursor.fetchone()
+        # The actor is the caller, not "anonymous", and the mode is recorded.
+        assert row["actor"] == "ruthn"
+        assert json.loads(row["details"])["mode"] == "link"
+
+
+async def test_a_read_only_provider_cannot_create_an_account(
+    temp_db_path: Path,
+) -> None:
+    """`can_provision_user=False` is honoured where accounts are made."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        ticket = await _ticket(client)
+        with patch.object(GoogleProvider, "can_provision_user", False):
+            response = client.post(
+                "/api/auth/sso/create",
+                json={"ticket": ticket, "username": "ruthn"},
+            )
+        assert response.status_code == 403
+        # Nothing was written, and the ticket is still usable for another try.
+        assert await storage.get_user_by_username("ruthn") is None
+
+
+async def test_a_viewer_cannot_start_a_link(temp_db_path: Path) -> None:
+    """Adding a method is the mirror of removing one, which needs a reviewer."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("vicky")
+        session = await storage.create_session("vicky", is_admin=False, role="viewer")
+        client.cookies.set("rootcoz_session", session)
+
+        response = client.get(
+            "/api/auth/sso/google/login?mode=link", follow_redirects=False
+        )
+        assert response.status_code == 303
+        assert response.headers["location"] == ("/login?sso_error=link_forbidden_role")
+
+
+async def test_link_mode_needs_a_session_before_it_starts(temp_db_path: Path) -> None:
+    """Starting a link anonymously is refused rather than turned into a login."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        response = client.get(
+            "/api/auth/sso/google/login?mode=link", follow_redirects=False
+        )
+        assert response.status_code == 303
+        assert response.headers["location"] == "/login?sso_error=link_requires_session"
+
+
+async def test_an_unknown_mode_is_refused(temp_db_path: Path) -> None:
+    """The mode is sealed, so it is also validated before anything is minted."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        response = client.get(
+            "/api/auth/sso/google/login?mode=attach", follow_redirects=False
+        )
+        assert response.headers["location"] == "/login?sso_error=unknown_mode"
+
+
+async def test_a_link_refusal_before_the_callback_lands_on_the_destination(
+    temp_db_path: Path,
+) -> None:
+    """A domain rejection happens in resolve(), before _sso_finish_link runs.
+
+    The person is still signed in, so /login would bounce them away before they
+    could read the reason.
+    """
+    env = dict(_SSO_ENV, SSO_ALLOWED_DOMAINS="redhat.com")
+    for client in make_app_client(temp_db_path, env):
+        await storage.create_user("ruthn")
+        session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+        sealed, state = _sealed(
+            mode=sso_state.MODE_LINK, link_to="ruthn", next_path="/settings"
+        )
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+
+        with patch.object(
+            GoogleProvider, "exchange", return_value=_claims(), autospec=True
+        ):
+            response = client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+        assert response.headers["location"] == "/settings?sso_error=domain_not_allowed"
+        assert await storage.list_user_identities("ruthn") == []
+
+
+async def test_a_role_demoted_mid_flow_cannot_finish_a_link(
+    temp_db_path: Path,
+) -> None:
+    """The role is re-read with the session: ten minutes is long enough to change."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("ruthn")
+        session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+        sealed, state = _sealed(
+            mode=sso_state.MODE_LINK, link_to="ruthn", next_path="/settings"
+        )
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+        # Demoted while the IdP round-trip was in progress.
+        async with storage._connect_db() as db:
+            await db.execute("UPDATE sessions SET role = 'viewer' WHERE 1")
+            await db.commit()
+
+        with patch.object(
+            GoogleProvider, "exchange", return_value=_claims(), autospec=True
+        ):
+            response = client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+        assert response.headers["location"] == "/settings?sso_error=link_forbidden_role"
+        assert await storage.list_user_identities("ruthn") == []
+
+
+async def test_a_link_cannot_be_finished_into_another_account(
+    temp_db_path: Path,
+) -> None:
+    """The cookie binds the attempt to a browser — not to an account.
+
+    A flow started by one person and finished with somebody else's session would
+    attach the first person's provider to the second person's account.
+    """
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        await storage.create_user("bob")
+        bob_session = await storage.create_session(
+            "bob", is_admin=False, role="reviewer"
+        )
+        client.cookies.set("rootcoz_session", bob_session)
+        sealed, state = _sealed(
+            mode=sso_state.MODE_LINK, link_to="alice", next_path="/settings"
+        )
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+
+        with patch.object(
+            GoogleProvider, "exchange", return_value=_claims(), autospec=True
+        ):
+            response = client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+        assert (
+            response.headers["location"] == "/settings?sso_error=link_session_changed"
+        )
+        assert await storage.list_user_identities("bob") == []
+        assert await storage.list_user_identities("alice") == []
+
+
+async def test_an_expired_session_cannot_start_or_finish_a_link(
+    temp_db_path: Path,
+) -> None:
+    """A dead credential names its owner — it must not prove they are there."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        await storage.add_user_identity("alice", "github", "gh-a")
+        session = await storage.create_session("alice", is_admin=False, role="reviewer")
+        async with storage._connect_db() as db:
+            await db.execute(
+                "UPDATE sessions SET expires_at = '2000-01-01 00:00:00' WHERE 1"
+            )
+            await db.commit()
+        client.cookies.set("rootcoz_session", session)
+
+        started = client.get(
+            "/api/auth/sso/google/login?mode=link", follow_redirects=False
+        )
+        assert started.headers["location"] == "/login?sso_error=link_requires_session"
+
+        sealed, state = _sealed(
+            mode=sso_state.MODE_LINK, link_to="alice", next_path="/settings"
+        )
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+        with patch.object(
+            GoogleProvider, "exchange", return_value=_claims(), autospec=True
+        ):
+            response = client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+        assert response.headers["location"] == "/login?sso_error=link_requires_session"
+        assert [i["provider"] for i in await storage.list_user_identities("alice")] == [
+            "github"
+        ]
+
+
+async def test_an_internal_link_reason_never_reaches_the_url(
+    temp_db_path: Path,
+) -> None:
+    """Only coarse public codes travel in a redirect; internal ones map to denied."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("ruthn")
+        session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+        sealed, state = _sealed(
+            mode=sso_state.MODE_LINK, link_to="ruthn", next_path="/settings"
+        )
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+
+        # The account disappears between the callback and the write.
+        with (
+            patch.object(
+                GoogleProvider, "exchange", return_value=_claims(), autospec=True
+            ),
+            patch.object(
+                storage,
+                "add_user_identity",
+                side_effect=ValueError("User 'ruthn' not found"),
+                autospec=True,
+            ),
+        ):
+            response = client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+        location = response.headers["location"]
+        assert "account_missing" not in location
+        assert location == "/settings?sso_error=denied"
+
+
+async def test_linking_the_same_identity_twice_is_a_no_op(temp_db_path: Path) -> None:
+    """A double click must not fail, and must not duplicate the row."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("ruthn")
+        await storage.add_user_identity(
+            "ruthn", "google", "sub-1", email="ruthn@example.com"
+        )
+        session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+        sealed, state = _sealed(
+            next_path="/settings", mode=sso_state.MODE_LINK, link_to="ruthn"
+        )
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+
+        with patch.object(
+            GoogleProvider, "exchange", return_value=_claims(), autospec=True
+        ):
+            response = client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+        assert response.headers["location"] == "/settings?sso_linked=google"
+        assert len(await storage.list_user_identities("ruthn")) == 1
+
+
+# -- Sign-in methods API ------------------------------------------------------
+
+
+async def test_listing_and_removing_linked_identities(temp_db_path: Path) -> None:
+    """Self-service listing shows providers, and removal is one provider wide."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("ruthn")
+        await storage.add_user_identity(
+            "ruthn", "google", "sub-1", email="ruthn@example.com"
+        )
+        await storage.add_user_identity(
+            "ruthn", "github", "gh-1", email="ruthn@example.com"
+        )
+        session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+
+        listed = client.get("/api/user/identities")
+        assert listed.status_code == 200
+        body = listed.json()
+        assert [i["provider"] for i in body["identities"]] == ["github", "google"]
+        assert body["unlinkable"] is True
+
+        removed = client.delete("/api/user/identities/github")
+        assert removed.status_code == 200
+        assert [i["provider"] for i in await storage.list_user_identities("ruthn")] == [
+            "google"
+        ]
+        # With one left, the client can say so before the person clicks.
+        assert client.get("/api/user/identities").json()["unlinkable"] is False
+
+
+async def test_the_last_sign_in_method_cannot_be_removed(temp_db_path: Path) -> None:
+    """An SSO-created account never saw its API key, so this would lock it out."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("ruthn")
+        await storage.add_user_identity(
+            "ruthn", "google", "sub-1", email="ruthn@example.com"
+        )
+        session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+
+        response = client.delete("/api/user/identities/google")
+        assert response.status_code == 409
+        assert "only way to sign in" in response.json()["detail"]
+        assert len(await storage.list_user_identities("ruthn")) == 1
+
+
+async def test_a_viewer_cannot_unlink_a_sign_in_method(temp_db_path: Path) -> None:
+    """Removing one is a write on the account, like removing your own AI key."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("vicky")
+        await storage.add_user_identity("vicky", "google", "sub-v")
+        await storage.add_user_identity("vicky", "github", "gh-v")
+        session = await storage.create_session("vicky", is_admin=False, role="viewer")
+        client.cookies.set("rootcoz_session", session)
+
+        response = client.delete("/api/user/identities/github")
+        assert response.status_code == 403
+        assert len(await storage.list_user_identities("vicky")) == 2
+
+
+async def test_removing_an_unconnected_provider_is_a_404(temp_db_path: Path) -> None:
+    """A provider the account never linked is not silently "removed"."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("ruthn")
+        await storage.add_user_identity("ruthn", "google", "sub-1")
+        session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+
+        assert client.delete("/api/user/identities/github").status_code == 404
+
+
+async def test_an_unknown_provider_name_is_a_client_error(
+    temp_db_path: Path,
+) -> None:
+    """A name outside SSO_PROVIDERS is "not connected", never a 500."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("ruthn")
+        await storage.add_user_identity("ruthn", "google", "sub-x")
+        await storage.add_user_identity("ruthn", "github", "gh-x")
+        session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+
+        assert client.delete("/api/user/identities/bogus").status_code == 404
+        login = client.post(
+            "/api/auth/login",
+            json={
+                "username": "admin",
+                "api_key": "test-admin-key-16chars",  # pragma: allowlist secret
+            },
+        )
+        assert login.status_code == 200
+        assert (
+            client.delete("/api/admin/users/ruthn/identities/bogus").status_code == 404
+        )
+        # Nothing was removed by either refusal.
+        assert len(await storage.list_user_identities("ruthn")) == 2
+
+
+async def test_an_admin_can_inspect_and_unlink_any_account(temp_db_path: Path) -> None:
+    """Admins get the same shape, scoped by username, with an audit row each."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        await storage.add_user_identity("alice", "google", "sub-9")
+        await storage.add_user_identity("alice", "github", "gh-9")
+        login = client.post(
+            "/api/auth/login",
+            json={
+                "username": "admin",
+                "api_key": "test-admin-key-16chars",  # pragma: allowlist secret
+            },
+        )
+        assert login.status_code == 200
+
+        listed = client.get("/api/admin/users/alice/identities")
+        assert listed.status_code == 200
+        assert len(listed.json()["identities"]) == 2
+
+        removed = client.delete("/api/admin/users/alice/identities/google")
+        assert removed.status_code == 200
+        assert [i["provider"] for i in await storage.list_user_identities("alice")] == [
+            "github"
+        ]
+
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT actor FROM audit_events WHERE action = 'admin.identity_unlinked'"
+            )
+            assert [row["actor"] for row in await cursor.fetchall()] == ["admin"]
+
+
+async def test_an_admin_cannot_remove_the_last_sign_in_method_either(
+    temp_db_path: Path,
+) -> None:
+    """Disabling is the access cut; removing the only way in is a lockout."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        await storage.add_user_identity("alice", "google", "sub-9")
+        login = client.post(
+            "/api/auth/login",
+            json={
+                "username": "admin",
+                "api_key": "test-admin-key-16chars",  # pragma: allowlist secret
+            },
+        )
+        assert login.status_code == 200
+
+        response = client.delete("/api/admin/users/alice/identities/google")
+        assert response.status_code == 409
+        assert len(await storage.list_user_identities("alice")) == 1
 
 
 # -- CLI device flow ----------------------------------------------------------

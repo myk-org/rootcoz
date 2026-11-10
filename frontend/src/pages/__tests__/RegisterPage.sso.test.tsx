@@ -47,12 +47,14 @@ vi.mock('@/lib/api', async (importOriginal) => {
 const authMock = vi.hoisted(() => ({
   login: vi.fn(async () => {}),
   refreshAuth: vi.fn(async () => {}),
+  /** Flipped by a test to emulate the session arriving after `create`. */
+  authenticated: false,
 }))
 
 vi.mock('@/lib/auth', () => ({
   useAuth: () => ({
     ...authMock,
-    authenticated: false,
+    authenticated: authMock.authenticated,
     loading: false,
     username: null,
   }),
@@ -103,10 +105,15 @@ function renderWithDestinations(entry: string | typeof TICKET_ENTRY | Record<str
 
 describe('RegisterPage SSO providers', () => {
   beforeEach(() => {
+    // The auth mock is module state: reset it or a test that signs in leaks.
+    authMock.authenticated = false
     localStorage.clear()
     apiMock.api.get.mockReset()
     apiMock.api.post.mockReset()
-    authMock.refreshAuth.mockClear()
+    // reset, not clear: one test installs an implementation that signs the
+    // person in, and that must not leak into the next test's redirect guard.
+    authMock.refreshAuth.mockReset()
+    authMock.refreshAuth.mockImplementation(async () => {})
     defaultServer()
   })
 
@@ -159,6 +166,66 @@ describe('RegisterPage SSO first-login choice', () => {
       ticket: 'tkt-1',
       username: 'rnetser',
     })
+  })
+
+  it('tells a pending account to wait while showing its key', async () => {
+    apiMock.api.post.mockImplementation(async (path: string) => {
+      if (path === '/api/auth/sso/ticket') return TICKET
+      return {
+        username: 'rnetser',
+        status: 'pending',
+        next: '/pending',
+        api_key: 'rootcoz_pending_key', // pragma: allowlist secret
+      }
+    })
+    renderLogin(TICKET_ENTRY)
+    await screen.findByRole('heading', { name: /isn't connected yet/i })
+
+    await userEvent.click(screen.getByRole('button', { name: /^create account$/i }))
+
+    expect(await screen.findByText('rootcoz_pending_key')).toBeInTheDocument()
+    expect(screen.getByText(/pending admin approval/i)).toBeInTheDocument()
+  })
+
+  it('drops the spent ticket from the URL once the account exists', async () => {
+    // The fragment held a live credential; after creation it is consumed, and
+    // the reveal must not depend on it staying in the URL.
+    apiMock.api.post.mockImplementation(async (path: string) => {
+      if (path === '/api/auth/sso/ticket') return TICKET
+      return {
+        username: 'rnetser',
+        status: 'active',
+        next: '/',
+        api_key: 'rootcoz_fragment_cleared', // pragma: allowlist secret
+      }
+    })
+    renderLogin(TICKET_ENTRY)
+    await screen.findByRole('heading', { name: /isn't connected yet/i })
+
+    await userEvent.click(screen.getByRole('button', { name: /^create account$/i }))
+    await screen.findByText('rootcoz_fragment_cleared')
+
+    expect(window.location.hash).toBe('')
+  })
+
+  it('shows the new API key once when the account is created here', async () => {
+    // An account created through SSO is shown its key once, here, and the last
+    // sign-in method cannot be removed without one.
+    apiMock.api.post.mockImplementation(async (path: string) => {
+      if (path === '/api/auth/sso/ticket') return TICKET
+      return {
+        username: 'rnetser',
+        status: 'active',
+        next: '/',
+        api_key: 'rootcoz_shown_once', // pragma: allowlist secret
+      }
+    })
+    renderLogin(TICKET_ENTRY)
+    await screen.findByRole('heading', { name: /isn't connected yet/i })
+
+    await userEvent.click(screen.getByRole('button', { name: /^create account$/i }))
+
+    expect(await screen.findByText('rootcoz_shown_once')).toBeInTheDocument()
   })
 
   it('reports a dead ticket as expired and offers the way back to the forms', async () => {

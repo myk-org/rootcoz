@@ -2,6 +2,7 @@ import { useState, useEffect, type FormEvent } from 'react'
 import { useNavigate, useLocation } from 'react-router-dom'
 import { useAuth } from '@/lib/auth'
 import { api, ApiError, extractApiDetail } from '@/lib/api'
+import { SSO_LOGIN_ERROR_FALLBACK, ssoErrorMessage } from '@/lib/ssoErrors'
 import { persistTokensToServer } from '@/lib/tokens'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -26,28 +27,6 @@ interface SsoTicket {
   email_domain: string
 }
 
-/**
- * One sentence per code the SSO callback can redirect with. The authoritative
- * list is `_SSO_PUBLIC_REASONS` (plus the `_SSO_DENIED` catch-all) in
- * `src/rootcoz/main.py` — keep the two in step when a reason is added.
- */
-const SSO_ERROR_MESSAGES: Record<string, string> = {
-  unknown_provider: 'That sign-in provider is not configured on this server.',
-  login_start_failed: 'The sign-in could not be started. Please try again.',
-  state_invalid: 'Your sign-in attempt expired. Please try again.',
-  state_mismatch: 'Your sign-in attempt expired. Please try again.',
-  missing_code: 'The provider did not finish the sign-in. Please try again.',
-  provider_error: 'The provider refused the sign-in. Please try again.',
-  exchange_failed: 'Could not complete the sign-in with the provider. Please try again.',
-  id_token_invalid: 'The provider returned an identity we could not verify. Please try again.',
-  userinfo_failed: 'Could not read your profile from the provider. Please try again.',
-  no_subject: 'The provider returned no account identity. Please try again.',
-  callback_misconfigured: 'SSO is misconfigured on this server. Contact an admin.',
-  denied: "That account can't sign in with this provider.",
-  domain_not_allowed: 'This account\'s email domain is not allowed on this server. Contact an admin.',
-  email_not_verified: 'Your provider has not verified this email address, so it cannot be used here.',
-}
-const SSO_ERROR_FALLBACK = 'Sign-in with the provider did not finish. Please try again.'
 
 /** The server's own explanation when it sent one, else a local sentence. */
 function failureMessage(err: unknown, fallback: string): string {
@@ -97,13 +76,15 @@ function WarningBanner({ message, tone = 'amber' }: { message: string; tone?: 'a
  * this browser) is the only credential these two endpoints accept, so the panel
  * asks *which way* to finish and nothing else.
  */
-function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpired, onDismiss }: {
+function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpired, onDismiss, onCreated }: {
   ticket: SsoTicket
   ticketValue: string
   providerLabel: string
   nextPath: string
   onExpired: () => void
   onDismiss: () => void
+  /** Called with the new account's one-time API key and where it should land. */
+  onCreated: (apiKey: string, destination: string, status: string) => void
 }) {
   const navigate = useNavigate()
   const { refreshAuth } = useAuth()
@@ -127,11 +108,28 @@ function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpire
     setLoading(true)
     setError('')
     try {
-      const result = await api.post<{ username: string; status: string; next?: string }>(path, body)
+      const result = await api.post<{
+        username: string
+        status: string
+        next?: string
+        /** Present only when this call created the account: shown once. */
+        api_key?: string
+      }>(path, body)
       try {
         await refreshAuth()
       } catch {
         // The session cookie is already set — navigate even if /me fails.
+      }
+      if (result.api_key) {
+        // An account created through SSO has no other credential its owner has
+        // ever seen, and the last sign-in method cannot be removed without one —
+        // so the key is shown once, exactly like registration.
+        onCreated(
+          result.api_key,
+          result.next || (result.status === 'active' ? nextPath : '/pending'),
+          result.status,
+        )
+        return
       }
       // The server decides where a login ends (pending page, or the destination
       // sealed in the ticket); the SPA only falls back for an older response.
@@ -290,6 +288,8 @@ export function RegisterPage() {
   const [apiKey, setApiKey] = useState('')
   const [showApiKey, setShowApiKey] = useState(false)
   const [newApiKey, setNewApiKey] = useState('')
+  /** Set when this page created an account through SSO: the key is shown once. */
+  const [ssoCreated, setSsoCreated] = useState<{ next: string } | null>(null)
   const [registrationStatus, setRegistrationStatus] = useState<RegistrationStatus>('active')
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
@@ -357,11 +357,32 @@ export function RegisterPage() {
 
   useEffect(() => {
     // A live session must not swallow an SSO attempt: the person followed a
-    // provider link on purpose, so the ticket has to be redeemed first.
-    if (!authLoading && authenticated && !ssoTicketValue && !ssoTicket && !ssoTicketExpired) {
+    // provider link on purpose, so the ticket has to be redeemed first. The
+    // key-reveal state is excluded explicitly — a created account flips
+    // `authenticated` while its one-time key is still on screen, and the reveal
+    // must not be navigated away by the session it just earned.
+    if (
+      !authLoading &&
+      authenticated &&
+      !ssoTicketValue &&
+      !ssoTicket &&
+      !ssoTicketExpired &&
+      !ssoCreated &&
+      mode !== 'key-reveal'
+    ) {
       navigate(returnTo, { replace: true })
     }
-  }, [authLoading, authenticated, navigate, returnTo, ssoTicketValue, ssoTicket, ssoTicketExpired])
+  }, [
+    authLoading,
+    authenticated,
+    navigate,
+    returnTo,
+    ssoTicketValue,
+    ssoTicket,
+    ssoTicketExpired,
+    ssoCreated,
+    mode,
+  ])
 
   async function handleRegister(e: FormEvent) {
     e.preventDefault()
@@ -446,6 +467,12 @@ export function RegisterPage() {
   }
 
   async function handleKeyAcknowledged() {
+    if (ssoCreated) {
+      // The session is already set, so `/pending` or the ticket's destination is
+      // where the person belongs — not the registration page's return path.
+      navigate(ssoCreated.next, { replace: true })
+      return
+    }
     if (registrationStatus === 'pending') {
       // Pending users can't access the app — go to login
       setMode('login')
@@ -475,10 +502,8 @@ export function RegisterPage() {
     navigate(location.pathname, { replace: true })
   }
 
-  // `Object.hasOwn`, not a bare index: a plain object inherits `__proto__` and
-  // friends, so `SSO_ERROR_MESSAGES['__proto__']` would render an object.
-  const ssoErrorMessage = ssoErrorCode
-    ? (Object.hasOwn(SSO_ERROR_MESSAGES, ssoErrorCode) ? SSO_ERROR_MESSAGES[ssoErrorCode] : SSO_ERROR_FALLBACK)
+  const ssoErrorSentence = ssoErrorCode
+    ? ssoErrorMessage(ssoErrorCode, SSO_LOGIN_ERROR_FALLBACK)
     : ''
   const ssoProviderLabel = ssoTicket
     ? ssoProviders.find((p) => p.name === ssoTicket.provider)?.display_name ?? ssoTicket.provider
@@ -527,6 +552,19 @@ export function RegisterPage() {
                   nextPath={returnTo}
                   onExpired={() => { setSsoTicket(null); setSsoTicketExpired(true) }}
                   onDismiss={dismissSso}
+                  onCreated={(apiKey, destination, status) => {
+                    // The account exists and the ticket is spent: drop the panel,
+                    // or it keeps winning over the reveal below, and drop the
+                    // fragment so the spent ticket does not linger in the URL.
+                    setSsoTicket(null)
+                    window.history.replaceState(null, '', window.location.pathname)
+                    setNewApiKey(apiKey)
+                    // A pending account sees the same "waiting for approval" note
+                    // registration shows, not a bare key followed by a redirect.
+                    setRegistrationStatus(status === 'active' ? 'active' : 'pending')
+                    setSsoCreated({ next: destination })
+                    setMode('key-reveal')
+                  }}
                 />
               ) : ssoTicketExpired ? (
                 <div className="space-y-4">
@@ -597,7 +635,7 @@ export function RegisterPage() {
                 <div className="space-y-4">
                   <form onSubmit={handleLogin} className="space-y-4">
                     <fieldset disabled={loading} className="space-y-4">
-                      <WarningBanner message={ssoErrorMessage} />
+                      <WarningBanner message={ssoErrorSentence} />
                       <WarningBanner message={error} />
 
                       <CustomMessageBanner message={loginCustomMessage} />

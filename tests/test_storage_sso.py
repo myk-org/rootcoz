@@ -5,6 +5,7 @@ whether an account may act — approval lives in ``rootcoz.auth.approval`` — s
 these tests pin storage behaviour only.
 """
 
+import asyncio
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from unittest.mock import patch
@@ -129,9 +130,72 @@ async def test_identity_links_lookup_list_and_unlink(setup_test_db: Path) -> Non
         assert await storage.get_user_identity("google", "other") is None
         assert await storage.list_user_identities("alice") == [created]
 
-        assert await storage.delete_user_identity("alice", "google") is True
-        assert await storage.list_user_identities("alice") == []
-        assert await storage.delete_user_identity("alice", "google") is False
+        # The only identity is not removable: an SSO-created account never saw
+        # its API key, so this would be a lockout.
+        assert await storage.unlink_user_identity("alice", "google") == "last"
+        assert len(await storage.list_user_identities("alice")) == 1
+
+        await storage.add_user_identity("alice", "github", "gh-1")
+        assert await storage.unlink_user_identity("alice", "google") == "deleted"
+        assert [i["provider"] for i in await storage.list_user_identities("alice")] == [
+            "github"
+        ]
+        assert await storage.unlink_user_identity("alice", "google") == "not_found"
+
+
+async def test_create_with_identity_returns_the_api_key(setup_test_db: Path) -> None:
+    """The key is part of creating the account: nothing else is ever shown."""
+    raw_key = await storage.create_user_with_identity(
+        "ssokey",
+        provider="google",
+        subject="sub-key",
+        email="k@example.com",
+        status="active",
+        role="reviewer",
+        created_via="google",
+    )
+
+    assert raw_key.startswith("rootcoz_")
+    user = await storage.get_user_by_key(raw_key)
+    assert user is not None and user["username"] == "ssokey"
+
+
+async def test_create_with_identity_refuses_a_reserved_name(
+    setup_test_db: Path,
+) -> None:
+    """The name rule is the store's, not whichever caller remembered it."""
+    for name in ("rootcoz-ai", "admin"):
+        with pytest.raises(ValueError):
+            await storage.create_user_with_identity(
+                name,
+                provider="google",
+                subject="sub-reserved",
+                email=None,
+                status="active",
+                role="reviewer",
+                created_via="google",
+            )
+
+
+async def test_concurrent_unlinks_cannot_leave_an_account_without_a_method(
+    setup_test_db: Path,
+) -> None:
+    """The last-method guard is part of the write, not a check before it.
+
+    Two removals issued together used to each see two identities and both
+    succeed, leaving an SSO-created account with no way in at all.
+    """
+    await storage.create_user("alice")
+    await storage.add_user_identity("alice", "google", "sub-1")
+    await storage.add_user_identity("alice", "github", "gh-1")
+
+    results = await asyncio.gather(
+        storage.unlink_user_identity("alice", "google"),
+        storage.unlink_user_identity("alice", "github"),
+    )
+
+    assert sorted(results) == ["deleted", "last"]
+    assert len(await storage.list_user_identities("alice")) == 1
 
 
 async def test_identity_claims_are_scrubbed_and_readable(

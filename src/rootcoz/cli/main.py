@@ -3799,6 +3799,47 @@ def auth_sso(
     )
 
 
+@auth_app.command("sso-identities")
+def auth_sso_identities(
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """List the SSO providers linked to your account."""
+    _run_client_command(
+        json_output,
+        lambda c: c.user_identities(),
+        columns=["identities", "unlinkable"],
+    )
+
+
+@auth_app.command("sso-unlink")
+def auth_sso_unlink(
+    provider: str = typer.Argument(help="Provider to unlink, e.g. google."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Unlink one SSO provider from your account.
+
+    The last one is refused: every account holds an API key, but an account
+    created through SSO is shown it only once, so removing the only sign-in method could
+    lock you out of your own account.
+    """
+    _set_json(json_output)
+    if not yes:
+        if _state.get("json", False):
+            # No prompt in a machine-readable run: consent has to be explicit,
+            # so the caller must have asked for it.
+            typer.echo("Refusing to unlink under --json without --yes.", err=True)
+            raise typer.Exit(1)
+        if not typer.confirm(f"Unlink {provider} from this account?"):
+            typer.echo("Not unlinked.", err=True)
+            raise typer.Exit(1)
+    _run_client_command(
+        json_output,
+        lambda c: c.delete_user_identity(provider),
+        columns=["ok", "provider"],
+    )
+
+
 @auth_app.command("sso-approve")
 def auth_sso_approve(
     user_code: str = typer.Argument(help="The code shown by the waiting client."),
@@ -4164,6 +4205,47 @@ def admin_users_unlock(
     )
     if not _state.get("json", False):
         typer.echo(f"Unlocked user: {data.get('username', username)}")
+
+
+@admin_users_app.command("identities")
+def admin_users_identities(
+    username: str = typer.Argument(help="Account to inspect."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """List the SSO providers linked to any account."""
+    _run_client_command(
+        json_output,
+        lambda c: c.admin_user_identities(username),
+        columns=["identities", "unlinkable"],
+    )
+
+
+@admin_users_app.command("unlink-identity")
+def admin_users_unlink_identity(
+    username: str = typer.Argument(help="Account to modify."),
+    provider: str = typer.Argument(help="Provider to unlink."),
+    yes: bool = typer.Option(False, "--yes", "-y", help="Skip the confirmation."),
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Unlink one SSO provider from any account.
+
+    The last one is refused here too: the owner may never have seen their API
+    key, so removing it would lock them out. Use ``admin users disable`` to cut
+    access instead, and rotate their key if they need to get back in.
+    """
+    _set_json(json_output)
+    if not yes:
+        if _state.get("json", False):
+            typer.echo("Refusing to unlink under --json without --yes.", err=True)
+            raise typer.Exit(1)
+        if not typer.confirm(f"Unlink {provider} from {username}?"):
+            typer.echo("Not unlinked.", err=True)
+            raise typer.Exit(1)
+    _run_client_command(
+        json_output,
+        lambda c: c.admin_delete_user_identity(username, provider),
+        columns=["ok", "username", "provider"],
+    )
 
 
 @admin_users_app.command("disable")

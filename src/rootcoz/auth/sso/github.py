@@ -36,6 +36,10 @@ class GitHubProvider(SSOProvider):
 
     name = "github"
     display_name = "GitHub"
+    # GitHub is OAuth2, not OIDC, so it names its two settings directly instead
+    # of inheriting the issuer/client pair from the OIDC base.
+    client_id_setting = "sso_github_client_id"
+    client_secret_setting = "sso_github_client_secret"  # pragma: allowlist secret
 
     #: GitHub.com's endpoints. A GitHub Enterprise Server installation serves its
     #: own and is therefore not supported by this provider (documented).

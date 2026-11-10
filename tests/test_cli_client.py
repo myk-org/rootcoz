@@ -1940,6 +1940,41 @@ class TestRootCozClientAuth:
         client = _make_client(handler)
         assert client.sso_device_approve("ABCD-EFGH")["ok"] is True
 
+    def test_user_identities(self):
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/user/identities"
+            return httpx.Response(200, json={"identities": [], "unlinkable": False})
+
+        client = _make_client(handler)
+        assert client.user_identities()["unlinkable"] is False
+
+    def test_delete_user_identity(self):
+        def handler(request):
+            assert request.method == "DELETE"
+            assert request.url.path == "/api/user/identities/github"
+            return httpx.Response(200, json={"ok": True, "provider": "github"})
+
+        client = _make_client(handler)
+        assert client.delete_user_identity("github")["ok"] is True
+
+    def test_admin_user_identities(self):
+        def handler(request):
+            assert request.url.path == "/api/admin/users/alice/identities"
+            return httpx.Response(200, json={"identities": []})
+
+        client = _make_client(handler)
+        assert client.admin_user_identities("alice") == {"identities": []}
+
+    def test_admin_delete_user_identity(self):
+        def handler(request):
+            assert request.method == "DELETE"
+            assert request.url.path == "/api/admin/users/alice/identities/google"
+            return httpx.Response(200, json={"ok": True})
+
+        client = _make_client(handler)
+        assert client.admin_delete_user_identity("alice", "google")["ok"] is True
+
     def test_sso_providers(self):
         def handler(request):
             assert request.url.path == "/api/auth/sso/providers"

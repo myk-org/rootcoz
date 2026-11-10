@@ -175,6 +175,26 @@ class RootCozClient:
         """Get current user info including can_view_reports. GET /api/auth/me"""
         return self._request("GET", "/api/auth/me")
 
+    def user_identities(self) -> dict[str, Any]:
+        """List the SSO identities linked to your account. GET /api/user/identities"""
+        return self._request("GET", "/api/user/identities")
+
+    def delete_user_identity(self, provider: str) -> dict[str, Any]:
+        """Unlink one provider from your account. DELETE /api/user/identities/{provider}"""
+        return self._request("DELETE", f"/api/user/identities/{provider}")
+
+    def admin_user_identities(self, username: str) -> dict[str, Any]:
+        """List any account's linked identities. GET /api/admin/users/{username}/identities"""
+        return self._request("GET", f"/api/admin/users/{username}/identities")
+
+    def admin_delete_user_identity(
+        self, username: str, provider: str
+    ) -> dict[str, Any]:
+        """Unlink a provider from any account. DELETE /api/admin/users/{username}/identities/{provider}"""
+        return self._request(
+            "DELETE", f"/api/admin/users/{username}/identities/{provider}"
+        )
+
     def sso_providers(self) -> dict[str, Any]:
         """List the SSO providers this deployment has configured.
 

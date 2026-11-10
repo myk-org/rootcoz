@@ -35,6 +35,13 @@ _STATE_PURPOSE = "rootcoz.sso.login_attempt"
 #: turn the callback into a redirector with a kilobyte payload.
 MAX_NEXT_LENGTH = 512
 
+#: What an attempt is for. ``login`` resolves or offers to create an account;
+#: ``link`` attaches the provider identity to the account already signed in and
+#: never touches account creation.
+MODE_LOGIN = "login"
+MODE_LINK = "link"
+MODES = frozenset({MODE_LOGIN, MODE_LINK})
+
 
 class StateError(Exception):
     """The state cookie is missing, unreadable, expired or not ours."""
@@ -51,6 +58,13 @@ class LoginAttempt:
         nonce: OIDC nonce echoed into the ID token, so the token is bound to this
             attempt and not just to this client.
         next_path: Where to send the user afterwards (already validated).
+        mode: ``login`` or ``link`` — sealed, so a callback cannot be talked into
+            linking when it was started as a login (or the reverse) by editing a
+            query parameter.
+        link_to: For a ``link`` attempt, the account that started it. Sealed for
+            the same reason: the cookie binds the attempt to a *browser*, and
+            without this a flow begun by one person could be finished into
+            somebody else's account.
     """
 
     provider: str
@@ -58,6 +72,8 @@ class LoginAttempt:
     code_verifier: str
     nonce: str
     next_path: str
+    mode: str = MODE_LOGIN
+    link_to: str = ""
 
 
 def ticket_binding(ticket: str) -> str:
@@ -142,14 +158,27 @@ def code_challenge(verifier: str) -> str:
 
 
 def new_attempt(
-    *, provider: str, next_path: str, ttl_seconds: int
+    *,
+    provider: str,
+    next_path: str,
+    ttl_seconds: int,
+    mode: str = MODE_LOGIN,
+    link_to: str = "",
 ) -> tuple[LoginAttempt, str, str]:
-    """Start a login attempt.
+    """Start a login or link attempt.
 
     Args:
         provider: Provider name the attempt is for.
         next_path: Requested post-login destination (sanitised here).
         ttl_seconds: How long the attempt stays valid.
+        mode: ``login`` (resolve an account) or ``link`` (attach this identity to
+            the account already signed in). Sealed with the rest of the attempt,
+            so the callback acts on what was started, not on what the query
+            string says now.
+        link_to: The account a ``link`` attempt belongs to (ignored for a login).
+
+    Raises:
+        ValueError: When ``mode`` is neither of :data:`MODES`.
 
     One sealed cookie per attempt. It is deleted when the login completes and
     left in place after a refusal until its TTL, so a transient provider error
@@ -161,12 +190,17 @@ def new_attempt(
         the provider.
     """
     verifier = secrets.token_urlsafe(48)
+    if mode not in MODES:
+        msg = f"Unknown SSO attempt mode: {mode}"
+        raise ValueError(msg)
     attempt = LoginAttempt(
         provider=provider,
         state=secrets.token_urlsafe(32),
         code_verifier=verifier,
         nonce=secrets.token_urlsafe(32),
         next_path=safe_next(next_path),
+        mode=mode,
+        link_to=link_to if mode == MODE_LINK else "",
     )
     payload = {
         "purpose": _STATE_PURPOSE,
@@ -175,6 +209,8 @@ def new_attempt(
         "verifier": attempt.code_verifier,
         "nonce": attempt.nonce,
         "next": attempt.next_path,
+        "mode": attempt.mode,
+        "link_to": attempt.link_to,
         "issued_at": int(time.time()),
         "ttl": ttl_seconds,
     }
@@ -223,10 +259,15 @@ def open_attempt(sealed: str, *, provider: str) -> LoginAttempt:
         raise StateError("state is missing its nonce or verifier")
     if not isinstance(nonce, str) or not nonce:
         raise StateError("state is missing its ID-token nonce")
+    mode = payload.get("mode", MODE_LOGIN)
+    if mode not in MODES:
+        raise StateError("state carries an unknown mode")
     return LoginAttempt(
         provider=provider,
         state=state,
         code_verifier=verifier,
         nonce=nonce,
         next_path=safe_next(str(payload.get("next", "/"))),
+        mode=mode,
+        link_to=str(payload.get("link_to", "")),
     )

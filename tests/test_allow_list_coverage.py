@@ -64,6 +64,10 @@ ALLOW_LIST_EXEMPT_ROUTES = {
     ("POST", "/api/validate-token"),
     ("POST", "/api/jobs/metadata/rules/preview"),
     ("DELETE", "/api/user/ai-credentials/{provider:path}"),
+    # Removing one of your own sign-in methods, for the same reason as removing
+    # your own AI key: a user dropped from the list must still be able to
+    # control how they sign in. The last one is refused by the handler anyway.
+    ("DELETE", "/api/user/identities/{provider}"),
 }
 
 MUTATING_METHODS = {"post", "put", "delete", "patch"}

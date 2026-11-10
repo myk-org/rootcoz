@@ -5211,6 +5211,57 @@ class TestAuthLoginCommand:
         assert "google" in result.output
         mock_client.sso_device_start.assert_not_called()
 
+    def test_auth_sso_identities_lists_linked_providers(self, mock_client):
+        mock_client.user_identities.return_value = {
+            "identities": [{"provider": "google", "email": "a@example.com"}],
+            "unlinkable": False,
+        }
+        result = runner.invoke(app, ["auth", "sso-identities"])
+        assert result.exit_code == 0
+        assert "google" in result.output
+
+    def test_auth_sso_unlink_asks_first(self, mock_client):
+        mock_client.delete_user_identity.return_value = {"ok": True}
+        declined = runner.invoke(app, ["auth", "sso-unlink", "google"], input="n\n")
+        assert declined.exit_code == 1
+        mock_client.delete_user_identity.assert_not_called()
+
+        agreed = runner.invoke(app, ["auth", "sso-unlink", "google", "--yes"])
+        assert agreed.exit_code == 0
+        mock_client.delete_user_identity.assert_called_once_with("google")
+
+    def test_auth_sso_unlink_refuses_to_skip_consent_under_json(self, mock_client):
+        result = runner.invoke(app, ["--json", "auth", "sso-unlink", "google"])
+        assert result.exit_code == 1
+        mock_client.delete_user_identity.assert_not_called()
+
+    def test_admin_users_unlink_identity_refuses_under_json(self, mock_client):
+        result = runner.invoke(
+            app, ["--json", "admin", "users", "unlink-identity", "alice", "google"]
+        )
+        assert result.exit_code == 1
+        mock_client.admin_delete_user_identity.assert_not_called()
+
+    def test_admin_users_identities(self, mock_client):
+        mock_client.admin_user_identities.return_value = {
+            "identities": [{"provider": "github"}],
+            "unlinkable": False,
+        }
+        result = runner.invoke(app, ["admin", "users", "identities", "alice"])
+        assert result.exit_code == 0
+        assert "github" in result.output
+
+    def test_admin_users_unlink_identity(self, mock_client):
+        mock_client.admin_delete_user_identity.return_value = {"ok": True}
+        result = runner.invoke(
+            app,
+            ["admin", "users", "unlink-identity", "alice", "google", "--yes"],
+        )
+        assert result.exit_code == 0
+        mock_client.admin_delete_user_identity.assert_called_once_with(
+            "alice", "google"
+        )
+
     def test_auth_sso_approve_shows_the_client_then_approves(self, mock_client):
         mock_client.sso_device_approve_info.return_value = {
             "user_code": "ABCD-EFGH",

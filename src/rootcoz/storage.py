@@ -503,6 +503,10 @@ DEFAULT_CREATED_VIA = "internal"
 #: How a users row came to exist. Reference data only — no authentication path
 #: reads it, and it is written once at creation (a later link never changes it).
 VALID_CREATED_VIA = ("internal", "admin", "proxy", *SSO_PROVIDERS)
+#: Prefix reserved for system identities (``rootcoz-ai`` and friends). Enforced
+#: by :func:`_validate_username`, the one check every creation path passes.
+RESERVED_USERNAME_PREFIX = "rootcoz"
+
 AI_SYSTEM_USERNAME = "rootcoz-ai"
 
 
@@ -565,6 +569,12 @@ def _validate_username(username: str) -> None:
     username = _normalize_username(username)
     if username == "admin":
         msg = "Username 'admin' is reserved"
+        raise ValueError(msg)
+    if username.startswith(RESERVED_USERNAME_PREFIX):
+        # One choke point: registration, SSO account creation and proxy
+        # provisioning all land here, so a reserved system identity cannot be
+        # created by whichever path forgets the check.
+        msg = f"Username '{username}' is reserved for system identities"
         raise ValueError(msg)
     if username in _SYSTEM_TAGS:
         msg = f"Username '{username}' conflicts with a reserved system tag"
@@ -10177,6 +10187,9 @@ async def add_user_identity(
     """
     _validate_sso_provider(provider)
     _validate_identity_subject(subject)
+    # No name validation here: this links an **existing** account, and a row that
+    # predates today's pattern must stay linkable. Creation is where the name
+    # rules apply (``create_user`` / ``create_user_with_identity``).
     username = _normalize_username(username)
     scrubbed_claims = _scrub_claims(raw_claims_json)
 
@@ -10259,7 +10272,7 @@ async def create_user_with_identity(
     status: str,
     role: str,
     created_via: str,
-) -> None:
+) -> str:
     """Create an account **and** its SSO link in one transaction, or neither.
 
     ``create_user`` cannot be reused here: it also answers "existing account
@@ -10277,10 +10290,20 @@ async def create_user_with_identity(
         role: Role for the new account.
         created_via: Provenance (the provider name).
 
+    Returns:
+        The raw API key, shown to the person once. An SSO-created account has no
+        other credential its owner has ever seen, and the last sign-in method
+        cannot be removed without one — so the key is part of creating the
+        account, not an afterthought.
+
     Raises:
-        ValueError: When the name is taken, or the subject is already linked.
+        ValueError: When the name is taken or reserved, when it is malformed, or
+            when the subject is already linked.
     """
     username = _normalize_username(username)
+    # The one name rule every creation path gets (``admin``, the ``rootcoz*``
+    # prefix, malformed names) — not only the callers that remember it.
+    _validate_username(username)
     _validate_sso_provider(provider)
     _validate_identity_subject(subject)
     _validate_user_status(status)
@@ -10327,6 +10350,7 @@ async def create_user_with_identity(
                 raise
 
     await _retry_contended(_attempt)
+    return raw_key
 
 
 async def delete_orphan_identity(provider: str, subject: str) -> bool:
@@ -10354,26 +10378,53 @@ async def delete_orphan_identity(provider: str, subject: str) -> bool:
         return cursor.rowcount > 0
 
 
-async def delete_user_identity(username: str, provider: str) -> bool:
-    """Unlink a provider from an account.
+async def unlink_user_identity(username: str, provider: str) -> str:
+    """Unlink a provider from an account, never leaving it without one.
+
+    The "last sign-in method cannot be removed" rule is enforced **inside** the
+    write, in one immediate transaction: a caller that read the list a moment ago
+    may be racing another tab, and a guard outside the delete lets two
+    concurrent removals each see two identities and leave zero.
 
     Args:
         username: The account to unlink from.
         provider: SSO provider name.
 
     Returns:
-        True when an identity was removed, False when there was none.
+        ``"deleted"``, ``"not_found"`` (this provider is not linked), or
+        ``"last"`` (it is the account's only identity, so nothing was removed).
     """
     _validate_sso_provider(provider)
     username = _normalize_username(username)
-    async with _connect_db() as db:
-        cursor = await db.execute(
-            "DELETE FROM user_identities WHERE provider = ? AND user_id ="
-            " (SELECT id FROM users WHERE username = ?)",
-            (provider, username),
-        )
-        await db.commit()
-        return cursor.rowcount > 0
+
+    async def _attempt() -> str:
+        async with _connect_db() as db:
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    "SELECT i.provider FROM user_identities i JOIN users u"
+                    " ON u.id = i.user_id WHERE u.username = ?",
+                    (username,),
+                )
+                providers = [row["provider"] for row in await cursor.fetchall()]
+                if provider not in providers:
+                    await db.rollback()
+                    return "not_found"
+                if len(providers) == 1:
+                    await db.rollback()
+                    return "last"
+                await db.execute(
+                    "DELETE FROM user_identities WHERE provider = ? AND user_id ="
+                    " (SELECT id FROM users WHERE username = ?)",
+                    (provider, username),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+            return "deleted"
+
+    return await _retry_contended(_attempt)
 
 
 def _normalize_user_code(user_code: str) -> str:
@@ -10665,7 +10716,7 @@ async def record_device_code_poll(device_code: str) -> bool:
                 raise
             return not too_soon
 
-    return await _with_lock_retry(_attempt)
+    return await _retry_contended(_attempt)
 
 
 async def count_live_device_codes() -> int:

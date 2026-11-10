@@ -2,7 +2,11 @@
   "groups": [
     {
       "name": "Getting Started",
-      "pages": ["quickstart", "deploy-rootcoz", "configuration-reference"]
+      "pages": [
+        "quickstart",
+        "deploy-rootcoz",
+        "configuration-reference"
+      ]
     },
     {
       "name": "Analyzing Results",
@@ -24,7 +28,11 @@
     },
     {
       "name": "Account and Administration",
-      "pages": ["manage-account-and-notifications", "manage-users-and-server-settings"]
+      "pages": [
+        "manage-account-and-notifications",
+        "sign-in-with-sso",
+        "manage-users-and-server-settings"
+      ]
     },
     {
       "name": "Reference",
