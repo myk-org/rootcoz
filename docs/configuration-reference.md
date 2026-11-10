@@ -236,6 +236,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
     | `PUBLIC_BASE_URL` | unset | string | no | no | yes |
     | `ADDITIONAL_REPOS` | empty | string | no | no | yes |
     | `MAX_CONCURRENT_REPO_CLONES` | `10` | integer > 0 | no | no | yes |
+    | `CHAT_CLONE_DEPTH` | `1` | integer ≥ 1 | no | no | yes |
    | `MAX_WORKSPACE_GRAPH_MB` | `1024` | integer 16–1048576 | no | no | yes |
     | `WAIT_FOR_COMPLETION` | `true` | boolean | no | no | yes |
     | `POLL_INTERVAL_MINUTES` | `2` | integer > 0 | no | no | yes |
@@ -254,6 +255,10 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
 
 
     `ADDITIONAL_REPOS` uses `name:url,name:url`, with an optional `:ref` and `@token` suffix per entry; names must be unique. `MAX_WAIT_MINUTES=0` means wait indefinitely. `PUBLIC_BASE_URL` is the only origin RootCoz will build absolute links from — request `Host` and `X-Forwarded-*` headers are never trusted, which is what blocks host-header injection in result and tracker links.
+
+    `MAX_CONCURRENT_REPO_CLONES` is the clone width for **both** paths — analysis and chat clone through the same fan-out and compete for the same process-wide slots. It is the only clone limit: `max_concurrent_ai_calls` describes LLM call width and has no bearing on cloning, so raising the clone ceiling raises the observed concurrency (and lowering it lowers it) with no other setting to cap it. Extra clone slots are consumed by the prompt's resource section, `copy_rootcoz_pi_resources` and graph indexing before the first AI call, not wasted.
+
+    `CHAT_CLONE_DEPTH` is the number of commits cloned per repository when a chat workspace is prepared, for the tests repository and every additional repository alike. **1 is the default on purpose:** the chat AI reads the working tree — `read`, `ls`, `find`, `grep`, the code graph — and never git history, so extra commits are transferred and stored once per repository and paid again on every re-clone, while nothing reads them. Raise it only if a chat session genuinely needs `git log` or `git show` from the agent's shell; a value of 50 on a 17-repository job is tens of times the clone cost for history nothing opens. The CLI takes the same value: `rootcoz admin settings set chat_clone_depth 1`, with `rootcoz admin settings history --key chat_clone_depth` for the audit trail of who changed it.
 
     `METADATA_RULES_FILE` points at a YAML or JSON file of name-based metadata rules. Rules load once and cache for the process lifetime, so edits need a restart. A broken rules file logs a warning and yields no rules rather than failing the server.
 
@@ -429,6 +434,7 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `PUBLIC_BASE_URL` | `public_base_url` | Server | runtime |
 | `ADDITIONAL_REPOS` | `additional_repos` | Server | runtime |
 | `MAX_CONCURRENT_REPO_CLONES` | `max_concurrent_repo_clones` | Server | runtime |
+| `CHAT_CLONE_DEPTH` | `chat_clone_depth` | Server | runtime |
 | `MAX_WORKSPACE_GRAPH_MB` | `max_workspace_graph_mb` | Workspace | runtime |
 | `WAIT_FOR_COMPLETION` | `wait_for_completion` | Server | runtime |
 | `POLL_INTERVAL_MINUTES` | `poll_interval_minutes` | Server | runtime |

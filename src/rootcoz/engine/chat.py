@@ -129,17 +129,6 @@ def _resolve_chat_repo_target(workspace: Path, repo_name: str) -> tuple[str, Pat
     return safe_name, target
 
 
-def _is_github_url(url: str) -> bool:
-    """Check if URL is a GitHub host (github.com or common GHE patterns)."""
-    from urllib.parse import urlsplit
-
-    try:
-        host = urlsplit(url).netloc.lower()
-        return host.endswith("github.com") or "github" in host
-    except TypeError, AttributeError, ValueError:
-        return False
-
-
 def purge_chat_staging(workspace: Path) -> None:
     """Drop a killed clone's staging residue from a chat workspace.
 
@@ -166,18 +155,23 @@ async def clone_chat_repos(
 
     Skips repos already present in the workspace.
     Returns True only when a repository was newly cloned.
-    ``on_repo`` is called with each repo name right before it is cloned, and
-    again as each clone ends -- with a repo still in flight, or with "" once the
-    batch is done -- so the name never outlives the clone it names.
+    ``on_repo`` is called with the clone width, e.g. ``cloning 3 of 17``, as
+    clones are admitted and as they end -- with the remaining width, or with ""
+    once the batch is done -- so a serial regression is visible in the UI and
+    not only in the log.
     ``failed`` collects the names that could not be cloned: a chat still starts
     without them, so the caller is what tells the user they are missing.
+    Every clone is a **read**, so it uses the same credentials as analysis: the
+    per-repo token on that repo's own URL, and the caller's resolved repo token
+    for the tests repo. No host is special-cased -- the write path is what
+    guards credentials, not this one.
 
     Note:
         Repo tokens may be embedded in git remote URLs within the workspace.
         The workspace is in /tmp/ owned by the server process. Tokens are
         cleaned up when repos are deleted via cleanup_chat_repos().
     """
-    from rootcoz.config import parse_repo_ref
+    from rootcoz.config import get_settings, parse_repo_ref
     from rootcoz.engine.core import CloneRequest, clone_repo_batch
     from rootcoz.models import AdditionalRepo
     from rootcoz.repository import (
@@ -196,6 +190,11 @@ async def clone_chat_repos(
         return False
 
     purge_chat_staging(workspace)
+
+    # The AI reads the working tree, never git history, so history is cost
+    # without benefit -- but it is a setting, because a chat that needs `git
+    # log` should not need a code change to get it (#547).
+    depth = get_settings().chat_clone_depth
 
     def report_failure(name: str, exc: BaseException) -> None:
         """One redacted line: the message carries a token-bearing remote."""
@@ -234,7 +233,7 @@ async def clone_chat_repos(
                 name=safe_name,
                 url=url,
                 target=target,
-                depth=50,
+                depth=depth,
                 branch=ref,
                 token=token,
             )
@@ -251,12 +250,7 @@ async def clone_chat_repos(
                 exc,
             )
         else:
-            # Only use the token for GitHub hosts (prevent credential leaks to
-            # other hosts).
-            token = (
-                user_repo_token if user_repo_token and _is_github_url(clean_url) else ""
-            )
-            plan(raw_name, clean_url, ref, token)
+            plan(raw_name, clean_url, ref, user_repo_token)
 
     for repo in additional_repos:
         plan(
@@ -268,19 +262,22 @@ async def clone_chat_repos(
 
     # Overlapping clones mean the detail has to be republished when one ends:
     # naming only the last-admitted repo kept a finished clone on screen until
-    # the whole batch was done.
+    # the whole batch was done, and it made a wide fan-out look serial (#547).
+    total = len(requests)
     in_flight: list[str] = []
+
+    def publish_width() -> None:
+        if on_repo:
+            on_repo(f"cloning {len(in_flight)} of {total}" if in_flight else "")
 
     async def started(request: CloneRequest) -> None:
         logger.info("Chat: cloning repo %s into %s", request.name, request.target)
         in_flight.append(request.name)
-        if on_repo:
-            on_repo(request.name)
+        publish_width()
 
     async def finished(request: CloneRequest, _outcome: str) -> None:
         in_flight.remove(request.name)
-        if on_repo:
-            on_repo(in_flight[0] if in_flight else "")
+        publish_width()
 
     cloned_any = False
     try:

@@ -689,6 +689,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "public_base_url",
         "additional_repos",
         "max_concurrent_repo_clones",
+        "chat_clone_depth",
         "wait_for_completion",
         "poll_interval_minutes",
         "max_wait_minutes",

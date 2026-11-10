@@ -963,3 +963,42 @@ def test_results_retention_bounds_are_single_sourced():
     row_limits = {meta.le for meta in rows_field.metadata if hasattr(meta, "le")}
     assert SQLITE_INT_MAX in row_limits
     assert storage.SQLITE_INT_MAX is SQLITE_INT_MAX
+
+
+# --- chat clone depth (#547) ---
+
+
+def test_chat_clone_depth_is_a_server_setting(client, monkeypatch):
+    """Registered, default 1, env-supplied default, DB override wins, ≥ 1 enforced."""
+    assert "chat_clone_depth" in main._SETTINGS_CATEGORIES["Server"]
+    by_key = {
+        item["key"]: item
+        for item in client.get("/api/admin/settings", headers=_admin_headers()).json()
+    }
+    row = by_key["chat_clone_depth"]
+    assert (row["category"], row["default"], row["env_var"]) == (
+        "Server",
+        "1",
+        "CHAT_CLONE_DEPTH",
+    )
+    assert (row["restart_required"], row["sensitive"]) == (False, False)
+
+    # 0 commits is not a clone. The bound is named, never applied silently.
+    rejected = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"chat_clone_depth": 0}},
+    )
+    assert rejected.status_code == 400
+
+    monkeypatch.setenv("CHAT_CLONE_DEPTH", "4")
+    clear_settings_cache()
+    assert get_settings().chat_clone_depth == 4
+    saved = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"chat_clone_depth": "2"}},
+    )
+    assert saved.status_code == 200
+    clear_settings_cache()
+    assert get_settings().chat_clone_depth == 2

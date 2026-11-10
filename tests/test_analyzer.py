@@ -1588,7 +1588,7 @@ class TestCloneAdditionalRepos:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize(
-        ("clone_limit", "ai_calls", "share"), [(10, 3, 3), (2, 10, 2), (10, 10, 10)]
+        ("clone_limit", "ai_calls", "share"), [(10, 1, 10), (10, 100, 10), (2, 100, 2)]
     )
     async def test_one_analysis_never_exceeds_its_clone_share(
         self,
@@ -1598,7 +1598,13 @@ class TestCloneAdditionalRepos:
         ai_calls: int,
         share: int,
     ) -> None:
-        """One analysis may not occupy the whole server clone budget (#461)."""
+        """Clone admission follows the clone ceiling alone (#547).
+
+        ``max_concurrent_ai_calls`` describes LLM call width; it used to cap the
+        clone share as a fairness proxy (#466), which made
+        ``max_concurrent_repo_clones`` inert above 3. Neither a narrow nor a
+        wide AI width may move the observed clone concurrency now.
+        """
         from rootcoz.engine import core as core_module
 
         repos = [
@@ -1759,8 +1765,8 @@ class TestCloneAdditionalRepos:
         assert set(attempted) == {repo["name"] for repo in repos}
         assert set(cloned) == set(attempted) - {"repo5"}
         assert all(path == workspace / name for name, path in cloned.items())
-        # The per-analysis share, never the raw process ceiling (#461).
-        assert peak == min(clone_limit, ai_calls)
+        # The clone ceiling, never the AI call width (#547).
+        assert peak == clone_limit
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("clone_limit", [10, 3])
