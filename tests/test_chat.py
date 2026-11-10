@@ -4,6 +4,7 @@ import asyncio
 import logging
 import os
 import time
+from collections.abc import Callable
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, ClassVar
@@ -13,7 +14,6 @@ import pytest
 from pi_sidecar_client import AIResult
 
 from rootcoz import storage
-from rootcoz.cli.main import CHAT_WAIT_SECONDS
 from rootcoz.engine.chat import (
     build_admin_custom_tools,
     build_admin_system_prompt,
@@ -3241,18 +3241,22 @@ async def _seed_chat_session(job_id: str, username: str = "alice") -> None:
     )
 
 
-#: The CLI's own patience for this same signal (``src/rootcoz/cli/main.py``), so the
-#: test waits exactly as long as a real client does. The bound exists to end a
-#: runaway wait; it never decides that a preparation was too slow.
-_CHAT_PREP_WAIT_SECONDS = CHAT_WAIT_SECONDS
+#: A test's own ceiling on the wait for preparation: generous against the 10 s that
+#: used to flake, short enough that a genuinely hung preparation fails the suite in a
+#: minute. It is deliberately not ``CHAT_WAIT_SECONDS`` -- that is the CLI's 600 s of
+#: production patience, and a unit test that spends ten wall-clock minutes to prove a
+#: timeout is broken itself. The timeout tests inject a fake clock and spend none of it.
+_CHAT_PREP_WAIT_CEILING_SECONDS = 60.0
 _CHAT_PREP_POLL_SECONDS = 0.01
 
 
 def _await_preparation(
     test_client,
     path: str,
-    timeout: float = _CHAT_PREP_WAIT_SECONDS,
+    timeout: float = _CHAT_PREP_WAIT_CEILING_SECONDS,
     headers: dict[str, str] | None = None,
+    clock: Callable[[], float] = time.monotonic,
+    sleep: Callable[[float], None] = time.sleep,
 ) -> None:
     """Poll history until the background preparation has ended.
 
@@ -3260,13 +3264,17 @@ def _await_preparation(
     task created on the portal's loop: the server's own state is the signal. The
     phase is per user, so the caller's own headers decide whose preparation ends.
 
-    Elapsed time comes from ``monotonic``, like the deadlines in ``main.py``, and the
-    bound is the CLI's own patience, not a number picked here. The bound is checked on
-    every poll, whatever the phase label does. When it expires, the message names the
-    last phase the server published and how long it has been there -- a reading, not a
-    verdict.
+    Elapsed time comes from ``clock`` (``monotonic``, like the deadlines in ``main.py``)
+    and each poll waits on ``sleep``. Both are injected so a timeout test can pass the
+    ``AdvancingClock`` pair from ``tests.conftest`` and simulate the wait instead of
+    spending it; the default ceiling is a test bound, not the CLI's patience, because
+    no test may burn ``CHAT_WAIT_SECONDS`` of wall clock to prove a deadline.
+
+    The bound is checked on every poll, whatever the phase label does. When it expires,
+    the message names the last phase the server published and how long it has been
+    there -- a reading, not a verdict.
     """
-    started = time.monotonic()
+    started = clock()
     seen: dict[str, float] = {}  # distinct labels in order, with the moment first seen
     last = ""
     last_at = started
@@ -3276,7 +3284,7 @@ def _await_preparation(
             return
         phase = observed.get("phase") or "?"
         label = f"{phase} ({observed['detail']})" if observed.get("detail") else phase
-        now = time.monotonic()
+        now = clock()
         if label != last:
             last, last_at = label, now
         seen.setdefault(label, now)
@@ -3286,7 +3294,7 @@ def _await_preparation(
                 f"{timeout:.0f} s (last phase: {label}, unchanged for "
                 f"{now - last_at:.0f} s); phases seen: {' -> '.join(seen)}"
             )
-        time.sleep(_CHAT_PREP_POLL_SECONDS)
+        sleep(_CHAT_PREP_POLL_SECONDS)
 
 
 class _ScriptedChat:
@@ -3315,42 +3323,49 @@ class _ScriptedChat:
         return SimpleNamespace(json=lambda: {"preparing": state})
 
 
-def test_a_slow_preparation_is_awaited(monkeypatch) -> None:
-    """A label held far past the old 10 s passes: the bound is the CLI's own patience.
+def test_a_slow_preparation_is_awaited() -> None:
+    """A label held far past the old 10 s passes: the bound is a minute, not ten.
 
-    One poll = one ``sleep(_CHAT_PREP_POLL_SECONDS)`` = 10 fake seconds, so the single
-    label dwells 400 s and the default bound is what lets it through.
+    One poll = one ``sleep(_CHAT_PREP_POLL_SECONDS)`` = 1 fake second, so the single
+    label dwells 40 s -- four times the old 10 s, still under the 60 s ceiling. The fake
+    clock keeps the wait simulated, so the test costs no wall clock.
     """
-    monkeypatch.setattr("tests.test_chat.time", AdvancingClock(step=10.0))
+    fake = AdvancingClock(step=1.0)
     client = _ScriptedChat([{"phase": "cloning", "detail": "tests-repo"}] * 40 + [None])
 
-    _await_preparation(client, "/api/chat/job")
+    _await_preparation(client, "/api/chat/job", clock=fake.monotonic, sleep=fake.sleep)
 
-    assert client.calls == 41  # 40 label polls (400 s) plus the clearing one
+    assert client.calls == 41  # 40 label polls (40 s) plus the clearing one
 
 
-def test_a_preparation_that_never_ends_reports_the_last_phase_and_elapsed(
-    monkeypatch,
-) -> None:
-    """A preparation that never ends stops at the bound and reports what it saw.
+def test_a_preparation_that_never_ends_reports_the_last_phase_and_elapsed() -> None:
+    """A preparation that never ends stops at the ceiling and reports what it saw.
 
     The label changes on every poll, so the bound firing proves it is checked
-    unconditionally rather than only on a repeating label.
+    unconditionally rather than only on a repeating label. Ten fake seconds per poll
+    reach the 60 s ceiling in seven polls and no wall clock; the real-time assertion is
+    the regression guard -- put a real ``sleep`` back in the poller and it fails here
+    instead of quietly costing the suite a minute per run.
     """
-    monkeypatch.setattr("tests.test_chat.time", AdvancingClock(step=10.0))
+    fake = AdvancingClock(step=10.0)
     client = _ScriptedChat(
         lambda call: {"phase": "cloning", "detail": f"repo-{'a' if call % 2 else 'b'}"}
     )
 
+    real_started = time.monotonic()
     with pytest.raises(AssertionError) as excinfo:
-        _await_preparation(client, "/api/chat/job")
+        _await_preparation(
+            client, "/api/chat/job", clock=fake.monotonic, sleep=fake.sleep
+        )
+    wall_clock = time.monotonic() - real_started
 
+    assert wall_clock < 1.0, f"the timeout path spent {wall_clock:.1f} s of real time"
     message = str(excinfo.value)
-    assert "did not finish within 600 s" in message
+    assert "did not finish within 60 s" in message
     assert "last phase: cloning (repo-a)" in message
     assert "phases seen: cloning (repo-a) -> cloning (repo-b)" in message
     assert "never ended" not in message
-    assert client.calls == 61  # t = 600 s on the 61st poll
+    assert client.calls == 7  # t = 60 s on the 7th poll
 
 
 async def _start_chat(
