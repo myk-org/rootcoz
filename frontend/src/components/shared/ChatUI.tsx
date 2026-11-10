@@ -154,6 +154,13 @@ export function ChatUI({
   const [sessionStarted, setSessionStarted] = useState(false)
   const [sessionChoice, setSessionChoice] = useState<SessionChoice | null>(null)
   const [starting, setStarting] = useState(false)
+  // A 202 means the server prepares the workspace; `starting` then stays true
+  // until the server reports a session, a failed row or no preparation at all.
+  const prepRunningRef = useRef(false)
+  // Counts the history answers in which the client saw a preparation end (a
+  // session or a failed row, with no phase). A 202 whose POST began before such
+  // an answer describes a preparation already over, so it must not take Start.
+  const settleMarkerRef = useRef(0)
   const [initStepIndex, setInitStepIndex] = useState(0)
   const [prepPhase, setPrepPhase] = useState<{ phase: string; detail: string } | null>(null)
   const [clearing, setClearing] = useState(false)
@@ -265,15 +272,16 @@ export function ChatUI({
 
   const historyIsCurrent = useCallback((generation: number) =>
     mountedRef.current && !clearingRef.current && historyGenerationRef.current === generation, [])
-  // Server-driven prep progress; initStepIndex > 0 means POST /init already returned.
+  // Server-driven prep progress: `preparing` is what the server reports, so a
+  // reload mid-preparation shows the same list as the click that started it.
   const prepActiveIndex = useMemo(() => {
-    if (initStepIndex > 0) return PREP_STEPS.length
     const found = PREP_STEPS.findIndex(s => s.phase === prepPhase?.phase)
     return found === -1 ? 0 : found
-  }, [initStepIndex, prepPhase])
-  const prepStatus = prepPhase && initStepIndex === 0
+  }, [prepPhase])
+  const prepStatus = prepPhase
     ? `${PREP_STEPS[prepActiveIndex]?.label ?? INIT_STEPS[0]}${prepPhase.detail ? `: ${prepPhase.detail}` : ''}...`
     : INIT_STEPS[initStepIndex]
+  const prepVisible = !sessionStarted && (starting || Boolean(prepPhase))
   const validPair = isAnalysisAiAvailable(providers, providerStatus, aiProvider, aiModel, false, canUseServerProviders, canUseFreeProviders)
   const canSend = Boolean(sessionStarted && !clearing && input.trim() && !sendBusy)
   const sendBlockedReason = clearing ? 'Clearing chat session'
@@ -299,6 +307,21 @@ export function ChatUI({
     }
     return { history, generation }
   }, [apiBasePath])
+
+  // The server is the only one that knows when a preparation ended: a session, a
+  // failed row, or no `preparing` at all.
+  const settlePreparation = useCallback((history: ChatHistory) => {
+    const failed = history.messages.some(m => m.role === 'assistant' && m.status === 'failed')
+    if (history.active_session || failed || !history.preparing) {
+      // Only a positive end product marks a settle: a merely empty history can
+      // predate the server registering the preparation, and must not block a
+      // 202 that is its own first report.
+      if (!history.preparing && (history.active_session || failed)) settleMarkerRef.current++
+      if (!prepRunningRef.current) return
+      prepRunningRef.current = false
+      setStarting(false)
+    }
+  }, [])
 
   const applySession = useCallback((active: ChatHistory['active_session'], version?: string) => {
     sessionVersionRef.current = active ? version ?? null : null
@@ -376,6 +399,7 @@ export function ChatUI({
         if (!ignore && historyIsCurrent(generation)) {
           setMessages(msgs)
           setPrepPhase(res.preparing ?? null)
+          settlePreparation(res)
           const active = res.active_session
           if (active || !confirmedInitRef.current) applySession(active, res.active_session_version)
           console.info('[ChatUI] Chat history loaded, active session:', !!active)
@@ -396,12 +420,41 @@ export function ChatUI({
     setPrepPhase(null)
     setError('')
     console.info('[ChatUI] Starting chat session')
+    // A 202 hands the wait to `settlePreparation`: `starting` must survive this
+    // function's `finally` or Start becomes clickable again mid-preparation.
+    const startGeneration = historyGenerationRef.current
+    const startSettleMarker = settleMarkerRef.current
     try {
-      const result = await api.post<{ ready: boolean; session_id?: string }>(`${apiBasePath}/init`, {
+      const result = await api.post<{
+        ready: boolean
+        session_id?: string
+        preparing?: { phase: string; detail: string } | null
+      }>(`${apiBasePath}/init`, {
         ai_provider: aiProvider, ai_model: aiModel,
       })
       if (!mountedRef.current) return
-      if (!result.ready || !result.session_id) throw new Error('Chat session unavailable. Clear chat and Start a new session.')
+      if (!result.ready || !result.session_id) {
+        // A 202 means the server is preparing the workspace: there is nothing to
+        // report as unavailable, and the phase list is the progress.
+        if (result.preparing) {
+          // The 202 is the server saying a preparation is running, and it owns
+          // `starting` before any generation check: a sync that raced this
+          // request was answered before the server registered the preparation,
+          // so its "no preparing" cannot be read as "already ended". But a sync
+          // that reported the preparation's end after this POST began already
+          // answered it — nothing re-syncs, so taking Start here would leave it
+          // disabled until a reload. Only the phase text is generation-gated — a
+          // newer one must not be rewound.
+          if (settleMarkerRef.current === startSettleMarker) prepRunningRef.current = true
+          if (historyGenerationRef.current === startGeneration) {
+            setPrepPhase(result.preparing)
+            setInitStepIndex(0)
+          }
+          console.info('[ChatUI] Chat preparation started in the background')
+          return
+        }
+        throw new Error('Chat session unavailable. Clear chat and Start a new session.')
+      }
       confirmedInitRef.current = true
       setSessionChoice({ provider: aiProvider, model: aiModel, credentialSource: '' })
       setSessionStarted(true)
@@ -431,7 +484,9 @@ export function ChatUI({
       console.warn('[ChatUI] Chat start failed')
     } finally {
       startInFlightRef.current = false
-      if (mountedRef.current) setStarting(false)
+      // A handed-off preparation still owns the spinner: `settlePreparation` is
+      // the only thing that ends one, and it clears this ref first.
+      if (mountedRef.current && !prepRunningRef.current) setStarting(false)
     }
   }
 
@@ -466,6 +521,7 @@ export function ChatUI({
         setMessages(history.messages)
         setPrepPhase(history.preparing ?? null)
         applySession(history.active_session, history.active_session_version)
+        settlePreparation(history)
         setLoadingHistory(false)
         setHistoryFailed(false)
         console.info('[ChatUI] Chat synchronized, active session:', !!history.active_session)
@@ -563,7 +619,7 @@ export function ChatUI({
       startPollForResponse(res.assistant_message_id)
     } catch (err) {
       if (!mountedRef.current) return
-      setError(err instanceof Error ? err.message : 'Failed to send message')
+      setError(extractApiDetail(err) ?? (err instanceof Error ? err.message : 'Failed to send message'))
       setInput(trimmed)
       console.warn('[ChatUI] Send failed')
     } finally {
@@ -595,7 +651,10 @@ export function ChatUI({
   }, [messages])
 
   const handleNewSession = useCallback(async () => {
-    if (clearingRef.current || clearing || sendInFlightRef.current) return
+    // A clear must not overtake the Start request it cannot see yet: before
+    // the 202, the server has no preparation to answer 425, so a DELETE here
+    // would be followed by the session this Start is about to create.
+    if (startInFlightRef.current || clearingRef.current || clearing || sendInFlightRef.current) return
     clearingRef.current = true
     historyGenerationRef.current++
     setClearing(true)
@@ -622,6 +681,8 @@ export function ChatUI({
       await api.delete(apiBasePath, undefined, { headers: { 'If-Match': history.active_session_version } })
       historyGenerationRef.current++
       confirmedInitRef.current = false
+      prepRunningRef.current = false
+      setStarting(false)
       cancelPoll()
       setSessionStarted(false)
       setSessionChoice(null)
@@ -634,7 +695,7 @@ export function ChatUI({
         setError('Chat session changed in another tab. History refreshed; review it before clearing again.')
         console.info('[ChatUI] Chat clear conflict, refreshing history')
       } else {
-        setError(err instanceof Error ? err.message : 'Failed to clear chat')
+        setError(extractApiDetail(err) ?? (err instanceof Error ? err.message : 'Failed to clear chat'))
         console.warn('[ChatUI] Chat clear failed')
       }
     } finally {
@@ -685,7 +746,12 @@ export function ChatUI({
               <div className="flex items-center gap-3">
                 <div className="w-[160px]"><AnalysisProviderSelect value={aiProvider} onChange={(v) => setAiPair(v, '')} forceServer={false} /></div>
                 <div className="w-[240px]"><AnalysisModelSelect provider={aiProvider} value={aiModel} onChange={(model) => setAiPair(aiProvider, model, { commit: false })} onCommit={(model) => setAiPair(aiProvider, model)} forceServer={false} hideNotice /></div>
-                <Button size="sm" onClick={handleStart} disabled={!validPair || starting || clearing || loadingHistory || historyFailed}>
+                <Button
+                  size="sm"
+                  onClick={handleStart}
+                  disabled={!validPair || starting || clearing || loadingHistory || historyFailed}
+                  aria-label="Start Chat"
+                >
                   {starting ? <Loader2 className="h-4 w-4 animate-spin" /> : 'Start Chat'}
                 </Button>
               </div>
@@ -712,7 +778,7 @@ export function ChatUI({
               size="sm"
               className="h-7 px-3 text-xs"
               onClick={handleNewSession}
-              disabled={sendBusy || starting || clearing || loadingHistory}
+              disabled={sendBusy || clearing || loadingHistory}
             >
               New Session
             </Button>
@@ -733,7 +799,7 @@ export function ChatUI({
         {!sessionStarted && !loadingHistory && (
           <p className="px-6 pt-2 text-xs text-text-tertiary" role="status">Select an available AI provider and model, then Start Chat. History remains visible until you clear it.</p>
         )}
-        {starting && <div className="px-6 pt-2 text-xs" role="status">
+        {prepVisible && <div className="px-6 pt-2 text-xs" role="status">
           <p>{prepStatus}</p>
           {PREP_STEPS.map((step, i) => <StepIndicator
             key={step.phase}

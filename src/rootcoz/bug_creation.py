@@ -909,7 +909,9 @@ async def create_jira_bug(
     if not connection.browse_base:
         raise ValueError(
             "Jira service account mode cannot build issue links: JIRA_SITE_URL "
-            "is required for browse links"
+            "must be set to the Jira site URL (e.g. "
+            "https://<site>.atlassian.net) — never the api.atlassian.com "
+            "gateway — because browse links are built from it"
         )
 
     headers: dict[str, str] = {"Content-Type": "application/json", **connection.headers}

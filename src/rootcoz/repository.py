@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
 import subprocess
@@ -123,6 +124,19 @@ def _scrub_credentials(target_dir: Path, repo_url: str | HttpUrl) -> None:
             check=False,
             capture_output=True,
         )
+
+
+def _staged_name(target_dir: Path) -> str:
+    """The target's own name, refused unless it is a plain path component.
+
+    ``clone_into`` clones into ``<target's parent>/.staging/<name>`` and clears
+    that path first, so a name like ``..`` would make the staging path the
+    caller's workspace and the clearing would delete its every child.
+    """
+    name = target_dir.name
+    if not name or name in (".", "..") or Path(name).name != name:
+        raise ValueError(f"Invalid clone target name: {name!r}")
+    return name
 
 
 def _validate_repo_url(repo_url: str | HttpUrl) -> None:
@@ -309,21 +323,43 @@ class RepositoryManager:
             ValueError: If repo_url uses an unsafe scheme.
         """
         _validate_repo_url(repo_url)
-        target_dir.mkdir(parents=True, exist_ok=True)
+        staging = target_dir.parent / ".staging" / _staged_name(target_dir)
+        staging.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        staging.parent.chmod(0o700)
+        # A clone appears in place only once it is complete. ``git clone``
+        # creates ``.git`` before it fetches, so a partial tree in the target
+        # would be listed, indexed and read as a finished repository — and the
+        # staging tree is one level below the workspace, where no scanner looks.
+        if staging.is_symlink() or staging.exists():
+            delete_tree(staging)
         clone_url = str(repo_url)
         if token:
             clone_url = _inject_token_into_url(clone_url, token)
+        failed = True
         try:
             _clone_by_ref_type(
                 clone_url,
-                target_dir,
+                staging,
                 branch=branch,
                 depth=depth,
                 log_prefix="Cloning repository into",
             )
+            failed = False
         finally:
             if token:
-                _scrub_credentials(target_dir, repo_url)
+                # Aimed at the staging tree: it is where the injected remote
+                # landed, and it reaches transcripts the agent can read.
+                _scrub_credentials(staging, repo_url)
+            if failed:
+                delete_tree(staging)
+        try:
+            os.replace(staging, target_dir)
+        except OSError:
+            delete_tree(staging)
+            raise
+        # The shared ``.staging`` parent stays: removing it after our own rename
+        # deletes the parent of a sibling clone that has not created its child
+        # yet, and that clone then lands nowhere. Chat purges the whole tree.
         return target_dir
 
     def create_workspace(self) -> Path:

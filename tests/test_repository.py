@@ -14,6 +14,38 @@ from rootcoz.repository import (
 )
 
 
+def staging_of(target: Path) -> Path:
+    """Where ``clone_into`` clones before renaming onto ``target``."""
+    return target.parent / ".staging" / target.name
+
+
+def clone_fails_then_succeeds(error: Exception):
+    """A ``Repo.clone_from`` stand-in that raises ``error`` once, then clones.
+
+    An iterable ``side_effect`` yields *return values*, it does not call them, so
+    the retry path needs a callable to create the staging leaf.
+    """
+
+    def clone(url, directory, **_kwargs) -> None:
+        if not clone.failed:  # type: ignore[attr-defined]
+            clone.failed = True  # type: ignore[attr-defined]
+            raise error
+        clone_into_staging(url, directory)
+
+    clone.failed = False  # type: ignore[attr-defined]
+    return clone
+
+
+def clone_into_staging(url, directory, **_kwargs) -> MagicMock:
+    """A ``Repo.clone_from`` stand-in that creates the staging leaf it clones into.
+
+    ``clone_into`` never pre-creates the repository directory — only its
+    ``.staging`` parent — so every fake that replaces ``Repo`` has to.
+    """
+    Path(directory).mkdir(parents=True, exist_ok=True)
+    return MagicMock()
+
+
 class TestRepositoryManager:
     """Tests for the RepositoryManager class."""
 
@@ -214,14 +246,15 @@ class TestCloneInto:
 
     @patch("rootcoz.repository.Repo")
     def test_clone_into_creates_directory(self, mock_repo: MagicMock, tmp_path) -> None:
-        """Test that clone_into creates the target directory and clones."""
+        """The clone lands in the staging tree, then the target holds it."""
         manager = RepositoryManager()
         target = tmp_path / "my-repo"
+        mock_repo.clone_from.side_effect = clone_into_staging
         result = manager.clone_into("https://github.com/org/repo", target, depth=1)
         assert result == target
         assert target.exists()
         mock_repo.clone_from.assert_called_once_with(
-            "https://github.com/org/repo", target, depth=1
+            "https://github.com/org/repo", staging_of(target), depth=1
         )
 
     @patch("rootcoz.repository.Repo")
@@ -231,6 +264,7 @@ class TestCloneInto:
         """Test that clone_into does NOT add directory to temp_dirs."""
         manager = RepositoryManager()
         target = tmp_path / "my-repo"
+        _mock_repo.clone_from.side_effect = clone_into_staging
         manager.clone_into("https://github.com/org/repo", target)
         assert target not in manager.temp_dirs
 
@@ -254,18 +288,17 @@ class TestCloneWithSslRetry:
         """clone_into retries with GIT_SSL_NO_VERIFY on cert failure."""
         manager = RepositoryManager()
         with patch("rootcoz.repository.Repo.clone_from") as mock_clone:
-            mock_clone.side_effect = [
+            mock_clone.side_effect = clone_fails_then_succeeds(
                 GitCommandError(
                     "git clone",
                     128,
                     stderr="server verification failed: certificate signer not trusted",
-                ),
-                MagicMock(),
-            ]
+                )
+            )
             target = tmp_path / "repo"
-            target.mkdir()
             manager.clone_into("https://example.com/repo", target)
             assert mock_clone.call_count == 2
+            assert target.exists()
             _, kwargs = mock_clone.call_args
             assert kwargs.get("env", {}).get("GIT_SSL_NO_VERIFY") == "1"
 
@@ -284,11 +317,11 @@ class TestCloneWithSslRetry:
         """Successful clone doesn't trigger retry."""
         manager = RepositoryManager()
         with patch("rootcoz.repository.Repo.clone_from") as mock_clone:
-            mock_clone.return_value = MagicMock()
+            mock_clone.side_effect = clone_into_staging
             target = tmp_path / "repo"
-            target.mkdir()
             manager.clone_into("https://example.com/repo", target)
             assert mock_clone.call_count == 1
+            assert target.exists()
 
     def test_clone_retries_on_ssl_error(self, tmp_path) -> None:
         """clone() retries with GIT_SSL_NO_VERIFY on SSL cert failure."""
@@ -518,28 +551,38 @@ class TestCloneWithSslRetryCleanup:
     """Tests for Finding 2: partial clone cleanup before SSL retry."""
 
     def test_partial_clone_cleaned_before_retry(self, tmp_path) -> None:
-        """After a failed SSL clone, the target dir is cleaned before retry."""
+        """The SSL retry cleans the staging residue, not a caller's target.
+
+        The failed clone lives in ``<workspace>/.staging/<name>`` now, so that is
+        the tree the retry has to clear before cloning again.
+        """
         manager = RepositoryManager()
         target = tmp_path / "repo"
-        target.mkdir()
-        # Create a partial file in the target to simulate partial clone
-        partial_file = target / "partial-object"
-        partial_file.write_text("partial data")
+        staging = staging_of(target)
 
-        with patch("rootcoz.repository.Repo.clone_from") as mock_clone:
-            mock_clone.side_effect = [
-                GitCommandError(
-                    "git clone",
-                    128,
-                    stderr="server verification failed: certificate signer not trusted",
-                ),
-                MagicMock(),
-            ]
+        def clone(url, directory, **_kwargs) -> None:
+            directory = Path(directory)
+            if clone.retried:  # type: ignore[attr-defined]
+                assert not (directory / "partial-object").exists(), (
+                    "the retry cloned into the residue"
+                )
+                clone_into_staging(url, directory)
+                return
+            clone.retried = True  # type: ignore[attr-defined]
+            directory.mkdir(parents=True, exist_ok=True)
+            (directory / "partial-object").write_text("partial data")
+            raise GitCommandError(
+                "git clone",
+                128,
+                stderr="server verification failed: certificate signer not trusted",
+            )
+
+        clone.retried = False  # type: ignore[attr-defined]
+
+        with patch("rootcoz.repository.Repo.clone_from", side_effect=clone):
             manager.clone_into("https://example.com/repo", target)
 
-        # The partial file should have been removed before the retry
-        assert not partial_file.exists()
-        # Target dir should still exist (recreated for the retry)
+        assert not staging.exists()
         assert target.exists()
 
     @pytest.mark.parametrize(
@@ -707,11 +750,15 @@ class TestCloneBranchParameter:
         """clone_into forwards branch to _clone_with_ssl_retry."""
         manager = RepositoryManager()
         target = tmp_path / "my-repo"
+        mock_repo.clone_from.side_effect = clone_into_staging
         manager.clone_into(
             "https://github.com/org/repo", target, depth=1, branch="feature-x"
         )
         mock_repo.clone_from.assert_called_once_with(
-            "https://github.com/org/repo", target, depth=1, branch="feature-x"
+            "https://github.com/org/repo",
+            staging_of(target),
+            depth=1,
+            branch="feature-x",
         )
 
     @patch("rootcoz.repository.Repo")
@@ -721,9 +768,10 @@ class TestCloneBranchParameter:
         """clone_into does not pass branch when empty string."""
         manager = RepositoryManager()
         target = tmp_path / "my-repo"
+        mock_repo.clone_from.side_effect = clone_into_staging
         manager.clone_into("https://github.com/org/repo", target, depth=1, branch="")
         mock_repo.clone_from.assert_called_once_with(
-            "https://github.com/org/repo", target, depth=1
+            "https://github.com/org/repo", staging_of(target), depth=1
         )
 
     @patch("rootcoz.repository.Repo")
@@ -905,6 +953,7 @@ class TestCloneShaFlow:
         target = tmp_path / "my-repo"
         mock_instance = MagicMock()
         mock_repo_cls.return_value = mock_instance
+        mock_repo_cls.clone_from.side_effect = clone_into_staging
 
         manager.clone_into("https://github.com/org/repo", target, depth=1, branch=sha)
 
@@ -923,13 +972,14 @@ class TestCloneShaFlow:
         """clone_into() with a branch name preserves existing behavior."""
         manager = RepositoryManager()
         target = tmp_path / "my-repo"
+        mock_repo_cls.clone_from.side_effect = clone_into_staging
 
         manager.clone_into(
             "https://github.com/org/repo", target, depth=1, branch="develop"
         )
 
         mock_repo_cls.clone_from.assert_called_once_with(
-            "https://github.com/org/repo", target, depth=1, branch="develop"
+            "https://github.com/org/repo", staging_of(target), depth=1, branch="develop"
         )
 
     @patch("rootcoz.repository.Repo")
@@ -943,9 +993,15 @@ class TestCloneShaFlow:
         mock_instance = MagicMock()
         mock_repo_cls.return_value = mock_instance
 
-        # Create .git directory to trigger scrubbing
-        target.mkdir(parents=True)
-        (target / ".git").mkdir()
+        staging = staging_of(target)
+
+        def clone(url, directory, **_kwargs):
+            # The injected remote lands in the staging tree's .git/config, which
+            # is the tree the scrub has to aim at.
+            Path(directory, ".git").mkdir(parents=True)
+            return MagicMock()
+
+        mock_repo_cls.clone_from.side_effect = clone
 
         with (
             patch("shutil.which", return_value="/usr/bin/git"),
@@ -963,8 +1019,9 @@ class TestCloneShaFlow:
         # Token injected in clone URL
         clone_url = mock_repo_cls.clone_from.call_args[0][0]
         assert "tok123" in clone_url  # pragma: allowlist secret
-        # Credentials scrubbed
+        # Credentials scrubbed against the staging tree
         mock_run.assert_called_once()
+        assert mock_run.call_args[1]["cwd"] == staging
         scrub_cmd = mock_run.call_args[0][0]
         assert scrub_cmd[-1] == "https://github.com/org/repo"
 
@@ -973,21 +1030,19 @@ class TestCloneShaFlow:
         manager = RepositoryManager()
         sha = "abc1234def5678"  # pragma: allowlist secret
         target = tmp_path / "repo"
-        target.mkdir()
 
         mock_instance = MagicMock()
         with patch("rootcoz.repository.Repo") as mock_repo_cls:
             mock_repo_cls.return_value = mock_instance
             mock_repo_cls.clone_from = MagicMock()
             mock_clone = mock_repo_cls.clone_from
-            mock_clone.side_effect = [
+            mock_clone.side_effect = clone_fails_then_succeeds(
                 GitCommandError(
                     "git clone",
                     128,
                     stderr="server verification failed: certificate signer not trusted",
-                ),
-                MagicMock(),
-            ]
+                )
+            )
             manager.clone_into("https://example.com/repo", target, branch=sha)
 
             assert mock_clone.call_count == 2
@@ -1012,6 +1067,7 @@ class TestCloneIntoWithToken:
         """clone_into with token injects it into the clone URL."""
         manager = RepositoryManager()
         target = tmp_path / "my-repo"
+        mock_repo.clone_from.side_effect = clone_into_staging
         manager.clone_into(
             "https://github.com/org/repo",
             target,
@@ -1020,7 +1076,7 @@ class TestCloneIntoWithToken:
         )
         mock_repo.clone_from.assert_called_once_with(
             "https://x-token-auth:tok123@github.com/org/repo",  # pragma: allowlist secret
-            target,
+            staging_of(target),
             depth=1,
         )
 
@@ -1029,9 +1085,10 @@ class TestCloneIntoWithToken:
         """clone_into without token uses original URL."""
         manager = RepositoryManager()
         target = tmp_path / "my-repo"
+        mock_repo.clone_from.side_effect = clone_into_staging
         manager.clone_into("https://github.com/org/repo", target, depth=1)
         mock_repo.clone_from.assert_called_once_with(
-            "https://github.com/org/repo", target, depth=1
+            "https://github.com/org/repo", staging_of(target), depth=1
         )
 
     @patch("rootcoz.repository.Repo")
@@ -1039,7 +1096,8 @@ class TestCloneIntoWithToken:
         """clone_into with None token uses original URL."""
         manager = RepositoryManager()
         target = tmp_path / "my-repo"
+        mock_repo.clone_from.side_effect = clone_into_staging
         manager.clone_into("https://github.com/org/repo", target, depth=1, token=None)
         mock_repo.clone_from.assert_called_once_with(
-            "https://github.com/org/repo", target, depth=1
+            "https://github.com/org/repo", staging_of(target), depth=1
         )

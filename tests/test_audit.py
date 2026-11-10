@@ -7563,7 +7563,7 @@ async def test_audit_write_retries_a_contended_lock(
             yield db
 
     monkeypatch.setattr(storage, "_connect_db", flaky_connect)
-    monkeypatch.setattr(storage, "_AUDIT_LOCK_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(storage, "_LOCK_RETRY_BACKOFF_SECONDS", 0)
 
     row = await storage.insert_audit_event(action="auth.login", actor="alice")
 
@@ -7584,7 +7584,7 @@ async def test_audit_write_does_not_retry_a_real_storage_error(
         yield  # pragma: no cover - unreachable, keeps this a generator
 
     monkeypatch.setattr(storage, "_connect_db", broken_connect)
-    monkeypatch.setattr(storage, "_AUDIT_LOCK_BACKOFF_SECONDS", 0)
+    monkeypatch.setattr(storage, "_LOCK_RETRY_BACKOFF_SECONDS", 0)
 
     with pytest.raises(sqlite3.OperationalError):
         await storage.insert_audit_event(action="auth.login", actor="alice")

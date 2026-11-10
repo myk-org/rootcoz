@@ -1895,11 +1895,12 @@ class RootCozClient:
         ai_provider: str,
         ai_model: str,
     ) -> dict[str, Any]:
-        """Start chat with an explicit provider/model."""
+        """Start preparing a chat; the response is a 202 until the session exists."""
         return self._request(
             "POST",
             f"/api/chat/{job_id}/init",
             json={"ai_provider": ai_provider, "ai_model": ai_model},
+            accept_statuses=(202,),
         )
 
     def get_chat_history(
