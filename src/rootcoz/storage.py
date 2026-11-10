@@ -6718,6 +6718,23 @@ async def oldest_running_analysis_started_at() -> str | None:
     return str(row[0])
 
 
+async def clear_analysis_started_at(job_id: str) -> None:
+    """Drop the analysis window so the next ``running`` transition re-stamps it.
+
+    A job queued for a free analysis slot (#544) leaves ``running`` for ``pending``
+    and comes back, and ``analysis_started_at`` is only stamped into a NULL — so
+    without this the queue wait is counted as analysis time, inflating the run
+    length on the report and firing the stuck-analysis alert on a job that has only
+    just started.
+    """
+    async with _connect_db() as db:
+        await db.execute(
+            "UPDATE results SET analysis_started_at = NULL WHERE job_id = ?",
+            (job_id,),
+        )
+        await db.commit()
+
+
 async def list_distinct_job_names() -> set[str]:
     """Return distinct non-empty job names from results. Lightweight query for backfill."""
     async with _connect_db() as db:

@@ -132,7 +132,11 @@ async def acquire(
     job as queued for the user.
     """
     if created_at is None:
-        created_at = datetime.now(UTC).isoformat()
+        # The same shape as ``results.created_at`` (SQLite ``CURRENT_TIMESTAMP``),
+        # because the queue orders these as strings: an ISO ``T`` sorts after the
+        # space every stored row carries, which would put a job that started
+        # waiting now behind every same-day row regardless of its time.
+        created_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
     announced = False
     try:
         while not _try_admit(job_key, created_at):

@@ -1,25 +1,12 @@
 """Unit tests for the analysis slot queue (#544). No server, no storage."""
 
 import asyncio
-from types import SimpleNamespace
+from datetime import datetime
+from typing import Any
 
 import pytest
 
 from rootcoz import analysis_slots
-
-
-@pytest.fixture
-def slot_limit(monkeypatch: pytest.MonkeyPatch):
-    """Set the cap the limiter reads, without touching the real Settings cache."""
-
-    def _set(limit: int) -> None:
-        monkeypatch.setattr(
-            analysis_slots,
-            "get_settings",
-            lambda: SimpleNamespace(max_concurrent_analyses=limit),
-        )
-
-    return _set
 
 
 @pytest.fixture(autouse=True)
@@ -125,6 +112,36 @@ async def test_same_second_arrivals_keep_arrival_order(slot_limit) -> None:
     await _settle()
 
     assert log.order == ["a", "first", "second", "third"]
+    await _drain(*log.tasks)
+
+
+async def test_a_job_with_no_row_sorts_against_stored_created_at(
+    slot_limit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T2c: the fallback stamp must be the stored shape, not ISO.
+
+    A per-failure re-analysis has no row of its own, so ``acquire`` stamps it now.
+    As ISO it carries a ``T``, which sorts after the space every stored
+    ``created_at`` carries -- so a *later* same-day job would overtake it.
+    """
+
+    class _Now(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> datetime:
+            return datetime(2026, 1, 1, 10, 0, 0, tzinfo=tz)
+
+    monkeypatch.setattr(analysis_slots, "datetime", _Now)
+    slot_limit(1)
+    log = _AdmissionLog()
+    await analysis_slots.acquire("holder")
+
+    log.spawn("reanalysis")  # no created_at: the "now" fallback
+    await _settle()
+    log.spawn("stored", created_at="2026-01-01 12:00:00")
+    await _settle()
+
+    assert analysis_slots.snapshot("reanalysis")["position"] == 1
+    assert analysis_slots.snapshot("stored")["position"] == 2
     await _drain(*log.tasks)
 
 

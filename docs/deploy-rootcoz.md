@@ -229,7 +229,7 @@ chart's default `12Gi` rather than adding to it.
 |---|---|---|
 | CPU | `4` | The live deployment's limit is `4000m`; CPU throttling stays under 1% of periods. |
 | Memory | `32Gi` | Peak usage is ~6 GiB. Size a smaller pod with **~1 GiB baseline + ~2 GiB per submitted analysis** (fetch + wait + run), multiplied by `max_concurrent_analyses`: at the default `10` that is `10 × ~2 GiB ≈ 21 GiB`. `max_concurrent_ai_calls` (default 3) is the width of *one* analysis and does not change this product. |
-| ephemeral-storage | `16Gi` | A judgement from the configured ceilings, not a measurement: one 1 GiB graph index (`max_workspace_graph_mb` default `1024`) per analysis workspace × `max_concurrent_analyses`, up to 10 concurrent repo clones, plus CI artifacts and the writable layer. At the default cap of 10 that is ~10 GiB before clone workspaces. Keep it at or below the node's ephemeral allocatable. |
+| ephemeral-storage | `16Gi` | A judgement from the configured ceilings, not a measurement: one 1 GiB graph index (`max_workspace_graph_mb` default `1024`) per analysis workspace × `max_concurrent_analyses`, up to 10 concurrent repo clones, plus CI artifacts and the writable layer. At the default cap of 10 that is ~10 GiB before clone workspaces. A job waiting for a slot is the exception the cap does not bound: it has already fetched its CI artifacts (up to `jenkins_artifacts_max_size_mb`, 500 MiB), so add that once per job you expect to queue. Keep it at or below the node's ephemeral allocatable. |
 
 **The shipped defaults host roughly 3 analyses.** The chart's default `2 CPU / 8Gi / 12Gi` limit fits
 about three analyses at the ~2 GiB each above, while `max_concurrent_analyses` defaults to `10`. An

@@ -67,18 +67,6 @@ class _SlotHold:
 
 
 @pytest.fixture
-def slot_limit(monkeypatch: pytest.MonkeyPatch):
-    def _set(limit: int) -> None:
-        monkeypatch.setattr(
-            analysis_slots,
-            "get_settings",
-            lambda: SimpleNamespace(max_concurrent_analyses=limit),
-        )
-
-    return _set
-
-
-@pytest.fixture
 def hold() -> _SlotHold:
     return _SlotHold()
 
@@ -219,6 +207,75 @@ def test_a_submission_over_the_cap_is_queued_then_started(
     _wait_for(client, a_id, lambda job: job["status"] == "completed")
     assert analysis_slots.running_count() == 0
     assert analysis_slots.waiter_count() == 0
+
+
+def test_the_queue_wait_is_not_counted_as_analysis_time(
+    client, hold, slot_limit
+) -> None:
+    """T13e: the fetch stamp must not survive the wait.
+
+    The row is stamped ``running`` for the fetch, goes ``pending`` while it queues
+    and comes back to ``running`` on admission, and that transition only fills a
+    NULL stamp -- so without clearing it the queue wait is counted as run time and
+    the stuck-analysis alert fires on a job that has just started.
+    """
+    slot_limit(1)
+    hold.hold("A")
+    a_id = _posted(client, _body("A"))
+    assert hold.enter("A").wait(timeout=15)
+
+    b_id = _posted(client, _body("B"))
+    # Queued *and* cleared: the queue entry appears a moment before the write lands.
+    queued = _wait_for(
+        client,
+        b_id,
+        lambda job: (
+            job["status"] == "pending"
+            and job.get("queue")
+            and job["analysis_started_at"] is None
+        ),
+    )
+    assert queued["queue"]["position"] == 1
+
+    hold.release("A")
+    started = _wait_for(
+        client,
+        b_id,
+        lambda job: job["status"] == "running" and job["analysis_started_at"],
+    )
+    assert started["analysis_started_at"] >= queued["created_at"]
+    _wait_for(client, b_id, lambda job: job["status"] == "completed")
+    _wait_for(client, a_id, lambda job: job["status"] == "completed")
+    assert analysis_slots.running_count() == 0
+
+
+def test_a_slot_is_held_until_the_workspace_is_reaped(
+    client, hold, slot_limit, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T13f: the cap bounds live workspaces, so a reap cannot free the slot early.
+
+    The release is in a nested ``finally``, so it still runs before the task ends
+    even when the reap raises or a shutdown cancels it.
+    """
+    slot_limit(1)
+    counts: list[int] = []
+
+    async def _reap(*_args: object, **_kwargs: object) -> None:
+        counts.append(analysis_slots.running_count())
+
+    monkeypatch.setattr(main, "_reap_analysis_workspace", _reap)
+    hold.hold("A")
+    a_id = _posted(client, _body("A"))
+    assert hold.enter("A").wait(timeout=15)
+    b_id = _posted(client, _body("B"))
+    _wait_for(client, b_id, lambda job: job.get("queue"))
+
+    hold.release_all()
+    _wait_for(client, a_id, lambda job: job["status"] == "completed")
+    _wait_for(client, b_id, lambda job: job["status"] == "completed")
+
+    assert counts and all(count == 1 for count in counts), counts
+    assert analysis_slots.running_count() == 0
 
 
 def test_an_ingest_only_submit_takes_no_slot(client, hold, slot_limit) -> None:

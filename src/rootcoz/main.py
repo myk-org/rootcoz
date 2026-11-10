@@ -6684,11 +6684,17 @@ async def _mark_queued_for_slot(job_id: str) -> None:
     -- which the next boot would then resume.
     """
     snapshot = analysis_slots.snapshot(job_id)
-    await update_status(
+    written = await update_status(
         job_id,
         "pending",
         expect_status=("pending", "running", "waiting"),
     )
+    if written:
+        # The queue wait is not analysis time: the row was already stamped when it
+        # went ``running`` for the fetch, and the admission below only fills a NULL,
+        # so without this the wait would count as run time (and the stuck-analysis
+        # alert would fire on it).
+        await storage.clear_analysis_started_at(job_id)
     notify_active_count_changed()
     notify_dashboard_changed()
     notify_job_status_changed(job_id)
@@ -7417,17 +7423,21 @@ async def _process_ci_source_analysis(
         notify_token_usage_changed()
 
     finally:
-        # First, synchronously: the reap below awaits network and filesystem work,
-        # and a raise or a shutdown cancellation there would otherwise keep the
-        # slot for the life of the process.
-        analysis_slots.release(job_id)
-        await _reap_analysis_workspace(
-            job_id=job_id,
-            auth_header=auth_header,
-            source=source,
-            repo_manager=repo_manager,
-            repo_path=repo_path,
-        )
+        # The slot is held through the reap -- the cap then bounds live workspaces,
+        # not only live prompts -- and released in a nested finally so a raise or a
+        # shutdown cancellation in the reap cannot keep it for the life of the
+        # process. ``release`` itself stays synchronous: no ``await`` between here
+        # and it means no second cancellation can land first.
+        try:
+            await _reap_analysis_workspace(
+                job_id=job_id,
+                auth_header=auth_header,
+                source=source,
+                repo_manager=repo_manager,
+                repo_path=repo_path,
+            )
+        finally:
+            analysis_slots.release(job_id)
 
 
 def _resolve_request_display_name(body: UnifiedAnalyzeRequest) -> str:
@@ -9078,16 +9088,20 @@ async def _reanalyze_failure_background(
             )
 
     finally:
-        # First, synchronously: one acquire, exactly one release, on every path.
-        analysis_slots.release(slot_key)
-        notify_job_status_changed(job_id)
-        await _reap_analysis_workspace(
-            job_id=job_id,
-            auth_header=auth_header,
-            source=source,
-            repo_manager=repo_manager,
-            repo_path=repo_path,
-        )
+        # Held through the reap, released in a nested finally: one acquire, exactly
+        # one release, on every path -- including a raise or a cancellation in the
+        # reap itself.
+        try:
+            notify_job_status_changed(job_id)
+            await _reap_analysis_workspace(
+                job_id=job_id,
+                auth_header=auth_header,
+                source=source,
+                repo_manager=repo_manager,
+                repo_path=repo_path,
+            )
+        finally:
+            analysis_slots.release(slot_key)
 
 
 @app.post(
