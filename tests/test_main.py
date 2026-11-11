@@ -15156,15 +15156,11 @@ class TestAdminSettingsEndpoints:
             "rootcoz.main.supported_key_providers", AsyncMock(return_value=[])
         )
         _provider_auth_status(monkeypatch, {})
-        with caplog.at_level(logging.WARNING, logger="rootcoz.main"):
-            logging.getLogger("rootcoz.main").propagate = True
-            try:
-                response = test_client.put(
-                    "/api/admin/settings",
-                    json={"settings": {"ambient_auth_providers": "Some New Provider"}},
-                )
-            finally:
-                logging.getLogger("rootcoz.main").propagate = False
+        with capture_main_logs(caplog, logging.WARNING):
+            response = test_client.put(
+                "/api/admin/settings",
+                json={"settings": {"ambient_auth_providers": "Some New Provider"}},
+            )
         assert response.status_code == 200, response.json()
         # Accepted unchanged — a transient sidecar gap is never a save failure
         assert (
@@ -15183,15 +15179,11 @@ class TestAdminSettingsEndpoints:
         monkeypatch.setattr(
             "rootcoz.ai_client.deployment_provider_credentials", lambda: None
         )
-        with caplog.at_level(logging.WARNING, logger="rootcoz.main"):
-            logging.getLogger("rootcoz.main").propagate = True
-            try:
-                response = test_client.put(
-                    "/api/admin/settings",
-                    json={"settings": {"ambient_auth_providers": "claude"}},
-                )
-            finally:
-                logging.getLogger("rootcoz.main").propagate = False
+        with capture_main_logs(caplog, logging.WARNING):
+            response = test_client.put(
+                "/api/admin/settings",
+                json={"settings": {"ambient_auth_providers": "claude"}},
+            )
         assert response.status_code == 200, response.json()
         assert any(
             "Deployment credentials unknown" in r.getMessage() for r in caplog.records
@@ -15859,15 +15851,11 @@ class TestEnumeratedSettings:
         from rootcoz import main
 
         monkeypatch.setattr(main, "_EXPORTER_CLASSES", {})
-        with caplog.at_level(logging.WARNING, logger="rootcoz.main"):
-            logging.getLogger("rootcoz.main").propagate = True
-            try:
-                response = test_client.put(
-                    "/api/admin/settings",
-                    json={"settings": {"auto_push_exporters": "not-loaded-yet"}},
-                )
-            finally:
-                logging.getLogger("rootcoz.main").propagate = False
+        with capture_main_logs(caplog, logging.WARNING):
+            response = test_client.put(
+                "/api/admin/settings",
+                json={"settings": {"auto_push_exporters": "not-loaded-yet"}},
+            )
         assert response.status_code == 200, response.json()
         assert _settings_item(test_client, "auto_push_exporters")["value"] == (
             "not-loaded-yet"
@@ -17405,14 +17393,10 @@ class TestIntegrationConnectionEndpoints:
 
         with (
             patch.dict("rootcoz.main._INTEGRATION_TESTERS", {"jenkins": _crash}),
-            # python-simple-logger disables propagation; re-enable so caplog sees records
-            caplog.at_level(logging.WARNING, logger="rootcoz.main"),
+            # python-simple-logger disables propagation; the helper attaches instead.
+            capture_main_logs(caplog, logging.WARNING),
         ):
-            logging.getLogger("rootcoz.main").propagate = True
-            try:
-                response = test_client.post("/api/admin/settings/test/jenkins")
-            finally:
-                logging.getLogger("rootcoz.main").propagate = False
+            response = test_client.post("/api/admin/settings/test/jenkins")
         assert response.status_code == 200
         data = response.json()
         assert data["ok"] is False
@@ -17684,21 +17668,17 @@ class TestUserTokenTestEndpoint:
             side_effect=_IntegrationTestError("authentication failed (HTTP 401)")
         )
         with (
-            caplog.at_level(logging.DEBUG, logger="rootcoz.main"),
+            capture_main_logs(caplog, logging.DEBUG),
             patch("rootcoz.main._integration_test_get_json", probe),
         ):
-            logging.getLogger("rootcoz.main").propagate = True
-            try:
-                bodies = [
-                    test_client.post(
-                        "/api/user/tokens/test/github", headers=gh_headers
-                    ).text,
-                    test_client.post(
-                        "/api/user/tokens/test/jira", headers=jira_headers
-                    ).text,
-                ]
-            finally:
-                logging.getLogger("rootcoz.main").propagate = False
+            bodies = [
+                test_client.post(
+                    "/api/user/tokens/test/github", headers=gh_headers
+                ).text,
+                test_client.post(
+                    "/api/user/tokens/test/jira", headers=jira_headers
+                ).text,
+            ]
         logged = "\n".join(record.getMessage() for record in caplog.records)
         for token in (self._FAKE_GITHUB_TOKEN, self._FAKE_JIRA_TOKEN):
             assert all(token not in body for body in bodies)

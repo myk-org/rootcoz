@@ -1,6 +1,7 @@
 """Loopback graph adapter isolation and sidecar tool wiring."""
 
 import json
+import logging
 import time
 from pathlib import Path
 from urllib.error import HTTPError
@@ -12,6 +13,7 @@ from rootcoz.engine.graft_http import (
     register_workspace,
     unregister_workspace,
 )
+from tests.conftest import capture_main_logs
 
 
 def _await_estimate(job_id: str, expected: int | None) -> None:
@@ -418,9 +420,7 @@ def test_revoked_query_cannot_credit_old_job(tmp_path: Path, monkeypatch) -> Non
         unregister_workspace(ws)
 
 
-def test_metric_failure_logs_traceback_after_reply(
-    tmp_path: Path, monkeypatch, caplog
-) -> None:
+def test_metric_failure_logs_traceback_after_reply(tmp_path: Path, monkeypatch) -> None:
     from threading import Event
 
     from rootcoz import storage
@@ -445,9 +445,6 @@ def test_metric_failure_logs_traceback_after_reply(
     workspace = tmp_path / "workspace"
     repo = workspace / "repo"
     repo.mkdir(parents=True)
-    # get_child_logger keeps propagate=False; letting it through is simpler and
-    # more honest than hand-wiring handlers, and caplog restores it per test.
-    monkeypatch.setattr(graft_http.logger, "propagate", True)
     tools = register_workspace(workspace, {"repo": repo}, job_id="gone")
     request = Request(
         tools[0]["http"]["url"],
@@ -475,7 +472,6 @@ def test_metric_failure_logs_traceback_after_reply(
 def test_estimate_calculation_failure_is_logged_and_query_succeeds(
     tmp_path: Path, monkeypatch, caplog
 ) -> None:
-    monkeypatch.setattr(graft_http.logger, "propagate", True)
     from rootcoz.engine import graft
 
     class BrokenSaved(dict):
@@ -502,13 +498,14 @@ def test_estimate_calculation_failure_is_logged_and_query_succeeds(
     )
     try:
         # A failing estimate's serialization path should still deliver the graph.
-        with urlopen(request, timeout=2) as response:
-            assert json.load(response)["status"] == "ok"
-        assert any(
-            record.exc_info and record.exc_info[0] is RuntimeError
-            for record in caplog.records
-            if "Unable to calculate Graft estimate" in record.message
-        )
+        with capture_main_logs(caplog, logging.WARNING, logger=graft_http.logger):
+            with urlopen(request, timeout=2) as response:
+                assert json.load(response)["status"] == "ok"
+            assert any(
+                record.exc_info and record.exc_info[0] is RuntimeError
+                for record in caplog.records
+                if "Unable to calculate Graft estimate" in record.message
+            )
     finally:
         unregister_workspace(workspace)
 

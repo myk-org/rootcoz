@@ -301,6 +301,26 @@ def test_a_capture_is_counted_once_despite_a_leaked_handler(
         main_logger.removeHandler(caplog.handler)  # never leak into the next test
 
 
+def test_a_nested_capture_keeps_the_outer_handler(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """An inner exit must not detach the handler the outer capture is using.
+
+    ``Logger.addHandler`` refuses the duplicate attach, so the inner capture adds
+    nothing to remove — detaching on its way out would empty the outer capture
+    and make every later assertion in the test pass vacuously, the #513 hazard
+    in the other direction.
+    """
+    main_logger = logging.getLogger("rootcoz.main")
+    line = "a line only the outer capture can see"
+    with capture_main_logs(caplog, level=logging.WARNING):
+        with capture_main_logs(caplog, level=logging.WARNING):
+            pass
+        assert caplog.handler in main_logger.handlers, "inner exit detached the handler"
+        main_logger.warning(line)
+        assert caplog.messages == [line]
+
+
 def test_a_capture_does_not_leave_its_line_remembered(
     caplog: pytest.LogCaptureFixture,
 ) -> None:
