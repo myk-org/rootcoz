@@ -19,7 +19,7 @@ import pytest
 from fastapi import BackgroundTasks, HTTPException
 from pydantic import SecretStr
 
-from rootcoz import storage
+from rootcoz import storage, temp_paths
 from rootcoz.config import Settings
 from rootcoz.encryption import encrypt_sensitive_fields
 from rootcoz.engine.core import AnalysisIncompleteError
@@ -2097,19 +2097,17 @@ class TestAbortEndpoint:
                 )
                 await db.commit()
             main._job_tasks["job-newer-payload"] = task
-            logging.getLogger("rootcoz.main").propagate = True
-            # simple_logger sets propagate=False on the storage logger too.
-            storage.logger.setLevel(logging.DEBUG)
-            storage.logger.addHandler(caplog.handler)
             try:
-                with caplog.at_level(logging.WARNING, logger="rootcoz.main"):
+                # Both halves log: the refusal at WARNING comes from the storage
+                # logger, the abort's own line from rootcoz.main.
+                with capture_main_logs(
+                    caplog, logging.WARNING, logger=("rootcoz.main", storage.logger)
+                ):
                     resp = test_client.post(
                         "/results/job-newer-payload/abort",
                         cookies={"rootcoz_username": "testuser"},
                     )
             finally:
-                storage.logger.removeHandler(caplog.handler)
-                logging.getLogger("rootcoz.main").propagate = False
                 main._job_tasks.pop("job-newer-payload", None)
 
             # The caller gets the abort it asked for...
@@ -2583,15 +2581,13 @@ class TestAppLifespan:
         monkeypatch.setattr(main, "backfill_results_denorm", _gated_denorm)
         # Both halves of the sweep log from different modules, and neither
         # propagates (python-simple-logger sets propagate=False).
-        storage.logger.setLevel(logging.INFO)
-        storage.logger.addHandler(caplog.handler)
         try:
             with (
-                capture_main_logs(caplog),
+                capture_main_logs(
+                    caplog, logging.INFO, logger=("rootcoz.main", storage.logger)
+                ),
                 patch.object(storage, "DB_PATH", temp_db_path),
             ):
-                # capture_main_logs levels caplog's handler to WARNING.
-                caplog.handler.setLevel(logging.NOTSET)
                 async with main.lifespan(main.app):
                     await asyncio.wait_for(started.wait(), 5)
                     temp_db_path.unlink()
@@ -2604,7 +2600,6 @@ class TestAppLifespan:
                     )
                     await asyncio.wait_for(sweep, 10)
         finally:
-            storage.logger.removeHandler(caplog.handler)
             release.set()
             for task in list(main._background_tasks):
                 task.cancel()
@@ -5925,6 +5920,9 @@ class TestCreateGithubIssueApiErrors:
         assert response.json()["detail"] == (
             "GitHub API rate limit reached. Try again later."
         )
+        # Positive control: the refusal was logged, so the absence below is a real
+        # absence and not an empty capture.
+        assert "status=429" in caplog.text
         assert _REPORT_GITHUB_TOKEN not in caplog.text
 
     @pytest.mark.asyncio
@@ -5980,6 +5978,8 @@ class TestCreateGithubIssueApiErrors:
         assert "may already be filed" in detail
         assert "could create a duplicate" in detail
         assert "bug report" in detail
+        # Positive control: the timeout was logged, so the absences below are real.
+        assert "GitHub timed out during the issue creation" in caplog.text
         assert _REPORT_GITHUB_TOKEN not in caplog.text
         assert _REPORT_BODY not in caplog.text
 
@@ -9271,6 +9271,7 @@ class TestResumeWaitingJobs:
             AsyncMock(side_effect=RuntimeError("secret-api-key")),
         )
         with (
+            capture_main_logs(caplog, logging.WARNING),
             patch.object(storage, "get_result", AsyncMock(return_value=None)),
             patch.object(storage, "update_status", new_callable=AsyncMock) as update,
             patch(
@@ -9280,6 +9281,8 @@ class TestResumeWaitingJobs:
             await _resume_waiting_jobs([{"job_id": "bad", "result_data": result_data}])
         assert update.await_args.args[1] == "failed"
         assert "secret-api-key" not in update.await_args.args[2]["error"]
+        # Positive control: the failure was logged, so the absence below is real.
+        assert "Cannot resume waiting job bad" in caplog.text
         assert "secret-api-key" not in caplog.text
 
     async def test_resumes_valid_waiting_job(self, mock_settings, monkeypatch) -> None:
@@ -9710,9 +9713,13 @@ class TestStartupWorkspaceReclaim:
         """
         from rootcoz import main as main_mod
 
-        with capture_main_logs(caplog):
+        with capture_main_logs(caplog, level=logging.DEBUG):
             assert await main_mod._reclaim_abandoned_workspaces() == 0
+            # Positive control: this capture does see rootcoz.main records, so the
+            # two absences below are real absences and not an empty capture.
+            main_mod.logger.debug("capture control reached caplog")
 
+        assert "capture control reached caplog" in caplog.text
         assert "reclaimed" not in caplog.text
         assert "abandoned workspaces stay on disk" not in caplog.text, (
             "a first boot claimed abandoned workspaces it could not list"
@@ -9866,9 +9873,12 @@ class TestStartupWorkspaceReclaim:
 
         with capture_main_logs(caplog, level=logging.DEBUG):
             assert await main_mod._reclaim_abandoned_workspaces({"live"}) == 0
+            # Positive control: the reaper's own line would land in this capture.
+            temp_paths.logger.debug("capture control reached caplog")
 
         assert extract.exists(), "an undecidable boot deleted an extract dir"
         assert "cannot resolve the chat workspace root" in caplog.text
+        assert "capture control reached caplog" in caplog.text
         assert "cleanup what=" not in caplog.text
 
     # -- chat workspaces: stale iff the job row is gone -------------------------
@@ -9943,8 +9953,11 @@ class TestStartupWorkspaceReclaim:
 
         with capture_main_logs(caplog, level=logging.DEBUG):
             assert await main_mod._reclaim_abandoned_workspaces({"live"}) == 0
+            # Positive control: the reaper's own line would land in this capture.
+            temp_paths.logger.debug("capture control reached caplog")
 
         assert dead.exists(), "a tree with a fresh delete marker was swept"
+        assert "capture control reached caplog" in caplog.text
         assert "cleanup what=dead " not in caplog.text
 
     # -- a decision that is unavailable deletes nothing -------------------------
@@ -9971,10 +9984,13 @@ class TestStartupWorkspaceReclaim:
             snapshot = await main_mod._startup_job_ids()
             assert snapshot is None
             assert await main_mod._reclaim_abandoned_workspaces(snapshot) == 0
+            # Positive control: the reaper's own line would land in this capture.
+            temp_paths.logger.debug("capture control reached caplog")
 
         assert (tmp_path / "rootcoz-chat-ghost").exists()
         assert extract.exists()
         assert "cannot read the job table (RuntimeError)" in caplog.text
+        assert "capture control reached caplog" in caplog.text
         assert "cleanup what=" not in caplog.text
 
     async def test_an_empty_job_table_deletes_no_chat_and_no_extract(

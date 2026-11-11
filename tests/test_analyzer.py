@@ -61,6 +61,7 @@ from rootcoz.sources.jenkins_source import (
     extract_failures_from_test_report,
     handle_jenkins_exception,
 )
+from tests.conftest import capture_main_logs
 
 _FAKE_JENKINS_PASSWORD = "test-pass"  # pragma: allowlist secret
 
@@ -416,32 +417,28 @@ class TestRunSingleAiAnalysis:
         )
         monkeypatch.setattr("rootcoz.engine.core.call_ai_once", mock_cli)
 
-        original_level = core_logger.level
-        core_logger.setLevel(logging.DEBUG)
-        core_logger.addHandler(caplog.handler)
-        try:
-            with pytest.raises(AnalysisIncompleteError):
-                await run_single_ai_analysis(
-                    failures=[
-                        FailedTest(
-                            test_name="test_foo",
-                            error_message="timeout",
-                            stack_trace="st",
-                        )
-                    ],
-                    console_context="",
-                    repo_path=tmp_path,
-                    ai_provider="cursor",
-                    ai_model="cursor:grok",
-                    ai_call_timeout=None,
-                    custom_prompt="",
-                    artifacts_context="",
-                    server_url="",
-                    job_id="job-1",
-                )
-        finally:
-            core_logger.removeHandler(caplog.handler)
-            core_logger.setLevel(original_level)
+        with (
+            capture_main_logs(caplog, logging.DEBUG, logger=core_logger),
+            pytest.raises(AnalysisIncompleteError),
+        ):
+            await run_single_ai_analysis(
+                failures=[
+                    FailedTest(
+                        test_name="test_foo",
+                        error_message="timeout",
+                        stack_trace="st",
+                    )
+                ],
+                console_context="",
+                repo_path=tmp_path,
+                ai_provider="cursor",
+                ai_model="cursor:grok",
+                ai_call_timeout=None,
+                custom_prompt="",
+                artifacts_context="",
+                server_url="",
+                job_id="job-1",
+            )
 
         return [
             r.getMessage()
@@ -1669,18 +1666,11 @@ class TestCloneAdditionalRepos:
 
         manager.clone_into.side_effect = fake_clone
 
-        # simple_logger sets propagate=False, so attach the handler directly.
-        original_level = core_logger.level
-        core_logger.setLevel(logging.ERROR)
-        core_logger.addHandler(caplog.handler)
-        try:
-            with pytest.raises(TypeError):
-                await asyncio.wait_for(
-                    clone_additional_repos(manager, repos, tmp_path), 5
-                )
-        finally:
-            core_logger.removeHandler(caplog.handler)
-            core_logger.setLevel(original_level)
+        with (
+            capture_main_logs(caplog, logging.ERROR, logger=core_logger),
+            pytest.raises(TypeError),
+        ):
+            await asyncio.wait_for(clone_additional_repos(manager, repos, tmp_path), 5)
 
         # Siblings still cloned and every slot was released before the raise.
         assert set(cloned_names) == {"repo0", "repo2"}
@@ -2936,20 +2926,13 @@ class TestRecoverFromDetails:
         """A silent empty fallback is what hid #397; recovery must warn instead."""
         from rootcoz.engine.core import logger as core_logger
 
-        # simple_logger sets propagate=False, so attach the handler directly.
-        original_level = core_logger.level
-        core_logger.setLevel(logging.WARNING)
-        core_logger.addHandler(caplog.handler)
-        try:
+        with capture_main_logs(caplog, logging.WARNING, logger=core_logger):
             result = recover_from_details(
                 AnalysisDetail(
                     classification="",
                     details="Now let me read the test source code.",
                 )
             )
-        finally:
-            core_logger.removeHandler(caplog.handler)
-            core_logger.setLevel(original_level)
 
         assert result.classification == ""
         assert any("classification" in record.message for record in caplog.records)
@@ -3877,15 +3860,9 @@ class TestRecoverableFailureRetry:
         failure = FailedTest(
             test_name="test_foo", error_message="err", stack_trace="st"
         )
-        # simple_logger sets propagate=False, so caplog.at_level alone captures
-        # nothing and the assertion below would pass vacuously. Attach the handler
-        # to the engine logger directly, as test_debug_request_logging does.
         from rootcoz.engine.core import logger as core_logger
 
-        original_level = core_logger.level
-        core_logger.setLevel(logging.WARNING)
-        core_logger.addHandler(caplog.handler)
-        try:
+        with capture_main_logs(caplog, logging.WARNING, logger=core_logger):
             await run_single_ai_analysis(
                 failures=[failure],
                 console_context="",
@@ -3898,9 +3875,6 @@ class TestRecoverableFailureRetry:
                 server_url="",
                 job_id="job-1",
             )
-        finally:
-            core_logger.removeHandler(caplog.handler)
-            core_logger.setLevel(original_level)
 
         assert mock_cli.await_count == 2
         # Guard against a vacuous pass: the retry must actually have been logged.

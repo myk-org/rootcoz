@@ -16,6 +16,7 @@ from rootcoz.config import Settings
 from rootcoz.engine import core as core_module
 from rootcoz.engine.chat import clone_chat_repos
 from rootcoz.repository import RepositoryManager
+from tests.conftest import capture_main_logs
 
 
 @pytest.fixture
@@ -88,8 +89,14 @@ async def test_one_failing_repo_warns_once_and_the_rest_still_clone(
     failed: list[str] = []
 
     chat_logger = logging.getLogger("rootcoz.engine.chat")
-    monkeypatch.setattr(chat_logger, "propagate", True)
-    with caplog.at_level(logging.WARNING, logger="rootcoz.engine.chat"):
+    # Two repos fan out concurrently, so an identical warning can be emitted
+    # twice; the duplicate filter is taken off so the count below counts emits.
+    with capture_main_logs(
+        caplog,
+        logging.WARNING,
+        logger=chat_logger,
+        bypass_duplicate_filter=True,
+    ):
         cloned_any = await clone_chat_repos(
             workspace, {"additional_repos": _repos(3)}, failed=failed
         )

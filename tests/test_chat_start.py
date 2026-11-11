@@ -463,19 +463,24 @@ async def test_refusal_exception_carries_no_body_and_no_context(
     await install_start_rig(
         credential_source="server", client=client, job_id="refusal-body", admin=False
     )
-    with pytest.raises(ai_client.SessionCreationRefused) as exc:
-        await ai_client.create_session_safely(
-            client,
-            provider="openai",
-            model="undeclared",
-            system_prompt="hi",
-            server_api_key=refusal_secret_key,
-        )
+    with capture_main_logs(caplog, logging.DEBUG, logger=ai_client.logger):
+        with pytest.raises(ai_client.SessionCreationRefused) as exc:
+            await ai_client.create_session_safely(
+                client,
+                provider="openai",
+                model="undeclared",
+                system_prompt="hi",
+                server_api_key=refusal_secret_key,
+            )
+        # The refusal path logs nothing on purpose, so the control has to be
+        # synthetic: this record proves the capture reaches the logger at all.
+        ai_client.logger.debug("capture control reached caplog")
     sentence = str(exc.value)
     assert sentence.startswith(f"{ai_client.SESSION_REFUSAL_MARKER}: ")
     assert "could not be created for openai/undeclared" in sentence
     assert "upstream said no" not in sentence
     assert exc.value.__context__ is None
+    assert "capture control reached caplog" in caplog.text
     assert refusal_secret_key not in caplog.text
 
 
