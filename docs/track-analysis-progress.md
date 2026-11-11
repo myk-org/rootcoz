@@ -24,7 +24,7 @@ This prints just the three fields a status check needs, instead of the full resu
 
    | Status | Badge | What it means |
    | --- | --- | --- |
-   | `pending` | `Pending` | The job is queued and has not started |
+   | `pending` | `Pending` | The job is accepted and has not started. It is every job's first status; a job **waiting for a free analysis slot** additionally shows the live sentence `waiting for a free analysis slot (N running, limit M)` instead of a phase label |
    | `waiting` | `Waiting` | RootCoz is polling your CI server for the build to finish. Only Jenkins submissions with `Wait for build completion` enabled sit here |
    | `running` | `Running` | Fetching, cloning, or analyzing |
    | `completed` | `Completed` | Finished. The page redirects to the report |
@@ -47,7 +47,7 @@ This prints just the three fields a status check needs, instead of the full resu
    | `USAGE / COST` | Token usage, or `GRAFT SAVINGS` when usage is not yet available |
    | `PEERS` | One line per peer model, when peer analysis is enabled |
    | `TEST REPO` | The tests repo URL and ref, linked |
-   | `QUEUED` | When the job was accepted |
+   | `QUEUED` | When the job was accepted — not its place in the analysis queue |
 
 4. **Follow the progress list.**
 
@@ -80,7 +80,7 @@ This prints just the three fields a status check needs, instead of the full resu
 
 7. **Understand what happens after a server restart.**
 
-   Jobs left in `pending` or `running` cannot be recovered. The process that takes the shutdown signal records them itself, in the same boot, as failed with `Analysis interrupted by server restart. Please re-submit.`, and `GET /results/{job_id}` returns `failure_reason: "server_restart"` beside that message, so a restart is distinguishable from a crash. Jobs in `waiting` are resumed automatically, so a Jenkins submission that was polling for its build survives a restart.
+   Only a job left in `running` cannot be recovered. The process that takes the shutdown signal records it itself, in the same boot, as failed with `Analysis interrupted by server restart. Please re-submit.`, and `GET /results/{job_id}` returns `failure_reason: "server_restart"` beside that message, so a restart is distinguishable from a crash. Jobs in `pending` and `waiting` are resumed automatically by the next boot: a Jenkins submission that was polling for its build survives a restart, and so does a job still queued for a free analysis slot.
 
 ## Advanced Usage
 - **Everything in flight, from the dashboard.** The dashboard pages the list newest first, 20 rows per page by default; the selector above the table switches to 10, 20, or 50, and the pager counts pages from the server's `total`, so a filter matching hundreds of jobs still opens on one short page. Each row carries the status badge, a Mode column reading `Submitted` or `Analyzed`, failure and pass/skip counts, review progress, comment count, and the submitter. Filter by status, review state, analysis state, date range, team, tier, version, labels, and submitter. Newest rows appear without a manual refresh, so several submissions can be watched at once.
@@ -119,7 +119,7 @@ This prints just the three fields a status check needs, instead of the full resu
   Updates are shared between browser tabs over one connection, and the connection is led by a single tab. If a tab misses events, reload it; it re-subscribes and refetches on mount.
 
 - **A job shows `Analysis interrupted by server restart. Please re-submit.`**  
-  The background task did not survive the restart; the server marks the job failed as it shuts down. `GET /results/{job_id}` carries `failure_reason: "server_restart"` for exactly these — the same sentence with an empty `failure_reason` came from a crash instead, or from a `waiting` job the next boot could not resume. Submitting again, or re-analyzing from the report header, is still the only way to get the analysis.
+  The background task did not survive the restart; the server marks the job failed as it shuts down. `GET /results/{job_id}` carries `failure_reason: "server_restart"` for exactly these — the same sentence with an empty `failure_reason` came from a crash instead, or from a `waiting` or queued job the next boot could not resume. Submitting again, or re-analyzing from the report header, is still the only way to get the analysis.
 
 - **`Abort` is greyed out.**  
   Only the submitter of that job and admins can abort it. The tooltip says the same thing.

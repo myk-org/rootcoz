@@ -1378,6 +1378,23 @@ class TestStatusCommand:
         assert "old-job" in result.output
         assert "Original Job" in result.output
 
+    def test_status_shows_why_a_queued_job_is_waiting(self, mock_client):
+        """T18: the CLI carries the wait the API reports, exit 0."""
+        mock_client.get_result.return_value = {
+            "job_id": "queued-job",
+            "status": "pending",
+            "queue": {
+                "position": 1,
+                "running": 1,
+                "limit": 1,
+                "message": "waiting for a free analysis slot (1 running, limit 1)",
+            },
+        }
+        result = runner.invoke(app, ["status", "queued-job"])
+        assert result.exit_code == 0
+        assert "pending" in result.output.lower()
+        assert "waiting for a free analysis slot (1 running, limit 1)" in result.output
+
     def test_status_no_reanalyzed_from_for_normal_jobs(self, mock_client):
         mock_client.get_result.return_value = {
             "job_id": "normal-job",
@@ -1386,6 +1403,36 @@ class TestStatusCommand:
         result = runner.invoke(app, ["status", "normal-job"])
         assert result.exit_code == 0
         assert "Reanalyzed from" not in result.output
+
+    def test_status_prints_the_queue_line_for_a_queued_job_answering_202(
+        self, mock_client
+    ):
+        """GET /results answers 202 while queued; status must still print, exit 0."""
+
+        def handler(request):
+            assert request.url.path == "/results/queued-job"
+            return httpx.Response(
+                202,
+                json={
+                    "job_id": "queued-job",
+                    "status": "pending",
+                    "queue": {
+                        "position": 1,
+                        "running": 1,
+                        "limit": 1,
+                        "message": "waiting for a free analysis slot (1 running, limit 1)",
+                    },
+                },
+            )
+
+        real_client = make_test_client(handler)
+        with patch("rootcoz.cli.main._get_client", return_value=real_client):
+            result = runner.invoke(app, ["status", "queued-job"])
+        assert result.exit_code == 0
+        assert (
+            "Queue: waiting for a free analysis slot (1 running, limit 1)"
+            in result.output
+        )
 
 
 class TestHistoryCommands:

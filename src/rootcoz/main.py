@@ -68,7 +68,13 @@ from pydantic import BaseModel, Field, SecretStr, ValidationError
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
-from rootcoz import get_child_logger, issue_matching, server_status, storage
+from rootcoz import (
+    analysis_slots,
+    get_child_logger,
+    issue_matching,
+    server_status,
+    storage,
+)
 from rootcoz import transcripts as sidecar_transcripts
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
@@ -689,6 +695,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "public_base_url",
         "additional_repos",
         "max_concurrent_repo_clones",
+        "max_concurrent_analyses",
         "chat_clone_depth",
         "wait_for_completion",
         "poll_interval_minutes",
@@ -764,6 +771,7 @@ _SETTING_LABEL_OVERRIDES: dict[str, str] = {
     "ai_model": "AI model",
     "ai_call_timeout": "AI call timeout",
     "max_concurrent_ai_calls": "Max concurrent AI calls",
+    "max_concurrent_analyses": "Max concurrent analyses",
     "session_ttl_hours": "Session lifetime (hours)",
     "jira_atst_token": "Jira service account scoped token",
     "jira_pat": "JIRA personal access token",
@@ -2835,10 +2843,16 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> None:
             continue
 
         # Adjust max_wait_minutes to account for time already elapsed before
-        # the restart, so the original deadline is honoured.
+        # the restart, so the original deadline is honoured. Only a job whose stored
+        # status is ``waiting`` is still inside that wait -- a ``pending`` job that
+        # finished it and is now queued for an analysis slot still carries
+        # wait_started_at, and its deadline has already served its purpose.
         raw_wait_started_at = params.get("wait_started_at")
         wait_started_at: float | None = None
-        if raw_wait_started_at is not None:
+        if (
+            job.get("status", "waiting") == "waiting"
+            and raw_wait_started_at is not None
+        ):
             try:
                 wait_started_at = float(raw_wait_started_at)
             except TypeError, ValueError:
@@ -2889,27 +2903,41 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> None:
                 job["job_id"],
             )
 
-        token = ai_username.set(resumed_username)
-        try:
-            ai_provider, ai_model = await _resolve_ai_config_allow_defer(body, merged)
-            resolved_peers = await _validate_peer_configs(body, merged)
-        except Exception as exc:
-            reason = (
-                exc.detail
-                if isinstance(exc, HTTPException)
-                else "AI/peer validation unavailable (grant or catalog lookup failed)"
-            )
-            logger.exception(
-                "Cannot resume waiting job %s", job["job_id"], exc_info=False
-            )
-            await _fail_resumed_waiting_job(
-                job["job_id"],
-                result_data,
-                f"Cannot resume: AI/peer validation failed: {reason}",
-            )
-            continue
-        finally:
-            ai_username.reset(token)
+        # Two producers of a ``pending`` + ``analysis_state='submitted'`` row, and
+        # they must be told apart: an ingest-only ``/submit`` (which is allowed to
+        # run with no AI configured) and a claimed in-place analyse, which sets
+        # ``analysis_started_at`` before its task exists. Treating the second as an
+        # ingest would discard the analysis the user asked for.
+        ingest_only = job.get("analysis_state") == "submitted" and not job.get(
+            "analysis_started_at"
+        )
+        resolved_peers: list[Any] | None = None
+        if ingest_only:
+            ai_provider, ai_model = "", ""
+        else:
+            token = ai_username.set(resumed_username)
+            try:
+                ai_provider, ai_model = await _resolve_ai_config_allow_defer(
+                    body, merged
+                )
+                resolved_peers = await _validate_peer_configs(body, merged)
+            except Exception as exc:
+                reason = (
+                    exc.detail
+                    if isinstance(exc, HTTPException)
+                    else "AI/peer validation unavailable (grant or catalog lookup failed)"
+                )
+                logger.exception(
+                    "Cannot resume waiting job %s", job["job_id"], exc_info=False
+                )
+                await _fail_resumed_waiting_job(
+                    job["job_id"],
+                    result_data,
+                    f"Cannot resume: AI/peer validation failed: {reason}",
+                )
+                continue
+            finally:
+                ai_username.reset(token)
         tests_repo_url_raw = resolve_tests_repo_url(body, merged)
         tests_repo_url, tests_repo_ref = parse_repo_ref(tests_repo_url_raw)
         resolved_tests_repo_token = (
@@ -2947,12 +2975,13 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> None:
                 additional_repos_list=additional_repos_list,
                 base_url=_build_internal_server_url(),
                 username=resumed_username,
+                ingest_only=ingest_only,
             )
         )
         _register_job_task(job["job_id"], task)
         logger.info(
-            f"Resumed waiting job {job['job_id']} "
-            f"({result_data.get('display_name') or result_data.get('job_name')} #{result_data.get('build_number')})"
+            f"Resumed {job.get('status', 'waiting')} job {job['job_id']} "
+            f"({result_data.get('display_name') or result_data.get('job_name')} #{result_data.get('build_number', '')})"
         )
 
 
@@ -6647,6 +6676,34 @@ async def _reap_analysis_workspace(
         await asyncio.shield(asyncio.create_task(_cleanup_ai_session(auth_header)))
 
 
+async def _mark_queued_for_slot(job_id: str) -> None:
+    """Show a job waiting for a free analysis slot as ``pending`` (#544).
+
+    ``expect_status`` is not decoration: the acquire awaits this, so an abort can
+    land first, and an unguarded write would put an aborted row back to ``pending``
+    -- which the next boot would then resume.
+    """
+    snapshot = analysis_slots.snapshot(job_id)
+    await update_status(
+        job_id,
+        "pending",
+        expect_status=("pending", "running", "waiting"),
+    )
+    # ``analysis_started_at`` is left alone: a submitted job claimed for in-place
+    # analysis is recognisable to the restart resume by its non-NULL stamp, so
+    # clearing it here would resume the queued analysis as an ingest-only run.
+    # The wait is kept out of the run length by re-stamping on admission instead.
+    notify_active_count_changed()
+    notify_dashboard_changed()
+    notify_job_status_changed(job_id)
+    logger.info(
+        "Analysis %s queued for a slot (%d running, limit %d)",
+        job_id,
+        snapshot["running"],
+        snapshot["limit"],
+    )
+
+
 async def _process_ci_source_analysis(
     *,
     job_id: str,
@@ -6754,7 +6811,21 @@ async def _process_ci_source_analysis(
         test_failures = source_result.failures
         console_context = source_result.console_context
 
+        # A slot is held only by something that runs the AI pipeline (#544): the
+        # two no-AI exits above (ingest-only and skip_analysis) have already
+        # returned, and the CI build wait earlier is not an analysis. The queue is
+        # ordered by the job's own created_at, so the oldest waiting analysis
+        # starts first. The job shows 'pending' while it waits.
+        await analysis_slots.acquire(
+            job_id,
+            created_at=await storage.get_job_created_at(job_id),
+            on_queued=partial(_mark_queued_for_slot, job_id),
+        )
+
         await update_status(job_id, "running")
+        # The run starts on admission, not at the ``running`` the fetch wrote
+        # before the gate, so the wait is not counted as analysis time (#544).
+        await storage.restamp_analysis_started_at(job_id)
         notify_active_count_changed()
         notify_dashboard_changed()
         notify_job_status_changed(job_id)
@@ -7349,13 +7420,21 @@ async def _process_ci_source_analysis(
         notify_token_usage_changed()
 
     finally:
-        await _reap_analysis_workspace(
-            job_id=job_id,
-            auth_header=auth_header,
-            source=source,
-            repo_manager=repo_manager,
-            repo_path=repo_path,
-        )
+        # The slot is held through the reap -- the cap then bounds live workspaces,
+        # not only live prompts -- and released in a nested finally so a raise or a
+        # shutdown cancellation in the reap cannot keep it for the life of the
+        # process. ``release`` itself stays synchronous: no ``await`` between here
+        # and it means no second cancellation can land first.
+        try:
+            await _reap_analysis_workspace(
+                job_id=job_id,
+                auth_header=auth_header,
+                source=source,
+                repo_manager=repo_manager,
+                repo_path=repo_path,
+            )
+        finally:
+            analysis_slots.release(job_id)
 
 
 def _resolve_request_display_name(body: UnifiedAnalyzeRequest) -> str:
@@ -8113,11 +8192,34 @@ async def get_job_result(
     result["tracked_in"] = await storage.get_tracked_in_for_job(job_id)
     settings = get_settings()
     result["capabilities"] = _build_capabilities(settings)
+    _attach_slot_queue(result, job_id)
     if result.get("status") in IN_PROGRESS_STATUSES:
         response.status_code = 202
     if field_list is not None:
         return filter_result_fields(result, field_list)
     return result
+
+
+def _attach_slot_queue(result: dict[str, Any], job_id: str) -> None:
+    """Say why a job is waiting, only while it really is queued (#544).
+
+    Computed at read time, never stored: the running count moves constantly, and a
+    computed field needs no migration and cannot go stale across a restart. Queue
+    membership is the discriminator, not the ``pending`` status -- that is the
+    initial status of every job.
+    """
+    snapshot = analysis_slots.snapshot(job_id)
+    if snapshot["position"] is None:
+        return
+    result["queue"] = {
+        "position": snapshot["position"],
+        "running": snapshot["running"],
+        "limit": snapshot["limit"],
+        "message": (
+            "waiting for a free analysis slot "
+            f"({snapshot['running']} running, limit {snapshot['limit']})"
+        ),
+    }
 
 
 def _validate_test_status_filter(status: list[str] | None) -> list[str] | None:
@@ -8436,6 +8538,36 @@ async def get_failure_by_uuid(failure_uuid: str) -> dict[str, Any]:
     return result
 
 
+async def _mark_failure_reanalysis_not_started(
+    job_id: str, failure_uuid: str, reason: str
+) -> None:
+    """End a failure-level re-analysis that never reached the AI, visibly.
+
+    The request marks the failure ``running`` before spawning, which renders a
+    spinner with the retry disabled, and nothing resets it at boot -- so a wait
+    that ends before admission has to write the outcome itself. Best-effort: this
+    runs from a cancellation or a shutdown path.
+    """
+
+    def _patch(result_data: dict[str, Any]) -> None:
+        failure = _find_failure_by_uuid_in_result(result_data, failure_uuid)
+        if failure:
+            failure["reanalysis_status"] = "failed"
+            failure["reanalysis_error"] = reason
+
+    try:
+        await patch_result_json(job_id, _patch)
+    except Exception:
+        logger.warning(
+            "Could not record that the re-analysis of failure %s in job %s never "
+            "started (%s)",
+            failure_uuid,
+            job_id,
+            reason,
+            exc_info=True,
+        )
+
+
 async def _reanalyze_failure_background(
     job_id: str,
     failure_uuid: str,
@@ -8467,8 +8599,36 @@ async def _reanalyze_failure_background(
     repo_manager: RepositoryManager | None = None
     repo_path: Path | None = None
     source: CISource | None = None
+    slot_key = f"{job_id}/{failure_uuid}"
 
     try:
+        # Inside the try, so the finally below covers every exit after admission --
+        # a cancellation here would otherwise keep the slot for the life of the
+        # process and permanently shrink the cap.
+        try:
+            await analysis_slots.acquire(slot_key)
+        except BaseException:
+            # Never admitted: the request already marked this failure 'running', and
+            # no pass resumes a failure-level re-analysis, so end it visibly instead
+            # of leaving a spinner with a disabled retry.
+            await _mark_failure_reanalysis_not_started(
+                job_id, failure_uuid, "interrupted while queued"
+            )
+            raise
+
+        # Admission can come after the parent was aborted: abort_analysis cancels
+        # only the job's own task, never this one, and the success patch below is
+        # not terminal-guarded -- so this would spend an AI call to rewrite an
+        # aborted job's report.
+        current = await get_result(job_id)
+        if current is None or current.get("status") == "aborted":
+            await _mark_failure_reanalysis_not_started(
+                job_id,
+                failure_uuid,
+                "the job was aborted while this re-analysis waited",
+            )
+            return
+
         auth_header = await _create_ai_auth_header(username)
 
         # Clone repos if configured (no artifact linking here — done after refetch)
@@ -8830,14 +8990,20 @@ async def _reanalyze_failure_background(
             )
 
     finally:
-        notify_job_status_changed(job_id)
-        await _reap_analysis_workspace(
-            job_id=job_id,
-            auth_header=auth_header,
-            source=source,
-            repo_manager=repo_manager,
-            repo_path=repo_path,
-        )
+        # Held through the reap, released in a nested finally: one acquire, exactly
+        # one release, on every path -- including a raise or a cancellation in the
+        # reap itself.
+        try:
+            notify_job_status_changed(job_id)
+            await _reap_analysis_workspace(
+                job_id=job_id,
+                auth_header=auth_header,
+                source=source,
+                repo_manager=repo_manager,
+                repo_path=repo_path,
+            )
+        finally:
+            analysis_slots.release(slot_key)
 
 
 @app.post(

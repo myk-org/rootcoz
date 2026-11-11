@@ -379,6 +379,26 @@ describe('StatusPage usage', () => {
     expect((await screen.findAllByText(phase)).length).toBe(2)
   })
 
+  it('explains a queued analysis with the live slot sentence, not the stale phase', async () => {
+    // The queued write keeps the previous run's progress_phase, so the phase label
+    // must lose to the queue message or the page claims it is fetching.
+    get.mockResolvedValue({
+      ...result('pending'),
+      queue: { position: 2, running: 1, limit: 1, message: 'waiting for a free analysis slot (1 running, limit 1)' },
+      result: { ...result('pending').result!, progress_phase: 'fetching' },
+    })
+    renderPage()
+    expect(await screen.findByText('waiting for a free analysis slot (1 running, limit 1)')).toBeInTheDocument()
+    expect(screen.queryByText(/Fetching test results/)).not.toBeInTheDocument()
+    expect(screen.getAllByText('Analysis queued').length).toBeGreaterThan(0)
+  })
+
+  it('still says a pending job is waiting in the queue when it is not slot-queued', async () => {
+    get.mockResolvedValue(result('pending'))
+    renderPage()
+    expect(await screen.findByText('Waiting in the analysis queue...')).toBeInTheDocument()
+  })
+
   it('does not show cost when there is no usage', async () => {
     get.mockResolvedValue(result('running'))
     renderPage()

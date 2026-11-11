@@ -34,7 +34,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pi_sidecar_client import AIResult
 
-from rootcoz import storage, temp_paths
+from rootcoz import analysis_slots, storage, temp_paths
 from rootcoz.ai_client import _setup_usage_recorder
 from rootcoz.cli.client import RootCozClient
 from rootcoz.config import Settings
@@ -124,6 +124,35 @@ def _capture_reaper_logs(caplog: pytest.LogCaptureFixture) -> Iterator[None]:
         bypass_duplicate_filter=True,
     ):
         yield
+
+
+@pytest.fixture(autouse=True)
+def _reset_analysis_slots() -> Iterator[None]:
+    """Leave no analysis slot or waiter behind for the next test (#544).
+
+    Autouse suite-wide, not only in the limiter's own tests: a test that ends with
+    a job still queued would otherwise hang the next one that needs a slot, and
+    there is no per-test timeout to turn that into a failure.
+    """
+    analysis_slots.reset()
+    try:
+        yield
+    finally:
+        analysis_slots.reset()
+
+
+@pytest.fixture
+def slot_limit(monkeypatch: pytest.MonkeyPatch) -> Callable[[int], None]:
+    """Set the analysis cap the slot limiter reads, without the real Settings cache."""
+
+    def _set(limit: int) -> None:
+        monkeypatch.setattr(
+            analysis_slots,
+            "get_settings",
+            lambda: SimpleNamespace(max_concurrent_analyses=limit),
+        )
+
+    return _set
 
 
 @pytest.fixture(autouse=True)

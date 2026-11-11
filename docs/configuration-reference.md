@@ -236,6 +236,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
     | `PUBLIC_BASE_URL` | unset | string | no | no | yes |
     | `ADDITIONAL_REPOS` | empty | string | no | no | yes |
     | `MAX_CONCURRENT_REPO_CLONES` | `10` | integer > 0 | no | no | yes |
+    | `MAX_CONCURRENT_ANALYSES` | `10` | integer > 0 | no | no | yes |
     | `CHAT_CLONE_DEPTH` | `1` | integer ≥ 1 | no | no | yes |
    | `MAX_WORKSPACE_GRAPH_MB` | `1024` | integer 16–1048576 | no | no | yes |
     | `WAIT_FOR_COMPLETION` | `true` | boolean | no | no | yes |
@@ -434,6 +435,7 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `PUBLIC_BASE_URL` | `public_base_url` | Server | runtime |
 | `ADDITIONAL_REPOS` | `additional_repos` | Server | runtime |
 | `MAX_CONCURRENT_REPO_CLONES` | `max_concurrent_repo_clones` | Server | runtime |
+| `MAX_CONCURRENT_ANALYSES` | `max_concurrent_analyses` | Server | runtime |
 | `CHAT_CLONE_DEPTH` | `chat_clone_depth` | Server | runtime |
 | `MAX_WORKSPACE_GRAPH_MB` | `max_workspace_graph_mb` | Workspace | runtime |
 | `WAIT_FOR_COMPLETION` | `wait_for_completion` | Server | runtime |

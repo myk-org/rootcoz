@@ -4230,8 +4230,9 @@ async def mark_jobs_failed_for_restart(job_ids: Sequence[str]) -> list[str]:
     """Fail the jobs that were in flight when the process took SIGTERM (#458).
 
     Runs from the lifespan shutdown, so it must never raise: one row per guarded
-    write, one bad row must not stop the rest. A ``waiting`` job is skipped on
-    purpose -- it is resumed by the next boot (see ORPHAN_STATUSES).
+    write, one bad row must not stop the rest. A ``waiting`` or ``pending`` job
+    is skipped on purpose -- both are resumed by the next boot (see
+    ORPHAN_STATUSES).
 
     Returns:
         The job ids the mark landed on.
@@ -4902,6 +4903,23 @@ async def get_result(
             )
         logger.debug(f"get_result: job_id={job_id}, found=False")
         return None
+
+
+async def get_job_created_at(job_id: str) -> str | None:
+    """The job's own created_at, as stored — the analysis queue's ordering key.
+
+    ``results.created_at`` is second-resolution, so callers keep their own
+    arrival tie-breaker; this only answers what the row says.
+    """
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT created_at FROM results WHERE job_id = ?",
+            (job_id,),
+        )
+        row = await cursor.fetchone()
+    if row is None or row["created_at"] is None:
+        return None
+    return str(row["created_at"])
 
 
 async def add_graft_estimated_tokens_saved(job_id: str, tokens: int) -> None:
@@ -6676,9 +6694,13 @@ ACTIVE_STATUSES = ("running", "pending", "waiting")
 ENDED_STATUSES = ("completed", "failed", "aborted")
 
 # Statuses whose background task is irrecoverably lost after a restart.
-# These are a subset of ACTIVE_STATUSES — "waiting" is excluded because
-# waiting jobs can be safely resumed.
-ORPHAN_STATUSES = ("pending", "running")
+# These are a subset of ACTIVE_STATUSES — "waiting" and "pending" are excluded
+# because both can be safely resumed by the next boot.
+ORPHAN_STATUSES = ("running",)
+#: Statuses the next boot re-creates a background task for. ``pending`` is here
+#: because it is how a job waits for a free analysis slot (#544): failing it on a
+#: restart would silently lose accepted work.
+RESUMABLE_STATUSES = ("pending", "waiting")
 RESTART_ERROR_MSG = "Analysis interrupted by server restart. Please re-submit."
 #: Machine-readable companion to RESTART_ERROR_MSG, in results.failure_reason:
 #: a restart and a crash read the same sentence, and only the process that took
@@ -6756,6 +6778,30 @@ async def oldest_running_analysis_started_at() -> str | None:
     if not row or row[0] is None:
         return None
     return str(row[0])
+
+
+async def restamp_analysis_started_at(job_id: str) -> None:
+    """Start the analysis window now, on admission to a slot.
+
+    A job queued for a free analysis slot (#544) leaves ``running`` for ``pending``
+    and comes back, and ``analysis_started_at`` is only stamped into a NULL — so
+    without this the queue wait would count as analysis time and inflate the run
+    length on the report.
+
+    The stamp is *moved*, not cleared while waiting: a submitted job claimed for
+    in-place analysis is recognisable to the restart resume only by a non-NULL
+    stamp (:func:`claim_submitted_job_for_analyze`), so clearing it while queued
+    would resume that user's analysis as the ingest-only run it was claimed from,
+    silently dropping the AI run. The stuck-analysis alert needs nothing here: it
+    reads ``running`` rows only (:func:`oldest_running_analysis_started_at`).
+    """
+    async with _connect_db() as db:
+        await db.execute(
+            "UPDATE results SET analysis_started_at = CURRENT_TIMESTAMP "
+            "WHERE job_id = ?",
+            (job_id,),
+        )
+        await db.commit()
 
 
 async def list_distinct_job_names() -> set[str]:
@@ -8517,23 +8563,26 @@ async def get_effective_classifications_bulk(
 async def mark_stale_results_failed() -> tuple[
     list[dict[str, Any]], list[dict[str, Any]]
 ]:
-    """Mark orphaned pending/running jobs as failed. Return waiting jobs for resumption.
+    """Mark orphaned running jobs as failed. Return resumable jobs for resumption.
 
-    Pending and running jobs have lost their background task and cannot recover,
-    so they are marked as failed with an error message and completion timestamp.
+    A running job has lost its background task and cannot recover, so it is marked
+    as failed with an error message and completion timestamp.
 
-    Waiting jobs were polling Jenkins and can be safely resumed by re-creating
-    their background task -- unless their payload is damaged, which no build can
-    inflate, so those are failed with the damage as their error.
+    ``pending`` and ``waiting`` jobs can be safely resumed by re-creating their
+    background task: ``waiting`` was polling Jenkins, ``pending`` was accepted and
+    is either waiting for a free analysis slot (#544) or an ingest that never
+    started. A damaged payload is the exception -- no build can inflate it, so
+    those are failed with the damage as their error.
 
     Returns:
-        Tuple of (waiting_jobs, recovered_jobs).
-        - waiting_jobs: list of dicts with ``job_id`` and ``result_data`` for
-          each waiting job to resume.
+        Tuple of (resumable_jobs, recovered_jobs).
+        - resumable_jobs: list of dicts with ``job_id``, ``result_data``, ``status``,
+          ``analysis_state`` and ``analysis_started_at`` for each job to resume,
+          oldest first.
         - recovered_jobs: list of dicts with ``job_id`` and ``previous_status``
           for each job that was marked failed.
     """
-    waiting_jobs: list[dict[str, Any]] = []
+    resumable_jobs: list[dict[str, Any]] = []
     recovered_jobs: list[dict[str, Any]] = []
     async with _connect_db() as db:
         # Collect orphaned job details before updating
@@ -8561,9 +8610,15 @@ async def mark_stale_results_failed() -> tuple[
                 f"Marked {cursor.rowcount} stale job(s) as failed on startup"
             )
 
-        # Collect waiting jobs for resumption instead of failing them
+        # Collect resumable jobs instead of failing them. Ordered oldest first: the
+        # spawn order is deterministic, and each row's created_at then orders the
+        # analysis queue exactly as it would have before the restart.
+        resumable_placeholders = ", ".join("?" for _ in RESUMABLE_STATUSES)
         cursor = await db.execute(
-            "SELECT job_id, result_json FROM results WHERE status = 'waiting'"
+            "SELECT job_id, status, result_json, analysis_state, "
+            "analysis_started_at FROM results "
+            f"WHERE status IN ({resumable_placeholders}) ORDER BY created_at",
+            RESUMABLE_STATUSES,
         )
         rows = await cursor.fetchall()
         for row in rows:
@@ -8575,11 +8630,11 @@ async def mark_stale_results_failed() -> tuple[
                 except DamagedResultEncoding as exc:
                     # Damage is terminal: no build's codec will inflate these
                     # bytes, so this job can never be resumed. Fail it with the
-                    # damage as its error instead of leaving it 'waiting'.
+                    # damage as its error instead of leaving it resumable.
                     _note_unreadable_result(row["job_id"], exc)
                     logger.warning(
-                        f"Marking waiting job {row['job_id']} as failed: its "
-                        "result_json is damaged, so no build can resume it"
+                        f"Marking {row['status']} job {row['job_id']} as failed: "
+                        "its result_json is damaged, so no build can resume it"
                     )
                     await db.execute(
                         "UPDATE results SET status = 'failed', "
@@ -8589,30 +8644,37 @@ async def mark_stale_results_failed() -> tuple[
                     continue
                 except UnsupportedResultEncoding as exc:
                     # Nothing proves this job is unrecoverable: leave the row
-                    # alone (still 'waiting', payload intact) so a build that
-                    # can read it resumes it after rolling forward.
+                    # alone (status and payload intact) so a build that can read
+                    # it resumes it after rolling forward.
                     _note_unreadable_result(row["job_id"], exc)
                     continue
                 stored_params = (
                     result_data.get("request_params") if result_data else None
                 )
+                # A waiting job polls Jenkins with this identity, so it needs the
+                # build number; a pending file/raw job carries none.
+                needs_build_number = row["status"] == "waiting"
                 is_resumable = (
                     result_data is not None
                     and isinstance(stored_params, dict)
                     and bool(stored_params)
                     and "job_name" in result_data
-                    and "build_number" in result_data
+                    and (not needs_build_number or "build_number" in result_data)
                 )
                 if is_resumable:
-                    waiting_jobs.append(
+                    resumable_jobs.append(
                         {
                             "job_id": row["job_id"],
                             "result_data": result_data,
+                            "status": row["status"],
+                            "analysis_state": row["analysis_state"],
+                            "analysis_started_at": row["analysis_started_at"],
                         }
                     )
                 else:
                     logger.warning(
-                        f"Marking unrecoverable waiting job {row['job_id']} as failed"
+                        f"Marking unrecoverable {row['status']} job "
+                        f"{row['job_id']} as failed"
                     )
                     await db.execute(
                         "UPDATE results SET status = 'failed', "
@@ -8620,24 +8682,25 @@ async def mark_stale_results_failed() -> tuple[
                         (RESTART_ERROR_MSG, now, row["job_id"]),
                     )
 
-        # Mark waiting jobs without result_json as failed (unrecoverable)
+        # Mark resumable jobs without result_json as failed (unrecoverable)
         cursor = await db.execute(
             "UPDATE results SET status = 'failed', "
             "error = ?, completed_at = ? "
-            "WHERE status = 'waiting' AND (result_json IS NULL OR result_json = '')",
-            (RESTART_ERROR_MSG, now),
+            f"WHERE status IN ({resumable_placeholders}) "
+            "AND (result_json IS NULL OR result_json = '')",
+            (RESTART_ERROR_MSG, now, *RESUMABLE_STATUSES),
         )
         if cursor.rowcount > 0:
             logger.warning(
-                f"Marked {cursor.rowcount} unrecoverable waiting job(s) as failed (missing result data)"
+                f"Marked {cursor.rowcount} unrecoverable job(s) as failed (missing result data)"
             )
 
         await db.commit()
 
-    if waiting_jobs:
-        logger.info(f"Found {len(waiting_jobs)} waiting job(s) to resume")
+    if resumable_jobs:
+        logger.info(f"Found {len(resumable_jobs)} job(s) to resume")
 
-    return waiting_jobs, recovered_jobs
+    return resumable_jobs, recovered_jobs
 
 
 # --- Auth storage functions ---

@@ -190,8 +190,8 @@ helm upgrade --install rootcoz ./chart -n rootcoz \
 | Resource | Value | Basis |
 |---|---|---|
 | CPU | `4` | The live deployment's limit is `4000m` and CPU throttling stays under 1% of periods. |
-| Memory | `32Gi` | Peak usage (analysis + graph indexing + sidecar) is ~6 GiB. 32Gi is headroom to raise `max_concurrent_ai_calls` above the default 3; the rule for sizing a smaller pod is **~1 GiB baseline + ~2 GiB per concurrent analysis**. |
-| ephemeral-storage | `16Gi` | **A judgement, not a measurement**: 1 GiB graph-index budget per analysis workspace × default concurrency 3, plus up to 10 concurrent repo clones of arbitrary size, plus Jenkins/Prow artifacts and the container writable layer. Must stay at or below the node's ephemeral allocatable. |
+| Memory | `32Gi` | Peak usage (analysis + graph indexing + sidecar) is ~6 GiB. 32Gi is headroom over the default `max_concurrent_analyses` of 10; the rule for sizing a smaller pod is **~1 GiB baseline + ~2 GiB per submitted analysis (fetch + wait + run)**, multiplied by the analysis cap — `10 × ~2 GiB ≈ 21 GiB` at the default. `max_concurrent_ai_calls` (3) is the width of one analysis, not this multiplier. |
+| ephemeral-storage | `16Gi` | **A judgement, not a measurement**: 1 GiB graph-index budget (`max_workspace_graph_mb` default `1024`) per analysis workspace × `max_concurrent_analyses`, plus up to 10 concurrent repo clones of arbitrary size, plus Jenkins/Prow artifacts and the container writable layer. At the default cap of 10 the graph term alone is ~10 GiB. A job queueing for a slot is not bounded by the cap: it has already fetched its artifacts (up to `jenkins_artifacts_max_size_mb`, 500 MiB each), so add one artifact extract per job expected to queue. Must stay at or below the node's ephemeral allocatable. |
 
 The overlay **replaces** the default `12Gi` (see [`/tmp` and ephemeral storage](#tmp-and-ephemeral-storage));
 it does not add to it, so a `-f` profile is still one number on both keys.
@@ -258,11 +258,17 @@ same way the production `16Gi` is:
 
 | Term | Source | GiB |
 |---|---|---|
-| Code-graph indexes | `max_workspace_graph_mb` default `1024` × `max_concurrent_ai_calls` default `3` | 3.0 |
+| Code-graph indexes | `max_workspace_graph_mb` default `1024` × default concurrency `3` | 3.0 |
 | Repo clones | `max_concurrent_repo_clones` default `10` × the largest measured snapshot (`kubev2v/forklift`, 557 MB) | 5.4 |
 | CI artifacts | `jenkins_artifacts_max_size_mb` `500` + the Prow ceiling `50` | 0.5 |
 | Writable layer and logs | pip/uv/node caches, scratch outside our own dirs | ~1.0 |
 | **Worst case** | summed, rounded up to whole GiB | **12** |
+
+The graph term is over the *deployment's* concurrency of three, not over `max_concurrent_analyses`:
+the issue that introduced that cap (#544) fixes its default at 10, while these shipped defaults host
+roughly three analyses. An operator who runs the default cap of 10 needs ~10 GiB of graph indexes and
+~21 GiB of memory, which this chart's defaults do not cover — lower `max_concurrent_analyses` (≤ 3 here)
+or apply `chart/examples/values-production.yaml` and raise `resources`.
 
 Roughly ten GiB is all the inputs support — the 557 MB snapshot is one repository and the writable
 layer is a guess — so the default is the sum rounded up. It is deliberately **below** the production

@@ -70,6 +70,7 @@ This queues a JUnit XML analysis from the terminal and prints the job ID to poll
    | --- | --- |
    | Wait | With `Wait for build completion` on, the job sits in `waiting` and polls Jenkins until the build finishes |
    | Fetch | The source plugin collects failures, passed tests, and skipped tests from the CI job or the XML |
+   | Queue | A job that will run AI waits here for a free analysis slot when `max_concurrent_analyses` jobs are already running. It stays `pending`, holds no clone slot, and starts as soon as a slot frees — oldest waiting job first. Ingest-only submissions (`Submit` without analysis) and jobs with no failures skip this stage entirely |
    | Preflight | RootCoz confirms the AI provider and model are actually reachable before starting expensive work |
    | Group | Failures are grouped by error signature: a SHA-256 hash of the normalized error message and stack trace, with timestamps, UUIDs, pod names, and build numbers stripped out first |
    | Clone | The tests repo and any additional repos are cloned into a workspace, and `.rootcoz/` agents, skills, and extensions are copied in |

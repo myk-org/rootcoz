@@ -796,21 +796,21 @@ class TestSetTestClassification:
 class TestMarkStaleResultsFailed:
     """Tests for the mark_stale_results_failed function."""
 
-    async def test_marks_pending_as_failed(self, setup_test_db: Path) -> None:
-        """Pending jobs are marked failed on startup."""
+    async def test_pending_is_resumed_not_failed(self, setup_test_db: Path) -> None:
+        """``pending`` waits for an analysis slot, so a restart resumes it (#544)."""
         with patch.object(storage, "DB_PATH", setup_test_db):
-            await storage.save_result("pending-1", "http://j/1", "pending")
-            waiting, recovered = await storage.mark_stale_results_failed()
-            assert waiting == []
-            assert len(recovered) == 1
-            assert recovered[0] == {"job_id": "pending-1", "previous_status": "pending"}
-            result = await storage.get_result("pending-1")
-            assert result["status"] == "failed"
-            assert (
-                result["error"]
-                == "Analysis interrupted by server restart. Please re-submit."
+            await storage.save_result(
+                "pending-1",
+                "http://j/1",
+                "pending",
+                {"job_name": "raw", "request_params": {"type": "raw"}},
             )
-            assert result["completed_at"] is not None
+            waiting, recovered = await storage.mark_stale_results_failed()
+            assert recovered == []
+            assert [job["job_id"] for job in waiting] == ["pending-1"]
+            result = await storage.get_result("pending-1")
+            assert result["status"] == "pending"
+            assert result["error"] == ""
 
     async def test_marks_running_as_failed(self, setup_test_db: Path) -> None:
         """Running jobs are marked failed on startup."""
@@ -854,7 +854,7 @@ class TestMarkStaleResultsFailed:
             assert result["status"] == "waiting"
 
     async def test_mixed_statuses(self, setup_test_db: Path) -> None:
-        """Pending/running are failed; waiting is returned; completed is untouched."""
+        """Running is failed; the resumable statuses are returned; completed is kept."""
         with patch.object(storage, "DB_PATH", setup_test_db):
             await storage.save_result("p1", "http://j/1", "pending")
             await storage.save_result("r1", "http://j/2", "running")
@@ -878,9 +878,10 @@ class TestMarkStaleResultsFailed:
             assert len(waiting) == 1
             assert waiting[0]["job_id"] == "w1"
 
-            # Check recovered jobs contain both pending and running
+            # p1 was stored with no payload, so it is not resumable and is failed
+            # by the unrecoverable branch; only a live `running` task is an orphan.
             recovered_ids = {r["job_id"]: r["previous_status"] for r in recovered}
-            assert recovered_ids == {"p1": "pending", "r1": "running"}
+            assert recovered_ids == {"r1": "running"}
 
             assert (await storage.get_result("p1"))["status"] == "failed"
             assert (await storage.get_result("r1"))["status"] == "failed"
@@ -1485,6 +1486,32 @@ class TestAnalysisWindow:
         assert age is not None
         assert age == pytest.approx(600, abs=5)
 
+    async def test_admission_moves_the_analysis_window_past_a_queue_wait(
+        self, setup_test_db: Path
+    ) -> None:
+        """A job queued for a slot is timed from admission, and keeps its stamp.
+
+        ``update_status`` only fills a NULL window, so a job that left ``running``
+        for ``pending`` and comes back would report the wait as run time (#544).
+        The stamp is *moved* rather than cleared while waiting: the restart resume
+        tells a claimed in-place analyse from an ingest-only submit by it.
+        """
+        wait_start = _stamp(7200)
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result("job-queued", "", "pending")
+            async with aiosqlite.connect(setup_test_db) as db:
+                await db.execute(
+                    "UPDATE results SET analysis_started_at = ? "
+                    "WHERE job_id = 'job-queued'",
+                    (wait_start,),
+                )
+                await db.commit()
+            await storage.restamp_analysis_started_at("job-queued")
+            row = await storage.get_result("job-queued")
+
+        assert row["analysis_started_at"] != wait_start
+        assert storage.elapsed_seconds_since(row["analysis_started_at"]) < 5
+
     async def test_claiming_a_submitted_job_rearms_the_analysis_window_and_releases_it_intact(
         self, setup_test_db: Path
     ) -> None:
@@ -1702,12 +1729,13 @@ class TestMarkJobsFailedForRestart:
         assert row["status"] == "completed"
         assert row["failure_reason"] == ""
 
-    async def test_a_waiting_row_is_refused_by_the_storage_guard(
-        self, setup_test_db: Path
+    @pytest.mark.parametrize("status", ["waiting", "pending"])
+    async def test_a_resumable_row_is_refused_by_the_storage_guard(
+        self, setup_test_db: Path, status: str
     ) -> None:
-        """``waiting`` is resumed by the next boot, so the write must refuse it."""
+        """A resumable row is picked up by the next boot, so the write must refuse it."""
         with patch.object(storage, "DB_PATH", setup_test_db):
-            await storage.save_result("job-w", "", "waiting")
+            await storage.save_result("job-w", "", status)
             landed = await storage.fail_job_without_result_write(
                 "job-w",
                 storage.RESTART_ERROR_MSG,
@@ -1717,7 +1745,7 @@ class TestMarkJobsFailedForRestart:
             row = await storage.get_result("job-w")
 
         assert landed is False
-        assert row["status"] == "waiting"
+        assert row["status"] == status
         assert row["failure_reason"] == ""
 
     async def test_an_in_place_analyze_clears_the_restart_marker(
@@ -4508,3 +4536,88 @@ async def test_delete_jobs_bulk_is_protected_skips_a_job(setup_test_db: Path) ->
         assert result["deleted"] == []
         assert result["failed"] == [{"job_id": "busy-job", "reason": "busy"}]
         assert await storage.get_result("busy-job") is not None
+
+
+class TestResumableAnalysisQueue:
+    """``pending`` is resumable, so a queued analysis survives a restart (#544)."""
+
+    async def test_the_resume_list_is_oldest_first_and_carries_its_state(
+        self, setup_test_db: Path
+    ) -> None:
+        """T14: a queued file/raw job needs no build number; order is created_at."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            for job_id in ("newest", "middle", "oldest"):
+                await storage.save_result(
+                    job_id,
+                    "http://ci/1",
+                    "pending",
+                    {"job_name": job_id, "request_params": {"type": "raw"}},
+                )
+                # Second-resolution created_at: space them so the order is real.
+                stamps = {
+                    "oldest": "2026-01-01 09:00:00",
+                    "middle": "2026-01-01 10:00:00",
+                    "newest": "2026-01-01 11:00:00",
+                }
+                async with aiosqlite.connect(setup_test_db) as db:
+                    await db.execute(
+                        "UPDATE results SET created_at = ? WHERE job_id = ?",
+                        (stamps[job_id], job_id),
+                    )
+                    await db.commit()
+            await storage.save_result("live", "http://ci/2", "running")
+
+            resumable, recovered = await storage.mark_stale_results_failed()
+
+            assert [job["job_id"] for job in resumable] == [
+                "oldest",
+                "middle",
+                "newest",
+            ]
+            assert recovered == [{"job_id": "live", "previous_status": "running"}]
+            entry = resumable[0]
+            assert entry["status"] == "pending"
+            assert entry["analysis_state"] == "analyzed"
+            assert entry["analysis_started_at"] is None
+            assert (await storage.get_result("live"))["status"] == "failed"
+
+    async def test_a_waiting_row_still_needs_its_build_number(
+        self, setup_test_db: Path
+    ) -> None:
+        """The Jenkins poll needs that identity; a queued file/raw job has none."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                "w-nobuild",
+                "http://ci/1",
+                "waiting",
+                {"job_name": "j", "request_params": {"type": "raw"}},
+            )
+            resumable, _recovered = await storage.mark_stale_results_failed()
+
+            assert resumable == []
+            assert (await storage.get_result("w-nobuild"))["status"] == "failed"
+
+
+class TestPendingSurvivesShutdown:
+    """A job still queued at SIGTERM is resumed, not failed (#544, #458)."""
+
+    async def test_a_pending_row_is_not_marked_failed_for_restart(
+        self, setup_test_db: Path
+    ) -> None:
+        """T14b: only a ``running`` task is lost with the process."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result(
+                "queued",
+                "",
+                "pending",
+                {"job_name": "q", "request_params": {"type": "raw"}},
+            )
+            await storage.save_result("live", "", "running")
+
+            marked = await storage.mark_jobs_failed_for_restart(["queued", "live"])
+
+            assert marked == ["live"]
+            assert (await storage.get_result("queued"))["status"] == "pending"
+            live = await storage.get_result("live")
+            assert live["status"] == "failed"
+            assert live["error"] == storage.RESTART_ERROR_MSG

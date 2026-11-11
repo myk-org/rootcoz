@@ -414,6 +414,14 @@ class Settings(BaseSettings):
         gt=0,
         description="Maximum simultaneous additional-repository clones",
     )
+    max_concurrent_analyses: int = Field(
+        default=10,
+        gt=0,
+        description=(
+            "Maximum number of analyses running at once (default 10). Further"
+            " submissions are accepted and queued as 'pending' until a slot frees."
+        ),
+    )
     chat_clone_depth: int = Field(
         default=1,
         ge=1,

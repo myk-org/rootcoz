@@ -30,6 +30,7 @@ RESULT_FIELD_PATHS: frozenset[str] = frozenset(
         "reanalyzed_from_job_id",
         "reanalyzed_to_job_ids",
         "origin_job_name",
+        "queue",
         "result",
         # Nested under result
         "result.job_id",
