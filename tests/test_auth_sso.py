@@ -57,6 +57,15 @@ def _claims(
     )
 
 
+def _returning(value: dict):
+    """An async stand-in for ``request_json`` that returns ``value``."""
+
+    async def _call(*args, **kwargs):
+        return value
+
+    return _call
+
+
 def _sealed(
     provider: str = "google",
     next_path: str = "/report/1",
@@ -264,11 +273,16 @@ def test_the_providers_endpoint_lists_only_configured_providers(
 ) -> None:
     """The login page asks this and renders exactly what comes back."""
     for client in make_app_client(temp_db_path):
-        assert client.get("/api/auth/sso/providers").json() == {"providers": []}
+        assert client.get("/api/auth/sso/providers").json() == {
+            "providers": [],
+            "browser_login": False,
+        }
 
     for client in make_app_client(temp_db_path, _SSO_ENV):
         assert client.get("/api/auth/sso/providers").json() == {
-            "providers": [{"name": "google", "display_name": "Google"}]
+            "providers": [{"name": "google", "display_name": "Google"}],
+            # `_SSO_ENV` sets PUBLIC_BASE_URL, so a browser login can complete.
+            "browser_login": True,
         }
 
 
@@ -2769,6 +2783,66 @@ async def test_a_client_name_cannot_forge_a_log_line(temp_db_path: Path) -> None
         assert stored == "laptop [AUDIT] forged entry with tabs"
 
 
+async def test_one_caller_cannot_reserve_every_device_code(temp_db_path: Path) -> None:
+    """The ceiling is per caller as well as global: anonymous means anyone."""
+    from rootcoz import main as app_module
+
+    monkeypatch = pytest.MonkeyPatch()
+    monkeypatch.setattr(app_module, "_MAX_LIVE_DEVICE_CODES_PER_CALLER", 2)
+    try:
+        for client in make_app_client(temp_db_path, _SSO_ENV):
+            assert client.post("/api/auth/sso/device/start", json={}).status_code == 200
+            assert client.post("/api/auth/sso/device/start", json={}).status_code == 200
+            # The global ceiling is far away; the caller's own is reached.
+            assert client.post("/api/auth/sso/device/start", json={}).status_code == 429
+            assert await storage.count_live_device_codes() == 2
+    finally:
+        monkeypatch.undo()
+
+
+async def test_a_failed_session_leaves_the_device_code_redeemable(
+    temp_db_path: Path,
+) -> None:
+    """A code is spent only once the terminal actually has a credential."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        session = await storage.create_session("alice", is_admin=False, role="reviewer")
+        started = _start_device(client)
+        client.cookies.set("rootcoz_session", session)
+        client.post(
+            "/api/auth/sso/device/approve", json={"user_code": started["user_code"]}
+        )
+        client.cookies.clear()
+
+        # The test client re-raises a server error, which is the failure the
+        # terminal would see as a 500.
+        with (
+            patch.object(
+                storage, "create_session", side_effect=RuntimeError("storage down")
+            ),
+            pytest.raises(RuntimeError),
+        ):
+            client.post(
+                "/api/auth/sso/device/poll",
+                json={"device_code": started["device_code"]},
+            )
+
+        # The code survived the failure, so the same terminal can retry — after
+        # the advertised interval, which the poll throttle enforces.
+        assert await storage.get_device_code(started["device_code"]) is not None
+        async with storage._connect_db() as db:
+            await db.execute(
+                "UPDATE sso_device_codes SET last_polled_at = '2000-01-01 00:00:00'"
+            )
+            await db.commit()
+        retried = client.post(
+            "/api/auth/sso/device/poll",
+            json={"device_code": started["device_code"]},
+        )
+        assert retried.json()["status"] == "approved"
+        assert retried.json()["token"]
+
+
 async def test_a_flood_of_pending_codes_is_refused_before_the_insert(
     temp_db_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -2978,3 +3052,120 @@ async def test_the_device_flow_is_audited_where_it_changes_anything(
         # which client, never the code itself (#379).
         for action, _actor, details in rows:
             assert "user_code" not in json.loads(details or "{}"), action
+
+
+async def test_oidc_discovery_must_claim_the_configured_issuer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The discovery document is trusted for an hour: pin what it claims."""
+    from rootcoz.auth.sso import oidc as oidc_module
+    from rootcoz.auth.sso.openshift import OpenShiftProvider
+
+    oidc_module._METADATA_CACHE.clear()
+    provider = OpenShiftProvider(
+        client_id="cid",
+        client_secret="secret",  # pragma: allowlist secret
+        issuer="https://idp.example",
+    )
+    monkeypatch.setattr(
+        oidc_module,
+        "request_json",
+        _returning(
+            {
+                "issuer": "https://evil.example",
+                "authorization_endpoint": "https://idp.example/auth",
+                "token_endpoint": "https://idp.example/token",
+                "jwks_uri": "https://idp.example/jwks",
+            }
+        ),
+    )
+    with pytest.raises(AuthError) as excinfo:
+        await provider.metadata()
+    assert excinfo.value.reason == "discovery_failed"
+
+
+async def test_oidc_discovery_rejects_a_plaintext_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Endpoints we call must be https; loopback http is the documented exception."""
+    from rootcoz.auth.sso import oidc as oidc_module
+    from rootcoz.auth.sso.openshift import OpenShiftProvider
+
+    oidc_module._METADATA_CACHE.clear()
+    provider = OpenShiftProvider(
+        client_id="cid",
+        client_secret="secret",  # pragma: allowlist secret
+        issuer="https://idp.example",
+    )
+    monkeypatch.setattr(
+        oidc_module,
+        "request_json",
+        _returning(
+            {
+                "issuer": "https://idp.example",
+                "authorization_endpoint": "https://idp.example/auth",
+                "token_endpoint": "http://idp.example/token",
+                "jwks_uri": "https://idp.example/jwks",
+            }
+        ),
+    )
+    with pytest.raises(AuthError) as excinfo:
+        await provider.metadata()
+    assert excinfo.value.reason == "discovery_failed"
+
+
+def test_an_azp_naming_another_client_is_refused_even_with_one_audience() -> None:
+    """A token minted for a sibling client carries its azp; aud alone is not enough."""
+    import asyncio
+    import time as _time
+
+    from joserfc import jwt as jose_jwt
+    from joserfc.jwk import RSAKey
+
+    from rootcoz.auth.sso.oidc import OIDCProvider
+
+    key = RSAKey.generate_key(2048, parameters={"kid": "k1"})
+
+    class _Provider(OIDCProvider):
+        name = "testoidc"
+        display_name = "Test"
+
+        @classmethod
+        def from_settings(cls, settings):
+            return None
+
+        async def _jwks_for(self, jwks_uri: str, *, force_refresh: bool = False):
+            from joserfc.jwk import KeySet
+
+            return KeySet.import_key_set({"keys": [key.as_dict(private=False)]})
+
+    provider = _Provider(
+        client_id="our-client",
+        client_secret="secret",  # pragma: allowlist secret
+        issuer="https://idp.example",
+    )
+    claims = {
+        "iss": "https://idp.example",
+        "aud": ["our-client"],
+        "azp": "another-client",
+        "sub": "s",
+        "nonce": "n1",
+        "exp": int(_time.time()) + 300,
+    }
+    token = jose_jwt.encode({"alg": "RS256", "kid": "k1"}, claims, key)
+
+    with pytest.raises(AuthError) as excinfo:
+        asyncio.run(
+            provider._verify_id_token({"jwks_uri": "https://idp/jwks"}, token, "n1")
+        )
+    assert "another party" in str(excinfo.value)
+
+
+def test_the_provider_names_are_declared_once() -> None:
+    """One list, asserted at import: adding a provider is a class, not two edits."""
+    from rootcoz import storage
+    from rootcoz.auth.sso import PROVIDER_BY_NAME
+    from rootcoz.sso_providers import SSO_PROVIDERS
+
+    assert storage.SSO_PROVIDERS == SSO_PROVIDERS
+    assert set(PROVIDER_BY_NAME) == set(SSO_PROVIDERS)
