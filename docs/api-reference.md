@@ -344,7 +344,7 @@ Date bounds use the `from` and `to` query names. Without the flag you get `403 R
 | POST | `/api/admin/db/query` | Read-only SQL for the admin chat |
 | GET | `/api/admin/chat` | Admin chat history |
 | POST | `/api/admin/chat` | Send an admin chat message; returns `202` |
-| POST | `/api/admin/chat/init`, `/close`, `/abort` | Admin chat session control; admin chat init stays synchronous and answers its own `422 AI session refused: …` (job chat reports a refusal as a transcript message instead) |
+| POST | `/api/admin/chat/init`, `/close`, `/abort` | Admin chat session control; admin chat init stays synchronous and answers its own `422 AI session refused: …` (job chat reports a refusal as a transcript message instead). A storage fault the server cannot retry past while minting its internal tools token answers `500 The chat workspace could not be prepared. Start it again.` instead of starting a chat with no admin tools; a momentary lock is retried and the chat still starts |
 | DELETE | `/api/admin/chat` | Clear admin chat history |
 | GET | `/api/admin/chat/stream` | Admin chat SSE: new messages **and the answer as it is written** (`chat-delta` frames) |
 | POST | `/api/admin-chat/artifacts` | Save a generated HTML report artifact |

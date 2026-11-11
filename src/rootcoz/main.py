@@ -5395,8 +5395,9 @@ async def _create_ai_auth_header(
     Returns a Bearer auth header string, or empty string on failure/no user.
 
     ``refuse_storage_fault`` is for a caller that cannot serve a useful result
-    without the token: a non-transient storage fault is re-raised instead of
-    returning ``""``, which every other caller needs so a run still proceeds.
+    without the token (the two chat Starts): a non-transient storage fault is
+    re-raised instead of returning ``""``, which every other caller needs so a
+    run still proceeds.
     A lock is never re-raised — it is transient and already retried by
     ``storage.create_session``. Neither the empty-username exit nor the two
     ``is_admin`` role re-checks are affected: they return ``""`` before any
@@ -25669,7 +25670,23 @@ async def init_admin_chat(
                 github_repo_available=_settings_github_repo_available(get_settings()),
                 has_profile=await _account_has_profile(username),
             )
-            auth_header = await _create_ai_auth_header(username, is_admin=True)
+            try:
+                auth_header = await _create_ai_auth_header(
+                    username, is_admin=True, refuse_storage_fault=True
+                )
+            except Exception as exc:  # noqa: BLE001 - a fault, never a lock
+                # No preparation task to record this in: this route is
+                # synchronous, and an admin chat without db_query is a broken
+                # chat dressed as a working one, so the fault is the answer.
+                # Never ``str(exc)``: it can carry a token-bearing remote.
+                logger.warning(
+                    "Admin chat init: internal tools token failed for %s: %s",
+                    username,
+                    _redacted_error(exc),
+                )
+                raise HTTPException(
+                    status_code=500, detail=_CHAT_PREP_FAILED_DETAIL
+                ) from None
             if auth_header:
                 server_url = _build_internal_server_url()
                 custom_tools = build_admin_custom_tools(

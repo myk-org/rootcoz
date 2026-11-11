@@ -150,6 +150,9 @@ For every available command and flag, see [CLI Command Reference](cli-reference.
 - A model shows `NO SESSION` and cannot be picked, or `Start` answers `422 AI session refused`.  
   The sidecar will not open a session with that model, so RootCoz refuses it instead of failing with a server error. The `422` detail names the cause: declare the model in that provider's `models.json`, or re-enter the key, or ask an administrator to check the server log. See [Configuration Reference](configuration-reference.html#adding-a-custom-provider) for the `models.json` rule.
 
+- Admin chat `Start` answers `500 The chat workspace could not be prepared. Start it again.`  
+  The server could not mint the internal tools token, and an admin chat without `db_schema`, `db_query` and `save_report` cannot read results or the database — so it refuses instead of starting a chat that looks healthy and cannot do its job. The server log carries `Admin chat init: internal tools token failed for …` with the cause. Job chat reports the same fault as a failed message in the transcript. Start it again once the storage fault is fixed; a momentary lock is retried, so it never ends an admin Start.
+
 - `rootcoz admin-chat send` fails with an admin error, or returns `409 Start a new chat session first`. The 409 means no session exists yet — run `rootcoz admin-chat init` first, which needs `--provider` and `--model`. A genuine admin error is a different failure: check the caller's role.  
   The CLI is not using an admin identity. Confirm it with `rootcoz auth whoami`.
 
@@ -158,9 +161,6 @@ For every available command and flag, see [CLI Command Reference](cli-reference.
 
 - `A saved artifact link returns 404.`  
   You started a new session or ran `rootcoz admin-chat clear`, which deletes saved artifacts for your account.
-
-- `The admin assistant cannot read results or the database, though Server Chat started normally.`  
-  Admin chat starts even when the server cannot mint the internal tools token — `get_job_result`, `db_schema`, `db_query` and `save_report` are then missing from its tool list and the server log carries `Failed to create AI session`. Job chat refuses that preparation and shows the failure message instead; admin chat is deliberately kept available, so start a new admin session once the storage fault is fixed to pick the tools up. The residual is tracked as issue #540.
 
 - `The CLI did not show a final answer.`  
   `admin-chat send` waits up to about two minutes. Check the result later with `rootcoz admin-chat history --limit 20`. For the raw endpoints, see [API Endpoint Reference](api-reference.html) for details.
