@@ -254,6 +254,63 @@ async def test_cancellation_during_on_queued_propagates(slot_limit) -> None:
     assert analysis_slots.running_count() == 1
 
 
+async def test_an_announce_does_not_cost_the_slot_that_freed_under_it(
+    slot_limit, monkeypatch
+) -> None:
+    """T4d: a slot that frees while the head announces is taken, not slept on.
+
+    The announce is an ``await`` and the head is not on the wake event while it
+    runs, so the wake it fires is consumed by the next waiter and cleared. The
+    gate must be re-checked on the way out of the announce instead of sleeping a
+    whole ceiling for a wake that already happened.
+    """
+    monkeypatch.setattr(analysis_slots, "_RECHECK_SECONDS", 30.0)
+    slot_limit(1)
+    announcing = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def _slow() -> None:
+        announcing.set()
+        await finish.wait()
+
+    await analysis_slots.acquire("holder")
+    log = _AdmissionLog()
+    head = asyncio.create_task(
+        _announce(
+            analysis_slots.acquire(
+                "head", created_at="2026-01-01 09:00:00", on_queued=_slow
+            ),
+            log.order,
+            "head",
+        )
+    )
+    await asyncio.wait_for(announcing.wait(), timeout=1)
+    log.spawn("next", created_at="2026-01-01 10:00:00")
+    await _settle()
+
+    analysis_slots.release("holder")
+    await _settle()  # "next" consumes that wake and re-sleeps behind the head
+    finish.set()
+    await asyncio.wait_for(head, timeout=1)
+    assert log.order == ["head"]
+
+    analysis_slots.release("head")
+    await _drain(head, *log.tasks)
+
+
+async def test_admission_leaving_a_free_slot_wakes_the_queue(slot_limit) -> None:
+    """T4e: an admission with capacity left must wake the next head, not wait it out."""
+    slot_limit(2)
+    await analysis_slots.acquire("holder")
+    analysis_slots._enqueue("waiting", "2026-01-01 10:00:00")
+    analysis_slots._enqueue("later", "2026-01-01 11:00:00")
+    event = analysis_slots._event()
+    slot_limit(3)  # capacity for both waiters
+
+    assert analysis_slots._try_admit("waiting", "2026-01-01 10:00:00") is True
+    assert event.is_set(), "the free slot left by an admission wakes the next head"
+
+
 async def test_a_waiter_does_not_spin(slot_limit, monkeypatch) -> None:
     """T4c: the shared wake event is cleared on every wake, so nobody busy-loops."""
     slot_limit(1)

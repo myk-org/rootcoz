@@ -71,6 +71,16 @@ def _event() -> asyncio.Event:
     return _released
 
 
+def _wake() -> None:
+    """Wake every waiter now, instead of leaving it to the recheck ceiling."""
+    if (
+        _released is not None
+        and _bound_loop is not None
+        and not _bound_loop.is_closed()
+    ):
+        _released.set()
+
+
 def _enqueue(key: str, created_at: str) -> None:
     """Insert ``key`` into the queue in ``(created_at, arrival)`` order, once."""
     global _arrival_seq
@@ -104,6 +114,10 @@ def _try_admit(key: str, created_at: str) -> bool:
         running_count(),
         _limit(),
     )
+    # The next head waits on the event like any other, and this admission does not
+    # wake it: without the wake a still-free slot waits out the recheck ceiling.
+    if _waiters and running_count() < _limit():
+        _wake()
     return True
 
 
@@ -146,6 +160,9 @@ async def acquire(
                 try:
                     await on_queued()
                     announced = True
+                    # The announce is an await: a slot can free under it, and the
+                    # wake that fired is already consumed. Re-check, do not sleep.
+                    continue
                 except Exception:
                     # A status write must never kill an analysis or the queue.
                     # ``Exception``, never ``BaseException``: a cancellation that
@@ -189,12 +206,7 @@ def release(job_key: str) -> None:
         running_count(),
         _limit(),
     )
-    if (
-        _released is not None
-        and _bound_loop is not None
-        and not _bound_loop.is_closed()
-    ):
-        _released.set()
+    _wake()
 
 
 def snapshot(job_key: str) -> dict[str, Any]:
