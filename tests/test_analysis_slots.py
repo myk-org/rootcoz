@@ -189,8 +189,13 @@ async def test_a_later_arrival_cannot_steal_a_free_slot(
     await _drain(*log.tasks)
 
 
-async def test_on_queued_runs_once_and_its_failure_is_not_fatal(slot_limit) -> None:
-    """T4: announce once; a raising status write neither kills nor wedges the wait."""
+async def test_on_queued_runs_once_and_is_retried_after_a_failure(slot_limit) -> None:
+    """T4: announce once; a raising status write neither kills nor wedges the wait.
+
+    A failed announce is retried on the next wake, because the row it could not
+    write is the ``pending`` state the user is shown; a successful one is not
+    repeated.
+    """
     slot_limit(1)
     calls = {"ok": 0, "broken": 0}
 
@@ -211,13 +216,14 @@ async def test_on_queued_runs_once_and_its_failure_is_not_fatal(slot_limit) -> N
     )
     await _settle(0.15)
 
-    assert calls["ok"] == 1
-    assert calls["broken"] == 1
+    assert calls["ok"] == 1, "a successful announce is not repeated"
+    assert calls["broken"] > 1, "a failed announce is retried, not dropped"
     assert analysis_slots.waiter_count() == 2
 
     analysis_slots.release("a")
     await _settle()
     assert admitted == ["b"]
+    assert calls["ok"] == 1
     analysis_slots.release("b")
     await _settle()
     assert admitted == ["b", "c"]

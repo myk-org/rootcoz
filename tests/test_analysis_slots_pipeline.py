@@ -201,9 +201,15 @@ def test_a_submission_over_the_cap_is_queued_then_started(
     assert sparse.json() == {"queue": queued["queue"]}
 
     hold.release("A")
-    started = _wait_for(client, b_id, lambda job: job["status"] == "running")
-    assert "queue" not in started
-    _wait_for(client, b_id, lambda job: job["status"] == "completed")
+    # The row is read after the run rather than mid-flight: ``running`` lives for
+    # tens of milliseconds under a mocked AI, so waiting for it is a race, and
+    # every property asserted here holds on the finished row too.
+    finished = _wait_for(client, b_id, lambda job: job["status"] == "completed")
+    assert "queue" not in finished, "the queue object is only carried while queued"
+    assert finished["analysis_started_at"]
+    assert finished["result"]["failures"][0]["analysis"]["details"] == "diagnosed", (
+        "the queued job was admitted and analysed, not just completed"
+    )
     _wait_for(client, a_id, lambda job: job["status"] == "completed")
     assert analysis_slots.running_count() == 0
     assert analysis_slots.waiter_count() == 0
@@ -212,12 +218,14 @@ def test_a_submission_over_the_cap_is_queued_then_started(
 def test_the_queue_wait_is_not_counted_as_analysis_time(
     client, hold, slot_limit
 ) -> None:
-    """T13e: the fetch stamp must not survive the wait.
+    """T13e: the run window starts on admission, and the wait keeps the stamp.
 
     The row is stamped ``running`` for the fetch, goes ``pending`` while it queues
-    and comes back to ``running`` on admission, and that transition only fills a
-    NULL stamp -- so without clearing it the queue wait is counted as run time and
-    the stuck-analysis alert fires on a job that has just started.
+    and comes back to ``running`` on admission, where the stamp is moved to now --
+    so the wait is not run time. The stamp is *not* cleared while waiting: a
+    submitted job claimed for in-place analysis is recognised by the restart
+    resume through exactly this non-NULL value, and a NULL would resume the user's
+    analysis as the ingest-only run it was claimed from.
     """
     slot_limit(1)
     hold.hold("A")
@@ -225,26 +233,26 @@ def test_the_queue_wait_is_not_counted_as_analysis_time(
     assert hold.enter("A").wait(timeout=15)
 
     b_id = _posted(client, _body("B"))
-    # Queued *and* cleared: the queue entry appears a moment before the write lands.
+    # Queued *and* still stamped: the queue entry appears a moment before the write lands.
     queued = _wait_for(
         client,
         b_id,
         lambda job: (
             job["status"] == "pending"
             and job.get("queue")
-            and job["analysis_started_at"] is None
+            and job["analysis_started_at"]
         ),
     )
     assert queued["queue"]["position"] == 1
 
+    # Long enough to be visible in a second-resolution stamp, so the assertion
+    # below measures the wait instead of racing the mocked pipeline.
+    time.sleep(1.2)
     hold.release("A")
-    started = _wait_for(
-        client,
-        b_id,
-        lambda job: job["status"] == "running" and job["analysis_started_at"],
-    )
-    assert started["analysis_started_at"] >= queued["created_at"]
-    _wait_for(client, b_id, lambda job: job["status"] == "completed")
+    finished = _wait_for(client, b_id, lambda job: job["status"] == "completed")
+    # The window the report measures starts on admission, so the wait is not in it.
+    assert finished["analysis_started_at"] > queued["analysis_started_at"]
+    assert finished["analysis_started_at"] >= queued["created_at"]
     _wait_for(client, a_id, lambda job: job["status"] == "completed")
     assert analysis_slots.running_count() == 0
 
@@ -469,6 +477,10 @@ def test_an_in_place_analyse_waits_for_a_slot(client, hold, slot_limit) -> None:
         lambda job: job["status"] == "pending" and job.get("queue"),
     )
     assert queued["queue"]["position"] == 1
+    # The claim stamp survives the wait: the restart resume tells a claimed
+    # in-place analyse from an ingest-only submit by this value, so a NULL here
+    # would resume the user's analysis as the ingest it was claimed from.
+    assert queued["analysis_started_at"]
 
     hold.release_all()
     _wait_for(client, submitted_id, lambda job: job["status"] == "completed")

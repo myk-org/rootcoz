@@ -16,6 +16,7 @@ slot must be freed.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime
 from typing import Any
@@ -138,22 +139,28 @@ async def acquire(
         # waiting now behind every same-day row regardless of its time.
         created_at = datetime.now(UTC).strftime("%Y-%m-%d %H:%M:%S")
     announced = False
+    warned = False
     try:
         while not _try_admit(job_key, created_at):
             if on_queued is not None and not announced:
-                announced = True
                 try:
                     await on_queued()
+                    announced = True
                 except Exception:
                     # A status write must never kill an analysis or the queue.
                     # ``Exception``, never ``BaseException``: a cancellation that
                     # lands here has to reach the cleanup below and be re-raised,
                     # or the aborted job would be admitted and run.
-                    logger.warning(
+                    # Retried on the next wake, because a row left ``running``
+                    # while it waits is the state the user is shown -- but warned
+                    # once, so a storage outage cannot flood the log every second.
+                    logger.log(
+                        logging.DEBUG if warned else logging.WARNING,
                         "Could not announce the queue wait for %s",
                         job_key,
-                        exc_info=True,
+                        exc_info=not warned,
                     )
+                    warned = True
             await _wait_for_wake()
     except BaseException:
         _dequeue(job_key)

@@ -6780,18 +6780,25 @@ async def oldest_running_analysis_started_at() -> str | None:
     return str(row[0])
 
 
-async def clear_analysis_started_at(job_id: str) -> None:
-    """Drop the analysis window so the next ``running`` transition re-stamps it.
+async def restamp_analysis_started_at(job_id: str) -> None:
+    """Start the analysis window now, on admission to a slot.
 
     A job queued for a free analysis slot (#544) leaves ``running`` for ``pending``
     and comes back, and ``analysis_started_at`` is only stamped into a NULL — so
-    without this the queue wait is counted as analysis time, inflating the run
-    length on the report and firing the stuck-analysis alert on a job that has only
-    just started.
+    without this the queue wait would count as analysis time and inflate the run
+    length on the report.
+
+    The stamp is *moved*, not cleared while waiting: a submitted job claimed for
+    in-place analysis is recognisable to the restart resume only by a non-NULL
+    stamp (:func:`claim_submitted_job_for_analyze`), so clearing it while queued
+    would resume that user's analysis as the ingest-only run it was claimed from,
+    silently dropping the AI run. The stuck-analysis alert needs nothing here: it
+    reads ``running`` rows only (:func:`oldest_running_analysis_started_at`).
     """
     async with _connect_db() as db:
         await db.execute(
-            "UPDATE results SET analysis_started_at = NULL WHERE job_id = ?",
+            "UPDATE results SET analysis_started_at = CURRENT_TIMESTAMP "
+            "WHERE job_id = ?",
             (job_id,),
         )
         await db.commit()

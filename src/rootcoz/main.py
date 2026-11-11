@@ -6686,17 +6686,15 @@ async def _mark_queued_for_slot(job_id: str) -> None:
     -- which the next boot would then resume.
     """
     snapshot = analysis_slots.snapshot(job_id)
-    written = await update_status(
+    await update_status(
         job_id,
         "pending",
         expect_status=("pending", "running", "waiting"),
     )
-    if written:
-        # The queue wait is not analysis time: the row was already stamped when it
-        # went ``running`` for the fetch, and the admission below only fills a NULL,
-        # so without this the wait would count as run time (and the stuck-analysis
-        # alert would fire on it).
-        await storage.clear_analysis_started_at(job_id)
+    # ``analysis_started_at`` is left alone: a submitted job claimed for in-place
+    # analysis is recognisable to the restart resume by its non-NULL stamp, so
+    # clearing it here would resume the queued analysis as an ingest-only run.
+    # The wait is kept out of the run length by re-stamping on admission instead.
     notify_active_count_changed()
     notify_dashboard_changed()
     notify_job_status_changed(job_id)
@@ -6827,6 +6825,9 @@ async def _process_ci_source_analysis(
         )
 
         await update_status(job_id, "running")
+        # The run starts on admission, not at the ``running`` the fetch wrote
+        # before the gate, so the wait is not counted as analysis time (#544).
+        await storage.restamp_analysis_started_at(job_id)
         notify_active_count_changed()
         notify_dashboard_changed()
         notify_job_status_changed(job_id)

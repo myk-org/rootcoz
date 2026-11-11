@@ -1486,6 +1486,32 @@ class TestAnalysisWindow:
         assert age is not None
         assert age == pytest.approx(600, abs=5)
 
+    async def test_admission_moves_the_analysis_window_past_a_queue_wait(
+        self, setup_test_db: Path
+    ) -> None:
+        """A job queued for a slot is timed from admission, and keeps its stamp.
+
+        ``update_status`` only fills a NULL window, so a job that left ``running``
+        for ``pending`` and comes back would report the wait as run time (#544).
+        The stamp is *moved* rather than cleared while waiting: the restart resume
+        tells a claimed in-place analyse from an ingest-only submit by it.
+        """
+        wait_start = _stamp(7200)
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result("job-queued", "", "pending")
+            async with aiosqlite.connect(setup_test_db) as db:
+                await db.execute(
+                    "UPDATE results SET analysis_started_at = ? "
+                    "WHERE job_id = 'job-queued'",
+                    (wait_start,),
+                )
+                await db.commit()
+            await storage.restamp_analysis_started_at("job-queued")
+            row = await storage.get_result("job-queued")
+
+        assert row["analysis_started_at"] != wait_start
+        assert storage.elapsed_seconds_since(row["analysis_started_at"]) < 5
+
     async def test_claiming_a_submitted_job_rearms_the_analysis_window_and_releases_it_intact(
         self, setup_test_db: Path
     ) -> None:
