@@ -33,8 +33,8 @@ def test_clone_into_stages_then_renames(tmp_path) -> None:
         assert not target.exists()
         (directory / ".git").mkdir(parents=True)
 
-    with patch("rootcoz.repository.Git") as mock_git:
-        mock_git.return_value.clone.side_effect = clone
+    with patch("rootcoz.repository._git_clone") as mock_git:
+        mock_git.side_effect = clone
         manager.clone_into("https://example.com/repo", target, depth=1)
 
     assert seen == [str(_clone_into_staging(workspace, "repo"))]
@@ -59,10 +59,10 @@ def test_a_failed_clone_leaves_no_target_and_no_residue(tmp_path) -> None:
         raise GitCommandError("git clone", 128, stderr="connection reset")
 
     with (
-        patch("rootcoz.repository.Git") as mock_git,
+        patch("rootcoz.repository._git_clone") as mock_git,
         pytest.raises(GitCommandError),
     ):
-        mock_git.return_value.clone.side_effect = clone
+        mock_git.side_effect = clone
         manager.clone_into("https://example.com/repo", target)
 
     assert not target.exists()
@@ -86,10 +86,10 @@ def test_a_failed_clone_does_not_keep_the_token_in_staging(tmp_path) -> None:
         raise GitCommandError("git clone", 128, stderr="boom")
 
     with (
-        patch("rootcoz.repository.Git") as mock_git,
+        patch("rootcoz.repository._git_clone") as mock_git,
         pytest.raises(GitCommandError),
     ):
-        mock_git.return_value.clone.side_effect = clone
+        mock_git.side_effect = clone
         manager.clone_into(
             "https://example.com/repo",
             target,

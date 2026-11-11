@@ -437,9 +437,14 @@ class Settings(BaseSettings):
         gt=0,
         description=(
             "Wall-clock ceiling, in seconds, for one repository clone -- the whole"
-            " ladder (by-id fetch or clone, SSL retry, checkout) shares it. A remote"
-            " that stops answering fails the clone with a reason instead of holding"
-            " the job; raise it for a very large repository over a slow link."
+            " ladder (by-id fetch or clone, SSL retry, checkout) shares it. The clone"
+            " runs in its own process group and is killed as a group at the ceiling,"
+            " so a remote that accepts and then never answers fails a clone with a"
+            " reason instead of holding the job. Known limit: the by-id 'git fetch'"
+            " that a commit-id ref starts with is not killed as a group, so an https"
+            " remote that never answers can leave a git-remote-https helper holding"
+            " that fetch open -- prefer a branch or tag ref for such a remote. Raise"
+            " this for a very large repository over a slow link."
         ),
     )
 

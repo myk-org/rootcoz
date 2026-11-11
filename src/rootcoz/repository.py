@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import shutil
+import signal
 import subprocess
 import time
 import uuid
@@ -286,15 +287,75 @@ def _remaining(deadline: float | None) -> float:
     return max(1.0, deadline - time.monotonic())
 
 
-def _git_clone(repo_url: str, clone_dir: Path, **kwargs: Any) -> None:
-    """``git clone`` as a plain command, so ``kill_after_timeout`` is honoured.
+def _kill_clone_tree(proc: subprocess.Popen[bytes]) -> None:
+    """SIGKILL the clone *and its children*, so nothing keeps the pipes open."""
+    try:
+        os.killpg(os.getpgid(proc.pid), signal.SIGKILL)
+    except ProcessLookupError, PermissionError:
+        proc.kill()
 
-    ``Repo.clone_from`` hands the command to GitPython with ``as_process=True``,
-    and ``git/cmd.py`` returns at that branch *before* arming the watchdog:
-    measured, ``Repo.clone_from(..., kill_after_timeout=3)`` against a hung
-    remote was still running at 25 s, while this form fires at 3.07 s.
+
+def _git_clone(
+    repo_url: str,
+    clone_dir: Path,
+    *,
+    kill_after_timeout: float,
+    depth: int | None = None,
+    branch: str = "",
+    env: dict[str, str] | None = None,
+) -> None:
+    """``git clone`` in its own process group, killed **as a group** on timeout.
+
+    GitPython is not used here: its watchdog SIGKILLs the ``git`` parent only.
+    ``git-remote-https`` inherits the stdout/stderr pipes, so ``communicate()``
+    never sees EOF -- measured, ``git.clone(..., kill_after_timeout=3)`` against
+    a listener that accepts and never answers was still blocked past 25 s on
+    ``https://`` while ``git://`` returned at 3.06 s, with the helper surviving.
+    ``start_new_session`` makes the clone its own group leader, so the timeout
+    has a group to kill and the call returns in seconds.
+
+    Raises:
+        GitCommandError: git failed, or the clone outlived *kill_after_timeout*
+            (its stderr says "did not complete in", which labels it
+            "Clone timed out" in ``_LABELS``).
     """
-    Git(clone_dir.parent).clone(str(repo_url), str(clone_dir), **kwargs)
+    cmd = [Git.GIT_PYTHON_GIT_EXECUTABLE or "git", "clone"]
+    if depth is not None:
+        cmd += ["--depth", str(depth)]
+    if branch:
+        cmd += ["--branch", branch]
+    cmd += ["--", str(repo_url), str(clone_dir)]
+    # LC_ALL/LANGUAGE as GitPython set them: ``_LABELS`` matches English phrases.
+    full_env = {
+        **os.environ,
+        "LANGUAGE": "C",
+        "LC_ALL": "C",
+        **(env or {}),
+    }
+    proc = subprocess.Popen(
+        cmd,
+        cwd=str(clone_dir.parent),
+        env=full_env,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+        start_new_session=True,
+    )
+    try:
+        _, raw_stderr = proc.communicate(timeout=kill_after_timeout)
+    except subprocess.TimeoutExpired:
+        _kill_clone_tree(proc)
+        proc.communicate()  # pipes close with the group; collect what was written
+        raise GitCommandError(
+            cmd,
+            proc.returncode,
+            stderr=f"Timeout: the command did not complete in "
+            f"{kill_after_timeout:.0f} secs.",
+        ) from None
+    if proc.returncode != 0:
+        raise GitCommandError(
+            cmd, proc.returncode, stderr=raw_stderr.decode(errors="replace")
+        )
 
 
 def _reset_target(target_dir: Path) -> None:
@@ -332,7 +393,7 @@ def _clone_with_ssl_retry(
         branch: Git ref (branch/tag) to check out. Empty string means default branch.
         deadline: ``time.monotonic()`` value the whole clone must finish by.
     """
-    kwargs: dict[str, object] = {}
+    kwargs: dict[str, Any] = {}
     if depth is not None:
         kwargs["depth"] = depth
     if branch:
