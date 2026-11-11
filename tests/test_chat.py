@@ -26,7 +26,7 @@ from rootcoz.engine.chat import (
 )
 from rootcoz.models import ChatInitRequest
 from rootcoz.sources.jenkins_source import _extract_build_params
-from tests.conftest import AdvancingClock
+from tests.conftest import AdvancingClock, capture_main_logs
 
 _TEST_ADMIN_KEY = "test-admin-key-16chars"  # pragma: allowlist secret
 _TEST_ENCRYPTION_KEY = "test-encryption-key-for-hmac"  # pragma: allowlist secret
@@ -4121,12 +4121,8 @@ class TestAdminChatArtifactEndpoints:
             main_mod, "delete_tree", lambda path: DeleteResult(0, 0, failed=2)
         )
 
-        with caplog.at_level(logging.INFO, logger="rootcoz.main"):
-            logging.getLogger("rootcoz.main").propagate = True
-            try:
-                result = main_mod._cleanup_admin_artifacts("alice")
-            finally:
-                logging.getLogger("rootcoz.main").propagate = False
+        with capture_main_logs(caplog, logging.INFO):
+            result = main_mod._cleanup_admin_artifacts("alice")
 
         assert result.failed == 2
         assert "2 artifact path(s) for alice survived their delete" in caplog.text

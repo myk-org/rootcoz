@@ -1840,8 +1840,12 @@ class SetCanViewReportsRequest(BaseModel):
 
 
 # Bounds for stored preset payloads: presets are returned on every list
-# call and server presets to every user, so values must stay small.
-MAX_FILTER_PRESET_VALUE_LENGTH = 200
+# call and server presets to every user, so values must stay small. The per-value
+# cap is 1000 rather than 200 because real failing test names run to 405
+# characters (546 distinct names exceed 200): a value the filtered endpoint
+# accepts must also be bookmarkable. The list cap and the serialized budget are
+# what bound the payload.
+MAX_FILTER_PRESET_VALUE_LENGTH = 1000
 MAX_FILTER_PRESET_LIST_LENGTH = 100
 MAX_FILTER_PRESET_JSON_LENGTH = 10_000
 

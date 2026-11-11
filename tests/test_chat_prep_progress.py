@@ -147,7 +147,7 @@ async def test_phase_cleared_when_init_fails(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_clone_reports_repo_name_before_cloning(monkeypatch, tmp_path):
+async def test_clone_reports_the_width_before_cloning(monkeypatch, tmp_path):
     from rootcoz.engine.chat import clone_chat_repos
     from rootcoz.repository import RepositoryManager
 
@@ -158,8 +158,9 @@ async def test_clone_reports_repo_name_before_cloning(monkeypatch, tmp_path):
         {"tests_repo_url": "https://github.com/acme/tests-repo.git"},
         on_repo=reported.append,
     )
-    # Named before the clone starts, cleared when it ends (nothing left running).
-    assert reported == ["tests-repo", ""]
+    # The width is published before the clone starts (#547), cleared when the
+    # batch ends (nothing left running).
+    assert reported == ["cloning 1 of 1", ""]
 
 
 @pytest.mark.asyncio

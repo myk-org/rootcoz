@@ -463,19 +463,24 @@ async def test_refusal_exception_carries_no_body_and_no_context(
     await install_start_rig(
         credential_source="server", client=client, job_id="refusal-body", admin=False
     )
-    with pytest.raises(ai_client.SessionCreationRefused) as exc:
-        await ai_client.create_session_safely(
-            client,
-            provider="openai",
-            model="undeclared",
-            system_prompt="hi",
-            server_api_key=refusal_secret_key,
-        )
+    with capture_main_logs(caplog, logging.DEBUG, logger=ai_client.logger):
+        with pytest.raises(ai_client.SessionCreationRefused) as exc:
+            await ai_client.create_session_safely(
+                client,
+                provider="openai",
+                model="undeclared",
+                system_prompt="hi",
+                server_api_key=refusal_secret_key,
+            )
+        # The refusal path logs nothing on purpose, so the control has to be
+        # synthetic: this record proves the capture reaches the logger at all.
+        ai_client.logger.debug("capture control reached caplog")
     sentence = str(exc.value)
     assert sentence.startswith(f"{ai_client.SESSION_REFUSAL_MARKER}: ")
     assert "could not be created for openai/undeclared" in sentence
     assert "upstream said no" not in sentence
     assert exc.value.__context__ is None
+    assert "capture control reached caplog" in caplog.text
     assert refusal_secret_key not in caplog.text
 
 
@@ -1131,9 +1136,9 @@ def test_is_lock_failure_matches_both_spellings():
     assert "is_lock_failure" in inspect.getsource(storage._retry_contended)
 
 
-def test_only_the_job_chat_preparation_refuses_a_storage_fault():
-    """#534: exactly one call site opts in, so an analysis never hard-fails."""
-    assert inspect.getsource(main).count("refuse_storage_fault=True") == 1
+def test_only_the_two_chat_starts_refuse_a_storage_fault():
+    """#534/#540: the chat starts opt in, so an analysis or a turn never hard-fails."""
+    assert inspect.getsource(main).count("refuse_storage_fault=True") == 2
 
 
 @pytest.mark.asyncio
@@ -1229,18 +1234,33 @@ async def test_a_restart_with_an_existing_session_ignores_the_internal_tools_fau
     assert not _error_rows(await storage.get_chat_messages("job", username="alice"))
 
 
+# -- The admin chat refuses a storage fault too (#540) ----------------------
+#
+# #534 left this route degrading on purpose because the admin-role sessions were
+# named as must-keep-degrading; #540 took the decision the other way. Same fault
+# class, same sentence, different surface: this route is synchronous, so a fault
+# the server cannot retry past becomes its answer instead of a transcript row.
+
+
+def _admin_start():
+    """The admin Start the route reads: identity, pair, and nothing prepared."""
+    return (
+        _start_request(admin=True),
+        ChatInitRequest(ai_provider="openai", ai_model="undeclared"),
+    )
+
+
 @pytest.mark.asyncio
-async def test_admin_chat_init_still_starts_when_the_internal_tools_token_hits_a_storage_fault(
+async def test_a_storage_fault_refuses_the_admin_chat_start(
     monkeypatch, tmp_path, caplog, install_start_rig
 ):
-    """#534 excludes the admin chat on purpose: it keeps degrading, pinned here.
+    """#540: a non-transient fault is not silent, and the chat carries its tools.
 
     ``header="real"`` is the point — the rig's default stubs the mint to ``""``,
-    so a test keeping it could not see a stray ``refuse_storage_fault=True``.
-    The tool-less ``ready`` answer asserted below is the documented limitation
-    (``docs/use-server-chat-for-cross-job-analysis.md``), not an endorsement: the
-    issue names admin-role sessions as must-keep-degrading, and the fix that needs
-    its owners' agreement is tracked as #540.
+    so a test keeping it could not see a missing ``refuse_storage_fault=True``.
+    What the admin must not get is ``ready: True`` with no ``db_query``: the
+    route has no transcript to fail into, so the shared preparation-failure
+    sentence is the answer, which is what ``Start`` shows as a server error.
     """
     created: list[dict] = []
     await install_start_rig(
@@ -1253,21 +1273,115 @@ async def test_admin_chat_init_still_starts_when_the_internal_tools_token_hits_a
     fault = _FragmentFault(
         "insert into sessions",
         sqlite3.OperationalError("no such table: sessions"),
-        times=1,
+        times=None,
     )
     with _wrapped_connections(monkeypatch, fault), capture_main_logs(caplog):
         caplog.clear()
-        answer = await main.init_admin_chat(
-            _start_request(admin=True),
-            ChatInitRequest(ai_provider="openai", ai_model="undeclared"),
+        with pytest.raises(HTTPException) as refused:
+            await main.init_admin_chat(*_admin_start())
+    assert refused.value.status_code == 500
+    assert refused.value.detail == main._CHAT_PREP_FAILED_DETAIL
+    assert fault.attempts == 1, "a genuine fault must not be retried"
+    assert created == [], "a provider session was created for a refused Start"
+    assert (
+        await storage.get_latest_chat_session(main.ADMIN_CHAT_JOB_ID, "alice") is None
+    ), "a refused Start must leave no session row"
+    assert (
+        "Admin chat init: internal tools token failed for alice: "
+        "OperationalError: no such table: sessions" in caplog.text
+    ), "the operator log does not name the fault and its user"
+    assert main._chat_lock_refs.get(f"{main.ADMIN_CHAT_JOB_ID}:alice") is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("message", ["database is locked", "database is busy"])
+async def test_a_lock_still_starts_the_admin_chat_without_internal_tools(
+    monkeypatch, tmp_path, caplog, install_start_rig, message
+):
+    """#540 keeps what was right: a lock is transient, so the chat still starts.
+
+    Injected at the connection, not by patching ``create_session`` — the retry
+    budget lives inside it, so a stub would bypass the very thing this asserts.
+    This route's own degradation warning is the one trace such a chat leaves.
+    """
+    created: list[dict] = []
+    headers, capture_header = _capture_header()
+    await install_start_rig(
+        credential_source="server",
+        client=_recording_sidecar(created),
+        job_id=main.ADMIN_CHAT_JOB_ID,
+        admin=True,
+        header=capture_header,
+    )
+    lock = _FragmentFault(
+        "insert into sessions", sqlite3.OperationalError(message), times=None
+    )
+    with _wrapped_connections(monkeypatch, lock), capture_main_logs(caplog):
+        caplog.clear()
+        answer = await main.init_admin_chat(*_admin_start())
+        assert answer["ready"] is True
+        assert "Admin chat init: no auth token for alice" in caplog.text, (
+            "the degradation is silent"
         )
-    assert answer["ready"] is True, "the admin chat must keep degrading"
-    assert fault.attempts == 1, "the injected fault never reached the mint"
-    lines = [r.getMessage() for r in caplog.records]
-    assert "Failed to create AI session" in lines
-    assert "for history access" not in " ".join(lines)
+
+    assert headers == [""], "the lock must degrade, never refuse"
+    assert lock.attempts == storage._LOCK_RETRY_ATTEMPTS, (
+        "the retry budget must run out"
+    )
+    assert answer["session_id"]
     tool_names = [t["name"] for t in created[0].get("custom_tools") or []]
     assert not {"db_schema", "db_query", "save_report"} & set(tool_names)
+
+
+@pytest.mark.asyncio
+async def test_a_demoted_admin_start_is_still_403(monkeypatch, install_start_rig):
+    """#540 does not widen the refusal into a 500 for a caller who lost the role.
+
+    The mint returns its sanctioned ``""`` before any exception exists, so the
+    route's own role re-check is what answers — the fault flag is a no-op here.
+    """
+    created: list[dict] = []
+    await install_start_rig(
+        credential_source="server",
+        client=_recording_sidecar(created),
+        job_id=main.ADMIN_CHAT_JOB_ID,
+        admin=True,
+        header="real",
+    )
+    monkeypatch.setattr(main, "_ai_admin_role_current", AsyncMock(return_value=False))
+    fault = _FragmentFault(
+        "insert into sessions",
+        sqlite3.OperationalError("no such table: sessions"),
+        times=None,
+    )
+    with (
+        _wrapped_connections(monkeypatch, fault),
+        pytest.raises(HTTPException) as refused,
+    ):
+        await main.init_admin_chat(*_admin_start())
+    assert refused.value.status_code == 403
+    assert refused.value.detail == "Admin access required"
+    assert fault.attempts == 0, "a demoted admin must not even reach the mint"
+    assert created == []
+
+
+@pytest.mark.asyncio
+async def test_a_healthy_admin_chat_start_returns_its_tools(install_start_rig):
+    """#540: the flag must not touch the ordinary path these tests all assume."""
+    created: list[dict] = []
+    headers, capture_header = _capture_header()
+    await install_start_rig(
+        credential_source="server",
+        client=_recording_sidecar(created),
+        job_id=main.ADMIN_CHAT_JOB_ID,
+        admin=True,
+        header=capture_header,
+    )
+    answer = await main.init_admin_chat(*_admin_start())
+    assert answer == {"ready": True, "session_id": "sess-1"}
+    assert len(headers) == 1 and headers[0].startswith("Bearer ")
+    tool_names = [t["name"] for t in created[0]["custom_tools"]]
+    assert {"db_schema", "db_query", "save_report"} <= set(tool_names)
 
 
 @pytest.mark.asyncio

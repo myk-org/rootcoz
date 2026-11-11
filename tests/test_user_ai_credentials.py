@@ -18,6 +18,18 @@ from rootcoz import ai_client, encryption, issue_matching, main, storage
 from rootcoz.ai_client import call_ai as real_call_ai
 from rootcoz.ai_client import call_ai_once as real_call_ai_once
 from rootcoz.engine import chat
+from tests.conftest import capture_main_logs
+
+# Every module a credential travels through on these paths: a leak in any of them
+# is exactly what the ``not in caplog.text`` assertions look for, and none of them
+# propagates, so a capture has to attach a handler to each.
+_CREDENTIAL_LOGGERS = (
+    "rootcoz.main",
+    "rootcoz.ai_client",
+    "rootcoz.engine.chat",
+    "rootcoz.storage",
+    pi_sidecar_client.logger,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -374,17 +386,22 @@ async def test_model_restriction_preserves_stored_key_and_hides_provider_error(
             lambda: SimpleNamespace(_client=http, delete_session=AsyncMock()),
         )
         request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
-        response = await main.set_user_ai_credential(
-            "openai",
-            main.AiCredentialInput(
-                api_key="candidate-key",  # pragma: allowlist secret
-                model="restricted",
-            ),
-            request,
-        )
+        with capture_main_logs(caplog, logging.WARNING, logger=_CREDENTIAL_LOGGERS):
+            response = await main.set_user_ai_credential(
+                "openai",
+                main.AiCredentialInput(
+                    api_key="candidate-key",  # pragma: allowlist secret
+                    model="restricted",
+                ),
+                request,
+            )
+            # Positive control: the capture does see these loggers, so a key in a
+            # log line would be found by the assertions below.
+            ai_client.logger.warning("capture control reached caplog")
     assert b'"outcome":"inconclusive"' in response.body
     assert b"candidate-key" not in response.body
     assert b"model access denied" not in response.body
+    assert "capture control reached caplog" in caplog.text
     assert "candidate-key" not in caplog.text
     assert "model access denied" not in caplog.text
     assert (await storage.get_user_ai_credentials("alice"))["openai"] == "previous-key"
@@ -480,7 +497,7 @@ async def test_sidecar_exception_never_exposes_user_key(
         raise RuntimeError("sidecar secret-value failed")
 
     monkeypatch.setattr(ai_client, "_call_user_session", fail)
-    with caplog.at_level(logging.ERROR):
+    with capture_main_logs(caplog, logging.ERROR, logger=_CREDENTIAL_LOGGERS):
         try:
             await (real_call_ai if sidecar_name == "_call_ai" else real_call_ai_once)(
                 "prompt", ai_provider="p", ai_model="m", session_id=session_id
@@ -491,6 +508,8 @@ async def test_sidecar_exception_never_exposes_user_key(
             import traceback
 
             rendered = traceback.format_exc()
+    # Positive control: the capture saw the caller's own rendered line.
+    assert "Caller logged sidecar failure" in caplog.text
     assert "secret-value" not in rendered + caplog.text
     assert "RuntimeError" in rendered
     ai_client.ai_username.reset(token)
@@ -516,7 +535,7 @@ async def test_failed_sidecar_result_redacted_before_chat_logging(
     )
     token = ai_client.ai_username.set("alice")
     try:
-        with caplog.at_level(logging.ERROR):
+        with capture_main_logs(caplog, logging.ERROR, logger=_CREDENTIAL_LOGGERS):
             result = await (
                 real_call_ai if sidecar_name == "_call_ai" else real_call_ai_once
             )("prompt", ai_provider="p", ai_model="m", session_id=session_id)
@@ -524,6 +543,8 @@ async def test_failed_sidecar_result_redacted_before_chat_logging(
                 "AI failure: %s / %s", result.text, result.error
             )
         assert not result.success
+        # Positive control: the capture saw the caller's own rendered line.
+        assert "AI failure:" in caplog.text
         assert secret not in result.text + (result.error or "") + caplog.text
         assert result.text and result.error
         assert original.text == f"sidecar rejected {secret}"
@@ -557,7 +578,6 @@ async def test_real_sidecar_http_error_never_logs_user_key(
     )
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(pi_sidecar_client, "get_sidecar_client", lambda: client)
-    monkeypatch.setattr(pi_sidecar_client.logger, "propagate", True)
     monkeypatch.setattr(ai_client, "_call_ai", pi_sidecar_client.call_ai)
     monkeypatch.setattr(
         ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
@@ -565,12 +585,14 @@ async def test_real_sidecar_http_error_never_logs_user_key(
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
     token = ai_client.ai_username.set("alice")
     try:
-        with caplog.at_level(logging.DEBUG):
+        with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
             result = await real_call_ai(
                 "prompt", ai_provider="p", ai_model="m", session_id=session_id
             )
             assert not result.success
             logging.getLogger(__name__).error("AI failed: %s", result.text)
+        # Positive control: the capture saw the caller's own rendered line.
+        assert "AI failed:" in caplog.text
         assert secret not in caplog.text + capsys.readouterr().err + result.text + (
             result.error or ""
         )
@@ -675,15 +697,16 @@ async def test_real_sidecar_encoded_prompt_error_never_logs_user_key(
     monkeypatch.setattr(
         ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
     )
-    monkeypatch.setattr(pi_sidecar_client.logger, "propagate", True)
     try:
-        with caplog.at_level(logging.DEBUG):
+        with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
             result = await real_call_ai_once("prompt", ai_provider="p", ai_model="m")
             logging.getLogger(__name__).error(
                 "AI failed: %s / %s", result.text, result.error
             )
         assert not result.success
         assert result.text == result.error == "AI call failed"
+        # Positive control: the capture saw the caller's own rendered line.
+        assert "AI failed:" in caplog.text
         assert secret not in caplog.text
         assert variants[encoded] not in caplog.text + result.text + result.error
     finally:
@@ -713,15 +736,17 @@ async def test_chat_initial_creation_encoded_error_never_logs_user_key(
         chat, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
     )
     monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
-    monkeypatch.setattr(pi_sidecar_client.logger, "propagate", True)
     try:
-        with caplog.at_level(logging.DEBUG):
+        with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
             assert (
                 await chat._create_chat_session(
                     system_prompt="system", ai_provider="p", ai_model="m"
                 )
                 is None
             )
+            # Positive control: the capture does see these loggers.
+            chat.logger.warning("capture control reached caplog")
+        assert "capture control reached caplog" in caplog.text
         assert encoded not in caplog.text
         assert secret not in caplog.text
     finally:
@@ -757,19 +782,21 @@ async def test_keyed_prompt_empty_text_usage_never_logs_encoded_key(
         ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
     )
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=secret))
-    monkeypatch.setattr(pi_sidecar_client.logger, "propagate", True)
     token = ai_client.ai_username.set("alice")
     try:
-        with caplog.at_level(logging.DEBUG):
+        with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
             result = await real_call_ai(
                 "prompt", ai_provider="p", ai_model="m", session_id=session_id
             )
+            # Positive control: the capture does see these loggers.
+            ai_client.logger.warning("capture control reached caplog")
         assert result.success and result.text == ""
         assert result.usage.input_tokens == 7
         assert result.session_id == (session_id or "created")
         assert len([r for r in requests if r.url.path == "/sessions"]) == (
             0 if session_id else 1
         )
+        assert "capture control reached caplog" in caplog.text
         assert encoded not in caplog.text
         assert secret not in caplog.text
     finally:
@@ -808,13 +835,14 @@ async def test_keyed_prompt_http_200_error_keeps_usage_without_logging_response(
     monkeypatch.setattr(
         ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
     )
-    monkeypatch.setattr(pi_sidecar_client.logger, "propagate", True)
     token = ai_client.ai_username.set("alice")
     try:
-        with caplog.at_level(logging.DEBUG):
+        with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
             result = await real_call_ai(
                 "prompt", ai_provider="p", ai_model="m", session_id="existing"
             )
+            # Positive control: the capture does see these loggers.
+            ai_client.logger.warning("capture control reached caplog")
         assert (result.success, result.text, result.error, result.session_id) == (
             False,
             "authentication required",
@@ -822,6 +850,7 @@ async def test_keyed_prompt_http_200_error_keeps_usage_without_logging_response(
             "existing",
         )
         assert result.usage.output_tokens == 3
+        assert "capture control reached caplog" in caplog.text
         assert encoded not in caplog.text
     finally:
         ai_client.ai_username.reset(token)
@@ -850,12 +879,14 @@ async def test_real_sidecar_creation_encoded_error_never_logs_user_key(
     monkeypatch.setattr(
         ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
     )
-    monkeypatch.setattr(pi_sidecar_client.logger, "propagate", True)
     try:
-        with caplog.at_level(logging.DEBUG):
+        with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
             result = await real_call_ai_once("prompt", ai_provider="p", ai_model="m")
+            # Positive control: the capture does see these loggers.
+            ai_client.logger.warning("capture control reached caplog")
         assert not result.success
         assert result.text == result.error == "AI call failed"
+        assert "capture control reached caplog" in caplog.text
         assert encoded not in caplog.text
     finally:
         await client.close()
@@ -883,9 +914,8 @@ async def test_real_sidecar_creation_error_never_logs_user_key(
     monkeypatch.setattr(
         ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
     )
-    monkeypatch.setattr(pi_sidecar_client.logger, "propagate", True)
     try:
-        with caplog.at_level(logging.DEBUG):
+        with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
             result = await real_call_ai("prompt", ai_provider="p", ai_model="m")
             logging.getLogger(__name__).error(
                 "AI failed: %s / %s", result.text, result.error
@@ -896,6 +926,8 @@ async def test_real_sidecar_creation_error_never_logs_user_key(
             "AI call failed",
             None,
         )
+        # Positive control: the capture saw the caller's own rendered line.
+        assert "AI failed:" in caplog.text
         assert secret not in caplog.text
     finally:
         await client.close()
@@ -953,9 +985,10 @@ async def test_real_sidecar_wrapper_logs_raw_resumed_exception(monkeypatch, capl
         base_url="http://sidecar.invalid", transport=httpx.MockTransport(handle)
     )
     monkeypatch.setattr(pi_sidecar_client, "get_sidecar_client", lambda: client)
-    monkeypatch.setattr(pi_sidecar_client.logger, "propagate", True)
     try:
-        with caplog.at_level(logging.ERROR):
+        with capture_main_logs(
+            caplog, logging.ERROR, logger=(pi_sidecar_client.logger,)
+        ):
             await sidecar_real_call_ai("prompt", session_id="existing")
         assert secret in caplog.text  # raw wrapper is unsafe for resumed sessions
     finally:
@@ -1026,7 +1059,7 @@ async def test_resumed_chat_failure_hides_rotated_key_from_log_and_response(
     monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=old_key))
     token = ai_client.ai_username.set("alice")
     try:
-        with caplog.at_level(logging.ERROR):
+        with capture_main_logs(caplog, logging.ERROR, logger=_CREDENTIAL_LOGGERS):
             ok, text, sid = await chat._chat_with_ai_impl(
                 message="next",
                 history=[],
@@ -1164,13 +1197,15 @@ async def test_real_sidecar_success_echo_is_not_logged_or_persisted(
         ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
     )
     try:
-        with caplog.at_level(logging.DEBUG):
+        with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
             result = await real_call_ai_once("prompt", ai_provider="p", ai_model="m")
             logging.getLogger(__name__).info("Analysis: %s", result.text)
         stored = tmp_path / "analysis.txt"
         stored.write_text(result.text)
         assert result.success
         assert result.text == "analysis: [REDACTED] done"
+        # Positive control: the capture saw the caller's own rendered line.
+        assert "Analysis: analysis: [REDACTED] done" in caplog.text
         assert encoded not in caplog.text + stored.read_text()
         assert secret not in caplog.text + stored.read_text()
         assert [r.method for r in requests] == ["POST", "POST", "DELETE"]
@@ -1205,7 +1240,7 @@ async def test_real_sidecar_failed_new_chat_prompt_deletes_session(
     )
     monkeypatch.setattr(chat, "call_ai", real_call_ai)
     try:
-        with caplog.at_level(logging.DEBUG):
+        with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
             ok, text, sid = await chat._chat_with_ai_impl(
                 message="hello",
                 history=[],
@@ -1214,8 +1249,11 @@ async def test_real_sidecar_failed_new_chat_prompt_deletes_session(
                 build_prompt_fn=lambda: "system",
                 install_mcp=False,
             )
+            # Positive control: the capture does see these loggers.
+            chat.logger.warning("capture control reached caplog")
         assert (ok, text, sid) == (False, "AI call failed", None)
         assert [r.method for r in requests] == ["POST", "POST", "DELETE"]
+        assert "capture control reached caplog" in caplog.text
         assert secret not in caplog.text + text
     finally:
         await client.close()
@@ -1247,11 +1285,14 @@ async def test_failed_prompt_cleanup_error_keeps_session_without_logging(
         ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
     )
     try:
-        with caplog.at_level(logging.DEBUG):
+        with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
             result = await real_call_ai("prompt", ai_provider="p", ai_model="m")
+            # Positive control: the capture does see these loggers.
+            ai_client.logger.warning("capture control reached caplog")
         assert not result.success
         assert result.session_id == "created"
         assert [r.method for r in requests] == ["POST", "POST", "DELETE"]
+        assert "capture control reached caplog" in caplog.text
         assert secret not in caplog.text + result.text
     finally:
         await client.close()
@@ -1621,7 +1662,7 @@ async def test_unreadable_credential_map_refuses_list_set_delete_and_preserves_d
     monkeypatch.setattr(ai_client, "verify_ai_key", AsyncMock(return_value="accepted"))
     request = SimpleNamespace(state=SimpleNamespace(username="alice", role="admin"))
     new_key = "new-value"  # pragma: allowlist secret
-    with caplog.at_level(logging.WARNING):
+    with capture_main_logs(caplog, logging.WARNING, logger=_CREDENTIAL_LOGGERS):
         for operation in (
             lambda: main.get_user_ai_credentials(request),
             lambda: main.set_user_ai_credential(
@@ -1633,6 +1674,8 @@ async def test_unreadable_credential_map_refuses_list_set_delete_and_preserves_d
                 await operation()
             assert exc.value.status_code == 409
             assert "stored-secret" not in exc.value.detail
+    # Positive control: the capture does see the refusing module's warning.
+    assert "Unreadable user AI credentials; refusing access" in caplog.text
     async with storage._connect_db() as db:
         row = await (
             await db.execute(

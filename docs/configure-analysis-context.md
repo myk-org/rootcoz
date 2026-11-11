@@ -55,7 +55,7 @@ This clones the tests repository plus both extra repositories into the analysis 
 
    `Additional Repositories` accepts a list of `name`, `url`, and optional `ref` entries. Each clone becomes a subdirectory of the workspace, and the AI is told the path and what is in it — for example that a repository contains VCS metadata it can browse.
 
-   Every declared repository is cloned before the analysis starts — never lazily on a first lookup miss, and never trimmed to a subset to keep a job fast. `max_concurrent_repo_clones` and the job's clone share slow the clones down, they do not drop any. A repository that fails to clone is reported in the result's `Source Warnings` on the report page, and the analysis continues with the rest.
+   Every declared repository is cloned before the analysis starts — never lazily on a first lookup miss, and never trimmed to a subset to keep a job fast. `max_concurrent_repo_clones` slows the clones down, it does not drop any. A repository that fails to clone is reported in the result's `Source Warnings` on the report page, and the analysis continues with the rest.
 
    | Rule | Behaviour |
    | --- | --- |

@@ -7,7 +7,7 @@ import os
 import shutil
 import sys
 import tempfile
-from collections.abc import Awaitable, Callable, Generator, Iterator
+from collections.abc import Awaitable, Callable, Generator, Iterable, Iterator
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
@@ -113,24 +113,17 @@ def _capture_reaper_logs(caplog: pytest.LogCaptureFixture) -> Iterator[None]:
     It is a simple_logger child (``propagate=False``), so records never reach the
     root logger caplog listens on — without this the log assertions pass vacuously.
     Autouse in conftest because the startup reclaim tests assert per-tree reaper
-    lines as well as its own.
+    lines as well as its own. The duplicate filter is out of the way, not merely
+    forgotten: the ``count(...) == 1`` assertions here count emits, and a filter
+    that collapses a repeated line would turn a double emit into a passing one.
     """
-    reaper_logger = temp_paths.logger
-    original_level = reaper_logger.level
-    original_filters = list(reaper_logger.filters)
-    reaper_logger.setLevel(logging.DEBUG)
-    reaper_logger.addHandler(caplog.handler)
-    # The duplicate filter keeps its remembered line for the whole session, so a
-    # later test's identical line would be dropped.
-    for log_filter in original_filters:
-        reaper_logger.removeFilter(log_filter)
-    try:
+    with capture_main_logs(
+        caplog,
+        level=logging.DEBUG,
+        logger=temp_paths.logger,
+        bypass_duplicate_filter=True,
+    ):
         yield
-    finally:
-        reaper_logger.removeHandler(caplog.handler)
-        reaper_logger.setLevel(original_level)
-        for log_filter in original_filters:
-            reaper_logger.addFilter(log_filter)
 
 
 @pytest.fixture(autouse=True)
@@ -164,11 +157,22 @@ def forget_duplicate_history(logger: logging.Logger) -> None:
             vars(log_filter).pop("repeated_number", None)
 
 
+_MAIN_LOGGER = "rootcoz.main"
+# How many open captures hold a logger. Nesting is real (autouse fixtures capture
+# first), and ``Logger.addHandler`` refuses the duplicate attach while
+# ``removeHandler`` does not refuse the mirrored detach.
+_capture_depth: dict[logging.Logger, int] = {}
+
+
 @contextmanager
 def capture_main_logs(
-    caplog: pytest.LogCaptureFixture, level: int = logging.WARNING
-) -> Generator[None]:
-    """Capture ``rootcoz.main`` logs on a handler attached to that logger.
+    caplog: pytest.LogCaptureFixture,
+    level: int = logging.WARNING,
+    logger: str | logging.Logger | Iterable[str | logging.Logger] = _MAIN_LOGGER,
+    *,
+    bypass_duplicate_filter: bool = False,
+) -> Generator[pytest.LogCaptureFixture]:
+    """Capture ``rootcoz.main`` — or any simple_logger child — on its own handler.
 
     python-simple-logger sets ``propagate=False``, so caplog's root handler never
     sees these records; it is attached here instead and detached in the
@@ -181,21 +185,54 @@ def capture_main_logs(
     session and drops a repeat before any handler sees it, so an identical line
     another test logged would leave the capture empty and the assertion failing
     as if the product had not logged at all (#522).
+
+    *logger* names another module's logger (or several) — every one of them is a
+    ``propagate=False`` child, so each needs its own attach. *bypass_duplicate_filter*
+    takes the filters off instead of just forgetting their state: an assertion that
+    counts emits (``caplog.text.count(line) == 1``) must see a double emit, which a
+    live filter would collapse into one line.
+
+    Captures nest (an autouse fixture captures first), so the handler is detached
+    only when the last open capture on that logger closes: an inner exit that took
+    it would leave the outer capture empty, and every assertion after it vacuous.
     """
-    logger = logging.getLogger("rootcoz.main")
-    forget_duplicate_history(logger)
-    original_propagate = logger.propagate
-    logger.propagate = False
-    logger.addHandler(caplog.handler)
+    named = (logger,) if isinstance(logger, (str, logging.Logger)) else tuple(logger)
+    loggers = [
+        logging.getLogger(item) if isinstance(item, str) else item for item in named
+    ]
+    handler_level = caplog.handler.level
+    levels = {target: target.level for target in loggers}
+    propagated = {target: target.propagate for target in loggers}
+    filters = {target: list(target.filters) for target in loggers}
+    for target in loggers:
+        forget_duplicate_history(target)
+        if bypass_duplicate_filter:
+            for log_filter in filters[target]:
+                target.removeFilter(log_filter)
+        target.setLevel(level)
+        target.propagate = False
+        target.addHandler(caplog.handler)
+        _capture_depth[target] = _capture_depth.get(target, 0) + 1
+    caplog.handler.setLevel(level)
     try:
-        with caplog.at_level(level, logger="rootcoz.main"):
-            yield
+        yield caplog
     finally:
-        logger.removeHandler(caplog.handler)
-        logger.propagate = original_propagate
-        # Entry alone is half the job: a line left remembered here would be
-        # dropped for the next test on this worker, the same #522 symptom.
-        forget_duplicate_history(logger)
+        caplog.handler.setLevel(handler_level)
+        for target in loggers:
+            _capture_depth[target] -= 1
+            if _capture_depth[target] <= 0:
+                # The outermost capture detaches — including a handler a leaking
+                # test left behind (#513).
+                del _capture_depth[target]
+                target.removeHandler(caplog.handler)
+            for log_filter in filters[target]:
+                if log_filter not in target.filters:
+                    target.addFilter(log_filter)
+            target.setLevel(levels[target])
+            target.propagate = propagated[target]
+            # Entry alone is half the job: a line left remembered here would be
+            # dropped for the next test on this worker, the same #522 symptom.
+            forget_duplicate_history(target)
 
 
 def make_test_client(

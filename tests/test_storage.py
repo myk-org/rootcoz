@@ -12,6 +12,7 @@ import aiosqlite
 import pytest
 
 from rootcoz import storage
+from tests.conftest import capture_main_logs
 
 
 @pytest.fixture
@@ -3423,13 +3424,9 @@ _DAMAGED_FRAME = b"\x28\xb5\x2f\xfd" + b"\x00\x01\x02\x03rest-of-frame"
 
 @pytest.fixture
 def storage_logs(caplog: pytest.LogCaptureFixture) -> Any:
-    """Attach caplog to the storage logger (simple_logger sets propagate=False)."""
-    storage.logger.setLevel(logging.DEBUG)
-    storage.logger.addHandler(caplog.handler)
-    try:
-        yield caplog
-    finally:
-        storage.logger.removeHandler(caplog.handler)
+    """Capture the storage logger (simple_logger sets propagate=False)."""
+    with capture_main_logs(caplog, logging.DEBUG, logger=storage.logger) as captured:
+        yield captured
 
 
 def _one_failure_result(

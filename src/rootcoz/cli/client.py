@@ -750,6 +750,8 @@ class RootCozClient:
         review_status: str = "all",
         analysis_state: str = "",
         submitted_by: list[str] | None = None,
+        test_name: str = "",
+        test_name_mode: str = "contains",
         limit: int = 500,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -777,6 +779,10 @@ class RootCozClient:
             params["analysis_state"] = analysis_state
         if submitted_by:
             params["submitted_by"] = submitted_by
+        if test_name:
+            params["test_name"] = test_name
+            if test_name_mode != "contains":
+                params["test_name_mode"] = test_name_mode
         if limit != 500:
             params["limit"] = limit
         if offset:
@@ -790,6 +796,17 @@ class RootCozClient:
         """
         data = self._request("GET", "/api/dashboard/submitters")
         return data.get("submitters", []) if isinstance(data, dict) else []
+
+    def failed_test_names(self, q: str = "", limit: int = 20) -> list[dict[str, Any]]:
+        """Top failing test names matching q, with counts.
+
+        GET /api/dashboard/test-names
+        """
+        params: dict[str, Any] = {"limit": limit}
+        if q:
+            params["q"] = q
+        data = self._request("GET", "/api/dashboard/test-names", params=params)
+        return data.get("test_names", []) if isinstance(data, dict) else []
 
     def get_active_count(self) -> dict[str, Any]:
         """Get count of currently active analyses. GET /api/dashboard/active-count"""
@@ -2055,10 +2072,14 @@ class RootCozClient:
         tags: list[str] | None = None,
         exclude_tags: list[str] | None = None,
         review_status: str = "",
+        submitted_by: list[str] | None = None,
+        analysis_state: str = "",
+        test_name: str = "",
+        test_name_mode: str = "contains",
         limit: int = 0,
         offset: int = 0,
     ) -> dict[str, Any]:
-        """Build shared query params for reports endpoints."""
+        """Build shared query params for reports endpoints (canonical dates)."""
         params: dict[str, Any] = {}
         if team:
             params["team"] = team
@@ -2067,9 +2088,13 @@ class RootCozClient:
         if version:
             params["version"] = version
         if date_from:
-            params["from"] = date_from
+            params["date_from"] = date_from
         if date_to:
-            params["to"] = date_to
+            params["date_to"] = date_to
+        if submitted_by:
+            params["submitted_by"] = submitted_by
+        if analysis_state:
+            params["analysis_state"] = analysis_state
         if status:
             params["status"] = status
         if tags:
@@ -2078,6 +2103,10 @@ class RootCozClient:
             params["exclude_tags"] = ",".join(exclude_tags)
         if review_status:
             params["review_status"] = review_status
+        if test_name:
+            params["test_name"] = test_name
+            if test_name_mode and test_name_mode != "contains":
+                params["test_name_mode"] = test_name_mode
         if limit > 0:
             params["limit"] = limit
         if offset > 0:
@@ -2095,6 +2124,10 @@ class RootCozClient:
         tags: list[str] | None = None,
         exclude_tags: list[str] | None = None,
         review_status: str = "",
+        submitted_by: list[str] | None = None,
+        analysis_state: str = "",
+        test_name: str = "",
+        test_name_mode: str = "contains",
         limit: int = 0,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -2109,6 +2142,10 @@ class RootCozClient:
             tags,
             exclude_tags,
             review_status,
+            submitted_by,
+            analysis_state,
+            test_name,
+            test_name_mode,
             limit,
             offset,
         )
@@ -2125,6 +2162,10 @@ class RootCozClient:
         tags: list[str] | None = None,
         exclude_tags: list[str] | None = None,
         review_status: str = "",
+        submitted_by: list[str] | None = None,
+        analysis_state: str = "",
+        test_name: str = "",
+        test_name_mode: str = "contains",
         limit: int = 0,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -2139,6 +2180,10 @@ class RootCozClient:
             tags,
             exclude_tags,
             review_status,
+            submitted_by,
+            analysis_state,
+            test_name,
+            test_name_mode,
             limit,
             offset,
         )
@@ -2157,6 +2202,10 @@ class RootCozClient:
         tags: list[str] | None = None,
         exclude_tags: list[str] | None = None,
         review_status: str = "",
+        submitted_by: list[str] | None = None,
+        analysis_state: str = "",
+        test_name: str = "",
+        test_name_mode: str = "contains",
         limit: int = 0,
         offset: int = 0,
     ) -> dict[str, Any]:
@@ -2171,6 +2220,10 @@ class RootCozClient:
             tags,
             exclude_tags,
             review_status,
+            submitted_by,
+            analysis_state,
+            test_name,
+            test_name_mode,
             limit,
             offset,
         )

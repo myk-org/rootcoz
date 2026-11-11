@@ -8,6 +8,7 @@ from unittest.mock import patch
 import pytest
 
 from rootcoz.utils import mask_sensitive_fields
+from tests.conftest import capture_main_logs
 
 # ---------------------------------------------------------------------------
 # Unit tests for mask_sensitive_fields
@@ -212,26 +213,6 @@ def test_client(_mock_settings, temp_db_path: Path):
         yield client
 
 
-def _capture_debug_logs(caplog):
-    """Enable caplog to capture DEBUG logs from the main module logger.
-
-    simple_logger sets propagate=False, so caplog.at_level alone won't
-    capture them.  We temporarily add the caplog handler and set the
-    logger level to DEBUG.
-    """
-    from rootcoz.main import logger as main_logger
-
-    original_level = main_logger.level
-    main_logger.setLevel(logging.DEBUG)
-    main_logger.addHandler(caplog.handler)
-    return main_logger, original_level
-
-
-def _restore_logger(main_logger, original_level, caplog):
-    main_logger.removeHandler(caplog.handler)
-    main_logger.setLevel(original_level)
-
-
 def _get_messages_by_level(caplog, *, level: int, containing: str = "") -> list[str]:
     """Extract messages at a given level from caplog, optionally filtered by substring."""
     messages = [r.message for r in caplog.records if r.levelno == level]
@@ -254,78 +235,73 @@ def test_middleware_logs_masked_body(test_client, caplog):
     Uses /api/validate-token (not in _BODY_LOGGING_SKIP_PATHS) to verify
     that body logging + masking works correctly.
     """
-    main_logger, orig_level = _capture_debug_logs(caplog)
-    try:
-        payload = {
-            "token_type": "github",
-            "token": "super-secret-token-value",  # pragma: allowlist secret
-            "email": "user@example.com",
-        }
-        with caplog.at_level(logging.DEBUG):
-            test_client.post(
-                "/api/validate-token",
-                json=payload,
-                cookies={"rootcoz_username": "testuser"},
-            )
-
-        body_log = _get_debug_messages(
-            caplog, containing="Incoming POST /api/validate-token body:"
+    payload = {
+        "token_type": "github",
+        "token": "super-secret-token-value",  # pragma: allowlist secret
+        "email": "user@example.com",
+    }
+    with capture_main_logs(caplog, logging.DEBUG):
+        test_client.post(
+            "/api/validate-token",
+            json=payload,
+            cookies={"rootcoz_username": "testuser"},
         )
-        assert body_log, "Expected a DEBUG log for the incoming request body"
-        log_entry = body_log[0]
-        # Sensitive values must be masked
-        assert "super-secret-token-value" not in log_entry
-        assert "***" in log_entry
-        # Non-sensitive values should be present
-        assert "user@example.com" in log_entry
-    finally:
-        _restore_logger(main_logger, orig_level, caplog)
+
+    body_log = _get_debug_messages(
+        caplog, containing="Incoming POST /api/validate-token body:"
+    )
+    assert body_log, "Expected a DEBUG log for the incoming request body"
+    log_entry = body_log[0]
+    # Sensitive values must be masked
+    assert "super-secret-token-value" not in log_entry
+    assert "***" in log_entry
+    # Non-sensitive values should be present
+    assert "user@example.com" in log_entry
 
 
 def test_skip_path_body_not_logged(test_client, caplog):
     """POST to a _BODY_LOGGING_SKIP_PATHS endpoint must NOT log the body."""
-    main_logger, orig_level = _capture_debug_logs(caplog)
-    try:
-        payload = {
-            "type": "jenkins",
-            "job_name": "my-job",
-            "build_number": 42,
-        }
-        with caplog.at_level(logging.DEBUG):
-            test_client.post(
-                "/analyze",
-                json=payload,
-                cookies={"rootcoz_username": "testuser"},
-            )
-
-        body_log = _get_debug_messages(
-            caplog, containing="Incoming POST /analyze body:"
+    payload = {
+        "type": "jenkins",
+        "job_name": "my-job",
+        "build_number": 42,
+    }
+    with capture_main_logs(caplog, logging.DEBUG):
+        test_client.post(
+            "/analyze",
+            json=payload,
+            cookies={"rootcoz_username": "testuser"},
         )
-        assert not body_log, "/analyze is in skip-paths; body should NOT be logged"
-    finally:
-        _restore_logger(main_logger, orig_level, caplog)
+        # The skip path logs nothing of its own, so the control has to be
+        # synthetic: this record proves the capture reaches the logger before the
+        # negative below.
+        logging.getLogger("rootcoz.main").debug("capture control reached caplog")
+
+    assert "capture control reached caplog" in caplog.text
+    body_log = _get_debug_messages(caplog, containing="Incoming POST /analyze body:")
+    assert not body_log, "/analyze is in skip-paths; body should NOT be logged"
 
 
 def test_chat_issue_body_is_never_logged(test_client, caplog):
     """Chat text can hold a pasted credential: no field name marks it secret."""
-    main_logger, orig_level = _capture_debug_logs(caplog)
-    try:
-        with caplog.at_level(logging.DEBUG):
-            test_client.post(
-                "/api/chat-issue",
-                json={
-                    "target": "github",
-                    "title": "token ghp_secret",
-                    "body": "token ghp_secret",
-                },
-            )
-
-        body_log = _get_debug_messages(
-            caplog, containing="Incoming POST /api/chat-issue body:"
+    with capture_main_logs(caplog, logging.DEBUG):
+        test_client.post(
+            "/api/chat-issue",
+            json={
+                "target": "github",
+                "title": "token ghp_secret",
+                "body": "token ghp_secret",
+            },
         )
-        assert not body_log, "chat text is in skip-paths; body should NOT be logged"
-    finally:
-        _restore_logger(main_logger, orig_level, caplog)
+        # A skip-path request logs nothing, so the control has to be synthetic:
+        # this record proves the capture reaches the logger before the negative.
+        logging.getLogger("rootcoz.main").debug("capture control reached caplog")
+
+    assert "capture control reached caplog" in caplog.text
+    body_log = _get_debug_messages(
+        caplog, containing="Incoming POST /api/chat-issue body:"
+    )
+    assert not body_log, "chat text is in skip-paths; body should NOT be logged"
 
 
 def test_validation_error_logged_at_error(test_client, caplog):
@@ -335,80 +311,68 @@ def test_validation_error_logged_at_error(test_client, caplog):
     invalid payload to trigger RequestValidationError and verify the
     error log contains masked sensitive values.
     """
-    main_logger, orig_level = _capture_debug_logs(caplog)
-    try:
-        # Send a payload missing the required 'token' field
-        payload = {
-            "token_type": "invalid-type",
-            "token": "oops-secret",  # pragma: allowlist secret
-        }
-        with caplog.at_level(logging.DEBUG):
-            resp = test_client.post(
-                "/api/validate-token",
-                json=payload,
-            )
-
-        assert resp.status_code == 422
-
-        validation_logs = _get_error_messages(
-            caplog, containing="RequestValidationError"
+    # Send a payload missing the required 'token' field
+    payload = {
+        "token_type": "invalid-type",
+        "token": "oops-secret",  # pragma: allowlist secret
+    }
+    with capture_main_logs(caplog, logging.DEBUG):
+        resp = test_client.post(
+            "/api/validate-token",
+            json=payload,
         )
-        assert validation_logs, "Expected a WARNING log for the validation error"
-        log_entry = validation_logs[0]
-        # Sensitive values must be masked
-        assert "oops-secret" not in log_entry
-        assert "***" in log_entry
-    finally:
-        _restore_logger(main_logger, orig_level, caplog)
+
+    assert resp.status_code == 422
+
+    validation_logs = _get_error_messages(caplog, containing="RequestValidationError")
+    assert validation_logs, "Expected a WARNING log for the validation error"
+    log_entry = validation_logs[0]
+    # Sensitive values must be masked
+    assert "oops-secret" not in log_entry
+    assert "***" in log_entry
 
 
 def test_validation_error_skip_path_no_debug_body(test_client, caplog):
     """422 on a skip-path endpoint must log errors with redacted input and body=<skipped>."""
-    main_logger, orig_level = _capture_debug_logs(caplog)
-    try:
-        # Missing required fields triggers 422 on /analyze
-        payload = {
-            "type": "jenkins",
-            "jenkins_password": "oops-secret",  # pragma: allowlist secret
-        }
-        with caplog.at_level(logging.DEBUG):
-            resp = test_client.post(
-                "/analyze",
-                json=payload,
-            )
+    # Missing required fields triggers 422 on /analyze
+    payload = {
+        "type": "jenkins",
+        "jenkins_password": "oops-secret",  # pragma: allowlist secret
+    }
+    with capture_main_logs(caplog, logging.DEBUG):
+        resp = test_client.post(
+            "/analyze",
+            json=payload,
+        )
 
-        assert resp.status_code == 422
+    assert resp.status_code == 422
 
-        validation_logs = _get_error_messages(
-            caplog, containing="RequestValidationError"
-        )
-        assert validation_logs, (
-            "/analyze is in skip-paths; validation errors should still be logged"
-        )
-        log_text = " ".join(validation_logs)
-        assert "body=<skipped>" in log_text, (
-            "skip-path log must show body=<skipped>, not the actual body"
-        )
-        assert "oops-secret" not in log_text, (
-            "sensitive input must not appear in skip-path validation log"
-        )
-        assert "<redacted>" in log_text, "skip-path log must redact input values"
-    finally:
-        _restore_logger(main_logger, orig_level, caplog)
+    validation_logs = _get_error_messages(caplog, containing="RequestValidationError")
+    assert validation_logs, (
+        "/analyze is in skip-paths; validation errors should still be logged"
+    )
+    log_text = " ".join(validation_logs)
+    assert "body=<skipped>" in log_text, (
+        "skip-path log must show body=<skipped>, not the actual body"
+    )
+    assert "oops-secret" not in log_text, (
+        "sensitive input must not appear in skip-path validation log"
+    )
+    assert "<redacted>" in log_text, "skip-path log must redact input values"
 
 
 def test_get_requests_not_logged(test_client, caplog):
     """GET requests should NOT produce body logging."""
-    main_logger, orig_level = _capture_debug_logs(caplog)
-    try:
-        with caplog.at_level(logging.DEBUG):
-            test_client.get(
-                "/health",
-                cookies={"rootcoz_username": "testuser"},
-            )
+    with capture_main_logs(caplog, logging.DEBUG):
+        test_client.get(
+            "/health",
+            cookies={"rootcoz_username": "testuser"},
+        )
+        # Nothing on a GET logs, so the control has to be synthetic: this record
+        # proves the capture reaches the logger before the negative below.
+        logging.getLogger("rootcoz.main").debug("capture control reached caplog")
 
-        body_logs = _get_debug_messages(caplog, containing="Incoming GET")
-        body_logs = [m for m in body_logs if "body:" in m]
-        assert not body_logs, "GET requests should not log a request body"
-    finally:
-        _restore_logger(main_logger, orig_level, caplog)
+    assert "capture control reached caplog" in caplog.text
+    body_logs = _get_debug_messages(caplog, containing="Incoming GET")
+    body_logs = [m for m in body_logs if "body:" in m]
+    assert not body_logs, "GET requests should not log a request body"

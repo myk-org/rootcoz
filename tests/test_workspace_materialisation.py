@@ -740,7 +740,7 @@ async def test_additional_caller_writes_its_reanalysis_operation_id(
 async def test_chat_caller_pins_its_credential_skip_and_cancel_policy(
     tmp_path, clone_settings
 ) -> None:
-    """Chat's three non-defaults: host-gated credential, skip, abandon."""
+    """Chat's non-defaults: host-gated credential, skip, abandon, its own depth."""
     from rootcoz.engine.chat import clone_chat_repos
 
     captured: dict = {}
@@ -756,7 +756,11 @@ async def test_chat_caller_pins_its_credential_skip_and_cancel_policy(
             {"name": "extra", "url": "https://example.com/extra", "ref": "dev"}
         ],
     }
-    with patch("rootcoz.engine.core.prepare_workspace_repos", side_effect=fake):
+    with (
+        patch("rootcoz.engine.core.prepare_workspace_repos", side_effect=fake),
+        # Chat's depth is a setting (#547), not the 50 analysis reads history at.
+        patch("rootcoz.config.get_settings", return_value=Settings(chat_clone_depth=7)),
+    ):
         cloned = await clone_chat_repos(tmp_path, params, user_repo_token="user-tok")
 
     assert cloned is False
@@ -766,9 +770,10 @@ async def test_chat_caller_pins_its_credential_skip_and_cancel_policy(
     assert captured["cancellation"] == "abandon"
     by_name = {target.name: target for target in captured["targets"]}
     assert by_name["tests"].ref == "main"
-    assert by_name["tests"].depth == 50
     assert by_name["extra"].ref == "dev"
-    assert by_name["extra"].depth == 50
+    # Both kinds carry the same depth the setting names: a caller that dropped
+    # it would fall back to ``RepoTarget.depth``'s 1, not to 7.
+    assert {target.depth for target in captured["targets"]} == {7}
 
 
 async def test_chat_caller_survives_a_malformed_stored_tests_repo_url(

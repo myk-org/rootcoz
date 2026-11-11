@@ -136,18 +136,22 @@ async def clone_chat_repos(
 
     Skips repos already present in the workspace.
     Returns True only when a repository was newly cloned.
-    ``on_repo`` is called with each repo name right before it is cloned, and
-    again as each clone ends -- with a repo still in flight, or with "" once the
-    batch is done -- so the name never outlives the clone it names.
+    ``on_repo`` is called with the clone width, e.g. ``cloning 3 of 17``, as
+    clones are admitted and as they end -- with the remaining width, or with ""
+    once the batch is done -- so a serial regression is visible in the UI and
+    not only in the log.
     ``failed`` collects the names that could not be cloned: a chat still starts
     without them, so the caller is what tells the user they are missing.
+    Every clone is a **read**, so a repo's own token rides with that repo's
+    URL; the chatting user's general credential only reaches a GitHub host,
+    because it is the same token they use to write.
 
     Note:
         Repo tokens may be embedded in git remote URLs within the workspace.
         The workspace is in /tmp/ owned by the server process. Tokens are
         cleaned up when repos are deleted via cleanup_chat_repos().
     """
-    from rootcoz.config import parse_repo_ref
+    from rootcoz.config import get_settings, parse_repo_ref
     from rootcoz.engine.core import (
         CloneOutcome,
         RepoTarget,
@@ -169,6 +173,11 @@ async def clone_chat_repos(
 
     purge_chat_staging(workspace)
 
+    # The AI reads the working tree, never git history, so history is cost
+    # without benefit -- but it is a setting, because a chat that needs `git
+    # log` should not need a code change to get it (#547).
+    depth = get_settings().chat_clone_depth
+
     # Chat is the only caller that parses a raw ref: the analysis side splits
     # url and ref upstream, so the shared function never sees a ":ref" suffix.
     targets: list[RepoTarget] = []
@@ -185,12 +194,7 @@ async def clone_chat_repos(
             logger.warning("Chat: unparseable tests repo URL for %s", workspace)
             missing.append("tests-repo")
             clean_url, ref = "", ""
-        target = tests_repo_target(
-            clean_url,
-            ref,
-            additional_repos,
-            depth=50,  # 50: file links and reads
-        )
+        target = tests_repo_target(clean_url, ref, additional_repos, depth=depth)
         if target is not None:
             targets.append(target)
     targets.extend(
@@ -198,7 +202,7 @@ async def clone_chat_repos(
             name=repo.name,
             url=repo.url,
             ref=repo.ref,
-            depth=50,
+            depth=depth,
             token=repo.token,
         )
         for repo in additional_repos
@@ -206,21 +210,24 @@ async def clone_chat_repos(
 
     # Overlapping clones mean the detail has to be republished when one ends:
     # naming only the last-admitted repo kept a finished clone on screen until
-    # the whole batch was done.
+    # the whole batch was done, and it made a wide fan-out look serial (#547).
+    total = len(targets)
     in_flight: list[str] = []
+
+    def publish_width() -> None:
+        if on_repo:
+            on_repo(f"cloning {len(in_flight)} of {total}" if in_flight else "")
 
     async def started(target: RepoTarget) -> None:
         logger.info(
             "Chat: cloning repo %s into %s", target.name, workspace / target.name
         )
         in_flight.append(target.name)
-        if on_repo:
-            on_repo(target.name)
+        publish_width()
 
     async def finished(target: RepoTarget, _state: str) -> None:
         in_flight.remove(target.name)
-        if on_repo:
-            on_repo(in_flight[0] if in_flight else "")
+        publish_width()
 
     outcome = CloneOutcome()
     try:
