@@ -179,6 +179,8 @@ async def test_workspace_cancelled_clone_reports_cancelled(
         ("tests", "cloning"),
         ("tests", "cancelled"),
     ]
+    # A cancelled clone names no cause: the default label is not a failure.
+    assert "reason" not in result["progress_log"][-1]
 
 
 @pytest.mark.asyncio

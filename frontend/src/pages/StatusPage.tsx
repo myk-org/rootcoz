@@ -243,7 +243,7 @@ export function StatusPage() {
     const clones = new Map<string, { name: string; state: string; url?: string; ref?: string; reason?: string }>()
     const updateClone = (name: string, state: string, url?: string, ref?: string, reason?: string) => {
       const previous = clones.get(name)
-      clones.set(name, { name, state, url: url ?? previous?.url, ref: ref ?? previous?.ref, reason: reason ?? previous?.reason })
+      clones.set(name, { name, state, url: url ?? previous?.url, ref: ref ?? previous?.ref, reason })
     }
     for (const entry of progressLog) {
       if (entry.phase === 'cloning') {

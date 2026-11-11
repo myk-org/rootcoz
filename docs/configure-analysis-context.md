@@ -28,7 +28,7 @@ This clones the tests repository plus both extra repositories into the analysis 
 
 1. **Point RootCoz at the tests repository.**
 
-   `Tests Repo URL` is the repository that owns the failing tests — usually a test repository rather than the product repository. `Ref / Branch` pins the checkout; leave it empty to use the remote default branch. RootCoz clones with a shallow history — `depth` commits of history, and the ref may be a branch, a tag or a full 40-character commit id — and exposes the clone to the AI as a readable resource.
+   `Tests Repo URL` is the repository that owns the failing tests — usually a test repository rather than the product repository. `Ref / Branch` pins the checkout; leave it empty to use the remote default branch. RootCoz clones with a shallow history — Git's `depth`, which is a graph depth rather than a commit count, so a merge-heavy history can bring in more commits than the number itself — and the ref may be a branch, a tag or a full 40-character commit id; the clone is then exposed to the AI as a readable resource.
 
    The field is per submission. Setting it once on the server (`tests_repo_url` in the `GitHub` category of Server Settings) makes it the default for every later submission.
 

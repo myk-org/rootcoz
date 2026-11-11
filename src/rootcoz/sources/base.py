@@ -555,7 +555,12 @@ async def setup_analysis_workspace(
             if error is not None:
                 failure_label = clone_failure_reason(error)
             await safe_update_clone_progress(
-                job_id, repo.name, False, state=state, reason=failure_label
+                job_id,
+                repo.name,
+                False,
+                state=state,
+                # A cancelled clone has no failure to name.
+                reason=failure_label if state == "failed" else "",
             )
 
         outcome = await prepare_workspace_repos(

@@ -122,7 +122,11 @@ def clone_failure_reason(exc: BaseException) -> str:
 
 
 def clone_failure_detail(exc: BaseException) -> str:
-    """One credential-free line of detail *for the log only*. Never stored, never served."""
+    """One credential-free line of detail *for the log only*. Never stored, never served.
+
+    Capped at 200 characters: stderr is remote-controlled, so the bound is what
+    keeps a verbose or hostile remote from writing an unbounded log line.
+    """
     return _printable(" ".join(redact_urls_in_text(str(exc)).split()))[:200]
 
 
@@ -415,6 +419,8 @@ def _ref_message(repo_url: str, ref: str, exc: BaseException) -> str:
         why = "the remote serves no commit by that id, and no branch of that name was found"
     else:
         why = f"the clone failed ({label})"
+    # 300 characters: a one-line message for a log or a CLI, and short enough
+    # that a remote padding its own text cannot push the cause out of view.
     return _printable(
         f"Cannot clone {sanitize_clone_url(str(repo_url))} at {ref}: {why}"
     )[:300]
@@ -488,12 +494,14 @@ def _clone_by_ref_type(
         repo_url: URL of the git repository to clone.
         target_dir: Directory to clone into.
         branch: Git ref or commit SHA.  Empty string means default branch.
-        depth: Shallow-clone depth for every rung of the ladder.
+        depth: Graph depth for the by-id fetch (and for a branch/tag clone).
+            The full-clone fallback is deliberately complete: a shallow
+            history cannot hold a commit outside the one it fetched.
         log_prefix: Human-readable prefix for the log message.
         deadline: ``time.monotonic()`` value the whole clone must finish by.
 
     Raises:
-        CloneRefUnavailableError: The ref could not be obtained; ``reason``
+        CloneRefUnavailableError: The ref could not be obtained; ``label``
             carries a label from the closed set and the message names the cause.
     """
     if branch and _is_commit_sha(branch):
