@@ -173,7 +173,13 @@ class OIDCProvider(SSOProvider):
                 "discovery_failed",
                 f"discovery document claims issuer {claimed_issuer!r}",
             )
-        for endpoint_key in ("authorization_endpoint", "token_endpoint", "jwks_uri"):
+        checked = ["authorization_endpoint", "token_endpoint", "jwks_uri"]
+        # ``userinfo_endpoint`` is optional, and it is the endpoint that receives
+        # the bearer access token on the no-id_token fallback — the one URL where a
+        # tampered document could hand our token to a plaintext or third-party host.
+        if document.get("userinfo_endpoint"):
+            checked.append("userinfo_endpoint")
+        for endpoint_key in checked:
             endpoint = str(document[endpoint_key])
             if not is_safe_navigation_url(endpoint, allow_loopback_http=True):
                 raise AuthError(
@@ -305,6 +311,10 @@ class OIDCProvider(SSOProvider):
         access_token = token.get("access_token")
         userinfo_endpoint = document.get("userinfo_endpoint")
         if isinstance(access_token, str) and access_token and userinfo_endpoint:
+            # ``metadata()`` refuses an unsafe userinfo URL before it is ever
+            # cached, so this call cannot leave for a plaintext or third-party
+            # host. The claims are still weaker than an ID token's: userinfo is not
+            # nonce-bound, so possession of the access token is the whole proof.
             return await self._userinfo(str(userinfo_endpoint), access_token)
         raise AuthError("exchange_failed", "token response carried no usable claims")
 
