@@ -1358,6 +1358,36 @@ class TestStatusCommand:
         assert result.exit_code == 0
         assert "Reanalyzed from" not in result.output
 
+    def test_status_prints_the_queue_line_for_a_queued_job_answering_202(
+        self, mock_client
+    ):
+        """GET /results answers 202 while queued; status must still print, exit 0."""
+
+        def handler(request):
+            assert request.url.path == "/results/queued-job"
+            return httpx.Response(
+                202,
+                json={
+                    "job_id": "queued-job",
+                    "status": "pending",
+                    "queue": {
+                        "position": 1,
+                        "running": 1,
+                        "limit": 1,
+                        "message": "waiting for a free analysis slot (1 running, limit 1)",
+                    },
+                },
+            )
+
+        real_client = make_test_client(handler)
+        with patch("rootcoz.cli.main._get_client", return_value=real_client):
+            result = runner.invoke(app, ["status", "queued-job"])
+        assert result.exit_code == 0
+        assert (
+            "Queue: waiting for a free analysis slot (1 running, limit 1)"
+            in result.output
+        )
+
 
 class TestHistoryCommands:
     def test_history_test(self, mock_client):

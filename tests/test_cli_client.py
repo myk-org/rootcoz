@@ -122,6 +122,30 @@ class TestRootCozClientResults:
             "new-2",
         ]
 
+    def test_get_result_returns_the_payload_of_an_in_progress_202(self):
+        """GET /results answers 202 with a real body while the job is queued."""
+        sample = {
+            "job_id": "queued-job",
+            "status": "pending",
+            "queue": {
+                "position": 1,
+                "running": 1,
+                "limit": 1,
+                "message": "waiting for a free analysis slot",
+            },
+        }
+        client = _make_client(lambda request: httpx.Response(202, json=sample))
+        assert client.get_result("queued-job") == sample
+
+    def test_get_result_still_raises_on_a_real_error_status(self):
+        client = _make_client(
+            lambda request: httpx.Response(500, json={"detail": "storage exploded"})
+        )
+        with pytest.raises(RootCozError) as exc_info:
+            client.get_result("abc-123")
+        assert exc_info.value.status_code == 500
+        assert exc_info.value.detail == "storage exploded"
+
     def test_list_result_fields(self):
         def handler(request):
             assert request.method == "GET"

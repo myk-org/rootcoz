@@ -801,11 +801,16 @@ class RootCozClient:
         Optional ``fields`` is a comma-separated allowlist of paths for a
         sparse response (full values, never truncated). Discover paths with
         ``list_result_fields()`` / GET /api/results/fields.
+
+        202 is success here: the server answers 202 with a body while the
+        analysis is in progress (queued or running).
         """
         params: dict[str, Any] | None = None
         if fields:
             params = {"fields": fields}
-        return self._request("GET", f"/results/{job_id}", params=params)
+        return self._request(
+            "GET", f"/results/{job_id}", params=params, accept_statuses=(200, 202)
+        )
 
     def list_result_fields(self) -> dict[str, Any]:
         """List allowlisted sparse field paths. GET /api/results/fields"""
