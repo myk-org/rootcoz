@@ -18,6 +18,10 @@ from rootcoz.repository import (
 )
 from rootcoz.url_utils import sanitize_clone_url
 
+# -c only for the calls that create a commit: commit-tree needs an author, and
+# spelling it out keeps the fixture independent of any ambient git identity.
+_IDENTITY = ("-c", "user.name=rootcoz-test", "-c", "user.email=test@example.invalid")
+
 
 def _run_git(cwd: Path, *args: str, stdin: str = "") -> str:
     """Run one git plumbing command in *cwd* and return its stripped stdout."""
@@ -53,7 +57,9 @@ def ref_repo(tmp_path: Path) -> dict:
         tree = _run_git(bare, "mktree", stdin=f"100644 blob {blob}\tfile-{index}.txt\n")
         parents = ["-p", shas[-1]] if shas else []
         shas.append(
-            _run_git(bare, "commit-tree", tree, *parents, "-m", f"commit {index}")
+            _run_git(
+                bare, *_IDENTITY, "commit-tree", tree, *parents, "-m", f"commit {index}"
+            )
         )
     _run_git(bare, "update-ref", "refs/heads/main", shas[-1])
     _run_git(bare, "symbolic-ref", "HEAD", "refs/heads/main")
@@ -62,7 +68,7 @@ def ref_repo(tmp_path: Path) -> dict:
     blob = _run_git(bare, "hash-object", "-w", "--stdin", stdin="dangling\n")
     tree = _run_git(bare, "mktree", stdin=f"100644 blob {blob}\tdangling.txt\n")
     dangling = _run_git(
-        bare, "commit-tree", tree, "-p", shas[-1], "-m", "on no ref at all"
+        bare, *_IDENTITY, "commit-tree", tree, "-p", shas[-1], "-m", "on no ref at all"
     )
     return {
         "url": f"file://{bare}",
