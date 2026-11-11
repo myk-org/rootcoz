@@ -48,7 +48,7 @@ async def test_workspace_clone_reports_test_repo_start_and_end(tmp_path: Path) -
         events.append((name, active))
 
     with (
-        patch("rootcoz.sources.base.asyncio.to_thread", side_effect=clone),
+        patch("rootcoz.engine.core.asyncio.to_thread", side_effect=clone),
         patch("rootcoz.engine.core.safe_update_clone_progress", side_effect=progress),
     ):
         task = asyncio.create_task(

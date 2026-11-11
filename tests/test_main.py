@@ -13242,7 +13242,8 @@ class TestReAnalyzeFailure:
                 new_callable=AsyncMock,
                 return_value="",
             ),
-            patch("rootcoz.main.logger.warning") as warning,
+            # The cancellation-cause classifier lives in the shared module (#514).
+            patch("rootcoz.engine.core.logger.warning") as warning,
         ):
             manager.return_value.create_workspace.return_value = tmp_path / "workspace"
             manager.return_value.clone_into.side_effect = clone

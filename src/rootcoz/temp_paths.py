@@ -166,6 +166,17 @@ def rootcoz_temp_base() -> Path:
     return Path(tempfile.gettempdir()) / ROOTCOZ_TEMP_DIRNAME
 
 
+def sanitize_path_part(part: str) -> str:
+    """A path component that cannot traverse: ``/``, ``..`` and ``\\`` become ``_``.
+
+    Sanitising, not refusing: the caller decides whether the result is usable
+    (it still has to reject an empty or dot-prefixed name), and a repository
+    whose name contains a separator becomes one clonable directory instead of
+    a directory that fails to clone.
+    """
+    return part.replace("/", "_").replace("..", "_").replace("\\", "_")
+
+
 def delete_marker(path: Path) -> Path:
     """Marker written beside ``path`` while a delete of it is in flight.
 

@@ -16,12 +16,14 @@ import re
 import shutil
 import threading
 from collections.abc import Awaitable, Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
+from urllib.parse import urlsplit
 
 from git.exc import GitCommandError
 from pi_sidecar_client import run_parallel_with_limit
+from pydantic import HttpUrl
 
 from rootcoz import get_child_logger
 from rootcoz.ai_client import (
@@ -49,13 +51,15 @@ from rootcoz.models import (
     PeerDebate,
     ProductBugReport,
 )
-from rootcoz.repository import RepositoryManager
+from rootcoz.repository import RepositoryManager, derive_test_repo_name
 from rootcoz.storage import (
     PRIMARY_CLASSIFICATIONS,
     update_clone_progress,
     update_progress_phase,
 )
+from rootcoz.temp_paths import sanitize_path_part
 from rootcoz.token_tracking import failure_group_usage
+from rootcoz.url_utils import sanitize_clone_url, strip_url_credentials
 
 logger = get_child_logger(__name__)
 
@@ -110,15 +114,65 @@ def _job_clone_share(settings: Settings) -> int:
 
 
 @dataclass(frozen=True, slots=True)
-class CloneRequest:
-    """One repository clone, as the shared fan-out needs it."""
+class RepoTarget:
+    """One repository a caller wants materialised in its workspace.
+
+    ``name`` is the caller's *declared* name. The shared function resolves it
+    into a directory name and reports the resolved one everywhere -- the
+    progress hooks and both outcome maps -- because that is the name the
+    directory actually has.
+    """
 
     name: str
-    url: str
-    target: Path
-    depth: int
-    branch: str = ""
-    token: str | None = None
+    url: str | HttpUrl
+    ref: str = ""
+    depth: int = 1
+    # This repo's own credential. Never the caller's general credential, and
+    # ``repr=False`` so no log line or traceback can print it.
+    token: str | None = field(default=None, repr=False)
+    # Which credential rule applies: only a tests-repo target may use the
+    # caller's general credential, an additional repo ever uses its own token.
+    kind: Literal["tests_repo", "additional_repo"] = "additional_repo"
+
+
+@dataclass
+class CloneOutcome:
+    """What one call materialised, in target declaration order."""
+
+    cloned: dict[str, Path] = field(default_factory=dict)
+    failed: list[str] = field(default_factory=list)
+    errors: dict[str, BaseException] = field(default_factory=dict)
+
+
+#: A clone failure that only means "this repository is missing": the caller
+#: warns, records it and carries on. Anything outside this set is unexpected,
+#: and only the caller knows whether that fails the run.
+CLONE_FAILURES: tuple[type[BaseException], ...] = (
+    GitCommandError,
+    OSError,
+    ValueError,
+    RuntimeError,
+)
+
+# Stderr phrases and the cause label they name. Matching fixed phrases only:
+# stderr may embed a credential-bearing URL.
+_CLONE_FAILURE_CAUSES: tuple[tuple[tuple[str, ...], str], ...] = (
+    (("authentication failed",), "Authentication failed"),
+    (
+        ("remote branch", "pathspec", "bad revision", "not a valid ref"),
+        "Branch or ref not found",
+    ),
+    (
+        ("ssl certificate", "certificate verify", "server verification failed"),
+        "SSL verification failed",
+    ),
+    (("permission denied",), "Permission denied"),
+    (
+        ("could not resolve host", "name or service not known"),
+        "Network DNS resolution failed",
+    ),
+    (("repository not found", "not a git repository"), "Repository not found"),
+)
 
 
 async def _admit_clone(active_here: list[int]) -> Callable[[], None]:
@@ -158,79 +212,361 @@ async def _admit_clone(active_here: list[int]) -> Callable[[], None]:
     return _release
 
 
-async def clone_repo_batch(
-    repo_manager: RepositoryManager,
-    requests: Sequence[CloneRequest],
-    *,
-    on_start: Callable[[CloneRequest], Awaitable[None]] | None = None,
-    on_finish: Callable[[CloneRequest, str], Awaitable[None]] | None = None,
-    on_error: Callable[[str, BaseException], None] | None = None,
-) -> list[tuple[CloneRequest, BaseException | None]]:
-    """Clone every request concurrently, under the one clone admission budget.
+def _is_github_host(url: str) -> bool:
+    """Whether *url* names a GitHub host (github.com or a self-hosted install).
 
-    The only clone fan-out in the codebase: analysis and chat both come through
-    here, so N repos cost one clone's latency instead of the sum, and both
-    compete for the same slots.
+    Reads ``hostname``, never ``netloc``: netloc keeps userinfo, so
+    ``https://github.com@evil.tld/x`` used to pass and the chatting user's
+    GitHub token was injected into a URL for ``evil.tld``.
 
-    ``on_start`` runs once admitted and before the clone starts, ``on_finish``
-    receives the outcome (``cloned`` / ``failed`` / ``cancelled``), ``on_error``
-    is the per-repo failure hook (a cancelled clone is not a failure, so it is
-    not reported). Returns (request, error) per request, in declaration order:
-    the caller decides what a failure means -- chat warns and carries on,
-    analysis re-raises the unexpected ones.
+    The predicate is deliberately loose -- a host that merely contains
+    ``github`` still qualifies -- because tightening it breaks self-hosted
+    enterprise clones. That is pre-existing debt, pinned by test.
     """
+    try:
+        host = (urlsplit(url).hostname or "").lower()
+    except ValueError:  # Malformed authority, e.g. an unmatched IPv6 bracket.
+        return False
+    return host.endswith("github.com") or "github" in host
+
+
+def _resolve_repo_target(root: Path, name: str) -> tuple[str, Path]:
+    """Resolve a declared repo name into ``(directory name, path inside root)``.
+
+    The sanitisation is chat's rule, now applied to every path: a name that
+    would traverse becomes one plain directory instead of a clone that fails.
+    An empty or dot-prefixed result is refused, and the containment check runs
+    on the *resolved* path so a symlinked directory cannot walk out of the
+    workspace. The returned path is the clone target -- never a re-join of
+    ``root / name`` -- or the guard would be check-time only.
+    """
+    safe_name = sanitize_path_part(name)
+    if not safe_name or safe_name.startswith("."):
+        raise ValueError(f"Invalid repository name: {name}")
+    path = (root / safe_name).resolve()
+    if not path.is_relative_to(root.resolve()):
+        raise ValueError(f"Repository target escapes the workspace: {name}")
+    return safe_name, path
+
+
+def tests_repo_target(
+    url: str,
+    ref: str,
+    additional_repos: Sequence[AdditionalRepo] | None = None,
+    *,
+    depth: int = 50,
+) -> RepoTarget | None:
+    """Build the tests-repo target, or ``None`` when there is no name to use.
+
+    The one place ``derive_test_repo_name`` is called, and it derives from a
+    credential-free URL: a ``?access_token=`` query would otherwise become a
+    directory name, a progress entry, a row in "not in this workspace" and a
+    line in the AI prompt.
+
+    Returns ``None`` silently for an empty URL (the common tests-repo-less
+    analysis) and with one redacted warning for a configured URL that derives
+    no name at all -- there is no directory to report in that case.
+    """
+    if not url:
+        return None
+    clean = strip_url_credentials(url)
+    name = derive_test_repo_name(clean, list(additional_repos or []))
+    if not name:
+        logger.warning(
+            "Skipping tests repository: no repository name in %s",
+            sanitize_clone_url(clean),
+        )
+        return None
+    return RepoTarget(name=name, url=url, ref=ref, depth=depth, kind="tests_repo")
+
+
+def _clone_token(target: RepoTarget, credential: str, policy: str) -> str | None:
+    """The token this target's clone may carry.
+
+    Two different credentials: a **repo-scoped** one (a tests-repo token, which
+    may be the deployment's own setting, or an ``AdditionalRepo.token``) rides
+    with that repo's host whatever it is -- otherwise no private self-hosted
+    repo could be cloned. A caller's **general-purpose** credential is not the
+    same thing, and under ``github_hosts_only`` it only ever goes to a GitHub
+    host.
+    """
+    if target.kind == "additional_repo":
+        return target.token or None
+    if not credential:
+        return None
+    if policy == "always" or _is_github_host(str(target.url)):
+        return credential
+    return None
+
+
+def _clone_failure_cause(error: BaseException) -> str:
+    """A fixed label for a clone failure. Never the exception's text."""
+    if isinstance(error, GitCommandError):
+        stderr = (error.stderr or "").lower()
+        for patterns, label in _CLONE_FAILURE_CAUSES:
+            if any(pattern in stderr for pattern in patterns):
+                return label
+        return "Git command failed"
+    if isinstance(error, ValueError) and str(error).startswith(
+        "Invalid repository URL scheme."
+    ):
+        return "Invalid repository URL scheme"
+    return "Clone worker failed"
+
+
+def _clone_failure_frames(error: BaseException) -> list[str]:
+    """Frame locations only: neither an exception message nor a filename is safe.
+
+    The prefix is the package root, so a frame reads ``repository.py`` rather
+    than ``engine/repository.py``.
+    """
+    package_root = str(Path(__file__).parent.parent) + os.sep
+    frames = []
+    tb = error.__traceback__
+    while tb:
+        code = tb.tb_frame.f_code
+        name = (
+            code.co_name
+            if code.co_name in {"clone", "clone_into", "_validate_repo_url"}
+            else "frame"
+        )
+        filename = code.co_filename
+        location = (
+            filename.removeprefix(package_root)
+            if filename.startswith(package_root)
+            else "[path]"
+        )
+        frames.append(f"{location}:{tb.tb_lineno} in {name}")
+        tb = tb.tb_next
+    return frames
+
+
+async def _join_clone_worker(clone_task: asyncio.Task[Path]) -> None:
+    """Await a clone worker, joining it across repeated cancellations.
+
+    A cancelled await cannot stop a thread already inside ``git clone``, so the
+    worker is joined before this coroutine raises: the caller's cleanup cannot
+    then delete the workspace under a live clone.
+    """
+    try:
+        await asyncio.wait({clone_task})
+        clone_task.result()
+    except asyncio.CancelledError:
+        while not clone_task.done():
+            try:
+                await asyncio.wait({clone_task})
+            except asyncio.CancelledError:
+                continue
+        error = None if clone_task.cancelled() else clone_task.exception()
+        if error is not None:
+            logger.warning(
+                "Repo clone worker failed after cancellation: %s: %s\n%s",
+                type(error).__name__,
+                _clone_failure_cause(error),
+                "\n".join(_clone_failure_frames(error)),
+            )
+        logger.info("Repo clone worker joined after cancellation")
+        raise
+
+
+def _release_on_done(
+    release: Callable[[], None] | None,
+) -> Callable[[asyncio.Task[Path]], None]:
+    """A done-callback that observes the worker and frees its slot.
+
+    Retrieving matters on every dispatch: a task whose exception nobody read is
+    reported by asyncio as ``Task exception was never retrieved``, traceback
+    included -- and for a ``GitCommandError`` that traceback carries
+    ``x-token-auth:<token>@host``.
+    """
+
+    def _done(task: asyncio.Task[Path]) -> None:
+        if not task.cancelled():
+            task.exception()
+        if release is not None:
+            release()
+
+    return _done
+
+
+async def prepare_workspace_repos(
+    repo_manager: RepositoryManager,
+    root: Path,
+    targets: Sequence[RepoTarget],
+    *,
+    credential: str = "",
+    credential_policy: Literal["always", "github_hosts_only"] = "github_hosts_only",
+    skip_existing: bool = False,
+    cancellation: Literal["propagate", "abandon"] = "propagate",
+    admit: bool = True,
+    on_repo_start: Callable[[RepoTarget], Awaitable[None]] | None = None,
+    on_repo_end: Callable[[RepoTarget, str], Awaitable[None]] | None = None,
+) -> CloneOutcome:
+    """Materialise *targets* into *root* -- the one repository clone path.
+
+    Analysis and chat both come through here, and so does re-analysis, so a
+    workspace change (a timeout bound, a naming rule, a credential policy) is
+    made once instead of twice and kept consistent by hand. Everything the
+    callers genuinely do differently is an argument, and both defaults are the
+    safe end: a general credential is host-gated unless a caller says
+    otherwise, and cancellation joins the worker unless a caller opts out.
+
+    A repo failure never raises: it is warned, recorded in ``failed``/``errors``
+    and the rest still clone. The caller decides what an unexpected one means
+    (``raise_first_unexpected``).
+
+    Args:
+        repo_manager: Manager whose ``clone_into`` performs the clone.
+        root: The caller's workspace root; never shared between callers.
+        targets: Repositories to materialise, in progress-report order.
+        credential: The caller's general-purpose credential. Only a
+            ``tests_repo`` target may carry it.
+        credential_policy: ``github_hosts_only`` sends ``credential`` to GitHub
+            hosts only; ``always`` sends it wherever the target points.
+        skip_existing: Leave a target whose directory is already there alone.
+        cancellation: ``propagate`` joins the clone worker before re-raising;
+            ``abandon`` re-raises at once and lets the worker finish.
+        admit: Take a clone slot from the shared budget. A single-repo caller
+            that was never budgeted passes ``False``.
+        on_repo_start: Per-repo progress, after admission and before the clone.
+        on_repo_end: Per-repo progress, with ``cloned`` / ``failed`` /
+            ``cancelled``.
+
+    Raises:
+        ValueError: two targets declare the same raw name. The name is the
+            directory, so one of them would vanish.
+    """
+    raw_names = [target.name for target in targets]
+    dupes = sorted({name for name in raw_names if raw_names.count(name) > 1})
+    if dupes:
+        # Every declaration path rejects duplicates already; this is the one
+        # place a collapse into ``cloned`` could happen, so report, never drop.
+        raise ValueError(f"Duplicate additional repo names: {', '.join(dupes)}")
+
+    reported: dict[int, str] = {}
+    problems: dict[int, BaseException] = {}
+    taken: set[str] = set()
+    prepared: list[tuple[int, RepoTarget, Path, str | None]] = []
+
+    for index, target in enumerate(targets):
+        reported[index] = target.name
+        try:
+            name, path = _resolve_repo_target(root, target.name)
+        except ValueError as exc:
+            logger.warning("Skipping repo with unsafe name: %s", target.name)
+            problems[index] = exc
+            continue
+        if name in taken:
+            # Two declarations that sanitise onto one directory would race each
+            # other's clone. Refuse the loser and report it instead of silently
+            # collapsing it into the winner.
+            logger.warning("Skipping repo with unsafe name: %s", target.name)
+            problems[index] = ValueError(
+                f"Repository name collides with an earlier target: {name}"
+            )
+            continue
+        taken.add(name)
+        reported[index] = name
+        if skip_existing and path.exists():
+            logger.debug("%s already cloned in %s", name, path)
+            continue
+        # The resolved name and a plain ``str`` URL, so no hook, log line or
+        # ``clone_into`` ever sees the caller's pydantic ``HttpUrl`` (which
+        # ``sanitize_clone_url`` would raise on) or its raw name.
+        prepared.append(
+            (
+                index,
+                replace(target, name=name, url=str(target.url)),
+                path,
+                _clone_token(target, credential, credential_policy),
+            )
+        )
+
     active_here = [0]
 
-    async def _clone_one(request: CloneRequest) -> Path:
-        release = await _admit_clone(active_here)
+    async def _clone_one(target: RepoTarget, path: Path, token: str | None) -> None:
+        release = await _admit_clone(active_here) if admit else None
         clone_task: asyncio.Task[Path] | None = None
-        outcome = "cancelled"
+        state = "cancelled"
         try:
-            if on_start is not None:
-                await on_start(request)
+            if on_repo_start is not None:
+                await on_repo_start(target)
             clone_task = asyncio.create_task(
                 asyncio.to_thread(
                     repo_manager.clone_into,
-                    request.url,
-                    request.target,
-                    depth=request.depth,
-                    branch=request.branch,
-                    token=request.token or None,
+                    target.url,
+                    path,
+                    depth=target.depth,
+                    branch=target.ref,
+                    token=token,
                 )
             )
-
-            def release_slot(task: asyncio.Task[Path]) -> None:
-                if not task.cancelled():
-                    task.exception()  # Observe failures even when the caller was cancelled.
-                release()
-
-            clone_task.add_done_callback(release_slot)
-            await asyncio.shield(clone_task)
-            outcome = "cloned"
-            return request.target
+            clone_task.add_done_callback(_release_on_done(release))
+            if cancellation == "propagate":
+                await _join_clone_worker(clone_task)
+            else:
+                # Not ``shield``: on 3.14.2 it installs its own exception
+                # reporter once the outer future is cancelled, and that record
+                # carries the exception's repr -- token and all.
+                await asyncio.wait({clone_task})
+                clone_task.result()
+            state = "cloned"
+            logger.info("Cloned %s into %s", target.name, path)
         except Exception:
-            outcome = "failed"
+            state = "failed"
             raise
         finally:
-            if clone_task is None:
+            if clone_task is None and release is not None:
+                # Cancelled while queued: no worker exists to release the slot.
                 release()
-            if on_finish is not None:
-                await on_finish(request, outcome)
+            if on_repo_end is not None:
+                await on_repo_end(target, state)
 
     results = await asyncio.gather(
-        *[_clone_one(request) for request in requests], return_exceptions=True
+        *(_clone_one(target, path, token) for _index, target, path, token in prepared),
+        return_exceptions=True,
     )
-    outcomes: list[tuple[CloneRequest, BaseException | None]] = []
-    for request, result in zip(requests, results, strict=True):
-        error = result if isinstance(result, BaseException) else None
-        if (
-            error is not None
-            and not isinstance(error, asyncio.CancelledError)
-            and on_error is not None
-        ):
-            on_error(request.name, error)
-        outcomes.append((request, error))
-    return outcomes
+
+    outcome = CloneOutcome()
+    for (index, target, path, _token), result in zip(prepared, results, strict=True):
+        if result is None:
+            outcome.cloned[target.name] = path
+            continue
+        if isinstance(result, asyncio.CancelledError):
+            continue
+        problems[index] = result
+        logger.warning(
+            "Failed to clone repo %s from %s into %s (%s)",
+            target.name,
+            sanitize_clone_url(str(target.url)),
+            path,
+            type(result).__name__,
+        )
+
+    # Declaration order, not completion order: under admission the workers
+    # finish in any order, and the caller's escalation winner has to be
+    # deterministic.
+    for index in sorted(problems):
+        name = reported[index]
+        outcome.failed.append(name)
+        outcome.errors[name] = problems[index]
+    return outcome
+
+
+def raise_first_unexpected(
+    errors: dict[str, BaseException],
+    known: tuple[type[BaseException], ...] = CLONE_FAILURES,
+) -> None:
+    """Fail the run on the first failure outside *known*, in declaration order.
+
+    ``known`` is the caller's policy: a missing repository is a warning, and
+    anything else is a bug the analysis must not silently work around.
+    """
+    for name, error in errors.items():
+        if isinstance(error, known):
+            continue
+        logger.error("Repo '%s' failed unexpectedly (%s)", name, type(error).__name__)
+        raise error
 
 
 async def clone_additional_repos(
@@ -264,15 +600,9 @@ async def clone_additional_repos(
         ValueError: two declared repos share a name. The name is the clone
             directory, so a second repo would overwrite the first and one of
             them would vanish from the workspace and the prompt.
+        BaseException: the first unexpected clone failure, after its siblings
+            finished.
     """
-    names = [ar.name for ar in additional_repos_list]
-    dupes = sorted({n for n in names if names.count(n) > 1})
-    if dupes:
-        # Every declaration path rejects duplicates already; this is the one
-        # place a collapse into ``cloned`` could happen, so report, never drop.
-        raise ValueError(f"Duplicate additional repo names: {', '.join(dupes)}")
-
-    cloned: dict[str, Path] = {}
     settings = get_settings()
     logger.info(
         "Cloning %d additional repo(s) at most %d at a time "
@@ -287,82 +617,60 @@ async def clone_additional_repos(
     def _operation_id(name: str) -> str:
         return f"{operation_id}:additional:{name}" if operation_id else ""
 
-    async def _started(request: CloneRequest) -> None:
+    async def _started(target: RepoTarget) -> None:
         if reanalysis:
             await safe_update_clone_progress(
                 job_id,
-                request.name,
+                target.name,
                 True,
                 reanalysis=True,
-                operation_id=_operation_id(request.name),
-                url=request.url,
-                ref=request.branch,
+                operation_id=_operation_id(target.name),
+                url=str(target.url),
+                ref=target.ref,
             )
         else:
             await safe_update_clone_progress(
-                job_id, request.name, True, url=request.url, ref=request.branch
+                job_id, target.name, True, url=str(target.url), ref=target.ref
             )
 
-    async def _finished(request: CloneRequest, outcome: str) -> None:
+    async def _finished(target: RepoTarget, outcome: str) -> None:
         if reanalysis:
             await safe_update_clone_progress(
                 job_id,
-                request.name,
+                target.name,
                 False,
                 state=outcome,
                 reanalysis=True,
-                operation_id=_operation_id(request.name),
+                operation_id=_operation_id(target.name),
             )
         elif outcome == "cloned":
-            await safe_update_clone_progress(job_id, request.name, False)
+            await safe_update_clone_progress(job_id, target.name, False)
         else:
-            await safe_update_clone_progress(job_id, request.name, False, state=outcome)
-        if outcome == "cloned":
-            logger.info(
-                "Cloned additional repo '%s' into %s", request.name, request.target
-            )
+            await safe_update_clone_progress(job_id, target.name, False, state=outcome)
 
-    outcomes = await clone_repo_batch(
+    outcome = await prepare_workspace_repos(
         repo_manager,
+        repo_path,
         [
-            CloneRequest(
-                name=ar.name,
-                url=str(ar.url),
-                target=repo_path / ar.name,
+            RepoTarget(
+                name=repo.name,
+                url=repo.url,
+                ref=repo.ref,
                 depth=1,
-                branch=ar.ref,
-                token=ar.token or None,
+                token=repo.token,
             )
-            for ar in additional_repos_list
+            for repo in additional_repos_list
         ],
-        on_start=_started,
-        on_finish=_finished,
+        # An additional repo carries its own credential, never a general one.
+        credential_policy="github_hosts_only",
+        # A cancelled analysis must return at once; the worker holds its slot
+        # until it ends, so a second clone cannot start behind it.
+        cancellation="abandon",
+        on_repo_start=_started,
+        on_repo_end=_finished,
     )
-
-    for request, error in outcomes:
-        if error is None:
-            cloned[request.name] = request.target
-            continue
-        if isinstance(error, asyncio.CancelledError):
-            continue
-        if isinstance(error, (GitCommandError, ValueError, OSError, RuntimeError)):
-            # non-fatal additional repo clone failure
-            logger.warning(
-                "Failed to clone additional repo '%s' (%s)",
-                request.name,
-                type(error).__name__,
-            )
-            continue
-        # An exception outside the known set is unexpected, so fail the job
-        # instead of analyzing with that repo silently missing.
-        logger.error(
-            "Additional repo '%s' failed unexpectedly: %s",
-            request.name,
-            type(error).__name__,
-        )
-        raise error
-
-    return cloned, repo_path
+    raise_first_unexpected(outcome.errors)
+    return outcome.cloned, repo_path
 
 
 # Module-level callback for SSE notifications.

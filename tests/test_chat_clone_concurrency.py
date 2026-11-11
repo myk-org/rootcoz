@@ -89,7 +89,10 @@ async def test_one_failing_repo_warns_once_and_the_rest_still_clone(
 
     chat_logger = logging.getLogger("rootcoz.engine.chat")
     monkeypatch.setattr(chat_logger, "propagate", True)
-    with caplog.at_level(logging.WARNING, logger="rootcoz.engine.chat"):
+    # One shared failure line, on the shared module's logger (#514).
+    core_logger = logging.getLogger("rootcoz.engine.core")
+    monkeypatch.setattr(core_logger, "propagate", True)
+    with caplog.at_level(logging.WARNING, logger="rootcoz.engine.core"):
         cloned_any = await clone_chat_repos(
             workspace, {"additional_repos": _repos(3)}, failed=failed
         )
@@ -97,7 +100,7 @@ async def test_one_failing_repo_warns_once_and_the_rest_still_clone(
     assert cloned_any is True
     assert failed == ["repo1"]
     assert sorted(cloned) == ["repo0", "repo2"]
-    warnings = [r for r in caplog.records if "failed to clone repo repo1" in r.message]
+    warnings = [r for r in caplog.records if "Failed to clone repo repo1" in r.message]
     assert len(warnings) == 1, [r.message for r in caplog.records]
     assert secret not in caplog.text
 
@@ -216,4 +219,6 @@ async def test_unsafe_name_is_skipped_and_the_others_clone(
 
     assert cloned == ["repo0"]
     assert cloned_any is True
-    assert failed == []
+    # A refused repository is named in ``failed`` so the "not in this workspace"
+    # row reports it; dropping it silently is what #514 removes.
+    assert failed == [".hidden"]
