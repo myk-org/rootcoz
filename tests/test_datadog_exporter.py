@@ -30,6 +30,7 @@ from rootcoz.exporters.datadog import (
     validate_datadog_credentials,
 )
 from rootcoz.storage import AI_SYSTEM_USERNAME
+from tests.conftest import capture_main_logs
 
 _API_KEY = "dd-test-key"  # pragma: allowlist secret
 _APP_KEY = "b" * 40  # pragma: allowlist secret
@@ -1718,11 +1719,8 @@ class TestApiErrorDetail:
     ) -> None:
         from rootcoz.exporters.datadog import logger as datadog_logger
 
-        datadog_logger.addHandler(caplog.handler)
-        try:
+        with capture_main_logs(caplog, logger=datadog_logger):
             result = await self._push(self._bad_request(body=self._MISSING_STATUS_BODY))
-        finally:
-            datadog_logger.removeHandler(caplog.handler)
 
         expected = (
             "Failed to emit Datadog event for 'test_login_flow' (HTTP 400:"

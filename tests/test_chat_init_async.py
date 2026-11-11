@@ -685,18 +685,16 @@ async def test_clone_failure_logs_no_token(monkeypatch, tmp_path, caplog):
     failed: list[str] = []
     workspace = tmp_path / "ws"
     workspace.mkdir()
-    chat_logger = logging.getLogger("rootcoz.engine.chat")
-    chat_logger.propagate = True
-    try:
-        with caplog.at_level(logging.DEBUG, logger="rootcoz.engine.chat"):
-            cloned = await clone_chat_repos(
-                workspace,
-                {"tests_repo_url": "https://example.com/org/tests-repo"},
-                failed=failed,
-            )
-    finally:
-        chat_logger.propagate = False
+    with capture_main_logs(caplog, logging.DEBUG, logger="rootcoz.engine.chat"):
+        cloned = await clone_chat_repos(
+            workspace,
+            {"tests_repo_url": "https://example.com/org/tests-repo"},
+            failed=failed,
+        )
     assert cloned is False
+    # Positive control: the capture does see this logger, so the absence below is
+    # a real absence and not an empty capture.
+    assert "failed to clone repo tests-repo" in caplog.text
     assert secret not in caplog.text
     assert failed == ["tests-repo"]
     assert all(secret not in name for name in failed)

@@ -18,16 +18,18 @@ from rootcoz.sources.base import (
 )
 from rootcoz.sources.jenkins_source import JenkinsSource
 from rootcoz.sources.prow_source import ProwSource
+from tests.conftest import capture_main_logs
 
 
 @pytest.fixture(autouse=True)
-def _caplog_reaches_module_logger(monkeypatch):
-    """get_child_logger sets propagate=False and simple_logger adds a
-    session-persistent DuplicateFilter; caplog needs both lifted here."""
+def _caplog_reaches_module_logger(caplog):
+    """get_child_logger sets propagate=False, so caplog needs its own attach here."""
+    import logging
+
     from rootcoz.sources import base as base_module
 
-    monkeypatch.setattr(base_module.logger, "propagate", True)
-    monkeypatch.setattr(base_module.logger, "filters", [])
+    with capture_main_logs(caplog, logging.INFO, logger=base_module.logger):
+        yield
 
 
 @pytest.mark.asyncio
@@ -200,6 +202,9 @@ async def test_cancelled_thread_clone_finishes_before_progress_and_cleanup(
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(task, 2)
     assert events == ["cloning", "worker finished", "cancelled", "cleanup"]
+    # Positive control: this capture does see the module logger, so the absence
+    # below is a real absence and not an empty capture.
+    assert "clone worker joined after cancellation" in caplog.text
     assert "not-for-logs" not in caplog.text
 
 
