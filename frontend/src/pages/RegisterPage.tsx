@@ -319,8 +319,11 @@ export function RegisterPage() {
 
   useEffect(() => {
     let active = true
-    api.get<{ providers?: SsoProvider[] }>('/api/auth/sso/providers')
-      .then((data) => { if (active) setSsoProviders(data.providers ?? []) })
+    api.get<{ providers?: SsoProvider[]; browser_login?: boolean }>('/api/auth/sso/providers')
+      // No public origin means the callback cannot be built, so a button here
+      // would only fail after the person clicked it. The CLI still works — it
+      // joins a relative verification URL itself.
+      .then((data) => { if (active) setSsoProviders(data.browser_login === false ? [] : data.providers ?? []) })
       .catch(() => { /* SSO is optional — the password forms stay usable */ })
     return () => { active = false }
   }, [])
@@ -560,8 +563,21 @@ export function RegisterPage() {
                     window.history.replaceState(null, '', window.location.pathname)
                     setNewApiKey(apiKey)
                     // A pending account sees the same "waiting for approval" note
-                    // registration shows, not a bare key followed by a redirect.
-                    setRegistrationStatus(status === 'active' ? 'active' : 'pending')
+                    // registration shows, not a bare key followed by a redirect —
+                    // including the deployment's own message, which registration
+                    // fetches and this path used to skip.
+                    const pending = status !== 'active'
+                    setRegistrationStatus(pending ? 'pending' : 'active')
+                    if (pending) {
+                      api
+                        .get<{ custom_message?: string }>('/api/auth/pending-status')
+                        .then((data) => {
+                          if (data.custom_message) setPendingCustomMessage(data.custom_message)
+                        })
+                        .catch(() => {
+                          /* the message is optional — non-blocking */
+                        })
+                    }
                     setSsoCreated({ next: destination })
                     setMode('key-reveal')
                   }}

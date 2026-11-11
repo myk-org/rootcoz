@@ -163,6 +163,23 @@ class OIDCProvider(SSOProvider):
                 raise AuthError(
                     "discovery_failed", f"discovery document has no {required}"
                 )
+        # The document comes from *our* issuer's well-known URL, but it is trusted
+        # for an hour afterwards: pin the issuer it claims and refuse endpoints
+        # that are not https (loopback http is the documented dev exception), so a
+        # redirected or tampered document cannot move the login elsewhere.
+        claimed_issuer = str(document.get("issuer", "")).rstrip("/")
+        if claimed_issuer and claimed_issuer != self.issuer.rstrip("/"):
+            raise AuthError(
+                "discovery_failed",
+                f"discovery document claims issuer {claimed_issuer!r}",
+            )
+        for endpoint_key in ("authorization_endpoint", "token_endpoint", "jwks_uri"):
+            endpoint = str(document[endpoint_key])
+            if not is_safe_navigation_url(endpoint, allow_loopback_http=True):
+                raise AuthError(
+                    "discovery_failed",
+                    f"{endpoint_key} is not an https URL",
+                )
         _METADATA_CACHE[self.issuer] = (now, document)
         return document
 
@@ -354,10 +371,15 @@ class OIDCProvider(SSOProvider):
         audiences = [audience] if isinstance(audience, str) else list(audience or [])
         if self._client_id not in audiences:
             raise AuthError("id_token_invalid", "audience does not name this client")
-        if len(audiences) > 1 and claims.get("azp") != self._client_id:
-            # With several audiences, OIDC requires azp to name the client the
-            # token was issued to — otherwise a token minted for a sibling client
-            # of the same issuer would be accepted here.
+        authorized_party = claims.get("azp")
+        if authorized_party is not None and authorized_party != self._client_id:
+            # OIDC requires azp to name the client the token was issued to. Check
+            # it whenever it is present, not only when ``aud`` holds several
+            # values: a token with ``aud=[this client]`` and a foreign ``azp`` is
+            # minted for a sibling client of the same issuer, and accepting it
+            # would let that client's login be replayed here.
+            raise AuthError("id_token_invalid", "token is authorized for another party")
+        if len(audiences) > 1 and authorized_party != self._client_id:
             raise AuthError("id_token_invalid", "token is authorized for another party")
         echoed = claims.get("nonce")
         if (
