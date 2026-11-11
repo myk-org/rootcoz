@@ -2,6 +2,7 @@
 
 import os
 import subprocess
+import sys
 import time
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
@@ -1448,10 +1449,18 @@ class TestCloneTimeoutIsEnforced:
         """
         pgid_file = tmp_path / "pgid"
         fake_git = tmp_path / "fake-git"
+        # The group comes from the kernel, not from ``ps``: a minimal container has
+        # none, and the redirection alone would leave an empty file behind. The
+        # interpreter already running this test is sleeping, so no ``sleep`` binary
+        # either -- and it reports the group itself, because the shim is SIGKILLed
+        # as a group and its pid is gone by the time the assertion runs.
         fake_git.write_text(
             "#!/bin/sh\n"
-            f"ps -o pgid= -p $$ > {pgid_file}\n"
-            "sleep 60\n"  # hangs like a remote that accepts and never answers
+            f'exec "{sys.executable}" -c "\n'
+            "import os, sys, time\n"
+            "open(sys.argv[1], 'w').write(str(os.getpgid(0)))\n"
+            "time.sleep(60)\n"  # hangs like a remote that accepts and never answers
+            f'" "{pgid_file}"\n'
         )
         fake_git.chmod(0o755)
         monkeypatch.setattr(git.cmd.Git, "GIT_PYTHON_GIT_EXECUTABLE", str(fake_git))
@@ -1469,7 +1478,9 @@ class TestCloneTimeoutIsEnforced:
 
         assert elapsed < 10, f"the deadline did not fire: {elapsed:.1f}s"
         assert clone_failure_reason(excinfo.value) == "Clone timed out"
-        assert int(pgid_file.read_text().strip()) != os.getpgid(0), (
+        recorded_group = pgid_file.read_text().strip()
+        assert recorded_group, "the fake git never ran: it recorded no process group"
+        assert int(recorded_group) != os.getpgid(0), (
             "the clone shares the caller's process group, so the timeout cannot "
             "kill a git-remote-https helper holding the pipes"
         )
