@@ -250,11 +250,13 @@ async def clone_chat_repos(
         missing.append("workspace")
 
     if failed is not None:
-        # ``failed`` is the caller's "not in this workspace" row: a name the
-        # workspace does hold -- an additional repo called ``tests-repo``, which
-        # the shared naming already treats as taken -- must never reach it.
-        present = set(outcome.cloned)
-        failed.extend(n for n in (*missing, *outcome.failed) if n not in present)
+        # ``failed`` is the caller's "not in this workspace" row, so a name the
+        # workspace holds -- an additional repo called ``tests-repo``, which the
+        # shared naming treats as taken -- must never reach it. Presence, not
+        # ``outcome.cloned``: ``skip_existing`` leaves a held repo out of it.
+        failed.extend(
+            n for n in (*missing, *outcome.failed) if not (workspace / n).exists()
+        )
 
     # Copy .rootcoz/{agents,skills,extensions}/ to workspace .pi/
     if outcome.cloned:
