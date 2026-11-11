@@ -160,7 +160,9 @@ async def test_skip_existing_leaves_the_repository_alone(
     async def started(target: RepoTarget) -> None:
         events.append((target.name, "start"))
 
-    async def ended(target: RepoTarget, state: str) -> None:
+    async def ended(
+        target: RepoTarget, state: str, _error: BaseException | None
+    ) -> None:
         events.append((target.name, state))
 
     outcome = await prepare_workspace_repos(
@@ -207,7 +209,9 @@ async def test_propagate_joins_the_worker_before_it_raises(
 
     manager.clone_into.side_effect = clone
 
-    async def ended(target: RepoTarget, state: str) -> None:
+    async def ended(
+        target: RepoTarget, state: str, _error: BaseException | None
+    ) -> None:
         events.append(state)
 
     task = asyncio.create_task(
@@ -353,6 +357,38 @@ async def test_the_failure_cause_label_reaches_the_log(
     )
     assert "GitCommandError: Authentication failed" in message
     assert secret not in caplog.text
+
+
+async def test_the_failure_label_reaches_the_progress_hook(
+    tmp_path, clone_settings
+) -> None:
+    """The stored reason needs the exception: the hook gets ``(target, state, error)``."""
+    from git.exc import GitCommandError
+
+    from rootcoz.repository import clone_failure_reason
+
+    manager = RecordingManager(
+        fail={
+            "bad": GitCommandError(
+                "git clone", 128, stderr="fatal: unable to read tree (abc)"
+            )
+        }
+    )
+    seen: list[tuple[str, str, str]] = []
+
+    async def ended(
+        target: RepoTarget, state: str, error: BaseException | None
+    ) -> None:
+        seen.append((target.name, state, clone_failure_reason(error) if error else ""))
+
+    await prepare_workspace_repos(
+        manager, tmp_path, [_target("good"), _target("bad")], on_repo_end=ended
+    )
+
+    assert sorted(seen) == [
+        ("bad", "failed", "Commit or ref not found"),
+        ("good", "cloned", ""),
+    ]
 
 
 async def test_duplicate_raw_names_refuse_the_whole_call(
@@ -636,7 +672,10 @@ async def test_analysis_caller_reports_a_refusal_as_a_redacted_failure(
 
     assert result.tests_repo_path is None
     assert result.cloned_repos == {}
-    assert result.repo_context == "\nFailed to clone repository (details redacted)"
+    assert result.repo_context == "\nFailed to clone repository (Clone worker failed)"
+    # The label replaces the old "details redacted": no URL, no exception text.
+    assert "redacted" not in result.repo_context
+    assert "example.com" not in result.repo_context
     # A refusal is not a clone: it reports through the outcome, not a hook.
     assert states == []
 

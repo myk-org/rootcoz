@@ -518,12 +518,14 @@ async def setup_analysis_workspace(
         safe_update_clone_progress,
         tests_repo_target,
     )
+    from rootcoz.repository import clone_failure_reason
     from rootcoz.url_utils import sanitize_clone_url
 
     repo_path = repo_manager.create_workspace()
     cloned_repos: dict[str, Path] = {}
     repo_context = ""
     tests_repo_path: Path | None = None
+    failure_label = "Clone worker failed"
 
     logger.debug("Workspace created at %s", repo_path)
 
@@ -546,8 +548,15 @@ async def setup_analysis_workspace(
                 job_id, repo.name, True, url=str(repo.url), ref=repo.ref
             )
 
-        async def _finished(repo: RepoTarget, state: str) -> None:
-            await safe_update_clone_progress(job_id, repo.name, False, state=state)
+        async def _finished(
+            repo: RepoTarget, state: str, error: BaseException | None
+        ) -> None:
+            nonlocal failure_label
+            if error is not None:
+                failure_label = clone_failure_reason(error)
+            await safe_update_clone_progress(
+                job_id, repo.name, False, state=state, reason=failure_label
+            )
 
         outcome = await prepare_workspace_repos(
             repo_manager,
@@ -573,7 +582,7 @@ async def setup_analysis_workspace(
                 f"(at {tests_repo_path.name}/)"
             )
         elif outcome.failed:
-            repo_context = "\nFailed to clone repository (details redacted)"
+            repo_context = f"\nFailed to clone repository ({failure_label})"
         raise_first_unexpected(outcome.errors, (*CLONE_FAILURES, TypeError))
 
     # Additional repositories are resolved after reading the test repo's settings.

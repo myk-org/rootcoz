@@ -296,7 +296,11 @@ from rootcoz.monitoring import (
     validate_startup_config,
 )
 from rootcoz.notifications import send_mention_notifications
-from rootcoz.repository import RepositoryManager, redact_url
+from rootcoz.repository import (
+    RepositoryManager,
+    clone_failure_reason,
+    redact_url,
+)
 from rootcoz.request_resolution import resolve_tests_repo_token
 from rootcoz.result_fields import (
     RESULT_FIELD_PATHS,
@@ -697,6 +701,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "max_concurrent_repo_clones",
         "max_concurrent_analyses",
         "chat_clone_depth",
+        "repo_clone_timeout_seconds",
         "wait_for_completion",
         "poll_interval_minutes",
         "max_wait_minutes",
@@ -8659,7 +8664,9 @@ async def _reanalyze_failure_background(
                     ref=repo.ref,
                 )
 
-            async def _tests_repo_finished(repo: RepoTarget, state: str) -> None:
+            async def _tests_repo_finished(
+                repo: RepoTarget, state: str, error: BaseException | None
+            ) -> None:
                 await safe_update_clone_progress(
                     job_id,
                     repo.name,
@@ -8667,6 +8674,7 @@ async def _reanalyze_failure_background(
                     state=state,
                     reanalysis=True,
                     operation_id=f"{failure_uuid}:tests",
+                    reason=clone_failure_reason(error) if error is not None else "",
                 )
 
             outcome = await prepare_workspace_repos(

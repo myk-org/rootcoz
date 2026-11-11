@@ -432,6 +432,16 @@ class Settings(BaseSettings):
             " re-clone, and buys history nothing reads."
         ),
     )
+    repo_clone_timeout_seconds: int = Field(
+        default=900,
+        gt=0,
+        description=(
+            "Wall-clock ceiling, in seconds, for one repository clone -- the whole"
+            " ladder (by-id fetch or clone, SSL retry, checkout) shares it. A remote"
+            " that stops answering fails the clone with a reason instead of holding"
+            " the job; raise it for a very large repository over a slow link."
+        ),
+    )
 
     # Jenkins artifacts configuration
     jenkins_artifacts_max_size_mb: int = Field(default=500, gt=0)

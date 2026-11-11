@@ -1045,6 +1045,32 @@ def test_queue_is_an_advertised_sparse_field(client):
     assert "queue" in RESULT_FIELD_PATHS
 
 
+def test_repo_clone_timeout_is_a_server_setting(client):
+    """Registered, default 900, env-supplied, and 0 (no deadline at all) is refused."""
+    assert "repo_clone_timeout_seconds" in main._SETTINGS_CATEGORIES["Server"]
+    by_key = {
+        item["key"]: item
+        for item in client.get("/api/admin/settings", headers=_admin_headers()).json()
+    }
+    row = by_key["repo_clone_timeout_seconds"]
+    assert (row["category"], row["default"], row["env_var"]) == (
+        "Server",
+        "900",
+        "REPO_CLONE_TIMEOUT_SECONDS",
+    )
+    assert (row["restart_required"], row["sensitive"]) == (False, False)
+
+    rejected = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"repo_clone_timeout_seconds": 0}},
+    )
+    assert rejected.status_code == 400
+
+    clear_settings_cache()
+    assert get_settings().repo_clone_timeout_seconds == 900
+
+
 # --- chat clone depth (#547) ---
 
 

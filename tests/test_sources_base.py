@@ -105,6 +105,42 @@ async def test_workspace_failed_clone_reports_failed(
 
 
 @pytest.mark.asyncio
+async def test_tests_repo_failure_records_the_label(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A failed tests-repo clone stores the label and says it in the prompt context."""
+    from git.exc import GitCommandError
+
+    from rootcoz import storage
+    from rootcoz.sources.base import setup_analysis_workspace
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "progress.db")
+    await storage.init_db()
+    await storage.save_result("job", "", "running", {})
+    manager = MagicMock()
+    manager.create_workspace.return_value = tmp_path
+    manager.clone_into.side_effect = GitCommandError(
+        "git clone", 128, stderr="fatal: unable to read tree (abc)"
+    )
+
+    result, _ = await setup_analysis_workspace(
+        manager,
+        tests_repo_url="https://example.com/tests",
+        tests_repo_ref="a" * 40,
+        job_id="job",
+    )
+
+    stored = (await storage.get_result("job"))["result"]["progress_log"]
+    failed = [entry for entry in stored if entry["state"] == "failed"]
+    assert failed and failed[0]["reason"] == "Commit or ref not found"
+    assert result.repo_context == (
+        "\nFailed to clone repository (Commit or ref not found)"
+    )
+    # A label, not a URL: the prompt line reaches the AI.
+    assert "example.com" not in result.repo_context
+
+
+@pytest.mark.asyncio
 async def test_workspace_cancelled_clone_reports_cancelled(
     tmp_path: Path, monkeypatch
 ) -> None:

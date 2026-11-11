@@ -50,7 +50,12 @@ from rootcoz.models import (
     PeerDebate,
     ProductBugReport,
 )
-from rootcoz.repository import RepositoryManager, derive_test_repo_name
+from rootcoz.repository import (
+    RepositoryManager,
+    clone_failure_detail,
+    clone_failure_reason,
+    derive_test_repo_name,
+)
 from rootcoz.storage import (
     PRIMARY_CLASSIFICATIONS,
     update_clone_progress,
@@ -158,25 +163,8 @@ CLONE_FAILURES: tuple[type[BaseException], ...] = (
     RuntimeError,
 )
 
-# Stderr phrases and the cause label they name. Matching fixed phrases only:
-# stderr may embed a credential-bearing URL.
-_CLONE_FAILURE_CAUSES: tuple[tuple[tuple[str, ...], str], ...] = (
-    (("authentication failed",), "Authentication failed"),
-    (
-        ("remote branch", "pathspec", "bad revision", "not a valid ref"),
-        "Branch or ref not found",
-    ),
-    (
-        ("ssl certificate", "certificate verify", "server verification failed"),
-        "SSL verification failed",
-    ),
-    (("permission denied",), "Permission denied"),
-    (
-        ("could not resolve host", "name or service not known"),
-        "Network DNS resolution failed",
-    ),
-    (("repository not found", "not a git repository"), "Repository not found"),
-)
+# Stderr phrases and the cause label they name now live in ``repository.py``,
+# next to the code that raises them: ``clone_failure_reason`` is the one table.
 
 
 async def _admit_clone(active_here: list[int]) -> Callable[[], None]:
@@ -284,17 +272,7 @@ def _clone_token(target: RepoTarget, credential: str) -> str | None:
 
 def _clone_failure_cause(error: BaseException) -> str:
     """A fixed label for a clone failure. Never the exception's text."""
-    if isinstance(error, GitCommandError):
-        stderr = (error.stderr or "").lower()
-        for patterns, label in _CLONE_FAILURE_CAUSES:
-            if any(pattern in stderr for pattern in patterns):
-                return label
-        return "Git command failed"
-    if isinstance(error, ValueError) and str(error).startswith(
-        "Invalid repository URL scheme."
-    ):
-        return "Invalid repository URL scheme"
-    return "Clone worker failed"
+    return clone_failure_reason(error)
 
 
 def _clone_failure_frames(error: BaseException) -> list[str]:
@@ -382,7 +360,8 @@ async def prepare_workspace_repos(
     cancellation: Literal["propagate", "abandon"] = "propagate",
     admit: bool = True,
     on_repo_start: Callable[[RepoTarget], Awaitable[None]] | None = None,
-    on_repo_end: Callable[[RepoTarget, str], Awaitable[None]] | None = None,
+    on_repo_end: Callable[[RepoTarget, str, BaseException | None], Awaitable[None]]
+    | None = None,
 ) -> CloneOutcome:
     """Materialise *targets* into *root* -- the one repository clone path.
 
@@ -410,7 +389,8 @@ async def prepare_workspace_repos(
             that was never budgeted passes ``False``.
         on_repo_start: Per-repo progress, after admission and before the clone.
         on_repo_end: Per-repo progress, with ``cloned`` / ``failed`` /
-            ``cancelled``.
+            ``cancelled``, plus the exception on a failure -- the label in it is
+            what the caller stores as the reason.
 
     Raises:
         ValueError: two targets declare the same raw name. The name is the
@@ -474,6 +454,7 @@ async def prepare_workspace_repos(
     async def _clone_one(target: RepoTarget, path: Path, token: str | None) -> None:
         release = await _admit_clone(active_here) if admit else None
         clone_task: asyncio.Task[Path] | None = None
+        error: BaseException | None = None
         state = "cancelled"
         try:
             if on_repo_start is not None:
@@ -499,15 +480,15 @@ async def prepare_workspace_repos(
                 clone_task.result()
             state = "cloned"
             logger.info("Cloned %s into %s", target.name, path)
-        except Exception:
-            state = "failed"
+        except Exception as exc:
+            state, error = "failed", exc
             raise
         finally:
             if clone_task is None and release is not None:
                 # Cancelled while queued: no worker exists to release the slot.
                 release()
             if on_repo_end is not None:
-                await on_repo_end(target, state)
+                await on_repo_end(target, state, error)
 
     results = await asyncio.gather(
         *(_clone_one(target, path, token) for _index, target, path, token in prepared),
@@ -526,12 +507,13 @@ async def prepare_workspace_repos(
         # exception's text: git's stderr carries the token-bearing remote URL.
         # The type alone cannot tell auth from a missing ref, DNS or TLS.
         logger.warning(
-            "Failed to clone repo %s from %s into %s (%s: %s)",
+            "Failed to clone repo %s from %s into %s (%s: %s; %s)",
             target.name,
             sanitize_clone_url(str(target.url)),
             path,
             type(result).__name__,
             _clone_failure_cause(result),
+            clone_failure_detail(result),
         )
 
     # Declaration order, not completion order: under admission the workers
@@ -629,7 +611,10 @@ async def clone_additional_repos(
                 job_id, target.name, True, url=str(target.url), ref=target.ref
             )
 
-    async def _finished(target: RepoTarget, outcome: str) -> None:
+    async def _finished(
+        target: RepoTarget, outcome: str, error: BaseException | None
+    ) -> None:
+        reason = clone_failure_reason(error) if error is not None else ""
         if reanalysis:
             await safe_update_clone_progress(
                 job_id,
@@ -638,11 +623,14 @@ async def clone_additional_repos(
                 state=outcome,
                 reanalysis=True,
                 operation_id=_operation_id(target.name),
+                reason=reason,
             )
         elif outcome == "cloned":
             await safe_update_clone_progress(job_id, target.name, False)
         else:
-            await safe_update_clone_progress(job_id, target.name, False, state=outcome)
+            await safe_update_clone_progress(
+                job_id, target.name, False, state=outcome, reason=reason
+            )
 
     outcome = await prepare_workspace_repos(
         repo_manager,
@@ -704,8 +692,13 @@ async def safe_update_clone_progress(
     url: str = "",
     ref: str = "",
     operation_id: str = "",
+    reason: str = "",
 ) -> None:
-    """Persist a named clone transition and notify SSE listeners."""
+    """Persist a named clone transition and notify SSE listeners.
+
+    ``reason`` is a label from ``repository.clone_failure_reason`` and is stored
+    only on the failed transition.
+    """
     if not job_id:
         return
     try:
@@ -719,11 +712,14 @@ async def safe_update_clone_progress(
                 url=url,
                 ref=ref,
                 operation_id=operation_id,
+                reason=reason,
             )
         elif started:
             await update_clone_progress(job_id, repo_name, started, url=url, ref=ref)
         elif state != "cloned":
-            await update_clone_progress(job_id, repo_name, started, state=state)
+            await update_clone_progress(
+                job_id, repo_name, started, state=state, reason=reason
+            )
         else:
             await update_clone_progress(job_id, repo_name, started)
         if _on_progress_updated:

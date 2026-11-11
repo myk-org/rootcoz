@@ -28,7 +28,7 @@ This clones the tests repository plus both extra repositories into the analysis 
 
 1. **Point RootCoz at the tests repository.**
 
-   `Tests Repo URL` is the repository that owns the failing tests — usually a test repository rather than the product repository. `Ref / Branch` pins the checkout; leave it empty to use the remote default branch. RootCoz clones with a shallow history and exposes the clone to the AI as a readable resource.
+   `Tests Repo URL` is the repository that owns the failing tests — usually a test repository rather than the product repository. `Ref / Branch` pins the checkout; leave it empty to use the remote default branch. RootCoz clones with a shallow history — `depth` commits of history, and the ref may be a branch, a tag or a full 40-character commit id — and exposes the clone to the AI as a readable resource.
 
    The field is per submission. Setting it once on the server (`tests_repo_url` in the `GitHub` category of Server Settings) makes it the default for every later submission.
 
@@ -55,7 +55,7 @@ This clones the tests repository plus both extra repositories into the analysis 
 
    `Additional Repositories` accepts a list of `name`, `url`, and optional `ref` entries. Each clone becomes a subdirectory of the workspace, and the AI is told the path and what is in it — for example that a repository contains VCS metadata it can browse.
 
-   Every declared repository is cloned before the analysis starts — never lazily on a first lookup miss, and never trimmed to a subset to keep a job fast. `max_concurrent_repo_clones` slows the clones down, it does not drop any. A repository that fails to clone is reported in the result's `Source Warnings` on the report page, and the analysis continues with the rest.
+   Every declared repository is cloned before the analysis starts — never lazily on a first lookup miss, and never trimmed to a subset to keep a job fast. `max_concurrent_repo_clones` slows the clones down, it does not drop any. A repository that fails to clone is reported in `Source Warnings` with the reason the clone failed on the report page, and the analysis continues with the rest.
 
    | Rule | Behaviour |
    | --- | --- |
@@ -64,6 +64,8 @@ This clones the tests repository plus both extra repositories into the analysis 
    | Collision | A name matching the tests repository clone directory fails the job. |
    | Duplicate name | Two repositories with the same `name` are rejected — one of them would otherwise be lost. |
    | `ref` | Branch, tag, or commit. Empty means the remote default branch. |
+
+   **Commit refs.** A **full 40-character** commit id is fetched directly by object id, so a commit that no branch or tag advertises can be obtained without cloning the whole history, bounded by the same `depth`. An **abbreviated** id cannot be fetched from a remote — use all 40 characters. A remote that refuses object ids is retried with a full clone and the explicit checkout; if the ref is then still absent the clone fails and **the repository's own entry names the cause** (`Commit or ref not found`), while the repository, the ref and the wrapped cause chain — the git command's class and its labelled reason — are written to the server log for an administrator. Whether an unadvertised commit can be obtained at all is the remote's policy, not RootCoz's: the fetch asks for exactly the object the ref names. Every clone is bounded by `repo_clone_timeout_seconds`, so a remote that stops answering fails the clone with a reason instead of holding the job.
 
    The server-side equivalent is the `additional_repos` setting, stored as `name:url` or `name:url:ref` separated by commas. `max_concurrent_repo_clones` caps how many clones run at once.
 

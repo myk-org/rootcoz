@@ -266,6 +266,7 @@ async def test_parallel_clone_progress_and_failure(tmp_path: Path) -> None:
         reanalysis: bool = False,
         url: str = "",
         ref: str = "",
+        reason: str = "",
     ) -> None:
         if started:
             active.add(name)
@@ -437,6 +438,75 @@ async def test_additional_clone_failure_persists_named_outcomes(
 
 
 @pytest.mark.asyncio
+async def test_additional_clone_failure_persists_the_reason(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A failed clone carries a label; a successful one carries no reason key."""
+    from git.exc import GitCommandError
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "progress.db")
+    await storage.init_db()
+    await storage.save_result("job", "", "running", {})
+    manager = MagicMock(spec=RepositoryManager)
+
+    def clone(_url, target, **_kwargs):
+        if target.name == "two":
+            raise GitCommandError(
+                "git clone", 128, stderr="fatal: unable to read tree (abc)"
+            )
+
+    manager.clone_into.side_effect = clone
+    repos = [
+        AdditionalRepo(name=name, url=f"https://example.com/{name}")
+        for name in ("one", "two")
+    ]
+
+    await clone_additional_repos(manager, repos, tmp_path, job_id="job")
+
+    entries = (await storage.get_result("job"))["result"]["progress_log"]
+    by_state = {(entry["repo"], entry["state"]): entry for entry in entries}
+    assert by_state[("two", "failed")]["reason"] == "Commit or ref not found"
+    assert "reason" not in by_state[("one", "cloned")]
+    assert "reason" not in by_state[("two", "cloning")]
+
+
+@pytest.mark.asyncio
+async def test_clone_reason_never_carries_credentials(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """The stored reason is a label: no URL, no stderr, no control characters."""
+    from git.exc import GitCommandError
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "progress.db")
+    await storage.init_db()
+    await storage.save_result("job", "", "running", {})
+    manager = MagicMock(spec=RepositoryManager)
+    manager.clone_into.side_effect = GitCommandError(
+        "git clone",
+        128,
+        stderr=(
+            "fatal: Authentication failed for "
+            "'https://x-token-auth:secret@host/repo?access_token=abc'"  # pragma: allowlist secret
+            "\x00\nFAKE: admin login"
+        ),
+    )
+
+    await clone_additional_repos(
+        manager,
+        [AdditionalRepo(name="one", url="https://example.com/one")],
+        tmp_path,
+        job_id="job",
+    )
+
+    result = (await storage.get_result("job"))["result"]
+    reason = next(e["reason"] for e in result["progress_log"] if e["state"] == "failed")
+    assert reason == "Authentication failed"
+    assert "secret" not in str(result)  # pragma: allowlist secret
+    assert "\x00" not in reason and "\n" not in reason
+    assert "FAKE" not in reason
+
+
+@pytest.mark.asyncio
 async def test_cancel_additional_clone_persists_cancelled(
     tmp_path: Path, monkeypatch
 ) -> None:
@@ -593,6 +663,7 @@ async def test_cancel_during_start_progress_releases_clone_slot(tmp_path: Path) 
         reanalysis: bool = False,
         url: str = "",
         ref: str = "",
+        reason: str = "",
     ) -> None:
         if started:
             entered.set()
@@ -636,6 +707,7 @@ async def test_cancelled_clone_clears_active_name(tmp_path: Path) -> None:
         reanalysis: bool = False,
         url: str = "",
         ref: str = "",
+        reason: str = "",
     ) -> None:
         if running:
             active.add(name)

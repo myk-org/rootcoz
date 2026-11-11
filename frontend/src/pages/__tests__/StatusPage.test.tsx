@@ -178,6 +178,20 @@ describe('StatusPage usage', () => {
     expect(screen.getAllByText('Routing failure groups...').at(-1)!.closest('[role="listitem"]')).not.toHaveClass('text-signal-red')
   })
 
+  it('shows the stored clone failure reason on the red repo line', async () => {
+    const running = result('running')
+    get.mockResolvedValue({ ...running, result: { ...running.result!, progress_log: [
+      { phase: 'cloning', repo: 'broken', state: 'failed', timestamp: 1, reason: 'Commit or ref not found' },
+      { phase: 'cloning', repo: 'stopped', state: 'cancelled', timestamp: 2, reason: 'Clone timed out' },
+    ] } })
+    renderPage()
+    const line = (await screen.findByText('broken')).closest('li')!
+    expect(line).toHaveClass('text-signal-red')
+    expect(line).toHaveTextContent('Commit or ref not found')
+    // The reason renders only for a failed repo, never for a cancelled one.
+    expect(screen.getByText('stopped').closest('li')).not.toHaveTextContent('Clone timed out')
+  })
+
   it('keeps the Cloning stage failed after a later successful transition for the same repo', async () => {
     const running = result('running')
     get.mockResolvedValue({ ...running, result: { ...running.result!, progress_log: [
