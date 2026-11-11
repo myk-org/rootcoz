@@ -306,3 +306,90 @@ describe('DashboardPage submitter filter', () => {
     await waitFor(() => expect(requests.at(-1)?.get('submitted_by')).toBe('yuva'))
   })
 })
+
+describe('DashboardPage test-name filter', () => {
+  afterEach(() => {
+    apiGet.mockReset()
+  })
+
+  it('filters by test_name and writes a non-default mode beside it', async () => {
+    mockApi(5)
+    renderPage('/?test_name=checkout')
+
+    await waitFor(() => expect(requests.at(-1)?.get('test_name')).toBe('checkout'))
+    // Absent mode is the default one: the clean URL carries the name alone.
+    expect(requests.at(-1)?.get('test_name_mode')).toBeNull()
+
+    await userEvent.click(screen.getByRole('combobox', { name: 'Test name match mode' }))
+    await userEvent.click(await screen.findByRole('option', { name: 'ends with' }))
+
+    await waitFor(() => expect(requests.at(-1)?.get('test_name_mode')).toBe('ends_with'))
+    expect(requests.at(-1)?.get('test_name')).toBe('checkout')
+  })
+
+  it('writes no test_name_mode while there is no name', async () => {
+    mockApi(5)
+    renderPage()
+    await waitFor(() => expect(requests.length).toBeGreaterThan(0))
+
+    await userEvent.click(screen.getByRole('combobox', { name: 'Test name match mode' }))
+    await userEvent.click(await screen.findByRole('option', { name: 'exact' }))
+
+    await waitFor(() => expect(requests.length).toBeGreaterThan(0))
+    // A mode with nothing to match is not a filter: it stays out of the URL.
+    expect(requests.at(-1)?.get('test_name_mode')).toBeNull()
+    expect(requests.at(-1)?.get('test_name')).toBeNull()
+  })
+
+  it('sends the name picked from the suggestions', async () => {
+    mockApi(5)
+    const fallback = apiGet.getMockImplementation()!
+    apiGet.mockImplementation((path: string) =>
+      path.startsWith('/api/dashboard/test-names')
+        ? Promise.resolve({ test_names: [{ test_name: 'test_checkout_fails', failure_count: 9 }] })
+        : fallback(path),
+    )
+    renderPage()
+    await waitFor(() => expect(requests.length).toBeGreaterThan(0))
+
+    await userEvent.click(screen.getByRole('combobox', { name: 'Select Test name' }))
+    await userEvent.type(screen.getByRole('combobox', { name: 'Search Test name' }), 'checkout')
+    const list = await screen.findByRole('listbox')
+    await userEvent.click(await within(list).findByText('test_checkout_fails'))
+
+    await waitFor(() => expect(requests.at(-1)?.get('test_name')).toBe('test_checkout_fails'))
+  })
+
+  it('returns to page 1 when the test-name filter changes', async () => {
+    mockApi(25)
+    renderPage('/?test_name=checkout')
+    await waitFor(() => expect(requests.at(-1)?.get('offset')).toBe('0'))
+
+    await userEvent.click(screen.getByRole('button', { name: 'Next' }))
+    await waitFor(() => expect(requests.at(-1)?.get('offset')).toBe('20'))
+
+    await userEvent.click(screen.getByRole('combobox', { name: 'Test name match mode' }))
+    await userEvent.click(await screen.findByRole('option', { name: 'exact' }))
+
+    // A new filter on page 3 would skip the first matches: it starts over.
+    await waitFor(() => expect(requests.at(-1)?.get('test_name_mode')).toBe('exact'))
+    expect(requests.at(-1)?.get('offset')).toBe('0')
+  })
+
+  it('applies a legacy from/to link and keeps the dates when the test name changes', async () => {
+    mockApi(5)
+    renderPage('/?from=2024-01-01&to=2024-01-05&test_name=checkout')
+
+    // The aliases are read, so the link opens the range it was saved with.
+    await waitFor(() => expect(requests.at(-1)?.get('date_from')).toBe('2024-01-01'))
+    expect(requests.at(-1)?.get('date_to')).toBe('2024-01-05')
+    expect(requests.at(-1)?.get('test_name')).toBe('checkout')
+
+    await userEvent.click(screen.getByRole('button', { name: 'Clear test name' }))
+
+    // Writing the pair drops the aliases, and writes what they said: no dates lost.
+    await waitFor(() => expect(requests.at(-1)?.get('test_name')).toBeNull())
+    expect(requests.at(-1)?.get('date_from')).toBe('2024-01-01')
+    expect(requests.at(-1)?.get('date_to')).toBe('2024-01-05')
+  })
+})

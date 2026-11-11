@@ -2654,6 +2654,13 @@ async def init_db() -> None:
             "CREATE INDEX IF NOT EXISTS idx_test_entries_job_status "
             "ON test_entries (job_id, child_job_name, child_build_number, status)"
         )
+        # The test-name typeahead (#546) scans only failing entries: the partial
+        # index keeps the write cost off the 1.3M passed/skipped rows and takes
+        # the query from ~194 ms to ~5.9 ms on the measured dataset.
+        await db.execute(
+            "CREATE INDEX IF NOT EXISTS idx_test_entries_failed_name "
+            "ON test_entries (test_name) WHERE status = 'failed'"
+        )
 
         # Named filter presets (#179): saved filter combinations per page.
         # scope='user' rows are personal (unique per username+page+name);
@@ -4917,9 +4924,6 @@ async def add_graft_estimated_tokens_saved(job_id: str, tokens: int) -> None:
 # enumeration, ownership lookup) reads it, and it stays table-alias free so the
 # enumeration matches the index below. Empty reads as NULL, never as a name.
 _SUBMITTED_BY_RAW_SQL = "NULLIF(submitted_by, '')"
-# Folding happens only in SQL: SQLite lower() is ASCII-only, so a Python lower()
-# would make a non-ASCII name unmatchable against its own rows.
-_SUBMITTED_BY_SQL = f"lower({_SUBMITTED_BY_RAW_SQL})"
 # The picker lists every stored name, and this index lets it do so without touching
 # result_json per row: DISTINCT reads the index alone. Only the enumeration uses it —
 # a LIKE '%name%' filter cannot (no index can narrow an unanchored substring match).
@@ -4940,17 +4944,75 @@ def _ascii_fold(value: str) -> str:
     return "".join(chr(ord(ch) + 32) if "A" <= ch <= "Z" else ch for ch in value)
 
 
-def _submitted_by_predicate(values: set[str]) -> tuple[str, list[str]]:
-    """Build a LIKE-any predicate for submitted_by values, folded in SQL."""
+def _like_escape(fragment: str) -> str:
+    """Escape LIKE metacharacters so ``%``/``_`` in a term match literally."""
+    for char in ("\\", "%", "_"):
+        fragment = fragment.replace(char, f"\\{char}")
+    return fragment
+
+
+# The four test-name match modes (#546). Literal text in every one: ``*``/``?``
+# are not metacharacters here and are never interpreted.
+TEST_NAME_MODES = ("contains", "exact", "starts_with", "ends_with")
+# Longest stored test name measured on the reporter's dataset is 405 characters;
+# 546 distinct failing names exceed 200, none exceed 1000. This equals
+# models.MAX_FILTER_PRESET_VALUE_LENGTH (pinned by a test) so a name the filter
+# accepts can also be bookmarked.
+MAX_TEST_NAME_LENGTH = 1000
+
+
+def _test_name_pattern(mode: str, text: str) -> str:
+    """Build the literal LIKE pattern for one of ``TEST_NAME_MODES``."""
+    if mode == "contains":
+        return f"%{_like_escape(text)}%"
+    if mode == "starts_with":
+        return f"{_like_escape(text)}%"
+    if mode == "ends_with":
+        return f"%{_like_escape(text)}"
+    if mode == "exact":
+        return _like_escape(text)
+    raise ValueError(
+        f"Invalid test_name_mode '{mode}'. Must be {', '.join(TEST_NAME_MODES)}."
+    )
+
+
+def _failed_test_name_predicate(
+    mode: str, text: str, *, job_column: str = "r.job_id"
+) -> tuple[str, list[str]]:
+    """EXISTS clause selecting jobs with a **failing** test matching *text*.
+
+    ``status = 'failed'`` is a SQL constant, not a parameter, so the scan scope
+    is by construction and never drifts with caller input; the typeahead
+    aggregate over the same scope is served by the partial index
+    ``idx_test_entries_failed_name`` (#546: 15,566 of 1,329,209 entries failed).
+    *job_column* names the job id column of the calling query (the reports
+    aggregates do not all alias ``results`` as ``r``).
+    """
+    if not text:
+        return "", []
+    pattern = _test_name_pattern(mode, text)
+    clause = (
+        f"EXISTS (SELECT 1 FROM test_entries te WHERE te.job_id = {job_column}"
+        " AND te.status = 'failed'"
+        " AND lower(te.test_name) LIKE lower(?) ESCAPE '\\')"
+    )
+    return clause, [pattern]
+
+
+def _submitted_by_predicate(
+    values: set[str], *, column: str = "submitted_by"
+) -> tuple[str, list[str]]:
+    """Build a LIKE-any predicate for submitted_by values, folded in SQL.
+
+    *column* lets the reports queries pass their table alias; the default is the
+    unaliased denormalized column, whose index the enumeration reads.
+    """
     patterns: list[str] = []
     for value in sorted(values):
         trimmed = value.strip()
-        # Escape the LIKE metacharacters, backslash first so it cannot eat the rest.
-        escaped = trimmed.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_")
-        patterns.append(f"%{escaped}%")
-    clause = " OR ".join(
-        f"{_SUBMITTED_BY_SQL} LIKE lower(?) ESCAPE '\\'" for _ in patterns
-    )
+        patterns.append(f"%{_like_escape(trimmed)}%")
+    folded = f"lower(NULLIF({column}, ''))"
+    clause = " OR ".join(f"{folded} LIKE lower(?) ESCAPE '\\'" for _ in patterns)
     return f"({clause})", patterns
 
 
@@ -7010,6 +7072,8 @@ async def list_results_for_dashboard_filtered(
     review_status: str = "all",
     analysis_state: str = "",
     submitters: set[str] | None = None,
+    test_name: str = "",
+    test_name_mode: str = "contains",
     limit: int = DEFAULT_DASHBOARD_LIMIT,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -7029,6 +7093,10 @@ async def list_results_for_dashboard_filtered(
         analysis_state: Filter by analysis state, empty = all.
         submitters: Case-insensitive (ASCII) substring match on submitted_by;
             ``None`` or an empty set means no filter.
+        test_name: Keep only jobs whose **failing** test entries match this text.
+            Empty means no filter. Literal: ``%``/``_``/backslash are escaped, ``*``
+            and ``?`` are not wildcards.
+        test_name_mode: One of ``TEST_NAME_MODES`` (default ``contains``).
         limit: Max results. 0 = no limit.
         offset: Rows to skip.
 
@@ -7116,6 +7184,11 @@ async def list_results_for_dashboard_filtered(
         conditions.append(clause)
         params.extend(like_params)
 
+    if test_name:
+        clause, test_params = _failed_test_name_predicate(test_name_mode, test_name)
+        conditions.append(clause)
+        params.extend(test_params)
+
     where = " WHERE " + " AND ".join(conditions) if conditions else ""
 
     async with _connect_db() as db:
@@ -7141,6 +7214,34 @@ async def list_results_for_dashboard_filtered(
         rows = await cursor.fetchall()
 
     return {"jobs": await _parse_dashboard_rows(rows), "total": total}
+
+
+async def list_failed_test_names(
+    search: str = "", limit: int = 20
+) -> list[dict[str, Any]]:
+    """Top failing test names matching *search*, most frequent first.
+
+    This is the typeahead's query: an aggregate over ``test_entries``, not the
+    job filter (which joins jobs to their failing entries). The ``failure_count``
+    alias is set here so no handler renames it. Empty *search* returns the top
+    names overall; a call never returns more than *limit* rows.
+    """
+    if limit < 1:
+        raise ValueError("limit must be >= 1")
+    pattern = _test_name_pattern("contains", search)
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT test_name, COUNT(*) AS failure_count FROM test_entries"
+            " WHERE status = 'failed' AND lower(test_name) LIKE lower(?) ESCAPE '\\'"
+            " GROUP BY test_name"
+            " ORDER BY failure_count DESC, test_name ASC LIMIT ?",
+            (pattern, limit),
+        )
+        rows = await cursor.fetchall()
+    return [
+        {"test_name": row["test_name"], "failure_count": row["failure_count"]}
+        for row in rows
+    ]
 
 
 # The dashboard endpoint caps one submitted_by value at this many characters. The
@@ -12454,6 +12555,10 @@ async def get_report_totals(
     tags: list[str] | None = None,
     exclude_tags: list[str] | None = None,
     review_status: str = "",
+    submitters: set[str] | None = None,
+    analysis_state: str = "",
+    test_name: str = "",
+    test_name_mode: str = "contains",
     limit: int = 0,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -12471,6 +12576,22 @@ async def get_report_totals(
     )
     _build_tags_filter(tags, "r.job_name", conditions, params)
     _build_exclude_tags_filter(exclude_tags, "r.job_name", conditions, params)
+    if submitters:
+        clause, submitter_params = _submitted_by_predicate(
+            submitters, column="r.submitted_by"
+        )
+        conditions.append(clause)
+        params.extend(submitter_params)
+    clause, extra = _analysis_state_filter_sql(
+        analysis_state, column="r.analysis_state"
+    )
+    if clause:
+        conditions.append(clause)
+        params.extend(extra)
+    clause, extra = _failed_test_name_predicate(test_name_mode, test_name)
+    if clause:
+        conditions.append(clause)
+        params.extend(extra)
 
     where = (" AND " + " AND ".join(conditions)) if conditions else ""
 
@@ -12555,12 +12676,23 @@ async def _count_reviewed_tests(
     tags: list[str] | None = None,
     exclude_tags: list[str] | None = None,
     review_status: str = "",
+    submitters: set[str] | None = None,
+    analysis_state: str = "",
 ) -> int:
     """Count reviewed tests with the given filters."""
     conditions: list[str] = []
     params: list[Any] = []
     _build_date_filter("fr.updated_at", date_from, date_to, conditions, params)
-    needs_results = bool(team or tier or version or tags or exclude_tags or status)
+    needs_results = bool(
+        team
+        or tier
+        or version
+        or tags
+        or exclude_tags
+        or status
+        or submitters
+        or analysis_state
+    )
     results_join = (
         "JOIN results r_res ON r_res.job_id = fr.job_id" if needs_results else ""
     )
@@ -12573,6 +12705,18 @@ async def _count_reviewed_tests(
         placeholders = ", ".join("?" for _ in status)
         conditions.append(f"r_res.status IN ({placeholders})")
         params.extend(status)
+    if submitters:
+        clause, submitter_params = _submitted_by_predicate(
+            submitters, column="r_res.submitted_by"
+        )
+        conditions.append(clause)
+        params.extend(submitter_params)
+    clause, extra = _analysis_state_filter_sql(
+        analysis_state, column="r_res.analysis_state"
+    )
+    if clause:
+        conditions.append(clause)
+        params.extend(extra)
     if review_status == "reviewed":
         conditions.append(
             "EXISTS (SELECT 1 FROM failure_reviews fr_rs"
@@ -12607,6 +12751,10 @@ async def get_report_classification_overrides(
     tags: list[str] | None = None,
     exclude_tags: list[str] | None = None,
     review_status: str = "",
+    submitters: set[str] | None = None,
+    analysis_state: str = "",
+    test_name: str = "",
+    test_name_mode: str = "contains",
     limit: int = 0,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -12625,12 +12773,39 @@ async def get_report_classification_overrides(
     _build_tags_filter(tags, "tc.job_name", conditions, params)
     _build_exclude_tags_filter(exclude_tags, "tc.job_name", conditions, params)
 
+    # One results join covers every results-column filter: status, submitter and
+    # analysis state. ``results.job_id`` is a primary key, so it cannot multiply
+    # rows.
     status_join = ""
+    result_conditions: list[str] = []
+    result_params: list[Any] = []
     if status:
-        status_join = " JOIN results r_status ON r_status.job_id = tc.job_id"
         placeholders = ", ".join("?" for _ in status)
-        conditions.append(f"r_status.status IN ({placeholders})")
-        params.extend(status)
+        result_conditions.append(f"r_filter.status IN ({placeholders})")
+        result_params.extend(status)
+    if submitters:
+        clause, submitter_params = _submitted_by_predicate(
+            submitters, column="r_filter.submitted_by"
+        )
+        result_conditions.append(clause)
+        result_params.extend(submitter_params)
+    clause, extra = _analysis_state_filter_sql(
+        analysis_state, column="r_filter.analysis_state"
+    )
+    if clause:
+        result_conditions.append(clause)
+        result_params.extend(extra)
+    if result_conditions:
+        status_join = " JOIN results r_filter ON r_filter.job_id = tc.job_id"
+        conditions.extend(result_conditions)
+        params.extend(result_params)
+
+    clause, extra = _failed_test_name_predicate(
+        test_name_mode, test_name, job_column="tc.job_id"
+    )
+    if clause:
+        conditions.append(clause)
+        params.extend(extra)
 
     if review_status == "reviewed":
         conditions.append(
@@ -12750,6 +12925,8 @@ async def get_report_classification_overrides(
             tags=tags,
             exclude_tags=exclude_tags,
             review_status=review_status,
+            submitters=submitters,
+            analysis_state=analysis_state,
         )
 
     # Group by from->to
@@ -12812,6 +12989,10 @@ async def get_report_issues_created(
     tags: list[str] | None = None,
     exclude_tags: list[str] | None = None,
     review_status: str = "",
+    submitters: set[str] | None = None,
+    analysis_state: str = "",
+    test_name: str = "",
+    test_name_mode: str = "contains",
     limit: int = 0,
     offset: int = 0,
 ) -> dict[str, Any]:
@@ -12838,6 +13019,23 @@ async def get_report_issues_created(
         placeholders = ", ".join("?" for _ in status)
         conditions.append(f"r.status IN ({placeholders})")
         params.extend(status)
+    if submitters:
+        clause, submitter_params = _submitted_by_predicate(
+            submitters, column="r.submitted_by"
+        )
+        conditions.append(clause)
+        params.extend(submitter_params)
+    clause, extra = _analysis_state_filter_sql(
+        analysis_state, column="r.analysis_state"
+    )
+    if clause:
+        conditions.append(clause)
+        params.extend(extra)
+
+    clause, extra = _failed_test_name_predicate(test_name_mode, test_name)
+    if clause:
+        conditions.append(clause)
+        params.extend(extra)
 
     if review_status == "reviewed":
         conditions.append(
@@ -12850,7 +13048,18 @@ async def get_report_issues_created(
 
     # Use JOIN when metadata/tag filters narrow results, LEFT JOIN otherwise
     join_type = (
-        "JOIN" if (team or tier or version or tags or exclude_tags) else "LEFT JOIN"
+        "JOIN"
+        if (
+            team
+            or tier
+            or version
+            or tags
+            or exclude_tags
+            or status
+            or submitters
+            or analysis_state
+        )
+        else "LEFT JOIN"
     )
     where = " AND ".join(conditions)
 
@@ -13831,13 +14040,6 @@ async def insert_audit_event(
     return await _retry_contended(_attempt)
 
 
-def _audit_like_escape(fragment: str) -> str:
-    """Escape LIKE metacharacters so ``%``/``_`` in a search term match literally."""
-    for char in ("\\", "%", "_"):
-        fragment = fragment.replace(char, f"\\{char}")
-    return fragment
-
-
 def _audit_like_patterns(q: str) -> list[str]:
     """LIKE patterns covering every serialization an ``details`` row may use.
 
@@ -13851,9 +14053,7 @@ def _audit_like_patterns(q: str) -> list[str]:
     # change touched, so re-spacing the query rebuilds the old row text.
     spaced = q.replace('","', '", "').replace('":"', '": "')
     variants = (q, spaced, json.dumps(q)[1:-1], json.dumps(spaced)[1:-1])
-    return list(
-        dict.fromkeys(f"%{_audit_like_escape(variant)}%" for variant in variants)
-    )
+    return list(dict.fromkeys(f"%{_like_escape(variant)}%" for variant in variants))
 
 
 _AUDIT_Q_COLUMNS: tuple[str, ...] = ("actor", "target_id", "action")

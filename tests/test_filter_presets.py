@@ -153,22 +153,56 @@ class TestFilterPresetsCRUD:
         assert resp.status_code == 422
         assert "bogus" in resp.json()["detail"]
 
-    def test_reports_date_keys_ok_dashboard_date_keys_rejected(self, client):
+    def test_reports_accepts_canonical_and_legacy_date_keys(self, client):
+        """Reports takes the unified date keys and still replays old presets (#546).
+
+        ``from``/``to`` stay accepted on read so a preset saved before the
+        unified contract keeps working; the UI writes ``date_from``/``date_to``.
+        """
         cookies = _register(client, "alice")
-        assert (
-            _create(
-                client,
-                cookies,
-                page="reports",
-                filters={"from": "2026-01-01", "to": "2026-02-01"},
-            ).status_code
-            == 201
-        )
-        # date_from/date_to are dashboard keys — reports rejects them
+        for index, filters in enumerate(
+            (
+                {"from": "2026-01-01", "to": "2026-02-01"},
+                {"date_from": "2026-01-01", "date_to": "2026-02-01"},
+            )
+        ):
+            resp = _create(
+                client, cookies, name=f"Dates {index}", page="reports", filters=filters
+            )
+            assert resp.status_code == 201, resp.text
+            assert resp.json()["filters"] == filters
+
+    def test_reports_accepts_submitter_and_analysis_state(self, client):
+        """The two dimensions reports used to lack (#546 A1)."""
+        cookies = _register(client, "alice")
         resp = _create(
-            client, cookies, page="reports", filters={"date_from": "2026-01-01"}
+            client,
+            cookies,
+            page="reports",
+            filters={"submitted_by": ["yuval"], "analysis_state": "analyzed"},
         )
-        assert resp.status_code == 422
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["filters"] == {
+            "submitted_by": ["yuval"],
+            "analysis_state": "analyzed",
+        }
+
+    def test_dashboard_test_name_keys_accepted_and_mode_validated(self, client):
+        """``test_name``/``test_name_mode`` are dashboard keys; a bad mode is 422."""
+        cookies = _register(client, "alice")
+        resp = _create(
+            client,
+            cookies,
+            filters={"test_name": "a" * 405, "test_name_mode": "exact"},
+        )
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["filters"]["test_name"] == "a" * 405
+
+        resp = _create(
+            client, cookies, name="Bad mode", filters={"test_name_mode": "wildcard"}
+        )
+        assert resp.status_code == 422, resp.text
+        assert "test_name_mode" in resp.text
 
     def test_dashboard_submitter_key_accepted(self, client):
         """submitted_by is a dashboard filter, so both save paths accept it (#390)."""
@@ -422,10 +456,25 @@ class TestFilterPresetHardening:
 
     def test_oversized_filter_value_422(self, client):
         cookies = _register(client, "alice")
-        resp = _create(client, cookies, name="Big value", filters={"team": ["x" * 201]})
+        resp = _create(
+            client, cookies, name="Big value", filters={"team": ["x" * 1001]}
+        )
         assert resp.status_code == 422, resp.text
-        resp = _create(client, cookies, name="Big value", filters={"team": "x" * 201})
+        resp = _create(client, cookies, name="Big value", filters={"team": "x" * 1001})
         assert resp.status_code == 422, resp.text
+
+    def test_long_test_name_accepted_above_the_old_cap(self, client):
+        """The band the raised cap creates: a real 405-char name saves (#546).
+
+        Named after the failure this covers: at the old 200 cap this preset was
+        a 422, so the picker's most useful value could not be bookmarked.
+        """
+        cookies = _register(client, "alice")
+        name = "tests.test_login." + "x" * 388
+        assert len(name) == 405
+        resp = _create(client, cookies, name="Long test", filters={"test_name": name})
+        assert resp.status_code == 201, resp.text
+        assert resp.json()["filters"]["test_name"] == name
 
     def test_oversized_filter_list_422(self, client):
         cookies = _register(client, "alice")
@@ -439,8 +488,8 @@ class TestFilterPresetHardening:
 
     def test_oversized_total_json_422(self, client):
         cookies = _register(client, "alice")
-        # 50 keys of 200-char values stays under the per-value cap but
-        # exceeds the 10k serialized budget.
+        # Each 200-char value is now under the 1000-char cap; the 50 of
+        # them still exceed the 10k serialized budget, which is the bound.
         filters = {f"k{i:02d}": "x" * 200 for i in range(50)}
         resp = _create(client, cookies, name="Big blob", filters=filters)
         assert resp.status_code == 422, resp.text
@@ -450,7 +499,7 @@ class TestFilterPresetHardening:
         preset_id = _create(client, cookies, name="Base").json()["id"]
         resp = client.put(
             f"/api/user/filter-presets/{preset_id}",
-            json={"filters": {"team": "x" * 201}},
+            json={"filters": {"team": "x" * 1001}},
             cookies=cookies,
         )
         assert resp.status_code == 422, resp.text

@@ -4,7 +4,7 @@ import {
   filtersEqual,
   filtersToQueryString,
   searchParamsToFilters,
-} from '../filterPresets'
+} from '../jobFilters'
 
 function params(entries: Record<string, string | string[]>): URLSearchParams {
   const p = new URLSearchParams()
