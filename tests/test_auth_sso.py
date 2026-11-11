@@ -3084,6 +3084,37 @@ async def test_oidc_discovery_must_claim_the_configured_issuer(
     assert excinfo.value.reason == "discovery_failed"
 
 
+async def test_oidc_discovery_rejects_a_plaintext_userinfo_endpoint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The userinfo URL receives the access token on the no-id_token fallback."""
+    from rootcoz.auth.sso import oidc as oidc_module
+    from rootcoz.auth.sso.openshift import OpenShiftProvider
+
+    oidc_module._METADATA_CACHE.clear()
+    provider = OpenShiftProvider(
+        client_id="cid",
+        client_secret="secret",  # pragma: allowlist secret
+        issuer="https://idp.example",
+    )
+    monkeypatch.setattr(
+        oidc_module,
+        "request_json",
+        _returning(
+            {
+                "issuer": "https://idp.example",
+                "authorization_endpoint": "https://idp.example/auth",
+                "token_endpoint": "https://idp.example/token",
+                "jwks_uri": "https://idp.example/jwks",
+                "userinfo_endpoint": "http://third-party.example/userinfo",
+            }
+        ),
+    )
+    with pytest.raises(AuthError) as excinfo:
+        await provider.metadata()
+    assert excinfo.value.reason == "discovery_failed"
+
+
 async def test_oidc_discovery_rejects_a_plaintext_endpoint(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
