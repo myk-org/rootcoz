@@ -361,18 +361,24 @@ async def test_duplicate_raw_names_refuse_the_whole_call(
 
 
 async def test_two_names_that_resolve_onto_one_directory_keep_the_first(
-    tmp_path, clone_settings
+    tmp_path, clone_settings, caplog
 ) -> None:
-    """The loser is refused and reported; the winner's clone is untouched."""
+    """The loser is refused, and logged as a collision, not as a missing repo."""
     manager = RecordingManager()
+    caplog.set_level(logging.WARNING, logger="rootcoz.engine.core")
 
     outcome = await prepare_workspace_repos(
         manager, tmp_path, [_target("a..b"), _target("a_b")]
     )
 
     assert list(outcome.cloned) == ["a_b"]
-    assert outcome.failed == ["a_b"]  # reported under the name that collided
+    # ``a_b`` *is* in the workspace, so it must not reach the "not in this
+    # workspace" row built from ``failed``: the refusal is a warning, and the
+    # reason stays in ``errors``.
+    assert outcome.failed == []
     assert outcome.errors["a_b"].args[0].startswith("Repository name collides")
+    assert "occupies" in caplog.text
+    assert "unsafe name" not in caplog.text
     assert len(manager.calls) == 1
 
 
@@ -763,6 +769,28 @@ async def test_chat_caller_pins_its_credential_skip_and_cancel_policy(
     assert by_name["tests"].depth == 50
     assert by_name["extra"].ref == "dev"
     assert by_name["extra"].depth == 50
+
+
+async def test_chat_caller_survives_a_malformed_stored_tests_repo_url(
+    tmp_path, clone_settings
+) -> None:
+    """One unparseable URL costs the chat that repo, never the others (#559)."""
+    from rootcoz.engine.chat import clone_chat_repos
+
+    manager = RecordingManager()
+    failed: list[str] = []
+    params = {
+        # ``urlsplit`` rejects this authority, and chat parses the ref upstream.
+        "tests_repo_url": "https://[bad/x",
+        "additional_repos": [{"name": "extra", "url": "https://example.com/extra"}],
+    }
+
+    with patch("rootcoz.repository.RepositoryManager", return_value=manager):
+        cloned = await clone_chat_repos(tmp_path, params, failed=failed)
+
+    assert cloned is True
+    assert failed == ["tests-repo"]
+    assert [call[1].name for call in manager.calls] == ["extra"]
 
 
 async def test_chat_caller_without_the_failed_carrier_still_returns_a_bool(

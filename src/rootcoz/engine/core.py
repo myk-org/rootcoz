@@ -446,6 +446,7 @@ async def prepare_workspace_repos(
     reported: dict[int, str] = {}
     problems: dict[int, BaseException] = {}
     taken: set[str] = set()
+    collided: set[int] = set()
     prepared: list[tuple[int, RepoTarget, Path, str | None]] = []
 
     for index, target in enumerate(targets):
@@ -460,7 +461,13 @@ async def prepare_workspace_repos(
             # Two declarations that sanitise onto one directory would race each
             # other's clone. Refuse the loser and report it instead of silently
             # collapsing it into the winner.
-            logger.warning("Skipping repo with unsafe name: %s", target.name)
+            logger.warning(
+                "Repo %s resolves onto %s, which an earlier target already occupies; "
+                "skipping this one",
+                target.name,
+                name,
+            )
+            collided.add(index)
             problems[index] = ValueError(
                 f"Repository name collides with an earlier target: {name}"
             )
@@ -548,8 +555,14 @@ async def prepare_workspace_repos(
     # deterministic.
     for index in sorted(problems):
         name = reported[index]
-        outcome.failed.append(name)
         outcome.errors[name] = problems[index]
+        if index in collided:
+            # The loser of a name collision: that directory belongs to an earlier
+            # declaration, which reports itself. Naming it in ``failed`` would put
+            # a repository that is in the workspace on the "not in this workspace"
+            # row, so the refusal stays a warning and an entry in ``errors``.
+            continue
+        outcome.failed.append(name)
     return outcome
 
 

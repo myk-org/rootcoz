@@ -173,7 +173,16 @@ async def clone_chat_repos(
     # url and ref upstream, so the shared function never sees a ":ref" suffix.
     targets: list[RepoTarget] = []
     if tests_repo_url:
-        clean_url, ref = parse_repo_ref(str(tests_repo_url))
+        try:
+            clean_url, ref = parse_repo_ref(str(tests_repo_url))
+        except ValueError:
+            # A stored URL with a malformed authority (``urlsplit`` rejects it) is
+            # one missing repository, not a failed preparation: the additional
+            # repositories still clone, and the user is told about this one.
+            logger.warning("Chat: unparseable tests repo URL for %s", workspace)
+            if failed is not None:
+                failed.append("tests-repo")
+            clean_url, ref = "", ""
         target = tests_repo_target(
             clean_url,
             ref,
