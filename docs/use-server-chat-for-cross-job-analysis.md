@@ -151,7 +151,10 @@ For every available command and flag, see [CLI Command Reference](cli-reference.
   The sidecar will not open a session with that model, so RootCoz refuses it instead of failing with a server error. The `422` detail names the cause: declare the model in that provider's `models.json`, or re-enter the key, or ask an administrator to check the server log. See [Configuration Reference](configuration-reference.html#adding-a-custom-provider) for the `models.json` rule.
 
 - Admin chat `Start` answers `500 The chat workspace could not be prepared. Start it again.`  
-  The server could not mint the internal tools token, and an admin chat without `db_schema`, `db_query` and `save_report` cannot read results or the database — so it refuses instead of starting a chat that looks healthy and cannot do its job. The server log carries `Admin chat init: internal tools token failed for …` with the cause. Job chat reports the same fault as a failed message in the transcript. Start it again once the storage fault is fixed; a momentary lock is retried, so it never ends an admin Start.
+  The server could not mint the internal tools token, and an admin chat without `db_schema`, `db_query` and `save_report` cannot read results or the database — so it refuses instead of starting a chat that looks healthy and cannot do its job. The server log carries `Admin chat init: internal tools token failed for …` with the cause. Job chat reports the same fault as a failed message in the transcript. Start it again once the storage fault is fixed.
+
+- The admin assistant cannot read results or the database, though admin chat started normally.  
+  A database lock that outlasted the retries still starts the chat, without `db_schema`, `db_query` and `save_report`; the server log carries `Admin chat init: no auth token for …`. Start a new admin session once the contention clears to pick the tools up.
 
 - `rootcoz admin-chat send` fails with an admin error, or returns `409 Start a new chat session first`. The 409 means no session exists yet — run `rootcoz admin-chat init` first, which needs `--provider` and `--model`. A genuine admin error is a different failure: check the caller's role.  
   The CLI is not using an admin identity. Confirm it with `rootcoz auth whoami`.
