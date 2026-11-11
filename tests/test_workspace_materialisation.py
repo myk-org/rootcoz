@@ -793,6 +793,28 @@ async def test_chat_caller_survives_a_malformed_stored_tests_repo_url(
     assert [call[1].name for call in manager.calls] == ["extra"]
 
 
+async def test_chat_never_names_a_repo_the_workspace_holds(
+    tmp_path, clone_settings
+) -> None:
+    """An additional repo called ``tests-repo`` must not become the missing row."""
+    from rootcoz.engine.chat import clone_chat_repos
+
+    manager = RecordingManager()
+    failed: list[str] = []
+    params = {
+        "tests_repo_url": "https://[bad/x",
+        "additional_repos": [
+            {"name": "tests-repo", "url": "https://example.com/tests-repo"}
+        ],
+    }
+
+    with patch("rootcoz.repository.RepositoryManager", return_value=manager):
+        cloned = await clone_chat_repos(tmp_path, params, failed=failed)
+
+    assert cloned is True
+    assert failed == []
+
+
 async def test_chat_caller_without_the_failed_carrier_still_returns_a_bool(
     tmp_path, clone_settings
 ) -> None:
