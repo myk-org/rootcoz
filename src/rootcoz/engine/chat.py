@@ -40,6 +40,7 @@ from rootcoz.temp_paths import (
     _Abandoned,
     delete_tree,
     reusable_path_lock,
+    sanitize_path_part,
 )
 
 logger = get_child_logger(__name__)
@@ -50,11 +51,6 @@ _CHAT_WORKSPACE_PREFIX = "rootcoz-chat-"
 def _tmp_root() -> Path:
     """Return the process temp root (honors ``TMPDIR``)."""
     return Path(tempfile.gettempdir()).resolve()
-
-
-def _sanitize_path_part(part: str) -> str:
-    """A path component that cannot traverse: ``/``, ``..`` and ``\\`` become ``_``."""
-    return part.replace("/", "_").replace("..", "_").replace("\\", "_")
 
 
 def chat_workspace_root() -> Path:
@@ -68,12 +64,12 @@ def chat_workspace_name(job_id: str) -> str:
     The startup reclaim builds the names it protects from the same function, so
     the creator and the sweeper cannot disagree about the sanitisation.
     """
-    return _CHAT_WORKSPACE_PREFIX + _sanitize_path_part(job_id)
+    return _CHAT_WORKSPACE_PREFIX + sanitize_path_part(job_id)
 
 
 def get_chat_workspace(job_id: str, username: str = "") -> Path:
     """Get the chat workspace path for a job and user."""
-    safe_user = _sanitize_path_part(username) if username else ""
+    safe_user = sanitize_path_part(username) if username else ""
     tmp = _tmp_root()
     if safe_user:
         workspace = tmp / chat_workspace_name(job_id) / safe_user
@@ -112,21 +108,6 @@ async def chat_workspace_lock(
         job_id, get_chat_workspace(job_id, username)
     ) as state:
         yield state
-
-
-def _resolve_chat_repo_target(workspace: Path, repo_name: str) -> tuple[str, Path]:
-    """Sanitize and validate a repo name for the chat workspace.
-
-    Returns (safe_name, target_path). Raises ValueError if the name is
-    invalid (empty, dot-prefixed, or escapes the workspace).
-    """
-    safe_name = _sanitize_path_part(repo_name)
-    if not safe_name or safe_name.startswith("."):
-        raise ValueError(f"Invalid repo name for chat workspace: {repo_name}")
-    target = (workspace / safe_name).resolve()
-    if not target.is_relative_to(workspace.resolve()):
-        raise ValueError(f"Repo target escapes chat workspace: {repo_name}")
-    return safe_name, target
 
 
 def purge_chat_staging(workspace: Path) -> None:
@@ -172,13 +153,16 @@ async def clone_chat_repos(
         cleaned up when repos are deleted via cleanup_chat_repos().
     """
     from rootcoz.config import get_settings, parse_repo_ref
-    from rootcoz.engine.core import CloneRequest, clone_repo_batch
-    from rootcoz.models import AdditionalRepo
-    from rootcoz.repository import (
-        RepositoryManager,
-        derive_test_repo_name,
-        repo_name_from_url,
+    from rootcoz.engine.core import (
+        CloneOutcome,
+        RepoTarget,
+        _resolve_repo_target,
+        prepare_workspace_repos,
+        tests_repo_target,
     )
+    from rootcoz.models import AdditionalRepo
+    from rootcoz.repository import RepositoryManager
+    from rootcoz.url_utils import strip_url_userinfo_in_text
 
     tests_repo_url = request_params.get("tests_repo_url", "")
     additional_repos = request_params.get("additional_repos") or []
@@ -196,104 +180,106 @@ async def clone_chat_repos(
     # log` should not need a code change to get it (#547).
     depth = get_settings().chat_clone_depth
 
-    def report_failure(name: str, exc: BaseException) -> None:
-        """One redacted line: the message carries a token-bearing remote."""
-        from rootcoz.url_utils import strip_url_userinfo_in_text
-
-        if failed is not None:
-            failed.append(name)
-        logger.warning(
-            "Chat: failed to clone repo %s for %s: %s",
-            name,
-            workspace,
-            strip_url_userinfo_in_text(f"{type(exc).__name__}: {exc}"),
-        )
-
-    # Decide what to clone first -- name resolution is pure, so this costs
-    # nothing -- then hand the clones to the same concurrent fan-out analysis
-    # uses. The per-repo loop this replaces made a chat opening with N repos
-    # wait for the sum of N clones.
-    requests: list[CloneRequest] = []
-    planned: set[str] = set()
-
-    def plan(name: str, url: str, ref: str, token: str) -> None:
-        try:
-            safe_name, target = _resolve_chat_repo_target(workspace, name)
-        except ValueError:
-            logger.warning("Skipping repo with unsafe name: %s", name)
-            return
-        if safe_name in planned or target.exists():
-            # ``planned`` covers a repo declared twice: without it both requests
-            # would clone into the same directory at the same time.
-            logger.debug("Chat: repo %s already present in %s", safe_name, workspace)
-            return
-        planned.add(safe_name)
-        requests.append(
-            CloneRequest(
-                name=safe_name,
-                url=url,
-                target=target,
-                depth=depth,
-                branch=ref,
-                token=token,
-            )
-        )
-
+    # Chat is the only caller that parses a raw ref: the analysis side splits
+    # url and ref upstream, so the shared function never sees a ":ref" suffix.
+    targets: list[RepoTarget] = []
+    # Chat's own labels for a repo it could not even name. Merged into ``failed``
+    # below only if the workspace does not hold a repository of that name.
+    missing: list[str] = []
     if tests_repo_url:
         try:
             clean_url, ref = parse_repo_ref(str(tests_repo_url))
-            raw_name = derive_test_repo_name(clean_url, additional_repos)
-        except Exception as exc:  # noqa: BLE001 - a repo that fails is reported
-            report_failure(
-                _sanitize_path_part(repo_name_from_url(str(tests_repo_url)))
-                or "tests-repo",
-                exc,
-            )
-        else:
-            plan(raw_name, clean_url, ref, user_repo_token)
-
-    for repo in additional_repos:
-        plan(
-            repo.name,
-            str(repo.url),
-            getattr(repo, "ref", "") or "",
-            getattr(repo, "token", None) or "",
+        except ValueError:
+            # A stored URL with a malformed authority (``urlsplit`` rejects it) is
+            # one missing repository, not a failed preparation: the additional
+            # repositories still clone, and the user is told about this one.
+            logger.warning("Chat: unparseable tests repo URL for %s", workspace)
+            missing.append("tests-repo")
+            clean_url, ref = "", ""
+        target = tests_repo_target(clean_url, ref, additional_repos, depth=depth)
+        if target is not None:
+            targets.append(target)
+    targets.extend(
+        RepoTarget(
+            name=repo.name,
+            url=repo.url,
+            ref=repo.ref,
+            depth=depth,
+            token=repo.token,
         )
+        for repo in additional_repos
+    )
+
+    def will_clone(target: RepoTarget) -> bool:
+        """Whether the shared path will actually start a clone for this target.
+
+        A reused workspace already holds some of them, and ``skip_existing`` --
+        or a refused name -- never starts a clone, so neither reaches a start or
+        end callback. Counting those would publish ``cloning 1 of 2`` for one.
+        """
+        try:
+            _name, path = _resolve_repo_target(workspace, target.name)
+        except ValueError:
+            return False
+        return not path.exists()
 
     # Overlapping clones mean the detail has to be republished when one ends:
     # naming only the last-admitted repo kept a finished clone on screen until
     # the whole batch was done, and it made a wide fan-out look serial (#547).
-    total = len(requests)
+    total = sum(1 for target in targets if will_clone(target))
     in_flight: list[str] = []
 
     def publish_width() -> None:
         if on_repo:
             on_repo(f"cloning {len(in_flight)} of {total}" if in_flight else "")
 
-    async def started(request: CloneRequest) -> None:
-        logger.info("Chat: cloning repo %s into %s", request.name, request.target)
-        in_flight.append(request.name)
-        publish_width()
-
-    async def finished(request: CloneRequest, _outcome: str) -> None:
-        in_flight.remove(request.name)
-        publish_width()
-
-    cloned_any = False
-    try:
-        outcomes = await clone_repo_batch(
-            RepositoryManager(),
-            requests,
-            on_start=started,
-            on_finish=finished,
-            on_error=report_failure,
+    async def started(target: RepoTarget) -> None:
+        logger.info(
+            "Chat: cloning repo %s into %s", target.name, workspace / target.name
         )
-        cloned_any = any(error is None for _request, error in outcomes)
+        in_flight.append(target.name)
+        publish_width()
+
+    async def finished(target: RepoTarget, _state: str) -> None:
+        in_flight.remove(target.name)
+        publish_width()
+
+    outcome = CloneOutcome()
+    try:
+        outcome = await prepare_workspace_repos(
+            RepositoryManager(),
+            workspace,
+            targets,
+            credential=user_repo_token,
+            skip_existing=True,
+            # A cancelled preparation returns at once; the worker keeps its slot
+            # until it ends, so nothing is admitted behind it.
+            cancellation="abandon",
+            on_repo_start=started,
+            on_repo_end=finished,
+        )
     except Exception as exc:  # noqa: BLE001 - the clone loop must not escape
-        report_failure("workspace", exc)
+        logger.warning(
+            "Chat: failed to clone repo %s for %s: %s",
+            "workspace",
+            workspace,
+            strip_url_userinfo_in_text(f"{type(exc).__name__}: {exc}"),
+        )
+        missing.append("workspace")
+
+    if failed is not None:
+        # ``failed`` is the caller's "not in this workspace" row, so a name the
+        # workspace holds -- an additional repo called ``tests-repo``, which the
+        # shared naming treats as taken -- must never reach it. Presence, not
+        # ``outcome.cloned``: ``skip_existing`` leaves a held repo out of it, and
+        # ``clone_into`` stages then renames, so a failed clone leaves no
+        # directory to drop a true label.
+        failed.extend(
+            n for n in (*missing, *outcome.failed) if not (workspace / n).exists()
+        )
 
     # Copy .rootcoz/{agents,skills,extensions}/ to workspace .pi/
-    if cloned_any:
+    if outcome.cloned:
         from rootcoz.engine.core import copy_rootcoz_pi_resources
 
         cloned_repos = {
@@ -304,7 +290,7 @@ async def clone_chat_repos(
         if cloned_repos:
             copy_rootcoz_pi_resources(cloned_repos, workspace)
 
-    return cloned_any
+    return bool(outcome.cloned)
 
 
 def _bearer_headers(auth_token: str) -> dict[str, str]:

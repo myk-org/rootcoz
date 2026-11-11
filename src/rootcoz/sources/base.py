@@ -8,15 +8,12 @@ out of the pipeline logic.
 
 from __future__ import annotations
 
-import asyncio
 import hashlib
 import logging
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
-
-from git.exc import GitCommandError
 
 from rootcoz import get_child_logger
 from rootcoz.engine.core import get_failure_signature, get_legacy_signature
@@ -473,6 +470,11 @@ class WorkspaceSetupResult:
     repo_path: Path
     cloned_repos: dict[str, Path] = field(default_factory=dict)
     repo_context: str = ""
+    #: Where the tests repo actually landed, when it landed at all. The caller
+    #: must use this rather than re-deriving the name: a resolver-rewritten name
+    #: would otherwise leave ``.rootcoz/settings.json`` unread for a repository
+    #: that *was* cloned.
+    tests_repo_path: Path | None = None
 
 
 async def setup_analysis_workspace(
@@ -507,87 +509,72 @@ async def setup_analysis_workspace(
         Tuple of ``(WorkspaceSetupResult, effective_artifacts_context)``.
         ``artifacts_context`` may be cleared if artifact linking fails.
     """
-    from rootcoz.engine.core import copy_rootcoz_pi_resources
-    from rootcoz.repository import derive_test_repo_name, redact_url
+    from rootcoz.engine.core import (
+        CLONE_FAILURES,
+        RepoTarget,
+        copy_rootcoz_pi_resources,
+        prepare_workspace_repos,
+        raise_first_unexpected,
+        safe_update_clone_progress,
+        tests_repo_target,
+    )
+    from rootcoz.url_utils import sanitize_clone_url
 
     repo_path = repo_manager.create_workspace()
     cloned_repos: dict[str, Path] = {}
     repo_context = ""
+    tests_repo_path: Path | None = None
 
     logger.debug("Workspace created at %s", repo_path)
 
-    if tests_repo_url:
-        logger.debug(
-            "Cloning test repo: %s (ref=%s)",
-            redact_url(str(tests_repo_url)),
-            tests_repo_ref,
+    target = (
+        tests_repo_target(
+            tests_repo_url, tests_repo_ref, additional_repos or [], depth=50
         )
-        try:
-            additional_repos_list = additional_repos or []
-            repo_name = derive_test_repo_name(
-                str(tests_repo_url), additional_repos_list
-            )
-            from rootcoz.engine.core import safe_update_clone_progress
+        if tests_repo_url
+        else None
+    )
+    if target is not None:
 
-            await safe_update_clone_progress(
-                job_id, repo_name, True, url=str(tests_repo_url), ref=tests_repo_ref
+        async def _started(repo: RepoTarget) -> None:
+            logger.debug(
+                "Cloning test repo: %s (ref=%s)",
+                sanitize_clone_url(str(repo.url)),
+                repo.ref,
             )
-            outcome = "cancelled"
-            try:
-                clone_task = asyncio.create_task(
-                    asyncio.to_thread(
-                        repo_manager.clone_into,
-                        str(tests_repo_url),
-                        repo_path / repo_name,
-                        depth=50,
-                        branch=tests_repo_ref,
-                        token=tests_repo_token or None,
-                    )
-                )
-                try:
-                    # wait() does not cancel the thread worker with this task.
-                    await asyncio.wait({clone_task})
-                    clone_task.result()
-                except asyncio.CancelledError:
-                    # A cancelled await cannot stop a running clone. Repeated
-                    # cancellations must not allow workspace cleanup to race it.
-                    while not clone_task.done():
-                        try:
-                            await asyncio.wait({clone_task})
-                        except asyncio.CancelledError:
-                            continue
-                    if not clone_task.cancelled() and clone_task.exception():
-                        logger.warning(
-                            "Test repository clone worker failed after cancellation (%s)",
-                            type(clone_task.exception()).__name__,
-                        )
-                    logger.info(
-                        "Test repository clone worker joined after cancellation"
-                    )
-                    raise
-                outcome = "cloned"
-            except GitCommandError, OSError, ValueError, RuntimeError, TypeError:
-                outcome = "failed"
-                raise
-            finally:
-                if outcome == "cloned":
-                    await safe_update_clone_progress(job_id, repo_name, False)
-                else:
-                    await safe_update_clone_progress(
-                        job_id, repo_name, False, state=outcome
-                    )
-            cloned_repos[repo_name] = repo_path / repo_name
-            logger.info("Test repo cloned successfully into %s/", repo_name)
+            await safe_update_clone_progress(
+                job_id, repo.name, True, url=str(repo.url), ref=repo.ref
+            )
+
+        async def _finished(repo: RepoTarget, state: str) -> None:
+            await safe_update_clone_progress(job_id, repo.name, False, state=state)
+
+        outcome = await prepare_workspace_repos(
+            repo_manager,
+            repo_path,
+            [target],
+            # The tests-repo token may be the deployment's own setting: it rides
+            # to whatever host the tests repo names, deliberately.
+            credential=tests_repo_token,
+            # A cancelled await cannot stop a worker already inside ``git
+            # clone``; joining it is what keeps cleanup from racing the clone.
+            cancellation="propagate",
+            # One repository, and this path never took a clone slot.
+            admit=False,
+            on_repo_start=_started,
+            on_repo_end=_finished,
+        )
+        cloned_repos.update(outcome.cloned)
+        tests_repo_path = next(iter(outcome.cloned.values()), None)
+        if tests_repo_path is not None:
             repo_context = (
                 f"\nTest repository cloned from: "
-                f"{redact_url(str(tests_repo_url))} (at {repo_name}/)"
+                f"{sanitize_clone_url(str(target.url))} "
+                f"(at {tests_repo_path.name}/)"
             )
-        except (GitCommandError, OSError, ValueError, RuntimeError, TypeError) as exc:
-            logger.warning(
-                "Failed to clone test repository (%s)",
-                type(exc).__name__,
-            )
+        elif outcome.failed:
             repo_context = "\nFailed to clone repository (details redacted)"
+        raise_first_unexpected(outcome.errors, (*CLONE_FAILURES, TypeError))
 
     # Additional repositories are resolved after reading the test repo's settings.
     if cloned_repos:
@@ -602,6 +589,7 @@ async def setup_analysis_workspace(
         repo_path=repo_path,
         cloned_repos=cloned_repos,
         repo_context=repo_context,
+        tests_repo_path=tests_repo_path,
     )
     return result, artifacts_context
 

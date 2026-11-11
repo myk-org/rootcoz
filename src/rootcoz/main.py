@@ -60,7 +60,6 @@ from fastapi.responses import (
     StreamingResponse,
 )
 from fastapi.staticfiles import StaticFiles
-from git.exc import GitCommandError
 from pi_sidecar_client import (
     check_sidecar_available,
     run_parallel_with_limit,
@@ -143,6 +142,7 @@ from rootcoz.encryption import (
 )
 from rootcoz.engine.core import (
     ROOTCOZ_ISSUE_PROMPT_FILENAME,
+    RepoTarget,
     _failed_group_analyses,
     analyze_failure_group,
     clone_additional_repos,
@@ -150,11 +150,13 @@ from rootcoz.engine.core import (
     extract_json_dict,
     get_failure_signature,
     incomplete_reason,
+    prepare_workspace_repos,
     resolve_additional_repos,
     run_orchestrated_analysis,
     safe_update_clone_progress,
     safe_update_progress,
     set_progress_callback,
+    tests_repo_target,
 )
 from rootcoz.error_messages import (
     jira_api_base_unresolved_message,
@@ -288,11 +290,7 @@ from rootcoz.monitoring import (
     validate_startup_config,
 )
 from rootcoz.notifications import send_mention_notifications
-from rootcoz.repository import (
-    RepositoryManager,
-    derive_test_repo_name,
-    redact_url,
-)
+from rootcoz.repository import RepositoryManager, redact_url
 from rootcoz.request_resolution import resolve_tests_repo_token
 from rootcoz.result_fields import (
     RESULT_FIELD_PATHS,
@@ -6823,14 +6821,10 @@ async def _process_ci_source_analysis(
             notify_dashboard_changed()
             notify_job_status_changed(job_id)
 
-        # Derive tests_cloned_path from workspace result (already cloned
-        # by setup_analysis_workspace above — no second clone needed).
-        tests_cloned_path: Path | None = None
-        if tests_repo_url:
-            repo_name = derive_test_repo_name(
-                str(tests_repo_url), additional_repos_list
-            )
-            tests_cloned_path = cloned_repos.get(repo_name)
+        # Taken from the setup result rather than re-derived: the resolver may
+        # have rewritten the name, and a name that no longer matches would
+        # silently stop .rootcoz/settings.json being read from the clone.
+        tests_cloned_path = ws_result.tests_repo_path
 
         try:
             effective = await resolve_repo_analysis_settings(
@@ -8482,149 +8476,54 @@ async def _reanalyze_failure_background(
         cloned_repos: dict[str, Path] = {}
         repo_path = repo_manager.create_workspace()
 
-        if tests_repo_url:
-            try:
-                repo_name = derive_test_repo_name(
-                    str(tests_repo_url), additional_repos_list or []
-                )
+        target = (
+            tests_repo_target(
+                str(tests_repo_url),
+                tests_repo_ref,
+                additional_repos_list or [],
+                depth=50,
+            )
+            if tests_repo_url
+            else None
+        )
+        if target is not None:
+
+            async def _tests_repo_started(repo: RepoTarget) -> None:
                 await safe_update_clone_progress(
                     job_id,
-                    repo_name,
+                    repo.name,
                     True,
                     reanalysis=True,
                     operation_id=f"{failure_uuid}:tests",
-                    url=str(tests_repo_url),
-                    ref=tests_repo_ref,
-                )
-                outcome = "cancelled"
-                try:
-                    clone_task = asyncio.create_task(
-                        asyncio.to_thread(
-                            repo_manager.clone_into,
-                            str(tests_repo_url),
-                            repo_path / repo_name,
-                            depth=50,
-                            branch=tests_repo_ref,
-                            token=tests_repo_token or None,
-                        )
-                    )
-                    try:
-                        # wait() leaves the worker running if this await is cancelled.
-                        await asyncio.wait({clone_task})
-                        clone_task.result()
-                    except asyncio.CancelledError:
-                        # A cancelled await does not stop the thread. Keep the workspace
-                        # until the worker exits, even if cancellation is repeated.
-                        while not clone_task.done():
-                            try:
-                                await asyncio.wait({clone_task})
-                            except asyncio.CancelledError:
-                                continue
-                        if not clone_task.cancelled() and (
-                            clone_error := clone_task.exception()
-                        ):
-                            # Exception text, stderr and traceback filenames can all
-                            # contain attacker-controlled URLs, headers or paths.
-                            if isinstance(clone_error, GitCommandError):
-                                # Match only fixed phrases; stderr may embed credentials.
-                                stderr = (clone_error.stderr or "").lower()
-                                cause = "Git command failed"
-                                for patterns, label in (
-                                    (
-                                        ("authentication failed",),
-                                        "Authentication failed",
-                                    ),
-                                    (
-                                        (
-                                            "remote branch",
-                                            "pathspec",
-                                            "bad revision",
-                                            "not a valid ref",
-                                        ),
-                                        "Branch or ref not found",
-                                    ),
-                                    (
-                                        (
-                                            "ssl certificate",
-                                            "certificate verify",
-                                            "server verification failed",
-                                        ),
-                                        "SSL verification failed",
-                                    ),
-                                    (("permission denied",), "Permission denied"),
-                                    (
-                                        (
-                                            "could not resolve host",
-                                            "name or service not known",
-                                        ),
-                                        "Network DNS resolution failed",
-                                    ),
-                                    (
-                                        (
-                                            "repository not found",
-                                            "not a git repository",
-                                        ),
-                                        "Repository not found",
-                                    ),
-                                ):
-                                    if any(pattern in stderr for pattern in patterns):
-                                        cause = label
-                                        break
-                            elif isinstance(clone_error, ValueError) and str(
-                                clone_error
-                            ).startswith("Invalid repository URL scheme."):
-                                cause = "Invalid repository URL scheme"
-                            else:
-                                cause = "Clone worker failed"
-                            frames = []
-                            tb = clone_error.__traceback__
-                            while tb:
-                                name = tb.tb_frame.f_code.co_name
-                                if name not in {
-                                    "clone",
-                                    "clone_into",
-                                    "_validate_repo_url",
-                                }:
-                                    name = "frame"
-                                filename = tb.tb_frame.f_code.co_filename
-                                source_dir = str(Path(__file__).parent) + os.sep
-                                location = (
-                                    filename.removeprefix(source_dir)
-                                    if filename.startswith(source_dir)
-                                    else "[path]"
-                                )
-                                frames.append(f"{location}:{tb.tb_lineno} in {name}")
-                                tb = tb.tb_next
-                            logger.warning(
-                                "Test repository clone failed during cancellation: %s: %s\n%s",
-                                type(clone_error).__name__,
-                                cause,
-                                "\n".join(frames),
-                            )
-                        logger.info(
-                            "Test repository clone worker joined after cancellation"
-                        )
-                        raise
-                    outcome = "cloned"
-                except Exception:
-                    outcome = "failed"
-                    raise
-                finally:
-                    await safe_update_clone_progress(
-                        job_id,
-                        repo_name,
-                        False,
-                        state=outcome,
-                        reanalysis=True,
-                        operation_id=f"{failure_uuid}:tests",
-                    )
-                cloned_repos[repo_name] = repo_path / repo_name
-            except Exception:
-                logger.warning(
-                    "Failed to clone test repository for failure re-analysis",
-                    exc_info=True,
+                    url=str(repo.url),
+                    ref=repo.ref,
                 )
 
+            async def _tests_repo_finished(repo: RepoTarget, state: str) -> None:
+                await safe_update_clone_progress(
+                    job_id,
+                    repo.name,
+                    False,
+                    state=state,
+                    reanalysis=True,
+                    operation_id=f"{failure_uuid}:tests",
+                )
+
+            outcome = await prepare_workspace_repos(
+                repo_manager,
+                repo_path,
+                [target],
+                # The tests-repo token may be the deployment's own setting: it
+                # rides to whatever host the tests repo names, deliberately.
+                credential=tests_repo_token,
+                cancellation="propagate",
+                admit=False,
+                on_repo_start=_tests_repo_started,
+                on_repo_end=_tests_repo_finished,
+            )
+            # No raise_first_unexpected: re-analysis warns for every exception
+            # and carries on to its AI step with the repository missing.
+            cloned_repos.update(outcome.cloned)
         tests_cloned_path = (
             next(iter(cloned_repos.values()), None) if cloned_repos else None
         )
@@ -26299,9 +26198,9 @@ _ADMIN_ARTIFACTS_BASE = Path("/tmp/rootcoz-admin-artifacts")
 
 def _get_admin_artifacts_dir(username: str) -> Path:
     """Get the artifacts directory for an admin user."""
-    from rootcoz.engine.chat import _sanitize_path_part
+    from rootcoz.temp_paths import sanitize_path_part
 
-    return _ADMIN_ARTIFACTS_BASE / _sanitize_path_part(username)
+    return _ADMIN_ARTIFACTS_BASE / sanitize_path_part(username)
 
 
 def _cleanup_admin_artifacts(username: str) -> DeleteResult:
@@ -26341,9 +26240,9 @@ async def save_admin_chat_artifact(
     username = request.state.username
 
     # Sanitize filename — strip path separators, keep only the basename
-    from rootcoz.engine.chat import _sanitize_path_part
+    from rootcoz.temp_paths import sanitize_path_part
 
-    safe_filename = _sanitize_path_part(body.filename).strip()
+    safe_filename = sanitize_path_part(body.filename).strip()
     if not safe_filename:
         raise HTTPException(status_code=422, detail="Invalid filename")
     # Ensure .html extension

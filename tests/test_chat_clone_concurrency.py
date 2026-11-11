@@ -89,13 +89,14 @@ async def test_one_failing_repo_warns_once_and_the_rest_still_clone(
     workspace.mkdir()
     failed: list[str] = []
 
-    chat_logger = logging.getLogger("rootcoz.engine.chat")
+    # One shared failure line, on the shared module's logger (#514).
+    core_logger = logging.getLogger("rootcoz.engine.core")
     # Two repos fan out concurrently, so an identical warning can be emitted
     # twice; the duplicate filter is taken off so the count below counts emits.
     with capture_main_logs(
         caplog,
         logging.WARNING,
-        logger=chat_logger,
+        logger=core_logger,
         bypass_duplicate_filter=True,
     ):
         cloned_any = await clone_chat_repos(
@@ -105,7 +106,7 @@ async def test_one_failing_repo_warns_once_and_the_rest_still_clone(
     assert cloned_any is True
     assert failed == ["repo1"]
     assert sorted(cloned) == ["repo0", "repo2"]
-    warnings = [r for r in caplog.records if "failed to clone repo repo1" in r.message]
+    warnings = [r for r in caplog.records if "Failed to clone repo repo1" in r.message]
     assert len(warnings) == 1, [r.message for r in caplog.records]
     assert secret not in caplog.text
 
@@ -115,16 +116,20 @@ async def test_one_failing_repo_warns_once_and_the_rest_still_clone(
     "url",
     [
         "https://github.com/acme/tests-repo.git",
-        "https://gitlab.com/acme/tests-repo.git",
+        # The repo the caller named, on whatever host they named it: chat's token
+        # is a read credential here, and dropping it would break self-hosted and
+        # GitLab tests repos (#514).
+        "https://gitlab.internal/acme/tests-repo.git",
     ],
 )
-async def test_repo_token_reaches_every_declared_host(
+async def test_the_chat_token_reaches_the_tests_repo_on_any_host(
     monkeypatch, tmp_path: Path, clone_settings, url: str
 ) -> None:
-    """Cloning is a read, so it takes the analysis token rules (#547).
+    """Chat is a read path: no host is special-cased, so its tests repo gets it.
 
-    The old GitHub-only guard made a private repo on any other host visible
-    only to anonymous callers -- the write path is what guards credentials.
+    The write path is what guards credentials. A host gate here withheld the
+    token from exactly the self-hosted and GitLab tests repos a user asks to
+    clone, which matches main's behaviour and main's docstring.
     """
     seen: list[str | None] = []
 
@@ -233,4 +238,6 @@ async def test_unsafe_name_is_skipped_and_the_others_clone(
 
     assert cloned == ["repo0"]
     assert cloned_any is True
-    assert failed == []
+    # A refused repository is named in ``failed`` so the "not in this workspace"
+    # row reports it; dropping it silently is what #514 removes.
+    assert failed == [".hidden"]
