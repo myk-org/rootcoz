@@ -110,7 +110,7 @@ interface StepLogEntry {
   label: string
   timestamp: string
   failed?: boolean
-  repos?: Array<{ name: string; state: string; url?: string; ref?: string }>
+  repos?: Array<{ name: string; state: string; url?: string; ref?: string; reason?: string }>
 }
 
 export function StatusPage() {
@@ -240,10 +240,10 @@ export function StatusPage() {
   const stepLog: StepLogEntry[] = useMemo(() => {
     const progressLog = Array.isArray(rawProgressLog) ? rawProgressLog : []
     const steps: StepLogEntry[] = []
-    const clones = new Map<string, { name: string; state: string; url?: string; ref?: string }>()
-    const updateClone = (name: string, state: string, url?: string, ref?: string) => {
+    const clones = new Map<string, { name: string; state: string; url?: string; ref?: string; reason?: string }>()
+    const updateClone = (name: string, state: string, url?: string, ref?: string, reason?: string) => {
       const previous = clones.get(name)
-      clones.set(name, { name, state, url: url ?? previous?.url, ref: ref ?? previous?.ref })
+      clones.set(name, { name, state, url: url ?? previous?.url, ref: ref ?? previous?.ref, reason })
     }
     for (const entry of progressLog) {
       if (entry.phase === 'cloning') {
@@ -251,7 +251,7 @@ export function StatusPage() {
           steps.push({ phase: 'cloning', label: 'Cloning', timestamp: new Date(entry.timestamp * 1000).toLocaleTimeString(), repos: [] })
         }
         if (entry.state === 'failed') steps.find(step => step.phase === 'cloning')!.failed = true
-        if (entry.repo) updateClone(entry.repo, entry.state ?? 'cloning', entry.url, entry.ref)
+        if (entry.repo) updateClone(entry.repo, entry.state ?? 'cloning', entry.url, entry.ref, entry.reason)
         // Older jobs contain active-name snapshots rather than per-repo transitions.
         if (entry.repos) {
           for (const [name, clone] of clones) {
@@ -668,6 +668,7 @@ export function StatusPage() {
                                     {' · '}{href && isSafeHref(href) ? <a href={href} target="_blank" rel="noopener noreferrer" className="break-all text-text-link hover:underline">{href}</a> : <span className="break-all text-text-tertiary">{display ?? 'URL unavailable'}</span>}
                                     {' · '}<span className="break-all">{ref}</span>
                                     <span className={`ml-2 ${repo.state === 'failed' ? 'text-signal-red' : 'text-text-tertiary'}`}>{repo.state}</span>
+                                    {repo.state === 'failed' && repo.reason && <span className="ml-2 text-signal-red">{repo.reason}</span>}
                                   </li>
                                 )
                               })}

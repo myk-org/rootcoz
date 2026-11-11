@@ -1081,6 +1081,38 @@ class TestProgressPhaseHelpers:
             assert set(refreshed["cloning_repos"]) == {"tests", "two"}
             assert refreshed["progress_log"][-1]["repos"] == refreshed["cloning_repos"]
 
+    async def test_update_clone_progress_persists_and_omits_reason(
+        self, setup_test_db: Path
+    ) -> None:
+        """``reason`` rides on the failed transition only, and only when it names one."""
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.save_result("clone-reason", "", "running", {})
+            await storage.update_clone_progress("clone-reason", "one", True)
+            await storage.update_clone_progress(
+                "clone-reason", "one", False, state="failed", reason="Clone timed out"
+            )
+            failed = (await storage.get_result("clone-reason"))["result"][
+                "progress_log"
+            ][-1]
+            assert failed["reason"] == "Clone timed out"
+
+            await storage.update_clone_progress("clone-reason", "two", True)
+            await storage.update_clone_progress("clone-reason", "two", False)
+            cloned = (await storage.get_result("clone-reason"))["result"][
+                "progress_log"
+            ][-1]
+            assert cloned["state"] == "cloned"
+            assert "reason" not in cloned
+
+            await storage.update_clone_progress("clone-reason", "three", True)
+            await storage.update_clone_progress(
+                "clone-reason", "three", False, state="failed", reason=""
+            )
+            unlabelled = (await storage.get_result("clone-reason"))["result"][
+                "progress_log"
+            ][-1]
+            assert "reason" not in unlabelled
+
     async def test_terminal_update_preserves_clone_history(
         self, setup_test_db: Path
     ) -> None:

@@ -4436,8 +4436,13 @@ async def update_clone_progress(
     url: str = "",
     ref: str = "",
     operation_id: str = "",
+    reason: str = "",
 ) -> None:
-    """Persist one named clone transition and the active repository list."""
+    """Persist one named clone transition and the active repository list.
+
+    ``reason`` is a label from ``repository.clone_failure_reason`` -- never git's
+    stderr, never a URL -- and it is written only on the failed transition.
+    """
     from rootcoz.url_utils import sanitize_clone_url
 
     safe_url = sanitize_clone_url(url)
@@ -4503,6 +4508,7 @@ async def update_clone_progress(
                 "repos": sorted(names),
                 "timestamp": time.time(),
                 **{key: metadata[key] for key in ("url", "ref") if metadata.get(key)},
+                **({"reason": reason} if (reason and not started) else {}),
             }
         )
         if (

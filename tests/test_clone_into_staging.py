@@ -6,6 +6,7 @@ clone that dies half-way must not be in the workspace at all: ``clone_into``
 stages under ``<workspace>/.staging/<name>`` and renames it into place.
 """
 
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -25,13 +26,15 @@ def test_clone_into_stages_then_renames(tmp_path) -> None:
     target = workspace / "repo"
     seen: list[str] = []
 
-    def clone_from(_url, directory, **_kwargs):
+    def clone(_url, directory, **_kwargs):
+        directory = Path(directory)
         # No ``.git`` in the target yet: the clone is not visible in place.
         seen.append(str(directory))
         assert not target.exists()
         (directory / ".git").mkdir(parents=True)
 
-    with patch("rootcoz.repository.Repo.clone_from", side_effect=clone_from):
+    with patch("rootcoz.repository._git_clone") as mock_git:
+        mock_git.side_effect = clone
         manager.clone_into("https://example.com/repo", target, depth=1)
 
     assert seen == [str(_clone_into_staging(workspace, "repo"))]
@@ -50,15 +53,16 @@ def test_a_failed_clone_leaves_no_target_and_no_residue(tmp_path) -> None:
     workspace = tmp_path / "workspace"
     target = workspace / "repo"
 
-    def clone_from(_url, directory, **_kwargs):
-        (directory / ".git").mkdir(parents=True)
-        (directory / "half-an-object").write_text("x")
+    def clone(_url, directory, **_kwargs):
+        (Path(directory) / ".git").mkdir(parents=True)
+        (Path(directory) / "half-an-object").write_text("x")
         raise GitCommandError("git clone", 128, stderr="connection reset")
 
     with (
-        patch("rootcoz.repository.Repo.clone_from", side_effect=clone_from),
+        patch("rootcoz.repository._git_clone") as mock_git,
         pytest.raises(GitCommandError),
     ):
+        mock_git.side_effect = clone
         manager.clone_into("https://example.com/repo", target)
 
     assert not target.exists()
@@ -76,15 +80,16 @@ def test_a_failed_clone_does_not_keep_the_token_in_staging(tmp_path) -> None:
     target = workspace / "repo"
     secret = "x-token-auth:sekrit"  # pragma: allowlist secret
 
-    def clone_from(_url, directory, **_kwargs):
-        (directory / ".git").mkdir(parents=True)
-        (directory / ".git" / "config").write_text(f"url = {secret}@host/repo")
+    def clone(_url, directory, **_kwargs):
+        (Path(directory) / ".git").mkdir(parents=True)
+        (Path(directory) / ".git" / "config").write_text(f"url = {secret}@host/repo")
         raise GitCommandError("git clone", 128, stderr="boom")
 
     with (
-        patch("rootcoz.repository.Repo.clone_from", side_effect=clone_from),
+        patch("rootcoz.repository._git_clone") as mock_git,
         pytest.raises(GitCommandError),
     ):
+        mock_git.side_effect = clone
         manager.clone_into(
             "https://example.com/repo",
             target,

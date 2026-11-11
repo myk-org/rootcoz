@@ -161,7 +161,7 @@ async def clone_chat_repos(
         tests_repo_target,
     )
     from rootcoz.models import AdditionalRepo
-    from rootcoz.repository import RepositoryManager
+    from rootcoz.repository import RepositoryManager, clone_failure_reason
     from rootcoz.url_utils import strip_url_userinfo_in_text
 
     tests_repo_url = request_params.get("tests_repo_url", "")
@@ -240,9 +240,18 @@ async def clone_chat_repos(
         in_flight.append(target.name)
         publish_width()
 
-    async def finished(target: RepoTarget, _state: str) -> None:
+    async def finished(
+        target: RepoTarget, state: str, error: BaseException | None
+    ) -> None:
         in_flight.remove(target.name)
         publish_width()
+        # The one shape shared by four callers; the line makes a failed repo visible.
+        logger.debug(
+            "Chat: repo %s clone ended as %s (%s)",
+            target.name,
+            state,
+            clone_failure_reason(error) if error is not None else "no error",
+        )
 
     outcome = CloneOutcome()
     try:

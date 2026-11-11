@@ -233,7 +233,7 @@ export interface AnalysisResult {
   source_warnings?: string[]
   cross_failure_patterns?: CrossFailurePattern[]
   failed_analysis_groups?: number
-  progress_log?: Array<{ phase: string; timestamp: number; repos?: string[]; repo?: string; url?: string; ref?: string; state?: 'cloning' | 'cloned' | 'failed' | 'cancelled' }>
+  progress_log?: Array<{ phase: string; timestamp: number; repos?: string[]; repo?: string; url?: string; ref?: string; reason?: string; state?: 'cloning' | 'cloned' | 'failed' | 'cancelled' }>
   cloning_repos?: string[]
   progress_phase?: string
   request_params?: {

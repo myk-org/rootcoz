@@ -238,6 +238,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
     | `MAX_CONCURRENT_REPO_CLONES` | `10` | integer > 0 | no | no | yes |
     | `MAX_CONCURRENT_ANALYSES` | `10` | integer > 0 | no | no | yes |
     | `CHAT_CLONE_DEPTH` | `1` | integer ≥ 1 | no | no | yes |
+    | `REPO_CLONE_TIMEOUT_SECONDS` | `900` | integer > 0 | no | no | yes |
    | `MAX_WORKSPACE_GRAPH_MB` | `1024` | integer 16–1048576 | no | no | yes |
     | `WAIT_FOR_COMPLETION` | `true` | boolean | no | no | yes |
     | `POLL_INTERVAL_MINUTES` | `2` | integer > 0 | no | no | yes |
@@ -262,6 +263,8 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
     `CHAT_CLONE_DEPTH` is the number of commits cloned per repository when a chat workspace is prepared, for the tests repository and every additional repository alike. **1 is the default on purpose:** the chat AI reads the working tree — `read`, `ls`, `find`, `grep`, the code graph — and never git history, so extra commits are transferred and stored once per repository and paid again on every re-clone, while nothing reads them. Raise it only if a chat session genuinely needs `git log` or `git show` from the agent's shell; a value of 50 on a 17-repository job is tens of times the clone cost for history nothing opens. The CLI takes the same value: `rootcoz admin settings set chat_clone_depth 1`, with `rootcoz admin settings history --key chat_clone_depth` for the audit trail of who changed it.
 
     `METADATA_RULES_FILE` points at a YAML or JSON file of name-based metadata rules. Rules load once and cache for the process lifetime, so edits need a restart. A broken rules file logs a warning and yields no rules rather than failing the server.
+
+    `REPO_CLONE_TIMEOUT_SECONDS` is the wall-clock ceiling, in seconds, for **one** repository clone — the whole ladder (a by-id fetch or a full clone, the SSL retry, the checkout) shares it, so it cannot multiply into an hour per repository. When the deadline passes the clone is killed and fails with the reason `Clone timed out`, and the job continues without that repository. 900 s is deliberately generous: the issue that introduced this setting measured a single branch fetch taking over 300 s on a large repository, so a hard-coded ceiling would sit within a factor of two of real traffic and give an operator a failure they could not raise.
 
     `LOG_MAX_BYTES`, `LOG_BACKUP_COUNT` and `LOG_MIN_FREE_BYTES` bound the application log file — see [Bounding the application log file](deploy-rootcoz.html#bounding-the-application-log-file). All three default to `0`, which means "derive it from the filesystem holding the data directory", and all three apply at runtime: saving one rebuilds the file handler without a restart. An explicit value is used as given — the `100 MiB x 21` cap applies to the derived default, not to a value you chose.
 
@@ -437,6 +440,7 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `MAX_CONCURRENT_REPO_CLONES` | `max_concurrent_repo_clones` | Server | runtime |
 | `MAX_CONCURRENT_ANALYSES` | `max_concurrent_analyses` | Server | runtime |
 | `CHAT_CLONE_DEPTH` | `chat_clone_depth` | Server | runtime |
+| `REPO_CLONE_TIMEOUT_SECONDS` | `repo_clone_timeout_seconds` | Server | runtime |
 | `MAX_WORKSPACE_GRAPH_MB` | `max_workspace_graph_mb` | Workspace | runtime |
 | `WAIT_FOR_COMPLETION` | `wait_for_completion` | Server | runtime |
 | `POLL_INTERVAL_MINUTES` | `poll_interval_minutes` | Server | runtime |

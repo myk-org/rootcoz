@@ -54,6 +54,16 @@ it('warns for only final failed clones, without leaking URLs or hiding successfu
   expect(screen.getByText('Analysis succeeded')).toBeInTheDocument()
 })
 
+it('shows the stored reason as the cause of a failed clone', async () => {
+  showReport([
+    { phase: 'cloning', repo: 'extra', state: 'failed', timestamp: 1, reason: 'Commit or ref not found' },
+  ])
+  const alert = await screen.findByRole('alert')
+  expect(alert).toHaveTextContent(
+    'Repository clone failed: extra — Commit or ref not found. Analysis results remain available below.',
+  )
+})
+
 it('drops a warning after a successful retry on result refresh', async () => {
   const response = showReport([{ phase: 'cloning', repo: 'extra', state: 'failed', timestamp: 1 }])
   await screen.findByRole('alert')
