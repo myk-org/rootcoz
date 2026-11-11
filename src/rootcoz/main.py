@@ -691,6 +691,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "public_base_url",
         "additional_repos",
         "max_concurrent_repo_clones",
+        "chat_clone_depth",
         "wait_for_completion",
         "poll_interval_minutes",
         "max_wait_minutes",
@@ -20949,6 +20950,11 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
         int_error = False
         if is_int:
             try:
+                # A JSON boolean is not an integer setting: int(True) passes
+                # every bound, and str(True) then persists "True", which fails
+                # the merged-settings build and drops *every* DB override.
+                if isinstance(value, bool):
+                    raise TypeError("a boolean is not an integer")
                 int_val = int(value)
                 # Check constraints from Field metadata
                 metadata = field_info.metadata

@@ -414,6 +414,16 @@ class Settings(BaseSettings):
         gt=0,
         description="Maximum simultaneous additional-repository clones",
     )
+    chat_clone_depth: int = Field(
+        default=1,
+        ge=1,
+        description=(
+            "Commits cloned per repository for a chat workspace. The chat AI"
+            " reads the working tree, never git history, so a deeper clone is"
+            " transferred and stored per repository, paid again on every"
+            " re-clone, and buys history nothing reads."
+        ),
+    )
 
     # Jenkins artifacts configuration
     jenkins_artifacts_max_size_mb: int = Field(default=500, gt=0)
