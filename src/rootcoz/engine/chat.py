@@ -183,8 +183,8 @@ async def clone_chat_repos(
     # Chat is the only caller that parses a raw ref: the analysis side splits
     # url and ref upstream, so the shared function never sees a ":ref" suffix.
     targets: list[RepoTarget] = []
-    # Chat's own labels for a repo it could not even name: a name we never
-    # derived, so no directory of that name is evidence about it.
+    # Chat's own labels for a repo it could not even name. Merged into ``failed``
+    # below only if the workspace does not hold a repository of that name.
     missing: list[str] = []
     if tests_repo_url:
         try:
@@ -268,12 +268,15 @@ async def clone_chat_repos(
         missing.append("workspace")
 
     if failed is not None:
-        # ``failed`` is the caller's "not in this workspace" row. The shared path
-        # keeps the loser of a name collision out of ``outcome.failed``, so every
-        # name here is a repo this workspace does not hold; re-checking the
-        # directory would swallow an unparseable tests repo whenever an unrelated
-        # additional repo happens to occupy its name.
-        failed.extend((*missing, *outcome.failed))
+        # ``failed`` is the caller's "not in this workspace" row, so a name the
+        # workspace holds -- an additional repo called ``tests-repo``, which the
+        # shared naming treats as taken -- must never reach it. Presence, not
+        # ``outcome.cloned``: ``skip_existing`` leaves a held repo out of it, and
+        # ``clone_into`` stages then renames, so a failed clone leaves no
+        # directory to drop a true label.
+        failed.extend(
+            n for n in (*missing, *outcome.failed) if not (workspace / n).exists()
+        )
 
     # Copy .rootcoz/{agents,skills,extensions}/ to workspace .pi/
     if outcome.cloned:

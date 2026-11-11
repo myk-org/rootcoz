@@ -788,7 +788,11 @@ async def test_chat_caller_pins_its_credential_skip_and_cancel_policy(
 async def test_chat_caller_survives_a_malformed_stored_tests_repo_url(
     tmp_path, clone_settings
 ) -> None:
-    """One unparseable URL costs the chat that repo, never the others (#559)."""
+    """One unparseable URL costs the chat that repo, never the others (#559).
+
+    The other direction of the row: nothing occupies that name here, so the
+    label is still the only true answer and must reach ``failed``.
+    """
     from rootcoz.engine.chat import clone_chat_repos
 
     manager = RecordingManager()
@@ -834,17 +838,15 @@ async def test_chat_clone_width_ignores_a_repo_the_workspace_holds(
 
 
 @pytest.mark.parametrize("preexisting", [False, True])
-async def test_chat_reports_a_tests_repo_whose_name_another_repo_holds(
+async def test_chat_never_names_a_repo_the_workspace_holds(
     tmp_path, clone_settings, preexisting
 ) -> None:
-    """A same-named additional repo must not swallow the missing tests repo.
+    """An additional repo called ``tests-repo`` must not become the missing row.
 
-    The configured tests repo could not be parsed, so it is not in this
-    workspace whatever else occupies that directory name: presence is not
-    evidence about a repo we could not even name. The shared path already keeps
-    the loser of a real name collision out of ``outcome.failed`` (see
-    ``test_two_names_that_resolve_onto_one_directory_keep_the_first``), so the
-    row needs no directory check of its own.
+    ``clone_into`` publishes only complete clones (staging, then rename), so a
+    directory of that name is what the workspace holds -- and ``skip_existing``
+    leaves a repo that is already there out of ``cloned``, which is why the row
+    asks the directory instead of this run's clone list.
     """
     from rootcoz.engine.chat import clone_chat_repos
 
@@ -862,7 +864,7 @@ async def test_chat_reports_a_tests_repo_whose_name_another_repo_holds(
     with patch("rootcoz.repository.RepositoryManager", return_value=manager):
         await clone_chat_repos(tmp_path, params, failed=failed)
 
-    assert failed == ["tests-repo"]
+    assert failed == []
     assert (tmp_path / "tests-repo").is_dir()
 
 
