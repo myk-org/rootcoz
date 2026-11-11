@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
-import { render, screen, fireEvent, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, waitFor, within } from '@testing-library/react'
 import { MemoryRouter, Routes, Route, useLocation } from 'react-router-dom'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { SavedFiltersSection } from '../SavedFiltersSection'
@@ -114,8 +114,10 @@ describe('SavedFiltersSection', () => {
     )
     renderSection()
     expect(await screen.findByText('Saved filters')).toBeDefined()
-    expect(screen.getByText('Yours')).toBeDefined()
-    expect(screen.getByText('Server')).toBeDefined()
+    // A scope heading per page group, and only where that scope has entries:
+    // the reports fixture is a server preset, the dashboard has one of each.
+    expect(screen.getAllByText('Yours')).toHaveLength(1)
+    expect(screen.getAllByText('Server')).toHaveLength(2)
     expect(screen.getByText('Storage unreviewed')).toBeDefined()
     expect(screen.getByText('Team view')).toBeDefined()
     expect(screen.getByText('Upgrade reports')).toBeDefined()
@@ -201,5 +203,33 @@ describe('SavedFiltersSection', () => {
     fireEvent.click(await screen.findByTestId('sidebar-filter-preset-1'))
     await screen.findByTestId('location-probe')
     expect(onNavigate).toHaveBeenCalledTimes(1)
+  })
+
+  it('groups a reports bookmark under Reports and leaves dashboard ones outside it', async () => {
+    apiGet.mockImplementation((path: string) =>
+      Promise.resolve(path.includes('page=dashboard') ? [PERSONAL] : [SERVER_REPORTS]),
+    )
+    renderSection()
+    await screen.findByText('Storage unreviewed')
+
+    // The sidebar must show where a click lands: the reports bookmark sits in
+    // the Reports group, the dashboard one does not.
+    const reports = screen.getByTestId('sidebar-preset-group-reports')
+    expect(within(reports).getByText('Upgrade reports')).toBeDefined()
+    expect(within(reports).queryByText('Storage unreviewed')).toBeNull()
+    expect(within(reports).getByText('Reports')).toBeDefined()
+
+    const dashboard = screen.getByTestId('sidebar-preset-group-dashboard')
+    expect(within(dashboard).getByText('Storage unreviewed')).toBeDefined()
+    expect(within(dashboard).queryByText('Upgrade reports')).toBeNull()
+  })
+
+  it('hides an empty page group rather than showing a bare heading', async () => {
+    apiGet.mockImplementation((path: string) =>
+      Promise.resolve(path.includes('page=dashboard') ? [PERSONAL] : []),
+    )
+    renderSection()
+    await screen.findByText('Storage unreviewed')
+    expect(screen.queryByTestId('sidebar-preset-group-reports')).toBeNull()
   })
 })

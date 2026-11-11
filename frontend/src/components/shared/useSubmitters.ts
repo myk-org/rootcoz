@@ -2,11 +2,11 @@ import { useEffect, useState } from 'react'
 import { api } from '@/lib/api'
 
 /**
- * Distinct submitters for the dashboard filter. Paged rows cannot supply them,
+ * Distinct submitters for the filter bar (dashboard and reports, one source). Paged rows cannot supply them,
  * so the server enumerates. A failed or empty response leaves the list empty —
  * the picker is free-entry, so the filter stays usable either way.
  */
-export function useDashboardSubmitters(): { submitters: string[]; loading: boolean } {
+export function useSubmitters(): { submitters: string[]; loading: boolean } {
   const [submitters, setSubmitters] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
 

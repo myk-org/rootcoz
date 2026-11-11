@@ -6,7 +6,6 @@ delete warnings), the scoped-models server pool, and per-session apiKey
 injection with unchanged credential-source semantics.
 """
 
-import contextlib
 import json
 import logging
 import sqlite3
@@ -22,6 +21,7 @@ from rootcoz.ai_client import call_ai as real_call_ai
 from rootcoz.ai_client import call_ai_once as real_call_ai_once
 from rootcoz.config import clear_settings_cache
 from rootcoz.main import app
+from tests.conftest import capture_main_logs
 
 SECRET = "server-test-key-123"  # pragma: allowlist secret
 
@@ -81,35 +81,6 @@ def _hermetic_deployment_env(monkeypatch):
 
 def _admin_headers():
     return {"Authorization": "Bearer sp-bootstrap-key"}
-
-
-@contextlib.contextmanager
-def _captured_logs(caplog, *names, level=logging.WARNING):
-    """Collect records from rootcoz module loggers (they set propagate=False)."""
-    module_loggers = [logging.getLogger(name) for name in names]
-    previous_levels = [module_logger.level for module_logger in module_loggers]
-    for module_logger in module_loggers:
-        # The app configures these loggers at LOG_LEVEL, so a DEBUG assertion
-        # would see nothing without lowering the logger itself (caplog's level
-        # only covers the handler).
-        module_logger.setLevel(level)
-        module_logger.addHandler(caplog.handler)
-        # A duplicate is a repeated rendered line inside one module/level/job
-        # context, and the filter keeps that state for the whole session, so a
-        # warning an earlier test already logged would never reach caplog. Clear
-        # that state for the assertion below.
-        for log_filter in module_logger.filters:
-            if hasattr(log_filter, "last_log"):
-                log_filter.last_log = None
-    try:
-        with caplog.at_level(level):
-            yield caplog
-    finally:
-        for module_logger, previous_level in zip(
-            module_loggers, previous_levels, strict=True
-        ):
-            module_logger.setLevel(previous_level)
-            module_logger.removeHandler(caplog.handler)
 
 
 def _fake_catalog(monkeypatch, catalog):
@@ -1659,13 +1630,11 @@ async def test_corrupt_ciphertext_never_becomes_an_api_key(
         )
         await db.commit()
 
-    storage_logger = logging.getLogger("rootcoz.storage")
-    storage_logger.addHandler(caplog.handler)
-    try:
-        with pytest.raises(storage.UnreadableAiCredentialsError):
-            await storage.get_server_ai_credential("google")
-    finally:
-        storage_logger.removeHandler(caplog.handler)
+    with (
+        capture_main_logs(caplog, logging.WARNING, logger=storage.logger),
+        pytest.raises(storage.UnreadableAiCredentialsError),
+    ):
+        await storage.get_server_ai_credential("google")
     assert "refusing access" in caplog.text
 
     # The handled caller path: no credential, never the ciphertext.
@@ -2688,7 +2657,9 @@ async def test_manifest_read_failure_keeps_listing_and_skips_sweep(
     # resolve here would sweep the captured listing away.
     monkeypatch.delenv(DEPLOYMENT_ENV, raising=False)
     (agent_dir / "models.json").write_text("{ half-written")
-    with _captured_logs(caplog, "rootcoz.ai_client", "rootcoz.main") as captured:
+    with capture_main_logs(
+        caplog, logger=("rootcoz.ai_client", "rootcoz.main")
+    ) as captured:
         listed = client.get("/api/admin/server-providers", headers=_admin_headers())
 
     assert listed.status_code == 200
@@ -2717,7 +2688,7 @@ async def test_sweep_storage_failure_keeps_rows_and_endpoint_ok(
 
     monkeypatch.delenv(DEPLOYMENT_ENV, raising=False)
     monkeypatch.setattr(storage, "set_server_provider_key_models", _boom)
-    with _captured_logs(caplog, "rootcoz.main") as captured:
+    with capture_main_logs(caplog, logger="rootcoz.main") as captured:
         listed = client.get("/api/admin/server-providers", headers=_admin_headers())
 
     assert listed.status_code == 200
@@ -2751,7 +2722,7 @@ async def test_sweep_failure_names_provider_and_keeps_unprocessed_rows(
         return await real_set(provider, models, **kwargs)
 
     monkeypatch.setattr(storage, "set_server_provider_key_models", _fail_for_zeta)
-    with _captured_logs(caplog, "rootcoz.main") as captured:
+    with capture_main_logs(caplog, logger="rootcoz.main") as captured:
         await rootcoz_main.capture_deployment_provider_listings(force=True)
 
     # The provider being processed and the failure itself are both named...
@@ -2952,7 +2923,9 @@ async def test_missing_manifest_keeps_captured_listing(
 
     # Atomic replace / mount blip: the agent dir is there, models.json is not.
     (agent_dir / "models.json").unlink()
-    with _captured_logs(caplog, "rootcoz.ai_client", "rootcoz.main") as captured:
+    with capture_main_logs(
+        caplog, logger=("rootcoz.ai_client", "rootcoz.main")
+    ) as captured:
         listed = client.get("/api/admin/server-providers", headers=_admin_headers())
 
     assert listed.status_code == 200
@@ -2990,7 +2963,7 @@ async def test_stored_key_appearing_mid_capture_wins(
         }
 
     monkeypatch.setattr(ai_client, "models_for_api_key", _discovery)
-    with _captured_logs(caplog, "rootcoz.main") as captured:
+    with capture_main_logs(caplog, logger="rootcoz.main") as captured:
         listed = client.get("/api/admin/server-providers", headers=_admin_headers())
 
     assert listed.status_code == 200
@@ -3059,8 +3032,8 @@ async def test_deployment_key_never_logged_or_returned(
     _mock_supported(monkeypatch, ["mygateway"])
     _fake_catalog(monkeypatch, [{"provider": "mygateway", "id": "mygateway/gpt-4o"}])
     _mock_key_discovery(monkeypatch, [{"id": "mygateway/gpt-4o"}])
-    with _captured_logs(
-        caplog, "rootcoz.main", "rootcoz.ai_client", level=logging.DEBUG
+    with capture_main_logs(
+        caplog, logging.DEBUG, logger=("rootcoz.main", "rootcoz.ai_client")
     ):
         listed = client.get("/api/admin/server-providers", headers=_admin_headers())
     assert DEPLOYMENT_KEY not in listed.text
@@ -3195,8 +3168,8 @@ async def test_ambient_env_provider_is_captured_and_refreshable(
         monkeypatch, [{"id": "gpt-5.6-luna"}, {"id": "gpt-5.6-mini"}]
     )
 
-    with _captured_logs(
-        caplog, "rootcoz.main", "rootcoz.ai_client", level=logging.DEBUG
+    with capture_main_logs(
+        caplog, logging.DEBUG, logger=("rootcoz.main", "rootcoz.ai_client")
     ) as captured:
         provider = _providers(client)["openai"]
 
@@ -3310,13 +3283,17 @@ async def test_server_provider_key_manifest_reference_never_logged(
     )
     monkeypatch.setenv(DEPLOYMENT_ENV, DEPLOYMENT_KEY)
 
-    with _captured_logs(
-        caplog, "rootcoz.ai_client", "rootcoz.main", level=logging.DEBUG
+    with capture_main_logs(
+        caplog, logging.DEBUG, logger=("rootcoz.ai_client", "rootcoz.main")
     ):
         assert await ai_client.server_provider_key("mygateway") == DEPLOYMENT_KEY
         # An unreadable manifest is unknown, never an exception.
         (agent_dir / "models.json").write_text("{ half-written")
         assert await ai_client.server_provider_key("mygateway") is None
+        # Nothing on this path logs, so the control has to be synthetic: this
+        # record proves the capture reaches the loggers before the negative.
+        ai_client.logger.debug("capture control reached caplog")
+    assert "capture control reached caplog" in caplog.text
     assert DEPLOYMENT_KEY not in caplog.text
 
 
@@ -3348,7 +3325,7 @@ async def test_deployment_capture_rechecks_stored_key_at_write(
         }
 
     monkeypatch.setattr(ai_client, "models_for_api_key", _discovery)
-    with _captured_logs(caplog, "rootcoz.main") as captured:
+    with capture_main_logs(caplog, logger="rootcoz.main") as captured:
         models, status = await rootcoz_main._capture_deployment_provider_listing(
             "mygateway", DEPLOYMENT_KEY
         )
@@ -3387,7 +3364,7 @@ async def test_ambient_provider_without_key_support_is_never_requested(
     _mock_supported(monkeypatch, ["google"])
     _forbid_key_discovery(monkeypatch)
 
-    with _captured_logs(caplog, "rootcoz.main", level=logging.DEBUG) as captured:
+    with capture_main_logs(caplog, logging.DEBUG, logger="rootcoz.main") as captured:
         provider = _providers(client)["openai"]
 
     assert provider["has_key"] is False
@@ -3531,7 +3508,7 @@ async def test_store_deployment_key_promotes_the_resolved_credential(
     verified = _mock_verify(monkeypatch, "accepted")
     _mock_key_discovery(monkeypatch, [{"id": "gpt-5.6-luna"}, {"id": "gpt-5.6-nova"}])
 
-    with _captured_logs(caplog, "rootcoz.main", level=logging.INFO) as logs:
+    with capture_main_logs(caplog, logging.INFO, logger="rootcoz.main") as logs:
         response = _store_deployment_key(client, "openai")
 
     assert response.status_code == 200
@@ -3698,7 +3675,7 @@ async def test_store_deployment_key_discovers_the_verification_model(
     verified = _mock_verify(monkeypatch, "accepted")
     _mock_key_discovery(monkeypatch, [{"id": "gw-first"}, {"id": "gw-second"}])
 
-    with _captured_logs(caplog, "rootcoz.main", level=logging.DEBUG) as logs:
+    with capture_main_logs(caplog, logging.DEBUG, logger="rootcoz.main") as logs:
         response = _store_deployment_key(client, "mygateway", posted_model)
 
     assert response.status_code == 200

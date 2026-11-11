@@ -96,6 +96,19 @@ async def test_a_failing_step_does_not_lose_the_rest(caplog) -> None:
     assert "s3cr3t" not in log
 
 
+def test_the_reaper_capture_counts_a_repeated_line_twice(caplog) -> None:
+    """The autouse capture takes the duplicate filter off, it does not just clear it.
+
+    The ``count(...) == 1`` assertions in this file exist to catch a line emitted
+    twice, and a live filter collapses a repeat into one line before caplog sees
+    it — which would make those assertions pass on the very bug they look for.
+    """
+    reaper_logger.warning("capture control: one repeated line")
+    reaper_logger.warning("capture control: one repeated line")
+
+    assert caplog.text.count("capture control: one repeated line") == 2
+
+
 async def test_a_cancelled_caller_loses_neither_the_delete_nor_the_session_revoke() -> (
     None
 ):
@@ -504,6 +517,10 @@ def test_a_file_that_vanished_mid_walk_is_not_reported_as_undeleted(
     assert not root.exists(), "a vanished entry stopped the walk"
     assert (nbytes, entries) == (0, 2)
     assert failed == 0, "a vanished entry is not a failed delete"
+    # Positive control: the reaper's own lines do reach this capture, so the
+    # absence below is a real absence and not an empty capture.
+    reaper_logger.info("capture control reached caplog")
+    assert "capture control reached caplog" in caplog.text
     assert "paths not deleted" not in caplog.text, caplog.text
 
 
@@ -1036,6 +1053,9 @@ async def test_a_clean_recovery_still_reports_not_reusable(
         assert not workspace.exists(), "a clean recovery kept the old tree"
     assert not delete_marker(workspace).exists()
     assert delete_tree(workspace) == (0, 0, 0), "a gone path reports no failure"
+    # Positive control: the reaper's own lines do reach this capture.
+    reaper_logger.info("capture control reached caplog")
+    assert "capture control reached caplog" in caplog.text
     assert "paths not deleted" not in caplog.text, caplog.text
 
 
@@ -1227,5 +1247,8 @@ async def test_clearing_a_chat_that_never_ran_is_a_clean_noop(tmp_path, caplog) 
     outcome = await cleanup_path_off_loop("job-never", never_created)
 
     assert outcome is CleanupOutcome.CLEAN
+    # Positive control: the reaper's own lines do reach this capture.
+    reaper_logger.info("capture control reached caplog")
+    assert "capture control reached caplog" in caplog.text
     assert "could not write the delete marker" not in caplog.text, caplog.text
     assert not never_created.parent.exists(), "the cleanup created the missing parent"

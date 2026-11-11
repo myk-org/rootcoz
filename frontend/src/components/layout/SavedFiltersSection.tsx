@@ -6,12 +6,12 @@ import { cn } from '@/lib/utils'
 import { useAuth } from '@/lib/auth'
 import {
   fetchFilterPresets,
-  filtersToQueryString,
   notifyPresetApplied,
   PRESETS_CHANGED_EVENT,
   type FilterPreset,
   type FilterPresetPage,
 } from '@/lib/filterPresets'
+import { filtersToQueryString } from '@/lib/jobFilters'
 
 // ─── Sidebar "Saved filters" section (#179) ─────────────────────────
 
@@ -86,12 +86,18 @@ export function SavedFiltersSection({ collapsed, onNavigate }: SavedFiltersSecti
     }
   }, [canViewReports])
 
-  const { mine, server } = useMemo(() => {
-    const lists = { mine: [] as PresetEntry[], server: [] as PresetEntry[] }
-    for (const entry of entries ?? []) {
-      (entry.preset.scope === 'server' ? lists.server : lists.mine).push(entry)
+  // Grouped by the page a bookmark opens, then by who owns it: the sidebar has
+  // to say where a click lands (#546), and "Reports" is the only destination
+  // that is not the page the sidebar's own dashboard links point at.
+  const groups = useMemo(() => {
+    const out: Record<FilterPresetPage, { mine: PresetEntry[]; server: PresetEntry[] }> = {
+      dashboard: { mine: [], server: [] },
+      reports: { mine: [], server: [] },
     }
-    return lists
+    for (const entry of entries ?? []) {
+      out[entry.preset.page][entry.preset.scope === 'server' ? 'server' : 'mine'].push(entry)
+    }
+    return out
   }, [entries])
 
   if (entries === null || entries.length === 0) return null
@@ -142,6 +148,29 @@ export function SavedFiltersSection({ collapsed, onNavigate }: SavedFiltersSecti
       </>
     )
 
+  const renderPageGroup = (
+    page: FilterPresetPage,
+    title: string | null,
+    lists: { mine: PresetEntry[]; server: PresetEntry[] },
+  ) => {
+    if (lists.mine.length === 0 && lists.server.length === 0) return null
+    return (
+      <div
+        key={page}
+        data-testid={`sidebar-preset-group-${page}`}
+        className={cn('space-y-0.5', !collapsed && title && 'ml-2 border-l border-border-default pl-1')}
+      >
+        {!collapsed && title && (
+          <div className="px-3 pb-1 pt-2 text-[10px] font-semibold uppercase tracking-wide text-text-tertiary">
+            {title}
+          </div>
+        )}
+        {renderGroup('Yours', lists.mine)}
+        {renderGroup('Server', lists.server)}
+      </div>
+    )
+  }
+
   return (
     <div data-testid="sidebar-saved-filters" className="pt-1">
       {!collapsed && (
@@ -149,8 +178,8 @@ export function SavedFiltersSection({ collapsed, onNavigate }: SavedFiltersSecti
           Saved filters
         </div>
       )}
-      {renderGroup('Yours', mine)}
-      {renderGroup('Server', server)}
+      {renderPageGroup('dashboard', null, groups.dashboard)}
+      {renderPageGroup('reports', 'Reports', groups.reports)}
     </div>
   )
 }

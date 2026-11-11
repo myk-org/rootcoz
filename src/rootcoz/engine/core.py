@@ -91,22 +91,27 @@ _active_clones = 0
 
 
 def _job_clone_share(settings: Settings) -> int:
-    """How many additional-repo clones one analysis may run at once.
+    """How many clones one caller (analysis or chat) may run at once.
 
-    Policy, not physics: the share is the smaller of the process-wide clone
-    ceiling and the server default AI width, so one analysis cannot occupy the
-    host's whole clone budget (#461). Extra fan-out is not wasted -- the clones
-    are consumed by ``copy_rootcoz_pi_resources``, graph indexing and the prompt's
-    resource section before the first AI call -- it is traded for the other
-    job's slots, deliberately.
+    The clone ceiling itself. #466 capped this at ``max_concurrent_ai_calls`` as
+    a fairness proxy, and the effect was that ``max_concurrent_repo_clones``
+    went inert above the AI width: a deployment with
+    ``max_concurrent_repo_clones=5`` and the default ``max_concurrent_ai_calls=3``
+    observed 3, so raising the clone ceiling changed nothing (#547). The AI
+    width describes LLM calls, not disk and network, and it has no bearing on
+    cloning.
+
+    Fairness is not lost: ``_clone_lock``/``_active_clones`` enforce the one
+    process-wide ceiling every caller competes for, so a single caller cannot
+    occupy more than the host budget by construction. Per-caller fairness would
+    need a setting that says so -- not an LLM call width.
 
     The caller passes the settings it already read for this admission attempt,
     so one decision costs one ``get_settings()`` call and a live change applies
-    on the next attempt. A repo-side or per-submission ``max_concurrent_ai_calls``
-    override does not widen it: the clone budget is a host resource, not a job
-    preference.
+    on the next attempt. A repo-side or per-submission override does not widen
+    it: the clone budget is a host resource, not a job preference.
     """
-    return min(settings.max_concurrent_repo_clones, settings.max_concurrent_ai_calls)
+    return settings.max_concurrent_repo_clones
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +131,8 @@ async def _admit_clone(active_here: list[int]) -> Callable[[], None]:
 
     ``active_here[0]`` is this batch's own count, so one batch cannot occupy the
     host's whole budget. The budget itself is process-wide and shared by every
-    caller, analysis and chat alike (#461).
+    caller, analysis and chat alike (#461), and it is the clone ceiling alone
+    -- never the AI call width (#547).
     """
     global _active_clones
     while True:
@@ -276,11 +282,10 @@ async def clone_additional_repos(
     settings = get_settings()
     logger.info(
         "Cloning %d additional repo(s) at most %d at a time "
-        "(max_concurrent_repo_clones=%d, max_concurrent_ai_calls=%d, job_id=%s)",
+        "(max_concurrent_repo_clones=%d, job_id=%s)",
         len(additional_repos_list),
         _job_clone_share(settings),
         settings.max_concurrent_repo_clones,
-        settings.max_concurrent_ai_calls,
         job_id or "-",
     )
 

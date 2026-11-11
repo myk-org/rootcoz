@@ -15,6 +15,7 @@ from rootcoz.config import (
     Settings,
     clear_db_settings_cache,
     clear_settings_cache,
+    db_setting_is_set,
     get_settings,
     update_db_settings_cache,
 )
@@ -1042,3 +1043,93 @@ def test_queue_is_an_advertised_sparse_field(client):
     assert response.status_code == 200
     assert "queue" in response.json()["fields"]
     assert "queue" in RESULT_FIELD_PATHS
+
+
+# --- chat clone depth (#547) ---
+
+
+def test_chat_clone_depth_is_a_server_setting(client, monkeypatch):
+    """Registered, default 1, env-supplied default, DB override wins, ≥ 1 enforced."""
+    assert "chat_clone_depth" in main._SETTINGS_CATEGORIES["Server"]
+    by_key = {
+        item["key"]: item
+        for item in client.get("/api/admin/settings", headers=_admin_headers()).json()
+    }
+    row = by_key["chat_clone_depth"]
+    assert (row["category"], row["default"], row["env_var"]) == (
+        "Server",
+        "1",
+        "CHAT_CLONE_DEPTH",
+    )
+    assert (row["restart_required"], row["sensitive"]) == (False, False)
+
+    # 0 commits is not a clone. The bound is named, never applied silently.
+    rejected = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"chat_clone_depth": 0}},
+    )
+    assert rejected.status_code == 400
+
+    # A JSON boolean is not a depth: int(True) passes the bound, and "True"
+    # persisted would fail the merged-settings build and drop every DB override.
+    boolean = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"chat_clone_depth": True}},
+    )
+    assert boolean.status_code == 400
+    clear_settings_cache()
+    assert get_settings().chat_clone_depth == 1
+
+    monkeypatch.setenv("CHAT_CLONE_DEPTH", "4")
+    clear_settings_cache()
+    assert get_settings().chat_clone_depth == 4
+    saved = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"chat_clone_depth": "2"}},
+    )
+    assert saved.status_code == 200
+    clear_settings_cache()
+    assert get_settings().chat_clone_depth == 2
+
+
+def test_boolean_is_refused_for_any_integer_setting(client):
+    """The guard is in the shared integer validator, not on ``chat_clone_depth``.
+
+    ``int(True)`` passes every bound, and the save path persisted ``"True"``,
+    which made ``_build_settings`` fall back and drop *every* DB override — so
+    the rejection must be key-agnostic, must store nothing, and a saved integer
+    must leave the other overrides in effect.
+    """
+    clear_settings_cache()
+    baseline = get_settings()
+    for key in (
+        "chat_clone_depth",
+        "max_concurrent_repo_clones",
+        "results_retention_days",
+        "max_concurrent_ai_calls",
+        "session_ttl_hours",
+    ):
+        refused = client.put(
+            "/api/admin/settings",
+            headers=_admin_headers(),
+            json={"settings": {key: True}},
+        )
+        assert refused.status_code == 400, key
+        assert not db_setting_is_set(key), key
+        clear_settings_cache()
+        assert getattr(get_settings(), key) == getattr(baseline, key), key
+
+    # Through the save path, not the cache: that is where the bug wrote "True".
+    for key, value in (("chat_clone_depth", 2), ("results_retention_days", 45)):
+        saved = client.put(
+            "/api/admin/settings",
+            headers=_admin_headers(),
+            json={"settings": {key: value}},
+        )
+        assert saved.status_code == 200, key
+    clear_settings_cache()
+    merged = get_settings()
+    assert (merged.chat_clone_depth, merged.results_retention_days) == (2, 45)

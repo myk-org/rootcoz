@@ -274,6 +274,23 @@ class TestReportOverrides:
             assert result["ai_accuracy_pct"] <= 100
 
     @pytest.mark.asyncio
+    async def test_accuracy_denominator_honours_submitters(self, populated_db: Path):
+        """The reviewed-test count uses the same job filters as the details.
+
+        Otherwise a submitter filter narrows the overrides but leaves
+        ``ai_accuracy_pct`` dividing by reviewed tests from every job.
+        """
+        with patch.object(storage, "DB_PATH", populated_db):
+            baseline = await storage.get_report_classification_overrides()
+            assert baseline["total_reviewed"] >= 1
+
+            filtered = await storage.get_report_classification_overrides(
+                submitters={"nobody-by-that-name"}
+            )
+            assert filtered["total"] == 0
+            assert filtered["total_reviewed"] == 0
+
+    @pytest.mark.asyncio
     async def test_same_classification_excluded(self, populated_db: Path):
         """Overrides where AI classification == user classification are excluded."""
         with patch.object(storage, "DB_PATH", populated_db):

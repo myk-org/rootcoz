@@ -21,6 +21,7 @@ from unittest.mock import patch
 import pytest
 
 from rootcoz import storage
+from tests.conftest import capture_main_logs
 
 _ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"  # little-endian frame magic (RFC 8878)
 
@@ -150,13 +151,9 @@ async def _insert_newer_encoding(job_id: str, blob: bytes) -> None:
 
 @pytest.fixture
 def storage_logs(caplog: pytest.LogCaptureFixture) -> Any:
-    """Attach caplog to the storage logger (simple_logger sets propagate=False)."""
-    storage.logger.setLevel(logging.DEBUG)
-    storage.logger.addHandler(caplog.handler)
-    try:
-        yield caplog
-    finally:
-        storage.logger.removeHandler(caplog.handler)
+    """Capture the storage logger (simple_logger sets propagate=False)."""
+    with capture_main_logs(caplog, logging.DEBUG, logger=storage.logger) as captured:
+        yield captured
 
 
 # --- the writer -------------------------------------------------------------
@@ -505,6 +502,8 @@ async def test_backfill_is_byte_identical(_storage, storage_logs) -> None:
 
     stats = await storage.backfill_result_json_compression()
     assert stats["rows"] == 1
+    # Positive control: an empty capture would pass the negative below.
+    assert "result_json compression: starting" in storage_logs.text
     assert "is no longer the database it started on" not in storage_logs.text
 
     row = await _stored(_storage, "job-bytes")
@@ -538,6 +537,8 @@ async def test_backfill_shrinks_the_column(_storage, storage_logs) -> None:
         )[0]
     assert after == stats["bytes_after"] < stats["bytes_before"] == before
     assert after <= before / 5  # measured ~9x on the dev DB
+    # Positive control: an empty capture would pass the negative below.
+    assert "result_json compression: starting" in storage_logs.text
     assert "is no longer the database it started on" not in storage_logs.text
 
     # Idempotent and resumable by construction: a second pass has nothing to do.
@@ -566,6 +567,8 @@ async def test_compression_does_not_overwrite_a_concurrent_patch(
         stats = await storage.backfill_result_json_compression()
 
     assert stats["rows"] == 0
+    # Positive control: an empty capture would pass the negative below.
+    assert "result_json compression: starting" in storage_logs.text
     assert "is no longer the database it started on" not in storage_logs.text
     row = await _stored(_storage, "job-race")
     assert row["kind"] == "text"
@@ -596,6 +599,8 @@ async def test_backfill_does_not_block_the_event_loop(_storage, storage_logs) ->
     await task
 
     assert stats["rows"] == 120
+    # Positive control: an empty capture would pass the negative below.
+    assert "result_json compression: starting" in storage_logs.text
     assert "is no longer the database it started on" not in storage_logs.text
     assert elapsed > 0.01, "the run must be long enough for the ticker to matter"
     # One tick per batch at minimum; a blocking encode would allow at most one.
@@ -1141,6 +1146,8 @@ async def test_denorm_backfill_repairs_a_late_old_build_row(
     row = await _stored(_storage, "job-late")
     assert row["kind"] == "blob"
     assert storage.parse_result_json(row["result_json"]) == payload
+    # Positive control: an empty capture would pass the negative below.
+    assert "result_json compression: starting" in storage_logs.text
     assert "is no longer the database it started on" not in storage_logs.text
 
 

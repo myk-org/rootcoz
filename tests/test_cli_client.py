@@ -403,6 +403,27 @@ class TestRootCozClientDashboard:
         client = _make_client(handler)
         assert client.dashboard_submitters() == ["Yuli", "myakove"]
 
+    def test_failed_test_names(self):
+        """GET /api/dashboard/test-names returns the counted rows."""
+
+        def handler(request):
+            assert request.method == "GET"
+            assert request.url.path == "/api/dashboard/test-names"
+            assert request.url.params["q"] == "login"
+            assert request.url.params["limit"] == "5"
+            return httpx.Response(
+                200,
+                json={
+                    "test_names": [
+                        {"test_name": "tests.login.test_one", "failure_count": 3}
+                    ]
+                },
+            )
+
+        client = _make_client(handler)
+        rows = client.failed_test_names(q="login", limit=5)
+        assert rows == [{"test_name": "tests.login.test_one", "failure_count": 3}]
+
     def test_dashboard_filtered_submitted_by_repeatable(self):
         """Each submitted_by value is sent as its own query param."""
 
@@ -3254,6 +3275,44 @@ class TestReports:
         )
         assert result["total_jobs"] == 1
 
+    def test_report_totals_sends_the_test_name_pair(self):
+        def handler(request):
+            url = str(request.url)
+            assert "test_name=prefix_needle_suffix" in url
+            assert "test_name_mode=exact" in url
+            return httpx.Response(
+                200,
+                json={
+                    "total_jobs": 0,
+                    "total_failures": 0,
+                    "total_reviewed": 0,
+                    "total_details": 0,
+                    "jobs": [],
+                },
+            )
+
+        client = _make_client(handler)
+        client.report_totals(test_name="prefix_needle_suffix", test_name_mode="exact")
+
+    def test_report_totals_leaves_the_default_mode_out(self):
+        def handler(request):
+            url = str(request.url)
+            assert "test_name=needle" in url
+            assert "test_name_mode" not in url
+            return httpx.Response(
+                200,
+                json={
+                    "total_jobs": 0,
+                    "total_failures": 0,
+                    "total_reviewed": 0,
+                    "total_details": 0,
+                    "jobs": [],
+                },
+            )
+
+        client = _make_client(handler)
+        client.report_totals(test_name="needle")
+
     def test_report_classification_overrides(self):
         def handler(request):
             assert "/api/reports/classification-overrides" in str(request.url)
@@ -3297,8 +3356,8 @@ class TestReports:
             "team": "a",
             "tier": "1",
             "version": "v1",
-            "from": "2025-01-01",
-            "to": "2025-12-31",
+            "date_from": "2025-01-01",
+            "date_to": "2025-12-31",
         }
 
     def test_build_report_params_with_status_and_tags(self):

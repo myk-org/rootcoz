@@ -29,7 +29,7 @@ import pytest
 from rootcoz import ai_client, main, monitoring, storage
 from rootcoz.config import update_db_settings_cache
 from rootcoz.encryption import encrypt_sensitive_fields
-from tests.conftest import admin_login, forget_duplicate_history, make_app_client
+from tests.conftest import admin_login, capture_main_logs, make_app_client
 
 MAIN_PATH = Path(__file__).resolve().parents[1] / "src" / "rootcoz" / "main.py"
 
@@ -229,29 +229,11 @@ async def test_prune_audit_events_by_cutoff(audit_db: Path) -> None:
 # --- record_audit ----------------------------------------------------------
 
 
-def _capture_main_logs(caplog: pytest.LogCaptureFixture) -> Any:
-    """Attach caplog to the main module logger (simple_logger sets propagate=False).
-
-    The duplicate filter keeps its remembered line for the whole session, so an
-    identical line another test logged is dropped before this handler sees it.
-    Every caller removes the handler again: ``caplog.handler`` is one
-    session-wide instance, and a leftover attach would make a later test's
-    capture count the same record twice (#513).
-    """
-    main_logger = main.logger
-    main_logger.setLevel(logging.INFO)
-    forget_duplicate_history(main_logger)
-    main_logger.addHandler(caplog.handler)
-    return main_logger
-
-
 async def test_record_audit_writes_row_and_log_line(
     audit_db: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.INFO)
-    main_logger = _capture_main_logs(caplog)
-
-    try:
+    with capture_main_logs(caplog, logging.INFO):
         await main.record_audit(
             action="admin.user_create",
             actor="admin",
@@ -261,8 +243,6 @@ async def test_record_audit_writes_row_and_log_line(
             details={"role": "reviewer"},
             request=_fake_request(),
         )
-    finally:
-        main_logger.removeHandler(caplog.handler)
 
     assert "[AUDIT] Admin 'admin' created reviewer user 'carol'" in caplog.text
 
@@ -279,17 +259,13 @@ async def test_record_audit_stores_compact_details(
     audit_db: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.INFO)
-    main_logger = _capture_main_logs(caplog)
-
-    try:
+    with capture_main_logs(caplog, logging.INFO):
         await main.record_audit(
             action="admin.setting_persist",
             actor="admin",
             message="Admin 'admin' stored a setting",
             details={"key": "value", "note": "naïve"},
         )
-    finally:
-        main_logger.removeHandler(caplog.handler)
 
     with sqlite3.connect(audit_db) as conn:
         (raw,) = conn.execute(
@@ -306,23 +282,21 @@ async def test_record_audit_swallows_db_failure(
     # The failure counter is process-wide; reset it so health tests stay hermetic.
     monkeypatch.setattr(monitoring, "_audit_write_failures", 0)
     caplog.set_level(logging.INFO)
-    main_logger = _capture_main_logs(caplog)
-
-    try:
-        with patch.object(
+    with (
+        capture_main_logs(caplog, logging.INFO),
+        patch.object(
             storage,
             "insert_audit_event",
             AsyncMock(side_effect=sqlite3.OperationalError("database is locked")),
-        ):
-            # Must not raise — an audit problem cannot fail the caller's action.
-            await main.record_audit(
-                action="auth.login",
-                actor="alice",
-                message="Login success: user='alice' is_admin=False",
-                request=_fake_request(),
-            )
-    finally:
-        main_logger.removeHandler(caplog.handler)
+        ),
+    ):
+        # Must not raise — an audit problem cannot fail the caller's action.
+        await main.record_audit(
+            action="auth.login",
+            actor="alice",
+            message="Login success: user='alice' is_admin=False",
+            request=_fake_request(),
+        )
 
     assert "Failed to persist audit event 'auth.login'" in caplog.text
     assert "[AUDIT] Login success: user='alice' is_admin=False" in caplog.text
@@ -332,9 +306,7 @@ async def test_record_audit_never_stores_swallowed_secret(
     audit_db: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.INFO)
-    main_logger = _capture_main_logs(caplog)
-
-    try:
+    with capture_main_logs(caplog, logging.INFO):
         await main.record_audit(
             action="provider.key.store",
             actor="admin",
@@ -348,11 +320,14 @@ async def test_record_audit_never_stores_swallowed_secret(
             },
             request=_fake_request(),
         )
-    finally:
-        main_logger.removeHandler(caplog.handler)
 
     event = (await storage.list_audit_events(action="provider.key.store"))["events"][0]
     assert _SECRET not in json.dumps(event)
+    # Positive control: the capture does see this logger's audit line, so the
+    # absence below is a real absence and not an empty capture.
+    assert (
+        "[AUDIT] Admin 'admin' stored server provider key for 'claude'" in caplog.text
+    )
     assert _SECRET not in caplog.text
     assert event["details"] == {"provider": "claude", "nested": {}}
 
@@ -749,11 +724,8 @@ def test_login_failure_for_unknown_username_keeps_it_verbatim(
     """The trail exists to name the username under attack, not to hide it."""
     bad = {"username": "attacker-1", "api_key": "wrong"}  # pragma: allowlist secret
     caplog.set_level(logging.INFO)
-    main_logger = _capture_main_logs(caplog)
-    try:
+    with capture_main_logs(caplog, logging.INFO):
         response = app_client.post("/api/auth/login", json=bad)
-    finally:
-        main_logger.removeHandler(caplog.handler)
     assert response.status_code == 401
 
     events = _events(action="auth.login_failed")
@@ -771,11 +743,8 @@ def test_login_failure_for_a_real_account_keeps_its_exact_name(
     assert registered.status_code == 200, registered.text
 
     bad = {"username": "real.user", "api_key": "wrong"}  # pragma: allowlist secret
-    main_logger = _capture_main_logs(caplog)
-    try:
+    with capture_main_logs(caplog, logging.INFO):
         response = app_client.post("/api/auth/login", json=bad)
-    finally:
-        main_logger.removeHandler(caplog.handler)
     assert response.status_code == 401
 
     events = _events(action="auth.login_failed")
@@ -790,17 +759,14 @@ def test_login_username_that_is_a_hex_token_is_stored_verbatim(
 ) -> None:
     """A token typed as a username is the evidence, not a secret to hide."""
     caplog.set_level(logging.INFO)
-    main_logger = _capture_main_logs(caplog)
     token = (
         "0123456789abcdef0123456789abcdef"  # pragma: allowlist secret  # gitleaks:allow
     )
-    try:
+    with capture_main_logs(caplog, logging.INFO):
         response = app_client.post(
             "/api/auth/login",
             json={"username": token, "api_key": "wrong"},  # pragma: allowlist secret
         )
-    finally:
-        main_logger.removeHandler(caplog.handler)
     assert response.status_code == 401
 
     events = _events(action="auth.login_failed")
@@ -822,14 +788,11 @@ def test_login_username_over_the_length_limit_is_recorded_truncated(
     expected = f"{username[: main._LOGIN_MAX_USERNAME_LENGTH]}…"
 
     caplog.set_level(logging.INFO)
-    main_logger = _capture_main_logs(caplog)
-    try:
+    with capture_main_logs(caplog, logging.INFO):
         response = app_client.post(
             "/api/auth/login",
             json={"username": username, "api_key": "wrong"},  # pragma: allowlist secret
         )
-    finally:
-        main_logger.removeHandler(caplog.handler)
 
     assert response.status_code == 401
     assert response.json() == baseline.json()
@@ -6797,16 +6760,15 @@ async def test_audit_write_failure_is_logged_at_error(
 ) -> None:
     monkeypatch.setattr(monitoring, "_audit_write_failures", 0)
     caplog.set_level(logging.INFO)
-    main_logger = _capture_main_logs(caplog)
-    try:
-        with patch.object(
+    with (
+        capture_main_logs(caplog, logging.INFO),
+        patch.object(
             storage,
             "insert_audit_event",
             AsyncMock(side_effect=sqlite3.OperationalError("database is locked")),
-        ):
-            await main.record_audit(action="auth.login", actor="alice", message="m")
-    finally:
-        main_logger.removeHandler(caplog.handler)
+        ),
+    ):
+        await main.record_audit(action="auth.login", actor="alice", message="m")
 
     record = next(
         entry
@@ -6990,9 +6952,8 @@ async def test_record_audit_scrubs_a_secret_pasted_into_free_text(
     audit_db: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
     caplog.set_level(logging.INFO)
-    main_logger = _capture_main_logs(caplog)
     secret = "ghp_9f8e7d6c5b4a39281706f5e4d3c2b1a0ffee"  # pragma: allowlist secret  # gitleaks:allow
-    try:
+    with capture_main_logs(caplog, logging.INFO):
         await main.record_audit(
             action="provider.key.rotate",
             actor="admin",
@@ -7000,12 +6961,12 @@ async def test_record_audit_scrubs_a_secret_pasted_into_free_text(
             details={"reason": f"rotated {secret} manually"},
             request=_fake_request(),
         )
-    finally:
-        main_logger.removeHandler(caplog.handler)
 
     event = (await storage.list_audit_events(action="provider.key.rotate"))["events"][0]
     assert event["details"] == {"reason": "rotated [redacted] manually"}
     assert secret not in json.dumps(event)
+    # Positive control: the capture does see this logger's audit line.
+    assert "[AUDIT] Admin 'admin' rotated a server provider key" in caplog.text
     assert secret not in caplog.text
 
 
@@ -7014,11 +6975,10 @@ async def test_record_audit_stores_identity_verbatim(
 ) -> None:
     """Root cause fix (#379): identity is not a detail, so it is never scrubbed."""
     caplog.set_level(logging.INFO)
-    main_logger = _capture_main_logs(caplog)
     token = (
         "0123456789abcdef0123456789abcdef"  # pragma: allowlist secret  # gitleaks:allow
     )
-    try:
+    with capture_main_logs(caplog, logging.INFO):
         await main.record_audit(
             action="auth.login_failed",
             actor=token,
@@ -7028,8 +6988,6 @@ async def test_record_audit_stores_identity_verbatim(
             outcome="failure",
             request=_fake_request(),
         )
-    finally:
-        main_logger.removeHandler(caplog.handler)
 
     event = (await storage.list_audit_events(action="auth.login_failed"))["events"][0]
     assert event["actor"] == token
@@ -7446,16 +7404,11 @@ async def test_suppressed_auth_failures_still_log_once_per_window(
     _reset_suppression(monkeypatch)
     monkeypatch.setattr(main, "get_settings", lambda: _throttle_settings(1))
     caplog.set_level(logging.INFO)
-    main_logger = _capture_main_logs(caplog)
     # The one-per-window summary is logged by the monitoring module.
-    monitoring_logger = monitoring.logger
-    monitoring_logger.setLevel(logging.INFO)
-    monitoring_logger.addHandler(caplog.handler)
-    try:
+    with capture_main_logs(
+        caplog, logging.INFO, logger=("rootcoz.main", monitoring.logger)
+    ):
         await _failed_logins(4)
-    finally:
-        main_logger.removeHandler(caplog.handler)
-        monitoring_logger.removeHandler(caplog.handler)
 
     # Four attempts against a one-per-minute budget: one row, three drops.
     stored = await storage.list_audit_events(action="auth.login_failed")

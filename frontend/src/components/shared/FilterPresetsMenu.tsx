@@ -36,19 +36,31 @@ import {
   createFilterPreset,
   deleteFilterPreset,
   fetchFilterPresets,
-  filtersEqual,
   FILTER_PRESET_KEYS,
   getLastAppliedPreset,
   notifyPresetApplied,
   notifyPresetsChanged,
   PRESET_APPLIED_EVENT,
-  searchParamsToFilters,
   updateFilterPreset,
   type FilterPreset,
   type FilterPresetPage,
   type FilterPresetScope,
-  type FilterValues,
 } from '@/lib/filterPresets'
+import {
+  filtersEqual,
+  jobFiltersFromFilters,
+  jobFiltersToFilters,
+  searchParamsToFilters,
+  type FilterValues,
+} from '@/lib/jobFilters'
+
+/**
+ * Both sides of a comparison go through the typed values, so a preset stored
+ * with the legacy `from`/`to` keys equals the same view written as
+ * `date_from`/`date_to` (#546 decision 10).
+ */
+const comparableFilters = (filters: FilterValues): FilterValues =>
+  jobFiltersToFilters(jobFiltersFromFilters(filters))
 
 // ─── Component ──────────────────────────────────────────────────────
 
@@ -119,11 +131,18 @@ export function FilterPresetsMenu({ page, searchParams, onApply }: FilterPresets
     return () => window.removeEventListener(PRESET_APPLIED_EVENT, handler)
   }, [page])
 
-  const currentFilters = useMemo(
+  // Save/Update send the URL's own shape, unchanged; only the *comparisons*
+  // below normalise, and `hasFilters` reads the normalised form so a mode like
+  // `analysis_state=all` is not a filter (#546 decision 10).
+  const currentFilters = useMemo<FilterValues>(
     () => searchParamsToFilters(searchParams, keys),
     [searchParams, keys],
   )
-  const hasFilters = Object.keys(currentFilters).length > 0
+  const currentComparable = useMemo(
+    () => comparableFilters(currentFilters),
+    [currentFilters],
+  )
+  const hasFilters = Object.keys(currentComparable).length > 0
 
   // A clean URL means no preset is selected: returning to the page via a
   // nav link (or clearing every filter) empties the URL filters, and the
@@ -145,13 +164,15 @@ export function FilterPresetsMenu({ page, searchParams, onApply }: FilterPresets
     const last = getLastAppliedPreset()
     if (!last || last.page !== page) return
     const candidate = presets.find((p) => p.id === last.id)
-    if (candidate && filtersEqual(currentFilters, candidate.filters)) {
+    if (candidate && filtersEqual(currentComparable, comparableFilters(candidate.filters))) {
       setActiveId(candidate.id)
     }
-  }, [presets, page, currentFilters])
+  }, [presets, page, currentComparable])
 
   const activePreset = presets?.find((p) => p.id === activeId) ?? null
-  const modified = activePreset !== null && !filtersEqual(currentFilters, activePreset.filters)
+  const modified =
+    activePreset !== null &&
+    !filtersEqual(currentComparable, comparableFilters(activePreset.filters))
 
   // ─── Actions ───────────────────────────────────────────────────
 
@@ -446,7 +467,7 @@ export function FilterPresetsMenu({ page, searchParams, onApply }: FilterPresets
                 className="rounded-md border border-border-default bg-surface-elevated px-2 py-0.5 font-mono text-[11px] text-text-secondary"
               >
                 <span className="font-semibold text-text-primary">{key}</span>=
-                {Array.isArray(value) ? value.join(',') : value}
+                {Array.isArray(value) ? value.join(',') : String(value)}
               </span>
             ))}
           </div>

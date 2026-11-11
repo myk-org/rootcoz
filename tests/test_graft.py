@@ -14,6 +14,7 @@ import pytest
 
 from rootcoz import temp_paths
 from rootcoz.engine import graft
+from tests.conftest import capture_main_logs
 
 
 @pytest.fixture
@@ -722,11 +723,6 @@ def test_reap_graph_abandons_the_delete_while_a_builder_holds_the_lock(
     """A live build owns the tree: the reaper logs, deletes nothing, returns None."""
     workspace, root = graft_tree
     monkeypatch.setattr(graft, "GRAPH_LOCK_SECONDS", 0.05)
-    monkeypatch.setattr(graft.logger, "propagate", True)
-    # The duplicate filter keeps its remembered line for the whole session, so an
-    # earlier test's identical line would swallow this one when the files run in
-    # one process.
-    monkeypatch.setattr(graft.logger, "filters", [])
     deleted: list[Path] = []
 
     def record_delete(path: Path) -> tuple[int, int]:
@@ -735,7 +731,10 @@ def test_reap_graph_abandons_the_delete_while_a_builder_holds_the_lock(
 
     monkeypatch.setattr(graft, "delete_tree", record_delete)
 
-    with _builder_holding(workspace), caplog.at_level(logging.WARNING):
+    with (
+        _builder_holding(workspace),
+        capture_main_logs(caplog, logging.WARNING, logger=graft.logger),
+    ):
         assert graft.reap_graph("job-1", workspace) is temp_paths.ABANDON
 
     assert deleted == []

@@ -6,6 +6,7 @@ the shared path.
 """
 
 import logging
+import re
 import threading
 import time
 from pathlib import Path
@@ -16,6 +17,7 @@ from rootcoz.config import Settings
 from rootcoz.engine import core as core_module
 from rootcoz.engine.chat import clone_chat_repos
 from rootcoz.repository import RepositoryManager
+from tests.conftest import capture_main_logs
 
 
 @pytest.fixture
@@ -88,8 +90,14 @@ async def test_one_failing_repo_warns_once_and_the_rest_still_clone(
     failed: list[str] = []
 
     chat_logger = logging.getLogger("rootcoz.engine.chat")
-    monkeypatch.setattr(chat_logger, "propagate", True)
-    with caplog.at_level(logging.WARNING, logger="rootcoz.engine.chat"):
+    # Two repos fan out concurrently, so an identical warning can be emitted
+    # twice; the duplicate filter is taken off so the count below counts emits.
+    with capture_main_logs(
+        caplog,
+        logging.WARNING,
+        logger=chat_logger,
+        bypass_duplicate_filter=True,
+    ):
         cloned_any = await clone_chat_repos(
             workspace, {"additional_repos": _repos(3)}, failed=failed
         )
@@ -104,16 +112,20 @@ async def test_one_failing_repo_warns_once_and_the_rest_still_clone(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("url", "expected_token"),
+    "url",
     [
-        ("https://github.com/acme/tests-repo.git", "tok"),
-        ("https://gitlab.com/acme/tests-repo.git", None),
+        "https://github.com/acme/tests-repo.git",
+        "https://gitlab.com/acme/tests-repo.git",
     ],
 )
-async def test_repo_token_only_reaches_github_hosts(
-    monkeypatch, tmp_path: Path, clone_settings, url: str, expected_token: str | None
+async def test_repo_token_reaches_every_declared_host(
+    monkeypatch, tmp_path: Path, clone_settings, url: str
 ) -> None:
-    """The load-bearing credential guard: no token towards a non-GitHub host."""
+    """Cloning is a read, so it takes the analysis token rules (#547).
+
+    The old GitHub-only guard made a private repo on any other host visible
+    only to anonymous callers -- the write path is what guards credentials.
+    """
     seen: list[str | None] = []
 
     def clone_into(_self, _url, _target, token=None, **_kwargs):
@@ -125,62 +137,32 @@ async def test_repo_token_only_reaches_github_hosts(
 
     await clone_chat_repos(workspace, {"tests_repo_url": url}, user_repo_token="tok")
 
-    assert seen == [expected_token]
+    assert seen == ["tok"]
 
 
 @pytest.mark.asyncio
-async def test_on_repo_names_each_repo_before_its_clone_starts(
+async def test_prep_detail_names_the_width_not_one_repo(
     monkeypatch, tmp_path: Path, clone_settings
 ) -> None:
-    """``preparing.phase`` follows the clone that is actually running."""
-    cloned: list[str] = []
-    unnamed: list[str] = []
+    """The detail shows how many clones are in flight, and drops as they end (#547).
 
-    def clone_into(_self, _url, target, **_kwargs):
-        cloned.append(target.name)
-        if target.name not in reported:
-            unnamed.append(target.name)
-
-    monkeypatch.setattr(RepositoryManager, "clone_into", clone_into)
-    workspace = tmp_path / "ws"
-    workspace.mkdir()
-    reported: list[str] = []
-
-    await clone_chat_repos(
-        workspace,
-        {"additional_repos": _repos(3)},
-        on_repo=reported.append,
-    )
-
-    # Each repo is named before its own clone starts, in the order they started.
-    assert reported[:3] == ["repo0", "repo1", "repo2"]
-    assert sorted(cloned) == ["repo0", "repo1", "repo2"]
-    assert unnamed == [], f"clone started before on_repo named it: {unnamed}"
-    # A finished batch names no repo at all: the last publication is the clear.
-    assert reported[-1] == ""
-
-
-@pytest.mark.asyncio
-async def test_a_finished_clone_stops_being_named(
-    monkeypatch, tmp_path: Path, clone_settings
-) -> None:
-    """The detail only ever names a clone that is still running.
-
-    ``repo1`` finishes first and its completion must move the detail back to the
-    clone still in flight, not leave ``repo1`` on screen.
+    A serial implementation can only ever publish ``cloning 1 of 2``, so naming
+    two at once is the assertion that separates wide from serial -- and a
+    finished clone leaves the count instead of lingering on screen.
     """
     published: list[str] = []
     release_repo0 = threading.Event()
 
     def on_repo(detail: str) -> None:
         published.append(detail)
-        if detail == "repo0" and "repo1" in published:
-            # repo1's completion was published; let repo0 finish now.
+        if detail == "cloning 2 of 2":
             release_repo0.set()
 
     def clone_into(_self, _url, target, **_kwargs):
+        # Hold the first clone open until the second is admitted, so the width
+        # is what the detail reports rather than scheduling luck.
         if target.name == "repo0":
-            assert release_repo0.wait(5), "sibling clone never finished"
+            assert release_repo0.wait(5), "the sibling clone was never admitted"
 
     monkeypatch.setattr(RepositoryManager, "clone_into", clone_into)
     workspace = tmp_path / "ws"
@@ -188,7 +170,42 @@ async def test_a_finished_clone_stops_being_named(
 
     await clone_chat_repos(workspace, {"additional_repos": _repos(2)}, on_repo=on_repo)
 
-    assert published == ["repo0", "repo1", "repo0", ""]
+    assert published == ["cloning 1 of 2", "cloning 2 of 2", "cloning 1 of 2", ""]
+    assert all(re.match(r"^cloning \d+ of \d+$", d) for d in published if d), published
+
+
+@pytest.mark.asyncio
+async def test_chat_clone_depth_reaches_both_repo_kinds(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """``chat_clone_depth`` -- not a hardcoded 50 -- decides every chat clone (#547)."""
+    monkeypatch.setattr(
+        "rootcoz.config.get_settings",
+        lambda: Settings(chat_clone_depth=7, max_concurrent_repo_clones=4),
+    )
+    depths: dict[str, int] = {}
+
+    def clone_into(_self, _url, target, depth=None, **_kwargs):
+        depths[target.name] = depth
+
+    monkeypatch.setattr(RepositoryManager, "clone_into", clone_into)
+    workspace = tmp_path / "ws"
+    workspace.mkdir()
+
+    await clone_chat_repos(
+        workspace,
+        {
+            "tests_repo_url": "https://github.com/acme/tests-repo.git",
+            "additional_repos": _repos(2),
+        },
+    )
+
+    assert depths == {"tests-repo": 7, "repo0": 7, "repo1": 7}
+
+
+def test_chat_clone_depth_defaults_to_one() -> None:
+    """The AI reads the working tree, so history is paid for and never read."""
+    assert Settings().chat_clone_depth == 1
 
 
 async def test_unsafe_name_is_skipped_and_the_others_clone(

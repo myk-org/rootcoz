@@ -13,11 +13,9 @@ import {
   SelectTrigger,
   SelectValue,
 } from '@/components/ui/select'
-import { ReviewStatusFilter } from '@/components/shared/ReviewStatusFilter'
+import { JobFilterBar } from '@/components/shared/JobFilterBar'
 import { parseReviewStatus, type ReviewStatusFilter as ReviewStatusValue } from '@/lib/review-status'
-import { AnalysisStateFilterControl } from '@/components/shared/AnalysisStateFilter'
 import { analysisStateLabel, parseAnalysisState, type AnalysisStateFilter } from '@/lib/analysis-state'
-import { MultiSelectFilter } from '@/components/shared/MultiSelectFilter'
 import {
   Table,
   TableBody,
@@ -35,26 +33,30 @@ import {
 import { Skeleton } from '@/components/ui/skeleton'
 import { parseApiTimestamp, isAnalysisTimeout, formatDuration, formatTimestamp, resolveBuildDisplayId } from '@/lib/utils'
 import { StatusChip } from '@/components/shared/StatusChip'
-import { SearchInput } from '@/components/shared/SearchInput'
 import { Pagination } from '@/components/shared/Pagination'
 import { ConfirmDialog } from '@/components/shared/ConfirmDialog'
 import { SortableHeader } from '@/components/shared/SortableHeader'
-import { DateRangePresetFilter } from '@/components/shared/DateRangePresetFilter'
 import { useTableSort } from '@/lib/useTableSort'
 import { Trash2, MessageSquare, CheckCircle2, GitFork, AlertTriangle, Github, List, ListTree, ChevronRight, MinusCircle } from 'lucide-react'
 import { JobAttribution } from '@/components/shared/JobAttribution'
 import { useAuth } from '@/lib/auth'
-import { MetadataDropdowns, MetadataLabelChips, MetadataClearButton } from '@/components/shared/MetadataFilterBar'
-import { FilterPresetsMenu } from '@/components/shared/FilterPresetsMenu'
-import { applyFiltersToParams, FILTER_PRESET_KEYS } from '@/lib/filterPresets'
+import { FILTER_PRESET_KEYS } from '@/lib/filterPresets'
+import {
+  applyFiltersToParams,
+  applyJobFiltersToParams,
+  DEFAULT_TEST_NAME_MODE,
+  EMPTY_JOB_FILTERS,
+  jobFiltersFromParams,
+  TEST_NAME_WRITE_KEYS,
+  type TestNameMode,
+} from '@/lib/jobFilters'
+import { MetadataLabelChips } from '@/components/shared/MetadataFilterBar'
 import { useMetadataOptions } from '@/components/shared/useMetadataOptions'
-import { useDashboardSubmitters } from '@/components/shared/useDashboardSubmitters'
-import { SearchableMultiSelect } from '@/components/ui/searchable-multi-select'
+import { useSubmitters } from '@/components/shared/useSubmitters'
 import { MetadataBadges } from '@/components/shared/MetadataBadges'
 import { WhatsNewDialog } from '@/components/shared/WhatsNewDialog'
 import { ExpandCollapseButtons } from '@/components/shared/ExpandCollapseButtons'
 
-const STATUS_FILTER_OPTIONS = ['completed', 'running', 'waiting', 'pending', 'failed', 'timeout', 'aborted'] as const
 const BULK_DELETE_LIMIT = 500
 
 function MetricCell({ value, displayValue, icon, tone, tooltipText }: {
@@ -197,8 +199,6 @@ export function DashboardPage() {
       return next
     }, { replace: true })
   }, [setSearchParams])
-  const dateFrom = searchParams.get('date_from') ?? ''
-  const dateTo = searchParams.get('date_to') ?? ''
 
   const reviewStatus = useMemo<ReviewStatusValue>(() => {
     return parseReviewStatus(searchParams.get('review_status'))
@@ -232,7 +232,7 @@ export function DashboardPage() {
   const versionParam = searchParams.getAll('version').sort().join(',')
   const labelParam = searchParams.getAll('label').sort().join(',')
   const excludeLabelParam = searchParams.getAll('exclude_label').sort().join(',')
-  const { submitters, loading: submittersLoading } = useDashboardSubmitters()
+  const { submitters, loading: submittersLoading } = useSubmitters()
   const metaTeams = useMemo(() => new Set(teamParam ? teamParam.split(',') : []), [teamParam])
   const metaTiers = useMemo(() => new Set(tierParam ? tierParam.split(',') : []), [tierParam])
   const metaVersions = useMemo(() => new Set(versionParam ? versionParam.split(',') : []), [versionParam])
@@ -242,6 +242,40 @@ export function DashboardPage() {
     () => normalizeSubmitters(searchParams.getAll('submitted_by'), submitters),
     [searchParams, submitters],
   )
+
+  // The test-name pair and the dates are read through the shared contract, so an
+  // absent mode means the default, a mode without a name is never a filter
+  // (#546 B), and a legacy `from`/`to` link still applies its dates (#546 A2).
+  const {
+    test_name: testName,
+    test_name_mode: testNameMode,
+    date_from: dateFrom,
+    date_to: dateTo,
+  } = useMemo(() => jobFiltersFromParams(searchParams, TEST_NAME_WRITE_KEYS), [searchParams])
+
+  const setTestName = useCallback((value: string, mode: TestNameMode) => {
+    // One writer for the pair: a mode with no name is dropped, and the clean URL
+    // carries `test_name` alone while the mode is the default.
+    setSearchParams(
+      (prev) => {
+        // The aliases are read here so the canonical pair is written as they are
+        // dropped: editing the test name must not lose the link's dates.
+        const current = jobFiltersFromParams(prev, TEST_NAME_WRITE_KEYS)
+        return applyJobFiltersToParams(
+          prev,
+          {
+            ...EMPTY_JOB_FILTERS,
+            date_from: current.date_from,
+            date_to: current.date_to,
+            test_name: value,
+            test_name_mode: mode,
+          },
+          TEST_NAME_WRITE_KEYS,
+        )
+      },
+      { replace: true },
+    )
+  }, [setSearchParams])
 
   const setSubmittedBy = useCallback((values: string[]) => {
     setSearchParams((prev) => {
@@ -305,10 +339,12 @@ export function DashboardPage() {
       next.delete('review_status')
       next.delete('analysis_state')
       next.delete('submitted_by')
+      next.delete('test_name')
+      next.delete('test_name_mode')
       return next
     }, { replace: true })
   }, [setSearchParams])
-  const hasMetadataFilters = !!(metaTeams.size > 0 || metaTiers.size > 0 || metaVersions.size > 0 || metaLabels.length > 0 || metaExcludeLabels.length > 0 || submittedBy.length > 0 || selectedStatuses.size > 0 || reviewStatus !== 'all' || analysisState !== 'all')
+  const hasMetadataFilters = !!(metaTeams.size > 0 || metaTiers.size > 0 || metaVersions.size > 0 || metaLabels.length > 0 || metaExcludeLabels.length > 0 || submittedBy.length > 0 || selectedStatuses.size > 0 || reviewStatus !== 'all' || analysisState !== 'all' || testName.length > 0)
   const { options: metadataOptions } = useMetadataOptions()
   const setDateRange = useCallback((from: string, to: string) => {
     setSearchParams((prev) => {
@@ -368,6 +404,10 @@ export function DashboardPage() {
       if (dateTo) params.set('date_to', dateTo)
       if (reviewStatus !== 'all') params.set('review_status', reviewStatus)
       if (analysisState !== 'all') params.set('analysis_state', analysisState)
+      if (testName) {
+        params.set('test_name', testName)
+        if (testNameMode !== DEFAULT_TEST_NAME_MODE) params.set('test_name_mode', testNameMode)
+      }
       // Server-side pagination
       params.set('limit', String(perPage))
       params.set('offset', String((page - 1) * perPage))
@@ -388,7 +428,7 @@ export function DashboardPage() {
         setLoading(false)
       }
     }
-  }, [metaTeams, metaTiers, metaVersions, metaLabels, metaExcludeLabels, submittedBy, debouncedSearch, selectedStatuses, dateFrom, dateTo, reviewStatus, analysisState, perPage, page])
+  }, [metaTeams, metaTiers, metaVersions, metaLabels, metaExcludeLabels, submittedBy, debouncedSearch, selectedStatuses, dateFrom, dateTo, reviewStatus, analysisState, testName, testNameMode, perPage, page])
 
   const fetchJobsRef = useLatestRef(fetchJobs)
 
@@ -406,12 +446,12 @@ export function DashboardPage() {
   // Reset page when filters change (but not when page itself changes)
   const prevFiltersRef = useRef('')
   useEffect(() => {
-    const filterKey = [debouncedSearch, statusParam, reviewStatus, analysisState, perPage, dateFrom, dateTo, teamParam, tierParam, versionParam, labelParam, excludeLabelParam, JSON.stringify(submittedBy)].join('|')
+    const filterKey = [debouncedSearch, statusParam, reviewStatus, analysisState, perPage, dateFrom, dateTo, teamParam, tierParam, versionParam, labelParam, excludeLabelParam, JSON.stringify(submittedBy), testName, testNameMode].join('|')
     if (prevFiltersRef.current && prevFiltersRef.current !== filterKey) {
       setPage(1)
     }
     prevFiltersRef.current = filterKey
-  }, [debouncedSearch, statusParam, reviewStatus, analysisState, perPage, dateFrom, dateTo, teamParam, tierParam, versionParam, labelParam, excludeLabelParam, submittedBy])
+  }, [debouncedSearch, statusParam, reviewStatus, analysisState, perPage, dateFrom, dateTo, teamParam, tierParam, versionParam, labelParam, excludeLabelParam, submittedBy, testName, testNameMode])
 
   const sorted = useMemo(() => {
     const copy = [...jobs]
@@ -582,54 +622,46 @@ export function DashboardPage() {
   return (
     <TooltipProvider delayDuration={200}>
       <div className="space-y-6">
-        {/* Filters — single wrapping row (filters only) */}
-        <div data-testid="dashboard-filters" className="flex flex-wrap gap-3 items-center">
-          <FilterPresetsMenu
-            page="dashboard"
-            searchParams={searchParams}
-            onApply={(filters) =>
-              setSearchParams(
-                (prev) => applyFiltersToParams(prev, filters, FILTER_PRESET_KEYS.dashboard),
-                { replace: true },
-              )
-            }
-          />
-          <SearchInput value={search} onChange={setSearch} placeholder="Filter jobs..." className="w-full sm:w-64" />
-          <SearchableMultiSelect
-            label="Submitted by"
-            values={submittedBy}
-            options={submitters.map((value) => ({ value }))}
-            loading={submittersLoading}
-            // Picked options are exact names; a typed term is a partial one and
-            // the server matches substrings, so both work from one control.
-            allowCustom
-            onChange={setSubmittedBy}
-            className="w-full sm:w-48"
-          />
-          <MetadataDropdowns
-            options={metadataOptions}
-            teams={metaTeams}
-            tiers={metaTiers}
-            versions={metaVersions}
-            onTeamToggle={(v) => toggleMetaParam('team', v)}
-            onTierToggle={(v) => toggleMetaParam('tier', v)}
-            onVersionToggle={(v) => toggleMetaParam('version', v)}
-            onTeamClear={() => clearMetaParam('team')}
-            onTierClear={() => clearMetaParam('tier')}
-            onVersionClear={() => clearMetaParam('version')}
-          />
-          <MultiSelectFilter
-            label="All statuses"
-            options={[...STATUS_FILTER_OPTIONS]}
-            selected={selectedStatuses}
-            onToggle={toggleStatus}
-            onClear={() => setSelectedStatuses(new Set())}
-            className="w-full sm:w-40"
-          />
-          <ReviewStatusFilter value={reviewStatus} onChange={setReviewStatus} />
-          <AnalysisStateFilterControl value={analysisState} onChange={setAnalysisState} />
-          <DateRangePresetFilter from={dateFrom} to={dateTo} onChange={setDateRange} />
-        </div>
+        {/* Filters — one shared bar, so both pages carry the same row (#546 A) */}
+        <JobFilterBar
+          page="dashboard"
+          searchParams={searchParams}
+          onApplyPreset={(filters) =>
+            setSearchParams(
+              (prev) => applyFiltersToParams(prev, filters, FILTER_PRESET_KEYS.dashboard),
+              { replace: true },
+            )
+          }
+          search={{ value: search, onChange: setSearch, placeholder: 'Filter jobs...' }}
+          submitters={{
+            values: submittedBy,
+            options: submitters,
+            loading: submittersLoading,
+            onChange: setSubmittedBy,
+          }}
+          metadata={{
+            options: metadataOptions,
+            teams: metaTeams,
+            tiers: metaTiers,
+            versions: metaVersions,
+            onTeamToggle: (v) => toggleMetaParam('team', v),
+            onTierToggle: (v) => toggleMetaParam('tier', v),
+            onVersionToggle: (v) => toggleMetaParam('version', v),
+            onTeamClear: () => clearMetaParam('team'),
+            onTierClear: () => clearMetaParam('tier'),
+            onVersionClear: () => clearMetaParam('version'),
+          }}
+          statuses={{
+            selected: selectedStatuses,
+            onToggle: toggleStatus,
+            onClear: () => setSelectedStatuses(new Set()),
+          }}
+          reviewStatus={{ value: reviewStatus, onChange: setReviewStatus }}
+          analysisState={{ value: analysisState, onChange: setAnalysisState }}
+          dateRange={{ from: dateFrom, to: dateTo, onChange: setDateRange }}
+          clearAll={{ hasFilters: hasMetadataFilters, onClear: clearMetadataFilters }}
+          testName={{ name: testName, mode: testNameMode, onChange: setTestName }}
+        />
 
         {/* Tag filter chips — only shown when labels exist */}
         <MetadataLabelChips
@@ -638,7 +670,6 @@ export function DashboardPage() {
           excludeLabels={metaExcludeLabels}
           onLabelToggle={handleLabelToggle}
         />
-        <MetadataClearButton hasFilters={hasMetadataFilters} onClearAll={clearMetadataFilters} />
 
         {/* Summary row: count + View Issues, results presentation controls on the right */}
         <div data-testid="dashboard-summary" className="flex flex-wrap items-center gap-3">

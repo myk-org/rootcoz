@@ -1,4 +1,9 @@
 import { api } from '@/lib/api'
+import {
+  JOB_FILTER_KEYS,
+  TEST_NAME_FILTER_KEYS,
+  type FilterValues,
+} from './jobFilters'
 
 // ─── Types ──────────────────────────────────────────────────────────
 
@@ -15,19 +20,12 @@ export interface FilterPreset {
   updated_at: string
 }
 
-export type FilterValues = Record<string, string | string[]>
-
 // URL query params each page's presets may carry (#179) — mirrors the
-// backend _FILTER_PRESET_KEYS allowlist.
+// backend _FILTER_PRESET_KEYS allowlist. Derived from the one canonical list in
+// lib/jobFilters.ts (#546), which also owns the helpers below.
 export const FILTER_PRESET_KEYS: Record<FilterPresetPage, readonly string[]> = {
-  dashboard: [
-    'team', 'tier', 'version', 'label', 'exclude_label',
-    'status', 'review_status', 'analysis_state', 'submitted_by', 'date_from', 'date_to',
-  ],
-  reports: [
-    'team', 'tier', 'version', 'label', 'exclude_label',
-    'status', 'review_status', 'from', 'to',
-  ],
+  dashboard: [...JOB_FILTER_KEYS, ...TEST_NAME_FILTER_KEYS],
+  reports: [...JOB_FILTER_KEYS, ...TEST_NAME_FILTER_KEYS],
 }
 
 // ─── Cross-component notifications ─────────────────────────────────
@@ -85,62 +83,4 @@ export async function updateFilterPreset(
 
 export async function deleteFilterPreset(id: number): Promise<void> {
   await api.delete(`/api/user/filter-presets/${id}`)
-}
-
-// ─── URL param conversion ───────────────────────────────────────────
-
-/** Extract allowlisted filter values from URL search params. */
-export function searchParamsToFilters(
-  params: URLSearchParams,
-  keys: readonly string[],
-): FilterValues {
-  const out: FilterValues = {}
-  for (const key of keys) {
-    const all = params.getAll(key).filter((v) => v !== '')
-    if (all.length === 0) continue
-    out[key] = all.length > 1 ? all : all[0]
-  }
-  return out
-}
-
-/** Replace allowlisted filter params in a URLSearchParams copy, leaving
- * everything else (e.g. `search`) untouched. */
-export function applyFiltersToParams(
-  params: URLSearchParams,
-  filters: FilterValues,
-  keys: readonly string[],
-): URLSearchParams {
-  const next = new URLSearchParams(params)
-  for (const key of keys) next.delete(key)
-  for (const [key, value] of Object.entries(filters)) {
-    if (!keys.includes(key)) continue
-    for (const v of Array.isArray(value) ? value : [value]) next.append(key, v)
-  }
-  return next
-}
-
-/** Build a query string from filter values (sidebar navigation). */
-export function filtersToQueryString(filters: FilterValues): string {
-  const params = new URLSearchParams()
-  for (const [key, value] of Object.entries(filters)) {
-    for (const v of Array.isArray(value) ? value : [value]) params.append(key, v)
-  }
-  return params.toString()
-}
-
-// ─── Comparison (modified detection) ────────────────────────────────
-
-const asSortedArray = (value: string | string[]): string[] =>
-  (Array.isArray(value) ? [...value] : [value]).sort()
-
-/** Deep-compare two filter value maps (order-insensitive for lists). */
-export function filtersEqual(a: FilterValues, b: FilterValues): boolean {
-  const ka = Object.keys(a).sort()
-  const kb = Object.keys(b).sort()
-  if (ka.length !== kb.length || ka.some((k, i) => k !== kb[i])) return false
-  return ka.every((k) => {
-    const va = asSortedArray(a[k])
-    const vb = asSortedArray(b[k])
-    return va.length === vb.length && va.every((v, i) => v === vb[i])
-  })
 }
