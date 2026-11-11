@@ -3799,16 +3799,46 @@ def auth_sso(
     )
 
 
+def _print_identities(payload: dict[str, Any], *, as_json: bool) -> None:
+    """Print one row per linked provider, or the raw payload as JSON.
+
+    The API answers ``{"identities": [...], "unlinkable": bool}``; handing that
+    list to a table printer as one cell renders a stringified array, which is what
+    the command used to do.
+
+    Args:
+        payload: The identities response from the API.
+        as_json: True to print the payload unchanged.
+    """
+    identities = payload.get("identities") or []
+    if as_json:
+        print_output(payload, columns=["identities", "unlinkable"], as_json=True)
+        return
+    if not identities:
+        typer.echo("No provider is connected to this account.")
+        return
+    print_output(
+        identities,
+        columns=["provider", "email", "created_at"],
+        as_json=False,
+    )
+    if not payload.get("unlinkable", True):
+        typer.echo("This is the only sign-in method, so it cannot be removed.")
+
+
 @auth_app.command("sso-identities")
 def auth_sso_identities(
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """List the SSO providers linked to your account."""
-    _run_client_command(
-        json_output,
-        lambda c: c.user_identities(),
-        columns=["identities", "unlinkable"],
-    )
+    _set_json(json_output)
+    as_json = _state.get("json", False)
+    try:
+        payload = _get_client().user_identities()
+    except RootCozError as err:
+        _handle_error(err)
+        return
+    _print_identities(payload, as_json=as_json)
 
 
 @auth_app.command("sso-unlink")
@@ -4213,11 +4243,14 @@ def admin_users_identities(
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """List the SSO providers linked to any account."""
-    _run_client_command(
-        json_output,
-        lambda c: c.admin_user_identities(username),
-        columns=["identities", "unlinkable"],
-    )
+    _set_json(json_output)
+    as_json = _state.get("json", False)
+    try:
+        payload = _get_client().admin_user_identities(username)
+    except RootCozError as err:
+        _handle_error(err)
+        return
+    _print_identities(payload, as_json=as_json)
 
 
 @admin_users_app.command("unlink-identity")

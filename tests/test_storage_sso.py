@@ -177,6 +177,20 @@ async def test_create_with_identity_refuses_a_reserved_name(
             )
 
 
+async def test_a_user_code_is_matched_with_or_without_its_hyphen(
+    setup_test_db: Path,
+) -> None:
+    """People read the code off a terminal: separators and case are not the code."""
+    record = await storage.create_device_code(ttl_seconds=600, interval_seconds=5)
+    stored = record["user_code"]
+    compact = stored.replace("-", "")
+
+    for typed in (stored, stored.lower(), compact, compact.lower(), f" {compact} "):
+        found = await storage.get_device_code_by_user_code(typed)
+        assert found is not None, typed
+        assert found["user_code"] == stored
+
+
 async def test_concurrent_unlinks_cannot_leave_an_account_without_a_method(
     setup_test_db: Path,
 ) -> None:
@@ -524,7 +538,20 @@ async def test_a_device_code_is_approved_then_redeemed_exactly_once(
             "username": "alice",
             "provider": None,
         }
+        # A second redemption is refused — the code is claimed, exactly once — but
+        # the row survives so a failed session can be retried without the terminal
+        # being told its code expired.
         assert await storage.redeem_device_code(code["device_code"]) is None
+        assert await storage.get_device_code(code["device_code"]) is not None
+
+        assert await storage.release_device_code(code["device_code"]) is True
+        assert await storage.redeem_device_code(code["device_code"]) == {
+            "username": "alice",
+            "provider": None,
+        }
+
+        # Consumption is the step that ends the flow.
+        assert await storage.consume_device_code(code["device_code"]) is True
         assert await storage.get_device_code(code["device_code"]) is None
         assert await storage.get_device_code_by_user_code(code["user_code"]) is None
 

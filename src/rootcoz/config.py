@@ -5,7 +5,7 @@ import re
 import threading
 import time
 from typing import Any, NamedTuple
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import urlparse, urlsplit, urlunsplit
 
 from pydantic import Field, SecretStr, field_validator, model_validator
 from pydantic_settings import (
@@ -765,12 +765,9 @@ class Settings(BaseSettings):
         if not issuer.startswith(("https://", "http://")):
             msg = f"{issuer!r} is not an http(s) URL"
             raise ValueError(msg)
-        if not issuer_is_secure(issuer):
-            msg = (
-                f"{issuer!r} uses plaintext http; an issuer must be https"
-                " (http is only accepted for a loopback development server)"
-            )
-            raise ValueError(msg)
+        problem = issuer_problem(issuer)
+        if problem is not None:
+            raise ValueError(f"{issuer!r}: {problem}")
         return issuer.rstrip("/")
 
     @field_validator("sso_allowed_domains")
@@ -1583,6 +1580,51 @@ def jira_site_url_error(value: str | None) -> str | None:
             "URL (e.g. https://<site>.atlassian.net), not "
             "https://api.atlassian.com/ex/jira/<cloudId>"
         )
+    return None
+
+
+def issuer_problem(url: str) -> str | None:
+    """Why a configured OIDC issuer is unusable, or ``None`` when it is fine.
+
+    Discovery is built by appending ``/.well-known/openid-configuration`` to this
+    value, and the HTTP client parses it on every login — so a query string
+    silently produces the wrong discovery URL and a non-numeric port raises inside
+    the client. Neither is caught by a scheme/host check, which is why the shape is
+    validated where an admin types it rather than at the first sign-in.
+
+    Args:
+        url: The issuer as configured.
+
+    Returns:
+        A human-readable reason to refuse it, or ``None``.
+    """
+    candidate = (url or "").strip()
+    if not candidate:
+        return "an issuer URL is required"
+    if not issuer_is_secure(candidate):
+        return "the issuer must be https (http is accepted only for a loopback host)"
+    try:
+        parsed = urlparse(candidate)
+        # Accessing .port raises for a non-numeric port, so this is the check.
+        _ = parsed.port
+    except ValueError:
+        return "the issuer has an invalid port"
+    if parsed.query:
+        return "the issuer must not carry a query string"
+    if parsed.fragment:
+        return "the issuer must not carry a fragment"
+    if parsed.params:
+        return "the issuer must not carry parameters"
+    if "/.well-known/" in parsed.path:
+        # A realm issuer legitimately carries a path (Keycloak:
+        # ``/auth/realms/<realm>``); what is never right is pasting the discovery
+        # URL itself, because discovery is appended to whatever is configured.
+        return (
+            "the issuer must be the value the provider puts in `iss`, not its"
+            " /.well-known/openid-configuration URL"
+        )
+    if parsed.path.rstrip("/").endswith("/.well-known"):
+        return "the issuer must not be the well-known discovery prefix"
     return None
 
 

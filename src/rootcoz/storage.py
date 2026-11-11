@@ -50,6 +50,7 @@ from rootcoz.models import (
     OverrideClassificationLiteral,
     PatternLiteral,
 )
+from rootcoz.sso_providers import SSO_PROVIDERS as SSO_PROVIDER_NAMES
 
 logger = get_child_logger(__name__)
 
@@ -495,7 +496,9 @@ VALID_USER_STATUSES = ("active", "pending", "rejected")
 
 #: SSO providers that can own a ``user_identities`` row. The single list —
 #: ``rootcoz.auth.registry`` re-exports it rather than declaring its own.
-SSO_PROVIDERS = ("google", "github", "openshift", "redhat")
+# The names live in a leaf module both storage and auth.sso can import.
+# Re-exported so existing callers keep working.
+SSO_PROVIDERS = SSO_PROVIDER_NAMES
 
 #: Provenance recorded when the caller names none.
 DEFAULT_CREATED_VIA = "internal"
@@ -2419,6 +2422,8 @@ async def init_db() -> None:
                 expires_at TEXT NOT NULL,
                 interval_seconds INTEGER NOT NULL,
                 last_polled_at TEXT,
+                client_ip TEXT,
+                redeemed_at TEXT,
                 created_at TEXT NOT NULL
             )
         """)
@@ -2430,6 +2435,12 @@ async def init_db() -> None:
         # last_polled_at; without it the server cannot tell an honest poll from
         # a flood, so the interval would be advisory only.
         await _migrate_add_column(db, "sso_device_codes", "last_polled_at", "TEXT")
+        # The start route is anonymous, so the ceiling is per caller as well as
+        # global — otherwise one client can reserve every slot.
+        await _migrate_add_column(db, "sso_device_codes", "client_ip", "TEXT")
+        # Claim-before-handover: redemption marks the row so exactly one poller
+        # wins, while the row survives until the session has been minted.
+        await _migrate_add_column(db, "sso_device_codes", "redeemed_at", "TEXT")
 
         # One-time tickets for the first-login choice screen: after the IdP has
         # authenticated someone with no link, the browser holds this instead of a
@@ -10430,13 +10441,21 @@ async def unlink_user_identity(username: str, provider: str) -> str:
 def _normalize_user_code(user_code: str) -> str:
     """Normalise a human-typed user code for lookup.
 
+    The stored form is ``XXXX-XXXX``; a person reading it off a terminal may type
+    it without the hyphen, with spaces, or in lower case, and all of those name the
+    same code.
+
     Args:
-        user_code: The code as typed (any case, stray whitespace).
+        user_code: The code as typed.
 
     Returns:
-        The stored form: upper case, no surrounding whitespace.
+        The stored form: upper case, no separators, with the hyphen re-inserted
+        after the fourth character when there are exactly eight.
     """
-    return user_code.strip().upper()
+    compact = "".join(ch for ch in user_code.upper() if ch.isalnum())
+    if len(compact) == 8:
+        return f"{compact[:4]}-{compact[4:]}"
+    return compact
 
 
 #: How many ``user_code`` allocations to try before giving up (collision odds
@@ -10466,6 +10485,9 @@ async def create_device_code(
     interval_seconds: int,
     provider: str | None = None,
     client_name: str | None = None,
+    max_live: int | None = None,
+    max_live_per_caller: int | None = None,
+    client_ip: str | None = None,
 ) -> dict[str, Any]:
     """Start a CLI device-authorization flow.
 
@@ -10477,6 +10499,11 @@ async def create_device_code(
             on the approval page so a human never approves a code they cannot
             recognise — the first half of the defence against device-code
             phishing.
+        max_live: Ceiling on codes that are simultaneously redeemable. Checked in
+            the same transaction as the insert, so a burst cannot all see room.
+        max_live_per_caller: Ceiling for one caller (``client_ip``), so a single
+            anonymous client cannot reserve every slot and lock everyone else out.
+        client_ip: The caller, recorded for the per-caller ceiling.
 
     Returns:
         The raw ``device_code`` (shown once), the ``user_code`` a human types,
@@ -10485,6 +10512,8 @@ async def create_device_code(
     Raises:
         ValueError: When ``provider`` is not one of :data:`SSO_PROVIDERS`, or
             when no free ``user_code`` could be allocated.
+        DeviceCodeCapacityError: When the global or per-caller ceiling is
+            already reached.
     """
     if provider is not None:
         _validate_sso_provider(provider)
@@ -10498,22 +10527,46 @@ async def create_device_code(
     # it must retry rather than surface a constraint violation as a 500.
     async def _insert(user_code: str) -> None:
         async with _connect_db() as db:
-            await db.execute(
-                "INSERT INTO sso_device_codes"
-                " (device_code_hash, user_code, provider, user_id, client_name,"
-                " expires_at, interval_seconds, created_at)"
-                " VALUES (?, ?, ?, NULL, ?, ?, ?, ?)",
-                (
-                    device_hash,
-                    user_code,
-                    provider,
-                    client_name,
-                    expires_str,
-                    interval_seconds,
-                    created_at,
-                ),
-            )
-            await db.commit()
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                if max_live is not None:
+                    cursor = await db.execute(
+                        f"SELECT COUNT(*) AS n FROM sso_device_codes WHERE {_LIVE_ROW}"
+                    )
+                    if int((await cursor.fetchone())["n"]) >= max_live:
+                        raise DeviceCodeCapacityError(
+                            "Too many pending device codes deployment-wide"
+                        )
+                if max_live_per_caller is not None and client_ip:
+                    cursor = await db.execute(
+                        "SELECT COUNT(*) AS n FROM sso_device_codes"
+                        f" WHERE client_ip = ? AND {_LIVE_ROW}",
+                        (client_ip,),
+                    )
+                    if int((await cursor.fetchone())["n"]) >= max_live_per_caller:
+                        raise DeviceCodeCapacityError(
+                            "Too many pending device codes from this caller"
+                        )
+                await db.execute(
+                    "INSERT INTO sso_device_codes"
+                    " (device_code_hash, user_code, provider, user_id, client_name,"
+                    " expires_at, interval_seconds, client_ip, created_at)"
+                    " VALUES (?, ?, ?, NULL, ?, ?, ?, ?, ?)",
+                    (
+                        device_hash,
+                        user_code,
+                        provider,
+                        client_name,
+                        expires_str,
+                        interval_seconds,
+                        client_ip,
+                        created_at,
+                    ),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
 
     for _attempt in range(_USER_CODE_ATTEMPTS):
         user_code = _new_user_code()
@@ -10524,6 +10577,9 @@ async def create_device_code(
 
         try:
             await _retry_contended(_insert_attempt)
+        except DeviceCodeCapacityError:
+            # Capacity is a refusal, not a contention retry: surface it at once.
+            raise
         except sqlite3.IntegrityError as exc:
             # Only a user_code collision is retryable; anything else is a bug in
             # the statement and must surface unchanged.
@@ -10719,6 +10775,14 @@ async def record_device_code_poll(device_code: str) -> bool:
     return await _retry_contended(_attempt)
 
 
+class DeviceCodeCapacityError(ValueError):
+    """The deployment already has as many live device codes as it allows.
+
+    Raised instead of a bare ``ValueError`` so the route can answer ``429`` and
+    name a retry, rather than surfacing a capacity refusal as a server fault.
+    """
+
+
 async def count_live_device_codes() -> int:
     """How many device codes are currently approvable.
 
@@ -10744,10 +10808,11 @@ async def redeem_device_code(device_code: str) -> dict[str, Any] | None:
         device_code: The raw device code the CLI holds.
 
     Returns:
-        ``{"username": ..., "provider": ...}`` when the code was authorized and
-        is now consumed, or ``None`` (unknown, expired, not yet approved, or
-        already redeemed). The caller mints the session — no credential is
-        stored with the approval.
+        ``{"username": ..., "provider": ...}`` when the code is authorized, or
+        ``None`` (unknown, expired or not yet approved). The caller mints the
+        session and then calls :func:`consume_device_code`; no credential is
+        stored with the approval, and the code survives a failed redemption so
+        the terminal can retry.
     """
     device_hash = _hash_token(device_code)
 
@@ -10759,6 +10824,7 @@ async def redeem_device_code(device_code: str) -> dict[str, Any] | None:
                     "SELECT u.username, d.provider"
                     " FROM sso_device_codes d JOIN users u ON u.id = d.user_id"
                     " WHERE d.device_code_hash = ? AND d.user_id IS NOT NULL"
+                    " AND d.redeemed_at IS NULL"
                     f" AND d.{_LIVE_ROW}",
                     (device_hash,),
                 )
@@ -10766,15 +10832,73 @@ async def redeem_device_code(device_code: str) -> dict[str, Any] | None:
                 if row is None:
                     await db.rollback()
                     return None
-                await db.execute(
-                    "DELETE FROM sso_device_codes WHERE device_code_hash = ?",
-                    (device_hash,),
+                # Claim the code for this caller: the row stays (so a failed
+                # session can be retried) but only one poller can claim it, which
+                # is what keeps the handover exactly-once.
+                claimed = await db.execute(
+                    "UPDATE sso_device_codes SET redeemed_at = ?"
+                    " WHERE device_code_hash = ? AND redeemed_at IS NULL",
+                    (_now_str(), device_hash),
                 )
+                if claimed.rowcount == 0:
+                    await db.rollback()
+                    return None
                 await db.commit()
             except Exception:
                 await db.rollback()
                 raise
             return {"username": row["username"], "provider": row["provider"]}
+
+    return await _retry_contended(_attempt)
+
+
+async def release_device_code(device_code: str) -> bool:
+    """Undo a redemption claim after the session could not be minted.
+
+    Args:
+        device_code: The raw device code the CLI holds.
+
+    Returns:
+        True when a claim was released, False when there was nothing to release.
+    """
+    device_hash = _hash_token(device_code)
+
+    async def _attempt() -> bool:
+        async with _connect_db() as db:
+            cursor = await db.execute(
+                "UPDATE sso_device_codes SET redeemed_at = NULL"
+                " WHERE device_code_hash = ?",
+                (device_hash,),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
+
+    return await _retry_contended(_attempt)
+
+
+async def consume_device_code(device_code: str) -> bool:
+    """Delete a redeemed device code, once its session has been minted.
+
+    Redemption reads the approval but deliberately leaves the row in place, so a
+    failure while creating the session does not destroy the only thing the
+    terminal can retry with. This is the step that ends the flow.
+
+    Args:
+        device_code: The raw device code the CLI holds.
+
+    Returns:
+        True when a row was removed, False when it was already gone.
+    """
+    device_hash = _hash_token(device_code)
+
+    async def _attempt() -> bool:
+        async with _connect_db() as db:
+            cursor = await db.execute(
+                "DELETE FROM sso_device_codes WHERE device_code_hash = ?",
+                (device_hash,),
+            )
+            await db.commit()
+            return cursor.rowcount > 0
 
     return await _retry_contended(_attempt)
 

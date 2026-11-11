@@ -17117,17 +17117,23 @@ async def sso_providers() -> JSONResponse:
     """List the SSO providers this deployment offers.
 
     Returns:
-        ``{"providers": [{"name": ..., "display_name": ...}]}``; empty when none
-        are configured. The login page does not call this yet — Stage 9 wires
-        the buttons that consume it.
+        ``{"providers": [{"name", "display_name"}], "browser_login": bool}``;
+        ``providers`` is empty when none is configured. ``browser_login`` is
+        False when ``PUBLIC_BASE_URL`` is unset: the callback and the post-logout
+        redirect are built from it, so a browser login would only fail *after* the
+        person clicked. It is reported rather than folded into the list, because
+        the CLI's device flow works without a public origin — it joins a relative
+        verification URL itself.
     """
     settings = get_settings()
+    browser_login = bool((settings.public_base_url or "").strip())
     return JSONResponse(
         content={
             "providers": [
                 {"name": provider.name, "display_name": provider.display_name}
                 for provider in auth_sso.configured_providers(settings)
-            ]
+            ],
+            "browser_login": browser_login,
         }
     )
 
@@ -18006,6 +18012,12 @@ _DEVICE_CLIENT_NAME_MAX = 200
 # without a cap the table grows at request rate. A real deployment has a handful
 # of pending logins at a time; 500 is far above that and still finite.
 _MAX_LIVE_DEVICE_CODES = 500
+#: Ceiling for one caller. The route is anonymous, so the global ceiling alone
+#: lets a single client reserve every slot and lock everyone else out until the
+#: codes expire. A tenth of the global ceiling: far above a real `auth sso` run,
+#: and deliberately not tiny, because behind an untrusted proxy every caller
+#: shares the proxy's address.
+_MAX_LIVE_DEVICE_CODES_PER_CALLER = 50
 
 
 def _device_client_name(raw: object) -> str | None:
@@ -18045,6 +18057,31 @@ def _device_approval_uri(settings: Settings) -> str:
     return f"{base}{_DEVICE_APPROVAL_PATH}" if base else _DEVICE_APPROVAL_PATH
 
 
+def _device_caller_key(request: Request) -> str:
+    """A stable key for the per-caller device-code ceiling.
+
+    Different question from :func:`_audit_request_ip`: the audit trail refuses to
+    guess an address, while a ceiling has to have *some* key or it cannot bound
+    one caller. The forwarded address is used only when the proxy is trusted (it
+    is forgeable otherwise); the socket peer is the fallback, which behind an
+    untrusted proxy is the proxy itself — the reason the per-caller ceiling is a
+    generous fraction of the global one rather than a small number.
+
+    Args:
+        request: The request being served.
+
+    Returns:
+        The caller key, or ``"unknown"`` when the peer cannot be determined.
+    """
+    if get_settings().trust_proxy_headers:
+        forwarded = request.headers.get("x-forwarded-for", "")
+        if forwarded:
+            first = forwarded.split(",")[0].strip()
+            if first:
+                return first
+    return request.client.host if request.client else "unknown"
+
+
 @app.post("/api/auth/sso/device/start", operation_id="ssoDeviceStart")
 async def sso_device_start(request: Request) -> JSONResponse:
     """Open a CLI device-authorization flow.
@@ -18081,19 +18118,24 @@ async def sso_device_start(request: Request) -> JSONResponse:
     if client_name is not None and len(client_name) > _DEVICE_CLIENT_NAME_MAX:
         raise HTTPException(status_code=400, detail="client_name is too long")
 
-    if await storage.count_live_device_codes() >= _MAX_LIVE_DEVICE_CODES:
-        # Refuse before the insert: throttling only the audit row would leave the
-        # table and the code space growing at request rate.
+    # Both ceilings are enforced inside the insert's transaction: a count read
+    # here would let a burst all see room, and one caller could reserve every
+    # slot before anyone else asked.
+    try:
+        record = await storage.create_device_code(
+            ttl_seconds=settings.sso_device_code_ttl_seconds,
+            interval_seconds=settings.sso_device_poll_interval_seconds,
+            provider=provider,
+            client_name=client_name,
+            max_live=_MAX_LIVE_DEVICE_CODES,
+            max_live_per_caller=_MAX_LIVE_DEVICE_CODES_PER_CALLER,
+            client_ip=_device_caller_key(request),
+        )
+    except storage.DeviceCodeCapacityError as exc:
         raise HTTPException(
             status_code=429,
             detail="Too many pending sign-in codes. Try again in a few minutes.",
-        )
-    record = await storage.create_device_code(
-        ttl_seconds=settings.sso_device_code_ttl_seconds,
-        interval_seconds=settings.sso_device_poll_interval_seconds,
-        provider=provider,
-        client_name=client_name,
-    )
+        ) from exc
     await record_audit(
         action="auth.sso_device_started",
         actor="anonymous",
@@ -18183,12 +18225,20 @@ async def sso_device_poll(request: Request) -> JSONResponse:
         return JSONResponse(content={"status": "denied"})
 
     role, is_admin = role_and_admin(user, settings.default_user_role)
-    token = await storage.create_session(
-        username,
-        is_admin=is_admin,
-        role=role,
-        auth_provider=redeemed["provider"],
-    )
+    try:
+        token = await storage.create_session(
+            username,
+            is_admin=is_admin,
+            role=role,
+            auth_provider=redeemed["provider"],
+        )
+    except Exception:
+        # The claim is released so the terminal can retry: a code that was never
+        # exchanged for a credential must not read as spent.
+        await storage.release_device_code(device_code)
+        raise
+    # Only now is the code spent.
+    await storage.consume_device_code(device_code)
     await record_audit(
         action="auth.sso_device_redeemed",
         actor=username,
