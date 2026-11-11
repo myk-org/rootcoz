@@ -151,7 +151,6 @@ from rootcoz.config import (
     duplicate_additional_repo_names,
     get_settings,
     jira_availability,
-    jira_method_missing_fields,
     jira_site_url_error,
     jira_unavailable_reason,
     normalize_domain_list,
