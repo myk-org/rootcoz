@@ -142,9 +142,10 @@ async def clone_chat_repos(
     not only in the log.
     ``failed`` collects the names that could not be cloned: a chat still starts
     without them, so the caller is what tells the user they are missing.
-    Every clone is a **read**, so a repo's own token rides with that repo's
-    URL; the chatting user's general credential only reaches a GitHub host,
-    because it is the same token they use to write.
+    Every clone is a **read**, so it uses the same credentials as analysis: the
+    per-repo token on that repo's own URL, and the caller's resolved repo token
+    for the tests repo. No host is special-cased -- the write path is what
+    guards credentials, not this one.
 
     Note:
         Repo tokens may be embedded in git remote URLs within the workspace.
@@ -155,6 +156,7 @@ async def clone_chat_repos(
     from rootcoz.engine.core import (
         CloneOutcome,
         RepoTarget,
+        _resolve_repo_target,
         prepare_workspace_repos,
         tests_repo_target,
     )
@@ -181,8 +183,8 @@ async def clone_chat_repos(
     # Chat is the only caller that parses a raw ref: the analysis side splits
     # url and ref upstream, so the shared function never sees a ":ref" suffix.
     targets: list[RepoTarget] = []
-    # Chat's own labels for a repo it could not even name. Merged into ``failed``
-    # below only if the workspace does not hold a repository of that name.
+    # Chat's own labels for a repo it could not even name: a name we never
+    # derived, so no directory of that name is evidence about it.
     missing: list[str] = []
     if tests_repo_url:
         try:
@@ -208,10 +210,23 @@ async def clone_chat_repos(
         for repo in additional_repos
     )
 
+    def will_clone(target: RepoTarget) -> bool:
+        """Whether the shared path will actually start a clone for this target.
+
+        A reused workspace already holds some of them, and ``skip_existing`` --
+        or a refused name -- never starts a clone, so neither reaches a start or
+        end callback. Counting those would publish ``cloning 1 of 2`` for one.
+        """
+        try:
+            _name, path = _resolve_repo_target(workspace, target.name)
+        except ValueError:
+            return False
+        return not path.exists()
+
     # Overlapping clones mean the detail has to be republished when one ends:
     # naming only the last-admitted repo kept a finished clone on screen until
     # the whole batch was done, and it made a wide fan-out look serial (#547).
-    total = len(targets)
+    total = sum(1 for target in targets if will_clone(target))
     in_flight: list[str] = []
 
     def publish_width() -> None:
@@ -236,10 +251,6 @@ async def clone_chat_repos(
             workspace,
             targets,
             credential=user_repo_token,
-            # The chatting user's GitHub token is a general-purpose credential:
-            # it goes to GitHub hosts only, never to whatever host a job's
-            # tests repo happens to name.
-            credential_policy="github_hosts_only",
             skip_existing=True,
             # A cancelled preparation returns at once; the worker keeps its slot
             # until it ends, so nothing is admitted behind it.
@@ -257,13 +268,12 @@ async def clone_chat_repos(
         missing.append("workspace")
 
     if failed is not None:
-        # ``failed`` is the caller's "not in this workspace" row, so a name the
-        # workspace holds -- an additional repo called ``tests-repo``, which the
-        # shared naming treats as taken -- must never reach it. Presence, not
-        # ``outcome.cloned``: ``skip_existing`` leaves a held repo out of it.
-        failed.extend(
-            n for n in (*missing, *outcome.failed) if not (workspace / n).exists()
-        )
+        # ``failed`` is the caller's "not in this workspace" row. The shared path
+        # keeps the loser of a name collision out of ``outcome.failed``, so every
+        # name here is a repo this workspace does not hold; re-checking the
+        # directory would swallow an unparseable tests repo whenever an unrelated
+        # additional repo happens to occupy its name.
+        failed.extend((*missing, *outcome.failed))
 
     # Copy .rootcoz/{agents,skills,extensions}/ to workspace .pi/
     if outcome.cloned:

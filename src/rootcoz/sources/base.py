@@ -556,7 +556,6 @@ async def setup_analysis_workspace(
             # The tests-repo token may be the deployment's own setting: it rides
             # to whatever host the tests repo names, deliberately.
             credential=tests_repo_token,
-            credential_policy="always",
             # A cancelled await cannot stop a worker already inside ``git
             # clone``; joining it is what keeps cleanup from racing the clone.
             cancellation="propagate",

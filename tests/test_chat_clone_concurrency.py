@@ -113,20 +113,23 @@ async def test_one_failing_repo_warns_once_and_the_rest_still_clone(
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize(
-    ("url", "expected_token"),
+    "url",
     [
-        ("https://github.com/acme/tests-repo.git", "tok"),
-        ("https://gitlab.com/acme/tests-repo.git", None),
+        "https://github.com/acme/tests-repo.git",
+        # The repo the caller named, on whatever host they named it: chat's token
+        # is a read credential here, and dropping it would break self-hosted and
+        # GitLab tests repos (#514).
+        "https://gitlab.internal/acme/tests-repo.git",
     ],
 )
-async def test_repo_token_only_reaches_github_hosts(
-    monkeypatch, tmp_path: Path, clone_settings, url: str, expected_token: str | None
+async def test_the_chat_token_reaches_the_tests_repo_on_any_host(
+    monkeypatch, tmp_path: Path, clone_settings, url: str
 ) -> None:
-    """The load-bearing credential guard: no token towards a non-GitHub host.
+    """Chat is a read path: no host is special-cased, so its tests repo gets it.
 
-    A repo's own token still rides with its own URL (#514); the chatting user's
-    general-purpose credential is the one that is host-gated, because it is the
-    same token they write with -- #547's chat rule stays ``github_hosts_only``.
+    The write path is what guards credentials. A host gate here withheld the
+    token from exactly the self-hosted and GitLab tests repos a user asks to
+    clone, which matches main's behaviour and main's docstring.
     """
     seen: list[str | None] = []
 
@@ -139,7 +142,7 @@ async def test_repo_token_only_reaches_github_hosts(
 
     await clone_chat_repos(workspace, {"tests_repo_url": url}, user_repo_token="tok")
 
-    assert seen == [expected_token]
+    assert seen == ["tok"]
 
 
 @pytest.mark.asyncio

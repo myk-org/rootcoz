@@ -3,7 +3,7 @@
 Analysis, re-analysis, additional repos and chat all clone through this one
 function. Everything the four sides genuinely do differently is an argument, so
 these are the pins: one per divergence, plus a caller pin for each of the four
--- a shared default is only safe while its callers still pass their policy.
+-- a shared default is only safe while its callers still say what they need.
 """
 
 from __future__ import annotations
@@ -106,54 +106,28 @@ async def test_every_target_is_cloned_inside_the_root(tmp_path, clone_settings) 
     assert outcome.cloned["two"].parent == tmp_path.resolve()
 
 
-async def test_always_policy_sends_the_credential_anywhere(
+async def test_the_caller_credential_reaches_a_tests_repo_on_any_host(
     tmp_path, clone_settings
 ) -> None:
-    """The analysis tests-repo token may be the deployment's own: it rides."""
+    """A tests-repo credential is scoped by destination, never by host.
+
+    The token may be the deployment's own setting, and a self-hosted or GitLab
+    tests repo is the repository the caller asked for.
+    """
     manager = RecordingManager()
 
     await prepare_workspace_repos(
         manager,
         tmp_path,
-        [_target("tests", kind="tests_repo")],
+        [_target("tests", "https://gitlab.internal/acme/tests", kind="tests_repo")],
         credential="tok",
-        credential_policy="always",
     )
 
     assert manager.by_name["tests"][4] == "tok"
 
 
-@pytest.mark.parametrize(
-    ("url", "expected"),
-    [
-        ("https://github.com/acme/tests", "tok"),
-        # The lookalike residual, pinned so a future tightening is deliberate.
-        ("https://github.evil.tld/acme/tests", "tok"),
-        ("https://gitlab.com/acme/tests", None),
-        # Userinfo used to keep "github" in netloc and leak the token to evil.tld.
-        ("https://github.com@evil.tld/acme/tests", None),
-    ],
-)
-async def test_github_hosts_only_policy(
-    url, expected, tmp_path, clone_settings
-) -> None:
-    """A general-purpose credential never reaches a non-GitHub host."""
-    manager = RecordingManager()
-
-    await prepare_workspace_repos(
-        manager,
-        tmp_path,
-        [_target("tests", url, kind="tests_repo")],
-        credential="tok",
-        credential_policy="github_hosts_only",
-    )
-
-    assert manager.by_name["tests"][4] == expected
-
-
-@pytest.mark.parametrize("policy", ["always", "github_hosts_only"])
 async def test_an_additional_repo_only_ever_uses_its_own_token(
-    policy, tmp_path, clone_settings
+    tmp_path, clone_settings
 ) -> None:
     """Its own token rides to whatever host it names -- and nothing else does."""
     manager = RecordingManager()
@@ -168,7 +142,6 @@ async def test_an_additional_repo_only_ever_uses_its_own_token(
         tmp_path,
         targets,
         credential="general",
-        credential_policy=policy,
     )
 
     assert manager.by_name["private"][4] == "own"
@@ -342,8 +315,44 @@ async def test_one_failure_is_one_redacted_warning_and_a_clean_info_line(
         if r.levelno == logging.INFO and r.name == logger.name
     ]
     assert infos == [f"Cloned good into {outcome.cloned['good']}"]
+    # A bare class name cannot tell auth from a missing ref, DNS or TLS, so the
+    # fixed cause label rides along -- and it is a label, never git's text.
+    assert "Clone worker failed" in warnings[0].getMessage()
     assert secret not in caplog.text
     assert "pass@" not in caplog.text
+
+
+async def test_the_failure_cause_label_reaches_the_log(
+    tmp_path, clone_settings, caplog
+) -> None:
+    """A failed clone logs a credential-safe *why*, not only the exception class."""
+    from git.exc import GitCommandError
+
+    secret = "sekrit-token"  # pragma: allowlist secret
+    manager = RecordingManager(
+        fail={
+            "bad": GitCommandError(
+                "git clone",
+                128,
+                stderr=(
+                    "fatal: Authentication failed for "
+                    f"'https://x-token-auth:{secret}@example.com/bad'"
+                ),
+            )
+        }
+    )
+    caplog.set_level(logging.WARNING, logger="rootcoz.engine.core")
+
+    outcome = await prepare_workspace_repos(manager, tmp_path, [_target("bad")])
+
+    assert outcome.failed == ["bad"]
+    message = " ".join(
+        r.getMessage()
+        for r in caplog.records
+        if "Failed to clone repo bad" in r.getMessage()
+    )
+    assert "GitCommandError: Authentication failed" in message
+    assert secret not in caplog.text
 
 
 async def test_duplicate_raw_names_refuse_the_whole_call(
@@ -581,7 +590,7 @@ def test_a_query_credential_never_becomes_the_directory_name() -> None:
 async def test_analysis_caller_pins_its_token_depth_ref_and_context(
     tmp_path, clone_settings
 ) -> None:
-    """A dropped ``credential_policy="always"`` would silently stop private clones."""
+    """A dropped ``credential=`` would silently stop private clones."""
     from rootcoz.sources.base import setup_analysis_workspace
 
     manager = RecordingManager(root=tmp_path)
@@ -740,7 +749,7 @@ async def test_additional_caller_writes_its_reanalysis_operation_id(
 async def test_chat_caller_pins_its_credential_skip_and_cancel_policy(
     tmp_path, clone_settings
 ) -> None:
-    """Chat's non-defaults: host-gated credential, skip, abandon, its own depth."""
+    """Chat's non-defaults: credential, skip, abandon, its own depth."""
     from rootcoz.engine.chat import clone_chat_repos
 
     captured: dict = {}
@@ -765,7 +774,7 @@ async def test_chat_caller_pins_its_credential_skip_and_cancel_policy(
 
     assert cloned is False
     assert captured["credential"] == "user-tok"
-    assert captured["credential_policy"] == "github_hosts_only"
+    assert "credential_policy" not in captured
     assert captured["skip_existing"] is True
     assert captured["cancellation"] == "abandon"
     by_name = {target.name: target for target in captured["targets"]}
@@ -798,14 +807,44 @@ async def test_chat_caller_survives_a_malformed_stored_tests_repo_url(
     assert [call[1].name for call in manager.calls] == ["extra"]
 
 
+async def test_chat_clone_width_ignores_a_repo_the_workspace_holds(
+    tmp_path, clone_settings
+) -> None:
+    """A reused workspace must not inflate the total: one clone reads ``of 1``."""
+    from rootcoz.engine.chat import clone_chat_repos
+
+    manager = RecordingManager()
+    (tmp_path / "repo0").mkdir()
+    published: list[str] = []
+
+    with patch("rootcoz.repository.RepositoryManager", return_value=manager):
+        await clone_chat_repos(
+            tmp_path,
+            {
+                "additional_repos": [
+                    {"name": "repo0", "url": "https://example.com/repo0"},
+                    {"name": "repo1", "url": "https://example.com/repo1"},
+                ]
+            },
+            on_repo=published.append,
+        )
+
+    assert [call[1].name for call in manager.calls] == ["repo1"]
+    assert published == ["cloning 1 of 1", ""]
+
+
 @pytest.mark.parametrize("preexisting", [False, True])
-async def test_chat_never_names_a_repo_the_workspace_holds(
+async def test_chat_reports_a_tests_repo_whose_name_another_repo_holds(
     tmp_path, clone_settings, preexisting
 ) -> None:
-    """An additional repo called ``tests-repo`` must not become the missing row.
+    """A same-named additional repo must not swallow the missing tests repo.
 
-    ``skip_existing`` leaves a repo that is already there out of ``cloned``, so
-    the row is decided by what the workspace holds, not by what this run cloned.
+    The configured tests repo could not be parsed, so it is not in this
+    workspace whatever else occupies that directory name: presence is not
+    evidence about a repo we could not even name. The shared path already keeps
+    the loser of a real name collision out of ``outcome.failed`` (see
+    ``test_two_names_that_resolve_onto_one_directory_keep_the_first``), so the
+    row needs no directory check of its own.
     """
     from rootcoz.engine.chat import clone_chat_repos
 
@@ -823,7 +862,7 @@ async def test_chat_never_names_a_repo_the_workspace_holds(
     with patch("rootcoz.repository.RepositoryManager", return_value=manager):
         await clone_chat_repos(tmp_path, params, failed=failed)
 
-    assert failed == []
+    assert failed == ["tests-repo"]
     assert (tmp_path / "tests-repo").is_dir()
 
 

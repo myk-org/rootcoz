@@ -8516,7 +8516,6 @@ async def _reanalyze_failure_background(
                 # The tests-repo token may be the deployment's own setting: it
                 # rides to whatever host the tests repo names, deliberately.
                 credential=tests_repo_token,
-                credential_policy="always",
                 cancellation="propagate",
                 admit=False,
                 on_repo_start=_tests_repo_started,

@@ -19,7 +19,6 @@ from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Literal
-from urllib.parse import urlsplit
 
 from git.exc import GitCommandError
 from pi_sidecar_client import run_parallel_with_limit
@@ -218,24 +217,6 @@ async def _admit_clone(active_here: list[int]) -> Callable[[], None]:
     return _release
 
 
-def _is_github_host(url: str) -> bool:
-    """Whether *url* names a GitHub host (github.com or a self-hosted install).
-
-    Reads ``hostname``, never ``netloc``: netloc keeps userinfo, so
-    ``https://github.com@evil.tld/x`` used to pass and the chatting user's
-    GitHub token was injected into a URL for ``evil.tld``.
-
-    The predicate is deliberately loose -- a host that merely contains
-    ``github`` still qualifies -- because tightening it breaks self-hosted
-    enterprise clones. That is pre-existing debt, pinned by test.
-    """
-    try:
-        host = (urlsplit(url).hostname or "").lower()
-    except ValueError:  # Malformed authority, e.g. an unmatched IPv6 bracket.
-        return False
-    return host.endswith("github.com") or "github" in host
-
-
 def _resolve_repo_target(root: Path, name: str) -> tuple[str, Path]:
     """Resolve a declared repo name into ``(directory name, path inside root)``.
 
@@ -286,23 +267,19 @@ def tests_repo_target(
     return RepoTarget(name=name, url=url, ref=ref, depth=depth, kind="tests_repo")
 
 
-def _clone_token(target: RepoTarget, credential: str, policy: str) -> str | None:
-    """The token this target's clone may carry.
+def _clone_token(target: RepoTarget, credential: str) -> str | None:
+    """The token this target's clone may carry, by destination not by host.
 
-    Two different credentials: a **repo-scoped** one (a tests-repo token, which
-    may be the deployment's own setting, or an ``AdditionalRepo.token``) rides
-    with that repo's host whatever it is -- otherwise no private self-hosted
-    repo could be cloned. A caller's **general-purpose** credential is not the
-    same thing, and under ``github_hosts_only`` it only ever goes to a GitHub
-    host.
+    Two different credentials, and neither is filtered by host: a
+    **repo-scoped** one (a tests-repo token, which may be the deployment's own
+    setting, or an ``AdditionalRepo.token``) rides on that repo's own URL
+    whatever its host is -- otherwise no private self-hosted repo could be
+    cloned. A caller's **general-purpose** credential reaches only a
+    ``tests_repo`` target, the repository the caller named.
     """
     if target.kind == "additional_repo":
         return target.token or None
-    if not credential:
-        return None
-    if policy == "always" or _is_github_host(str(target.url)):
-        return credential
-    return None
+    return credential or None
 
 
 def _clone_failure_cause(error: BaseException) -> str:
@@ -401,7 +378,6 @@ async def prepare_workspace_repos(
     targets: Sequence[RepoTarget],
     *,
     credential: str = "",
-    credential_policy: Literal["always", "github_hosts_only"] = "github_hosts_only",
     skip_existing: bool = False,
     cancellation: Literal["propagate", "abandon"] = "propagate",
     admit: bool = True,
@@ -411,11 +387,11 @@ async def prepare_workspace_repos(
     """Materialise *targets* into *root* -- the one repository clone path.
 
     Analysis and chat both come through here, and so does re-analysis, so a
-    workspace change (a timeout bound, a naming rule, a credential policy) is
-    made once instead of twice and kept consistent by hand. Everything the
-    callers genuinely do differently is an argument, and both defaults are the
-    safe end: a general credential is host-gated unless a caller says
-    otherwise, and cancellation joins the worker unless a caller opts out.
+    workspace change (a timeout bound, a naming rule, a credential destination)
+    is made once instead of twice and kept consistent by hand. Everything the
+    callers genuinely do differently is an argument, and every default is the
+    safe end: no credential unless a caller passes one, and cancellation joins
+    the worker unless a caller opts out.
 
     A repo failure never raises: it is warned, recorded in ``failed``/``errors``
     and the rest still clone. The caller decides what an unexpected one means
@@ -427,8 +403,6 @@ async def prepare_workspace_repos(
         targets: Repositories to materialise, in progress-report order.
         credential: The caller's general-purpose credential. Only a
             ``tests_repo`` target may carry it.
-        credential_policy: ``github_hosts_only`` sends ``credential`` to GitHub
-            hosts only; ``always`` sends it wherever the target points.
         skip_existing: Leave a target whose directory is already there alone.
         cancellation: ``propagate`` joins the clone worker before re-raising;
             ``abandon`` re-raises at once and lets the worker finish.
@@ -491,7 +465,7 @@ async def prepare_workspace_repos(
                 index,
                 replace(target, name=name, url=str(target.url)),
                 path,
-                _clone_token(target, credential, credential_policy),
+                _clone_token(target, credential),
             )
         )
 
@@ -548,12 +522,16 @@ async def prepare_workspace_repos(
         if isinstance(result, asyncio.CancelledError):
             continue
         problems[index] = result
+        # The cause is a fixed label (``_clone_failure_cause``), never the
+        # exception's text: git's stderr carries the token-bearing remote URL.
+        # The type alone cannot tell auth from a missing ref, DNS or TLS.
         logger.warning(
-            "Failed to clone repo %s from %s into %s (%s)",
+            "Failed to clone repo %s from %s into %s (%s: %s)",
             target.name,
             sanitize_clone_url(str(target.url)),
             path,
             type(result).__name__,
+            _clone_failure_cause(result),
         )
 
     # Declaration order, not completion order: under admission the workers
@@ -679,8 +657,6 @@ async def clone_additional_repos(
             )
             for repo in additional_repos_list
         ],
-        # An additional repo carries its own credential, never a general one.
-        credential_policy="github_hosts_only",
         # A cancelled analysis must return at once; the worker holds its slot
         # until it ends, so a second clone cannot start behind it.
         cancellation="abandon",
