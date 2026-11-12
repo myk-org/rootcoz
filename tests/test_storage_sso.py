@@ -400,10 +400,15 @@ async def test_admin_created_accounts_record_admin_provenance(
     assert rows == {"boss": "admin", "boss2": "admin"}
 
 
-async def test_approval_can_record_the_provider_it_was_made_with(
+async def test_approval_records_the_approver_not_the_requested_provider(
     setup_test_db: Path,
 ) -> None:
-    """A flow that fixed no provider learns it at approval; a conflict is refused."""
+    """A flow that fixed no provider learns it at approval; a conflict is refused.
+
+    And a code fixed to github, approved from a username-and-key session, keeps
+    github as what it was opened for while leaving the session with no issuer —
+    nobody signed in through github.
+    """
     with patch.object(storage, "DB_PATH", setup_test_db):
         await storage.create_user("alice")
         open_code = await storage.create_device_code(
@@ -414,7 +419,7 @@ async def test_approval_can_record_the_provider_it_was_made_with(
         )
         assert await storage.redeem_device_code(open_code["device_code"]) == {
             "username": "alice",
-            "provider": "google",
+            "approved_provider": "google",
         }
 
         fixed = await storage.create_device_code(
@@ -425,9 +430,11 @@ async def test_approval_can_record_the_provider_it_was_made_with(
             fixed["user_code"], username="alice", provider="google"
         )
         assert await storage.authorize_device_code(fixed["user_code"], username="alice")
+        requested = await storage.get_device_code_by_user_code(fixed["user_code"])
+        assert requested is not None and requested["provider"] == "github"
         assert await storage.redeem_device_code(fixed["device_code"]) == {
             "username": "alice",
-            "provider": "github",
+            "approved_provider": None,
         }
 
 
@@ -536,10 +543,10 @@ async def test_a_device_code_is_approved_then_redeemed_exactly_once(
 
         assert await storage.redeem_device_code(code["device_code"]) == {
             "username": "alice",
-            "provider": None,
+            "approved_provider": None,
         }
-        # A second redemption is refused — the code is claimed, exactly once — but
-        # the row survives so a failed session can be retried without the terminal
+        # A second claim is refused — the code is claimed, exactly once — but the
+        # row survives so a failed session can be retried without the terminal
         # being told its code expired.
         assert await storage.redeem_device_code(code["device_code"]) is None
         assert await storage.get_device_code(code["device_code"]) is not None
@@ -547,13 +554,25 @@ async def test_a_device_code_is_approved_then_redeemed_exactly_once(
         assert await storage.release_device_code(code["device_code"]) is True
         assert await storage.redeem_device_code(code["device_code"]) == {
             "username": "alice",
-            "provider": None,
+            "approved_provider": None,
         }
 
-        # Consumption is the step that ends the flow.
-        assert await storage.consume_device_code(code["device_code"]) is True
+        # The exchange is the step that ends the flow: one commit writes the
+        # session and spends the code.
+        session = await storage.exchange_device_code_for_session(
+            code["device_code"], username="alice", is_admin=False, role="reviewer"
+        )
+        assert session is not None
+        assert (await storage.get_session(session))["username"] == "alice"
         assert await storage.get_device_code(code["device_code"]) is None
         assert await storage.get_device_code_by_user_code(code["user_code"]) is None
+        # Nothing left to exchange: a second exchange cannot mint a second token.
+        assert (
+            await storage.exchange_device_code_for_session(
+                code["device_code"], username="alice", is_admin=False, role="reviewer"
+            )
+            is None
+        )
 
 
 async def test_only_the_hashed_device_code_is_stored(setup_test_db: Path) -> None:
@@ -595,7 +614,7 @@ async def test_an_authorized_code_cannot_be_approved_for_someone_else(
         )
         assert await storage.redeem_device_code(code["device_code"]) == {
             "username": "alice",
-            "provider": None,
+            "approved_provider": None,
         }
 
 
@@ -622,7 +641,7 @@ async def test_concurrent_redemption_has_exactly_one_winner(
 ) -> None:
     """Eight pollers, one code: one CLI gets the account, seven get nothing.
 
-    ``redeem_device_code`` holds BEGIN IMMEDIATE across the read and the delete,
+    ``redeem_device_code`` holds BEGIN IMMEDIATE across the read and the claim,
     which is what makes the handover exactly-once under concurrency.
     """
     import asyncio
@@ -637,7 +656,65 @@ async def test_concurrent_redemption_has_exactly_one_winner(
         )
 
     winners = [result for result in results if result is not None]
-    assert winners == [{"username": "alice", "provider": None}]
+    assert winners == [{"username": "alice", "approved_provider": None}]
+
+
+async def test_a_failed_session_write_spends_nothing(setup_test_db: Path) -> None:
+    """The session and the spend are one commit: neither lands without the other."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.create_user("alice")
+        code = await storage.create_device_code(ttl_seconds=600, interval_seconds=5)
+        await storage.authorize_device_code(code["user_code"], username="alice")
+        assert await storage.redeem_device_code(code["device_code"]) is not None
+
+        with (
+            patch.object(
+                storage, "_insert_session_in_tx", side_effect=RuntimeError("storage")
+            ),
+            pytest.raises(RuntimeError),
+        ):
+            await storage.exchange_device_code_for_session(
+                code["device_code"], username="alice", is_admin=False, role="reviewer"
+            )
+
+        # Nothing was written, and the code is still there to retry with.
+        assert await storage.get_device_code(code["device_code"]) is not None
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) AS n FROM sessions WHERE username = 'alice'"
+            )
+            assert (await cursor.fetchone())["n"] == 0
+
+        token = await storage.exchange_device_code_for_session(
+            code["device_code"], username="alice", is_admin=False, role="reviewer"
+        )
+        assert token is not None
+        assert await storage.get_device_code(code["device_code"]) is None
+
+
+async def test_a_claim_cannot_be_exchanged_for_another_account(
+    setup_test_db: Path,
+) -> None:
+    """The approval names the account: a claim is not transferable."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.create_user("alice")
+        await storage.create_user("bob")
+        code = await storage.create_device_code(ttl_seconds=600, interval_seconds=5)
+        await storage.authorize_device_code(code["user_code"], username="alice")
+        assert await storage.redeem_device_code(code["device_code"]) is not None
+
+        assert (
+            await storage.exchange_device_code_for_session(
+                code["device_code"], username="bob", is_admin=False, role="reviewer"
+            )
+            is None
+        )
+        assert (
+            await storage.exchange_device_code_for_session(
+                code["device_code"], username="alice", is_admin=False, role="reviewer"
+            )
+            is not None
+        )
 
 
 async def test_purge_removes_only_expired_device_codes(setup_test_db: Path) -> None:
