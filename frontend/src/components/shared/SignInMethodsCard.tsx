@@ -45,9 +45,11 @@ function label(provider: string): string {
  */
 export function SignInMethodsCard() {
   // Connecting and disconnecting are reviewer-level writes on the account, so a
-  // viewer is told that instead of being offered a button the server refuses.
-  const { role } = useAuth()
-  const canManage = role !== 'viewer'
+  // viewer is told that instead of being offered a button the server refuses. The
+  // bootstrap administrator is excluded for a different reason: it has no users
+  // row, so no provider identity could ever be attached to it.
+  const { role, username } = useAuth()
+  const canManage = role !== 'viewer' && username !== 'admin'
   const [identities, setIdentities] = useState<LinkedIdentity[] | null>(null)
   const [unlinkable, setUnlinkable] = useState(true)
   const [providers, setProviders] = useState<SsoProvider[]>([])
@@ -80,8 +82,20 @@ export function SignInMethodsCard() {
     const params = new URLSearchParams(window.location.search)
     const linked = params.get('sso_linked')
     const failed = params.get('sso_error')
-    if (linked) setNotice(`${label(linked)} connected.`)
-    if (failed) setError(ssoErrorMessage(failed, SSO_LINK_ERROR_FALLBACK))
+    if (linked || failed) {
+      if (linked) setNotice(`${label(linked)} connected.`)
+      if (failed) setError(ssoErrorMessage(failed, SSO_LINK_ERROR_FALLBACK))
+      // The outcome is a one-shot notice: leaving it in the URL re-shows a stale
+      // "connected" (or an old failure) on every refresh and back-navigation.
+      params.delete('sso_linked')
+      params.delete('sso_error')
+      const query = params.toString()
+      window.history.replaceState(
+        null,
+        '',
+        `${window.location.pathname}${query ? `?${query}` : ''}`,
+      )
+    }
   }, [load])
 
   async function handleUnlink(provider: string) {
