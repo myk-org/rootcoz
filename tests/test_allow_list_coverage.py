@@ -68,6 +68,13 @@ ALLOW_LIST_EXEMPT_ROUTES = {
     # your own AI key: a user dropped from the list must still be able to
     # control how they sign in. The last one is refused by the handler anyway.
     ("DELETE", "/api/user/identities/{provider}"),
+    # Connecting another provider to your own account is the same class of
+    # self-service account-security write as unlinking above — the handler
+    # already refuses it to anyone below reviewer — and it can never widen what
+    # the account may do, because a linked provider resolves to that same
+    # account. Gating it would let a list change strand a signed-in person who
+    # may still remove a method but not add one.
+    ("POST", "/api/auth/sso/{provider}/login"),
 }
 
 MUTATING_METHODS = {"post", "put", "delete", "patch"}

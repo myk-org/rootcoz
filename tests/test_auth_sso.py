@@ -36,6 +36,9 @@ _SSO_ENV = {
     "PUBLIC_BASE_URL": "https://rootcoz.example",
 }
 
+#: What the settings page's own POST carries — the proof a link start needs.
+_SAME_ORIGIN = {"sec-fetch-site": "same-origin"}
+
 
 def _claims(
     subject: str = "sub-1",
@@ -134,6 +137,16 @@ async def _last_logout_reason(temp_db_path: Path) -> str | None:
     return rows[-1]["details"]["idp_logout"] if rows else None
 
 
+async def _last_sso_refusal(temp_db_path: Path) -> dict:
+    """The most recent SSO refusal row, for its reason and subject."""
+    rows = [
+        r
+        for r in await _audit_actions(temp_db_path)
+        if r["action"] == "auth.sso_login_failed"
+    ]
+    return rows[0] if rows else {}
+
+
 async def _audit_actions(temp_db_path: Path) -> list[dict]:
     """Every audit row written to the test database."""
     with patch.object(storage, "DB_PATH", temp_db_path):
@@ -216,6 +229,7 @@ def test_each_provider_is_offered_only_when_fully_configured() -> None:
         SSO_OPENSHIFT_CLIENT_ID="ocp-id",
         SSO_OPENSHIFT_CLIENT_SECRET="ocp-secret",  # pragma: allowlist secret
         SSO_OPENSHIFT_ISSUER="https://oauth-openshift.apps.example.com",
+        SSO_OPENSHIFT_API_URL="https://api.example.com:6443",
         SSO_REDHAT_CLIENT_ID="rh-id",
         SSO_REDHAT_CLIENT_SECRET="rh-secret",  # pragma: allowlist secret
         SSO_REDHAT_ISSUER="https://sso.redhat.com/auth/realms/redhat-external",
@@ -224,8 +238,8 @@ def test_each_provider_is_offered_only_when_fully_configured() -> None:
         clear_settings_cache()
         names = [provider.name for provider in configured_providers(get_settings())]
         assert names == ["github", "openshift", "redhat"]
-        # OpenShift's cluster origin drives its OAuth2 flow; Red Hat SSO's issuer
-        # is what its OIDC discovery is built from.
+        # OpenShift's cluster origin drives its OAuth2 flow, its API URL the account
+        # lookup; Red Hat SSO's issuer is what its OIDC discovery is built from.
         assert get_provider("openshift", get_settings()) is not None
         assert get_provider("redhat", get_settings()).issuer == (
             "https://sso.redhat.com/auth/realms/redhat-external"
@@ -235,11 +249,24 @@ def test_each_provider_is_offered_only_when_fully_configured() -> None:
     missing_issuer = build_test_env(
         SSO_OPENSHIFT_CLIENT_ID="ocp-id",
         SSO_OPENSHIFT_CLIENT_SECRET="ocp-secret",  # pragma: allowlist secret
+        SSO_OPENSHIFT_API_URL="https://api.example.com:6443",
     )
     with patch.dict(os.environ, missing_issuer, clear=True):
         clear_settings_cache()
         assert configured_providers(get_settings()) == []
         assert get_provider("openshift", get_settings()) is None
+        assert OpenShiftProvider.from_settings(get_settings()) is None
+
+    # The API URL is the second origin: without it every lookup would go to the
+    # OAuth server, which serves only /oauth/*.
+    missing_api_url = build_test_env(
+        SSO_OPENSHIFT_CLIENT_ID="ocp-id",
+        SSO_OPENSHIFT_CLIENT_SECRET="ocp-secret",  # pragma: allowlist secret
+        SSO_OPENSHIFT_ISSUER="https://oauth-openshift.apps.example.com",
+    )
+    with patch.dict(os.environ, missing_api_url, clear=True):
+        clear_settings_cache()
+        assert configured_providers(get_settings()) == []
         assert OpenShiftProvider.from_settings(get_settings()) is None
 
     # An issuer without a scheme is a deployment error, not a hidden provider:
@@ -378,6 +405,9 @@ def test_an_expired_attempt_is_refused() -> None:
         ("sso_openshift_issuer", "oauth-openshift.apps.example.com"),
         ("sso_openshift_issuer", "ftp://example.com"),
         ("sso_openshift_issuer", "http://oauth-openshift.apps.example.com"),
+        ("sso_openshift_api_url", "api.example.com:6443"),
+        ("sso_openshift_api_url", "ftp://api.example.com:6443"),
+        ("sso_openshift_api_url", "http://api.example.com:6443"),
         ("sso_redhat_issuer", "sso.redhat.com/auth/realms/x"),
         ("sso_redhat_issuer", "http://sso.redhat.com/auth/realms/x"),
     ],
@@ -394,7 +424,7 @@ def test_a_malformed_issuer_is_refused_where_it_is_written(
         Settings.model_validate({field: value})
 
 
-def test_a_plaintext_issuer_disables_the_provider_at_runtime() -> None:
+def test_a_plaintext_origin_disables_the_provider_at_runtime() -> None:
     """A value that bypassed validation (an old DB row) must not be discovered.
 
     Settings validation refuses such a value on write; this is the second line
@@ -411,12 +441,28 @@ def test_a_plaintext_issuer_disables_the_provider_at_runtime() -> None:
                 "ocp-secret"  # pragma: allowlist secret
             ),
             "sso_openshift_issuer": "http://oauth-openshift.apps.example.com",
+            "sso_openshift_api_url": "https://api.example.com:6443",
         }
     )
     assert OpenShiftProvider.from_settings(settings) is None
 
-    # A loopback dev issuer is allowed, so a local Keycloak still works.
-    dev = settings.model_copy(update={"sso_openshift_issuer": "http://localhost:8443"})
+    # The API URL crosses the network with the caller's token, so it is held to
+    # the same rule as the issuer.
+    plaintext_api = settings.model_copy(
+        update={
+            "sso_openshift_issuer": "https://oauth-openshift.apps.example.com",
+            "sso_openshift_api_url": "http://api.example.com:6443",
+        }
+    )
+    assert OpenShiftProvider.from_settings(plaintext_api) is None
+
+    # A loopback dev server is allowed for both, so a local cluster still works.
+    dev = settings.model_copy(
+        update={
+            "sso_openshift_issuer": "http://localhost:8443",
+            "sso_openshift_api_url": "http://localhost:6443",
+        }
+    )
     assert OpenShiftProvider.from_settings(dev) is not None
 
 
@@ -664,6 +710,159 @@ async def test_github_authorization_url_asks_for_the_email_scope() -> None:
     assert "user%3Aemail" in url
     assert "state=st" in url
     assert "redirect_uri=https%3A%2F%2Fx%2Fcb" in url
+
+
+def _openshift_transport(user: dict, identities: dict | None = None):
+    """A MockTransport standing in for a cluster's OAuth server and API server.
+
+    Returns the transport and the requests it saw, so a test can assert which of
+    the two origins each call reached.
+    """
+    import httpx
+
+    seen: list[httpx.Request] = []
+    identity_prefix = "/apis/user.openshift.io/v1/identities/"
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        if request.url.path == "/oauth/token":
+            return httpx.Response(200, json={"access_token": "sha256~token"})
+        if request.url.path == "/apis/user.openshift.io/v1/users/~":
+            return httpx.Response(200, json=user)
+        if request.url.path.startswith(identity_prefix):
+            name = request.url.path[len(identity_prefix) :]
+            found = (identities or {}).get(name)
+            if found is None:
+                return httpx.Response(404, json={"kind": "Status"})
+            return httpx.Response(200, json=found)
+        return httpx.Response(404, json={"kind": "Status"})
+
+    return httpx.MockTransport(handler), seen
+
+
+def _openshift_provider():
+    """The provider with both of the cluster's origins configured."""
+    from rootcoz.auth.sso.openshift import OpenShiftProvider
+
+    return OpenShiftProvider(
+        client_id="id",
+        client_secret="secret",  # pragma: allowlist secret
+        issuer="https://oauth-openshift.apps.example.com",
+        api_url="https://api.example.com:6443",
+    )
+
+
+async def test_openshift_reads_the_account_from_the_api_server() -> None:
+    """The OAuth origin serves only /oauth/*: the account lives on the API host."""
+    import httpx
+
+    user = {
+        "metadata": {"uid": "u-1", "name": "alice"},
+        "identities": ["oidc:alice"],
+    }
+    transport, seen = _openshift_transport(
+        user, {"oidc:alice": {"extra": {"email": ["alice@example.com"]}}}
+    )
+    with _github_client(transport):
+        claims = await _openshift_provider().exchange(
+            code="c", code_verifier="", redirect_uri="https://x/cb", nonce=""
+        )
+
+    assert claims.subject == "u-1"
+    assert claims.username_hint == "alice"
+    assert claims.email == "alice@example.com"
+    assert httpx  # the transport itself is the proof the helper ran
+
+    token_request = next(r for r in seen if r.url.path == "/oauth/token")
+    assert token_request.url.host == "oauth-openshift.apps.example.com"
+    user_request = next(r for r in seen if r.url.path.endswith("/users/~"))
+    assert user_request.url.host == "api.example.com"
+    assert user_request.url.port == 6443
+    assert user_request.headers["authorization"] == "Bearer sha256~token"
+    identity_request = next(r for r in seen if "/identities/" in r.url.path)
+    assert identity_request.url.host == "api.example.com"
+
+
+@pytest.mark.parametrize(
+    "user",
+    [
+        {"metadata": [1]},
+        {"metadata": "u-1"},
+        {"identities": ["oidc:alice"]},
+        {"metadata": {"name": "alice"}},
+        {"metadata": {"uid": "", "name": "alice"}},
+    ],
+)
+async def test_a_cluster_reply_without_a_usable_account_id_is_a_refusal(
+    user: dict,
+) -> None:
+    """Malformed required data is the handled refusal, never an AttributeError."""
+    transport, _seen = _openshift_transport(user)
+    with _github_client(transport), pytest.raises(AuthError) as excinfo:
+        await _openshift_provider().exchange(
+            code="c", code_verifier="", redirect_uri="https://x/cb", nonce=""
+        )
+    assert excinfo.value.reason == "no_subject"
+
+
+@pytest.mark.parametrize(
+    "user,identities",
+    [
+        # No identities list at all, and one that is not a list.
+        ({"metadata": {"uid": "u-1"}}, {}),
+        ({"metadata": {"uid": "u-1"}, "identities": "oidc:alice"}, {}),
+        # Entries that are not identity names are skipped, not dereferenced.
+        ({"metadata": {"uid": "u-1"}, "identities": [None, 7, ""]}, {}),
+        # An identity the token cannot read is skipped too.
+        ({"metadata": {"uid": "u-1"}, "identities": ["oidc:gone"]}, {}),
+        # An identity without an address (or with a malformed one) is normal.
+        ({"metadata": {"uid": "u-1"}, "identities": ["oidc:a"]}, {"oidc:a": {}}),
+        (
+            {"metadata": {"uid": "u-1"}, "identities": ["oidc:a"]},
+            {"oidc:a": {"email": 1, "extra": [1]}},
+        ),
+    ],
+)
+async def test_optional_identity_data_that_is_malformed_is_skipped(
+    user: dict, identities: dict
+) -> None:
+    """Only SSO_ALLOWED_DOMAINS wants the address, so a gap never fails a login."""
+    transport, _seen = _openshift_transport(user, identities)
+    with _github_client(transport):
+        claims = await _openshift_provider().exchange(
+            code="c", code_verifier="", redirect_uri="https://x/cb", nonce=""
+        )
+    assert claims.subject == "u-1"
+    assert claims.email is None
+
+
+async def test_a_recycled_account_name_is_not_the_previous_person(
+    temp_db_path: Path,
+) -> None:
+    """A cluster can reassign metadata.name; the link is on the immutable uid."""
+    for client in make_app_client(temp_db_path):
+        ticket = await _ticket(
+            client, provider="openshift", subject="uid-old", suggested="alice"
+        )
+        created = client.post(
+            "/api/auth/sso/create", json={"ticket": ticket, "username": "alice"}
+        )
+        assert created.status_code == 200, created.text
+
+        # The same name now belongs to a different person (a new uid).
+        user = {"metadata": {"uid": "uid-new", "name": "alice"}}
+        transport, _seen = _openshift_transport(user)
+        with _github_client(transport):
+            claims = await _openshift_provider().exchange(
+                code="c", code_verifier="", redirect_uri="https://x/cb", nonce=""
+            )
+
+        assert claims.subject == "uid-new"
+        assert claims.username_hint == "alice"
+        # Not signed into the previous owner's account: this is a new choice.
+        choice = await auth_identity.resolve("openshift", claims, get_settings())
+        assert isinstance(choice, auth_identity.LoginChoice)
+        assert choice.suggested_username == "alice"
 
 
 async def test_an_unlinked_identity_gets_a_suggestion_not_an_account(
@@ -2315,8 +2514,9 @@ async def test_a_signed_in_person_can_start_a_link(temp_db_path: Path) -> None:
             return_value="https://accounts.google.com/o/oauth2/v2/auth?state=xyz",
             autospec=True,
         ):
-            response = client.get(
+            response = client.post(
                 "/api/auth/sso/google/login?mode=link&next=/settings",
+                headers=_SAME_ORIGIN,
                 follow_redirects=False,
             )
 
@@ -2358,8 +2558,10 @@ async def test_a_viewer_cannot_start_a_link(temp_db_path: Path) -> None:
         session = await storage.create_session("vicky", is_admin=False, role="viewer")
         client.cookies.set("rootcoz_session", session)
 
-        response = client.get(
-            "/api/auth/sso/google/login?mode=link", follow_redirects=False
+        response = client.post(
+            "/api/auth/sso/google/login?mode=link",
+            headers=_SAME_ORIGIN,
+            follow_redirects=False,
         )
         assert response.status_code == 303
         assert response.headers["location"] == ("/login?sso_error=link_forbidden_role")
@@ -2368,11 +2570,137 @@ async def test_a_viewer_cannot_start_a_link(temp_db_path: Path) -> None:
 async def test_link_mode_needs_a_session_before_it_starts(temp_db_path: Path) -> None:
     """Starting a link anonymously is refused rather than turned into a login."""
     for client in make_app_client(temp_db_path, _SSO_ENV):
-        response = client.get(
-            "/api/auth/sso/google/login?mode=link", follow_redirects=False
+        response = client.post(
+            "/api/auth/sso/google/login?mode=link",
+            headers=_SAME_ORIGIN,
+            follow_redirects=False,
         )
         assert response.status_code == 303
         assert response.headers["location"] == "/login?sso_error=link_requires_session"
+
+
+async def test_link_mode_must_be_started_with_a_post(temp_db_path: Path) -> None:
+    """A bare GET cannot start a link: a cross-site navigation is not consent.
+
+    Nothing is minted and nothing is sealed — the refusal happens before the
+    flow exists, so there is no attempt a callback could finish.
+    """
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("ruthn")
+        session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+
+        with patch.object(
+            GoogleProvider, "authorization_url", autospec=True
+        ) as authorization_url:
+            response = client.get(
+                "/api/auth/sso/google/login?mode=link&next=/settings",
+                follow_redirects=False,
+            )
+
+        assert authorization_url.await_count == 0
+        assert response.status_code == 303
+        assert response.headers["location"] == "/login?sso_error=link_requires_post"
+        assert not response.cookies.get(sso_state.STATE_COOKIE)
+        refusal = await _last_sso_refusal(temp_db_path)
+        assert refusal["details"]["reason"] == "link_requires_post"
+        # The row names the account whose cookie rode along.
+        assert refusal["actor"] == "ruthn"
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"sec-fetch-site": "cross-site"},
+        # A sibling subdomain is another origin, and this is a write.
+        {"sec-fetch-site": "same-site"},
+        {"origin": "https://evil.example"},
+        {"referer": "https://evil.example/settings"},
+        {"origin": "null"},
+        # Nothing proves the origin, so it is treated as cross-site.
+        {},
+    ],
+)
+async def test_a_link_cannot_be_started_cross_site(
+    temp_db_path: Path, headers: dict[str, str]
+) -> None:
+    """A signed-in browser is not consent: the POST must prove its origin."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("ruthn")
+        session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+
+        with patch.object(
+            GoogleProvider, "authorization_url", autospec=True
+        ) as authorization_url:
+            response = client.post(
+                "/api/auth/sso/google/login?mode=link&next=/settings",
+                headers=headers,
+                follow_redirects=False,
+            )
+
+        assert authorization_url.await_count == 0
+        assert response.status_code == 303
+        # The person is still signed in, so the reason renders on the settings
+        # page rather than on /login, which bounces them away.
+        assert response.headers["location"] == "/settings?sso_error=link_cross_site"
+        assert not response.cookies.get(sso_state.STATE_COOKIE)
+        refusal = await _last_sso_refusal(temp_db_path)
+        assert refusal["details"]["reason"] == "link_cross_site"
+        assert refusal["actor"] == "ruthn"
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        {"origin": "https://rootcoz.example"},
+        {"referer": "https://rootcoz.example/settings"},
+    ],
+)
+async def test_the_origin_header_also_proves_a_link_is_same_origin(
+    temp_db_path: Path, headers: dict[str, str]
+) -> None:
+    """Clients that send no Sec-Fetch-Site are covered by Origin/Referer."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("ruthn")
+        session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+
+        with patch.object(
+            GoogleProvider,
+            "authorization_url",
+            return_value="https://accounts.google.com/o/oauth2/v2/auth?state=xyz",
+            autospec=True,
+        ):
+            response = client.post(
+                "/api/auth/sso/google/login?mode=link&next=/settings",
+                headers=headers,
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 303
+        assert response.headers["location"].startswith("https://accounts.google.com/")
+        assert response.cookies.get(sso_state.STATE_COOKIE)
+
+
+async def test_an_ordinary_login_needs_neither_a_post_nor_an_origin(
+    temp_db_path: Path,
+) -> None:
+    """The same-origin rule is the link's, not the login's: sign-in stays a GET."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        with patch.object(
+            GoogleProvider,
+            "authorization_url",
+            return_value="https://accounts.google.com/o/oauth2/v2/auth?state=xyz",
+            autospec=True,
+        ):
+            response = client.get(
+                "/api/auth/sso/google/login?next=/dashboard", follow_redirects=False
+            )
+
+        assert response.status_code == 303
+        assert response.headers["location"].startswith("https://accounts.google.com/")
+        assert response.cookies.get(sso_state.STATE_COOKIE)
 
 
 async def test_an_unknown_mode_is_refused(temp_db_path: Path) -> None:
@@ -2443,6 +2771,58 @@ async def test_a_role_demoted_mid_flow_cannot_finish_a_link(
         assert await storage.list_user_identities("ruthn") == []
 
 
+@pytest.mark.parametrize(
+    ("user_status", "disabled", "reason"),
+    [
+        # ``disabled`` is applied as the row change alone: disabling through
+        # storage also drops the account's sessions, and the surviving session is
+        # exactly the case this gate must not depend on the middleware for.
+        ("active", True, "account_disabled"),
+        ("pending", False, "account_pending"),
+        ("rejected", False, "account_rejected"),
+    ],
+)
+async def test_a_blocked_account_cannot_finish_a_link(
+    temp_db_path: Path, user_status: str, disabled: bool, reason: str
+) -> None:
+    """The public SSO routes skip the middleware's gate, so it is applied here.
+
+    The state is re-read at the finish, never taken from the start: ten minutes
+    and an admin action can sit in between.
+    """
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("ruthn")
+        session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+        # The status changed while the IdP round-trip was in progress.
+        async with storage._connect_db() as db:
+            await db.execute(
+                "UPDATE users SET status = ?, disabled = ? WHERE username = ?",
+                (user_status, 1 if disabled else 0, "ruthn"),
+            )
+            await db.commit()
+        sealed, state = _sealed(
+            mode=sso_state.MODE_LINK, link_to="ruthn", next_path="/settings"
+        )
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+
+        with patch.object(
+            GoogleProvider, "exchange", return_value=_claims(), autospec=True
+        ):
+            response = client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 303
+        # The account state never reaches the URL; the audit row carries it.
+        assert response.headers["location"] == "/settings?sso_error=denied"
+        assert await storage.list_user_identities("ruthn") == []
+        refusal = await _last_sso_refusal(temp_db_path)
+        assert refusal["details"]["reason"] == reason
+        assert refusal["actor"] == "ruthn"
+
+
 async def test_a_link_cannot_be_finished_into_another_account(
     temp_db_path: Path,
 ) -> None:
@@ -2493,8 +2873,10 @@ async def test_an_expired_session_cannot_start_or_finish_a_link(
             await db.commit()
         client.cookies.set("rootcoz_session", session)
 
-        started = client.get(
-            "/api/auth/sso/google/login?mode=link", follow_redirects=False
+        started = client.post(
+            "/api/auth/sso/google/login?mode=link",
+            headers=_SAME_ORIGIN,
+            follow_redirects=False,
         )
         assert started.headers["location"] == "/login?sso_error=link_requires_session"
 

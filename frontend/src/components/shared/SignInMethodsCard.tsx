@@ -38,7 +38,9 @@ function label(provider: string): string {
  *
  * "Connect" leaves the SPA for the provider and comes back with
  * `?sso_linked=<provider>`, because a redirect exchange cannot happen inside a
- * fetch. The last identity cannot be removed: an account created through SSO is
+ * fetch. It is a real form POST, never a link: a cross-site navigation can follow
+ * a GET, so the server accepts `mode=link` only as a same-origin POST. The last
+ * identity cannot be removed: an account created through SSO is
  * shown its API key once, at creation, and may never have saved it, so unlinking
  * the only way in would lock the person out — the server refuses it and this card
  * says so before the click.
@@ -187,13 +189,15 @@ export function SignInMethodsCard() {
         {available.length > 0 && canManage && (
           <div className="flex flex-wrap gap-2">
             {available.map((provider) => (
-              <Button key={provider.name} variant="outline" size="sm" asChild>
-                <a
-                  href={`/api/auth/sso/${encodeURIComponent(provider.name)}/login?mode=link&next=${encodeURIComponent('/settings')}`}
-                >
+              <form
+                key={provider.name}
+                method="post"
+                action={`/api/auth/sso/${encodeURIComponent(provider.name)}/login?mode=link&next=${encodeURIComponent('/settings')}`}
+              >
+                <Button type="submit" variant="outline" size="sm">
                   Connect {provider.display_name}
-                </a>
-              </Button>
+                </Button>
+              </form>
             ))}
           </div>
         )}
