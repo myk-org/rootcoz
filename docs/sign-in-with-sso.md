@@ -127,8 +127,13 @@ lets you connect another or disconnect one. An account with none connected gets 
 one-line prompt on the dashboard — only when the deployment offers SSO and only to
 someone who may connect one; dismissing it hides it for that browser session.
 
-Two rules matter:
+Three rules matter:
 
+- **Attaching a provider to an existing account asks first.** The confirmation names
+  both the provider and the account it is being attached to ("Attach Google to
+  alice?"), and nothing is sent until it is accepted — the claim form's own submit
+  only produces that confirmation. Cancelling goes back to the form with what was
+  typed still there.
 - **The last sign-in method cannot be removed**, by you or by an administrator.
   Every account holds an API key, but it is shown only once — at registration, or
   at the moment an SSO account is created — and it may never have been saved, so
