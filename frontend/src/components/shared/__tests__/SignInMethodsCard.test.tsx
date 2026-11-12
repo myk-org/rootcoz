@@ -47,10 +47,16 @@ it('offers to connect a provider that is not connected yet', async () => {
   mockState([{ provider: 'google', email: null, created_at: '' }], true)
   render(<SignInMethodsCard />)
 
-  const link = await screen.findByRole('link', { name: /connect github/i })
-  expect(link.getAttribute('href')).toBe(
+  // A real same-origin POST navigation, not a link: the security property is the
+  // POST itself, which a cross-site navigation cannot trigger.
+  const submit = await screen.findByRole('button', { name: /connect github/i })
+  const form = submit.closest('form')
+  expect(form?.method).toBe('post')
+  expect(form?.getAttribute('action')).toBe(
     '/api/auth/sso/github/login?mode=link&next=%2Fsettings',
   )
+  expect(submit.getAttribute('type')).toBe('submit')
+  expect(screen.queryByRole('link', { name: /connect github/i })).toBeNull()
 })
 
 it('cannot disconnect the only sign-in method', async () => {
