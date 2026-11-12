@@ -19,23 +19,35 @@ export function hardNavigate(url: string): boolean {
 }
 
 /**
+ * Rewrite the current history entry in place, keeping its state.
+ *
+ * The state is React Router's, and it holds `location.state.from` — the page to
+ * return to. `replaceState(null, …)` would drop it, so a reload or a step back
+ * after a URL cleanup lands on `/` instead of where the person came from.
+ * Rewritten in place, so no extra history entry appears either.
+ */
+function rewriteUrl(search: string, hash: string): void {
+  window.history.replaceState(
+    window.history.state,
+    '',
+    `${window.location.pathname}${search}${hash}`,
+  )
+}
+
+/**
  * Drop one-shot query parameters from the address bar, keeping the rest.
  *
  * An outcome reported in the query (`?sso_linked=…`, `?sso_error=…`) is read
  * once; left in the URL it shows a stale notice again on every refresh and
- * back-navigation. Rewritten in place, so no extra history entry appears.
+ * back-navigation.
  */
 export function stripQueryParams(...keys: string[]): void {
   const params = new URLSearchParams(window.location.search)
   const before = params.toString()
   for (const key of keys) params.delete(key)
-  if (params.toString() === before) return
   const query = params.toString()
-  window.history.replaceState(
-    null,
-    '',
-    `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`,
-  )
+  if (query === before) return
+  rewriteUrl(query ? `?${query}` : '', window.location.hash)
 }
 
 /**
@@ -46,9 +58,5 @@ export function stripQueryParams(...keys: string[]): void {
  */
 export function clearUrlFragment(): void {
   if (!window.location.hash) return
-  window.history.replaceState(
-    null,
-    '',
-    `${window.location.pathname}${window.location.search}`,
-  )
+  rewriteUrl(window.location.search, '')
 }
