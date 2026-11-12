@@ -1,6 +1,6 @@
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
-import { MemoryRouter, Route, Routes, useLocation } from 'react-router-dom'
+import { BrowserRouter, MemoryRouter, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { RegisterPage } from '@/pages/RegisterPage'
 
@@ -89,6 +89,38 @@ function LocationProbe() {
   return <div data-testid="location">{`${location.pathname}${location.search}${location.hash}`}</div>
 }
 
+/**
+ * Drops the fragment mid-flow: what the address bar looks like on the render
+ * after the page itself stripped the ticket from it.
+ */
+function FragmentDropper() {
+  const navigate = useNavigate()
+  return (
+    <button type="button" onClick={() => navigate('/login', { replace: true })}>
+      drop fragment
+    </button>
+  )
+}
+
+function renderWithFragmentDropper() {
+  return render(
+    <MemoryRouter initialEntries={[TICKET_ENTRY]}>
+      <FragmentDropper />
+      <RegisterPage />
+    </MemoryRouter>,
+  )
+}
+
+/** The real address bar, so `?sso_error=` and `#sso_ticket=` behave as deployed. */
+function renderLoginAtUrl(url: string) {
+  window.history.replaceState({}, '', url)
+  return render(
+    <BrowserRouter>
+      <RegisterPage />
+    </BrowserRouter>,
+  )
+}
+
 /** Same page, but with the destinations mounted so navigation is observable. */
 function renderWithDestinations(entry: string | typeof TICKET_ENTRY | Record<string, unknown>) {
   return render(
@@ -114,6 +146,8 @@ describe('RegisterPage SSO providers', () => {
     // person in, and that must not leak into the next test's redirect guard.
     authMock.refreshAuth.mockReset()
     authMock.refreshAuth.mockImplementation(async () => {})
+    // The address bar is shared state between the tests that use it.
+    window.history.replaceState({}, '', '/')
     defaultServer()
   })
 
@@ -407,6 +441,7 @@ describe('RegisterPage SSO first-login choice', () => {
     await userEvent.type(screen.getByLabelText(/^username$/i), 'jdoe')
     await userEvent.type(screen.getByLabelText(/api key/i), 'existing-key') // pragma: allowlist secret
     await userEvent.click(screen.getByRole('button', { name: /^connect account$/i }))
+    await userEvent.click(screen.getByRole('button', { name: /^yes, attach to jdoe$/i }))
 
     await waitFor(() =>
       expect(apiMock.api.post).toHaveBeenCalledWith('/api/auth/sso/link', {
@@ -416,5 +451,90 @@ describe('RegisterPage SSO first-login choice', () => {
       }),
     )
     await waitFor(() => expect(authMock.refreshAuth).toHaveBeenCalled())
+  })
+
+  it('posts the captured ticket after the fragment is gone', async () => {
+    // The ticket is a live credential the page strips from the URL as soon as it
+    // is spent, so the panel must post the value it captured, not re-read it.
+    renderWithFragmentDropper()
+    await screen.findByRole('heading', { name: /isn't connected yet/i })
+
+    await userEvent.click(screen.getByRole('button', { name: /drop fragment/i }))
+    await userEvent.click(screen.getByRole('button', { name: /^create account$/i }))
+
+    await waitFor(() =>
+      expect(apiMock.api.post).toHaveBeenCalledWith('/api/auth/sso/create', {
+        ticket: 'tkt-1',
+        username: 'rnetser',
+      }),
+    )
+  })
+
+  it('posts the captured ticket to the link endpoint after the fragment is gone', async () => {
+    renderWithFragmentDropper()
+    await screen.findByRole('heading', { name: /isn't connected yet/i })
+
+    await userEvent.click(screen.getByRole('button', { name: /i already have an account/i }))
+    await userEvent.type(screen.getByLabelText(/^username$/i), 'jdoe')
+    await userEvent.type(screen.getByLabelText(/api key/i), 'existing-key') // pragma: allowlist secret
+    await userEvent.click(screen.getByRole('button', { name: /drop fragment/i }))
+    await userEvent.click(screen.getByRole('button', { name: /^connect account$/i }))
+    await userEvent.click(screen.getByRole('button', { name: /^yes, attach to jdoe$/i }))
+
+    await waitFor(() =>
+      expect(apiMock.api.post).toHaveBeenCalledWith('/api/auth/sso/link', {
+        ticket: 'tkt-1',
+        username: 'jdoe',
+        api_key: 'existing-key', // pragma: allowlist secret
+      }),
+    )
+  })
+
+  it('names the provider and the account before anything is linked', async () => {
+    renderLogin(TICKET_ENTRY)
+    await screen.findByRole('heading', { name: /isn't connected yet/i })
+
+    await userEvent.click(screen.getByRole('button', { name: /i already have an account/i }))
+    await userEvent.type(screen.getByLabelText(/^username$/i), 'jdoe')
+    await userEvent.type(screen.getByLabelText(/api key/i), 'existing-key') // pragma: allowlist secret
+    await userEvent.click(screen.getByRole('button', { name: /^connect account$/i }))
+
+    expect(await screen.findByText(/attach google to jdoe\?/i)).toBeInTheDocument()
+    expect(apiMock.api.post).not.toHaveBeenCalledWith('/api/auth/sso/link', expect.anything())
+  })
+
+  it('posts nothing and keeps the typed values when the link is cancelled', async () => {
+    renderLogin(TICKET_ENTRY)
+    await screen.findByRole('heading', { name: /isn't connected yet/i })
+
+    await userEvent.click(screen.getByRole('button', { name: /i already have an account/i }))
+    await userEvent.type(screen.getByLabelText(/^username$/i), 'jdoe')
+    await userEvent.type(screen.getByLabelText(/api key/i), 'existing-key') // pragma: allowlist secret
+    await userEvent.click(screen.getByRole('button', { name: /^connect account$/i }))
+    await userEvent.click(screen.getByRole('button', { name: /^cancel$/i }))
+
+    expect(screen.getByLabelText(/^username$/i)).toHaveValue('jdoe')
+    expect(screen.getByLabelText(/api key/i)).toHaveValue('existing-key') // pragma: allowlist secret
+    expect(apiMock.api.post).not.toHaveBeenCalledWith('/api/auth/sso/link', expect.anything())
+  })
+
+  it('strips ?sso_error once read, and shows the notice once', async () => {
+    renderLoginAtUrl('/login?sso_error=denied')
+
+    expect(await screen.findAllByText("That account can't sign in with this provider.")).toHaveLength(1)
+    await waitFor(() => expect(window.location.search).toBe(''))
+  })
+
+  it('clears the fragment even when the ticket could not be checked', async () => {
+    window.history.replaceState({}, '', '/login#sso_ticket=tkt-1') // pragma: allowlist secret
+    apiMock.api.post.mockImplementation(async (path: string) => {
+      if (path === '/api/auth/sso/ticket') throw apiError(500, 'Server exploded')
+      return {}
+    })
+    renderLogin(TICKET_ENTRY)
+
+    expect(await screen.findByText('Server exploded')).toBeInTheDocument()
+    await waitFor(() => expect(window.location.hash).toBe(''))
+    expect(apiMock.api.post).toHaveBeenCalledTimes(1)
   })
 })

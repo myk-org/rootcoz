@@ -17,3 +17,38 @@ export function hardNavigate(url: string): boolean {
   window.location.assign(url)
   return true
 }
+
+/**
+ * Drop one-shot query parameters from the address bar, keeping the rest.
+ *
+ * An outcome reported in the query (`?sso_linked=…`, `?sso_error=…`) is read
+ * once; left in the URL it shows a stale notice again on every refresh and
+ * back-navigation. Rewritten in place, so no extra history entry appears.
+ */
+export function stripQueryParams(...keys: string[]): void {
+  const params = new URLSearchParams(window.location.search)
+  const before = params.toString()
+  for (const key of keys) params.delete(key)
+  if (params.toString() === before) return
+  const query = params.toString()
+  window.history.replaceState(
+    null,
+    '',
+    `${window.location.pathname}${query ? `?${query}` : ''}${window.location.hash}`,
+  )
+}
+
+/**
+ * Drop the fragment from the address bar, keeping the path and query.
+ *
+ * An unredeemed SSO ticket arrives in the fragment; it must not stay visible in
+ * the address bar and history entry, nor be re-posted on the next reload.
+ */
+export function clearUrlFragment(): void {
+  if (!window.location.hash) return
+  window.history.replaceState(
+    null,
+    '',
+    `${window.location.pathname}${window.location.search}`,
+  )
+}

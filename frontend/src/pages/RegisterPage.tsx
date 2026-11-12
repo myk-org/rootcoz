@@ -4,6 +4,7 @@ import { useAuth } from '@/lib/auth'
 import { api, ApiError, extractApiDetail } from '@/lib/api'
 import { SSO_LOGIN_ERROR_FALLBACK, ssoErrorMessage } from '@/lib/ssoErrors'
 import { persistTokensToServer } from '@/lib/tokens'
+import { clearUrlFragment, stripQueryParams } from '@/lib/navigation'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { TokenField } from '@/components/shared/TokenField'
@@ -93,6 +94,8 @@ function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpire
   const [linkName, setLinkName] = useState('')
   const [linkKey, setLinkKey] = useState('')
   const [showLinkKey, setShowLinkKey] = useState(false)
+  /** The claim the person submitted, shown back for confirmation before it is posted. */
+  const [confirmLink, setConfirmLink] = useState<{ username: string; apiKey: string } | null>(null)
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
@@ -148,6 +151,19 @@ function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpire
     }
   }
 
+  /**
+   * Attach this identity to `claim`'s account — only after the person has seen
+   * both the provider and the account named, since it joins an account that
+   * already exists.
+   */
+  function linkTo(claim: { username: string; apiKey: string }) {
+    void finish('/api/auth/sso/link', {
+      ticket: ticketValue,
+      username: claim.username,
+      api_key: claim.apiKey,
+    })
+  }
+
   return (
     <div className="space-y-4">
       <h2 className="font-display text-base font-semibold text-text-primary">
@@ -156,51 +172,85 @@ function SsoChoicePanel({ ticket, ticketValue, providerLabel, nextPath, onExpire
       <WarningBanner message={error} tone="red" />
 
       {linking ? (
-        <form
-          onSubmit={(e) => {
-            e.preventDefault()
-            const name = linkName.trim()
-            if (name && linkKey.trim()) void finish('/api/auth/sso/link', { ticket: ticketValue, username: name, api_key: linkKey.trim() })
-          }}
-          className="space-y-4"
-        >
-          <fieldset disabled={loading} className="space-y-4">
-            <p className="text-xs text-text-tertiary">Connect this {providerLabel} sign-in to the account you already have.</p>
+        confirmLink ? (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              linkTo(confirmLink)
+            }}
+            className="space-y-4"
+          >
+            <fieldset disabled={loading} className="space-y-4">
+              <p className="text-sm text-text-primary">
+                Attach {providerLabel} to {confirmLink.username}?
+              </p>
+              <p className="text-xs text-text-tertiary">
+                This signs you in with {providerLabel} from now on, on the existing
+                account {confirmLink.username}. Its username and API key keep working too.
+              </p>
 
-            <UsernameField
-              id="sso-link-username"
-              value={linkName}
-              onChange={(v) => { setLinkName(v); setError('') }}
-              autoFocus
-            />
+              <Button type="submit" className="w-full" disabled={loading}>
+                {loading ? 'Connecting...' : `Yes, attach to ${confirmLink.username}`}
+              </Button>
 
-            <TokenField
-              id="sso-link-apikey"
-              label="API Key"
-              value={linkKey}
-              onChange={(v) => { setLinkKey(v); setError('') }}
-              show={showLinkKey}
-              onToggleShow={() => setShowLinkKey(!showLinkKey)}
-              placeholder="Your existing API key..."
-              optionalLabel={false}
-              autoFocus={!!linkName}
-            />
-
-            <Button type="submit" className="w-full" disabled={!linkName.trim() || !linkKey.trim() || loading}>
-              {loading ? 'Connecting...' : 'Connect account'}
-            </Button>
-
-            <p className="text-center text-xs text-text-tertiary">
-              <button
+              <Button
                 type="button"
-                onClick={() => { setLinking(false); setError('') }}
-                className="font-medium text-signal-blue hover:underline"
+                variant="outline"
+                className="w-full"
+                disabled={loading}
+                onClick={() => { setConfirmLink(null); setError('') }}
               >
-                Create a new account instead
-              </button>
-            </p>
-          </fieldset>
-        </form>
+                Cancel
+              </Button>
+            </fieldset>
+          </form>
+        ) : (
+          <form
+            onSubmit={(e) => {
+              e.preventDefault()
+              const name = linkName.trim()
+              if (name && linkKey.trim()) setConfirmLink({ username: name, apiKey: linkKey.trim() })
+            }}
+            className="space-y-4"
+          >
+            <fieldset disabled={loading} className="space-y-4">
+              <p className="text-xs text-text-tertiary">Connect this {providerLabel} sign-in to the account you already have.</p>
+
+              <UsernameField
+                id="sso-link-username"
+                value={linkName}
+                onChange={(v) => { setLinkName(v); setError('') }}
+                autoFocus
+              />
+
+              <TokenField
+                id="sso-link-apikey"
+                label="API Key"
+                value={linkKey}
+                onChange={(v) => { setLinkKey(v); setError('') }}
+                show={showLinkKey}
+                onToggleShow={() => setShowLinkKey(!showLinkKey)}
+                placeholder="Your existing API key..."
+                optionalLabel={false}
+                autoFocus={!!linkName}
+              />
+
+              <Button type="submit" className="w-full" disabled={!linkName.trim() || !linkKey.trim() || loading}>
+                Connect account
+              </Button>
+
+              <p className="text-center text-xs text-text-tertiary">
+                <button
+                  type="button"
+                  onClick={() => { setLinking(false); setError('') }}
+                  className="font-medium text-signal-blue hover:underline"
+                >
+                  Create a new account instead
+                </button>
+              </p>
+            </fieldset>
+          </form>
+        )
       ) : (
         <form
           onSubmit={(e) => {
@@ -303,6 +353,10 @@ export function RegisterPage() {
   // The fragment is never sent with a request, so the ticket stays out of access
   // logs and Referer headers; the panel posts it back to /ticket, /create, /link.
   const ssoTicketValue = new URLSearchParams(location.hash.replace(/^#/, '')).get('sso_ticket') ?? ''
+  // The ticket the panel posts, remembered from the first render that saw one:
+  // the fragment is stripped as soon as the ticket is redeemed (or fails), so
+  // re-deriving it later would post an empty credential to /create and /link.
+  const [ssoTicketCaptured, setSsoTicketCaptured] = useState(ssoTicketValue)
   // Read once: the code is a one-shot notice, so it must not reappear after the
   // person dismisses the panel or switches to Register.
   const [ssoErrorCode] = useState(
@@ -329,7 +383,14 @@ export function RegisterPage() {
   }, [])
 
   useEffect(() => {
+    // Same one-shot notice rule: `?sso_error=…` is stripped here, or a refresh
+    // (or a step back to that history entry) shows the old failure again.
+    stripQueryParams('sso_error')
+  }, [])
+
+  useEffect(() => {
     if (!ssoTicketValue) return
+    setSsoTicketCaptured(ssoTicketValue)
     setSsoTicketSettled(false)
     // POST, never GET: the ticket is a live credential, so it must not travel in
     // a URL — the same reason it arrives in the fragment. `active` keeps a late
@@ -339,9 +400,6 @@ export function RegisterPage() {
       .then((ticket) => {
         if (!active) return
         setSsoTicket(ticket)
-        // Redeemed: drop it from the address bar and the history entry, so it is
-        // not visible for the panel's lifetime (or in a shared screenshot).
-        window.history.replaceState(null, '', window.location.pathname)
       })
       .catch((err: unknown) => {
         if (!active) return
@@ -354,7 +412,13 @@ export function RegisterPage() {
         }
         setError(failureMessage(err, 'Could not check this sign-in. Please try again.'))
       })
-      .finally(() => { if (active) setSsoTicketSettled(true) })
+      .finally(() => {
+        if (!active) return
+        setSsoTicketSettled(true)
+        // Whatever the outcome: a still-live ticket left in the address bar is
+        // visible in the history entry and re-posted on every refresh.
+        clearUrlFragment()
+      })
     return () => { active = false }
   }, [ssoTicketValue])
 
@@ -550,7 +614,7 @@ export function RegisterPage() {
               ) : ssoTicket ? (
                 <SsoChoicePanel
                   ticket={ssoTicket}
-                  ticketValue={ssoTicketValue}
+                  ticketValue={ssoTicketCaptured}
                   providerLabel={ssoProviderLabel}
                   nextPath={returnTo}
                   onExpired={() => { setSsoTicket(null); setSsoTicketExpired(true) }}
@@ -560,7 +624,7 @@ export function RegisterPage() {
                     // or it keeps winning over the reveal below, and drop the
                     // fragment so the spent ticket does not linger in the URL.
                     setSsoTicket(null)
-                    window.history.replaceState(null, '', window.location.pathname)
+                    clearUrlFragment()
                     setNewApiKey(apiKey)
                     // A pending account sees the same "waiting for approval" note
                     // registration shows, not a bare key followed by a redirect —
