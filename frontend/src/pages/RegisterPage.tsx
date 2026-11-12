@@ -363,13 +363,24 @@ export function RegisterPage() {
     () => new URLSearchParams(location.search).get('sso_error') ?? '',
   )
   const [ssoProviders, setSsoProviders] = useState<SsoProvider[]>([])
-  const [ssoTicket, setSsoTicket] = useState<SsoTicket | null>(null)
+  // The metadata travels with the ticket it describes: a panel drawn from one
+  // ticket's metadata must never finish another ticket's sign-in.
+  const [ssoTicket, setSsoTicket] = useState<{ value: string; data: SsoTicket } | null>(null)
   const [ssoTicketExpired, setSsoTicketExpired] = useState(false)
-  // Derived, not initialised once: the hash is re-read every render, so a ticket
-  // that appears without a remount (SPA push, bfcache restore) must not leave an
-  // interactive login form on screen while its redemption is in flight.
+  // A lookup failure that is not expiry leaves the ticket live, so it gets a
+  // retry rather than a provider round trip. Its own state, because it is the
+  // page's state — not a form error.
+  const [ssoTicketFailure, setSsoTicketFailure] = useState('')
+  // A retry request, remembering the captured ticket to re-post. An object, not
+  // the bare value, so pressing it again after a second failure is a new request.
+  const [ssoTicketRetry, setSsoTicketRetry] = useState<{ ticket: string } | null>(null)
+  // Settled once the current ticket's lookup has an answer — right or wrong —
+  // so the spinner shows for the redemption in flight, not for a page with none.
   const [ssoTicketSettled, setSsoTicketSettled] = useState(ssoTicketValue === '')
-  const ssoTicketPending = ssoTicketValue !== '' && !ssoTicketSettled
+  // Derived, not stored: a ticket that appears without a remount (SPA push,
+  // bfcache restore) must not leave an interactive login form on screen while
+  // its redemption is in flight.
+  const ssoTicketPending = !ssoTicketSettled
 
   useEffect(() => {
     let active = true
@@ -389,17 +400,25 @@ export function RegisterPage() {
   }, [])
 
   useEffect(() => {
-    if (!ssoTicketValue) return
-    setSsoTicketCaptured(ssoTicketValue)
+    // The fragment's value normally; a retry re-posts the captured one, since
+    // the cleanup below already removed the only copy from the address bar.
+    const ticketValue = ssoTicketValue || ssoTicketRetry?.ticket || ''
+    if (!ticketValue) return
+    setSsoTicketCaptured(ticketValue)
     setSsoTicketSettled(false)
+    // A new ticket is a new identity: the previous ticket's metadata, its expiry
+    // verdict and its failure must not be shown — or submitted — over this one.
+    setSsoTicket(null)
+    setSsoTicketExpired(false)
+    setSsoTicketFailure('')
     // POST, never GET: the ticket is a live credential, so it must not travel in
     // a URL — the same reason it arrives in the fragment. `active` keeps a late
     // response from setting state after the panel was dismissed.
     let active = true
-    api.post<SsoTicket>('/api/auth/sso/ticket', { ticket: ssoTicketValue })
+    api.post<SsoTicket>('/api/auth/sso/ticket', { ticket: ticketValue })
       .then((ticket) => {
         if (!active) return
-        setSsoTicket(ticket)
+        setSsoTicket({ value: ticketValue, data: ticket })
       })
       .catch((err: unknown) => {
         if (!active) return
@@ -410,7 +429,7 @@ export function RegisterPage() {
           setSsoTicketExpired(true)
           return
         }
-        setError(failureMessage(err, 'Could not check this sign-in. Please try again.'))
+        setSsoTicketFailure(failureMessage(err, 'Could not check this sign-in. Please try again.'))
       })
       .finally(() => {
         if (!active) return
@@ -420,7 +439,7 @@ export function RegisterPage() {
         clearUrlFragment()
       })
     return () => { active = false }
-  }, [ssoTicketValue])
+  }, [ssoTicketValue, ssoTicketRetry])
 
   useEffect(() => {
     // A live session must not swallow an SSO attempt: the person followed a
@@ -434,6 +453,7 @@ export function RegisterPage() {
       !ssoTicketValue &&
       !ssoTicket &&
       !ssoTicketExpired &&
+      !ssoTicketFailure &&
       !ssoCreated &&
       mode !== 'key-reveal'
     ) {
@@ -447,6 +467,7 @@ export function RegisterPage() {
     ssoTicketValue,
     ssoTicket,
     ssoTicketExpired,
+    ssoTicketFailure,
     ssoCreated,
     mode,
   ])
@@ -563,20 +584,37 @@ export function RegisterPage() {
   function dismissSso() {
     setSsoTicket(null)
     setSsoTicketExpired(false)
+    setSsoTicketFailure('')
     setSsoTicketSettled(true)
+    // Abandoning the panel abandons the credential with it.
+    setSsoTicketCaptured('')
+    setSsoTicketRetry(null)
     setError('')
     // Drops the fragment as well: the ticket must not survive in the URL.
     navigate(location.pathname, { replace: true })
   }
 
+  /** Re-post the captured ticket — the fragment stays clean, the URL never sees it. */
+  function retrySsoTicket() {
+    setSsoTicketRetry({ ticket: ssoTicketCaptured })
+  }
+
   const ssoErrorSentence = ssoErrorCode
     ? ssoErrorMessage(ssoErrorCode, SSO_LOGIN_ERROR_FALLBACK)
     : ''
-  const ssoProviderLabel = ssoTicket
-    ? ssoProviders.find((p) => p.name === ssoTicket.provider)?.display_name ?? ssoTicket.provider
+  /**
+   * The choice panel's source: the ticket in hand and the metadata that belongs
+   * to it, never a previous ticket's. A ticket that has only just arrived has
+   * no metadata yet, and the old one would name the old provider over a live
+   * credential — and could submit the new ticket as that identity.
+   */
+  const ssoTicketPanel =
+    ssoTicket && ssoTicket.value === (ssoTicketValue || ssoTicketCaptured) ? ssoTicket : null
+  const ssoProviderLabel = ssoTicketPanel
+    ? ssoProviders.find((p) => p.name === ssoTicketPanel.data.provider)?.display_name ?? ssoTicketPanel.data.provider
     : ''
 
-  const subtitle = ssoTicketPending || ssoTicket || ssoTicketExpired
+  const subtitle = ssoTicketPending || ssoTicketPanel || ssoTicketFailure || ssoTicketExpired
     ? 'Finish signing in'
     : mode === 'key-reveal'
       ? 'Your account has been created'
@@ -611,10 +649,10 @@ export function RegisterPage() {
                 <div className="flex justify-center py-10">
                   <LoadingSpinner />
                 </div>
-              ) : ssoTicket ? (
+              ) : ssoTicketPanel ? (
                 <SsoChoicePanel
-                  ticket={ssoTicket}
-                  ticketValue={ssoTicketCaptured}
+                  ticket={ssoTicketPanel.data}
+                  ticketValue={ssoTicketPanel.value}
                   providerLabel={ssoProviderLabel}
                   nextPath={returnTo}
                   onExpired={() => { setSsoTicket(null); setSsoTicketExpired(true) }}
@@ -646,6 +684,17 @@ export function RegisterPage() {
                     setMode('key-reveal')
                   }}
                 />
+              ) : ssoTicketFailure ? (
+                <div className="space-y-4">
+                  <h2 className="font-display text-base font-semibold text-text-primary">Couldn't check this sign-in</h2>
+                  <WarningBanner message={ssoTicketFailure} tone="red" />
+                  <p className="text-xs text-text-tertiary">
+                    Your sign-in link is still valid. Try again — no need to go back to
+                    your provider.
+                  </p>
+                  <Button className="w-full" onClick={retrySsoTicket}>Try again</Button>
+                  <Button variant="outline" className="w-full" onClick={dismissSso}>Back to sign in</Button>
+                </div>
               ) : ssoTicketExpired ? (
                 <div className="space-y-4">
                   <h2 className="font-display text-base font-semibold text-text-primary">This sign-in link has expired</h2>
