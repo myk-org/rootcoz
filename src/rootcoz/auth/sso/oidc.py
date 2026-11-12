@@ -333,7 +333,8 @@ class OIDCProvider(SSOProvider):
             The verified claims.
 
         Raises:
-            AuthError: When the signature, issuer, audience or expiry is wrong.
+            AuthError: When the signature, issuer, audience, expiry or issue
+                time is wrong.
         """
         from joserfc import jwt as jose_jwt
         from joserfc.errors import JoseError
@@ -372,7 +373,9 @@ class OIDCProvider(SSOProvider):
         ):
             raise AuthError("id_token_invalid", "ID token is not valid yet")
         issued_at = claims.get("iat")
-        if isinstance(issued_at, int | float) and issued_at - CLOCK_SKEW_SECONDS > now:
+        if not isinstance(issued_at, int | float):
+            raise AuthError("id_token_invalid", "ID token has no iat")
+        if issued_at - CLOCK_SKEW_SECONDS > now:
             raise AuthError("id_token_invalid", "ID token was issued in the future")
         issuer = claims.get("iss")
         if issuer not in {self.issuer, self.issuer.rstrip("/")}:
@@ -475,6 +478,7 @@ class OIDCProvider(SSOProvider):
             email=email,
             claims=claims,
             asserts_email_verified=self.asserts_email_verified,
+            email_is_authoritative=self.email_is_authoritative,
         )
 
     async def end_session_url(self, post_logout_redirect_uri: str) -> str | None:

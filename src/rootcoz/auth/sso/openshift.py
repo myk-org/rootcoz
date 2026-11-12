@@ -61,7 +61,13 @@ def _identity_email(identity: Mapping[str, Any]) -> str | None:
 
 
 class OpenShiftProvider(SSOProvider):
-    """Sign in with a cluster OpenShift account."""
+    """Sign in with a cluster OpenShift account.
+
+    The account's address is read from its identity objects, which a cluster
+    admin (or the IdP mapping the admin configured) writes: the end user cannot
+    set it. It is therefore authoritative, and an allow-list accepts it without
+    a verification claim the cluster never publishes.
+    """
 
     name = "openshift"
     display_name = "OpenShift"
@@ -70,9 +76,11 @@ class OpenShiftProvider(SSOProvider):
     client_id_setting = "sso_openshift_client_id"
     # A settings field name, not a credential: detect-secrets matches the keyword.
     client_secret_setting = "sso_openshift_client_secret"  # pragma: allowlist secret
-    # An OpenShift OAuth server publishes no `email_verified` claim, so the domain
-    # rule can only check the address itself there.
+    # An OpenShift OAuth server publishes no `email_verified` claim, so there is
+    # nothing to assert here — the address still counts, because an identity
+    # object is written by the cluster admin, never by the end user.
     asserts_email_verified = False
+    email_is_authoritative = True
 
     def __init__(
         self, client_id: str, client_secret: str, issuer: str, api_url: str
@@ -215,7 +223,8 @@ class OpenShiftProvider(SSOProvider):
             username_hint=str(metadata.get("name") or "").strip(),
             email=email,
             claims={"user": user},
-            asserts_email_verified=False,
+            asserts_email_verified=self.asserts_email_verified,
+            email_is_authoritative=self.email_is_authoritative,
         )
 
     async def _email(self, names: Any, headers: dict[str, str]) -> str | None:

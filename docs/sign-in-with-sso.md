@@ -51,8 +51,10 @@ token), while the account, its identities and the email are read from the API
 server — with only the OAuth origin set, every login fails at the account lookup.
 The API URL follows the same rule as the issuer: `https`, no path, and `http` only
 for a loopback development server. An OpenShift OAuth server publishes no
-`email_verified` claim, so if you use the domain allow-list it is the address
-alone that is checked there.
+`email_verified` claim, so if you use the domain allow-list the address itself
+decides: an identity object is written by the cluster admin (or by the IdP
+mapping the admin configured), never by the end user, so the address it carries
+is authoritative and admitted on its domain alone.
 
 ### Red Hat SSO (Keycloak)
 
@@ -70,8 +72,8 @@ is rejected when the setting is saved, rather than silently removing the button.
 
 The providers talk to their IdP directly (`httpx`) and verify ID tokens with
 `joserfc`: the signing algorithm is pinned to RS256, the key comes from the
-issuer's JWKS, and `iss`, `aud`, `azp`, `exp` and `nonce` are each checked
-explicitly. This is deliberately not built on Authlib — the checks that matter
+issuer's JWKS, and `iss`, `aud`, `azp`, `exp`, `iat` and `nonce` are each checked
+explicitly — a token that omits `exp` or `iat` is refused, not waved through. This is deliberately not built on Authlib — the checks that matter
 here are the claim-level ones this repository needs to state in one place (a
 stolen token from a sibling client, an unverified address, a nonce from another
 attempt), and the discovery document is pinned to the configured issuer with every
@@ -107,9 +109,13 @@ that domain and its real subdomains, so `alice@eng.redhat.com` passes for
 
 It is checked on **every** SSO sign-in, before any account is looked up, so
 removing a domain also cuts off an account that is already linked — on its next
-sign-in. While the list is set, a login whose address is missing or unverified is
-refused as well. It never applies to username + API key logins or to `ADMIN_KEY`,
-so an administrator cannot lock themselves out with it.
+sign-in. An address is admitted only when it is **positively verified** (the
+provider asserts `email_verified` as `true`) or **authoritative** (only the
+deployment's IdP or cluster admin can write it — which is how an OpenShift
+identity is admitted, since its cluster publishes no `email_verified` claim); a
+login whose address is missing or neither of those is refused. It never applies
+to username + API key logins or to `ADMIN_KEY`, so an administrator cannot lock
+themselves out with it.
 
 The domain list decides *who may sign in*; `REQUIRE_APPROVAL` decides *when they
 may act*. Pair them when the provider's tenant is wider than your team.
