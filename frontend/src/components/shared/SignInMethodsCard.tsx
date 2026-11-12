@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, extractApiDetail } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 import { SSO_LINK_ERROR_FALLBACK, ssoErrorMessage } from '@/lib/ssoErrors'
+import { stripQueryParams } from '@/lib/navigation'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 
@@ -89,14 +90,7 @@ export function SignInMethodsCard() {
       if (failed) setError(ssoErrorMessage(failed, SSO_LINK_ERROR_FALLBACK))
       // The outcome is a one-shot notice: leaving it in the URL re-shows a stale
       // "connected" (or an old failure) on every refresh and back-navigation.
-      params.delete('sso_linked')
-      params.delete('sso_error')
-      const query = params.toString()
-      window.history.replaceState(
-        null,
-        '',
-        `${window.location.pathname}${query ? `?${query}` : ''}`,
-      )
+      stripQueryParams('sso_linked', 'sso_error')
     }
   }, [load])
 
