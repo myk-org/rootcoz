@@ -58,6 +58,19 @@ claim** — no `/.well-known/…` suffix and no extra path — and it must be `h
 Plaintext is accepted only for a loopback development server. A malformed issuer
 is rejected when the setting is saved, rather than silently removing the button.
 
+
+### What verifies the tokens
+
+The providers talk to their IdP directly (`httpx`) and verify ID tokens with
+`joserfc`: the signing algorithm is pinned to RS256, the key comes from the
+issuer's JWKS, and `iss`, `aud`, `azp`, `exp` and `nonce` are each checked
+explicitly. This is deliberately not built on Authlib — the checks that matter
+here are the claim-level ones this repository needs to state in one place (a
+stolen token from a sibling client, an unverified address, a nonce from another
+attempt), and the discovery document is pinned to the configured issuer with every
+endpoint required to be https. Authlib was dropped from the dependencies because
+nothing used it.
+
 ## How a sign-in works
 
 1. The person picks a provider on the login page and is sent to it with a sealed

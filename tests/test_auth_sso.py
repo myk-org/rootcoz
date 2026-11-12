@@ -224,10 +224,9 @@ def test_each_provider_is_offered_only_when_fully_configured() -> None:
         clear_settings_cache()
         names = [provider.name for provider in configured_providers(get_settings())]
         assert names == ["github", "openshift", "redhat"]
-        # The per-deployment issuers are what the OIDC flow will discover from.
-        assert get_provider("openshift", get_settings()).issuer == (
-            "https://oauth-openshift.apps.example.com"
-        )
+        # OpenShift's cluster origin drives its OAuth2 flow; Red Hat SSO's issuer
+        # is what its OIDC discovery is built from.
+        assert get_provider("openshift", get_settings()) is not None
         assert get_provider("redhat", get_settings()).issuer == (
             "https://sso.redhat.com/auth/realms/redhat-external"
         )
@@ -3059,10 +3058,10 @@ async def test_oidc_discovery_must_claim_the_configured_issuer(
 ) -> None:
     """The discovery document is trusted for an hour: pin what it claims."""
     from rootcoz.auth.sso import oidc as oidc_module
-    from rootcoz.auth.sso.openshift import OpenShiftProvider
+    from rootcoz.auth.sso.redhat import RedHatSSOProvider
 
     oidc_module._METADATA_CACHE.clear()
-    provider = OpenShiftProvider(
+    provider = RedHatSSOProvider(
         client_id="cid",
         client_secret="secret",  # pragma: allowlist secret
         issuer="https://idp.example",
@@ -3089,10 +3088,10 @@ async def test_oidc_discovery_rejects_a_plaintext_userinfo_endpoint(
 ) -> None:
     """The userinfo URL receives the access token on the no-id_token fallback."""
     from rootcoz.auth.sso import oidc as oidc_module
-    from rootcoz.auth.sso.openshift import OpenShiftProvider
+    from rootcoz.auth.sso.redhat import RedHatSSOProvider
 
     oidc_module._METADATA_CACHE.clear()
-    provider = OpenShiftProvider(
+    provider = RedHatSSOProvider(
         client_id="cid",
         client_secret="secret",  # pragma: allowlist secret
         issuer="https://idp.example",
@@ -3120,10 +3119,10 @@ async def test_oidc_discovery_rejects_a_plaintext_endpoint(
 ) -> None:
     """Endpoints we call must be https; loopback http is the documented exception."""
     from rootcoz.auth.sso import oidc as oidc_module
-    from rootcoz.auth.sso.openshift import OpenShiftProvider
+    from rootcoz.auth.sso.redhat import RedHatSSOProvider
 
     oidc_module._METADATA_CACHE.clear()
-    provider = OpenShiftProvider(
+    provider = RedHatSSOProvider(
         client_id="cid",
         client_secret="secret",  # pragma: allowlist secret
         issuer="https://idp.example",
@@ -3200,3 +3199,19 @@ def test_the_provider_names_are_declared_once() -> None:
 
     assert storage.SSO_PROVIDERS == SSO_PROVIDERS
     assert set(PROVIDER_BY_NAME) == set(SSO_PROVIDERS)
+
+
+async def test_a_spent_ticket_leaves_no_account_behind(temp_db_path: Path) -> None:
+    """The ticket is spent in the account's own transaction (#Qodo round 3)."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        ticket = await _ticket(client)
+        # A second browser consumed it first — the classic expiry race.
+        assert await storage.consume_sso_ticket(ticket) is not None
+
+        response = client.post(
+            "/api/auth/sso/create", json={"ticket": ticket, "username": "ruthn"}
+        )
+
+        assert response.status_code in (404, 409)
+        # Nothing durable: no account, no undisclosed key.
+        assert await storage.get_user_by_username("ruthn") is None

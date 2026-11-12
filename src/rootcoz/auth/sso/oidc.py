@@ -378,7 +378,14 @@ class OIDCProvider(SSOProvider):
         if issuer not in {self.issuer, self.issuer.rstrip("/")}:
             raise AuthError("id_token_invalid", f"unexpected issuer {issuer!r}")
         audience = claims.get("aud")
-        audiences = [audience] if isinstance(audience, str) else list(audience or [])
+        if isinstance(audience, str):
+            audiences = [audience]
+        elif isinstance(audience, list) and all(isinstance(a, str) for a in audience):
+            audiences = list(audience)
+        else:
+            # A numeric, object or mixed `aud` is a malformed claim, and list() on
+            # it would raise a TypeError deep in the callback instead of refusing.
+            raise AuthError("id_token_invalid", "audience is not a string or list")
         if self._client_id not in audiences:
             raise AuthError("id_token_invalid", "audience does not name this client")
         authorized_party = claims.get("azp")

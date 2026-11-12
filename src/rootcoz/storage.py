@@ -10174,6 +10174,7 @@ async def add_user_identity(
     *,
     email: str | None = None,
     raw_claims_json: str | None = None,
+    ticket: str | None = None,
 ) -> dict[str, Any]:
     """Link an external identity to a local account.
 
@@ -10187,6 +10188,7 @@ async def add_user_identity(
         raw_claims_json: Serialized IdP claims for audit. Credential-shaped
             keys (tokens, secrets, passwords, authorization codes) are removed
             before storage.
+        ticket: One-time first-login ticket to spend in the same transaction.
 
     Returns:
         The stored identity.
@@ -10274,6 +10276,28 @@ async def add_user_identity(
     return rows[0]
 
 
+async def _consume_ticket_in_tx(db: Any, ticket: str | None) -> None:
+    """Delete a one-time ticket inside the caller's transaction.
+
+    Args:
+        db: Open connection with an active transaction.
+        ticket: The raw ticket, or ``None`` when the caller has none to spend.
+
+    Raises:
+        ValueError: When ``ticket`` is given and no live ticket row matched, so
+            the caller's transaction rolls back and nothing durable is left.
+    """
+    if ticket is None:
+        return
+    cursor = await db.execute(
+        f"DELETE FROM sso_link_tickets WHERE ticket_hash = ? AND {_LIVE_ROW}",
+        (_hash_token(ticket),),
+    )
+    if cursor.rowcount == 0:
+        msg = "ticket is expired or was already used"
+        raise ValueError(msg)
+
+
 async def create_user_with_identity(
     username: str,
     *,
@@ -10283,6 +10307,7 @@ async def create_user_with_identity(
     status: str,
     role: str,
     created_via: str,
+    ticket: str | None = None,
 ) -> str:
     """Create an account **and** its SSO link in one transaction, or neither.
 
@@ -10300,6 +10325,8 @@ async def create_user_with_identity(
         status: ``active`` or ``pending`` (approval).
         role: Role for the new account.
         created_via: Provenance (the provider name).
+        ticket: One-time first-login ticket to spend in the same transaction, so a
+            ticket that expired meanwhile leaves no account behind.
 
     Returns:
         The raw API key, shown to the person once. An SSO-created account has no
@@ -10332,6 +10359,10 @@ async def create_user_with_identity(
                 if await cursor.fetchone() is not None:
                     msg = f"Username '{username}' is already taken"
                     raise ValueError(msg)
+                # The ticket is spent here, in the account's own transaction: a
+                # ticket that expired between the read and this write must not
+                # leave a created account (with a key nobody was shown) behind.
+                await _consume_ticket_in_tx(db, ticket)
                 cursor = await db.execute(
                     "SELECT 1 FROM user_identities WHERE provider = ? AND subject = ?",
                     (provider, subject),

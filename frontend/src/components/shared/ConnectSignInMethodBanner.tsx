@@ -26,14 +26,14 @@ interface ProvidersResponse {
  * their mind; a per-session one is forgotten when the browser is.
  */
 export function ConnectSignInMethodBanner() {
-  const { authenticated, role } = useAuth()
+  const { authenticated, role, username } = useAuth()
   const [providers, setProviders] = useState<ProvidersResponse['providers']>([])
   const [unlinked, setUnlinked] = useState(false)
   const [dismissed, setDismissed] = useSessionState<boolean>(DISMISS_KEY, false)
 
   useEffect(() => {
     // Nothing to offer a viewer, and nothing to load without a session.
-    if (!authenticated || role === 'viewer') return
+    if (!authenticated || role === 'viewer' || username === 'admin') return
     let cancelled = false
 
     async function load() {
@@ -55,13 +55,16 @@ export function ConnectSignInMethodBanner() {
     return () => {
       cancelled = true
     }
-  }, [authenticated, role])
+  }, [authenticated, role, username])
 
   function dismiss() {
     setDismissed(true)
   }
 
-  const canManage = authenticated && role !== 'viewer'
+  // The bootstrap administrator lives outside the users table, so it has no
+  // account a provider identity could attach to — offering the prompt would send
+  // it to a flow that cannot succeed.
+  const canManage = authenticated && role !== 'viewer' && username !== 'admin'
   if (!canManage || dismissed || !unlinked || providers.length === 0) return null
 
   const names = providers.map((provider) => provider.display_name).join(', ')

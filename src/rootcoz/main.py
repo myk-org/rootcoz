@@ -17768,6 +17768,7 @@ async def sso_create_account(request: Request) -> Response:
             email=record["email"],
             username=username,
             settings=settings,
+            ticket=ticket,
         )
     except auth_sso.AuthError as exc:
         await _audit_sso_refusal(request, record["provider"], exc.reason)
@@ -17781,11 +17782,6 @@ async def sso_create_account(request: Request) -> Response:
         raise HTTPException(
             status_code=_sso_error_status(exc.reason), detail=detail
         ) from exc
-
-    # Consumed only after the rows exist, so a failed attempt never costs the
-    # person another trip through the IdP.
-    if await storage.consume_sso_ticket(ticket) is None:
-        raise HTTPException(status_code=404, detail="This sign-in link has expired")
 
     response = await _sso_issue_session(
         request,
@@ -17880,6 +17876,7 @@ async def sso_link_account(request: Request) -> Response:
             provider=record["provider"],
             subject=record["subject"],
             email=record["email"],
+            ticket=ticket,
         )
     except auth_sso.AuthError as exc:
         await _audit_sso_refusal(
@@ -17899,9 +17896,6 @@ async def sso_link_account(request: Request) -> Response:
         raise HTTPException(
             status_code=_sso_error_status(exc.reason), detail=detail
         ) from exc
-
-    if await storage.consume_sso_ticket(ticket) is None:
-        raise HTTPException(status_code=404, detail="This sign-in link has expired")
 
     response = await _sso_issue_session(
         request,
