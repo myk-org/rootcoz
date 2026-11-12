@@ -37,7 +37,8 @@ AUDIT_EXEMPT: dict[tuple[str, str], str] = {
     # query string: the route reads the ticket and returns what it stands for.
     ("POST", "/api/auth/sso/ticket"): "reads a ticket, stores nothing",
     # Same reason for the device flow's lookup: POST only so a live user code
-    # never reaches an access log. It reads a code and stores nothing.
+    # never reaches an access log. It reads a code and stores nothing — only a
+    # refused lookup writes a row, and that is the shared approve-refusal row.
     ("POST", "/api/auth/sso/device/approve/lookup"): "reads a code, stores nothing",
     ("POST", "/results/{job_id}/preview-github-issue"): "read-only preview",
     ("POST", "/results/{job_id}/preview-jira-bug"): "read-only preview",
@@ -217,12 +218,18 @@ def test_exemptions_are_not_stale() -> None:
         # a public path, so the mutating-route gate alone would not cover them.
         "auth.sso_device_started",
         "auth.sso_device_approved",
+        # Every approval that is refused, including a code that is not there: the
+        # refusal is the only trace of a code-guessing run.
+        "auth.sso_device_approve_refused",
         "auth.sso_device_redeemed",
         # §Linking another provider (Stage 6c): the attach, and the detach by
         # the account owner and by an admin.
         "auth.identity_linked",
         "auth.identity_unlinked",
         "admin.identity_unlinked",
+        # A removal that is refused (#Qodo round 5): retrying the last method, or
+        # probing another account's providers, is otherwise invisible.
+        "auth.identity_unlink_refused",
         # §Proxy auto-provision (Stage 5): the first request of a proxy-vouched
         # account creates its row, and that is the only record of when it appeared.
         "auth.proxy_provisioned",

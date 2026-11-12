@@ -44,6 +44,8 @@ def _claims(
     subject: str = "sub-1",
     username_hint: str = "alice",
     email: str | None = "alice@example.com",
+    *,
+    email_is_authoritative: bool = False,
 ) -> ClaimSet:
     """A claim set as a provider would produce it."""
     return ClaimSet(
@@ -57,6 +59,7 @@ def _claims(
             "email_verified": True,
             "preferred_username": username_hint,
         },
+        email_is_authoritative=email_is_authoritative,
     )
 
 
@@ -538,10 +541,21 @@ def test_each_provider_declares_whether_it_asserts_verification(
     )
 
 
-async def test_an_idp_without_a_verification_claim_still_uses_the_domain_rule(
+def test_only_openshift_declares_an_authoritative_address() -> None:
+    """The allow-list exception is declared by the provider it is for."""
+    from rootcoz.auth.sso import PROVIDER_BY_NAME
+
+    assert {
+        name
+        for name, cls in PROVIDER_BY_NAME.items()
+        if getattr(cls, "email_is_authoritative", False)
+    } == {"openshift"}
+
+
+async def test_an_authoritative_address_is_admitted_without_a_verification_claim(
     temp_db_path: Path,
 ) -> None:
-    """OpenShift publishes no `email_verified`; the domain check is still applied."""
+    """OpenShift writes the address through the cluster admin: the domain counts."""
     from rootcoz.auth.sso.base import ClaimSet as BaseClaimSet
 
     env = dict(_SSO_ENV, SSO_ALLOWED_DOMAINS="redhat.com")
@@ -553,6 +567,7 @@ async def test_an_idp_without_a_verification_claim_still_uses_the_domain_rule(
             email="alice@redhat.com",
             claims={"sub": "ocp-1", "email": "alice@redhat.com"},
             asserts_email_verified=False,
+            email_is_authoritative=True,
         )
         choice = await auth_identity.resolve(
             "openshift", openshift_claims, get_settings()
@@ -566,10 +581,31 @@ async def test_an_idp_without_a_verification_claim_still_uses_the_domain_rule(
             email="alice@gmail.com",
             claims={"sub": "ocp-2", "email": "alice@gmail.com"},
             asserts_email_verified=False,
+            email_is_authoritative=True,
         )
         with pytest.raises(AuthError) as excinfo:
             await auth_identity.resolve("openshift", wrong, get_settings())
         assert excinfo.value.reason == "domain_not_allowed"
+
+
+async def test_a_provider_with_neither_verification_nor_an_authoritative_address_is_refused(
+    temp_db_path: Path,
+) -> None:
+    """Publishing no `email_verified` claim is not itself a pass."""
+    from rootcoz.auth.sso.base import ClaimSet as BaseClaimSet
+
+    env = dict(_SSO_ENV, SSO_ALLOWED_DOMAINS="redhat.com")
+    for _client in make_app_client(temp_db_path, env):
+        silent = BaseClaimSet(
+            subject="silent-1",
+            username_hint="alice",
+            email="alice@redhat.com",
+            claims={"sub": "silent-1", "email": "alice@redhat.com"},
+            asserts_email_verified=False,
+        )
+        with pytest.raises(AuthError) as excinfo:
+            await auth_identity.resolve("openshift", silent, get_settings())
+        assert excinfo.value.reason == "email_not_verified"
 
 
 async def test_github_returns_the_verified_primary_address() -> None:
@@ -771,6 +807,9 @@ async def test_openshift_reads_the_account_from_the_api_server() -> None:
     assert claims.subject == "u-1"
     assert claims.username_hint == "alice"
     assert claims.email == "alice@example.com"
+    # The domain allow-list needs this: the cluster never sends `email_verified`,
+    # but the address is written by the cluster admin.
+    assert claims.email_is_authoritative is True
     assert httpx  # the transport itself is the proof the helper ran
 
     token_request = next(r for r in seen if r.url.path == "/oauth/token")
@@ -1075,14 +1114,22 @@ async def test_a_verified_email_passes_and_a_silent_provider_does_not(
         assert excinfo.value.reason == "email_not_verified"
 
 
+@pytest.mark.parametrize("authoritative", [False, True])
 async def test_a_missing_email_is_refused_when_the_list_is_set(
-    temp_db_path: Path,
+    temp_db_path: Path, authoritative: bool
 ) -> None:
-    """No address means nothing to check: fail closed, do not guess."""
+    """No address means nothing to check: fail closed, do not guess.
+
+    An authoritative provider gets no exception here — there is still no domain.
+    """
     env = dict(_SSO_ENV, SSO_ALLOWED_DOMAINS="redhat.com")
     for _client in make_app_client(temp_db_path, env):
         with pytest.raises(AuthError) as excinfo:
-            await auth_identity.resolve("google", _claims(email=None), get_settings())
+            await auth_identity.resolve(
+                "google",
+                _claims(email=None, email_is_authoritative=authoritative),
+                get_settings(),
+            )
         assert excinfo.value.reason == "domain_not_allowed"
 
 
@@ -2242,6 +2289,7 @@ def _signed_id_token(
     audience: str = "test-client-id",
     expires_in: int = 300,
     nonce: str = "attempt-nonce",
+    overrides: dict[str, object] | None = None,
 ) -> tuple[str, object]:
     """Build a real RS256 ID token plus the key set that verifies it.
 
@@ -2254,6 +2302,7 @@ def _signed_id_token(
         audience: ``aud`` claim.
         expires_in: Seconds until ``exp``.
         nonce: ``nonce`` claim — the value the attempt sent.
+        overrides: Claims to replace, or to drop when the value is ``None``.
 
     Returns:
         The compact JWS and a key set usable by ``joserfc``.
@@ -2264,7 +2313,7 @@ def _signed_id_token(
     from joserfc.jwk import KeySet, RSAKey
 
     key = RSAKey.generate_key(2048, parameters={"kid": "k1"})
-    claims = {
+    claims: dict[str, object] = {
         "iss": issuer,
         "aud": audience,
         "sub": "sub-1",
@@ -2273,6 +2322,11 @@ def _signed_id_token(
         "exp": int(_time.time()) + expires_in,
         "iat": int(_time.time()),
     }
+    for name, value in (overrides or {}).items():
+        if value is None:
+            claims.pop(name, None)
+        else:
+            claims[name] = value
     token = jose_jwt.encode({"alg": "RS256", "kid": "k1"}, claims, key)
     return token, KeySet.import_key_set({"keys": [key.as_dict(private=False)]})
 
@@ -2334,17 +2388,32 @@ async def test_a_token_for_another_attempt_is_refused() -> None:
 
 async def test_a_token_without_exp_is_refused() -> None:
     """``exp`` is required, not merely checked when present."""
-    from joserfc import jwt as jose_jwt
-    from joserfc.jwk import KeySet, RSAKey
-
-    key = RSAKey.generate_key(2048, parameters={"kid": "k1"})
-    claims = {"iss": GoogleProvider.issuer, "aud": "test-client-id", "sub": "s"}
-    token = jose_jwt.encode({"alg": "RS256", "kid": "k1"}, claims, key)
-    key_set = KeySet.import_key_set({"keys": [key.as_dict(private=False)]})
+    token, key_set = _signed_id_token(overrides={"exp": None})
 
     with pytest.raises(AuthError) as excinfo:
         await _verify(token, key_set)
     assert excinfo.value.reason == "id_token_invalid"
+    assert "exp" in str(excinfo.value)
+
+
+@pytest.mark.parametrize("issued_at", [None, "yesterday"])
+async def test_a_token_without_a_numeric_iat_is_refused(issued_at: object) -> None:
+    """``iat`` is required by OIDC Core: a missing one is not a pass."""
+    token, key_set = _signed_id_token(overrides={"iat": issued_at})
+
+    with pytest.raises(AuthError) as excinfo:
+        await _verify(token, key_set)
+    assert excinfo.value.reason == "id_token_invalid"
+    assert "iat" in str(excinfo.value)
+
+
+async def test_a_valid_token_within_the_clock_skew_is_still_accepted() -> None:
+    """The iat rule must not turn small clock differences into a refused login."""
+    import time as _time
+
+    token, key_set = _signed_id_token(overrides={"iat": int(_time.time()) - 60})
+    claims = await _verify(token, key_set)
+    assert claims["sub"] == "sub-1"
 
 
 async def test_a_token_with_several_audiences_needs_azp() -> None:
@@ -2361,6 +2430,7 @@ async def test_a_token_with_several_audiences_needs_azp() -> None:
         "sub": "s",
         "nonce": "attempt-nonce",
         "exp": int(_time.time()) + 300,
+        "iat": int(_time.time()),
     }
     token = jose_jwt.encode({"alg": "RS256", "kid": "k1"}, claims, key)
     key_set = KeySet.import_key_set({"keys": [key.as_dict(private=False)]})
@@ -2533,6 +2603,26 @@ async def test_a_signed_in_person_can_start_a_link(temp_db_path: Path) -> None:
         # The actor is the caller, not "anonymous", and the mode is recorded.
         assert row["actor"] == "ruthn"
         assert json.loads(row["details"])["mode"] == "link"
+
+
+async def test_the_link_start_is_its_own_operation(temp_db_path: Path) -> None:
+    """One operation id per handler, and the id is the handler's own name.
+
+    Both routes used to sit on one ``sso_login`` handler, so the generated
+    client named the account write after the sign-in and vice versa.
+    """
+    from rootcoz.main import app
+
+    routes = [
+        route
+        for route in app.routes
+        if getattr(route, "path", "") == "/api/auth/sso/{provider}/login"
+    ]
+    assert {
+        route.operation_id: route.endpoint.__name__
+        for route in routes
+        if getattr(route, "operation_id", None)
+    } == {"ssoLogin": "sso_login", "ssoLinkStart": "sso_link_start"}
 
 
 async def test_a_read_only_provider_cannot_create_an_account(
@@ -3057,6 +3147,42 @@ async def test_an_unknown_provider_name_is_a_client_error(
         assert len(await storage.list_user_identities("ruthn")) == 2
 
 
+async def test_a_refused_removal_is_audited(temp_db_path: Path) -> None:
+    """A refusal is a probe: retrying the last removal must leave a trace.
+
+    The status codes are unchanged — only what the trail sees is.
+    """
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("ruthn")
+        await storage.add_user_identity("ruthn", "google", "sub-1")
+        session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+
+        assert client.delete("/api/user/identities/github").status_code == 404
+        assert client.delete("/api/user/identities/google").status_code == 409
+
+        rows = [
+            row
+            for row in await _audit_actions(temp_db_path)
+            if row["action"] == "auth.identity_unlink_refused"
+        ]
+        # Most recent first: the last-method attempt, then the probe.
+        assert [
+            (row["details"]["reason"], row["details"]["provider"]) for row in rows
+        ] == [
+            ("last_method", "google"),
+            ("not_connected", "github"),
+        ]
+        for row in rows:
+            assert row["actor"] == "ruthn"
+            assert row["target_type"] == "user"
+            assert row["target_id"] == "ruthn"
+            assert row["outcome"] == "denied"
+            assert row["details"]["as_admin"] is False
+        # Nothing was removed by either refusal.
+        assert len(await storage.list_user_identities("ruthn")) == 1
+
+
 async def test_an_admin_can_inspect_and_unlink_any_account(temp_db_path: Path) -> None:
     """Admins get the same shape, scoped by username, with an audit row each."""
     for client in make_app_client(temp_db_path, _SSO_ENV):
@@ -3108,6 +3234,24 @@ async def test_an_admin_cannot_remove_the_last_sign_in_method_either(
         response = client.delete("/api/admin/users/alice/identities/google")
         assert response.status_code == 409
         assert len(await storage.list_user_identities("alice")) == 1
+        # The admin's attempt is recorded too, and marked as acting on another
+        # account — a lockout attempt is exactly what this row has to show.
+        assert (
+            client.delete("/api/admin/users/nobody/identities/google").status_code
+            == 404
+        )
+        rows = [
+            row
+            for row in await _audit_actions(temp_db_path)
+            if row["action"] == "auth.identity_unlink_refused"
+        ]
+        assert [
+            (row["details"]["reason"], row["details"]["as_admin"]) for row in rows
+        ] == [
+            ("not_connected", True),
+            ("last_method", True),
+        ]
+        assert [row["actor"] for row in rows] == ["admin", "admin"]
 
 
 # -- CLI device flow ----------------------------------------------------------
@@ -3199,7 +3343,9 @@ async def test_a_failed_session_leaves_the_device_code_redeemable(
         # terminal would see as a 500.
         with (
             patch.object(
-                storage, "create_session", side_effect=RuntimeError("storage down")
+                storage,
+                "exchange_device_code_for_session",
+                side_effect=RuntimeError("storage down"),
             ),
             pytest.raises(RuntimeError),
         ):
@@ -3209,9 +3355,15 @@ async def test_a_failed_session_leaves_the_device_code_redeemable(
             )
 
         # The code survived the failure, so the same terminal can retry — after
-        # the advertised interval, which the poll throttle enforces.
+        # the advertised interval, which the poll throttle enforces. No session
+        # was left behind either: the pair is one transaction.
         assert await storage.get_device_code(started["device_code"]) is not None
         async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) AS n FROM sessions WHERE username = 'alice'"
+            )
+            # Only the approver's own session, minted before the flow started.
+            assert (await cursor.fetchone())["n"] == 1
             await db.execute(
                 "UPDATE sso_device_codes SET last_polled_at = '2000-01-01 00:00:00'"
             )
@@ -3399,6 +3551,142 @@ async def test_an_unknown_user_code_is_not_approvable(temp_db_path: Path) -> Non
         assert response.status_code == 404
 
 
+async def test_every_refused_approval_leaves_a_row(temp_db_path: Path) -> None:
+    """A refusal is a decision: it must be readable afterwards, minus the code."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        session = await storage.create_session(
+            "alice", is_admin=False, role="reviewer", auth_provider="github"
+        )
+        pinned = _start_device(client, provider="google")
+        open_code = _start_device(client)
+        client.cookies.set("rootcoz_session", session)
+
+        unknown = client.post(
+            "/api/auth/sso/device/approve", json={"user_code": "ZZZZ-ZZZZ"}
+        )
+        assert unknown.status_code == 404
+        # Opened for google, approved from a github session.
+        mismatch = client.post(
+            "/api/auth/sso/device/approve", json={"user_code": pinned["user_code"]}
+        )
+        assert mismatch.status_code == 400
+        approved = client.post(
+            "/api/auth/sso/device/approve",
+            json={"user_code": open_code["user_code"]},
+        )
+        assert approved.status_code == 200
+        again = client.post(
+            "/api/auth/sso/device/approve",
+            json={"user_code": open_code["user_code"]},
+        )
+        assert again.status_code == 409
+
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT action, actor, outcome, details FROM audit_events"
+                " WHERE action = 'auth.sso_device_approve_refused' ORDER BY id"
+            )
+            rows = [tuple(row) for row in await cursor.fetchall()]
+
+    assert len(rows) == 3
+    assert {(action, actor, outcome) for action, actor, outcome, _ in rows} == {
+        ("auth.sso_device_approve_refused", "alice", "denied")
+    }
+    details = [json.loads(row[3]) for row in rows]
+    assert [detail["reason"] for detail in details] == [
+        "code_not_found",
+        "provider_mismatch",
+        "already_approved",
+    ]
+    # The code's provider where there is a code, the caller's where there is not.
+    assert [detail["provider"] for detail in details] == [None, "google", "github"]
+    # A user code is a credential a human types: no row may carry one.
+    for _action, _actor, _outcome, stored in rows:
+        for code in (pinned["user_code"], open_code["user_code"], "ZZZZ-ZZZZ"):
+            assert code not in stored
+
+
+@pytest.mark.parametrize("status", ["pending", "rejected"])
+async def test_a_pending_or_rejected_account_is_denied_at_redemption(
+    temp_db_path: Path, status: str
+) -> None:
+    """Approving a code is not a standing exemption from the approval gate."""
+    env = {**_SSO_ENV, "REQUIRE_APPROVAL": "true"}
+    for client in make_app_client(temp_db_path, env):
+        await storage.create_user("alice", status="active")
+        session = await storage.create_session("alice", is_admin=False, role="reviewer")
+        started = _start_device(client)
+        client.cookies.set("rootcoz_session", session)
+        approved = client.post(
+            "/api/auth/sso/device/approve", json={"user_code": started["user_code"]}
+        )
+        assert approved.status_code == 200
+        client.cookies.clear()
+        # The admin moves the account back to an unapproved state afterwards.
+        async with storage._connect_db() as db:
+            await db.execute(
+                "UPDATE users SET status = ? WHERE username = 'alice'", (status,)
+            )
+            await db.commit()
+
+        polled = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": started["device_code"]}
+        )
+        assert polled.json() == {"status": "denied"}
+
+        # No credential was minted for it.
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT COUNT(*) AS n FROM sessions WHERE username = 'alice'"
+            )
+            assert (await cursor.fetchone())["n"] == 1
+            cursor = await db.execute(
+                "SELECT details FROM audit_events"
+                " WHERE action = 'auth.sso_login_failed' ORDER BY id DESC LIMIT 1"
+            )
+            refusal = json.loads((await cursor.fetchone())["details"])
+        assert refusal["reason"] == f"account_{status}"
+
+
+async def test_a_key_approval_does_not_stamp_the_requested_provider(
+    temp_db_path: Path,
+) -> None:
+    """The code was opened for google; nobody signed in through it."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        # A username-and-key session carries no provider.
+        key_session = await storage.create_session(
+            "alice", is_admin=False, role="reviewer"
+        )
+        started = _start_device(client, provider="google")
+        client.cookies.set("rootcoz_session", key_session)
+        approved = client.post(
+            "/api/auth/sso/device/approve", json={"user_code": started["user_code"]}
+        )
+        assert approved.status_code == 200
+        # The pin is what allowed the approval, and it is not what signed in.
+        assert approved.json()["provider"] is None
+        client.cookies.clear()
+
+        polled = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": started["device_code"]}
+        ).json()
+        assert polled["status"] == "approved"
+        assert polled["provider"] is None
+        identity = await storage.get_session_identity(polled["token"])
+        assert identity is not None and identity["auth_provider"] is None
+
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT details FROM audit_events"
+                " WHERE action = 'auth.sso_device_approved' ORDER BY id DESC LIMIT 1"
+            )
+            details = json.loads((await cursor.fetchone())["details"])
+        assert details["provider"] is None
+        assert details["requested_provider"] == "google"
+
+
 async def test_the_device_flow_is_audited_where_it_changes_anything(
     temp_db_path: Path,
 ) -> None:
@@ -3563,6 +3851,7 @@ def test_an_azp_naming_another_client_is_refused_even_with_one_audience() -> Non
         "sub": "s",
         "nonce": "n1",
         "exp": int(_time.time()) + 300,
+        "iat": int(_time.time()),
     }
     token = jose_jwt.encode({"alg": "RS256", "kid": "k1"}, claims, key)
 
@@ -3581,6 +3870,71 @@ def test_the_provider_names_are_declared_once() -> None:
 
     assert storage.SSO_PROVIDERS == SSO_PROVIDERS
     assert set(PROVIDER_BY_NAME) == set(SSO_PROVIDERS)
+
+
+async def test_linking_spends_the_ticket(temp_db_path: Path) -> None:
+    """A ticket left live after a link could re-attach the identity later.
+
+    Once the identity is unlinked from this account, a still-valid ticket would
+    let its holder attach the same IdP identity to an account of their own.
+    """
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("ruthn")
+        raw_key = await storage.rotate_own_key("ruthn")
+        ticket = await _ticket(client)
+
+        linked = client.post(
+            "/api/auth/sso/link",
+            json={"ticket": ticket, "username": "ruthn", "api_key": raw_key},
+        )
+        assert linked.status_code == 200, linked.text
+        assert await storage.peek_sso_ticket(ticket) is None
+
+        # The same browser (binding cookie included) presents the same ticket.
+        again = client.post(
+            "/api/auth/sso/link",
+            json={"ticket": ticket, "username": "ruthn", "api_key": raw_key},
+        )
+        assert again.status_code == 404
+        assert [i["provider"] for i in await storage.list_user_identities("ruthn")] == [
+            "google"
+        ]
+
+
+async def test_a_link_whose_ticket_died_before_the_write_writes_no_identity(
+    temp_db_path: Path,
+) -> None:
+    """The identity insert and the ticket spend commit together, or neither does."""
+    from rootcoz.auth import password as auth_password
+
+    real_verify = auth_password.PasswordLogin.verify
+
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("ruthn")
+        raw_key = await storage.rotate_own_key("ruthn")
+        ticket = await _ticket(client)
+
+        # Bound as a default so the patched method closes over this request's
+        # ticket, not the loop's variable.
+        async def _verify_and_lose_the_ticket(
+            self, username, api_key, settings, doomed: str = ticket
+        ):
+            verified = await real_verify(self, username, api_key, settings)
+            # Another browser redeemed the ticket between the read and the write.
+            assert await storage.consume_sso_ticket(doomed) is not None
+            return verified
+
+        with patch.object(
+            auth_password.PasswordLogin, "verify", _verify_and_lose_the_ticket
+        ):
+            response = client.post(
+                "/api/auth/sso/link",
+                json={"ticket": ticket, "username": "ruthn", "api_key": raw_key},
+            )
+
+        assert response.status_code == 400
+        # Nothing durable: the ticket was gone, so the link never landed.
+        assert await storage.list_user_identities("ruthn") == []
 
 
 async def test_a_spent_ticket_leaves_no_account_behind(temp_db_path: Path) -> None:

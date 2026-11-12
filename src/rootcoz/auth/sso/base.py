@@ -56,8 +56,10 @@ class ClaimSet:
         claims: The full claim set, for the audit trail.
         asserts_email_verified: Whether this provider publishes an
             ``email_verified`` claim at all. Google and GitHub do; an OpenShift
-            OAuth server does not, and a deployment must not be unable to use
-            ``SSO_ALLOWED_DOMAINS`` merely because its IdP is silent about it.
+            OAuth server does not.
+        email_is_authoritative: Whether the address came from a store only the
+            deployment's IdP or cluster admin can write (see
+            :attr:`SSOProvider.email_is_authoritative`).
     """
 
     subject: str
@@ -65,6 +67,7 @@ class ClaimSet:
     email: str | None = None
     claims: dict[str, Any] = field(default_factory=dict)
     asserts_email_verified: bool = True
+    email_is_authoritative: bool = False
 
 
 class SSOProvider(ABC):
@@ -94,6 +97,10 @@ class SSOProvider(ABC):
     sensitive_settings: ClassVar[tuple[str, ...]] = ()
     restart_required_settings: ClassVar[tuple[str, ...]] = ()
     can_provision_user: ClassVar[bool] = True
+    #: True when this provider's address comes from a store only the deployment's
+    #: IdP or cluster admin can write, so it is accepted for
+    #: ``SSO_ALLOWED_DOMAINS`` without a verification claim.
+    email_is_authoritative: ClassVar[bool] = False
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         """Fill in ``settings_fields``/``sensitive_settings`` for a new provider.

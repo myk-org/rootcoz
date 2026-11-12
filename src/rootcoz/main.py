@@ -1712,6 +1712,11 @@ _AUDIT_THROTTLED_ACTIONS: frozenset[str] = frozenset(
         # enumerable from /api/auth/sso/providers: without the budget, anyone can
         # add rows at request rate.
         "auth.sso_login_start",
+        # A refused device approval costs one row per call and its 404 branch is
+        # reached by trying codes: the trail must not be fillable that way. The
+        # row is written in the shared code-lookup helper, so the budget is the
+        # one place a flood is stopped.
+        "auth.sso_device_approve_refused",
     }
 )
 
@@ -17128,6 +17133,36 @@ async def _audit_sso_refusal(
     )
 
 
+async def _audit_device_approve_refusal(
+    request: Request, reason: str, *, provider: str | None
+) -> None:
+    """Record one refused device approval.
+
+    Written where the refusal is raised, so no ``raise`` in the flow can answer
+    without a row. Never the user code or the device code: a code is a live
+    credential, and the #379 contract stores reason and provider only — which is
+    also why a 404 for an unknown code names the reason and no provider.
+
+    Args:
+        request: The request that carried the refusal (authenticated: both
+            approval routes require a session).
+        reason: ``already_approved`` / ``provider_mismatch`` / ``code_not_found``.
+        provider: The code's provider where one was read, else the caller's.
+    """
+    await record_audit(
+        action="auth.sso_device_approve_refused",
+        actor=request.state.username,
+        message=(
+            f"SSO device approval refused for provider '{provider or 'any'}' ({reason})"
+        ),
+        target_type="provider",
+        target_id=provider or "",
+        outcome="denied",
+        details={"provider": provider, "reason": reason},
+        request=request,
+    )
+
+
 @app.get("/api/auth/sso/providers", operation_id="ssoProviders")
 async def sso_providers() -> JSONResponse:
     """List the SSO providers this deployment offers.
@@ -17179,20 +17214,59 @@ def _link_request_is_same_origin(request: Request) -> bool:
     )
 
 
-@app.post("/api/auth/sso/{provider}/login", operation_id="ssoLinkStart")
 @app.get("/api/auth/sso/{provider}/login", operation_id="ssoLogin")
 async def sso_login(provider: str, request: Request) -> RedirectResponse:
-    """Start a browser SSO login for one provider.
+    """Start an ordinary browser SSO login for one provider.
 
     Args:
         provider: Provider name from the path.
         request: Incoming request. ``next`` and ``mode`` are read from the query
-            string; ``mode=link`` attaches this identity to the account already
-            signed in instead of resolving an account. A link is a POST — an
-            explicit action from the settings page that must prove it is
-            same-origin — and is refused without a live reviewer session, because
-            linking is a write on an account. An ordinary login stays a GET and
-            stays reachable with no session at all.
+            string. Signing in stays a GET and stays reachable with no session at
+            all, because signing in is what creates one; a ``mode=link`` on a GET
+            is refused (``link_requires_post``) instead of becoming an account
+            write nobody asked for.
+
+    Returns:
+        A redirect to the provider, with the sealed attempt in a cookie.
+    """
+    mode = request.query_params.get("mode", auth_sso_state.MODE_LOGIN)
+    return await _sso_start(request, provider, mode)
+
+
+@app.post("/api/auth/sso/{provider}/login", operation_id="ssoLinkStart")
+async def sso_link_start(provider: str, request: Request) -> RedirectResponse:
+    """Start attaching a provider identity to the account already signed in.
+
+    Its own handler because the route is its own operation: a POST from the
+    settings page is an account write, while the GET beside it is a sign-in.
+
+    Args:
+        provider: Provider name from the path.
+        request: Incoming request, proven same-origin and carrying a live
+            reviewer session. ``next`` is read from the query string.
+
+    Returns:
+        A redirect to the provider, with the sealed attempt in a cookie.
+    """
+    # The mode is fixed here, never read from the query: a client that POSTs
+    # this route asks for a link, and a link is bounded by a live session, a
+    # reviewer role and the same-origin proof — never a login.
+    return await _sso_start(request, provider, auth_sso_state.MODE_LINK)
+
+
+async def _sso_start(request: Request, provider: str, mode: str) -> RedirectResponse:
+    """Start one SSO attempt — a login or a link — for one provider.
+
+    Shared by both login-start routes so the sealed attempt, the session gate,
+    the origin proof and the audit row cannot drift apart.
+
+    Args:
+        request: Incoming request; ``next`` comes from its query string.
+        provider: Provider name from the path.
+        mode: Sealed into the attempt — ``login`` or ``link``. A link attaches
+            this identity to the account already signed in instead of resolving
+            an account, and is only accepted on a POST from this origin, with a
+            live reviewer session, because linking is a write on an account.
 
     Returns:
         A redirect to the provider, with the sealed attempt in a cookie.
@@ -17202,7 +17276,6 @@ async def sso_login(provider: str, request: Request) -> RedirectResponse:
     if selected is None:
         await _audit_sso_refusal(request, provider, "unknown_provider")
         return _sso_error_redirect("unknown_provider")
-    mode = request.query_params.get("mode", auth_sso_state.MODE_LOGIN)
     if mode not in auth_sso_state.MODES:
         await _audit_sso_refusal(request, provider, "unknown_mode")
         return _sso_error_redirect("unknown_mode")
@@ -18039,24 +18112,34 @@ async def _unlink_identity(
 
     Raises:
         HTTPException: 404 when the account does not exist (admin path) or has no
-            such identity, 409 when it is the account's only one.
+            such identity, 409 when it is the account's only one. Both write an
+            ``auth.identity_unlink_refused`` row first: a repeated attempt on the
+            last method, or a probe of another account's providers, is exactly
+            what an admin needs to see.
     """
     if as_admin and await storage.get_user_by_username(username) is None:
+        await _audit_unlink_refusal(
+            request, username, provider, reason="not_connected", as_admin=as_admin
+        )
         raise HTTPException(status_code=404, detail="User not found")
     # The last-method guard lives inside the write: reading the list here and
     # deleting after it would let two concurrent removals each see two
     # identities and leave the account with none.
     try:
         outcome = await storage.unlink_user_identity(username, provider)
-    except ValueError as exc:
+    except ValueError:
         # storage rejects a name outside SSO_PROVIDERS; that is "not connected",
         # not a server fault — the same answer an unknown-but-valid name gets.
-        raise HTTPException(
-            status_code=404, detail="That provider is not connected"
-        ) from exc
+        outcome = "not_found"
     if outcome == "not_found":
+        await _audit_unlink_refusal(
+            request, username, provider, reason="not_connected", as_admin=as_admin
+        )
         raise HTTPException(status_code=404, detail="That provider is not connected")
     if outcome == "last":
+        await _audit_unlink_refusal(
+            request, username, provider, reason="last_method", as_admin=as_admin
+        )
         raise HTTPException(status_code=409, detail=_LAST_IDENTITY_DETAIL)
     await record_audit(
         action=audit_action,
@@ -18078,6 +18161,46 @@ _LAST_IDENTITY_DETAIL = (
     "This is the only way to sign in to this account. Link another provider, or "
     "rotate the API key and keep the new one, before removing it."
 )
+
+
+async def _audit_unlink_refusal(
+    request: Request,
+    username: str,
+    provider: str,
+    *,
+    reason: str,
+    as_admin: bool,
+) -> None:
+    """Record a refused sign-in-method removal before it is raised.
+
+    Only successful removals were audited, so a person retrying the one removal
+    that is refused — or an admin probing another account's providers — left no
+    trace at all. The row names the provider and the reason, never an address
+    and never a credential.
+
+    Args:
+        request: The request being served (for the actor and its context).
+        username: The account the removal was aimed at.
+        provider: Provider the caller tried to unlink.
+        reason: ``not_connected`` (no such identity) or ``last_method``.
+        as_admin: True when an admin was acting on somebody else's account.
+    """
+    await record_audit(
+        action="auth.identity_unlink_refused",
+        actor=request.state.username,
+        actor_role=request.state.role,
+        is_admin=request.state.is_admin,
+        message=(
+            f"SSO identity removal refused ({reason}):"
+            f" user='{username}' provider='{provider}'"
+        ),
+        target_type="user",
+        target_id=username,
+        outcome="denied",
+        details={"provider": provider, "reason": reason, "as_admin": as_admin},
+        request=request,
+    )
+
 
 _DEVICE_APPROVAL_PATH = "/login/device"
 # A client name is a label a human reads on the approval page, not a payload:
@@ -18264,7 +18387,10 @@ async def sso_device_poll(request: Request) -> JSONResponse:
 
     A code approved for an account that has since become unusable is denied
     here rather than handed a session: approval is minutes older than this call,
-    and the account's state is not.
+    and the account's state is not. The state gate is the login route's, not a
+    second policy: a disabled or locked row, and (while ``REQUIRE_APPROVAL`` is
+    on) a non-administrator an admin has moved back to ``pending`` or
+    ``rejected``, all end here with ``denied``.
     """
     body = await _read_json_object(request)
     device_code = str(body.get("device_code") or "")
@@ -18283,38 +18409,58 @@ async def sso_device_poll(request: Request) -> JSONResponse:
 
     redeemed = await storage.redeem_device_code(device_code)
     if redeemed is None:
-        # Approved between the two reads and consumed by a concurrent poll, or
+        # Approved between the two reads and claimed by a concurrent poll, or
         # expired in the same window: either way this caller gets nothing.
         return JSONResponse(content={"status": "expired"})
     username = redeemed["username"]
+    provider = redeemed["approved_provider"]
     user = await storage.get_user_by_username(username)
     if user is None:
-        await _audit_sso_refusal(
-            request, redeemed["provider"], "account_missing", subject=username
-        )
+        await _audit_sso_refusal(request, provider, "account_missing", subject=username)
         return JSONResponse(content={"status": "denied"})
+    # The shared decision is auth_approval.account_block_reason, exactly as the
+    # login route applies it; a lock is a login-only guard there too, but this
+    # call is a login of its own — it mints the credential.
     block_reason = auth_approval.account_block_reason(user)
     if block_reason is not None:
         await _audit_sso_refusal(
-            request, redeemed["provider"], f"account_{block_reason}", subject=username
+            request, provider, f"account_{block_reason}", subject=username
         )
         return JSONResponse(content={"status": "denied"})
 
     role, is_admin = role_and_admin(user, settings.default_user_role)
+    # The login route's approval gate, on the account the approval named: an
+    # admin may have moved it back to pending since, and an approval is not a
+    # standing exemption from `REQUIRE_APPROVAL`. Same condition and same
+    # decision as `/api/auth/login`, from `auth/approval` so they cannot drift.
+    if not is_admin and settings.require_approval:
+        status = await storage.get_user_status(username) or ""
+        if auth_approval.is_approval_blocked(status):
+            await _audit_sso_refusal(
+                request, provider, f"account_{status}", subject=username
+            )
+            return JSONResponse(content={"status": "denied"})
+
     try:
-        token = await storage.create_session(
-            username,
+        # One transaction: the session is written and the code spent together, so
+        # a failure cannot leave a token the terminal never saw behind a code no
+        # later poll can redeem.
+        token = await storage.exchange_device_code_for_session(
+            device_code,
+            username=username,
             is_admin=is_admin,
             role=role,
-            auth_provider=redeemed["provider"],
+            approved_provider=provider,
         )
     except Exception:
         # The claim is released so the terminal can retry: a code that was never
         # exchanged for a credential must not read as spent.
         await storage.release_device_code(device_code)
         raise
-    # Only now is the code spent.
-    await storage.consume_device_code(device_code)
+    if token is None:
+        # The claim was released by a failed exchange that another poll has
+        # already re-taken, or the code expired meanwhile: nothing to hand over.
+        return JSONResponse(content={"status": "expired"})
     await record_audit(
         action="auth.sso_device_redeemed",
         actor=username,
@@ -18323,7 +18469,7 @@ async def sso_device_poll(request: Request) -> JSONResponse:
         message=f"SSO device code redeemed: user='{username}'",
         target_type="user",
         target_id=username,
-        details={"provider": redeemed["provider"], "role": role},
+        details={"provider": provider, "role": role},
         request=request,
     )
     response = JSONResponse(
@@ -18331,7 +18477,7 @@ async def sso_device_poll(request: Request) -> JSONResponse:
             "status": "approved",
             "token": token,
             "username": username,
-            "provider": redeemed["provider"],
+            "provider": provider,
         }
     )
     response.headers["Cache-Control"] = "no-store"
@@ -18352,7 +18498,9 @@ async def _device_code_or_404(request: Request) -> dict[str, Any]:
 
     Raises:
         HTTPException: 404 when the body carries no code, or the code is
-            unknown, expired or already redeemed.
+            unknown, expired or already redeemed. The refusal is audited here —
+            one row for both routes, and the volume guard on that action is what
+            keeps a code-guessing run from filling the trail.
     """
     body = await _read_json_object(request)
     user_code = str(body.get("user_code") or "").strip()
@@ -18360,6 +18508,9 @@ async def _device_code_or_404(request: Request) -> dict[str, Any]:
         await storage.get_device_code_by_user_code(user_code) if user_code else None
     )
     if record is None:
+        # No provider: there is no code, so there is nothing whose provider could
+        # be named — and the user code itself is never recorded (#379).
+        await _audit_device_approve_refusal(request, "code_not_found", provider=None)
         raise HTTPException(status_code=404, detail="That code is not valid")
     return record
 
@@ -18410,14 +18561,18 @@ async def sso_device_approve(request: Request) -> JSONResponse:
         request: Body ``{"user_code": str}``, authenticated as usual.
 
     Returns:
-        ``{"ok": true, "user_code", "provider"}``. ``provider`` is the issuer
-        recorded for the session the CLI will receive — the approver's own, when
-        they signed in through SSO, so an IdP logout can end it later.
+        ``{"ok": true, "user_code", "provider"}``. ``provider`` is the approver's
+        own issuer — what the redeemed session will record, and what an IdP
+        logout can end later. It is ``null`` when they signed in with a username
+        and key, even for a code opened for a specific provider: the code was
+        opened *for* that provider, which is why approving it was allowed, but
+        nobody signed in through it.
 
     Raises:
         HTTPException: 404 when the code is unknown or expired, 409 when it was
             already approved, 400 when it was opened for a different provider
-            than the one this person signed in with.
+            than the one this person signed in with. Every one of them is
+            audited as ``auth.sso_device_approve_refused`` before it is raised.
     """
     record = await _device_code_or_404(request)
     user_code = record["user_code"]
@@ -18428,12 +18583,18 @@ async def sso_device_approve(request: Request) -> JSONResponse:
     )
     provider = session["auth_provider"] if session else None
     if record["authorized"]:
+        await _audit_device_approve_refusal(
+            request, "already_approved", provider=provider
+        )
         raise HTTPException(status_code=409, detail="That code was already approved")
     if (
         record["provider"] is not None
         and provider is not None
         and record["provider"] != provider
     ):
+        await _audit_device_approve_refusal(
+            request, "provider_mismatch", provider=record["provider"]
+        )
         raise HTTPException(
             status_code=400,
             detail="That code was opened for a different provider",
@@ -18441,6 +18602,11 @@ async def sso_device_approve(request: Request) -> JSONResponse:
     if not await storage.authorize_device_code(
         user_code, username=username, provider=provider
     ):
+        # Lost the race to another approver: the code was taken between the read
+        # above and the write, so this is the same refusal as the pre-check.
+        await _audit_device_approve_refusal(
+            request, "already_approved", provider=provider
+        )
         raise HTTPException(status_code=409, detail="That code was already approved")
     await record_audit(
         action="auth.sso_device_approved",
@@ -18449,12 +18615,16 @@ async def sso_device_approve(request: Request) -> JSONResponse:
         is_admin=request.state.is_admin,
         message=(
             f"SSO device code approved: user='{username}'"
-            f" provider='{provider or record['provider'] or 'any'}'"
+            f" provider='{provider or 'none'}'"
+            f" requested='{record['provider'] or 'any'}'"
         ),
         target_type="user",
         target_id=username,
         details={
-            "provider": provider or record["provider"],
+            # The session's provenance, and separately what the code was opened
+            # for: the two are different questions and were one column before.
+            "provider": provider,
+            "requested_provider": record["provider"],
             "client_name": record["client_name"],
         },
         request=request,
@@ -18463,7 +18633,7 @@ async def sso_device_approve(request: Request) -> JSONResponse:
         content={
             "ok": True,
             "user_code": record["user_code"],
-            "provider": provider or record["provider"],
+            "provider": provider,
         }
     )
 

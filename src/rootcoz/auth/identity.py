@@ -121,8 +121,10 @@ def check_domain(claims: ClaimSet, settings: Settings) -> None:
     elsewhere.
 
     While the list is set the address must be *positively* verified: a provider
-    that omits ``email_verified`` (or sends ``false``) is refused, because an
-    unverified address can be changed by whoever holds the account.
+    that publishes ``email_verified`` must send ``true``, and a provider that
+    publishes none is refused unless its address is authoritative (see
+    :attr:`rootcoz.auth.sso.base.SSOProvider.email_is_authoritative`) — an
+    address the person holding the account can change is never enough.
 
     Args:
         claims: The verified claims.
@@ -130,8 +132,8 @@ def check_domain(claims: ClaimSet, settings: Settings) -> None:
 
     Raises:
         AuthError: ``domain_not_allowed`` when the address is missing or its
-            domain is not listed, ``email_not_verified`` when the provider does
-            not assert that the address is verified.
+            domain is not listed, ``email_not_verified`` when the address is
+            neither asserted verified nor authoritative.
     """
     try:
         allowed = settings.sso_allowed_domains_set
@@ -148,13 +150,15 @@ def check_domain(claims: ClaimSet, settings: Settings) -> None:
     if "@" not in email:
         # Fail closed: without an address there is nothing to check against.
         raise AuthError("domain_not_allowed", "provider returned no email address")
-    if claims.asserts_email_verified:
+    if not claims.email_is_authoritative:
         assertion = claims.claims.get("email_verified")
         # Only a positive assertion passes: a provider that publishes the claim
         # and stays silent about verification cannot satisfy an allow-list that
-        # checks the address. A provider that publishes no such claim at all
-        # (OpenShift) has nothing to assert, and the domain check is all there is.
-        if not (assertion is True or str(assertion).lower() == "true"):
+        # checks the address, and a provider that publishes no such claim at all
+        # has nothing to offer here (OpenShift is accepted above instead).
+        if not claims.asserts_email_verified or not (
+            assertion is True or str(assertion).lower() == "true"
+        ):
             raise AuthError(
                 "email_not_verified",
                 "provider did not assert that the email is verified",

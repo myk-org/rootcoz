@@ -2417,6 +2417,7 @@ async def init_db() -> None:
                 device_code_hash TEXT PRIMARY KEY,
                 user_code TEXT UNIQUE NOT NULL,
                 provider TEXT,
+                approved_provider TEXT,
                 user_id INTEGER,
                 client_name TEXT,
                 expires_at TEXT NOT NULL,
@@ -2441,6 +2442,11 @@ async def init_db() -> None:
         # Claim-before-handover: redemption marks the row so exactly one poller
         # wins, while the row survives until the session has been minted.
         await _migrate_add_column(db, "sso_device_codes", "redeemed_at", "TEXT")
+        # Two meanings, two columns: ``provider`` is what the flow was opened for
+        # (the compatibility check at approval), ``approved_provider`` is who
+        # actually approved it — NULL for a key session. Stamping the second onto
+        # the first made a key approval claim an IdP it never used.
+        await _migrate_add_column(db, "sso_device_codes", "approved_provider", "TEXT")
 
         # One-time tickets for the first-login choice screen: after the IdP has
         # authenticated someone with no link, the browser holds this instead of a
@@ -9891,6 +9897,49 @@ async def track_user(username: str) -> None:
         await db.commit()
 
 
+async def _insert_session_in_tx(
+    db: Any,
+    *,
+    username: str,
+    is_admin: bool,
+    role: str,
+    auth_provider: str | None,
+    ttl_hours: int,
+) -> str:
+    """Write one sessions row inside the caller's transaction.
+
+    Extracted so a caller that must land a second write with the session (the
+    CLI device flow) shares the one insert instead of restating its columns.
+
+    Args:
+        db: Open connection with an active transaction.
+        username: Owner of the session.
+        is_admin: Whether the session carries administrator rights.
+        role: Role recorded on the session.
+        auth_provider: Authentication provider that issued the session.
+        ttl_hours: Lifetime in hours.
+
+    Returns:
+        The raw session token; only its hash is stored.
+    """
+    token = secrets.token_urlsafe(32)
+    expires_at = datetime.now(UTC) + timedelta(hours=ttl_hours)
+    await db.execute(
+        "INSERT INTO sessions"
+        " (token, username, is_admin, expires_at, role, auth_provider)"
+        " VALUES (?, ?, ?, ?, ?, ?)",
+        (
+            _hash_token(token),
+            username,
+            1 if is_admin else 0,
+            expires_at.strftime(SQL_TIMESTAMP_FORMAT),
+            role,
+            auth_provider,
+        ),
+    )
+    return token
+
+
 async def create_session(
     username: str,
     is_admin: bool = False,
@@ -9911,33 +9960,24 @@ async def create_session(
     """
     if ttl_hours is None:
         ttl_hours = current_session_ttl_hours()
-    token = secrets.token_urlsafe(32)
-    token_hash = _hash_token(token)
-    expires_at = datetime.now(UTC) + timedelta(hours=ttl_hours)
-    expires_str = expires_at.strftime(SQL_TIMESTAMP_FORMAT)
 
-    async def _insert() -> None:
+    async def _insert() -> str:
         async with _connect_db() as db:
-            await db.execute(
-                "INSERT INTO sessions"
-                " (token, username, is_admin, expires_at, role, auth_provider)"
-                " VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    token_hash,
-                    username,
-                    1 if is_admin else 0,
-                    expires_str,
-                    role,
-                    auth_provider,
-                ),
+            token = await _insert_session_in_tx(
+                db,
+                username=username,
+                is_admin=is_admin,
+                role=role,
+                auth_provider=auth_provider,
+                ttl_hours=ttl_hours,
             )
             await db.commit()
+            return token
 
     # The retry exists so a transient lock never reaches chat preparation's
     # refusal: what a refused Start reports is a storage fault the server could
     # not retry past.
-    await _retry_contended(_insert)
-    return token
+    return await _retry_contended(_insert)
 
 
 async def get_session(token: str) -> dict[str, Any] | None:
@@ -10188,15 +10228,17 @@ async def add_user_identity(
         raw_claims_json: Serialized IdP claims for audit. Credential-shaped
             keys (tokens, secrets, passwords, authorization codes) are removed
             before storage.
-        ticket: One-time first-login ticket to spend in the same transaction.
+        ticket: One-time first-login ticket to spend in the same transaction, so
+            a spent or expired ticket leaves no identity behind.
 
     Returns:
         The stored identity.
 
     Raises:
         ValueError: When the provider is unknown, the account does not exist,
-            the subject is already linked to another account, or the account
-            already has an identity for this provider.
+            the subject is already linked to another account, the account
+            already has an identity for this provider, or the ticket was no
+            longer live.
     """
     _validate_sso_provider(provider)
     _validate_identity_subject(subject)
@@ -10242,6 +10284,11 @@ async def add_user_identity(
                         " — unlink it first"
                     )
                     raise ValueError(msg)
+                # The ticket that vouched for this identity is spent in the
+                # link's own transaction: a ticket left live after a link could
+                # re-attach the same IdP identity to another account once this
+                # one is unlinked.
+                await _consume_ticket_in_tx(db, ticket)
                 await db.execute(
                     "INSERT INTO user_identities"
                     " (user_id, provider, subject, email, raw_claims_json, created_at)"
@@ -10634,7 +10681,11 @@ def _device_code_row(row: Any) -> dict[str, Any]:
     """Shape a ``sso_device_codes`` row for both the poll and approval views."""
     return {
         "user_code": row["user_code"],
+        # What the flow was opened for: the approval page shows it and the
+        # approval route checks it.
         "provider": row["provider"],
+        # Who approved it, which is what the redeemed session names as its issuer.
+        "approved_provider": row["approved_provider"],
         "client_name": row["client_name"],
         "authorized": row["user_id"] is not None,
         "expires_at": row["expires_at"],
@@ -10644,8 +10695,8 @@ def _device_code_row(row: Any) -> dict[str, Any]:
 
 
 _DEVICE_CODE_SELECT = (
-    "SELECT user_code, provider, user_id, client_name, expires_at,"
-    " interval_seconds, last_polled_at FROM sso_device_codes"
+    "SELECT user_code, provider, approved_provider, user_id, client_name,"
+    " expires_at, interval_seconds, last_polled_at FROM sso_device_codes"
 )
 
 
@@ -10708,16 +10759,19 @@ async def authorize_device_code(
     """Approve a pending device code for an account.
 
     Approval records the account only — no credential is stored. The CLI
-    redeems the code once (:func:`redeem_device_code`) and the API layer mints a
-    session for that account then, so a stale approval can never hand out a
-    session that was issued for somebody else's login.
+    redeems the code once (:func:`redeem_device_code`, then
+    :func:`exchange_device_code_for_session`) and the session is minted for that
+    account then, so a stale approval can never hand out a session that was
+    issued for somebody else's login.
 
     Args:
         user_code: The code the human typed on the approval page.
         username: The account being authorized.
-        provider: Provider the approval was made with, when the flow did not fix
-            one at creation. Recorded so the redeemed session can name its
-            issuer; a value contradicting the one fixed at creation is refused.
+        provider: Provider the approver's own session was issued by (``None`` for
+            a username-and-key session). Stored as the approved session's
+            provenance — never merged into the provider the flow was opened for,
+            or a key approval would claim an IdP it never used. A provider
+            contradicting the one fixed at creation is refused.
 
     Returns:
         True when a pending, unexpired code was approved; False otherwise
@@ -10737,8 +10791,7 @@ async def authorize_device_code(
             if user is None:
                 return False
             updated = await db.execute(
-                "UPDATE sso_device_codes SET user_id = ?,"
-                " provider = COALESCE(provider, ?)"
+                "UPDATE sso_device_codes SET user_id = ?, approved_provider = ?"
                 " WHERE user_code = ? AND user_id IS NULL"
                 f" AND {_LIVE_ROW}"
                 " AND (provider IS NULL OR ? IS NULL OR provider = ?)",
@@ -10833,17 +10886,21 @@ async def count_live_device_codes() -> int:
 
 
 async def redeem_device_code(device_code: str) -> dict[str, Any] | None:
-    """Consume an authorized device code and name the account it approved.
+    """Claim an authorized device code and name the account it approved.
+
+    This claims, it does not spend: the row survives so the caller can decide
+    whether the account may still sign in, and so a failure while minting the
+    session can be retried (:func:`release_device_code`). Exactly one poller can
+    hold the claim, which is what makes the handover exactly-once.
 
     Args:
         device_code: The raw device code the CLI holds.
 
     Returns:
-        ``{"username": ..., "provider": ...}`` when the code is authorized, or
-        ``None`` (unknown, expired or not yet approved). The caller mints the
-        session and then calls :func:`consume_device_code`; no credential is
-        stored with the approval, and the code survives a failed redemption so
-        the terminal can retry.
+        ``{"username": ..., "approved_provider": ...}`` when the code is
+        authorized, or ``None`` (unknown, expired, not yet approved or already
+        claimed). ``approved_provider`` is who approved the code — ``None`` for a
+        username-and-key approval — and becomes the session's issuer.
     """
     device_hash = _hash_token(device_code)
 
@@ -10852,7 +10909,7 @@ async def redeem_device_code(device_code: str) -> dict[str, Any] | None:
             await db.execute("BEGIN IMMEDIATE")
             try:
                 cursor = await db.execute(
-                    "SELECT u.username, d.provider"
+                    "SELECT u.username, d.approved_provider"
                     " FROM sso_device_codes d JOIN users u ON u.id = d.user_id"
                     " WHERE d.device_code_hash = ? AND d.user_id IS NOT NULL"
                     " AND d.redeemed_at IS NULL"
@@ -10878,7 +10935,10 @@ async def redeem_device_code(device_code: str) -> dict[str, Any] | None:
             except Exception:
                 await db.rollback()
                 raise
-            return {"username": row["username"], "provider": row["provider"]}
+            return {
+                "username": row["username"],
+                "approved_provider": row["approved_provider"],
+            }
 
     return await _retry_contended(_attempt)
 
@@ -10907,29 +10967,77 @@ async def release_device_code(device_code: str) -> bool:
     return await _retry_contended(_attempt)
 
 
-async def consume_device_code(device_code: str) -> bool:
-    """Delete a redeemed device code, once its session has been minted.
+async def exchange_device_code_for_session(
+    device_code: str,
+    *,
+    username: str,
+    is_admin: bool,
+    role: str,
+    approved_provider: str | None = None,
+    ttl_hours: int | None = None,
+) -> str | None:
+    """Spend a claimed device code and mint its session in one transaction.
 
-    Redemption reads the approval but deliberately leaves the row in place, so a
-    failure while creating the session does not destroy the only thing the
-    terminal can retry with. This is the step that ends the flow.
+    The two writes share a commit for the same reason
+    :func:`create_user_with_identity` keeps its pair together: a session written
+    without spending the code hands the same terminal a second credential, and a
+    spent code whose session never landed strands the terminal with nothing left
+    to retry. This is the only way a code becomes a session; a mint that fails
+    leaves the claim releasable (:func:`release_device_code`), never a half-done
+    redemption.
 
     Args:
         device_code: The raw device code the CLI holds.
+        username: The account the claim was made for; a claim naming another
+            account is not exchangeable.
+        is_admin: Whether the session carries administrator rights.
+        role: Role recorded on the session.
+        approved_provider: Provider that approved the code — the session's
+            issuer. ``None`` for a username-and-key approval.
+        ttl_hours: Lifetime; ``None`` uses the configured session TTL.
 
     Returns:
-        True when a row was removed, False when it was already gone.
+        The raw session token, or ``None`` when there is no live claim to spend
+        (unknown, expired, unapproved, never claimed, or claimed for another
+        account). Nothing is written in that case.
     """
+    if ttl_hours is None:
+        ttl_hours = current_session_ttl_hours()
     device_hash = _hash_token(device_code)
+    normalized = _normalize_username(username)
 
-    async def _attempt() -> bool:
+    async def _attempt() -> str | None:
         async with _connect_db() as db:
-            cursor = await db.execute(
-                "DELETE FROM sso_device_codes WHERE device_code_hash = ?",
-                (device_hash,),
-            )
-            await db.commit()
-            return cursor.rowcount > 0
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    "SELECT 1 FROM sso_device_codes d"
+                    " JOIN users u ON u.id = d.user_id"
+                    " WHERE d.device_code_hash = ? AND d.redeemed_at IS NOT NULL"
+                    " AND u.username = ?"
+                    f" AND d.{_LIVE_ROW}",
+                    (device_hash, normalized),
+                )
+                if await cursor.fetchone() is None:
+                    await db.rollback()
+                    return None
+                token = await _insert_session_in_tx(
+                    db,
+                    username=normalized,
+                    is_admin=is_admin,
+                    role=role,
+                    auth_provider=approved_provider,
+                    ttl_hours=ttl_hours,
+                )
+                await db.execute(
+                    "DELETE FROM sso_device_codes WHERE device_code_hash = ?",
+                    (device_hash,),
+                )
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+            return token
 
     return await _retry_contended(_attempt)
 
