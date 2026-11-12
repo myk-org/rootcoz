@@ -290,6 +290,7 @@ async def link_existing(
     provider: str,
     subject: str,
     email: str | None,
+    ticket: str | None = None,
 ) -> IdentityResolution:
     """Attach a verified IdP identity to an account whose owner just proved it.
 
@@ -317,11 +318,18 @@ async def link_existing(
             provider,
             subject,
             email=email,
+            ticket=ticket,
         )
     except ValueError as exc:
         # The account disappeared between the credential check and this write: it
         # is not a conflict, and the caller must not be told "already linked".
-        reason = "account_missing" if "not found" in str(exc) else "identity_conflict"
+        text = str(exc)
+        if "ticket" in text:
+            reason = "ticket_expired"
+        elif "not found" in text:
+            reason = "account_missing"
+        else:
+            reason = "identity_conflict"
         raise AuthError(reason, str(exc), subject=username) from exc
     return IdentityResolution(
         username=username, created=False, status=await status_of(username)
@@ -353,7 +361,13 @@ def validate_new_username(username: str, settings: Settings) -> None:
 
 
 async def create_new(
-    *, provider: str, subject: str, email: str | None, username: str, settings: Settings
+    *,
+    provider: str,
+    subject: str,
+    email: str | None,
+    username: str,
+    settings: Settings,
+    ticket: str | None = None,
 ) -> IdentityResolution:
     """Create a new account with the name the person chose, and link it.
 
@@ -368,6 +382,8 @@ async def create_new(
         email: Email the provider reported.
         username: Name chosen on the choice screen (register rules apply).
         settings: Application settings (``REQUIRE_APPROVAL``, ``ALLOWED_USERS``).
+        ticket: One-time first-login ticket, spent in the same transaction as the
+            account so an expired ticket leaves nothing behind.
 
     Returns:
         The resolution for the new account.
@@ -389,6 +405,7 @@ async def create_new(
             status=status,
             role=settings.default_user_role,
             created_via=provider,
+            ticket=ticket,
         )
     except ValueError as exc:
         reason = (

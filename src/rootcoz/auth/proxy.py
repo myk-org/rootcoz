@@ -182,6 +182,11 @@ class ProxyStrategy(AuthStrategy):
                 # identity, so the request is refused rather than given a
                 # row-less session.
                 logger.warning("Refused proxy account '%s': unusable name", username)
+                setattr(
+                    request.state,
+                    PROVISION_REFUSED_ATTR,
+                    {"username": username, "reason": "unusable_name"},
+                )
                 return None
             return existing
         user = await storage.get_user_by_username(username)
