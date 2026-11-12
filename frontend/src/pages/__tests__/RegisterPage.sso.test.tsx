@@ -121,6 +121,28 @@ function renderLoginAtUrl(url: string) {
   )
 }
 
+/**
+ * Puts a second ticket in the address bar without remounting the page — a
+ * provider round trip that lands while this page is still mounted.
+ */
+function SecondTicketArriver() {
+  const navigate = useNavigate()
+  return (
+    <button type="button" onClick={() => navigate('/login#sso_ticket=tkt-2', { replace: true })}>
+      second ticket
+    </button>
+  )
+}
+
+function renderWithSecondTicket() {
+  return render(
+    <MemoryRouter initialEntries={[TICKET_ENTRY]}>
+      <SecondTicketArriver />
+      <RegisterPage />
+    </MemoryRouter>,
+  )
+}
+
 /** Same page, but with the destinations mounted so navigation is observable. */
 function renderWithDestinations(entry: string | typeof TICKET_ENTRY | Record<string, unknown>) {
   return render(
@@ -536,5 +558,93 @@ describe('RegisterPage SSO first-login choice', () => {
     expect(await screen.findByText('Server exploded')).toBeInTheDocument()
     await waitFor(() => expect(window.location.hash).toBe(''))
     expect(apiMock.api.post).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('RegisterPage SSO ticket failures and ticket identity', () => {
+  beforeEach(() => {
+    authMock.authenticated = false
+    localStorage.clear()
+    apiMock.api.get.mockReset()
+    apiMock.api.post.mockReset()
+    authMock.refreshAuth.mockReset()
+    authMock.refreshAuth.mockImplementation(async () => {})
+    window.history.replaceState(null, '', '/')
+    defaultServer()
+  })
+
+  it('keeps a live ticket out of the URL and offers a retry when the lookup fails', async () => {
+    // A 5xx is not expiry: the ticket is still valid, so the person must be able
+    // to try again without going back to the provider.
+    let lookups = 0
+    apiMock.api.post.mockImplementation(async (path: string) => {
+      if (path === '/api/auth/sso/ticket') {
+        lookups += 1
+        if (lookups === 1) throw apiError(503, 'Sign-in service unavailable')
+        return TICKET
+      }
+      return {}
+    })
+    renderLoginAtUrl('/login#sso_ticket=tkt-1') // pragma: allowlist secret
+
+    expect(await screen.findByText('Sign-in service unavailable')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /^try again$/i })).toBeInTheDocument()
+    // The fragment is gone, so a failure could not be retried by refreshing —
+    // and the retry must not put the credential back in the address bar either.
+    await waitFor(() => expect(window.location.hash).toBe(''))
+
+    await userEvent.click(screen.getByRole('button', { name: /^try again$/i }))
+
+    expect(await screen.findByRole('heading', { name: /this google account isn't connected yet/i })).toBeInTheDocument()
+    expect(lookups).toBe(2)
+    expect(apiMock.api.post).toHaveBeenCalledWith('/api/auth/sso/ticket', { ticket: 'tkt-1' })
+    expect(window.location.hash).toBe('')
+    expect(window.location.search).toBe('')
+  })
+
+  it('still offers the retry after a second failure, then reaches the panel', async () => {
+    let lookups = 0
+    apiMock.api.post.mockImplementation(async (path: string) => {
+      if (path === '/api/auth/sso/ticket') {
+        lookups += 1
+        if (lookups === 1) throw apiError(500, 'Server exploded')
+        if (lookups === 2) throw apiError(502, 'Bad gateway')
+        return TICKET
+      }
+      return {}
+    })
+    renderLoginAtUrl('/login#sso_ticket=tkt-1') // pragma: allowlist secret
+
+    expect(await screen.findByText('Server exploded')).toBeInTheDocument()
+    await userEvent.click(screen.getByRole('button', { name: /^try again$/i }))
+    expect(await screen.findByText('Bad gateway')).toBeInTheDocument()
+
+    await userEvent.click(screen.getByRole('button', { name: /^try again$/i }))
+
+    expect(await screen.findByRole('heading', { name: /this google account isn't connected yet/i })).toBeInTheDocument()
+    expect(lookups).toBe(3)
+    expect(window.location.hash).toBe('')
+  })
+
+  it('shows the failure, never the previous ticket\'s panel, when a second ticket fails', async () => {
+    // The first ticket's metadata names Google; the second lookup fails. Showing
+    // the old panel would submit the new ticket under the old identity.
+    apiMock.api.post.mockImplementation(async (path: string, body?: unknown) => {
+      if (path === '/api/auth/sso/ticket') {
+        const ticket = (body as { ticket: string }).ticket
+        if (ticket === 'tkt-2') throw apiError(500, 'Server exploded') // pragma: allowlist secret
+        return TICKET
+      }
+      return { username: 'rnetser', status: 'active' }
+    })
+    renderWithSecondTicket()
+    await screen.findByRole('heading', { name: /this google account isn't connected yet/i })
+
+    await userEvent.click(screen.getByRole('button', { name: /^second ticket$/i }))
+
+    expect(await screen.findByText('Server exploded')).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: /isn't connected yet/i })).toBeNull()
+    expect(screen.queryByRole('button', { name: /^create account$/i })).toBeNull()
+    expect(apiMock.api.post).toHaveBeenCalledWith('/api/auth/sso/ticket', { ticket: 'tkt-2' })
   })
 })
