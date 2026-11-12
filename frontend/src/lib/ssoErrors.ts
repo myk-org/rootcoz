@@ -30,6 +30,10 @@ export const SSO_ERROR_MESSAGES: Record<string, string> = {
   // Linking another provider (Profile → Sign-in methods).
   unknown_mode:
     'That sign-in link was not valid. Start again from Profile → Sign-in methods.',
+  link_requires_post:
+    'Connecting a provider is a button on this page, not a link. Use Connect below.',
+  link_cross_site:
+    'That connect request came from another site, so it was refused. Use Connect below.',
   link_requires_session:
     'Your session ended before the provider answered. Sign in, then connect the provider again.',
   link_forbidden_role: 'A reviewer account is required to change sign-in methods.',

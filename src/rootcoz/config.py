@@ -7,7 +7,7 @@ import time
 from typing import Any, NamedTuple
 from urllib.parse import urlparse, urlsplit, urlunsplit
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -672,13 +672,14 @@ class Settings(BaseSettings):
         ),
     )
 
-    # OpenShift and Red Hat SSO are OIDC, but the issuer is per deployment.
+    # OpenShift needs two origins (its OAuth server and its API server), Red Hat
+    # SSO one; both are per deployment rather than fixed like Google's.
     sso_openshift_client_id: str = Field(
         default="",
         description=(
             "OAuth client id from the cluster's OpenShift OAuth server."
-            " OpenShift sign-in is offered only when the id, the secret and"
-            " SSO_OPENSHIFT_ISSUER are all set."
+            " OpenShift sign-in is offered only when the id, the secret,"
+            " SSO_OPENSHIFT_ISSUER and SSO_OPENSHIFT_API_URL are all set."
         ),
     )
     sso_openshift_client_secret: SecretStr | None = Field(
@@ -696,6 +697,16 @@ class Settings(BaseSettings):
             " trailing path, e.g. 'https://oauth-openshift.apps.example.com'."
             " Must be https (http only for a loopback dev server); any other value"
             " is refused, so a misconfiguration cannot silently hide the button."
+        ),
+    )
+    sso_openshift_api_url: str = Field(
+        default="",
+        description=(
+            "URL of the cluster's API server, e.g. 'https://api.example.com:6443'."
+            " The OAuth server above serves only '/oauth/*', so the account and"
+            " identity reads go here. Must be https (http only for a loopback dev"
+            " server); any other value is refused, so a misconfiguration cannot"
+            " silently fail every login."
         ),
     )
     sso_redhat_client_id: str = Field(
@@ -742,16 +753,23 @@ class Settings(BaseSettings):
         ),
     )
 
-    @field_validator("sso_openshift_issuer", "sso_redhat_issuer")
+    @field_validator(
+        "sso_openshift_issuer", "sso_openshift_api_url", "sso_redhat_issuer"
+    )
     @classmethod
-    def _validate_issuer(cls, value: str) -> str:
-        """Require an absolute http(s) issuer URL, where it is written.
+    def _validate_issuer(cls, value: str, info: ValidationInfo) -> str:
+        """Require an absolute http(s) issuer or cluster API URL, where written.
 
         A malformed issuer used to make the provider silently disappear from the
-        login page; refusing it at save time tells the admin instead.
+        login page; refusing it at save time tells the admin instead. The cluster
+        API URL follows the same rule for the same reason: it crosses the network
+        with the caller's token. Only the wording of a refusal differs — the API
+        URL is not an issuer, so telling an admin "the issuer must be https" about
+        it would name the wrong field back to them.
 
         Args:
             value: The raw setting.
+            info: Which field is being validated, for the refusal's wording.
 
         Returns:
             The value without a trailing slash (the form discovery is built from).
@@ -765,7 +783,9 @@ class Settings(BaseSettings):
         if not issuer.startswith(("https://", "http://")):
             msg = f"{issuer!r} is not an http(s) URL"
             raise ValueError(msg)
-        problem = issuer_problem(issuer)
+        is_api_url = info.field_name == "sso_openshift_api_url"
+        noun = "cluster API URL" if is_api_url else "issuer"
+        problem = issuer_problem(issuer, noun=noun)
         if problem is not None:
             raise ValueError(f"{issuer!r}: {problem}")
         return issuer.rstrip("/")
@@ -1583,48 +1603,52 @@ def jira_site_url_error(value: str | None) -> str | None:
     return None
 
 
-def issuer_problem(url: str) -> str | None:
-    """Why a configured OIDC issuer is unusable, or ``None`` when it is fine.
+def issuer_problem(url: str, *, noun: str = "issuer") -> str | None:
+    """Why a configured OIDC issuer or cluster API URL is unusable.
 
-    Discovery is built by appending ``/.well-known/openid-configuration`` to this
-    value, and the HTTP client parses it on every login — so a query string
+    Discovery is built by appending ``/.well-known/openid-configuration`` to an
+    issuer, and the HTTP client parses it on every login — so a query string
     silently produces the wrong discovery URL and a non-numeric port raises inside
     the client. Neither is caught by a scheme/host check, which is why the shape is
-    validated where an admin types it rather than at the first sign-in.
+    validated where an admin types it rather than at the first sign-in. A cluster
+    API URL (OpenShift's second origin) is held to the same shape because the
+    caller's token crosses it, even though nothing is discovered on it.
 
     Args:
-        url: The issuer as configured.
+        url: The value as configured.
+        noun: What the setting is called, so a refusal names the field the admin
+            actually typed into.
 
     Returns:
         A human-readable reason to refuse it, or ``None``.
     """
     candidate = (url or "").strip()
     if not candidate:
-        return "an issuer URL is required"
+        return f"a {noun} is required"
     if not issuer_is_secure(candidate):
-        return "the issuer must be https (http is accepted only for a loopback host)"
+        return f"the {noun} must be https (http is accepted only for a loopback host)"
     try:
         parsed = urlparse(candidate)
         # Accessing .port raises for a non-numeric port, so this is the check.
         _ = parsed.port
     except ValueError:
-        return "the issuer has an invalid port"
+        return f"the {noun} has an invalid port"
     if parsed.query:
-        return "the issuer must not carry a query string"
+        return f"the {noun} must not carry a query string"
     if parsed.fragment:
-        return "the issuer must not carry a fragment"
+        return f"the {noun} must not carry a fragment"
     if parsed.params:
-        return "the issuer must not carry parameters"
+        return f"the {noun} must not carry parameters"
     if "/.well-known/" in parsed.path:
         # A realm issuer legitimately carries a path (Keycloak:
         # ``/auth/realms/<realm>``); what is never right is pasting the discovery
         # URL itself, because discovery is appended to whatever is configured.
         return (
-            "the issuer must be the value the provider puts in `iss`, not its"
+            f"the {noun} must be the value the provider puts in `iss`, not its"
             " /.well-known/openid-configuration URL"
         )
     if parsed.path.rstrip("/").endswith("/.well-known"):
-        return "the issuer must not be the well-known discovery prefix"
+        return f"the {noun} must not be the well-known discovery prefix"
     return None
 
 

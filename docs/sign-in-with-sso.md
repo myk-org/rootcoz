@@ -42,10 +42,17 @@ Enterprise Server installation serves its own endpoints and is not supported yet
 
 ### OpenShift
 
-Create an OAuth client on the cluster (`oauthclients.oauth.openshift.io`) and set
-`SSO_OPENSHIFT_ISSUER` to the cluster's issuer URL. An OpenShift OAuth server
-publishes no `email_verified` claim, so if you use the domain allow-list it is the
-address alone that is checked there.
+Create an OAuth client on the cluster (`oauthclients.oauth.openshift.io`), set
+`SSO_OPENSHIFT_ISSUER` to the cluster's OAuth server origin
+(`https://oauth-openshift.apps.<cluster>`), and set `SSO_OPENSHIFT_API_URL` to the
+cluster API server (`https://api.<cluster>:6443`). Both are required, and they are
+not the same origin: the OAuth server serves only `/oauth/*` (authorize and
+token), while the account, its identities and the email are read from the API
+server — with only the OAuth origin set, every login fails at the account lookup.
+The API URL follows the same rule as the issuer: `https`, no path, and `http` only
+for a loopback development server. An OpenShift OAuth server publishes no
+`email_verified` claim, so if you use the domain allow-list it is the address
+alone that is checked there.
 
 ### Red Hat SSO (Keycloak)
 
@@ -124,6 +131,20 @@ Two rules matter:
 - An identity that already belongs to **another** account is refused without
   naming that account, since the answer would otherwise confirm that an address
   has an account here.
+
+Connecting is a **button on the settings page, never a link** you can be sent to.
+The card `POST`s the start from the page itself, and the server requires proof
+that the request came from this deployment (`Sec-Fetch-Site: same-origin`, or a
+matching `Origin`/`Referer`): a signed-in browser is not consent, so a cross-site
+navigation cannot start a connection that a provider session might then authorise
+silently. A plain `GET` carrying `mode=link` is refused (`link_requires_post`) and
+a cross-site `POST` is refused (`link_cross_site`) — neither starts a flow.
+
+Linking is also re-checked when it finishes, not just when it starts: the account
+must still exist, still be a reviewer, and still be usable. A **disabled,
+pending or rejected** account cannot complete a connection, even from a session
+that is still valid — and an administrator disabling an account takes effect
+immediately rather than when that session expires.
 
 Administrators can inspect and change anyone's sign-in methods under
 **Admin → Users**, and from the CLI:

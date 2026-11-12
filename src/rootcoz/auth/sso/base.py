@@ -112,6 +112,9 @@ class SSOProvider(ABC):
                     "client_id_setting",
                     "client_secret_setting",
                     "issuer_setting",
+                    # A provider spanning two origins (OpenShift: OAuth server and
+                    # API server) names its second URL here, after the issuer.
+                    "api_url_setting",
                 )
             )
             cls.settings_fields = tuple(name for name in declared if name)

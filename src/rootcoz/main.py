@@ -4394,10 +4394,22 @@ _BODY_LOGGING_SKIP_PATHS = frozenset(
         "/api/feedback/create",
         "/analyze",
         # Chat text is not structurally secret, so key-based masking misses a
-        # pasted credential — the same reason /api/chat/ is skipped above.
+        # pasted credential — the same reason the chat prefix is skipped.
         "/api/chat-issue",
         "/api/chat-issue/propose",
     }
+)
+
+#: Skip prefixes, matched by both body-reading handlers below. Skipped by prefix
+#: so a route added later under one of them is covered without being listed: the
+#: five chat/AI-credential paths carry secrets no field name marks, and every SSO
+#: surface carries a live credential in its body (the CLI's ``device_code``, the
+#: ``user_code`` a human types, a one-time ``ticket``, a session token) that
+#: ``mask_sensitive_fields`` would print unmasked at DEBUG.
+_BODY_LOGGING_SKIP_PREFIXES = (
+    "/api/auth/sso/",
+    "/api/chat/",
+    "/api/user/ai-credentials",
 )
 
 
@@ -4408,7 +4420,7 @@ class RequestBodyLoggingMiddleware(BaseHTTPMiddleware):
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
         if request.url.path in _BODY_LOGGING_SKIP_PATHS or request.url.path.startswith(
-            ("/api/chat/", "/api/user/ai-credentials")
+            _BODY_LOGGING_SKIP_PREFIXES
         ):
             return await call_next(request)
         if logger.isEnabledFor(logging.DEBUG) and request.method in (
@@ -4504,7 +4516,7 @@ async def _validation_error_handler(
         {"fields": _invalid_field_names(exc)},
     )
     if request.url.path in _BODY_LOGGING_SKIP_PATHS or request.url.path.startswith(
-        "/api/chat/"
+        _BODY_LOGGING_SKIP_PREFIXES
     ):
         raw_errors = jsonable_encoder(exc.errors())
         masked_errors = [_mask_pydantic_error(e) for e in raw_errors]
@@ -17022,6 +17034,10 @@ _SSO_PUBLIC_REASONS = frozenset(
         "link_forbidden_role",
         "link_session_changed",
         "identity_conflict",
+        # The link's transport: it is a same-origin POST, so a GET or a cross-site
+        # request is refused with the step that was wrong, not the account state.
+        "link_requires_post",
+        "link_cross_site",
     }
 )
 
@@ -17138,6 +17154,32 @@ async def sso_providers() -> JSONResponse:
     )
 
 
+def _link_request_is_same_origin(request: Request) -> bool:
+    """Whether a link POST proves it came from this deployment's own page.
+
+    ``Sec-Fetch-Site`` is what current browsers send and is decisive when present;
+    the ``Origin`` header (falling back to ``Referer``) covers a client that omits
+    it. Anything that proves nothing — no header, an unset ``PUBLIC_BASE_URL``, a
+    foreign host — is refused, because "unproven" and "cross-site" must take the
+    same branch.
+
+    Args:
+        request: The request that wants to start a link.
+
+    Returns:
+        True only when one of the three says the request is same-origin.
+    """
+    fetch_site = request.headers.get("sec-fetch-site", "")
+    if fetch_site:
+        return fetch_site == "same-origin"
+    base = urlparse((get_settings().public_base_url or "").strip())
+    source = request.headers.get("origin") or request.headers.get("referer") or ""
+    return bool(base.netloc) and (
+        urlparse(source).netloc.lower() == base.netloc.lower()
+    )
+
+
+@app.post("/api/auth/sso/{provider}/login", operation_id="ssoLinkStart")
 @app.get("/api/auth/sso/{provider}/login", operation_id="ssoLogin")
 async def sso_login(provider: str, request: Request) -> RedirectResponse:
     """Start a browser SSO login for one provider.
@@ -17146,8 +17188,11 @@ async def sso_login(provider: str, request: Request) -> RedirectResponse:
         provider: Provider name from the path.
         request: Incoming request. ``next`` and ``mode`` are read from the query
             string; ``mode=link`` attaches this identity to the account already
-            signed in instead of resolving an account, and is refused without a
-            session — linking is a write on an account, so it needs one.
+            signed in instead of resolving an account. A link is a POST — an
+            explicit action from the settings page that must prove it is
+            same-origin — and is refused without a live reviewer session, because
+            linking is a write on an account. An ordinary login stays a GET and
+            stays reachable with no session at all.
 
     Returns:
         A redirect to the provider, with the sealed attempt in a cookie.
@@ -17175,6 +17220,24 @@ async def sso_login(provider: str, request: Request) -> RedirectResponse:
     # checks below are advisory — ``_sso_finish_link`` re-reads the session and is
     # the authoritative gate, because ten minutes is long enough for it to change.
     caller = session["username"] if session else ""
+    if mode == auth_sso_state.MODE_LINK:
+        # A link is a write on an account, so it must be an explicit POST from
+        # this origin: a cross-site top-level navigation would otherwise start
+        # one off the session cookie alone, and a provider session that
+        # authorises silently would attach the identity with no action here.
+        # Refused before the session is required, so a GET carrying mode=link is
+        # answered as a transport error rather than as "sign in first".
+        destination = auth_sso_state.safe_next(request.query_params.get("next", ""))
+        if request.method != "POST":
+            await _audit_sso_refusal(
+                request, provider, "link_requires_post", subject=caller
+            )
+            return _sso_error_redirect("link_requires_post")
+        if not _link_request_is_same_origin(request):
+            await _audit_sso_refusal(
+                request, provider, "link_cross_site", subject=caller
+            )
+            return _link_error_redirect(destination, "link_cross_site")
     if mode == auth_sso_state.MODE_LINK and not caller:
         # No session means there is nothing to link *to*: completing the flow
         # would silently become a login, which is not what was asked for.
@@ -17321,6 +17384,25 @@ async def _sso_finish_link(
             request, provider, "link_session_changed", subject=username
         )
         return _link_error_redirect(destination, "link_session_changed")
+
+    # The SSO surfaces are public, so the middleware's account gate never ran for
+    # this request: it is applied here, on the row re-read with the session. A
+    # disabled account is refused on every path and a pending or rejected one
+    # until an admin acts — the same two decisions the middleware takes, from
+    # ``auth/approval`` so the two gates cannot drift. ``locked`` is a login-only
+    # guard and is deliberately not applied to a live session; the bootstrap admin
+    # has no row and is unaffected.
+    user = await storage.get_user_by_username(username)
+    status = await storage.get_user_status(username) or ""
+    if auth_approval.is_approval_blocked(status):
+        refusal = f"account_{status}"
+    elif auth_approval.account_block_reason(user) == "disabled":
+        refusal = "account_disabled"
+    else:
+        refusal = ""
+    if refusal:
+        await _audit_sso_refusal(request, provider, refusal, subject=username)
+        return _link_error_redirect(destination, refusal)
 
     if not isinstance(outcome, auth_identity.LoginChoice):
         # Already linked. Same account is a no-op (the person clicked twice);
@@ -22548,6 +22630,7 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
         "default_user_role",
         "sso_allowed_domains",
         "sso_openshift_issuer",
+        "sso_openshift_api_url",
         "sso_redhat_issuer",
     ):
         if key not in settings_updates:

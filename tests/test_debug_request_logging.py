@@ -361,6 +361,30 @@ def test_validation_error_skip_path_no_debug_body(test_client, caplog):
     assert "<redacted>" in log_text, "skip-path log must redact input values"
 
 
+def test_sso_device_poll_body_is_never_logged(test_client, caplog):
+    """A device code is a live credential, and no field name marks it secret.
+
+    ``/api/auth/sso/`` is skipped by prefix, so the poll (and any SSO route added
+    later) never has its body printed — masked or otherwise.
+    """
+    device_code = "live-device-code-value"  # pragma: allowlist secret
+    with capture_main_logs(caplog, logging.DEBUG):
+        response = test_client.post(
+            "/api/auth/sso/device/poll", json={"device_code": device_code}
+        )
+        # A skip-path request logs nothing, so the control has to be synthetic:
+        # this record proves the capture reaches the logger before the negative.
+        logging.getLogger("rootcoz.main").debug("capture control reached caplog")
+
+    assert response.status_code == 200
+    assert "capture control reached caplog" in caplog.text
+    assert device_code not in caplog.text, "a live device code reached the log"
+    body_logs = _get_debug_messages(
+        caplog, containing="Incoming POST /api/auth/sso/device/poll body:"
+    )
+    assert not body_logs, "the SSO prefix is in skip-paths; the body is not logged"
+
+
 def test_get_requests_not_logged(test_client, caplog):
     """GET requests should NOT produce body logging."""
     with capture_main_logs(caplog, logging.DEBUG):
