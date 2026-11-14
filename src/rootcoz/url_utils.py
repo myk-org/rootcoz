@@ -1,4 +1,9 @@
-"""Cross-cutting HTTP(S) URL sanitization helpers."""
+"""Cross-cutting URL helpers.
+
+Two jobs: sanitizing HTTP(S) URLs before they are stored or shown (userinfo,
+clone URLs, hrefs), and answering whether a URL may be handed to a browser as a
+navigation target — the rule the SSO logout path and the issuer settings share.
+"""
 
 from __future__ import annotations
 
@@ -35,6 +40,51 @@ def sanitize_http_href(url: str) -> str:
     if parsed.scheme not in ("http", "https") or not parsed.hostname:
         return ""
     return cleaned
+
+
+#: Hosts for which plaintext http is acceptable — a loopback development server
+#: has no network segment to intercept.
+LOOPBACK_HOSTS = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+def is_safe_navigation_url(url: str, *, allow_loopback_http: bool = False) -> bool:
+    """Whether a URL may be handed to a browser as a redirect target.
+
+    One rule for every place that answers "may the browser go here": https
+    always, plaintext http only for a loopback host when the caller opts in
+    (a local IdP), and never a URL carrying credentials or a fragment — both
+    exist to move data, not to navigate.
+
+    Args:
+        url: The candidate URL.
+        allow_loopback_http: Accept http when the host is loopback (dev IdP).
+
+    Returns:
+        True when the URL is safe to navigate to.
+    """
+    if not url:
+        return False
+    # A control character can split a header or a log line; nothing legitimate
+    # carries one. Checked before stripping: a trailing newline is exactly the
+    # header-injection shape.
+    if any(ord(char) < 0x20 or ord(char) == 0x7F for char in url):
+        return False
+    candidate = url.strip()
+    cleaned = strip_url_userinfo(candidate)
+    if cleaned != candidate:
+        # Credentials were present: drop the URL rather than silently rewrite it.
+        return False
+    try:
+        parsed = urlparse(cleaned)
+    except ValueError:  # e.g. "https://[::1/x" — invalid IPv6, fail closed
+        return False
+    if parsed.fragment:
+        return False
+    if parsed.scheme == "https":
+        return bool(parsed.hostname)
+    if parsed.scheme == "http":
+        return allow_loopback_http and (parsed.hostname or "").lower() in LOOPBACK_HOSTS
+    return False
 
 
 def sanitize_clone_url(url: str) -> str:

@@ -818,8 +818,13 @@ def test_logout_is_audited(app_client) -> None:
     assert event["target_type"] == "user"
     assert event["target_id"] == "admin"
     assert event["outcome"] == "success"
-    # The session cookie is cleared, but its value is never a detail.
-    assert event["details"] == {"session_cleared": True}
+    # The session cookie is cleared, but its value is never a detail. The row
+    # also says why an IdP logout was or was not offered — `not_sso` for this
+    # API-key login.
+    assert event["details"] == {"session_cleared": True, "idp_logout": "not_sso"}
+    # Logout is reachable while anonymous, so the actor is read from the session
+    # row rather than from the middleware.
+    assert event["actor"] == "admin"
 
 
 def test_settings_update_audits_keys_without_values(app_client) -> None:

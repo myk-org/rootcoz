@@ -5,6 +5,7 @@ description = "AI-powered root cause analysis for CI/CD test failures"
 license = {text = "Apache-2.0"}
 requires-python = ">=3.14,<3.15"
 dependencies = [
+    "joserfc>=1.8",
   "aiosqlite",
   "pi-sidecar-client>=4.20.1",
   "cryptography>=46.0.5",

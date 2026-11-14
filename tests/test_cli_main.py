@@ -5060,6 +5060,244 @@ class TestAuthLoginCommand:
         assert "admin: True" in result.output
         mock_client.login.assert_called_once_with("admin", "test-key")
 
+    def test_auth_sso_prints_the_code_and_the_token(self, mock_client, monkeypatch):
+        monkeypatch.setattr("rootcoz.cli.main.time.sleep", lambda _s: None)
+        mock_client.sso_providers.return_value = {
+            "providers": [{"name": "google", "display_name": "Google"}]
+        }
+        mock_client.sso_device_start.return_value = {
+            "device_code": "dc",
+            "user_code": "ABCD-EFGH",
+            "verification_uri": "https://rootcoz.example/login/device",
+            "expires_in": 600,
+            "interval": 5,
+        }
+        mock_client.sso_device_poll.return_value = {
+            "status": "approved",
+            "token": "session-token",  # pragma: allowlist secret
+            "username": "alice",
+        }
+        result = runner.invoke(app, ["auth", "sso", "--provider", "google"])
+        assert result.exit_code == 0
+        assert "ABCD-EFGH" in result.output
+        assert "Signed in as alice" in result.output
+        assert "session-token" in result.output
+        # It never rewrites the user's configuration.
+        assert "config.toml" in result.output
+
+    def test_auth_sso_backs_off_when_the_server_says_slow_down(
+        self, mock_client, monkeypatch
+    ):
+        slept: list[float] = []
+        monkeypatch.setattr("rootcoz.cli.main.time.sleep", slept.append)
+        mock_client.sso_providers.return_value = {"providers": []}
+        mock_client.sso_device_start.return_value = {
+            "device_code": "dc",
+            "user_code": "CODE",
+            "verification_uri": "/login/device",
+            "expires_in": 600,
+            "interval": 5,
+        }
+        mock_client.sso_device_poll.side_effect = [
+            {"status": "slow_down"},
+            {"status": "pending"},
+            {"status": "approved", "token": "t", "username": "alice"},
+        ]
+        result = runner.invoke(app, ["auth", "sso"])
+        assert result.exit_code == 0
+        # 5, then +5 after slow_down, then 10: it widened rather than hammered.
+        assert slept == [5, 10, 10]
+
+    def test_auth_sso_joins_a_relative_approval_path_to_the_server(
+        self, mock_client, monkeypatch
+    ):
+        monkeypatch.setattr("rootcoz.cli.main.time.sleep", lambda _s: None)
+        mock_client.sso_providers.return_value = {"providers": []}
+        # Without PUBLIC_BASE_URL the server answers with the bare path, because
+        # it will not build an absolute URL from caller-controlled headers.
+        mock_client.server_url = _TEST_SERVER
+        mock_client.sso_device_start.return_value = {
+            "device_code": "dc",
+            "user_code": "CODE",
+            "verification_uri": "/login/device",
+            "expires_in": 600,
+            "interval": 5,
+        }
+        mock_client.sso_device_poll.return_value = {
+            "status": "approved",
+            "token": "t",
+            "username": "alice",
+        }
+        result = runner.invoke(app, ["auth", "sso"])
+        assert result.exit_code == 0
+        assert f"{_TEST_SERVER.rstrip('/')}/login/device" in result.output
+
+    def test_auth_sso_reports_an_expired_code(self, mock_client, monkeypatch):
+        monkeypatch.setattr("rootcoz.cli.main.time.sleep", lambda _s: None)
+        mock_client.sso_providers.return_value = {"providers": []}
+        mock_client.sso_device_start.return_value = {
+            "device_code": "dc",
+            "user_code": "CODE",
+            "verification_uri": "/login/device",
+            "expires_in": 600,
+            "interval": 5,
+        }
+        mock_client.sso_device_poll.return_value = {"status": "expired"}
+        result = runner.invoke(app, ["auth", "sso"])
+        assert result.exit_code == 1
+        assert "expired" in result.output
+
+    def test_auth_sso_json(self, mock_client, monkeypatch):
+        monkeypatch.setattr("rootcoz.cli.main.time.sleep", lambda _s: None)
+        mock_client.sso_providers.return_value = {"providers": []}
+        mock_client.sso_device_start.return_value = {
+            "device_code": "dc",
+            "user_code": "CODE",
+            "verification_uri": "/login/device",
+            "expires_in": 600,
+            "interval": 5,
+        }
+        mock_client.sso_device_poll.return_value = {
+            "status": "approved",
+            "token": "t",
+            "username": "alice",
+        }
+        result = runner.invoke(app, ["--json", "auth", "sso"])
+        assert result.exit_code == 0
+        payload = json.loads(result.output[result.output.index("{") :])
+        assert payload["username"] == "alice"
+
+    def test_auth_sso_json_still_prints_the_code_for_the_human(
+        self, mock_client, monkeypatch
+    ):
+        # Under --json stdout stays machine-readable, so the code a person cannot
+        # proceed without goes to stderr.
+        monkeypatch.setattr("rootcoz.cli.main.time.sleep", lambda _s: None)
+        mock_client.sso_providers.return_value = {"providers": []}
+        mock_client.sso_device_start.return_value = {
+            "device_code": "dc",
+            "user_code": "ABCD-EFGH",
+            "verification_uri": "/login/device",
+            "expires_in": 600,
+            "interval": 5,
+        }
+        mock_client.sso_device_poll.return_value = {
+            "status": "approved",
+            "token": "t",
+            "username": "alice",
+        }
+        result = runner.invoke(app, ["--json", "auth", "sso"])
+        assert result.exit_code == 0
+        # The human still sees the code; the JSON document is what a script reads.
+        assert "ABCD-EFGH" in result.output
+        payload = json.loads(result.output[result.output.index("{") :])
+        assert payload["username"] == "alice"
+
+    def test_auth_sso_lists_the_offered_providers(self, mock_client):
+        mock_client.sso_providers.return_value = {
+            "providers": [{"name": "google", "display_name": "Google"}]
+        }
+        result = runner.invoke(app, ["auth", "sso", "--list-providers"])
+        assert result.exit_code == 0
+        assert "google" in result.output
+        mock_client.sso_device_start.assert_not_called()
+
+    def test_auth_sso_refuses_a_provider_the_server_does_not_offer(self, mock_client):
+        mock_client.sso_providers.return_value = {
+            "providers": [{"name": "google", "display_name": "Google"}]
+        }
+        result = runner.invoke(app, ["auth", "sso", "--provider", "github"])
+        assert result.exit_code == 1
+        assert "google" in result.output
+        mock_client.sso_device_start.assert_not_called()
+
+    def test_auth_sso_identities_lists_linked_providers(self, mock_client):
+        mock_client.user_identities.return_value = {
+            "identities": [{"provider": "google", "email": "a@example.com"}],
+            "unlinkable": False,
+        }
+        result = runner.invoke(app, ["auth", "sso-identities"])
+        assert result.exit_code == 0
+        assert "google" in result.output
+
+    def test_auth_sso_unlink_asks_first(self, mock_client):
+        mock_client.delete_user_identity.return_value = {"ok": True}
+        declined = runner.invoke(app, ["auth", "sso-unlink", "google"], input="n\n")
+        assert declined.exit_code == 1
+        mock_client.delete_user_identity.assert_not_called()
+
+        agreed = runner.invoke(app, ["auth", "sso-unlink", "google", "--yes"])
+        assert agreed.exit_code == 0
+        mock_client.delete_user_identity.assert_called_once_with("google")
+
+    def test_auth_sso_unlink_refuses_to_skip_consent_under_json(self, mock_client):
+        result = runner.invoke(app, ["--json", "auth", "sso-unlink", "google"])
+        assert result.exit_code == 1
+        mock_client.delete_user_identity.assert_not_called()
+
+    def test_admin_users_unlink_identity_refuses_under_json(self, mock_client):
+        result = runner.invoke(
+            app, ["--json", "admin", "users", "unlink-identity", "alice", "google"]
+        )
+        assert result.exit_code == 1
+        mock_client.admin_delete_user_identity.assert_not_called()
+
+    def test_admin_users_identities(self, mock_client):
+        mock_client.admin_user_identities.return_value = {
+            "identities": [{"provider": "github"}],
+            "unlinkable": False,
+        }
+        result = runner.invoke(app, ["admin", "users", "identities", "alice"])
+        assert result.exit_code == 0
+        assert "github" in result.output
+
+    def test_admin_users_unlink_identity(self, mock_client):
+        mock_client.admin_delete_user_identity.return_value = {"ok": True}
+        result = runner.invoke(
+            app,
+            ["admin", "users", "unlink-identity", "alice", "google", "--yes"],
+        )
+        assert result.exit_code == 0
+        mock_client.admin_delete_user_identity.assert_called_once_with(
+            "alice", "google"
+        )
+
+    def test_auth_sso_approve_shows_the_client_then_approves(self, mock_client):
+        mock_client.sso_device_approve_info.return_value = {
+            "user_code": "ABCD-EFGH",
+            "client_name": "laptop",
+        }
+        mock_client.sso_device_approve.return_value = {
+            "ok": True,
+            "user_code": "ABCD-EFGH",
+            "provider": "google",
+        }
+        result = runner.invoke(app, ["auth", "sso-approve", "ABCD-EFGH", "--yes"])
+        assert result.exit_code == 0
+        assert "laptop" in result.output
+        mock_client.sso_device_approve.assert_called_once_with("ABCD-EFGH")
+
+    def test_auth_sso_approve_asks_before_granting(self, mock_client):
+        # The client name is the only defence against approving a code someone
+        # else sent: it is shown first, and the answer has to be yes.
+        mock_client.sso_device_approve_info.return_value = {
+            "user_code": "ABCD-EFGH",
+            "client_name": "evil-laptop",
+        }
+        result = runner.invoke(app, ["auth", "sso-approve", "ABCD-EFGH"], input="n\n")
+        assert result.exit_code == 1
+        assert "evil-laptop" in result.output
+        mock_client.sso_device_approve.assert_not_called()
+
+    def test_auth_sso_approve_refuses_to_skip_consent_under_json(self, mock_client):
+        mock_client.sso_device_approve_info.return_value = {
+            "user_code": "ABCD-EFGH",
+            "client_name": "evil-laptop",
+        }
+        result = runner.invoke(app, ["--json", "auth", "sso-approve", "ABCD-EFGH"])
+        assert result.exit_code == 1
+        mock_client.sso_device_approve.assert_not_called()
+
     def test_auth_login_json(self, mock_client):
         mock_client.login.return_value = {
             "username": "admin",
