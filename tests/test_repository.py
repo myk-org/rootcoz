@@ -1,8 +1,12 @@
 """Tests for repository management."""
 
+import contextlib
 import os
+import select
+import socket
 import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 from unittest.mock import ANY, MagicMock, patch
@@ -17,6 +21,7 @@ from rootcoz.repository import (
     RepositoryManager,
     _clone_by_ref_type,
     _git_clone,
+    _git_fetch,
     _is_commit_sha,
     _is_full_commit_sha,
     clone_failure_reason,
@@ -1033,9 +1038,10 @@ class TestCloneShaFlow:
     """A commit ref is fetched by id; the full clone is the fallback, not the first move."""
 
     @patch("rootcoz.repository.Repo")
+    @patch("rootcoz.repository._git_fetch")
     @patch("rootcoz.repository._git_clone")
     def test_clone_with_sha_fetches_the_object_by_id(
-        self, mock_git: MagicMock, mock_repo_cls: MagicMock
+        self, mock_git: MagicMock, mock_fetch: MagicMock, mock_repo_cls: MagicMock
     ) -> None:
         """clone() with a full SHA fetches the object itself -- no full clone."""
         manager = RepositoryManager()
@@ -1049,7 +1055,10 @@ class TestCloneShaFlow:
         fetch_repo.create_remote.assert_called_once_with(
             "origin", "https://github.com/org/repo"
         )
-        assert fetch_repo.git.fetch.call_args[0] == ("--depth=50", "origin", sha)
+        mock_fetch.assert_called_once()
+        assert mock_fetch.call_args[0] == (manager.temp_dirs[0], sha)
+        assert mock_fetch.call_args[1]["depth"] == 50
+        assert mock_fetch.call_args[1]["kill_after_timeout"] > 0
         assert fetch_repo.git.checkout.call_args[0] == ("--detach", "FETCH_HEAD")
         assert fetch_repo.git.checkout.call_args[1]["kill_after_timeout"] > 0
         # The whole point: no full clone on the success path.
@@ -1057,15 +1066,16 @@ class TestCloneShaFlow:
         manager.cleanup()
 
     @patch("rootcoz.repository.Repo")
+    @patch("rootcoz.repository._git_fetch")
     @patch("rootcoz.repository._git_clone")
     def test_clone_with_sha_falls_back_when_the_remote_refuses_the_id(
-        self, mock_git: MagicMock, mock_repo_cls: MagicMock
+        self, mock_git: MagicMock, mock_fetch: MagicMock, mock_repo_cls: MagicMock
     ) -> None:
         """A server that refuses the object id is recovered by a full clone."""
         manager = RepositoryManager()
         sha = ("abc1234def5678" * 3)[:40]  # pragma: allowlist secret
         assert len(sha) == 40
-        mock_repo_cls.init.return_value.git.fetch.side_effect = GitCommandError(
+        mock_fetch.side_effect = GitCommandError(
             "git fetch",
             1,
             stderr="error: Server does not allow request for unadvertised object",
@@ -1088,16 +1098,16 @@ class TestCloneShaFlow:
         manager.cleanup()
 
     @patch("rootcoz.repository.Repo")
+    @patch("rootcoz.repository._git_fetch")
     @patch("rootcoz.repository._git_clone")
     def test_clone_with_sha_raises_a_specific_error_when_the_commit_is_unavailable(
-        self, mock_git: MagicMock, mock_repo_cls: MagicMock
+        self, mock_git: MagicMock, mock_fetch: MagicMock, mock_repo_cls: MagicMock
     ) -> None:
         """An absent commit names the repository, the ref and the cause -- no token."""
         manager = RepositoryManager()
         sha = ("abc1234def5678" * 3)[:40]  # pragma: allowlist secret
         assert len(sha) == 40
-        fetch_repo = mock_repo_cls.init.return_value
-        fetch_repo.git.fetch.side_effect = GitCommandError(
+        mock_fetch.side_effect = GitCommandError(
             "git fetch", 128, stderr="fatal: git upload-pack: not our ref"
         )
         after_clone = mock_repo_cls.return_value.git
@@ -1124,9 +1134,10 @@ class TestCloneShaFlow:
         manager.cleanup()
 
     @patch("rootcoz.repository.Repo")
+    @patch("rootcoz.repository._git_fetch")
     @patch("rootcoz.repository._git_clone")
     def test_the_ssl_label_falls_back_to_the_full_clone(
-        self, mock_git: MagicMock, mock_repo_cls: MagicMock
+        self, mock_git: MagicMock, mock_fetch: MagicMock, mock_repo_cls: MagicMock
     ) -> None:
         """A cert rejection on the by-id fetch must not regress today's recovery.
 
@@ -1137,7 +1148,7 @@ class TestCloneShaFlow:
         manager = RepositoryManager()
         sha = ("abc1234def5678" * 3)[:40]  # pragma: allowlist secret
         assert len(sha) == 40
-        mock_repo_cls.init.return_value.git.fetch.side_effect = GitCommandError(
+        mock_fetch.side_effect = GitCommandError(
             "git fetch",
             128,
             stderr="server verification failed: certificate signer not trusted",
@@ -1159,15 +1170,16 @@ class TestCloneShaFlow:
         manager.cleanup()
 
     @patch("rootcoz.repository.Repo")
+    @patch("rootcoz.repository._git_fetch")
     @patch("rootcoz.repository._git_clone")
     def test_a_timeout_raises_and_does_not_fall_back(
-        self, mock_git: MagicMock, mock_repo_cls: MagicMock
+        self, mock_git: MagicMock, mock_fetch: MagicMock, mock_repo_cls: MagicMock
     ) -> None:
         """A hung remote fails at once: a second rung would spend a second deadline."""
         manager = RepositoryManager()
         sha = ("abc1234def5678" * 3)[:40]  # pragma: allowlist secret
         assert len(sha) == 40
-        mock_repo_cls.init.return_value.git.fetch.side_effect = GitCommandError(
+        mock_fetch.side_effect = GitCommandError(
             "git fetch",
             -9,
             stderr='Timeout: the command "git fetch" did not complete in 900 secs.',
@@ -1198,9 +1210,10 @@ class TestCloneShaFlow:
         manager.cleanup()
 
     @patch("rootcoz.repository.Repo")
+    @patch("rootcoz.repository._git_fetch")
     @patch("rootcoz.repository._git_clone")
     def test_abbreviated_sha_skips_the_fetch_path(
-        self, mock_git: MagicMock, mock_repo_cls: MagicMock
+        self, mock_git: MagicMock, mock_fetch: MagicMock, mock_repo_cls: MagicMock
     ) -> None:
         """A 7-39 hex ref cannot be fetched by id; today's resolution is kept."""
         manager = RepositoryManager()
@@ -1211,6 +1224,7 @@ class TestCloneShaFlow:
         manager.clone("https://github.com/org/repo", depth=50, branch=sha)
 
         mock_repo_cls.init.assert_not_called()
+        mock_fetch.assert_not_called()
         clone_kwargs = mock_git.call_args[1]
         assert "depth" not in clone_kwargs
         assert "branch" not in clone_kwargs
@@ -1218,9 +1232,14 @@ class TestCloneShaFlow:
         manager.cleanup()
 
     @patch("rootcoz.repository.Repo")
+    @patch("rootcoz.repository._git_fetch")
     @patch("rootcoz.repository._git_clone")
     def test_clone_into_with_sha_fetches_the_object_by_id(
-        self, mock_git: MagicMock, mock_repo_cls: MagicMock, tmp_path
+        self,
+        mock_git: MagicMock,
+        mock_fetch: MagicMock,
+        mock_repo_cls: MagicMock,
+        tmp_path,
     ) -> None:
         """clone_into() with a full SHA fetches the object itself, then renames in place."""
         manager = RepositoryManager()
@@ -1237,7 +1256,10 @@ class TestCloneShaFlow:
         fetch_repo.create_remote.assert_called_once_with(
             "origin", "https://github.com/org/repo"
         )
-        assert fetch_repo.git.fetch.call_args[0] == ("--depth=1", "origin", sha)
+        mock_fetch.assert_called_once()
+        assert mock_fetch.call_args[0] == (staging, sha)
+        assert mock_fetch.call_args[1]["depth"] == 1
+        assert mock_fetch.call_args[1]["kill_after_timeout"] > 0
         assert fetch_repo.git.checkout.call_args[0] == ("--detach", "FETCH_HEAD")
         mock_git.assert_not_called()
         assert target.exists()
@@ -1265,9 +1287,14 @@ class TestCloneShaFlow:
         assert call[1]["kill_after_timeout"] > 0
 
     @patch("rootcoz.repository.Repo")
+    @patch("rootcoz.repository._git_fetch")
     @patch("rootcoz.repository._git_clone")
     def test_clone_into_sha_with_token_scrubs_credentials(
-        self, mock_git: MagicMock, mock_repo_cls: MagicMock, tmp_path
+        self,
+        mock_git: MagicMock,
+        mock_fetch: MagicMock,
+        mock_repo_cls: MagicMock,
+        tmp_path,
     ) -> None:
         """clone_into() with a SHA + token still scrubs the staging remote."""
         manager = RepositoryManager()
@@ -1290,9 +1317,13 @@ class TestCloneShaFlow:
                 token="tok123",  # pragma: allowlist secret
             )
 
-        # Token injected into the remote the fetch rung adds.
+        # Token injected into the remote the fetch rung adds, never fetch argv.
         remote_url = mock_repo_cls.init.return_value.create_remote.call_args[0][1]
         assert "tok123" in remote_url  # pragma: allowlist secret
+        mock_fetch.assert_called_once()
+        assert mock_fetch.call_args[0] == (staging, sha)
+        assert mock_fetch.call_args[1]["depth"] == 1
+        assert mock_fetch.call_args[1]["kill_after_timeout"] > 0
         # Credentials scrubbed against the staging tree
         mock_run.assert_called_once()
         assert mock_run.call_args[1]["cwd"] == staging
@@ -1300,9 +1331,14 @@ class TestCloneShaFlow:
         assert scrub_cmd[-1] == "https://github.com/org/repo"
 
     @patch("rootcoz.repository.Repo")
+    @patch("rootcoz.repository._git_fetch")
     @patch("rootcoz.repository._git_clone")
     def test_clone_into_sha_with_ssl_retry(
-        self, mock_git: MagicMock, mock_repo_cls: MagicMock, tmp_path
+        self,
+        mock_git: MagicMock,
+        mock_fetch: MagicMock,
+        mock_repo_cls: MagicMock,
+        tmp_path,
     ) -> None:
         """clone_into() with a SHA falls back to a full clone and retries on SSL."""
         manager = RepositoryManager()
@@ -1310,7 +1346,7 @@ class TestCloneShaFlow:
         assert len(sha) == 40
         target = tmp_path / "repo"
         mock_repo_cls.init.side_effect = _init_creating_leaf(mock_repo_cls)
-        mock_repo_cls.init.return_value.git.fetch.side_effect = GitCommandError(
+        mock_fetch.side_effect = GitCommandError(
             "git fetch",
             1,
             stderr="error: Server does not allow request for unadvertised object",
@@ -1484,6 +1520,188 @@ class TestCloneTimeoutIsEnforced:
             "the clone shares the caller's process group, so the timeout cannot "
             "kill a git-remote-https helper holding the pipes"
         )
+
+    @pytest.mark.parametrize("scheme", ["https", "git"])
+    def test_clone_into_sha_against_silent_listener_times_out_and_kills_helpers(
+        self,
+        scheme: str,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        """A silent listener on commit-ID fetch times out, never falls back, and leaves no open socket."""
+        for var in (
+            "HTTPS_PROXY",
+            "https_proxy",
+            "HTTP_PROXY",
+            "http_proxy",
+            "ALL_PROXY",
+            "all_proxy",
+        ):
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1,localhost")
+        monkeypatch.setenv("no_proxy", "127.0.0.1,localhost")
+        budget = 2.0
+        monkeypatch.setattr("rootcoz.repository._clone_timeout", lambda: budget)
+
+        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        srv.bind(("127.0.0.1", 0))
+        srv.listen(8)
+        srv.settimeout(0.1)
+        port = srv.getsockname()[1]
+
+        accepted: list[socket.socket] = []
+        stop_event = threading.Event()
+
+        def _accept_loop() -> None:
+            while not stop_event.is_set():
+                try:
+                    conn, _ = srv.accept()
+                except TimeoutError, OSError:
+                    continue
+                accepted.append(conn)
+
+        accept_thread = threading.Thread(target=_accept_loop, daemon=True)
+        accept_thread.start()
+
+        target = tmp_path / "repo"
+        caught: list[BaseException] = []
+
+        def _run_clone() -> None:
+            try:
+                RepositoryManager().clone_into(
+                    f"{scheme}://127.0.0.1:{port}/org/repo.git",
+                    target,
+                    branch="a" * 40,
+                )
+            except BaseException as exc:  # noqa: BLE001
+                caught.append(exc)
+
+        worker = threading.Thread(target=_run_clone, daemon=True)
+        try:
+            started = time.monotonic()
+            worker.start()
+            worker.join(timeout=budget + 5.0)
+            elapsed = time.monotonic() - started
+
+            assert not worker.is_alive(), (
+                f"clone_into hung past {elapsed:.2f}s against silent {scheme}:// listener"
+            )
+            assert elapsed < budget + 5.0, (
+                f"expected timeout within {budget + 5.0:.1f}s, got {elapsed:.2f}s"
+            )
+            assert len(caught) == 1
+            assert isinstance(caught[0], CloneRefUnavailableError)
+            assert caught[0].label == "Clone timed out"
+
+            stop_event.set()
+            accept_thread.join(timeout=2.0)
+            srv.setblocking(False)
+            while True:
+                try:
+                    conn, _ = srv.accept()
+                except BlockingIOError:
+                    break
+                accepted.append(conn)
+            srv.close()
+
+            assert len(accepted) == 1, (
+                f"expected 1 connection (no full-clone fallback), got {len(accepted)}"
+            )
+            for conn in accepted:
+                conn.settimeout(1.0)
+                while conn.recv(4096):
+                    pass
+
+            assert not target.exists()
+            assert not (tmp_path / ".staging" / "repo").exists()
+        finally:
+            stop_event.set()
+            with contextlib.suppress(OSError):
+                srv.close()
+            accept_thread.join(timeout=2.0)
+            for conn in accepted:
+                with contextlib.suppress(OSError):
+                    conn.shutdown(socket.SHUT_RDWR)
+                with contextlib.suppress(OSError):
+                    conn.close()
+            if worker.is_alive():
+                worker.join(timeout=5.0)
+
+    def test_git_fetch_runs_in_its_own_group_and_passes_stderr_on_nonzero_exit(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """_git_fetch isolates and kills grandchild helpers on timeout, and preserves stderr labels."""
+        fifo_path = tmp_path / "child.fifo"
+        os.mkfifo(fifo_path)
+        pgid_file = tmp_path / "pgid"
+        argv_file = tmp_path / "argv"
+        fake_git = tmp_path / "fake-git"
+        fake_git.write_text(
+            f"#!{sys.executable}\n"
+            "import os, subprocess, sys, time\n"
+            f"open({str(pgid_file)!r}, 'w').write(str(os.getpgid(0)))\n"
+            f"open({str(argv_file)!r}, 'w').write('\\n'.join(sys.argv[1:]))\n"
+            "subprocess.Popen(\n"
+            "    [\n"
+            "        sys.executable,\n"
+            "        '-c',\n"
+            '        \'import sys, time; f = open(sys.argv[1], "wb", buffering=0); f.write(b"1"); time.sleep(60)\',\n'
+            f"        {str(fifo_path)!r},\n"
+            "    ],\n"
+            "    stdin=subprocess.DEVNULL,\n"
+            "    stdout=subprocess.DEVNULL,\n"
+            "    stderr=subprocess.DEVNULL,\n"
+            ")\n"
+            "time.sleep(60)\n"
+        )
+        fake_git.chmod(0o755)
+        monkeypatch.setattr(git.cmd.Git, "GIT_PYTHON_GIT_EXECUTABLE", str(fake_git))
+
+        read_fd = os.open(fifo_path, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            started = time.monotonic()
+            with pytest.raises(GitCommandError) as excinfo:
+                _git_fetch(tmp_path, "a" * 40, depth=2, kill_after_timeout=2)
+            elapsed = time.monotonic() - started
+
+            assert elapsed < 5.0, f"_git_fetch timeout took {elapsed:.2f}s"
+            assert clone_failure_reason(excinfo.value) == "Clone timed out"
+            assert argv_file.read_text().splitlines() == [
+                "fetch",
+                "--depth",
+                "2",
+                "--",
+                "origin",
+                "a" * 40,
+            ]
+            recorded_group = pgid_file.read_text().strip()
+            assert recorded_group
+            assert int(recorded_group) != os.getpgid(0)
+
+            ready, _, _ = select.select([read_fd], [], [], 1.0)
+            assert ready, "grandchild never wrote readiness marker to child.fifo"
+            assert os.read(read_fd, 1) == b"1"
+            eof_ready, _, _ = select.select([read_fd], [], [], 1.0)
+            assert eof_ready, (
+                "grandchild still holds child.fifo open after group SIGKILL"
+            )
+            assert os.read(read_fd, 16) == b""
+        finally:
+            os.close(read_fd)
+
+        ssl_git = tmp_path / "ssl-git"
+        ssl_git.write_text(
+            f"#!{sys.executable}\n"
+            "import sys\n"
+            "sys.stderr.write('server verification failed: certificate signer not trusted\\n')\n"
+            "sys.exit(128)\n"
+        )
+        ssl_git.chmod(0o755)
+        monkeypatch.setattr(git.cmd.Git, "GIT_PYTHON_GIT_EXECUTABLE", str(ssl_git))
+
+        with pytest.raises(GitCommandError) as ssl_exc:
+            _git_fetch(tmp_path, "a" * 40, depth=2, kill_after_timeout=5)
+        assert clone_failure_reason(ssl_exc.value) == "SSL verification failed"
 
 
 class TestCloneIntoWithToken:
