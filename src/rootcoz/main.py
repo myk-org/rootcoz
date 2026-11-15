@@ -515,6 +515,8 @@ _DEFAULTS_HIDDEN_SETTINGS: frozenset[str] = frozenset(
         "pi_sidecar_log_level",
         "node_binary",
         "pi_sidecar_transcripts_dir",
+        "pi_sidecar_transcripts_max_age_days",
+        "pi_sidecar_transcripts_max_size_mb",
         # Operator detail, not a per-analysis default: it drives
         # supported_key_providers() (which providers may ever touch a user
         # API key) and is edited via env/CLI, never in Server Settings.
@@ -541,6 +543,8 @@ _RESTART_REQUIRED_SETTINGS: frozenset[str] = frozenset(
         "pi_sidecar_log_level",
         "node_binary",
         "pi_sidecar_transcripts_dir",
+        "pi_sidecar_transcripts_max_age_days",
+        "pi_sidecar_transcripts_max_size_mb",
     }
 )
 
@@ -759,6 +763,8 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "pi_sidecar_log_level",
         "node_binary",
         "pi_sidecar_transcripts_dir",
+        "pi_sidecar_transcripts_max_age_days",
+        "pi_sidecar_transcripts_max_size_mb",
     ],
     # Data lifecycle. Before Workspace, which stays last on the page.
     "Storage": [
@@ -3856,6 +3862,8 @@ _SIDECAR_BRIDGE_SETTINGS: tuple[str, ...] = (
     "pi_sidecar_log_level",
     "node_binary",
     "pi_sidecar_transcripts_dir",
+    "pi_sidecar_transcripts_max_age_days",
+    "pi_sidecar_transcripts_max_size_mb",
 )
 
 
@@ -22103,6 +22111,14 @@ def _settings_dotenv_values() -> dict[str, str]:
         return {}
 
 
+def _setting_is_int(key: str) -> bool:
+    """True when the Settings field behind ``key`` is integer-typed."""
+    annotation = Settings.model_fields[key].annotation
+    return annotation is int or (
+        hasattr(annotation, "__args__") and int in getattr(annotation, "__args__", ())
+    )
+
+
 def _settings_env_value(key: str, dotenv: dict[str, str] | None = None) -> str | None:
     """Resolve a setting's environment value the same way Settings does.
 
@@ -22113,6 +22129,11 @@ def _settings_env_value(key: str, dotenv: dict[str, str] | None = None) -> str |
     value only exists in the DB store there is no env value to persist, and
     the caller must report no-env-value rather than re-persisting the DB's
     own value.
+
+    A blank value on an integer field reads as no env value: ``Settings``
+    coerces it to the field default (the sidecar does the same with
+    ``Number("")``), so reporting it as env-sourced would offer a
+    ``Save to DB`` the persist endpoint must refuse.
     """
     env_var = key.upper()
     if key == "jira_auth_mode":
@@ -22120,9 +22141,16 @@ def _settings_env_value(key: str, dotenv: dict[str, str] | None = None) -> str |
         # JIRA_AUTH_MODE in the environment is ignored, matching the
         # pydantic-settings source that drops it.
         return None
+    env_value: str | None
     if os.environ.get(env_var) is not None:
-        return os.environ[env_var]
-    return (dotenv if dotenv is not None else _settings_dotenv_values()).get(key)
+        env_value = os.environ[env_var]
+    else:
+        env_value = (dotenv if dotenv is not None else _settings_dotenv_values()).get(
+            key
+        )
+    if env_value == "" and _setting_is_int(key):
+        return None
+    return env_value
 
 
 async def _live_provider_spellings() -> dict[str, str]:
@@ -22473,11 +22501,7 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
         # flagged the key, model_validate is skipped: a violation must
         # produce exactly one message, not the manual one plus pydantic's
         # duplicate (#361 Qodo r2).
-        annotation = field_info.annotation
-        is_int = annotation is int or (
-            hasattr(annotation, "__args__")
-            and int in getattr(annotation, "__args__", ())
-        )
+        is_int = _setting_is_int(key)
         int_error = False
         if is_int:
             try:
@@ -22528,6 +22552,11 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
                 errors.append(
                     f"{key}: {ctx_err if ctx_err else err.get('msg', str(err))}"
                 )
+            continue
+        if is_int:
+            # Canonical decimal form: "+14" and " 14 " must persist as "14"
+            # in the DB and in the sidecar env bridge the entrypoint sources.
+            settings_updates[key] = str(int_val)
 
     return errors
 
@@ -23072,11 +23101,14 @@ async def persist_admin_setting(request: Request, key: str) -> JSONResponse:
         )
     # Same validation the PUT path applies to admin-typed values
     try:
-        Settings.model_validate({key: env_value})
+        validated = Settings.model_validate({key: env_value})
     except ValidationError as exc:
         raise HTTPException(
             status_code=400, detail=f"Invalid env value for '{key}'"
         ) from exc
+    if _setting_is_int(key):
+        # Canonical decimal form — the env bridge exports this verbatim.
+        env_value = str(getattr(validated, key))
 
     username = request.state.username or "admin"
     await _save_settings_to_db({key: env_value}, username)

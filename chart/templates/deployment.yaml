@@ -135,6 +135,16 @@ spec:
             {{- end }}
             - name: PI_SIDECAR_TRANSCRIPTS_DIR
               value: {{ .Values.env.sidecarTranscriptsDir | default (printf "%s/pi-sidecar/transcripts" .Values.env.xdgDataHome) | quote }}
+            {{- $transcriptsMaxAge := .Values.env.sidecarTranscriptsMaxAgeDays }}
+            {{- if and (not (kindIs "invalid" $transcriptsMaxAge)) (or (not (kindIs "string" $transcriptsMaxAge)) (ne $transcriptsMaxAge "")) }}
+            - name: PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS
+              value: {{ if kindIs "string" $transcriptsMaxAge }}{{ $transcriptsMaxAge | quote }}{{ else }}{{ printf "%d" (int64 $transcriptsMaxAge) | quote }}{{ end }}
+            {{- end }}
+            {{- $transcriptsMaxSize := .Values.env.sidecarTranscriptsMaxSizeMb }}
+            {{- if and (not (kindIs "invalid" $transcriptsMaxSize)) (or (not (kindIs "string" $transcriptsMaxSize)) (ne $transcriptsMaxSize "")) }}
+            - name: PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB
+              value: {{ if kindIs "string" $transcriptsMaxSize }}{{ $transcriptsMaxSize | quote }}{{ else }}{{ printf "%d" (int64 $transcriptsMaxSize) | quote }}{{ end }}
+            {{- end }}
             {{- if $ephemeralLimit }}
             # Clones and graph indexes land under /tmp; TMPDIR keeps tempfile on the
             # capped volume instead of assuming the interpreter default.

@@ -751,7 +751,7 @@ def server_status_cmd(json_output: bool = _JSON_OPTION) -> None:
         f"{_status_bytes(disk.get('used_bytes'))} of "
         f"{_status_bytes(disk.get('capacity_bytes'))} "
         f"(database {_status_bytes(disk.get('database_bytes'))}, "
-        f"transcripts {_status_bytes(disk.get('transcripts_bytes'))}, "
+        f"{_status_transcripts(disk)}, "
         f"logs {_status_bytes(disk.get('logs_bytes'))})",
     )
     cpu = data.get("cpu", {})
@@ -860,6 +860,37 @@ def _status_bytes(value: Any) -> str:
             return f"{size:.0f} {unit}" if unit == "B" else f"{size:.1f} {unit}"
         size /= 1024
     return f"{size:.1f} TiB"
+
+
+def _status_age(seconds: Any) -> str:
+    """Format an age in seconds at ``formatUptime``'s scale; ``?`` if unknown."""
+    if seconds is None:
+        return "?"
+    total = int(seconds)
+    if total >= 86400:
+        return f"{total // 86400}d {total % 86400 // 3600}h"
+    if total >= 3600:
+        return f"{total // 3600}h {total % 3600 // 60}m"
+    if total >= 60:
+        return f"{total // 60}m {total % 60}s"
+    return f"{total}s"
+
+
+def _status_transcripts(disk: dict[str, Any]) -> str:
+    """Transcript usage with file count and oldest-file age when reported.
+
+    A server older than this field sends no ``transcripts_files``, so the
+    byte total stays exactly what it printed before.
+    """
+    summary = f"transcripts {_status_bytes(disk.get('transcripts_bytes'))}"
+    files = disk.get("transcripts_files")
+    if files is None:
+        return summary
+    count = f"{files} file" if files == 1 else f"{files} files"
+    age = disk.get("transcripts_oldest_age_seconds")
+    if files and age is not None:
+        return f"{summary} ({count}, oldest {_status_age(age)})"
+    return f"{summary} ({count})"
 
 
 def _status_cpu_quota(cpu: dict[str, Any]) -> str:

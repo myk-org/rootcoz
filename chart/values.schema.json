@@ -248,7 +248,23 @@
         "publicBaseUrl": { "type": "string" },
         "metadataRulesFile": { "type": "string" },
         "recordTranscripts": { "type": "boolean" },
-        "sidecarTranscriptsDir": { "type": "string" }
+        "sidecarTranscriptsDir": { "type": "string" },
+        "sidecarTranscriptsMaxAgeDays": {
+          "description": "PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS: delete transcripts older than this many days (0 disables).",
+          "anyOf": [
+            { "type": "integer", "minimum": 0, "maximum": 999999 },
+            { "type": "string", "pattern": "^[0-9]{1,6}$" },
+            { "type": "string", "enum": [""] }
+          ]
+        },
+        "sidecarTranscriptsMaxSizeMb": {
+          "description": "PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB: keep the transcripts directory under this total size in MB (0 disables).",
+          "anyOf": [
+            { "type": "integer", "minimum": 0, "maximum": 999999999 },
+            { "type": "string", "pattern": "^[0-9]{1,9}$" },
+            { "type": "string", "enum": [""] }
+          ]
+        }
       }
     },
     "tuning": {

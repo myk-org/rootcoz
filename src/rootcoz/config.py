@@ -51,6 +51,13 @@ SQLITE_INT_MAX = 2**63 - 1
 # magnitude the audit settings accept.
 RESULTS_RETENTION_DAYS_MAX = 36500
 
+# Ceilings for the pi-sidecar transcript retention budgets. The sidecar
+# multiplies them by 86_400_000 and 1_048_576, so these keep its arithmetic
+# inside Number.MAX_SAFE_INTEGER, and they match the Helm schema's digit
+# limits one to one.
+SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS = 999_999
+SIDECAR_TRANSCRIPTS_MAX_SIZE_MB = 999_999_999
+
 
 def _split_outside_brackets(raw: str) -> list[str]:
     """Split string on commas that are not inside square brackets."""
@@ -905,6 +912,42 @@ class Settings(BaseSettings):
             "(PI_SIDECAR_TRANSCRIPTS_DIR). Restart required."
         ),
     )
+    pi_sidecar_transcripts_max_age_days: int = Field(
+        default=0,
+        ge=0,
+        le=SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS,
+        description=(
+            "Delete recorded pi-sidecar session transcripts older than this "
+            "many days. 0 disables age-based pruning. Active sessions are "
+            "never deleted. Restart required."
+        ),
+    )
+    pi_sidecar_transcripts_max_size_mb: int = Field(
+        default=0,
+        ge=0,
+        le=SIDECAR_TRANSCRIPTS_MAX_SIZE_MB,
+        description=(
+            "Maximum total size in MB for the pi-sidecar transcripts "
+            "directory; oldest files are deleted first when exceeded. "
+            "0 disables size-based pruning. Active sessions are never "
+            "deleted. Restart required."
+        ),
+    )
+
+    @field_validator(
+        "pi_sidecar_transcripts_max_age_days",
+        "pi_sidecar_transcripts_max_size_mb",
+        mode="before",
+    )
+    @classmethod
+    def _blank_retention_budget_disables(cls, v: object) -> object:
+        """A blank env line means 0, exactly as the sidecar's ``Number("")``.
+
+        A ``PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS=`` in a deployment env file
+        must not crash ``Settings()`` at boot; admin-typed empties are still
+        rejected by the write paths, which never reach this validator.
+        """
+        return 0 if v == "" else v
 
     # --- Notifications (#347) ---
     smtp_host: str = Field(default="", description="SMTP server host for email alerts.")

@@ -138,6 +138,12 @@ services:
       # /data and survive replacement.
       - RECORD_TRANSCRIPTS=${RECORD_TRANSCRIPTS:-false}
       - PI_SIDECAR_TRANSCRIPTS_DIR=${PI_SIDECAR_TRANSCRIPTS_DIR:-/data/pi-sidecar/transcripts}
+      # Retention budgets (0 = disabled). Left unset here on purpose: an
+      # unset var keeps the setting's source "default" instead of "env",
+      # while a value in the shell or .env is passed through. Server
+      # Settings → Sidecar manages the same budgets for a restart.
+      - PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS
+      - PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB
 
       # ===================
       # Optional Defaults (can be overridden per-request)

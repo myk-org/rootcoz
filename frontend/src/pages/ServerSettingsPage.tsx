@@ -4,6 +4,7 @@ import { api, ApiError, extractApiDetail, type TestIntegrationResult } from '@/l
 import { useLatestRef } from '@/lib/useLatestRef'
 import { useSSE } from '@/lib/useSSE'
 import { useAuth } from '@/lib/auth'
+import { formatBytes, formatUptime } from '@/lib/format'
 import { Card, CardContent } from '@/components/ui/card'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/tabs'
 import { Input } from '@/components/ui/input'
@@ -55,7 +56,7 @@ import { useCursorAuthStatus } from '@/lib/useProviderOptions'
 import { ServerProvidersCard } from '@/components/shared/ServerProvidersCard'
 import { AdditionalReposList } from '@/components/shared/AdditionalReposList'
 import type { RepoWithId } from '@/components/shared/AdditionalReposList'
-import type { AiModelsResponse } from '@/types'
+import type { AiModelsResponse, ServerStatusDisk } from '@/types'
 
 // ---------------------------------------------------------------------------
 // Types
@@ -109,6 +110,14 @@ const CATEGORY_ORDER = [
   'Server', 'AI', 'Jenkins', 'Jira', 'GitHub', 'Report Portal', 'Datadog', 'Prow',
   'Auth & Security', 'Web Push', 'Notifications', 'Sidecar', 'Storage', 'Workspace',
 ]
+
+// The Sidecar rows whose live transcript directory usage the card below them
+// reports (a recording directory plus its two retention budgets).
+const TRANSCRIPT_SETTING_KEYS = new Set([
+  'pi_sidecar_transcripts_dir',
+  'pi_sidecar_transcripts_max_age_days',
+  'pi_sidecar_transcripts_max_size_mb',
+])
 
 // Categories with a test-connection endpoint (category -> integration id).
 const TEST_INTEGRATIONS: Record<string, string> = {
@@ -1271,6 +1280,40 @@ export function ServerSettingsPage() {
     ? activeTab
     : allGroups[0]?.category ?? ''
 
+  // ---- Live transcript directory usage (Sidecar card) ----
+  // Only fetched while the transcript rows are actually on screen: the probe
+  // samples CPU and walks the data directory, which no unrelated tab pays for.
+  const transcriptsUsageVisible = groups.some(
+    ({ category, settings }) =>
+      category === 'Sidecar'
+      && !state.collapsedCategories.has(category)
+      && settings.some(s => TRANSCRIPT_SETTING_KEYS.has(s.key)),
+  ) && (Boolean(state.search) || effectiveTab === 'Sidecar')
+  const [transcriptsUsage, setTranscriptsUsage] = useState<ServerStatusDisk | null>(null)
+  const [transcriptsUsageLoading, setTranscriptsUsageLoading] = useState(false)
+  const transcriptsUsageInFlight = useRef(false)
+
+  const fetchTranscriptsUsage = useCallback(async () => {
+    if (transcriptsUsageInFlight.current) return
+    transcriptsUsageInFlight.current = true
+    setTranscriptsUsageLoading(true)
+    try {
+      const res = await api.get<{ disk?: ServerStatusDisk }>('/api/admin/server-status')
+      if (!res || Array.isArray(res) || !res.disk) throw new Error('unexpected server-status payload')
+      setTranscriptsUsage(res.disk)
+    } catch {
+      // A probe the server cannot read must render as "not visible", never 0 B.
+      setTranscriptsUsage(null)
+    } finally {
+      transcriptsUsageInFlight.current = false
+      setTranscriptsUsageLoading(false)
+    }
+  }, [])
+
+  useEffect(() => {
+    if (transcriptsUsageVisible) void fetchTranscriptsUsage()
+  }, [transcriptsUsageVisible, fetchTranscriptsUsage])
+
   // A highlighted row has to be visible: drop a search that filters it out,
   // open its category, expand it, then scroll to the row. One change per pass,
   // and the saved tab is left alone — following an audit link must not rewrite
@@ -1778,6 +1821,15 @@ export function ServerSettingsPage() {
               ))}
             </div>
             {category === 'AI' && <ServerProvidersCard />}
+            {category === 'Sidecar'
+              && rowSettings.some(s => TRANSCRIPT_SETTING_KEYS.has(s.key))
+              && (
+                <SidecarTranscriptsUsage
+                  disk={transcriptsUsage}
+                  loading={transcriptsUsageLoading}
+                  onRefresh={() => void fetchTranscriptsUsage()}
+                />
+              )}
 
           </CardContent>
         )}
@@ -2590,6 +2642,53 @@ function HistoryToggle({
 // ---------------------------------------------------------------------------
 // Restart Badge
 // ---------------------------------------------------------------------------
+
+// Live transcript directory usage shown under the Sidecar retention rows.
+// It reports what is on disk (stat-only, from GET /api/admin/server-status) and
+// never echoes the budgets — a card that looked like a setting would invite a
+// save that needs a restart. Unreadable reads as "not visible", never 0 B.
+function SidecarTranscriptsUsage({
+  disk,
+  loading,
+  onRefresh,
+}: {
+  disk: ServerStatusDisk | null
+  loading: boolean
+  onRefresh: () => void
+}) {
+  const bytes = disk?.transcripts_bytes
+  const files = disk?.transcripts_files
+  const readable = disk != null && bytes != null && files != null
+  let summary = 'not visible in this container'
+  if (readable) {
+    const oldest = files > 0
+      ? (disk.transcripts_oldest_age_seconds != null
+          ? formatUptime(disk.transcripts_oldest_age_seconds)
+          : 'unknown')
+      : 'none'
+    summary = `${formatBytes(bytes)} · ${files} ${files === 1 ? 'file' : 'files'} · oldest: ${oldest}`
+  }
+  return (
+    <div data-testid="sidecar-transcripts-usage" className="mt-3 rounded-md border border-border-default bg-surface-elevated px-3 py-2.5">
+      <div className="flex items-center justify-between gap-2">
+        <span className="text-xs text-text-secondary">Recorded transcripts on disk</span>
+        <Button
+          size="sm"
+          variant="ghost"
+          onClick={onRefresh}
+          disabled={loading}
+          className="h-6 px-2 text-xs text-text-tertiary hover:text-text-secondary"
+        >
+          <RefreshCw className={`mr-1 h-3 w-3 ${loading ? 'animate-spin' : ''}`} />
+          Refresh
+        </Button>
+      </div>
+      <p className={`mt-1 text-xs ${readable ? 'text-text-primary' : 'text-text-tertiary'}`}>
+        {summary}
+      </p>
+    </div>
+  )
+}
 
 function RestartBadge() {
   return (
