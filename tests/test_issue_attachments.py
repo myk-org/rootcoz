@@ -33,42 +33,90 @@ def test_validation_and_safe_metadata():
 
 
 @pytest.mark.parametrize(
-    "name,data",
+    "name,data,expected_reason",
     [
-        ("x.svg", b"<svg/>"),
-        ("x.txt", b"%PDF-1.7"),
-        ("x.log", b"\x7f"),
-        ("x.txt", b""),
-        ("x.png", b"hello"),
-        ("x.txt", b"\x00"),
-        ("x.txt", b"\xff"),
-        ("x" * 121 + ".txt", b"x"),
-        ("x\n.txt", b"x"),
-        ("x.txt", b"\x1f\x8babc"),
-        ("x.txt", b"MZexecutable"),
-        ("x.jpg", b"\xff\xd8\xff" + b"x" * 20 + b"\xff\xd9"),
-        ("x.gif", b"GIF89a" + b"x" * 20 + b";"),
+        ("x.svg", b"<svg/>", "unsupported file extension"),
+        ("x.txt", b"%PDF-1.7", "container or executable content"),
+        ("x.log", b"\x7f", "NUL or DEL in text"),
+        ("x.txt", b"", "attachment is empty"),
+        ("x.png", b"hello", "file content does not match extension"),
+        ("x.txt", b"\x00", "NUL or DEL in text"),
+        ("x.txt", b"\xff", "text attachment is not valid UTF-8"),
+        ("x" * 121 + ".txt", b"x", "invalid display name; maximum 120 characters"),
+        ("x\n.txt", b"x", "invalid display name; maximum 120 characters"),
+        ("x.txt", b"\x1f\x8babc", "container or executable content"),
+        ("x.txt", b"MZexecutable", "container or executable content"),
+        (
+            "x.jpg",
+            b"\xff\xd8\xff" + b"x" * 20 + b"\xff\xd9",
+            "text attachment is not valid UTF-8",
+        ),
+        (
+            "x.gif",
+            b"GIF89a" + b"x" * 20 + b";",
+            "file content does not match extension",
+        ),
     ],
 )
-def test_refuses_unsafe_content(name, data):
+def test_refuses_unsafe_content_with_specific_reason(name, data, expected_reason):
     from rootcoz.issue_attachments import IssueAttachmentRejected, validate_attachments
 
-    with pytest.raises(IssueAttachmentRejected):
+    with pytest.raises(IssueAttachmentRejected) as exc:
         validate_attachments([upload(name, data)])
+    msg = str(exc.value)
+    assert expected_reason in msg
+    assert "0xff" not in msg
+    assert "MZexecutable" not in msg
 
 
 def test_limits_and_aggregate_refusal():
     from rootcoz.issue_attachments import IssueAttachmentRejected, validate_attachments
 
     with pytest.raises(IssueAttachmentRejected) as exc:
-        validate_attachments([upload("first.svg"), upload("second.html")])
-    assert "first.svg" in str(exc.value) and "second.html" in str(exc.value)
-    with pytest.raises(IssueAttachmentRejected):
-        validate_attachments([upload()] * 4)
-    with pytest.raises(IssueAttachmentRejected):
         validate_attachments(
-            [models.IssueAttachmentUpload(filename="x.txt", data_b64="!!!!")]
+            [
+                upload("first.svg", b"<svg/>"),
+                models.IssueAttachmentUpload(filename="second.txt", data_b64="!!!!"),
+                upload("third.log", b"%PDF-1.7"),
+            ]
         )
+    msg = str(exc.value)
+    assert "first.svg: unsupported file extension" in msg
+    assert "second.txt: invalid base64 encoding" in msg
+    assert "third.log: container or executable content" in msg
+    with pytest.raises(IssueAttachmentRejected) as count_exc:
+        validate_attachments([upload()] * 4)
+    assert "At most 3 attachments are allowed" in str(count_exc.value)
+    with pytest.raises(IssueAttachmentRejected) as non_ascii_b64_exc:
+        validate_attachments(
+            [models.IssueAttachmentUpload(filename="x.txt", data_b64="é===")]
+        )
+    assert "x.txt: invalid base64 encoding" in str(non_ascii_b64_exc.value)
+    assert "ASCII" not in str(non_ascii_b64_exc.value)
+
+
+def test_jira_attachments_section_has_no_stray_backslashes():
+    from rootcoz.issue_attachments import attachments_section
+
+    id_plain = str(uuid4())
+    id_special = str(uuid4())
+    section = attachments_section(
+        [
+            {"id": id_plain, "display_name": "my-log_file.txt"},
+            {"id": id_special, "display_name": "a|b[1]{x}.txt"},
+        ],
+        "https://rootcoz.example.com",
+        tracker="jira",
+    )
+    assert (
+        f"* [my-log_file.txt|https://rootcoz.example.com/api/issue-attachments/{id_plain}]"
+        in section
+    )
+    assert (
+        f"* [a_b_1__x_.txt|https://rootcoz.example.com/api/issue-attachments/{id_special}]"
+        in section
+    )
+    assert "\\" not in section
 
 
 @pytest.mark.asyncio

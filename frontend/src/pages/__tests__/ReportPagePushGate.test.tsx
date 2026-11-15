@@ -54,6 +54,8 @@ function makeResponse(allowUnreviewedPush: boolean): ResultResponse {
         max_files: 3,
         max_file_bytes: 5242880,
         max_total_bytes: 10485760,
+        max_run_bytes: 209715200,
+        max_owner_bytes: 524288000,
         types: ['text/plain', 'image/png', 'image/jpeg', 'image/gif', 'image/webp'],
         report_github: { available: false, reason: 'tracker_disabled' },
         report_jira: { available: false, reason: 'tracker_disabled' },

@@ -33,6 +33,8 @@ MAX_FILES = 3
 MAX_FILE_BYTES = 5 * 1024 * 1024
 MAX_TOTAL_BYTES = 10 * 1024 * 1024
 MAX_ENVELOPE_BYTES = 15 * 1024 * 1024
+MAX_RUN_BYTES = 200 * 1024 * 1024
+MAX_OWNER_BYTES = 500 * 1024 * 1024
 TEXT_SUFFIXES = {".log", ".txt", ".json", ".xml", ".csv", ".yaml", ".yml", ".md"}
 IMAGE_TYPES = {
     ".png": "image/png",
@@ -167,21 +169,32 @@ def validate_attachments(
             name = sanitize_path_part(name)
             if len(item.data_b64) > 4 * ((MAX_FILE_BYTES + 2) // 3):
                 raise ValueError("exceeds 5 MiB per-file limit")
-            data = base64.b64decode(item.data_b64, validate=True)
+            try:
+                data = base64.b64decode(item.data_b64, validate=True)
+            except (binascii.Error, ValueError) as exc:
+                raise binascii.Error("invalid base64 encoding") from exc
             total += len(data)
-            if not data or len(data) > MAX_FILE_BYTES:
-                raise ValueError("empty or exceeds 5 MiB per-file limit")
+            if not data:
+                raise ValueError("attachment is empty")
+            if len(data) > MAX_FILE_BYTES:
+                raise ValueError("exceeds 5 MiB per-file limit")
             media = _media(data)
             suffix = Path(name).suffix.lower()
+            if suffix not in TEXT_SUFFIXES and suffix not in IMAGE_TYPES:
+                raise ValueError("unsupported file extension")
             if not (
                 media == "text/plain"
                 and suffix in TEXT_SUFFIXES
                 or IMAGE_TYPES.get(suffix) == media
             ):
-                raise ValueError("unsupported type or content mismatch")
+                raise ValueError("file content does not match extension")
             result.append(ValidatedAttachment(name, media, data))
-        except ValueError, UnicodeError, binascii.Error:
-            errors.append(f"{safe}: invalid name, encoding, content or size")
+        except binascii.Error:
+            errors.append(f"{safe}: invalid base64 encoding")
+        except UnicodeError:
+            errors.append(f"{safe}: text attachment is not valid UTF-8")
+        except ValueError as exc:
+            errors.append(f"{safe}: {exc}")
     if total > MAX_TOTAL_BYTES:
         errors.append("Attachments exceed 10 MiB total")
     if errors:
@@ -331,16 +344,13 @@ def attachments_section(
         "Rootcoz login required. Links expire when their run or uploader account is deleted.",
     ]
     for row in rows:
-        punctuation = (
-            r"([\\`*_{}\[\]()#+.!|>~-])"
-            if tracker == "github"
-            else r"([\\{}\[\]|!*_#^~+\-])"
-        )
-        name = re.sub(punctuation, r"\\\1", row["display_name"])
         url = f"{base_url.rstrip('/')}/api/issue-attachments/{_uuid(row['id'])}"
-        lines.append(
-            f"- [{name}]({url})" if tracker == "github" else f"* [{name}|{url}]"
-        )
+        if tracker == "github":
+            name = re.sub(r"([\\`*_{}\[\]()#+.!|>~-])", r"\\\1", row["display_name"])
+            lines.append(f"- [{name}]({url})")
+        else:
+            name = re.sub(r"[\[\]|{}\r\n]", "_", row["display_name"])
+            lines.append(f"* [{name}|{url}]")
     return "\n".join(lines)
 
 
@@ -485,6 +495,59 @@ def _remove_owner_marker_sync(owner_id: int) -> None:
 async def remove_owner_delete_marker(owner_id: int) -> None:
     """Remove ``.<owner_id>.rootcoz-deleting`` once blobs and run-less rows are gone."""
     await asyncio.to_thread(_remove_owner_marker_sync, owner_id)
+
+
+def _write_job_marker_sync(job_id: str, *, only_if_dir_exists: bool = False) -> bool:
+    canonical = _uuid(job_id)
+    marker_name = f".job-{canonical}.rootcoz-deleting"
+    try:
+        with _scope_parent_fd("jobs", create=not only_if_dir_exists) as jobs_fd:
+            if only_if_dir_exists:
+                try:
+                    st = os.stat(canonical, dir_fd=jobs_fd, follow_symlinks=False)
+                except FileNotFoundError:
+                    return False
+                if not stat.S_ISDIR(st.st_mode):
+                    return False
+            try:
+                fd = os.open(
+                    marker_name,
+                    os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o660,
+                    dir_fd=jobs_fd,
+                )
+            except FileExistsError:
+                return False
+            with os.fdopen(fd, "wb") as stream:
+                os.fchmod(stream.fileno(), 0o660)
+                stream.flush()
+                os.fsync(stream.fileno())
+            return True
+    except FileNotFoundError:
+        return False
+
+
+async def write_job_delete_marker(
+    job_id: str, *, only_if_dir_exists: bool = False
+) -> bool:
+    """Create ``.job-<job_id>.rootcoz-deleting``; return True if newly created here."""
+    return await asyncio.to_thread(
+        partial(_write_job_marker_sync, job_id, only_if_dir_exists=only_if_dir_exists)
+    )
+
+
+def _remove_job_marker_sync(job_id: str) -> None:
+    marker_name = f".job-{_uuid(job_id)}.rootcoz-deleting"
+    try:
+        with _scope_parent_fd("jobs") as jobs_fd:
+            os.unlink(marker_name, dir_fd=jobs_fd)
+    except FileNotFoundError:
+        return
+
+
+async def remove_job_delete_marker(job_id: str) -> None:
+    """Remove ``.job-<job_id>.rootcoz-deleting`` once run blobs and rows are gone."""
+    await asyncio.to_thread(_remove_job_marker_sync, job_id)
 
 
 def list_scope_entries(kind: str) -> list[tuple[str, os.stat_result]] | None:

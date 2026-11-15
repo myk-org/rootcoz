@@ -6,9 +6,42 @@ import type {
   IssueAttachmentUpload,
 } from '@/types'
 
-/** Read only at create time; never persist bytes or include them in AI previews. */
-export async function filesToAttachmentPayload(files: File[]): Promise<IssueAttachmentUpload[]> {
-  return Promise.all(files.map(file => new Promise<IssueAttachmentUpload>((resolve, reject) => {
+export const DEFAULT_MAX_ATTACHMENT_FILES = 3
+export const DEFAULT_MAX_ATTACHMENT_FILE_BYTES = 5 * 1024 * 1024
+export const DEFAULT_MAX_ATTACHMENT_TOTAL_BYTES = 10 * 1024 * 1024
+
+export interface AttachmentLimits {
+  maxFiles?: number
+  maxFileBytes?: number
+  maxTotalBytes?: number
+}
+
+export function validateAttachmentSelection(
+  files: File[],
+  limits: AttachmentLimits = {},
+): string | null {
+  const {
+    maxFiles = DEFAULT_MAX_ATTACHMENT_FILES,
+    maxFileBytes = DEFAULT_MAX_ATTACHMENT_FILE_BYTES,
+    maxTotalBytes = DEFAULT_MAX_ATTACHMENT_TOTAL_BYTES,
+  } = limits
+  if (files.length > maxFiles) {
+    return `Cannot attach more than ${maxFiles} ${maxFiles === 1 ? 'file' : 'files'} (${files.length} selected).`
+  }
+  const oversized = files.filter((file) => file.size > maxFileBytes)
+  if (oversized.length > 0) {
+    const names = oversized.map((file) => `${file.name} (${formatAttachmentBytes(file.size)})`).join(', ')
+    return `${names} ${oversized.length === 1 ? 'exceeds' : 'exceed'} the ${formatAttachmentBytes(maxFileBytes)} per-file limit.`
+  }
+  const totalBytes = files.reduce((sum, file) => sum + file.size, 0)
+  if (totalBytes > maxTotalBytes) {
+    return `Selected files total ${formatAttachmentBytes(totalBytes)}, exceeding the ${formatAttachmentBytes(maxTotalBytes)} total limit.`
+  }
+  return null
+}
+
+function readFileAsAttachmentUpload(file: File): Promise<IssueAttachmentUpload> {
+  return new Promise<IssueAttachmentUpload>((resolve, reject) => {
     const reader = new FileReader()
     const fail = () => reject(new Error(`Could not read ${file.name}. Select the file again before creating the issue.`))
     reader.onerror = fail
@@ -25,7 +58,24 @@ export async function filesToAttachmentPayload(files: File[]): Promise<IssueAtta
     } catch {
       fail()
     }
-  })))
+  })
+}
+
+/** Read only at create time; never persist bytes or include them in AI previews. */
+export async function filesToAttachmentPayload(
+  files: File[],
+  limits: AttachmentLimits = {},
+): Promise<IssueAttachmentUpload[]> {
+  if (files.length === 0) return []
+  const rejection = validateAttachmentSelection(files, limits)
+  if (rejection) {
+    throw new Error(rejection)
+  }
+  const encoded: IssueAttachmentUpload[] = []
+  for (const file of files) {
+    encoded.push(await readFileAsAttachmentUpload(file))
+  }
+  return encoded
 }
 
 export interface CapabilityReadState {
@@ -81,7 +131,13 @@ export function attachmentPickerPropsFromCapability(
   capabilities: Capabilities | null | undefined,
   loaded: boolean,
   surface: IssueAttachmentDialogSurface,
-): { disabledReason?: string; hint?: string } {
+): {
+  disabledReason?: string
+  hint?: string
+  maxFiles?: number
+  maxFileBytes?: number
+  maxTotalBytes?: number
+} {
   if (!loaded) {
     return { disabledReason: 'Checking attachment capabilities...' }
   }
@@ -104,6 +160,9 @@ export function attachmentPickerPropsFromCapability(
   }
   return {
     hint: `Up to ${ia.max_files} files (${formatAttachmentBytes(ia.max_file_bytes)} each, ${formatAttachmentBytes(ia.max_total_bytes)} total).`,
+    maxFiles: ia.max_files,
+    maxFileBytes: ia.max_file_bytes,
+    maxTotalBytes: ia.max_total_bytes,
   }
 }
 

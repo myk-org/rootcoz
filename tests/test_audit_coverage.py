@@ -182,6 +182,7 @@ def test_exemptions_are_not_stale() -> None:
         # refuses one — same action, ``outcome: denied``, no issue content.
         "issue.create",
         "issue_attachment.download",
+        "issue_attachment.delete",
         "provider.models_refresh",
         "admin.settings_export",
         "audit.export",

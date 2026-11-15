@@ -4127,3 +4127,30 @@ class TestIssueAttachmentsClient:
             client.download_issue_attachment("att/id", str(real_dest))
         assert planted_part.is_symlink()
         assert sentinel.read_bytes() == b"keep-safe"
+
+    def test_delete_issue_attachment_and_empty_id_validation(self):
+        seen: list[tuple[str, bytes]] = []
+
+        def del_handler(request):
+            seen.append((request.method, request.url.raw_path))
+            return httpx.Response(
+                200,
+                json={
+                    "status": "deleted",
+                    "attachment_id": "att/id",
+                    "freed_bytes": 4096,
+                },
+            )
+
+        client = _make_client(del_handler)
+        resp = client.delete_issue_attachment("  att/id  ")
+        assert resp == {
+            "status": "deleted",
+            "attachment_id": "att/id",
+            "freed_bytes": 4096,
+        }
+        assert seen == [("DELETE", b"/api/issue-attachments/att%2Fid")]
+
+        with pytest.raises(RootCozError, match="must not be empty"):
+            client.delete_issue_attachment("   ")
+        assert len(seen) == 1

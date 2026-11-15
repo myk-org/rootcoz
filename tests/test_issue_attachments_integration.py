@@ -404,6 +404,28 @@ class TestPrepareFeedbackAndSettings:
         assert by_key["feedback_repo_url"]["sensitive"] is False
         assert by_key["feedback_repo_url"]["env_var"] == "FEEDBACK_REPO_URL"
 
+        # Saving blank or whitespace-only feedback_repo_url round-trips to the
+        # normalized default URL in Server Settings rather than displaying blank.
+        for raw_blank in ("", "   "):
+            put_resp = client.put(
+                "/api/admin/settings",
+                headers=admin_headers,
+                json={"settings": {"feedback_repo_url": raw_blank}},
+            )
+            assert put_resp.status_code == 200
+            clear_settings_cache()
+            assert (
+                get_settings().feedback_repo_url == "https://github.com/myk-org/rootcoz"
+            )
+            refreshed = {
+                row["key"]: row
+                for row in client.get(
+                    "/api/admin/settings", headers=admin_headers
+                ).json()
+            }["feedback_repo_url"]
+            assert refreshed["source"] == "db"
+            assert refreshed["value"] == "https://github.com/myk-org/rootcoz"
+
     async def test_invalid_feedback_repo_url_refused_without_echoing_value(
         self, integration_env
     ) -> None:
@@ -432,16 +454,30 @@ class TestCapabilitiesAndOrchestration:
         self, integration_env, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         client, _ = integration_env
-        contract = json.loads(
-            Path(
-                "/home/myakove/git/rootcoz/.pi/tmp/issue505/attachment-wire-contract.json"
-            ).read_text()
-        )
+        expected_capabilities = {
+            "max_files": 3,
+            "max_file_bytes": 5242880,
+            "max_total_bytes": 10485760,
+            "max_run_bytes": 209715200,
+            "max_owner_bytes": 524288000,
+            "types": [
+                "text/plain",
+                "image/png",
+                "image/jpeg",
+                "image/gif",
+                "image/webp",
+            ],
+            "report_github": {"available": True, "reason": "available"},
+            "report_jira": {"available": True, "reason": "available"},
+            "feedback": {"available": True, "reason": "available"},
+            "chat_ui": {"available": False, "reason": "browser_chat_unsupported"},
+            "direct_chat": {"available": True, "reason": "available"},
+        }
         admin_headers = {"Authorization": "Bearer test-bootstrap-admin-key"}
         resp = client.get("/api/capabilities", headers=admin_headers)
         assert resp.status_code == 200
         cap = resp.json()["issue_attachments"]
-        assert cap == contract["capabilities_example"]["issue_attachments"]
+        assert cap == expected_capabilities
 
         # Removing PUBLIC_BASE_URL flips enabled trackers to public_base_url_required,
         # while disabled tracker stays tracker_disabled and chat_ui stays browser_chat_unsupported.
@@ -627,6 +663,7 @@ class TestCapabilitiesAndOrchestration:
             refused = client.post(endpoint, headers=headers_a, json=payload)
             assert refused.status_code == 400, endpoint
             assert "ceiling 500 MiB" in refused.json()["detail"]
+            assert "rootcoz delete-attachment" in refused.json()["detail"]
 
         # User B succeeds on all four callers on the SAME run and feedback/chat!
         with (
@@ -814,6 +851,92 @@ class TestCapabilitiesAndOrchestration:
                 f"https://rootcoz.example.com/api/issue-attachments/{f['id']}"
                 in seen_create_bodies[0]
             )
+
+    async def test_jira_sa_mode_adf_file_links_have_exact_names_and_hrefs(
+        self, integration_env, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client, _ = integration_env
+        monkeypatch.setenv("JIRA_AUTH_MODE", "oauth")
+        monkeypatch.setenv("ATLASSIAN_OAUTH_CLOUD_ID", str(uuid4()))
+        monkeypatch.setenv("JIRA_SITE_URL", "https://acme.atlassian.net")
+        monkeypatch.setenv("ATLASSIAN_OAUTH_CLIENT_ID", "deploy-cid")
+        monkeypatch.setenv("JIRA_OAUTH_CLIENT_SECRET", "ATOA-deploy-secret")
+        clear_settings_cache()
+
+        _, _, headers = await _create_reviewer("jira-sa-user", jira_token="")
+        await storage.save_user_tokens(
+            "jira-sa-user",
+            jira_sa_token="ATOA-caller-secret",  # pragma: allowlist secret
+        )
+        job_id = await _seed_completed_job(submitter="jira-sa-user")
+        captured_payloads: list[dict[str, object]] = []
+
+        class FakeJiraV3Client:
+            def __init__(self, **kwargs):
+                pass
+
+            async def __aenter__(self):
+                return self
+
+            async def __aexit__(self, *args):
+                return False
+
+            async def post(self, url: str, **kwargs):
+                captured_payloads.append(kwargs["json"])
+                return httpx.Response(
+                    201,
+                    json={"key": "PROJ-505"},
+                    request=httpx.Request("POST", url),
+                )
+
+        with (
+            patch(
+                "rootcoz.jira.mint_atlassian_access_token",
+                AsyncMock(return_value="minted-sa-token"),
+            ),
+            patch("rootcoz.bug_creation.httpx.AsyncClient", FakeJiraV3Client),
+            patch(
+                "rootcoz.main.add_jira_attachment",
+                AsyncMock(return_value="native_attached"),
+            ),
+        ):
+            resp = client.post(
+                f"/results/{job_id}/create-jira-bug",
+                headers=headers,
+                json={
+                    "test_name": "test_example",
+                    "title": "ADF links",
+                    "body": "Body text",
+                    "attachments": [
+                        _upload_payload("my-log_file.txt", b"log-1"),
+                        _upload_payload("a|b[1].txt", b"log-2"),
+                    ],
+                },
+            )
+        assert resp.status_code == 201, resp.text
+        files = resp.json()["attachments"]["files"]
+        assert len(captured_payloads) == 1
+        adf_doc = captured_payloads[0]["fields"]["description"]  # type: ignore[index]
+        link_nodes = [
+            inline
+            for block in adf_doc["content"]  # type: ignore[index]
+            if block["type"] == "bulletList"
+            for item in block["content"]
+            for para in item["content"]
+            for inline in para["content"]
+            if any(m.get("type") == "link" for m in inline.get("marks", []))
+        ]
+        by_href = {
+            next(m["attrs"]["href"] for m in n["marks"] if m["type"] == "link"): n[
+                "text"
+            ]
+            for n in link_nodes
+        }
+        url_0 = f"https://rootcoz.example.com/api/issue-attachments/{files[0]['id']}"
+        url_1 = f"https://rootcoz.example.com/api/issue-attachments/{files[1]['id']}"
+        assert by_href[url_0] == "my-log_file.txt"
+        assert "\\" not in by_href[url_0]
+        assert by_href[url_1] == "a_b_1_.txt"
 
     async def test_proven_not_filed_rolls_back_exact_submission_while_ambiguous_retains(
         self, integration_env
@@ -1289,6 +1412,68 @@ class TestDownloadSecurityAndAuditDedupe:
         assert sym_resp.status_code == 404
         assert b"TOPSECRET" not in sym_resp.content
 
+        # Finding #5: Downloading all 3 attachments of a single issue submission records
+        # at most ONE success audit row per caller (and at most ONE denied row per caller)!
+        monkeypatch.setattr(main, "_DOWNLOAD_AUDIT_DEDUPE_MAX", 4096)
+        main._download_audit_dedupe.clear()
+        _, _, multi_stranger_headers = await _create_reviewer("multi-stranger")
+        with patch(
+            "rootcoz.main.create_github_issue",
+            AsyncMock(
+                return_value={
+                    "url": "https://github.com/myk-org/rootcoz/issues/33",
+                    "number": 33,
+                    "title": "Multi",
+                }
+            ),
+        ):
+            multi_fb = client.post(
+                "/api/feedback/create",
+                headers=uploader_headers,
+                json={
+                    "title": "Multi FB",
+                    "body": "Body",
+                    "labels": ["bug"],
+                    "attachments": [
+                        _upload_payload("one.log", b"111"),
+                        _upload_payload("two.txt", b"222"),
+                        _upload_payload("three.png", _MIN_PNG),
+                    ],
+                },
+            )
+        assert multi_fb.status_code == 201
+        multi_ids = [f["id"] for f in multi_fb.json()["attachments"]["files"]]
+        assert len(multi_ids) == 3
+
+        before_events = len(
+            (await storage.list_audit_events(action="issue_attachment.download"))[
+                "events"
+            ]
+        )
+        for mid in multi_ids:
+            dl_multi = client.get(
+                f"/api/issue-attachments/{mid}", headers=uploader_headers
+            )
+            assert dl_multi.status_code == 200
+        after_ok_events = len(
+            (await storage.list_audit_events(action="issue_attachment.download"))[
+                "events"
+            ]
+        )
+        assert after_ok_events == before_events + 1
+
+        for mid in multi_ids:
+            den_multi = client.get(
+                f"/api/issue-attachments/{mid}", headers=multi_stranger_headers
+            )
+            assert den_multi.status_code == 404
+        after_den_events = len(
+            (await storage.list_audit_events(action="issue_attachment.download"))[
+                "events"
+            ]
+        )
+        assert after_den_events == after_ok_events + 1
+
 
 class TestEnvelopeMiddlewareAndRedaction:
     """Item 4: authenticated 15 MiB actual-body ASGI bound and 422/body log redaction."""
@@ -1424,6 +1609,101 @@ class TestEnvelopeMiddlewareAndRedaction:
             "SECRET_ISSUE_BODY_TEXT",
         ):
             assert leak not in bad_422.text
+            assert leak not in caplog.text
+
+        # 5) Trailing-slash attachment routes (/api/feedback/create/, /api/chat-issue/,
+        # /results/{job_id}/create-github-issue/) NEVER log body or base64 at DEBUG level
+        # across BOTH RequestBodyLoggingMiddleware and _validation_error_handler!
+        from fastapi.exceptions import RequestValidationError
+        from starlette.requests import Request as StarletteRequest
+
+        caplog.clear()
+        trailing_secret_b64 = _b64(b"TRAILING_SLASH_SECRET_PAYLOAD_98765")
+        with capture_main_logs(caplog, level=logging.DEBUG):
+            for slash_path, payload in (
+                (
+                    "/api/feedback/create/",
+                    {
+                        "title": "Valid",
+                        "body": "TRAILING_SECRET_BODY_OK",
+                        "labels": ["bug"],
+                        "attachments": [
+                            {
+                                "filename": "trailing-secret.log",
+                                "data_b64": trailing_secret_b64,
+                            }
+                        ],
+                    },
+                ),
+                (
+                    "/api/chat-issue/",
+                    {
+                        "target": "github",
+                        "title": "Valid",
+                        "body": "TRAILING_SECRET_CHAT_BODY",
+                        "confirmation_id": "cid",
+                        "confirmation_code": "code",
+                        "attachments": [
+                            {
+                                "filename": "trailing-secret.log",
+                                "data_b64": trailing_secret_b64,
+                            }
+                        ],
+                    },
+                ),
+                (
+                    f"/results/{job_id}/create-github-issue/",
+                    {
+                        "test_name": "test_example",
+                        "title": "Valid",
+                        "body": "TRAILING_SECRET_REPORT_BODY",
+                        "attachments": [
+                            {
+                                "filename": "trailing-secret.log",
+                                "data_b64": trailing_secret_b64,
+                            }
+                        ],
+                    },
+                ),
+            ):
+                client.post(slash_path, headers=headers, json=payload)
+                fake_req = StarletteRequest(
+                    {
+                        "type": "http",
+                        "method": "POST",
+                        "path": slash_path,
+                        "raw_path": slash_path.encode(),
+                        "query_string": b"",
+                        "headers": [(b"content-type", b"application/json")],
+                        "state": {
+                            "username": "env-user",
+                            "role": "reviewer",
+                            "is_admin": False,
+                        },
+                    }
+                )
+                val_exc = RequestValidationError(
+                    errors=[
+                        {
+                            "type": "value_error",
+                            "loc": ("body", "attachments", 0, "data_b64"),
+                            "msg": "Invalid attachment",
+                            "input": trailing_secret_b64,
+                        }
+                    ],
+                    body=payload,
+                )
+                val_resp = await main._validation_error_handler(fake_req, val_exc)
+                assert val_resp.status_code == 422
+                assert trailing_secret_b64.encode() not in val_resp.body
+        for leak in (
+            "TRAILING_SLASH_SECRET_PAYLOAD",
+            trailing_secret_b64,
+            "trailing-secret.log",
+            "TRAILING_SECRET_BODY_OK",
+            "TRAILING_SECRET_CHAT_BODY",
+            "TRAILING_SECRET_REPORT_BODY",
+        ):
             assert leak not in caplog.text
 
 
@@ -1682,6 +1962,12 @@ class TestLifecycleAndResiduals:
             del_job = client.delete(f"/results/{job_id}", headers=headers)
         assert del_job.status_code == 200
         assert not (db_path.parent / "issue-attachments" / "jobs" / job_id).exists()
+        assert not (
+            db_path.parent
+            / "issue-attachments"
+            / "jobs"
+            / f".job-{job_id}.rootcoz-deleting"
+        ).exists()
         assert await storage.get_issue_attachment(run_file_id) is None
         # Live run-less file still untouched!
         assert (
@@ -1690,6 +1976,74 @@ class TestLifecycleAndResiduals:
             ).status_code
             == 200
         )
+
+        # Finding #1: Unmarked directory under issue-attachments/jobs/ is NEVER swept
+        # by startup recovery; ONLY explicit .job-<id>.rootcoz-deleting markers from
+        # an interrupted inline deletion request are retried!
+        unmarked_dead_job = str(uuid4())
+        unmarked_dir = db_path.parent / "issue-attachments" / "jobs" / unmarked_dead_job
+        unmarked_dir.mkdir(parents=True, exist_ok=True)
+        (unmarked_dir / str(uuid4())).write_bytes(b"unmarked")
+        os.utime(unmarked_dir, (1, 1))
+        assert (
+            await main._reclaim_abandoned_workspaces(
+                await main._startup_job_ids(), await main._startup_owner_ids()
+            )
+            == 0
+        )
+        assert unmarked_dir.exists()
+
+        # Now delete a real job while injecting inline unlink failure -> writes explicit
+        # .job-<job_id_2>.rootcoz-deleting marker, which startup recovery retries cleanly!
+        job_id_2 = await _seed_completed_job(submitter="live-owner")
+        with patch(
+            "rootcoz.main.create_github_issue",
+            AsyncMock(
+                return_value={
+                    "url": "https://github.com/myk-org/rootcoz/issues/4",
+                    "number": 4,
+                    "title": "T",
+                }
+            ),
+        ):
+            run_2 = client.post(
+                f"/results/{job_id_2}/create-github-issue",
+                headers=headers,
+                json={
+                    "test_name": "test_example",
+                    "title": "T",
+                    "body": "B",
+                    "attachments": [_upload_payload("job2.log", b"job2-bytes")],
+                },
+            )
+        assert run_2.status_code == 201
+        job_marker_2 = (
+            db_path.parent
+            / "issue-attachments"
+            / "jobs"
+            / f".job-{job_id_2}.rootcoz-deleting"
+        )
+        job_dir_2 = db_path.parent / "issue-attachments" / "jobs" / job_id_2
+        with patch.object(
+            issue_attachments,
+            "delete_job_attachments_dir",
+            side_effect=OSError(13, "injected busy"),
+        ):
+            del_job_2 = client.delete(f"/results/{job_id_2}", headers=headers)
+        assert del_job_2.status_code == 200
+        assert job_dir_2.exists()
+        assert job_marker_2.exists()
+        os.utime(job_dir_2, (1, 1))
+        os.utime(job_marker_2, (1, 1))
+        assert (
+            await main._reclaim_abandoned_workspaces(
+                await main._startup_job_ids(), await main._startup_owner_ids()
+            )
+            == 1
+        )
+        assert not job_dir_2.exists()
+        assert not job_marker_2.exists()
+        assert unmarked_dir.exists()
 
     async def test_remaining_r1_r3_r5_r6_r7_openapi_and_reclaim_edges(
         self,
@@ -1727,6 +2081,12 @@ class TestLifecycleAndResiduals:
                 "operationId"
             ]
             == "downloadIssueAttachment"
+        )
+        assert (
+            openapi["paths"]["/api/issue-attachments/{attachment_id}"]["delete"][
+                "operationId"
+            ]
+            == "deleteIssueAttachment"
         )
         assert (
             "attachments"
@@ -2059,3 +2419,382 @@ class TestLifecycleAndResiduals:
         assert bk.status_code == 502
         assert "https://github.com/myk-org/rootcoz/issues/555" in bk.json()["detail"]
         assert "do not submit it again" in bk.json()["detail"]
+
+    async def test_delete_issue_attachment_endpoint_frees_quota_and_audits(
+        self, integration_env
+    ) -> None:
+        client, db_path = integration_env
+        admin_headers = {"Authorization": "Bearer test-bootstrap-admin-key"}
+        uid_owner, _, owner_headers = await _create_reviewer("quota-del-owner")
+        _, _, stranger_headers = await _create_reviewer("quota-del-stranger")
+
+        with patch(
+            "rootcoz.main.create_github_issue",
+            AsyncMock(
+                return_value={
+                    "url": "https://github.com/myk-org/rootcoz/issues/201",
+                    "number": 201,
+                    "title": "T",
+                }
+            ),
+        ):
+            c1 = client.post(
+                "/api/feedback/create",
+                headers=owner_headers,
+                json={
+                    "title": "FB1",
+                    "body": "B1",
+                    "labels": ["bug"],
+                    "attachments": [
+                        _upload_payload("private-evidence.log", b"1234567890")
+                    ],
+                },
+            )
+            c2 = client.post(
+                "/api/feedback/create",
+                headers=owner_headers,
+                json={
+                    "title": "FB2",
+                    "body": "B2",
+                    "labels": ["bug"],
+                    "attachments": [_upload_payload("second.log", b"abcdef")],
+                },
+            )
+        att_1 = c1.json()["attachments"]["files"][0]["id"]
+        att_2 = c2.json()["attachments"]["files"][0]["id"]
+
+        # Inflate att_1's recorded size_bytes to hit the 500 MiB owner ceiling.
+        with sqlite3.connect(db_path) as conn:
+            conn.execute(
+                "UPDATE issue_attachments SET size_bytes = ? WHERE id = ?",
+                (500 * 1024 * 1024 - 6, att_1),
+            )
+
+        # Owner is now blocked by the 500 MiB ceiling!
+        blocked = client.post(
+            "/api/feedback/create",
+            headers=owner_headers,
+            json={
+                "title": "Blocked",
+                "body": "B",
+                "labels": ["bug"],
+                "attachments": [_upload_payload("next.log", b"new-bytes")],
+            },
+        )
+        assert blocked.status_code == 400
+        assert "rootcoz delete-attachment" in blocked.json()["detail"]
+
+        # Unknown / invalid UUID returns 404 without writing an audit row.
+        assert (
+            client.delete(
+                "/api/issue-attachments/not-a-uuid", headers=owner_headers
+            ).status_code
+            == 404
+        )
+        assert (
+            client.delete(
+                f"/api/issue-attachments/{uuid4()}", headers=owner_headers
+            ).status_code
+            == 404
+        )
+        assert (await storage.list_audit_events(action="issue_attachment.delete"))[
+            "events"
+        ] == []
+
+        # Stranger gets 404 (hiding attachment existence & filename) + denied audit row!
+        stranger_del = client.delete(
+            f"/api/issue-attachments/{att_1}", headers=stranger_headers
+        )
+        assert stranger_del.status_code == 404
+        assert "private-evidence" not in stranger_del.text
+        den_events = (
+            await storage.list_audit_events(action="issue_attachment.delete")
+        )["events"]
+        assert len(den_events) == 1
+        assert den_events[0]["outcome"] == "denied"
+        assert "private-evidence" not in json.dumps(den_events[0])
+
+        # Uploader deletes att_1 -> quota is freed immediately, so the new upload succeeds!
+        del_resp = client.delete(
+            f"/api/issue-attachments/{att_1}", headers=owner_headers
+        )
+        assert del_resp.status_code == 200
+        assert del_resp.json() == {
+            "status": "deleted",
+            "attachment_id": att_1,
+            "freed_bytes": 500 * 1024 * 1024 - 6,
+        }
+        assert await storage.get_issue_attachment(att_1) is None
+        assert not (
+            db_path.parent / "issue-attachments" / "users" / str(uid_owner) / att_1
+        ).exists()
+
+        with patch(
+            "rootcoz.main.create_github_issue",
+            AsyncMock(
+                return_value={
+                    "url": "https://github.com/myk-org/rootcoz/issues/202",
+                    "number": 202,
+                    "title": "Unblocked",
+                }
+            ),
+        ):
+            unblocked = client.post(
+                "/api/feedback/create",
+                headers=owner_headers,
+                json={
+                    "title": "Unblocked",
+                    "body": "B",
+                    "labels": ["bug"],
+                    "attachments": [_upload_payload("next.log", b"new-bytes")],
+                },
+            )
+        assert unblocked.status_code == 201, unblocked.text
+
+        # Admin can delete another user's attachment too.
+        admin_del = client.delete(
+            f"/api/issue-attachments/{att_2}", headers=admin_headers
+        )
+        assert admin_del.status_code == 200
+        assert await storage.get_issue_attachment(att_2) is None
+        all_del_events = (
+            await storage.list_audit_events(action="issue_attachment.delete")
+        )["events"]
+        assert [e["outcome"] for e in all_del_events].count("success") == 2
+
+    async def test_delete_issue_attachment_enforces_allow_list(
+        self, integration_env, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        client, db_path = integration_env
+        admin_headers = {"Authorization": "Bearer test-bootstrap-admin-key"}
+        uid_excluded, _, excluded_headers = await _create_reviewer("excluded-uploader")
+        uid_allowed, _, allowed_headers = await _create_reviewer("allowed-uploader")
+
+        with patch(
+            "rootcoz.main.create_github_issue",
+            AsyncMock(
+                return_value={
+                    "url": "https://github.com/myk-org/rootcoz/issues/205",
+                    "number": 205,
+                    "title": "T",
+                }
+            ),
+        ):
+            c_excl = client.post(
+                "/api/feedback/create",
+                headers=excluded_headers,
+                json={
+                    "title": "FB Excl",
+                    "body": "B1",
+                    "labels": ["bug"],
+                    "attachments": [
+                        _upload_payload("confidential-trace.log", b"evidence-1")
+                    ],
+                },
+            )
+            c_allow = client.post(
+                "/api/feedback/create",
+                headers=allowed_headers,
+                json={
+                    "title": "FB Allow",
+                    "body": "B2",
+                    "labels": ["bug"],
+                    "attachments": [
+                        _upload_payload("allowed-trace.log", b"evidence-2")
+                    ],
+                },
+            )
+        assert c_excl.status_code == 201, c_excl.text
+        assert c_allow.status_code == 201, c_allow.text
+        att_excl = c_excl.json()["attachments"]["files"][0]["id"]
+        att_allow = c_allow.json()["attachments"]["files"][0]["id"]
+        blob_excl = (
+            db_path.parent
+            / "issue-attachments"
+            / "users"
+            / str(uid_excluded)
+            / att_excl
+        )
+        blob_allow = (
+            db_path.parent
+            / "issue-attachments"
+            / "users"
+            / str(uid_allowed)
+            / att_allow
+        )
+
+        # Restrict write allow-list to allowed-uploader only.
+        monkeypatch.setenv("ALLOWED_USERS", "allowed-uploader")
+        clear_settings_cache()
+
+        # Non-admin excluded from ALLOWED_USERS gets 403 + denied audit row; row/blob untouched.
+        denied = client.delete(
+            f"/api/issue-attachments/{att_excl}", headers=excluded_headers
+        )
+        assert denied.status_code == 403
+        assert "confidential-trace" not in denied.text
+        assert await storage.get_issue_attachment(att_excl) is not None
+        assert blob_excl.is_file()
+
+        events = (await storage.list_audit_events(action="issue_attachment.delete"))[
+            "events"
+        ]
+        assert len(events) == 1
+        assert events[0]["actor"] == "excluded-uploader"
+        assert events[0]["outcome"] == "denied"
+        assert events[0]["target_type"] == "issue_attachment"
+        assert events[0]["target_id"] == att_excl
+        assert events[0]["details"] == {
+            "reason": "forbidden",
+            "attachment_id": att_excl,
+        }
+        assert "confidential-trace" not in json.dumps(events[0])
+
+        # Invalid/secret-shaped ID on allow-list refusal never leaks into response or audit row.
+        bad_seg = "ghp_" + ("x" * 36)
+        denied_bad = client.delete(
+            f"/api/issue-attachments/{bad_seg}", headers=excluded_headers
+        )
+        assert denied_bad.status_code == 403
+        assert bad_seg not in denied_bad.text
+        events_after_bad = (
+            await storage.list_audit_events(action="issue_attachment.delete")
+        )["events"]
+        assert len(events_after_bad) == 2
+        bad_event = next(e for e in events_after_bad if e["target_id"] is None)
+        assert bad_event["outcome"] == "denied"
+        assert bad_event["details"] == {"reason": "forbidden"}
+        assert bad_seg not in json.dumps(bad_event)
+
+        # Allowed uploader succeeds (200) and frees row + blob.
+        ok_allowed = client.delete(
+            f"/api/issue-attachments/{att_allow}", headers=allowed_headers
+        )
+        assert ok_allowed.status_code == 200
+        assert await storage.get_issue_attachment(att_allow) is None
+        assert not blob_allow.exists()
+
+        # Admin bypasses ALLOWED_USERS automatically and succeeds (200).
+        ok_admin = client.delete(
+            f"/api/issue-attachments/{att_excl}", headers=admin_headers
+        )
+        assert ok_admin.status_code == 200
+        assert await storage.get_issue_attachment(att_excl) is None
+        assert not blob_excl.exists()
+
+    async def test_slow_tracker_does_not_stall_job_or_user_deletion(
+        self, integration_env
+    ) -> None:
+        _, db_path = integration_env
+        uid_slow, _, _ = await _create_reviewer("slow-tracker-user", role="operator")
+        job_id = await _seed_completed_job(submitter="slow-tracker-user")
+        cfg = get_settings()
+
+        # 1) Job deletion completes immediately while slow report issue create is in flight!
+        in_tracker_job = asyncio.Event()
+        release_tracker_job = asyncio.Event()
+
+        async def slow_github_job(**kwargs):
+            in_tracker_job.set()
+            await release_tracker_job.wait()
+            return {
+                "url": "https://github.com/org/tests-repo/issues/301",
+                "number": 301,
+                "title": kwargs["title"],
+            }
+
+        with patch("rootcoz.main.create_github_issue", side_effect=slow_github_job):
+            create_task = asyncio.create_task(
+                main._create_issue_from_text(
+                    "github",
+                    "Slow Job Issue",
+                    "Body",
+                    username="slow-tracker-user",
+                    settings=cfg,
+                    github_token="ghp_tok",
+                    github_repo_url="https://github.com/org/tests-repo",
+                    job_id=job_id,
+                    attachments=[
+                        IssueAttachmentUpload(
+                            filename="slow.log", data_b64=_b64(b"slow-bytes")
+                        )
+                    ],
+                )
+            )
+            await asyncio.wait_for(in_tracker_job.wait(), timeout=2.0)
+
+            # While slow_github_job is still blocked, job deletion under _hold_attachment_run_locks
+            # finishes immediately without waiting on release_tracker_job!
+            origins = await main._reanalysis_origins([job_id])
+
+            async def delete_job_now() -> None:
+                async with main._hold_attachment_run_locks([job_id]):
+                    deleted = [job_id] if await storage.delete_job(job_id) else []
+                    await main._finish_job_deletion([job_id], deleted, origins)
+
+            await asyncio.wait_for(delete_job_now(), timeout=1.0)
+            assert await storage.get_result(job_id) is None
+            assert not (db_path.parent / "issue-attachments" / "jobs" / job_id).exists()
+
+            release_tracker_job.set()
+            created = await asyncio.wait_for(create_task, timeout=2.0)
+            assert created["url"] == "https://github.com/org/tests-repo/issues/301"
+            assert (
+                await storage.get_issue_attachment(
+                    created["attachments"]["files"][0]["id"]
+                )
+                is None
+            )
+
+        # 2) User deletion completes immediately while slow run-less create is in flight!
+        in_tracker_user = asyncio.Event()
+        release_tracker_user = asyncio.Event()
+
+        async def slow_github_user(**kwargs):
+            in_tracker_user.set()
+            await release_tracker_user.wait()
+            req = httpx.Request(
+                "POST", "https://api.github.com/repos/myk-org/rootcoz/issues"
+            )
+            raise httpx.HTTPStatusError(
+                "503", request=req, response=httpx.Response(503, request=req)
+            )
+
+        with patch("rootcoz.main.create_github_issue", side_effect=slow_github_user):
+            user_create_task = asyncio.create_task(
+                main._create_issue_from_text(
+                    "github",
+                    "Slow Feedback",
+                    "Body",
+                    username="slow-tracker-user",
+                    settings=cfg,
+                    github_token="ghp_tok",
+                    github_repo_url=cfg.feedback_repo_url,
+                    attachments=[
+                        IssueAttachmentUpload(
+                            filename="fb-slow.log", data_b64=_b64(b"fb-slow")
+                        )
+                    ],
+                )
+            )
+            await asyncio.wait_for(in_tracker_user.wait(), timeout=2.0)
+
+            async def delete_user_now() -> None:
+                async with main._hold_attachment_scope_locks(f"owner:{uid_slow}"):
+                    await issue_attachments.write_owner_delete_marker(uid_slow)
+                    assert await storage.delete_user("slow-tracker-user")
+                    assert await main._cleanup_deleted_owner_attachments(uid_slow)
+
+            await asyncio.wait_for(delete_user_now(), timeout=1.0)
+            assert not await storage.user_id_exists(uid_slow)
+            assert not (
+                db_path.parent / "issue-attachments" / "users" / str(uid_slow)
+            ).exists()
+
+            release_tracker_user.set()
+            with pytest.raises(main.HTTPException) as exc_info:
+                await asyncio.wait_for(user_create_task, timeout=2.0)
+            assert exc_info.value.status_code == 502
+            assert not (
+                db_path.parent / "issue-attachments" / "users" / str(uid_slow)
+            ).exists()

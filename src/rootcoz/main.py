@@ -134,6 +134,7 @@ from rootcoz.config import (
     jira_availability,
     jira_site_url_error,
     jira_unavailable_reason,
+    normalize_feedback_repo_url,
     normalize_jira_auth_mode,
     parse_additional_repos,
     parse_peer_configs,
@@ -3420,6 +3421,9 @@ async def _startup_owner_ids() -> set[int] | None:
 
 
 _OWNER_MARKER_NAME_RE = re.compile(r"\A\.([1-9][0-9]*)\.rootcoz-deleting\Z")
+_JOB_MARKER_NAME_RE = re.compile(
+    r"\A\.job-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.rootcoz-deleting\Z"
+)
 _POSITIVE_INT_NAME_RE = re.compile(r"\A[1-9][0-9]*\Z")
 _attachment_scope_locks: dict[str, asyncio.Lock] = {}
 _attachment_scope_lock_refs: dict[str, int] = {}
@@ -3479,13 +3483,42 @@ def _canonical_uuid(value: str) -> bool:
 @asynccontextmanager
 async def _hold_attachment_run_locks(job_ids: Sequence[str]) -> AsyncIterator[None]:
     """Hold attachment run locks for every canonical UUID in *job_ids*."""
-    keys = [f"job:{jid}" for jid in job_ids if _canonical_uuid(jid)]
+    canonical_ids = [jid for jid in job_ids if _canonical_uuid(jid)]
+    keys = [f"job:{jid}" for jid in canonical_ids]
     async with _hold_attachment_scope_locks(*keys):
-        yield
+        try:
+            yield
+        except BaseException:
+            for jid in canonical_ids:
+                with contextlib.suppress(Exception):
+                    if await asyncio.shield(storage.get_result(jid)) is None:
+                        await asyncio.shield(
+                            issue_attachments.write_job_delete_marker(
+                                jid, only_if_dir_exists=True
+                            )
+                        )
+            raise
+
+
+async def _record_interrupted_job_delete_marker(job_id: str) -> None:
+    """Persist ``.job-<job_id>.rootcoz-deleting`` only when inline run cleanup failed."""
+    try:
+        await issue_attachments.write_job_delete_marker(job_id)
+    except OSError as exc:
+        logger.warning(
+            "Failed to record delete marker for job %s (errno=%s)",
+            job_id,
+            exc.errno,
+        )
 
 
 async def _cleanup_deleted_job_attachments(job_id: str) -> bool:
-    """Remove ``issue-attachments/jobs/<job_id>`` off-loop under the run lock."""
+    """Remove ``issue-attachments/jobs/<job_id>`` synchronously under the run lock.
+
+    Writes ``.job-<job_id>.rootcoz-deleting`` only if inline cleanup fails so an
+    interrupted run-deletion request can be retried explicitly without scanning
+    arbitrary directories for orphans.
+    """
     from rootcoz.temp_paths import CleanupOutcome, cleanup_off_loop
 
     if not _canonical_uuid(job_id):
@@ -3500,8 +3533,32 @@ async def _cleanup_deleted_job_attachments(job_id: str) -> bool:
             logger.warning(
                 "Failed to cleanup job attachments for %s", job_id, exc_info=True
             )
+            await _record_interrupted_job_delete_marker(job_id)
             return False
-    return outcome is CleanupOutcome.CLEAN
+        if outcome is not CleanupOutcome.CLEAN:
+            await _record_interrupted_job_delete_marker(job_id)
+            return False
+        try:
+            await storage.delete_issue_attachment_rows_for_job(job_id)
+        except Exception:
+            logger.warning(
+                "Failed to delete attachment rows for deleted job %s; "
+                "recording delete marker for explicit retry",
+                job_id,
+                exc_info=True,
+            )
+            await _record_interrupted_job_delete_marker(job_id)
+            return False
+        try:
+            await issue_attachments.remove_job_delete_marker(job_id)
+        except OSError as exc:
+            logger.warning(
+                "Failed to remove delete marker for job %s (errno=%s)",
+                job_id,
+                exc.errno,
+            )
+            return False
+    return True
 
 
 async def _cleanup_deleted_job_disk_state(job_id: str) -> bool:
@@ -3556,48 +3613,65 @@ async def _cleanup_deleted_owner_attachments(owner_id: int) -> bool:
 async def _reclaim_issue_attachments(
     job_ids: set[str] | None, owner_ids: set[int] | None
 ) -> tuple[int, int]:
-    """Phase 4: dead run attachment dirs, deleted-owner markers, and pending submissions."""
-    from rootcoz.temp_paths import CleanupOutcome, cleanup_off_loop
+    """Retry explicit interrupted attachment deletion markers and pending submission rows.
 
+    Attachment blobs and rows are deleted synchronously inline on run deletion,
+    retention chunks, submission rollback, attachment deletion, and account
+    deletion. This pass never scans unmarked directories for orphans; it only
+    retries explicit ``.job-<job_id>.rootcoz-deleting`` markers,
+    ``.<owner_id>.rootcoz-deleting`` markers, and ``reserved``/``cleanup_pending``
+    submission rows left behind when a specific deletion or create request was
+    interrupted.
+    """
     reclaimed = 0
     considered = 0
 
-    # 1. Dead run attachment directories (None or empty snapshot = no decision).
-    if job_ids:
+    # 1. Explicit interrupted run-deletion markers (.job-<job_id>.rootcoz-deleting) only.
+    if job_ids is not None:
         job_entries = await asyncio.to_thread(
             issue_attachments.list_scope_entries, "jobs"
         )
-        for name, st in job_entries or ():
-            try:
-                if not _canonical_uuid(name):
-                    logger.debug(
-                        "Startup reclaim: attachment job candidate %r skipped (unsafe-name)",
-                        name,
-                    )
+        if job_entries is not None:
+            by_job_name = dict(job_entries)
+            candidate_jobs: list[str] = []
+            seen_jobs: set[str] = set()
+            for name, st in job_entries:
+                marker_match = _JOB_MARKER_NAME_RE.fullmatch(name)
+                if not marker_match:
                     continue
-                if name in job_ids:
+                jid = marker_match.group(1)
+                if (
+                    not _canonical_uuid(jid)
+                    or jid in job_ids
+                    or jid in seen_jobs
+                    or stat.S_ISLNK(st.st_mode)
+                    or st.st_mtime >= _PROCESS_STARTED_AT
+                ):
                     continue
-                if stat.S_ISLNK(st.st_mode) or not stat.S_ISDIR(st.st_mode):
+                dir_st = by_job_name.get(jid)
+                if dir_st is not None and (
+                    stat.S_ISLNK(dir_st.st_mode)
+                    or not stat.S_ISDIR(dir_st.st_mode)
+                    or dir_st.st_mtime >= _PROCESS_STARTED_AT
+                ):
                     continue
-                if st.st_mtime >= _PROCESS_STARTED_AT:
-                    continue
+                seen_jobs.add(jid)
+                candidate_jobs.append(jid)
+            for jid in candidate_jobs:
                 considered += 1
-                async with _hold_attachment_scope_locks(f"job:{name}"):
-                    outcome = await cleanup_off_loop(
-                        f"attachments-{name}",
-                        partial(issue_attachments.delete_job_attachments_dir, name),
-                    )
-                    if outcome is CleanupOutcome.CLEAN:
-                        await storage.delete_issue_attachment_rows_for_job(name)
+                try:
+                    if await storage.get_result(jid) is not None:
+                        continue
+                    if await _cleanup_deleted_job_attachments(jid):
                         reclaimed += 1
-            except Exception:
-                logger.warning(
-                    "Startup reclaim: failed to reclaim job attachments for %r",
-                    name,
-                    exc_info=True,
-                )
+                except Exception:
+                    logger.warning(
+                        "Startup recovery: failed to retry interrupted job attachment delete for %r",
+                        jid,
+                        exc_info=True,
+                    )
 
-    # 2. Deleted owner run-less dirs and dangling old markers (absent owner_id + old marker).
+    # 2. Explicit interrupted owner-deletion markers (.<owner_id>.rootcoz-deleting) only.
     if owner_ids:
         user_entries = await asyncio.to_thread(
             issue_attachments.list_scope_entries, "users"
@@ -3628,7 +3702,7 @@ async def _reclaim_issue_attachments(
                     candidate_owners.append(oid)
                 elif not _POSITIVE_INT_NAME_RE.fullmatch(name):
                     logger.debug(
-                        "Startup reclaim: attachment user candidate %r skipped (unsafe-name)",
+                        "Startup recovery: attachment user entry %r ignored (non-marker)",
                         name,
                     )
             for oid in candidate_owners:
@@ -3640,7 +3714,7 @@ async def _reclaim_issue_attachments(
                         reclaimed += 1
                 except Exception:
                     logger.warning(
-                        "Startup reclaim: failed to reclaim attachments for owner %d",
+                        "Startup recovery: failed to retry attachments for deleted owner %d",
                         oid,
                         exc_info=True,
                     )
@@ -3650,7 +3724,7 @@ async def _reclaim_issue_attachments(
         pending_rows = await storage.list_pending_issue_attachment_rows()
     except Exception:
         logger.warning(
-            "Startup reclaim: cannot read pending issue attachment rows",
+            "Startup recovery: cannot read pending issue attachment rows",
             exc_info=True,
         )
         pending_rows = []
@@ -3682,19 +3756,19 @@ async def _reclaim_issue_attachments(
                     reclaimed += 1
         except Exception:
             logger.warning(
-                "Startup reclaim: failed to recover pending attachment submission %s",
+                "Startup recovery: failed to recover pending attachment submission %s",
                 sub_id,
                 exc_info=True,
             )
 
     if reclaimed:
         logger.info(
-            "Startup reclaim: reclaimed %d abandoned attachment scope/submission item(s)",
+            "Startup recovery: completed %d interrupted attachment deletion/submission item(s)",
             reclaimed,
         )
     if survivors := considered - reclaimed:
         logger.warning(
-            "Startup reclaim: %d attachment cleanup item(s) survived and remain retryable",
+            "Startup recovery: %d interrupted attachment cleanup item(s) survived and remain retryable",
             survivors,
         )
     return (reclaimed, considered)
@@ -3704,12 +3778,13 @@ async def _reclaim_abandoned_workspaces(
     job_ids: set[str] | None = None,
     owner_ids: set[int] | None = None,
 ) -> int:
-    """Delete trees and attachment artifacts a previous process abandoned; return count reclaimed.
+    """Delete leftover temp workspaces and retry interrupted attachment deletion markers.
 
-    One pass across the process temp roots and the data directory's
-    ``issue-attachments`` store: analysis workspaces and marked children of the
-    temp base, chat workspaces whose ``results`` row is gone, leftover CI artifact
-    extracts, and dead-run / deleted-owner / pending-submission attachments.
+    One pass across the process temp roots and explicit interrupted deletion
+    markers in ``issue-attachments``: analysis workspaces and marked children of
+    the temp base, chat workspaces whose ``results`` row is gone, leftover CI
+    artifact extracts, and explicit ``.rootcoz-deleting`` / ``cleanup_pending``
+    attachment retry records (never an unmarked attachment orphan scan).
 
     ``job_ids`` and ``owner_ids`` are snapshots ``lifespan`` took *before* spawning
     this task. ``None`` or empty means "no decision available" for that half.
@@ -4658,9 +4733,16 @@ _ATTACHMENT_ENVELOPE_EXACT_PATHS = frozenset(
 )
 
 
+def _normalize_request_path(path: str) -> str:
+    """Normalize HTTP request path consistently across middleware and 422 redaction."""
+    return path.rstrip("/") or "/"
+
+
 def _is_report_create_issue_path(path: str) -> bool:
-    normalized = path.rstrip("/") if path != "/" else path
-    return _REPORT_CREATE_ISSUE_PATH_RE.fullmatch(normalized) is not None
+    return (
+        _REPORT_CREATE_ISSUE_PATH_RE.fullmatch(_normalize_request_path(path))
+        is not None
+    )
 
 
 def _is_audit_safe_job_id(job_id: str) -> bool:
@@ -4736,8 +4818,7 @@ class AttachmentEnvelopeBoundMiddleware:
         if scope.get("type") != "http" or scope.get("method") != "POST":
             await self.app(scope, receive, send)
             return
-        raw_path = scope.get("path") or ""
-        normalized = raw_path.rstrip("/") if raw_path != "/" else raw_path
+        normalized = _normalize_request_path(scope.get("path") or "")
         if (
             normalized not in _ATTACHMENT_ENVELOPE_EXACT_PATHS
             and _REPORT_CREATE_ISSUE_PATH_RE.fullmatch(normalized) is None
@@ -4851,10 +4932,12 @@ class RequestBodyLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
+        normalized_path = _normalize_request_path(request.url.path)
         if (
-            request.url.path in _BODY_LOGGING_SKIP_PATHS
-            or _is_report_create_issue_path(request.url.path)
-            or request.url.path.startswith(("/api/chat/", "/api/user/ai-credentials"))
+            normalized_path in _BODY_LOGGING_SKIP_PATHS
+            or _is_report_create_issue_path(normalized_path)
+            or normalized_path == "/api/chat"
+            or normalized_path.startswith(("/api/chat/", "/api/user/ai-credentials"))
         ):
             return await call_next(request)
         if logger.isEnabledFor(logging.DEBUG) and request.method in (
@@ -4949,10 +5032,12 @@ async def _validation_error_handler(
         "invalid_request",
         {"fields": _invalid_field_names(exc)},
     )
+    normalized_path = _normalize_request_path(request.url.path)
     if (
-        request.url.path in _BODY_LOGGING_SKIP_PATHS
-        or _is_report_create_issue_path(request.url.path)
-        or request.url.path.startswith("/api/chat/")
+        normalized_path in _BODY_LOGGING_SKIP_PATHS
+        or _is_report_create_issue_path(normalized_path)
+        or normalized_path == "/api/chat"
+        or normalized_path.startswith("/api/chat/")
     ):
         raw_errors = jsonable_encoder(exc.errors())
         masked_errors = [_mask_pydantic_error(e) for e in raw_errors]
@@ -11221,6 +11306,8 @@ def _build_capabilities(settings: Settings) -> dict[str, Any]:
             "max_files": issue_attachments.MAX_FILES,
             "max_file_bytes": issue_attachments.MAX_FILE_BYTES,
             "max_total_bytes": issue_attachments.MAX_TOTAL_BYTES,
+            "max_run_bytes": issue_attachments.MAX_RUN_BYTES,
+            "max_owner_bytes": issue_attachments.MAX_OWNER_BYTES,
             "types": [
                 "text/plain",
                 "image/png",
@@ -13139,48 +13226,53 @@ async def _create_issue_from_text(
             )
 
         issue_body = _build_body(reserved_rows, base_url)
+
+    # Release attachment scope locks before calling the external tracker so a slow
+    # GitHub/Jira response cannot block job deletion, retention chunks, user
+    # deletion, or other file-bearing creates on the same scope.
+    try:
         try:
-            try:
-                if github:
-                    result = await create_github_issue(
-                        title=title,
-                        body=issue_body,
-                        repo_url=tests_repo_url,
-                        github_token=github_token.strip(),
-                        labels=labels,
-                        attribution=effective_attribution,
-                    )
-                else:
-                    assert jira_conn is not None
-                    result = await create_jira_bug(
-                        title=title,
-                        body=issue_body,
-                        connection=jira_conn,
-                        project_key=jira_project_key
-                        or effective_jira_settings.jira_project_key
-                        or "",
-                        security_level=jira_security_level,
-                        issue_type=jira_issue_type,
-                    )
-            except _ISSUE_CREATE_REFUSALS as exc:
-                raise _map_create_refusal(
-                    target,
-                    exc,
-                    subject=subject,
-                    repo=named_repo,
-                    repo_setting=repo_setting,
-                ) from exc
-            issue_url = _require_tracker_url(result, label)
-        except BaseException as exc:
-            if not _create_may_have_filed(exc):
-                await issue_attachments.delete_stored(reserved_rows)
-            else:
-                logger.warning(
-                    "Retaining %d hosted attachment(s) after ambiguous %s create outcome",
-                    len(reserved_rows),
-                    target,
+            if github:
+                result = await create_github_issue(
+                    title=title,
+                    body=issue_body,
+                    repo_url=tests_repo_url,
+                    github_token=github_token.strip(),
+                    labels=labels,
+                    attribution=effective_attribution,
                 )
-            raise
+            else:
+                assert jira_conn is not None
+                result = await create_jira_bug(
+                    title=title,
+                    body=issue_body,
+                    connection=jira_conn,
+                    project_key=jira_project_key
+                    or effective_jira_settings.jira_project_key
+                    or "",
+                    security_level=jira_security_level,
+                    issue_type=jira_issue_type,
+                )
+        except _ISSUE_CREATE_REFUSALS as exc:
+            raise _map_create_refusal(
+                target,
+                exc,
+                subject=subject,
+                repo=named_repo,
+                repo_setting=repo_setting,
+            ) from exc
+        issue_url = _require_tracker_url(result, label)
+    except BaseException as exc:
+        if not _create_may_have_filed(exc):
+            async with _hold_attachment_scope_locks(*scope_keys):
+                await issue_attachments.delete_stored(reserved_rows)
+        else:
+            logger.warning(
+                "Retaining %d hosted attachment(s) after ambiguous %s create outcome",
+                len(reserved_rows),
+                target,
+            )
+        raise
 
     # Issue is now known-created; native Jira upload failures never undo or fail the 201.
     file_summaries: list[IssueAttachmentFileSummary] = []
@@ -13936,15 +14028,23 @@ _download_audit_dedupe: OrderedDict[tuple[int | str, str, str], None] = OrderedD
 
 
 def _should_record_download_audit(
-    caller_key: int | str, attachment_id: str, outcome: str
+    caller_key: int | str,
+    attachment_id: str,
+    outcome: str,
+    row: Mapping[str, Any] | None = None,
 ) -> bool:
-    """Bounded 4096-entry LRU dedupe keyed by (immutable caller id, attachment id, outcome)."""
-    key = (caller_key, attachment_id, outcome)
+    """Bounded 4096-entry LRU dedupe keyed by (immutable caller id, issue submission, outcome)."""
+    scope_id = (
+        str(row.get("submission_id") or attachment_id)
+        if row is not None
+        else attachment_id
+    )
+    key = (caller_key, scope_id, outcome)
     if key in _download_audit_dedupe:
         _download_audit_dedupe.move_to_end(key)
         logger.debug(
-            "Attachment download audit deduplicated: attachment_id=%s outcome=%s",
-            attachment_id,
+            "Attachment download audit deduplicated: submission_or_id=%s outcome=%s",
+            scope_id,
             outcome,
         )
         return False
@@ -13998,7 +14098,7 @@ async def download_issue_attachment(
     }
 
     async def _deny(refused_kind: str) -> NoReturn:
-        if _should_record_download_audit(caller_key, row["id"], "denied"):
+        if _should_record_download_audit(caller_key, row["id"], "denied", row):
             await record_audit(
                 action="issue_attachment.download",
                 actor=username,
@@ -14049,7 +14149,7 @@ async def download_issue_attachment(
             "Cache-Control": "private, no-store",
             "Content-Length": str(row["size_bytes"]),
         }
-        if _should_record_download_audit(caller_key, row["id"], "success"):
+        if _should_record_download_audit(caller_key, row["id"], "success", row):
             await record_audit(
                 action="issue_attachment.download",
                 actor=username,
@@ -14070,6 +14170,136 @@ async def download_issue_attachment(
         with contextlib.suppress(OSError):
             stream_file.close()
         raise
+
+
+@app.delete(
+    "/api/issue-attachments/{attachment_id}",
+    operation_id="deleteIssueAttachment",
+)
+async def delete_issue_attachment(
+    attachment_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    """Delete an issue attachment (uploader or admin) to free quota immediately."""
+    username = getattr(request.state, "username", "")
+    safe_id = attachment_id if _canonical_uuid(attachment_id) else ""
+    try:
+        _check_allow_list(request)
+    except HTTPException as exc:
+        logger.debug(
+            "DELETE /api/issue-attachments/%s refused by allow list for user=%s",
+            safe_id or "<invalid>",
+            username,
+        )
+        refusal_msg = (
+            f"User '{username}' deleted attachment {safe_id}"
+            if safe_id
+            else f"User '{username}' deleted attachment"
+        )
+        await _record_refused_attempt(
+            action="issue_attachment.delete",
+            request=request,
+            message=refusal_msg,
+            target_type="issue_attachment",
+            target_id=safe_id,
+            exc=exc,
+            details={"attachment_id": safe_id} if safe_id else None,
+        )
+        raise
+
+    if not safe_id:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    row = await storage.get_issue_attachment(attachment_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+
+    is_admin = bool(getattr(request.state, "is_admin", False))
+    role = getattr(request.state, "role", "")
+    caller_row = await storage.get_user_by_username(username) if username else None
+
+    job_id = str(row.get("job_id") or "")
+    owner_id = int(row["owner_id"])
+    base_audit_details: dict[str, Any] = {
+        "attachment_id": str(row["id"]),
+        "media_type": str(row["media_type"]),
+        "size_bytes": int(row["size_bytes"]),
+        "tracker": str(row["tracker"]),
+        **({"job_id": job_id} if job_id else {}),
+    }
+
+    async def _deny_delete(refused_kind: str) -> NoReturn:
+        await record_audit(
+            action="issue_attachment.delete",
+            actor=username,
+            message=(
+                f"User '{username}' was denied deleting attachment {row['id']} "
+                f"({refused_kind})"
+            ),
+            target_type="issue_attachment",
+            target_id=str(row["id"]),
+            outcome="denied",
+            details={**base_audit_details, "refused_kind": refused_kind},
+            request=request,
+        )
+        raise HTTPException(status_code=404, detail="Attachment not found")
+
+    if not username or role not in ("viewer", "reviewer", "operator", "admin"):
+        await _deny_delete("forbidden")
+    if caller_row is not None and caller_row.get("disabled"):
+        await _deny_delete("account_disabled")
+    if not is_admin:
+        if caller_row is None or int(caller_row["id"]) != owner_id:
+            await _deny_delete("not_owner")
+        if not await storage.is_active_user_id(owner_id):
+            await _deny_delete("inactive_owner")
+
+    scope_keys = [
+        f"owner:{owner_id}",
+        *([f"job:{job_id}"] if job_id and _canonical_uuid(job_id) else []),
+    ]
+    async with _hold_attachment_scope_locks(*scope_keys):
+        current_row = await storage.get_issue_attachment(attachment_id)
+        if current_row is None:
+            raise HTTPException(status_code=404, detail="Attachment not found")
+        await storage.mark_issue_attachments_stored(
+            [attachment_id], cleanup_pending=True
+        )
+        cleaned = await issue_attachments.unlink_attachment_row(current_row)
+        if not cleaned:
+            await record_audit(
+                action="issue_attachment.delete",
+                actor=username,
+                message=f"Failed to delete attachment {current_row['id']}",
+                target_type="issue_attachment",
+                target_id=str(current_row["id"]),
+                outcome="failure",
+                details=base_audit_details,
+                request=request,
+            )
+            raise HTTPException(status_code=500, detail="Failed to delete attachment")
+
+    freed_bytes = int(current_row["size_bytes"])
+    logger.info(
+        "Deleted issue attachment %s (owner_id=%d, size_bytes=%d)",
+        current_row["id"],
+        owner_id,
+        freed_bytes,
+    )
+    await record_audit(
+        action="issue_attachment.delete",
+        actor=username,
+        message=f"User '{username}' deleted attachment {current_row['id']}",
+        target_type="issue_attachment",
+        target_id=str(current_row["id"]),
+        outcome="success",
+        details=base_audit_details,
+        request=request,
+    )
+    return {
+        "status": "deleted",
+        "attachment_id": str(current_row["id"]),
+        "freed_bytes": freed_bytes,
+    }
 
 
 def _detect_tracker_type(url: str) -> str:
@@ -21757,7 +21987,7 @@ async def get_admin_settings(
                     logger.debug(
                         "Failed to decrypt settings value for %s: %s", key, exc
                     )
-            item["value"] = db_value
+            item["value"] = _normalize_setting_override(key, db_value)
             item["updated_by"] = override.get("updated_by", "")
             item["updated_at"] = override.get("updated_at", "")
             # Flag if an OS env var also exists (from configmap/container),
@@ -22514,7 +22744,10 @@ async def import_server_settings(request: Request) -> JSONResponse:
     raw_settings = body.get("settings")
     if not isinstance(raw_settings, dict) or not raw_settings:
         raise HTTPException(status_code=422, detail="No settings in export document")
-    updates = {str(k): "" if v is None else str(v) for k, v in raw_settings.items()}
+    updates = {
+        str(k): _normalize_setting_override(str(k), "" if v is None else str(v))
+        for k, v in raw_settings.items()
+    }
 
     # Validate the whole batch before anything is applied — the same
     # rules the per-setting PUT enforces, plus the empty-override gates
@@ -22635,6 +22868,13 @@ def _empty_override_error(key: str) -> str | None:
     return None
 
 
+def _normalize_setting_override(key: str, value: str) -> str:
+    """Normalize persisted setting overrides whose blank values coerce to a fixed default."""
+    if key == "feedback_repo_url":
+        return normalize_feedback_repo_url(value)
+    return value
+
+
 async def _save_settings_to_db(
     settings_updates: dict[str, Any], username: str
 ) -> list[str]:
@@ -22657,9 +22897,12 @@ async def _save_settings_to_db(
             if error:
                 raise HTTPException(status_code=400, detail=error)
 
+    normalized_updates = {
+        key: _normalize_setting_override(key, str(value) if value is not None else "")
+        for key, value in settings_updates.items()
+    }
     db_values: dict[str, str] = {}
-    for key, value in settings_updates.items():
-        str_value = str(value) if value is not None else ""
+    for key, str_value in normalized_updates.items():
         # Upsert (empty allowed — an explicit empty override beats env).
         # Sensitive values are encrypted only when non-empty; the empty
         # override stays a plain empty string (nothing to protect).
@@ -22687,9 +22930,7 @@ async def _save_settings_to_db(
     # Update in-memory cache so get_settings() picks up changes. Saved
     # values — empty included — are explicit overrides that beat env;
     # falling back to env/default is the reset endpoint's job (DELETE).
-    update_db_settings_cache(
-        {k: str(v) if v is not None else "" for k, v in settings_updates.items()}
-    )
+    update_db_settings_cache(normalized_updates)
 
     # The log-file budget and floor apply to the running handler, not the next
     # boot: rebuilding it here covers the PUT, the import and the env→DB persist.

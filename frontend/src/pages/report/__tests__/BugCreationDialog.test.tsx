@@ -644,6 +644,8 @@ function makeAttachmentCapabilities(
       max_files: 3,
       max_file_bytes: 5242880,
       max_total_bytes: 10485760,
+      max_run_bytes: 209715200,
+      max_owner_bytes: 524288000,
       types: ['text/plain', 'image/png', 'image/jpeg', 'image/gif', 'image/webp'],
       report_github: { available: true, reason: 'available' },
       report_jira: { available: true, reason: 'available' },
@@ -964,5 +966,68 @@ describe('BugCreationDialog issue attachments', () => {
     const statusBox = screen.getByRole('status')
     expect(statusBox).toHaveTextContent(/One or more Jira native uploads were unavailable.*Do not resubmit/i)
     expect(statusBox).toHaveTextContent(/Jira native upload outcome is unknown.*Never resubmit/i)
+  })
+
+  it('enforces capability count, per-file, and cumulative limits in the picker and before create encoding', async () => {
+    const user = userEvent.setup()
+    const readSpy = vi.spyOn(FileReader.prototype, 'readAsDataURL')
+    const caps = makeAttachmentCapabilities({
+      max_files: 2,
+      max_file_bytes: 10,
+      max_total_bytes: 15,
+    })
+    const { rerender } = await openPreviewWithCapabilities(user, 'github', caps)
+    const fileInput = screen.getByLabelText('Issue attachments')
+
+    // Count rejection (> 2 files)
+    fireEvent.change(fileInput, {
+      target: { files: [new File(['a'], '1.log'), new File(['b'], '2.log'), new File(['c'], '3.log')] },
+    })
+    expect(screen.getByRole('alert')).toHaveTextContent('Cannot attach more than 2 files (3 selected).')
+    expect(screen.queryByText('1.log')).not.toBeInTheDocument()
+
+    // Per-file size rejection (> 10 bytes)
+    fireEvent.change(fileInput, {
+      target: { files: [new File(['0123456789A'], 'oversize.log')] },
+    })
+    expect(screen.getByRole('alert')).toHaveTextContent('oversize.log (11 bytes) exceeds the 10 bytes per-file limit.')
+    expect(screen.queryByText('oversize.log')).not.toBeInTheDocument()
+
+    // Valid selection clears picker alert, then cumulative rejection (> 15 bytes) preserves valid file
+    fireEvent.change(fileInput, { target: { files: [new File(['0123456789'], 'ten.log')] } })
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByText('ten.log')).toBeInTheDocument()
+
+    fireEvent.change(fileInput, { target: { files: [new File(['012345'], 'six.log')] } })
+    expect(screen.getByRole('alert')).toHaveTextContent('Selected files total 16 bytes, exceeding the 15 bytes total limit.')
+    expect(screen.getByText('ten.log')).toBeInTheDocument()
+    expect(screen.queryByText('six.log')).not.toBeInTheDocument()
+
+    // Tighten server capability limits before submit so encoder defense triggers before FileReader
+    const tighterCaps = makeAttachmentCapabilities({
+      max_files: 2,
+      max_file_bytes: 8,
+      max_total_bytes: 15,
+    })
+    rerender(
+      <MemoryRouter>
+        <ReportProvider>
+          <BugCreationDialog
+            open
+            onOpenChange={() => {}}
+            jobId="job-1"
+            testName="test-a"
+            target="github"
+            capabilities={tighterCaps}
+          />
+        </ReportProvider>
+      </MemoryRouter>,
+    )
+    readSpy.mockClear()
+    await user.click(screen.getByRole('button', { name: /create github issue/i }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('ten.log (10 bytes) exceeds the 8 bytes per-file limit.')
+    expect(readSpy).not.toHaveBeenCalled()
+    expect(post.mock.calls.filter(([path]) => path === createPathFor('github'))).toHaveLength(0)
   })
 })

@@ -9430,6 +9430,7 @@ class TestIssueAttachmentsCLI:
             ["create-chat-issue", "--help"],
             ["feedback-create", "--help"],
             ["download-attachment", "--help"],
+            ["delete-attachment", "--help"],
         ],
     )
     def test_help_exposes_expected_flags_and_zero_token_flags(self, subcmd):
@@ -9445,12 +9446,16 @@ class TestIssueAttachmentsCLI:
             "--ai-used",
         ):
             assert forbidden not in normalized
-        if subcmd[0] != "download-attachment":
-            assert "--attach" in normalized
-            assert "browser chat" in normalized.lower()
-        else:
+        if subcmd[0] == "download-attachment":
             assert "--output" in normalized
             assert "-o" in normalized
+        elif subcmd[0] == "delete-attachment":
+            assert "--force" in normalized
+            assert "-f" in normalized
+            assert "--json" in normalized
+        else:
+            assert "--attach" in normalized
+            assert "browser chat" in normalized.lower()
 
     def test_repeatable_attach_forwarded_across_all_create_and_propose_commands(
         self, mock_client
@@ -9971,3 +9976,69 @@ class TestIssueAttachmentsCLI:
             )
             assert err_res.exit_code == 1
             assert not missing_dest.exists()
+
+    def test_subcommand_help_works_without_server_config_while_value_arg_does_not_bypass(
+        self,
+    ):
+        env = host_env()
+        with (
+            patch("rootcoz.cli.main._state", {}),
+            patch.dict(os.environ, env, clear=True),
+            patch("rootcoz.cli.main.get_server_config", return_value=None),
+        ):
+            for cmd in (
+                ["create-issue", "--help"],
+                ["results", "delete", "--help"],
+                ["delete-attachment", "--help"],
+                ["results", "--help"],
+            ):
+                res = runner.invoke(app, cmd)
+                assert res.exit_code == 0, (cmd, res.output)
+            no_args = runner.invoke(app, ["results"])
+            assert "Usage:" in no_args.output
+            assert "No server specified" not in no_args.output
+            # Passing --help as the value of --body is NOT a help invocation!
+            not_help = runner.invoke(
+                app,
+                [
+                    "create-issue",
+                    "job-1",
+                    "--test",
+                    "t",
+                    "--type",
+                    "github",
+                    "--title",
+                    "T",
+                    "--body",
+                    "--help",
+                ],
+            )
+            assert not_help.exit_code == 1
+            assert "No server specified" in not_help.output
+
+    def test_delete_attachment_cli_confirmation_force_and_json(self, mock_client):
+        att_id = "ce8c8dc3-b6fd-486e-97cc-e461c0067119"
+        mock_client.delete_issue_attachment.return_value = {
+            "status": "deleted",
+            "attachment_id": att_id,
+            "freed_bytes": 1024,
+        }
+
+        aborted = runner.invoke(app, ["delete-attachment", att_id], input="n\n")
+        assert aborted.exit_code != 0
+        mock_client.delete_issue_attachment.assert_not_called()
+
+        confirmed = runner.invoke(app, ["delete-attachment", att_id], input="y\n")
+        assert confirmed.exit_code == 0, confirmed.output
+        assert f"Deleted attachment {att_id} (1024 bytes freed)" in confirmed.output
+        mock_client.delete_issue_attachment.assert_called_once_with(att_id)
+
+        mock_client.delete_issue_attachment.reset_mock()
+        forced = runner.invoke(app, ["delete-attachment", att_id, "-f", "--json"])
+        assert forced.exit_code == 0, forced.output
+        assert json.loads(forced.output) == {
+            "status": "deleted",
+            "attachment_id": att_id,
+            "freed_bytes": 1024,
+        }
+        mock_client.delete_issue_attachment.assert_called_once_with(att_id)

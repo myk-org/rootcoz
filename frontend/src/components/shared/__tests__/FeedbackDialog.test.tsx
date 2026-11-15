@@ -669,6 +669,7 @@ describe('FeedbackDialog', () => {
 
 function makeFeedbackCapabilities(
   feedbackOverride?: Capabilities['issue_attachments']['feedback'],
+  attachmentOverrides?: Partial<Capabilities['issue_attachments']>,
 ): Capabilities {
   return {
     github_issues_enabled: true,
@@ -677,12 +678,15 @@ function makeFeedbackCapabilities(
       max_files: 3,
       max_file_bytes: 5242880,
       max_total_bytes: 10485760,
+      max_run_bytes: 209715200,
+      max_owner_bytes: 524288000,
       types: ['text/plain', 'image/png', 'image/jpeg', 'image/gif', 'image/webp'],
       report_github: { available: true, reason: 'available' },
       report_jira: { available: true, reason: 'available' },
       feedback: feedbackOverride ?? { available: true, reason: 'available' },
       chat_ui: { available: false, reason: 'browser_chat_unsupported' },
       direct_chat: { available: true, reason: 'available' },
+      ...attachmentOverrides,
     },
   }
 }
@@ -913,5 +917,63 @@ describe('FeedbackDialog issue attachments', () => {
     await user.click(screen.getByRole('button', { name: /preview/i }))
     await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
     expect(screen.queryByText('temp.log')).not.toBeInTheDocument()
+  })
+
+  it('enforces capability count, per-file, and cumulative limits in the picker and before create encoding', async () => {
+    const user = userEvent.setup()
+    const readSpy = vi.spyOn(FileReader.prototype, 'readAsDataURL')
+    mockPost.mockResolvedValue({ title: 'Preview T', body: 'Preview B', labels: ['bug'] })
+
+    const initialCaps = makeFeedbackCapabilities(undefined, {
+      max_files: 2,
+      max_file_bytes: 10,
+      max_total_bytes: 15,
+    })
+    const { rerender } = render(
+      <FeedbackDialog open={true} onOpenChange={onOpenChange} capabilities={initialCaps} />,
+    )
+    await user.type(screen.getByLabelText('Description'), 'Oversized feedback selection')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+
+    const fileInput = screen.getByLabelText('Issue attachments')
+
+    // Count rejection (> 2 files)
+    fireEvent.change(fileInput, {
+      target: { files: [new File(['a'], '1.log'), new File(['b'], '2.log'), new File(['c'], '3.log')] },
+    })
+    expect(screen.getByRole('alert')).toHaveTextContent('Cannot attach more than 2 files (3 selected).')
+    expect(screen.queryByText('1.log')).not.toBeInTheDocument()
+
+    // Per-file size rejection (> 10 bytes)
+    fireEvent.change(fileInput, {
+      target: { files: [new File(['0123456789A'], 'big.log')] },
+    })
+    expect(screen.getByRole('alert')).toHaveTextContent('big.log (11 bytes) exceeds the 10 bytes per-file limit.')
+    expect(screen.queryByText('big.log')).not.toBeInTheDocument()
+
+    // Valid selection clears alert; cumulative rejection (> 15 bytes) preserves valid file
+    fireEvent.change(fileInput, { target: { files: [new File(['0123456789'], 'ten.log')] } })
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByText('ten.log')).toBeInTheDocument()
+
+    fireEvent.change(fileInput, { target: { files: [new File(['012345'], 'six.log')] } })
+    expect(screen.getByRole('alert')).toHaveTextContent('Selected files total 16 bytes, exceeding the 15 bytes total limit.')
+    expect(screen.getByText('ten.log')).toBeInTheDocument()
+    expect(screen.queryByText('six.log')).not.toBeInTheDocument()
+
+    // Tighten capability limit before submit so encoder rejects before starting FileReader or POST
+    const tighterCaps = makeFeedbackCapabilities(undefined, {
+      max_files: 2,
+      max_file_bytes: 8,
+      max_total_bytes: 15,
+    })
+    rerender(<FeedbackDialog open={true} onOpenChange={onOpenChange} capabilities={tighterCaps} />)
+    readSpy.mockClear()
+
+    await user.click(screen.getByRole('button', { name: /create issue/i }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('ten.log (10 bytes) exceeds the 8 bytes per-file limit.')
+    expect(readSpy).not.toHaveBeenCalled()
+    expect(mockPost.mock.calls.filter(([p]) => p === '/api/feedback/create')).toHaveLength(0)
   })
 })

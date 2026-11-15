@@ -234,6 +234,14 @@ class ReportPortalConfig(NamedTuple):
     push_tracker_links: bool
 
 
+DEFAULT_FEEDBACK_REPO_URL = "https://github.com/myk-org/rootcoz"
+
+
+def normalize_feedback_repo_url(value: str | None) -> str:
+    """Normalize feedback_repo_url so blank/whitespace coerces to the upstream default."""
+    return (value or "").strip() or DEFAULT_FEEDBACK_REPO_URL
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
@@ -263,10 +271,10 @@ class Settings(BaseSettings):
     tests_repo_url: str | None = None
     tests_repo_token: SecretStr | None = None  # NEW
     feedback_repo_url: str = Field(
-        default="https://github.com/myk-org/rootcoz",
+        default=DEFAULT_FEEDBACK_REPO_URL,
         description=(
             "GitHub repository URL for user feedback issues "
-            "(blank falls back to https://github.com/myk-org/rootcoz)."
+            f"(blank falls back to {DEFAULT_FEEDBACK_REPO_URL})."
         ),
     )
     # Jira integration (optional). Each auth method is a fully
@@ -1172,8 +1180,7 @@ class Settings(BaseSettings):
         object.__setattr__(
             self,
             "feedback_repo_url",
-            (self.feedback_repo_url or "").strip()
-            or "https://github.com/myk-org/rootcoz",
+            normalize_feedback_repo_url(self.feedback_repo_url),
         )
         # Normalize ai_provider (lowercase + legacy *-cli → canonical)
         if self.ai_provider:

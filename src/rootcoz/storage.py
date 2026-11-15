@@ -13646,7 +13646,9 @@ async def reserve_issue_attachments(
             used = (await cursor.fetchone())[0]
             if used + size > ceiling:
                 raise ValueError(
-                    f"Attachment {label} ceiling {ceiling // 1048576} MiB exceeded; delete old evidence first"
+                    f"Attachment {label} ceiling {ceiling // 1048576} MiB exceeded; "
+                    "delete old attachments with 'rootcoz delete-attachment <id>' "
+                    "(DELETE /api/issue-attachments/<id>) or delete the run first"
                 )
         await db.executemany(
             "INSERT INTO issue_attachments (id,submission_id,job_id,owner_id,media_type,display_name,size_bytes,tracker,state) VALUES (:id,:submission_id,:job_id,:owner_id,:media_type,:display_name,:size_bytes,:tracker,:state)",

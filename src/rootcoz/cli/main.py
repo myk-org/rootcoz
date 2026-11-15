@@ -13,6 +13,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Annotated, Any
 
+import click
 import typer
 import yaml
 from click.core import ParameterSource
@@ -37,10 +38,21 @@ from rootcoz.storage import MAX_INCOMPLETE_LIST_LIMIT, TEST_NAME_MODES, VALID_RO
 
 # -- App and sub-command groups -----------------------------------------------
 
+
+class _RootCozGroup(typer.core.TyperGroup):
+    """Preserve subcommand args across Click's Group.invoke clear so --help works config-free."""
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        rest = super().parse_args(ctx, args)
+        ctx.meta["subcommand_args"] = list(ctx.args)
+        return rest
+
+
 app = typer.Typer(
     name="rootcoz",
     help="CLI for the rootcoz REST API.",
     no_args_is_help=True,
+    cls=_RootCozGroup,
 )
 
 results_app = typer.Typer(help="Manage analysis results.", no_args_is_help=True)
@@ -473,6 +485,52 @@ def _resolve_server(
     raise typer.Exit(1)
 
 
+def _is_subcommand_help_invocation(ctx: typer.Context) -> bool:
+    """Return True when Click is completing or rendering help for a subcommand."""
+    if ctx.resilient_parsing:
+        return True
+    if not ctx.invoked_subcommand or not isinstance(ctx.command, click.Group):
+        return False
+    help_flags = set(ctx.help_option_names) | {"--help", "-h"}
+    cmd = ctx.command.get_command(ctx, ctx.invoked_subcommand)
+    rem = list(ctx.meta.get("subcommand_args", ctx.args))
+    while cmd is not None:
+        if not rem and getattr(cmd, "no_args_is_help", False):
+            return True
+        value_opts: dict[str, int] = {}
+        for param in cmd.params:
+            if (
+                isinstance(param, click.Option)
+                and not param.is_flag
+                and param.nargs > 0
+            ):
+                for opt in param.opts:
+                    value_opts[opt] = param.nargs
+        idx = 0
+        next_sub: tuple[click.Command | None, list[str]] | None = None
+        while idx < len(rem):
+            arg = rem[idx]
+            if arg == "--":
+                return False
+            if arg in help_flags:
+                return True
+            if arg in value_opts:
+                idx += 1 + value_opts[arg]
+                continue
+            if (
+                isinstance(cmd, click.Group)
+                and not arg.startswith("-")
+                and next_sub is None
+            ):
+                next_sub = (cmd.get_command(ctx, arg), rem[idx + 1 :])
+                break
+            idx += 1
+        if next_sub is None:
+            return False
+        cmd, rem = next_sub
+    return False
+
+
 @app.callback()
 def main_callback(
     ctx: typer.Context,
@@ -533,6 +591,9 @@ def main_callback(
         no_verify_ssl = False
     elif insecure:
         no_verify_ssl = True
+
+    if _is_subcommand_help_invocation(ctx):
+        return
 
     # Local-only config subcommands do not require a server connection.
     # 'defaults' needs a server to fetch analysis defaults from the API.
@@ -3020,6 +3081,13 @@ _DOWNLOAD_ATTACHMENT_OUTPUT_OPTION = typer.Option(
     "-o",
     help="Destination file path, or - for raw binary stdout.",
 )
+_DELETE_ATTACHMENT_ID_ARGUMENT = typer.Argument(help="Attachment ID (UUID) to delete.")
+_DELETE_ATTACHMENT_FORCE_OPTION = typer.Option(
+    False,
+    "--force",
+    "-f",
+    help="Skip confirmation prompt.",
+)
 
 
 def _print_attachment_summary(data: dict[str, Any]) -> None:
@@ -3189,6 +3257,30 @@ def download_attachment(
         )
     else:
         typer.echo(f"Downloaded {written} bytes to {sanitize_terminal_text(output)}")
+
+
+@app.command("delete-attachment")
+def delete_attachment(
+    attachment_id: str = _DELETE_ATTACHMENT_ID_ARGUMENT,
+    force: bool = _DELETE_ATTACHMENT_FORCE_OPTION,
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Delete an issue attachment you uploaded (or any attachment as admin) to free quota."""
+    safe_id = sanitize_terminal_text(attachment_id)
+    if not force and not typer.confirm(f"Delete issue attachment '{safe_id}'?"):
+        raise typer.Abort()
+    data = _run_client_command(
+        json_output,
+        lambda c: c.delete_issue_attachment(attachment_id),
+        emit_output=False,
+    )
+    if not _state.get("json", False):
+        freed = data.get("freed_bytes")
+        suffix = f" ({freed} bytes freed)" if isinstance(freed, int) else ""
+        deleted_id = sanitize_terminal_text(
+            str(data.get("attachment_id", attachment_id))
+        )
+        typer.echo(f"Deleted attachment {deleted_id}{suffix}")
 
 
 @app.command("create-issue")

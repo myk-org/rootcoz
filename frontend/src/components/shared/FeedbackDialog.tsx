@@ -184,7 +184,7 @@ export function FeedbackDialog({ open, onOpenChange, capabilities }: FeedbackDia
       let encodedAttachments: IssueAttachmentUpload[] = []
       if (attachments.length > 0) {
         try {
-          encodedAttachments = await filesToAttachmentPayload(attachments)
+          encodedAttachments = await filesToAttachmentPayload(attachments, pickerProps)
         } catch (err) {
           if (gen !== generationRef.current) return
           setCreateError(err instanceof Error ? err.message : 'Failed to read selected attachment.')
@@ -375,6 +375,9 @@ export function FeedbackDialog({ open, onOpenChange, capabilities }: FeedbackDia
               <AttachmentPicker
                 files={attachments}
                 onChange={setAttachments}
+                maxFiles={pickerProps.maxFiles}
+                maxFileBytes={pickerProps.maxFileBytes}
+                maxTotalBytes={pickerProps.maxTotalBytes}
                 disabledReason={
                   uncertainAttachmentLock
                     ? 'Issue creation outcome is uncertain — check GitHub instead of resubmitting.'

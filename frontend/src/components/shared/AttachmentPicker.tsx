@@ -1,8 +1,14 @@
-import { useId, useRef } from 'react'
+import { useId, useRef, useState } from 'react'
 import { Paperclip, X } from 'lucide-react'
 import { Button } from '@/components/ui/button'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
-import { describeAttachmentDelivery } from '@/lib/attachments'
+import {
+  DEFAULT_MAX_ATTACHMENT_FILE_BYTES,
+  DEFAULT_MAX_ATTACHMENT_FILES,
+  DEFAULT_MAX_ATTACHMENT_TOTAL_BYTES,
+  describeAttachmentDelivery,
+  validateAttachmentSelection,
+} from '@/lib/attachments'
 import type { IssueAttachmentSummary } from '@/types'
 
 interface AttachmentPickerProps {
@@ -10,17 +16,43 @@ interface AttachmentPickerProps {
   onChange: (files: File[]) => void
   disabledReason?: string
   hint?: string
+  maxFiles?: number
+  maxFileBytes?: number
+  maxTotalBytes?: number
 }
 
-export function AttachmentPicker({ files, onChange, disabledReason, hint }: AttachmentPickerProps) {
+export function AttachmentPicker({
+  files,
+  onChange,
+  disabledReason,
+  hint,
+  maxFiles = DEFAULT_MAX_ATTACHMENT_FILES,
+  maxFileBytes = DEFAULT_MAX_ATTACHMENT_FILE_BYTES,
+  maxTotalBytes = DEFAULT_MAX_ATTACHMENT_TOTAL_BYTES,
+}: AttachmentPickerProps) {
   const input = useRef<HTMLInputElement>(null)
   const reasonId = useId()
+  const [rejection, setRejection] = useState<{ message: string; filesRef: File[] } | null>(null)
+  const rejectionError = !disabledReason && rejection?.filesRef === files ? rejection.message : null
+
   return (
     <div className="space-y-2 min-w-0">
       <input ref={input} type="file" multiple hidden aria-label="Issue attachments" disabled={!!disabledReason}
         onChange={event => {
-          onChange([...files, ...Array.from(event.target.files ?? [])])
+          const selected = Array.from(event.target.files ?? [])
           event.target.value = ''
+          if (selected.length === 0) {
+            setRejection(null)
+            return
+          }
+          const nextFiles = [...files, ...selected]
+          const error = validateAttachmentSelection(nextFiles, { maxFiles, maxFileBytes, maxTotalBytes })
+          if (error) {
+            setRejection({ message: error, filesRef: files })
+            return
+          }
+          setRejection(null)
+          onChange(nextFiles)
         }} />
       <TooltipProvider>
         <Tooltip>
@@ -36,12 +68,20 @@ export function AttachmentPicker({ files, onChange, disabledReason, hint }: Atta
       </TooltipProvider>
       {disabledReason && <p id={reasonId} className="text-xs text-text-secondary">{disabledReason}</p>}
       {hint && <p className="text-xs text-text-tertiary">{hint}</p>}
+      {rejectionError && (
+        <p role="alert" className="rounded border border-signal-red/30 bg-glow-red px-2.5 py-1.5 text-xs text-signal-red">
+          {rejectionError}
+        </p>
+      )}
       {files.length > 0 && <ul className="space-y-1 text-sm text-text-secondary">
         {files.map((file, index) => <li key={index} className="flex items-center gap-2 min-w-0">
           <span className="break-all min-w-0">{file.name}</span>
           <span className="shrink-0 text-xs text-text-tertiary">{file.size.toLocaleString()} bytes</span>
           <Button type="button" variant="ghost" size="sm" aria-label={`Remove ${file.name}`} disabled={!!disabledReason}
-            onClick={() => onChange(files.filter((_, i) => i !== index))}><X className="h-4 w-4" /></Button>
+            onClick={() => {
+              setRejection(null)
+              onChange(files.filter((_, i) => i !== index))
+            }}><X className="h-4 w-4" /></Button>
         </li>)}
       </ul>}
     </div>

@@ -1742,6 +1742,15 @@ class RootCozClient:
         )
         return written
 
+    def delete_issue_attachment(self, attachment_id: str) -> dict[str, Any]:
+        """Delete an issue attachment (uploader or admin) to free quota. DELETE /api/issue-attachments/{id}"""
+        stripped_id = attachment_id.strip()
+        if not stripped_id:
+            raise RootCozError(detail="Attachment ID must not be empty")
+        return self._request(
+            "DELETE", f"/api/issue-attachments/{quote(stripped_id, safe='')}"
+        )
+
     # -- User Tokens ----------------------------------------------------------
 
     def get_user_tokens(self) -> dict[str, Any]:

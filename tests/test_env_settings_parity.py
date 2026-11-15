@@ -1195,3 +1195,23 @@ def test_feedback_repo_url_is_a_github_setting_with_blank_coercion_and_userinfo_
     assert defaults.status_code == 200
     assert defaults.json()["feedback_repo_url"] == "https://github.com/acme/feedback"
     assert "secret_tok" not in defaults.text
+
+    # Round-trip blank and whitespace DB overrides: both persist and display the
+    # normalized default URL in Server Settings rather than a blank string.
+    for blank in ("", "   "):
+        saved = client.put(
+            "/api/admin/settings",
+            headers=_admin_headers(),
+            json={"settings": {"feedback_repo_url": blank}},
+        )
+        assert saved.status_code == 200
+        clear_settings_cache()
+        assert get_settings().feedback_repo_url == "https://github.com/myk-org/rootcoz"
+        round_trip = {
+            item["key"]: item
+            for item in client.get(
+                "/api/admin/settings", headers=_admin_headers()
+            ).json()
+        }["feedback_repo_url"]
+        assert round_trip["source"] == "db"
+        assert round_trip["value"] == "https://github.com/myk-org/rootcoz"

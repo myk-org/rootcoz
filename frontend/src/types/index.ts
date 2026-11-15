@@ -365,6 +365,8 @@ export interface IssueAttachmentsCapability {
   max_files: number
   max_file_bytes: number
   max_total_bytes: number
+  max_run_bytes: number
+  max_owner_bytes: number
   types: string[]
   report_github: IssueAttachmentSurfaceCapability
   report_jira: IssueAttachmentSurfaceCapability

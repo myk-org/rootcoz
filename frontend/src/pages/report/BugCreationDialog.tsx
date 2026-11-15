@@ -265,7 +265,7 @@ export function BugCreationDialog({
       let encodedAttachments: IssueAttachmentUpload[] = []
       if (attachments.length > 0) {
         try {
-          encodedAttachments = await filesToAttachmentPayload(attachments)
+          encodedAttachments = await filesToAttachmentPayload(attachments, pickerProps)
         } catch (err) {
           setCreateError(err instanceof Error ? err.message : 'Failed to read selected attachment.')
           setCreateMaybeFiled(false)
@@ -632,6 +632,9 @@ export function BugCreationDialog({
               <AttachmentPicker
                 files={attachments}
                 onChange={setAttachments}
+                maxFiles={pickerProps.maxFiles}
+                maxFileBytes={pickerProps.maxFileBytes}
+                maxTotalBytes={pickerProps.maxTotalBytes}
                 disabledReason={
                   uncertainAttachmentLock
                     ? 'Issue creation outcome is uncertain — check the tracker instead of resubmitting.'
