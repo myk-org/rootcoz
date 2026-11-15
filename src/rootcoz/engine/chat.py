@@ -547,8 +547,22 @@ def analysis_http_tools(
     return tools
 
 
-CHAT_TOOL_REJECTED_TEMPLATE = (
-    "{attachments}|{attach}|{files}|{file_path}|{file_paths}|{path}|{paths}"
+CHAT_TOOL_REJECTED_FIELDS = (
+    "attachments",
+    "attachment",
+    "attach",
+    "files",
+    "file",
+    "file_path",
+    "file_paths",
+    "attachment_path",
+    "attachment_paths",
+    "path",
+    "paths",
+    "data_b64",
+)
+CHAT_TOOL_REJECTED_TEMPLATE = "|".join(
+    f"{{{field}}}" for field in CHAT_TOOL_REJECTED_FIELDS
 )
 _CHAT_TOOL_ATTACHMENT_NOTE = (
     " File attachments and local file paths are not supported in chat model "

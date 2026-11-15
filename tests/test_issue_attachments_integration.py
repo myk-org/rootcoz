@@ -1169,24 +1169,91 @@ class TestDirectChatManifestAndModelRefusal:
         assert "--attach" in conv_refused.json()["detail"]
 
         # Model tool header with interpolated rejected path arg is refused instead of silently stripped.
-        tool_headers = dict(by_name["propose_tracker_issue"]["http"]["headers"])
-        tool_headers["Authorization"] = headers["Authorization"]
-        tool_headers["X-RootCoz-Chat-Tool-Rejected"] = tool_headers[
-            "X-RootCoz-Chat-Tool-Rejected"
-        ].replace("{file_path}", "/etc/passwd")
-        path_refused = client.post(
-            "/api/chat-issue/propose",
-            headers=tool_headers,
-            json={
-                "target": "github",
-                "title": "T",
-                "body": "B",
-                "job_id": job_id,
-                "conversation": job_id,
-            },
-        )
-        assert path_refused.status_code == 400
-        assert "local paths" in path_refused.json()["detail"]
+        for tool_name, endpoint, base_payload in (
+            (
+                "propose_tracker_issue",
+                "/api/chat-issue/propose",
+                {
+                    "target": "jira",
+                    "title": "T",
+                    "body": "B",
+                    "job_id": job_id,
+                    "conversation": job_id,
+                },
+            ),
+            (
+                "create_github_issue",
+                "/api/chat-issue",
+                {
+                    "target": "github",
+                    "title": "T",
+                    "body": "B",
+                    "confirmation_id": "missing-draft-id",
+                    "confirmation_code": "BADCODE",
+                    "job_id": job_id,
+                },
+            ),
+            (
+                "create_jira_issue",
+                "/api/chat-issue",
+                {
+                    "target": "jira",
+                    "title": "T",
+                    "body": "B",
+                    "confirmation_id": "missing-draft-id",
+                    "confirmation_code": "BADCODE",
+                },
+            ),
+        ):
+            template_hdrs = by_name[tool_name]["http"]["headers"]
+            for forbidden_field, sample_val in (
+                ("attachments", '[{"filename":"log.txt","data_b64":"aGVsbG8="}]'),
+                ("data_b64", "aGVsbG8K"),
+                ("file_path", "/tmp/issue505-sentinel.log"),
+                ("attachment_path", "/tmp/issue505-sentinel.log"),
+                ("attachment", "log.txt"),
+                ("files", "log.txt"),
+                ("path", "/tmp/issue505-sentinel.log"),
+                ("paths", "/tmp/issue505-sentinel.log"),
+            ):
+                placeholder = f"{{{forbidden_field}}}"
+                assert placeholder in template_hdrs["X-RootCoz-Chat-Tool-Rejected"], (
+                    f"{tool_name} missing {placeholder} in X-RootCoz-Chat-Tool-Rejected"
+                )
+                tool_headers = dict(template_hdrs)
+                tool_headers["Authorization"] = headers["Authorization"]
+                tool_headers["X-RootCoz-Chat-Tool-Rejected"] = tool_headers[
+                    "X-RootCoz-Chat-Tool-Rejected"
+                ].replace(placeholder, sample_val)
+                refused = client.post(
+                    endpoint,
+                    headers=tool_headers,
+                    json=base_payload,
+                )
+                assert refused.status_code == 400, (
+                    f"{tool_name} with {forbidden_field} returned {refused.status_code}: {refused.text}"
+                )
+                detail = refused.json()["detail"]
+                assert "local paths" in detail and "--attach" in detail
+
+                # Even if a caller sends X-RootCoz-Chat-Tool: 1 with raw extra field in JSON body
+                # (without interpolating X-RootCoz-Chat-Tool-Rejected), attachment/path refusal
+                # still fires BEFORE confirmation_id validation.
+                if forbidden_field != "attachments":
+                    raw_headers = {
+                        "Authorization": headers["Authorization"],
+                        "X-RootCoz-Chat-Tool": "1",
+                    }
+                    raw_refused = client.post(
+                        endpoint,
+                        headers=raw_headers,
+                        json={**base_payload, forbidden_field: sample_val},
+                    )
+                    assert raw_refused.status_code == 400
+                    assert (
+                        "local paths" in raw_refused.json()["detail"]
+                        and "--attach" in raw_refused.json()["detail"]
+                    )
 
 
 class TestDownloadSecurityAndAuditDedupe:

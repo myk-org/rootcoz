@@ -150,7 +150,10 @@ from rootcoz.encryption import (
     get_hmac_secret,
     strip_sensitive_from_response,
 )
-from rootcoz.engine.chat import CHAT_TOOL_REJECTED_TEMPLATE
+from rootcoz.engine.chat import (
+    CHAT_TOOL_REJECTED_FIELDS,
+    CHAT_TOOL_REJECTED_TEMPLATE,
+)
 from rootcoz.engine.core import (
     ROOTCOZ_ISSUE_PROMPT_FILENAME,
     RepoTarget,
@@ -12968,21 +12971,44 @@ _CHAT_TOOL_ATTACHMENT_REFUSAL = (
     "Chat model tools cannot attach files or read local paths; use the report "
     "dialog, feedback dialog, or rootcoz CLI --attach instead."
 )
+_CHAT_TOOL_REJECTED_FIELD_SET = frozenset(CHAT_TOOL_REJECTED_FIELDS)
+_CHAT_TOOL_BODY_ONLY_REJECTED_FIELDS = _CHAT_TOOL_REJECTED_FIELD_SET - {"attachments"}
 
 
-def _reject_model_chat_tool_attachments(
+async def _reject_model_chat_tool_attachments(
     request: Request,
     attachments: Sequence[IssueAttachmentUpload],
     *,
     conversation: str = "",
 ) -> None:
-    if request.headers.get("x-rootcoz-chat-tool") == "1":
+    is_chat_tool = request.headers.get("x-rootcoz-chat-tool") == "1"
+    if not is_chat_tool and not conversation:
+        return
+    raw_body: Any = None
+    with contextlib.suppress(Exception):
+        raw_body = await request.json()
+    raw_keys = set(raw_body.keys()) if isinstance(raw_body, dict) else set()
+    if is_chat_tool:
         rejected_hdr = request.headers.get(
             "x-rootcoz-chat-tool-rejected", CHAT_TOOL_REJECTED_TEMPLATE
         )
-        if attachments or rejected_hdr != CHAT_TOOL_REJECTED_TEMPLATE:
+        if (
+            attachments
+            or rejected_hdr != CHAT_TOOL_REJECTED_TEMPLATE
+            or bool(raw_keys & _CHAT_TOOL_REJECTED_FIELD_SET)
+        ):
+            logger.info(
+                "Rejected chat tool attachment/path parameter on %s",
+                request.url.path,
+            )
             raise HTTPException(status_code=400, detail=_CHAT_TOOL_ATTACHMENT_REFUSAL)
-    if conversation and attachments:
+    if conversation and (
+        attachments or bool(raw_keys & _CHAT_TOOL_BODY_ONLY_REJECTED_FIELDS)
+    ):
+        logger.info(
+            "Rejected conversation-bound attachment/path parameter on %s",
+            request.url.path,
+        )
         raise HTTPException(status_code=400, detail=_CHAT_TOOL_ATTACHMENT_REFUSAL)
 
 
@@ -13810,7 +13836,7 @@ async def propose_chat_issue(
         # half of the gate a chat model reaches most often.
         _require_reviewer(request)
         _check_allow_list(request)
-        _reject_model_chat_tool_attachments(
+        await _reject_model_chat_tool_attachments(
             request, body.attachments, conversation=body.conversation
         )
         if tracker == "github":
@@ -13920,7 +13946,7 @@ async def create_chat_issue(
         # the docs promise a row for, and this endpoint has no other refusal path.
         _require_reviewer(request)
         _check_allow_list(request)
-        _reject_model_chat_tool_attachments(request, body.attachments)
+        await _reject_model_chat_tool_attachments(request, body.attachments)
         user_tokens = await _chat_issue_tracker_tokens(username, tracker, settings)
         title = scrub_sensitive_data(body.title)
         issue_body = scrub_sensitive_data(body.body)

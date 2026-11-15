@@ -4154,3 +4154,67 @@ class TestIssueAttachmentsClient:
         with pytest.raises(RootCozError, match="must not be empty"):
             client.delete_issue_attachment("   ")
         assert len(seen) == 1
+
+    @pytest.mark.parametrize(
+        ("method", "args"),
+        [
+            ("create_github_issue", ("job-1", "test_case", "Title", "Body")),
+            ("create_jira_bug", ("job-1", "test_case", "Title", "Body")),
+            ("propose_chat_issue", ("jira", "Title", "Body")),
+            ("create_chat_issue", ("jira", "Title", "Body", "draft-1", "CODE12")),
+            ("feedback_create", ("Title", "Body")),
+        ],
+    )
+    def test_attachment_calls_enforce_120s_minimum_timeout_and_preserve_larger_timeout(
+        self, tmp_path, method, args
+    ):
+        att_file = tmp_path / "evidence.log"
+        att_file.write_bytes(b"timeout-check\n")
+        seen_timeouts: list[dict[str, float | None]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_timeouts.append(dict(request.extensions.get("timeout") or {}))
+            return httpx.Response(
+                201,
+                json={
+                    "url": "https://example.com/1",
+                    "issue_url": "https://example.com/1",
+                },
+            )
+
+        def _client_with_timeout(timeout_s: float) -> RootCozClient:
+            client = RootCozClient(BASE_URL, timeout=timeout_s)
+            client._client.close()
+            client._client = httpx.Client(
+                transport=httpx.MockTransport(handler),
+                base_url=BASE_URL,
+                timeout=timeout_s,
+            )
+            return client
+
+        # 1) Default 30s client: text-only stays 30s, attachments bump to 120s.
+        default_client = _client_with_timeout(30.0)
+        getattr(default_client, method)(*args)
+        getattr(default_client, method)(*args, attachments=[])
+        getattr(default_client, method)(*args, attachments=[str(att_file)])
+
+        # 2) Smaller custom timeout (15s): attachments still enforce >= 120s.
+        short_client = _client_with_timeout(15.0)
+        getattr(short_client, method)(*args, attachments=[str(att_file)])
+
+        # 3) Larger custom timeout (180s): preserved when attachments are passed.
+        long_client = _client_with_timeout(180.0)
+        getattr(long_client, method)(*args, attachments=[str(att_file)])
+
+        assert [t["read"] for t in seen_timeouts] == [
+            30.0,
+            30.0,
+            120.0,
+            120.0,
+            180.0,
+        ]
+        assert all(
+            seen_timeouts[idx][phase] == expected
+            for idx, expected in ((2, 120.0), (3, 120.0), (4, 180.0))
+            for phase in ("connect", "read", "write", "pool")
+        )

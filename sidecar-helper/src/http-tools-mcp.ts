@@ -21,6 +21,63 @@ interface HttpToolDef {
 
 const PROTOCOL_VERSION = "2024-11-05";
 
+const ATTACHMENT_LIKE_FIELDS = new Set([
+  "attachments",
+  "attachment",
+  "attach",
+  "files",
+  "file",
+  "file_path",
+  "file_paths",
+  "attachment_path",
+  "attachment_paths",
+  "path",
+  "paths",
+  "data_b64",
+]);
+
+const CHAT_TOOL_ATTACHMENT_REFUSAL =
+  "Chat model tools cannot attach files or read local paths; use the report dialog, feedback dialog, or rootcoz CLI --attach instead.";
+
+function sanitizeFieldName(key: string): string {
+  return key.replace(/[\x00-\x1f\x7f]/g, "");
+}
+
+function isAttachmentLikeField(key: string): boolean {
+  const lower = key.toLowerCase();
+  return (
+    ATTACHMENT_LIKE_FIELDS.has(lower) ||
+    lower.includes("attach") ||
+    lower.includes("file_path") ||
+    lower.includes("filepath") ||
+    lower.includes("b64")
+  );
+}
+
+function validateToolArguments(
+  tool: HttpToolDef,
+  args: Record<string, unknown>,
+): string | null {
+  const schema = tool.parameters;
+  if (!schema || schema.additionalProperties !== false) {
+    return null;
+  }
+  const rawProps = schema.properties;
+  const allowed =
+    rawProps && typeof rawProps === "object" && !Array.isArray(rawProps)
+      ? new Set(Object.keys(rawProps as Record<string, unknown>))
+      : new Set<string>();
+  const unexpected = Object.keys(args).filter((key) => !allowed.has(key));
+  if (unexpected.length === 0) {
+    return null;
+  }
+  const safeNames = unexpected.map(sanitizeFieldName).join(", ");
+  if (unexpected.some(isAttachmentLikeField)) {
+    return `Unsupported parameter(s): ${safeNames}. ${CHAT_TOOL_ATTACHMENT_REFUSAL}`;
+  }
+  return `Unsupported parameter(s): ${safeNames}.`;
+}
+
 function toolsFilePath(): string {
   const path = process.env.ROOTCOZ_HTTP_TOOLS_FILE?.trim();
   if (!path) {
@@ -126,12 +183,25 @@ async function handleRequest(msg: {
       return;
     }
     const args =
-      params.arguments && typeof params.arguments === "object"
+      params.arguments &&
+      typeof params.arguments === "object" &&
+      !Array.isArray(params.arguments)
         ? (params.arguments as Record<string, unknown>)
         : {};
     const tool = loadTools().find((t) => t.name === name);
     if (!tool?.http) {
       respondError(id, -32602, `Unknown tool: ${name}`);
+      return;
+    }
+    const validationError = validateToolArguments(tool, args);
+    if (validationError !== null) {
+      process.stderr.write(
+        `[http-tools-mcp] Rejected undeclared argument(s) on tool=${sanitizeFieldName(name)}: ${validationError}\n`,
+      );
+      respond(id, {
+        content: [{ type: "text", text: validationError }],
+        isError: true,
+      });
       return;
     }
     const httpConfig = expandHttpConfig(tool.http, args);

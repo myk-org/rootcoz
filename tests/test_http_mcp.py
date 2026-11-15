@@ -1026,3 +1026,263 @@ async def test_best_effort_async_fallback_lock_without_fcntl(
         ]
     )
     assert events == ["start", "end"] * 3
+
+
+def _prepare_mcp_entrypoint(
+    tmp_path: Path, *, force_ts_source: bool = False
+) -> list[str]:
+    """Return node argv for executing the real sidecar-helper http-tools-mcp server."""
+    import shutil
+    import subprocess
+
+    node = shutil.which("node")
+    if not node:
+        pytest.skip("node binary not available")
+    repo_root = Path(__file__).resolve().parents[1]
+    dist_js = repo_root / "sidecar-helper" / "dist" / "http-tools-mcp.js"
+    sidecar_pkg = (
+        repo_root / "sidecar-helper" / "node_modules" / "@myk-org" / "pi-sidecar"
+    )
+    if not force_ts_source and dist_js.is_file() and sidecar_pkg.is_dir():
+        return [node, str(dist_js)]
+
+    probe = subprocess.run(
+        [node, "-e", "process.exit(process.features?.typescript ? 0 : 1)"],
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+    if probe.returncode != 0:
+        pytest.skip("Node TypeScript stripping or built http-tools-mcp.js unavailable")
+
+    # Hermetic fallback for clean CI checkouts without sidecar-helper npm install:
+    # run the real TypeScript source directly under Node's built-in TS stripping
+    # with a minimal @myk-org/pi-sidecar HTTP executor shim.
+    runner_dir = tmp_path / "mcp_runner"
+    pkg_dir = runner_dir / "node_modules" / "@myk-org" / "pi-sidecar"
+    pkg_dir.mkdir(parents=True)
+    (runner_dir / "package.json").write_text('{"type":"module"}\n', encoding="utf-8")
+    (pkg_dir / "package.json").write_text(
+        '{"name":"@myk-org/pi-sidecar","type":"module","main":"index.js"}\n',
+        encoding="utf-8",
+    )
+    (pkg_dir / "index.js").write_text(
+        "export function normalizeHttpToolConfig(raw) {\n"
+        "  return {\n"
+        "    method: raw.method,\n"
+        "    url: raw.url,\n"
+        "    headers: raw.headers,\n"
+        "    queryParams: raw.queryParams ?? raw.query_params,\n"
+        "    bodyTemplate: raw.bodyTemplate ?? raw.body_template,\n"
+        "  };\n"
+        "}\n"
+        "function interp(tpl, params) {\n"
+        "  return tpl.replace(/\\{(\\w+)\\}/g, (m, k) =>\n"
+        "    k in params ? (typeof params[k] === 'string' ? params[k] : JSON.stringify(params[k])) : m\n"
+        "  );\n"
+        "}\n"
+        "export function createHttpToolExecutor(cfg) {\n"
+        "  return async (params) => {\n"
+        "    const headers = {};\n"
+        "    for (const [k, v] of Object.entries(cfg.headers || {})) {\n"
+        "      headers[k] = interp(String(v), params).replace(/[\\r\\n]/g, '');\n"
+        "    }\n"
+        "    const body = cfg.bodyTemplate === undefined ? undefined : interp(JSON.stringify(cfg.bodyTemplate), params);\n"
+        "    const resp = await fetch(cfg.url, { method: cfg.method, headers, body });\n"
+        "    const txt = await resp.text();\n"
+        "    return resp.ok ? txt : `HTTP ${resp.status}: ${txt}`;\n"
+        "  };\n"
+        "}\n",
+        encoding="utf-8",
+    )
+    src_ts = repo_root / "sidecar-helper" / "src" / "http-tools-mcp.ts"
+    target_ts = runner_dir / "http-tools-mcp.ts"
+    target_ts.write_text(src_ts.read_text(encoding="utf-8"), encoding="utf-8")
+    return [node, str(target_ts)]
+
+
+@pytest.mark.parametrize("force_ts_source", [False, True])
+def test_http_tools_mcp_rejects_attachments_and_paths_before_http_post(
+    tmp_path: Path, force_ts_source: bool
+) -> None:
+    """Actual stdio http-tools-mcp refuses attachments/data_b64/file_path/attachment_path before HTTP."""
+    import subprocess
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    cmd = _prepare_mcp_entrypoint(tmp_path, force_ts_source=force_ts_source)
+    received_posts: list[tuple[str, dict[str, object]]] = []
+
+    class _Handler(BaseHTTPRequestHandler):
+        def do_POST(self) -> None:
+            length = int(self.headers.get("Content-Length", "0"))
+            raw = self.rfile.read(length)
+            received_posts.append((self.path, json.loads(raw.decode("utf-8"))))
+            out = json.dumps(
+                {"confirmation_id": "cid-1", "confirmation_code": "123456"}
+            ).encode("utf-8")
+            self.send_response(201)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(out)))
+            self.end_headers()
+            self.wfile.write(out)
+
+        def log_message(self, format: str, *args: object) -> None:
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _Handler)
+    port = server.server_address[1]
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    sentinel = tmp_path / "issue505-sentinel.log"
+    sentinel.write_text("SENTINEL_DO_NOT_READ\n", encoding="utf-8")
+    sentinel_bytes_before = sentinel.read_bytes()
+
+    try:
+        tools = build_chat_custom_tools(
+            server_url=f"http://127.0.0.1:{port}",
+            auth_token="tok-test",
+            job_id="job-505",
+            tracker_targets=("github", "jira"),
+        )
+        tools_file = tmp_path / "tools.json"
+        tools_file.write_text(json.dumps(tools), encoding="utf-8")
+
+        forbidden_payloads: list[tuple[str, object]] = [
+            ("attachments", [{"filename": "log.txt", "data_b64": "aGVsbG8K"}]),
+            ("data_b64", "aGVsbG8K"),
+            ("file_path", str(sentinel)),
+            ("attachment_path", str(sentinel)),
+        ]
+        tool_base_args: list[tuple[str, dict[str, object]]] = [
+            ("propose_tracker_issue", {"target": "jira", "title": "T", "body": "B"}),
+            (
+                "create_github_issue",
+                {
+                    "title": "T",
+                    "body": "B",
+                    "confirmation_id": "c",
+                    "confirmation_code": "k",
+                },
+            ),
+            (
+                "create_jira_issue",
+                {
+                    "title": "T",
+                    "body": "B",
+                    "confirmation_id": "c",
+                    "confirmation_code": "k",
+                },
+            ),
+        ]
+
+        req_lines = [json.dumps({"jsonrpc": "2.0", "id": 0, "method": "tools/list"})]
+        expected_rejected: dict[int, tuple[str, str]] = {}
+        call_id = 1
+        for tool_name, base_args in tool_base_args:
+            for field_name, field_val in forbidden_payloads:
+                expected_rejected[call_id] = (tool_name, field_name)
+                req_lines.append(
+                    json.dumps(
+                        {
+                            "jsonrpc": "2.0",
+                            "id": call_id,
+                            "method": "tools/call",
+                            "params": {
+                                "name": tool_name,
+                                "arguments": {**base_args, field_name: field_val},
+                            },
+                        }
+                    )
+                )
+                call_id += 1
+
+        # Generic undeclared field on additionalProperties=false tool also fails before HTTP
+        generic_id = call_id
+        call_id += 1
+        req_lines.append(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": generic_id,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "propose_tracker_issue",
+                        "arguments": {
+                            "target": "jira",
+                            "title": "T",
+                            "body": "B",
+                            "unexpected_extra": "val",
+                        },
+                    },
+                }
+            )
+        )
+
+        # Valid call with declared args succeeds via HTTP POST
+        valid_id = call_id
+        req_lines.append(
+            json.dumps(
+                {
+                    "jsonrpc": "2.0",
+                    "id": valid_id,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "propose_tracker_issue",
+                        "arguments": {
+                            "target": "jira",
+                            "title": "Clean",
+                            "body": "Body",
+                        },
+                    },
+                }
+            )
+        )
+
+        env = os.environ.copy()
+        env["ROOTCOZ_HTTP_TOOLS_FILE"] = str(tools_file)
+        proc = subprocess.run(
+            cmd,
+            input="\n".join(req_lines) + "\n",
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=20,
+            check=True,
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+
+    by_id = {
+        msg["id"]: msg["result"]
+        for line in proc.stdout.splitlines()
+        if line.strip()
+        for msg in [json.loads(line)]
+    }
+    listed = {t["name"]: t for t in by_id[0]["tools"]}
+    for tname in ("propose_tracker_issue", "create_github_issue", "create_jira_issue"):
+        assert listed[tname]["inputSchema"]["additionalProperties"] is False
+        assert "--attach" in listed[tname]["description"]
+
+    for cid, (tool_name, field_name) in expected_rejected.items():
+        result = by_id[cid]
+        assert result.get("isError") is True, (
+            f"{tool_name}({field_name}) was not rejected: {result}"
+        )
+        text = result["content"][0]["text"]
+        assert field_name in text
+        assert "cannot attach files or read local paths" in text
+        assert "--attach" in text
+        assert "SENTINEL_DO_NOT_READ" not in text
+
+    assert by_id[generic_id].get("isError") is True
+    assert "unexpected_extra" in by_id[generic_id]["content"][0]["text"]
+
+    # Only the single valid call reached the HTTP server!
+    assert by_id[valid_id].get("isError") is False
+    assert len(received_posts) == 1
+    assert received_posts[0][0] == "/api/chat-issue/propose"
+    assert received_posts[0][1]["title"] == "Clean"
+    assert sentinel.read_bytes() == sentinel_bytes_before
