@@ -1469,6 +1469,87 @@ async def test_linking_respects_the_allow_list(temp_db_path: Path) -> None:
         assert await storage.list_user_identities("ruthn") == []
 
 
+async def test_both_link_paths_refuse_the_same_account(temp_db_path: Path) -> None:
+    """The ticket route and the live callback are one rule, not two.
+
+    Both doors write the same credential onto the same account, so a name outside
+    ``ALLOWED_USERS`` must be refused at both, with the same audited reason — and
+    an account inside the list must still link through the browser flow (the
+    control below), or the refusal would just be "linking is broken".
+    """
+    env = dict(_SSO_ENV, ALLOWED_USERS="someone-else")
+    for client in make_app_client(temp_db_path, env):
+        await storage.create_user("ruthn")
+        raw_key = await storage.rotate_own_key("ruthn")
+        ticket = await _ticket(client)
+
+        # Door one: the credential-verified ticket. A 403, as before.
+        ticket_refusal = client.post(
+            "/api/auth/sso/link",
+            json={"ticket": ticket, "username": "ruthn", "api_key": raw_key},
+        )
+        assert ticket_refusal.status_code == 403
+
+        # Door two: the live callback, for the same account and provider.
+        session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+        sealed, state = _sealed(
+            mode=sso_state.MODE_LINK, link_to="ruthn", next_path="/settings"
+        )
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+        with patch.object(
+            GoogleProvider, "exchange", return_value=_claims(), autospec=True
+        ):
+            callback_refusal = client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+        assert callback_refusal.status_code == 303
+        assert callback_refusal.headers["location"] == "/settings?sso_error=denied"
+        assert await storage.list_user_identities("ruthn") == []
+        # One rule, so one reason: both doors left the same row for the same account.
+        refusals = [
+            row
+            for row in await _audit_actions(temp_db_path)
+            if row["action"] == "auth.sso_login_failed"
+            and row["details"]["reason"] == "not_allowed"
+        ]
+        assert [row["actor"] for row in refusals] == ["ruthn", "ruthn"]
+        assert [row["details"]["provider"] for row in refusals] == ["google", "google"]
+        assert {row["outcome"] for row in refusals} == {"denied"}
+
+
+async def test_a_browser_link_works_for_an_allow_listed_account(
+    temp_db_path: Path,
+) -> None:
+    """The control: inside ``ALLOWED_USERS`` the same callback does link."""
+    env = dict(_SSO_ENV, ALLOWED_USERS="ruthn")
+    for client in make_app_client(temp_db_path, env):
+        await storage.create_user("ruthn")
+        session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+        sealed, state = _sealed(
+            mode=sso_state.MODE_LINK, link_to="ruthn", next_path="/settings"
+        )
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+
+        with patch.object(
+            GoogleProvider, "exchange", return_value=_claims(), autospec=True
+        ):
+            response = client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 303
+        assert response.headers["location"] == "/settings?sso_linked=google"
+        linked = await storage.list_user_identities("ruthn")
+        assert [(row["provider"], row["subject"]) for row in linked] == [
+            ("google", "sub-1")
+        ]
+
+
 async def test_a_stolen_ticket_cannot_be_redeemed_in_another_browser(
     temp_db_path: Path,
 ) -> None:
@@ -3657,6 +3738,102 @@ async def test_an_account_that_became_unusable_is_denied_at_redemption(
         assert polled.json()["status"] == "denied"
 
 
+async def test_a_downgrade_after_approval_is_not_undone_by_redemption(
+    temp_db_path: Path,
+) -> None:
+    """Approval captures no rights: redemption reads the account as it is now.
+
+    A demotion also invalidates the account's sessions. If redemption minted from
+    the role the poll read, that invalidation would lose to a code approved
+    before it.
+    """
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_admin_user("boss")
+        session = await storage.create_session("boss", is_admin=True, role="admin")
+        started = _start_device(client)
+        client.cookies.set("rootcoz_session", session)
+        client.post(
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers=_SAME_ORIGIN,
+        )
+        client.cookies.clear()
+        # Demoted while the code was still waiting for the terminal to poll.
+        await storage.change_user_role("boss", "reviewer")
+
+        polled = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": started["device_code"]}
+        )
+        body = polled.json()
+        assert body["status"] == "approved"
+        minted = await storage.get_session(body["token"])
+        assert minted is not None
+        assert minted["role"] == "reviewer"
+        assert bool(minted["is_admin"]) is False
+
+
+async def test_a_downgrade_between_the_polls_read_and_the_exchange_wins(
+    temp_db_path: Path,
+) -> None:
+    """The demotion lands in the window the poll leaves open, and still wins.
+
+    ``sso_device_poll`` reads the account before it spends the code; this test
+    commits the demotion *after* that read (the poll's own read is forced to
+    "admin", the value a stale implementation would have minted) and *before*
+    the exchange transaction. The exchange re-reads the row, so the session and
+    the audit row name the rights the account actually holds now.
+    """
+    from rootcoz import main as main_module
+
+    real_exchange = storage.exchange_device_code_for_session
+
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_admin_user("boss")
+        session = await storage.create_session("boss", is_admin=True, role="admin")
+        started = _start_device(client)
+        client.cookies.set("rootcoz_session", session)
+        client.post(
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers=_SAME_ORIGIN,
+        )
+        client.cookies.clear()
+
+        async def exchange_after_the_downgrade(device_code: str, **kwargs: object):
+            # The window between the poll's read and the exchange transaction.
+            await storage.change_user_role("boss", "reviewer")
+            return await real_exchange(device_code, **kwargs)
+
+        with (
+            # The poll sees the old rights; a mint from this value would be the bug.
+            patch.object(main_module, "role_and_admin", return_value=("admin", True)),
+            patch.object(
+                storage,
+                "exchange_device_code_for_session",
+                exchange_after_the_downgrade,
+            ),
+        ):
+            polled = client.post(
+                "/api/auth/sso/device/poll",
+                json={"device_code": started["device_code"]},
+            )
+
+        body = polled.json()
+        assert body["status"] == "approved"
+        minted = await storage.get_session(body["token"])
+        assert minted is not None
+        assert minted["role"] == "reviewer"
+        assert bool(minted["is_admin"]) is False
+        # The row names the session's real rights, not the poll's stale read.
+        redeemed = [
+            row
+            for row in await _audit_actions(temp_db_path)
+            if row["action"] == "auth.sso_device_redeemed"
+        ]
+        assert redeemed and redeemed[0]["actor_role"] == "reviewer"
+        assert redeemed[0]["details"]["role"] == "reviewer"
+
+
 async def test_an_approval_cannot_stamp_a_provider_the_code_was_not_opened_for(
     temp_db_path: Path,
 ) -> None:
@@ -4291,35 +4468,115 @@ async def test_oidc_discovery_accepts_and_caches_a_matching_issuer(
     assert fetches == 1
 
 
-async def test_oidc_discovery_rejects_a_plaintext_userinfo_endpoint(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The userinfo URL receives the access token on the no-id_token fallback."""
+async def test_oidc_refuses_a_response_without_an_id_token() -> None:
+    """No signature and no nonce is not an identity, so userinfo is not a fallback.
+
+    Google and Red Hat SSO both answer the code exchange with an ``id_token``, so
+    a response without one is a downgrade — a replayed access token from another
+    attempt would otherwise pass as this one.
+    """
+    import httpx
+
     from rootcoz.auth.sso import oidc as oidc_module
     from rootcoz.auth.sso.redhat import RedHatSSOProvider
 
     oidc_module._reset_discovery_cache()
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.path)
+        if request.url.path.endswith("openid-configuration"):
+            return httpx.Response(
+                200,
+                json={
+                    "issuer": "https://idp.example",
+                    "authorization_endpoint": "https://idp.example/auth",
+                    "token_endpoint": "https://idp.example/token",
+                    "jwks_uri": "https://idp.example/jwks",
+                    "userinfo_endpoint": "https://idp.example/userinfo",
+                },
+            )
+        if request.url.path == "/token":
+            return httpx.Response(
+                200, json={"access_token": "at", "token_type": "Bearer"}
+            )
+        return httpx.Response(200, json={"sub": "sub-1"})
+
     provider = RedHatSSOProvider(
         client_id="cid",
         client_secret="secret",  # pragma: allowlist secret
         issuer="https://idp.example",
     )
-    monkeypatch.setattr(
-        oidc_module,
-        "request_json",
-        _returning(
-            {
-                "issuer": "https://idp.example",
-                "authorization_endpoint": "https://idp.example/auth",
-                "token_endpoint": "https://idp.example/token",
-                "jwks_uri": "https://idp.example/jwks",
-                "userinfo_endpoint": "http://third-party.example/userinfo",
-            }
-        ),
-    )
-    with pytest.raises(AuthError) as excinfo:
-        await provider.metadata()
-    assert excinfo.value.reason == "discovery_failed"
+    with (
+        _github_client(httpx.MockTransport(handler)),
+        pytest.raises(AuthError) as excinfo,
+    ):
+        await provider.exchange(
+            code="c", code_verifier="v", redirect_uri="https://x/cb", nonce="n"
+        )
+
+    assert excinfo.value.reason == "no_id_token"
+    # The access token is never presented to the userinfo endpoint.
+    assert "/userinfo" not in calls
+
+
+async def test_an_oidc_login_without_an_id_token_is_refused_and_audited(
+    temp_db_path: Path,
+) -> None:
+    """A downgraded token response stops the browser login, naming the cause.
+
+    No provider rootcoz ships opts in to a userinfo-only identity, so a token
+    response with no ``id_token`` is a refusal on the normal sign-in path: the
+    browser gets ``no_id_token``, the trail records the same reason, and the
+    access token is never presented to the userinfo endpoint.
+    """
+    import httpx
+
+    from rootcoz.auth.sso import oidc as oidc_module
+
+    oidc_module._reset_discovery_cache()
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request.url.path)
+        if request.url.path == "/.well-known/openid-configuration":
+            return httpx.Response(
+                200,
+                json={
+                    "issuer": "https://accounts.google.com",
+                    "authorization_endpoint": "https://accounts.google.com/auth",
+                    "token_endpoint": "https://accounts.google.com/token",
+                    "jwks_uri": "https://accounts.google.com/jwks",
+                    "userinfo_endpoint": "https://accounts.google.com/userinfo",
+                },
+            )
+        if request.url.path == "/token":
+            return httpx.Response(
+                200, json={"access_token": "at", "token_type": "Bearer"}
+            )
+        return httpx.Response(200, json={"sub": "sub-1"})
+
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        sealed, state = _sealed()
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+
+        with _github_client(httpx.MockTransport(handler)):
+            response = client.get(
+                f"/api/auth/sso/google/callback?code=abc&state={state}",
+                follow_redirects=False,
+            )
+
+        assert response.status_code == 303
+        # Public by shape: the step that failed, never an account state.
+        assert response.headers["location"] == "/login?sso_error=no_id_token"
+        assert response.cookies.get("rootcoz_session") is None
+        refusal = await _last_sso_refusal(temp_db_path)
+        assert refusal["details"]["reason"] == "no_id_token"
+        # The unsigned userinfo answer was never asked for.
+        assert "/userinfo" not in seen
+        async with storage._connect_db() as db:
+            cursor = await db.execute("SELECT COUNT(*) AS n FROM users")
+            assert (await cursor.fetchone())["n"] == 0
 
 
 async def test_oidc_discovery_rejects_a_plaintext_endpoint(

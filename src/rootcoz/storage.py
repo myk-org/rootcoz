@@ -11207,11 +11207,9 @@ async def exchange_device_code_for_session(
     device_code: str,
     *,
     username: str,
-    is_admin: bool,
-    role: str,
     approved_provider: str | None = None,
     ttl_hours: int | None = None,
-) -> str | None:
+) -> dict[str, Any] | None:
     """Spend a claimed device code and mint its session in one transaction.
 
     The two writes share a commit for the same reason
@@ -11222,27 +11220,34 @@ async def exchange_device_code_for_session(
     leaves the claim releasable (:func:`release_device_code`), never a half-done
     redemption.
 
+    The rights are read from the account's row *inside* the transaction, never
+    taken from whatever the poll saw before it: a downgrade commits a role change
+    and invalidates the account's sessions, and a code approved under the old
+    rights must not get past that invalidation with them (the same reason the
+    row is re-read rather than cached). Removing the role from the signature is
+    what makes the stale value unrepresentable.
+
     Args:
         device_code: The raw device code the CLI holds.
         username: The account the claim was made for; a claim naming another
             account is not exchangeable.
-        is_admin: Whether the session carries administrator rights.
-        role: Role recorded on the session.
         approved_provider: Provider that approved the code — the session's
             issuer. ``None`` for a username-and-key approval.
         ttl_hours: Lifetime; ``None`` uses the configured session TTL.
 
     Returns:
-        The raw session token, or ``None`` when there is no live claim to spend
-        (unknown, expired, unapproved, never claimed, or claimed for another
-        account). Nothing is written in that case.
+        ``{"token", "role", "is_admin"}`` — the credential and the rights the
+        account holds now — or ``None`` when there is no live claim to spend
+        (unknown, expired, unapproved, never claimed, claimed for another
+        account, or naming an account that no longer has a row). Nothing is
+        written in that case.
     """
     if ttl_hours is None:
         ttl_hours = current_session_ttl_hours()
     device_hash = _hash_token(device_code)
     normalized = _normalize_username(username)
 
-    async def _attempt() -> str | None:
+    async def _attempt() -> dict[str, Any] | None:
         async with _connect_db() as db:
             await db.execute("BEGIN IMMEDIATE")
             try:
@@ -11256,6 +11261,22 @@ async def exchange_device_code_for_session(
                 if await cursor.fetchone() is None:
                     await db.rollback()
                     return None
+                cursor = await db.execute(
+                    "SELECT role FROM users WHERE username = ?", (normalized,)
+                )
+                row = await cursor.fetchone()
+                if row is None:
+                    # A row-less name is the bootstrap administrator, which is an
+                    # administrator by construction — the same answer ``/api/auth/login``
+                    # and the poll give it. Any other row-less name lost its account
+                    # since the approval, and no session can be minted for it.
+                    if normalized != "admin":
+                        await db.rollback()
+                        return None
+                    role, is_admin = "admin", True
+                else:
+                    role = str(row["role"] or "reviewer")
+                    is_admin = role == "admin"
                 token = await _insert_session_in_tx(
                     db,
                     username=normalized,
@@ -11272,7 +11293,7 @@ async def exchange_device_code_for_session(
             except Exception:
                 await db.rollback()
                 raise
-            return token
+            return {"token": token, "role": role, "is_admin": is_admin}
 
     return await _retry_contended(_attempt)
 

@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from 'react'
+import { useRef, useState, type FormEvent } from 'react'
 
 import { api, extractApiDetail } from '@/lib/api'
 import { parseApiTimestamp } from '@/lib/utils'
@@ -42,21 +42,28 @@ export function DeviceApprovalPage() {
   const [error, setError] = useState('')
   const [approved, setApproved] = useState(false)
   const [busy, setBusy] = useState(false)
+  // Latest-wins guard: an answer about a code that is no longer the one being
+  // entered would otherwise describe — and let the person approve — a code
+  // they are not looking at.
+  const lookupSeqRef = useRef(0)
 
   async function handleLookup(event: FormEvent) {
     event.preventDefault()
+    const seq = ++lookupSeqRef.current
     setError('')
     setInfo(null)
     try {
       // POSTed, not GET: a user code in a URL would be written to the server's
       // access log, and holding one is what lets a CLI become an account.
-      setInfo(
-        await api.post<DeviceCodeInfo>('/api/auth/sso/device/approve/lookup', {
-          user_code: userCode,
-        }),
+      const result = await api.post<DeviceCodeInfo>(
+        '/api/auth/sso/device/approve/lookup',
+        { user_code: userCode },
       )
+      if (seq === lookupSeqRef.current) setInfo(result)
     } catch (err) {
-      setError(extractApiDetail(err) ?? 'That code could not be approved.')
+      if (seq === lookupSeqRef.current) {
+        setError(extractApiDetail(err) ?? 'That code could not be approved.')
+      }
     }
   }
 
@@ -102,7 +109,9 @@ export function DeviceApprovalPage() {
                   onChange={(event) => {
                     setUserCode(event.target.value)
                     // A different code means the shown client name no longer
-                    // describes it.
+                    // describes it, and a lookup already in flight describes
+                    // the previous one — drop it instead of letting it land.
+                    lookupSeqRef.current += 1
                     setInfo(null)
                   }}
                   placeholder="ABCD-EFGH"

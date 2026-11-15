@@ -609,17 +609,20 @@ async def test_a_device_code_is_approved_then_redeemed_exactly_once(
 
         # The exchange is the step that ends the flow: one commit writes the
         # session and spends the code.
-        session = await storage.exchange_device_code_for_session(
-            code["device_code"], username="alice", is_admin=False, role="reviewer"
+        minted = await storage.exchange_device_code_for_session(
+            code["device_code"], username="alice"
         )
-        assert session is not None
-        assert (await storage.get_session(session))["username"] == "alice"
+        assert minted is not None
+        # The rights come from the row, not from the caller.
+        assert minted["role"] == "reviewer"
+        assert minted["is_admin"] is False
+        assert (await storage.get_session(minted["token"]))["username"] == "alice"
         assert await storage.get_device_code(code["device_code"]) is None
         assert await storage.get_device_code_by_user_code(code["user_code"]) is None
         # Nothing left to exchange: a second exchange cannot mint a second token.
         assert (
             await storage.exchange_device_code_for_session(
-                code["device_code"], username="alice", is_admin=False, role="reviewer"
+                code["device_code"], username="alice"
             )
             is None
         )
@@ -730,7 +733,7 @@ async def test_a_failed_session_write_spends_nothing(setup_test_db: Path) -> Non
             pytest.raises(RuntimeError),
         ):
             await storage.exchange_device_code_for_session(
-                code["device_code"], username="alice", is_admin=False, role="reviewer"
+                code["device_code"], username="alice"
             )
 
         # Nothing was written, and the code is still there to retry with.
@@ -741,10 +744,10 @@ async def test_a_failed_session_write_spends_nothing(setup_test_db: Path) -> Non
             )
             assert (await cursor.fetchone())["n"] == 0
 
-        token = await storage.exchange_device_code_for_session(
-            code["device_code"], username="alice", is_admin=False, role="reviewer"
+        minted = await storage.exchange_device_code_for_session(
+            code["device_code"], username="alice"
         )
-        assert token is not None
+        assert minted is not None
         assert await storage.get_device_code(code["device_code"]) is None
 
 
@@ -761,15 +764,116 @@ async def test_a_claim_cannot_be_exchanged_for_another_account(
 
         assert (
             await storage.exchange_device_code_for_session(
-                code["device_code"], username="bob", is_admin=False, role="reviewer"
+                code["device_code"], username="bob"
             )
             is None
         )
         assert (
             await storage.exchange_device_code_for_session(
-                code["device_code"], username="alice", is_admin=False, role="reviewer"
+                code["device_code"], username="alice"
             )
             is not None
+        )
+
+
+async def test_a_downgraded_account_cannot_redeem_its_admin_session(
+    setup_test_db: Path,
+) -> None:
+    """A downgrade that commits while the code is pending must win.
+
+    Approval happens minutes before redemption. If the exchange took the rights
+    the poll read, the demotion's own session invalidation would lose: it would
+    mint a fresh administrator session from the rights it had before.
+    """
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.create_admin_user("boss")
+        code = await storage.create_device_code(ttl_seconds=600, interval_seconds=5)
+        await storage.authorize_device_code(code["user_code"], username="boss")
+        assert await storage.redeem_device_code(code["device_code"]) is not None
+
+        # Demoted (which also drops every session) before the terminal polls.
+        await storage.change_user_role("boss", "reviewer")
+
+        minted = await storage.exchange_device_code_for_session(
+            code["device_code"], username="boss"
+        )
+        assert minted is not None
+        assert minted["role"] == "reviewer"
+        assert minted["is_admin"] is False
+        session = await storage.get_session(minted["token"])
+        assert session is not None
+        assert session["role"] == "reviewer"
+        assert not session["is_admin"]
+
+
+async def test_the_exchange_reads_the_role_at_mint_time(setup_test_db: Path) -> None:
+    """The minted rights are the row's at mint, in either direction, not the poll's.
+
+    The signature no longer accepts ``role``/``is_admin``: a stale value read
+    before the exchange is unrepresentable. A promotion committed while the code
+    waited is honoured the same way a demotion wins — the row is the only source.
+    """
+    import inspect
+
+    parameters = inspect.signature(storage.exchange_device_code_for_session).parameters
+    assert "role" not in parameters
+    assert "is_admin" not in parameters
+
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.create_user("alice")
+        code = await storage.create_device_code(ttl_seconds=600, interval_seconds=5)
+        await storage.authorize_device_code(code["user_code"], username="alice")
+        assert await storage.redeem_device_code(code["device_code"]) is not None
+
+        # Promoted after the approval, before the terminal redeemed the claim.
+        await storage.change_user_role("alice", "admin")
+
+        minted = await storage.exchange_device_code_for_session(
+            code["device_code"], username="alice"
+        )
+        assert minted is not None
+        assert minted["role"] == "admin"
+        assert minted["is_admin"] is True
+        session = await storage.get_session(minted["token"])
+        assert session is not None
+        assert session["role"] == "admin"
+        assert bool(session["is_admin"]) is True
+
+
+async def test_a_row_less_bootstrap_admin_is_minted_as_an_admin(
+    setup_test_db: Path,
+) -> None:
+    """The bootstrap admin has no users row: it is an administrator by construction."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        code = await storage.create_device_code(ttl_seconds=600, interval_seconds=5)
+        await storage.authorize_device_code(code["user_code"], username="admin")
+        assert await storage.redeem_device_code(code["device_code"]) is not None
+
+        minted = await storage.exchange_device_code_for_session(
+            code["device_code"], username="admin"
+        )
+        assert minted is not None
+        assert minted["role"] == "admin"
+        assert minted["is_admin"] is True
+
+
+async def test_an_account_that_lost_its_row_gets_no_session(
+    setup_test_db: Path,
+) -> None:
+    """Only the reserved name may be row-less; anything else is a deleted account."""
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.create_user("alice")
+        code = await storage.create_device_code(ttl_seconds=600, interval_seconds=5)
+        await storage.authorize_device_code(code["user_code"], username="alice")
+        assert await storage.redeem_device_code(code["device_code"]) is not None
+
+        await storage.delete_user("alice")
+
+        assert (
+            await storage.exchange_device_code_for_session(
+                code["device_code"], username="alice"
+            )
+            is None
         )
 
 

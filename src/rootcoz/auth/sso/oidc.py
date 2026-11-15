@@ -13,8 +13,11 @@ Two rules keep this safe:
   attacker's server would require an admin to set that server as the issuer.
 * The ID token is verified against the issuer's JWKS — signature pinned to
   RS256, then ``iss``, ``aud``, ``exp``/``nbf``/``iat`` (each required to be a
-  finite number) with a small clock skew — before any claim is trusted. The userinfo endpoint is only a fallback for
-  providers that return no ``id_token``.
+  finite number) with a small clock skew — before any claim is trusted. A token
+  response that carries no ``id_token`` is refused: the userinfo endpoint is
+  authenticated by the access token alone (no signature, no nonce), so it cannot
+  tell a fresh login from a replayed one. A provider that cannot issue ID tokens
+  gets its own module (``openshift.py``) instead of a weaker path here.
 * The OAuth ``state`` binds the *redirect* to this browser attempt; the OIDC
   ``nonce`` binds the *token* to it. A token that does not echo the attempt's
   nonce is refused, so a token minted for one login cannot be replayed into
@@ -221,11 +224,6 @@ class OIDCProvider(SSOProvider):
                 f"discovery document claims issuer {claimed_issuer!r}",
             )
         checked = ["authorization_endpoint", "token_endpoint", "jwks_uri"]
-        # ``userinfo_endpoint`` is optional, and it is the endpoint that receives
-        # the bearer access token on the no-id_token fallback — the one URL where a
-        # tampered document could hand our token to a plaintext or third-party host.
-        if document.get("userinfo_endpoint"):
-            checked.append("userinfo_endpoint")
         for endpoint_key in checked:
             endpoint = str(document[endpoint_key])
             if not is_safe_navigation_url(endpoint, allow_loopback_http=True):
@@ -339,7 +337,17 @@ class OIDCProvider(SSOProvider):
     async def _claims_from_token(
         self, document: dict[str, Any], token: dict[str, Any], nonce: str
     ) -> dict[str, Any]:
-        """Get claims from the ID token, falling back to userinfo.
+        """Get claims from the ID token, and only from it.
+
+        Every provider rootcoz ships asks for the ``openid`` scope and answers
+        with an ``id_token``: Google and Red Hat SSO both do, GitHub and OpenShift
+        never reach this code (they are OAuth2 providers with their own module).
+        The userinfo endpoint is not a fallback here on purpose — it is
+        authenticated by the access token alone, so it has no signature and no
+        nonce, and a token replayed from an earlier attempt would name a real
+        person and be indistinguishable from a fresh login. A provider that
+        cannot issue ID tokens needs its own module (see ``openshift.py``), not a
+        weaker path through this one.
 
         Args:
             document: The discovery document.
@@ -350,20 +358,16 @@ class OIDCProvider(SSOProvider):
             The claim set.
 
         Raises:
-            AuthError: When no verified claim set can be produced.
+            AuthError: ``no_id_token`` when the response carries none, or
+                ``id_token_invalid`` when it does not verify.
         """
         id_token = token.get("id_token")
-        if isinstance(id_token, str) and id_token:
-            return await self._verify_id_token(document, id_token, nonce)
-        access_token = token.get("access_token")
-        userinfo_endpoint = document.get("userinfo_endpoint")
-        if isinstance(access_token, str) and access_token and userinfo_endpoint:
-            # ``metadata()`` refuses an unsafe userinfo URL before it is ever
-            # cached, so this call cannot leave for a plaintext or third-party
-            # host. The claims are still weaker than an ID token's: userinfo is not
-            # nonce-bound, so possession of the access token is the whole proof.
-            return await self._userinfo(str(userinfo_endpoint), access_token)
-        raise AuthError("exchange_failed", "token response carried no usable claims")
+        if not isinstance(id_token, str) or not id_token:
+            raise AuthError(
+                "no_id_token",
+                "token response carried no id_token, so the identity is unverified",
+            )
+        return await self._verify_id_token(document, id_token, nonce)
 
     async def _verify_id_token(
         self, document: dict[str, Any], id_token: str, nonce: str
@@ -478,26 +482,6 @@ class OIDCProvider(SSOProvider):
             cached = (now, document)
             _JWKS_CACHE[jwks_uri] = cached
         return KeySet.import_key_set(cached[1])
-
-    async def _userinfo(self, endpoint: str, access_token: str) -> dict[str, Any]:
-        """Read claims from the userinfo endpoint.
-
-        Args:
-            endpoint: The ``userinfo_endpoint`` from discovery.
-            access_token: Bearer token from the token response.
-
-        Returns:
-            The claim set.
-
-        Raises:
-            AuthError: When userinfo fails or is not an object.
-        """
-        return await request_json(
-            "GET",
-            endpoint,
-            reason="userinfo_failed",
-            headers={"Authorization": f"Bearer {access_token}"},
-        )
 
     def _normalise(self, claims: dict[str, Any]) -> ClaimSet:
         """Turn provider claims into the provider-agnostic shape.
