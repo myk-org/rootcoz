@@ -19575,20 +19575,33 @@ async def sso_callback(provider: str, request: Request) -> RedirectResponse:
                 )
         return _sso_error_redirect(reason)
 
-    if error:
-        return await refuse("provider_error")
-    if not code or not state:
-        return await refuse("missing_code")
+    # The sealed attempt is validated *before* the IdP's ``error`` is handled.
+    # Ordering is the point: only a validated attempt may supply the destination
+    # a refusal returns to, so a cancelled **link** must be opened first — with
+    # the attempt still unset it would go to ``/login``, which bounces a
+    # signed-in person away before the reason can be read.
+    if not state:
+        # Fail closed: with no `state` nothing can be validated, so no attempt
+        # lends a destination and the answer stays ``/login``. The reason is the
+        # one the old order gave — the IdP's error, else the missing code.
+        return await refuse("provider_error" if error else "missing_code")
     try:
-        attempt = auth_sso_state.open_attempt(state_cookie, provider=provider)
+        opened = auth_sso_state.open_attempt(state_cookie, provider=provider)
     except auth_sso_state.StateError as exc:
         logger.debug("SSO state rejected: %s", exc)
         return await refuse("state_invalid")
     # Compared as bytes: compare_digest raises TypeError on a non-ASCII *str*,
     # and the state arrives from the query string — a latin-1 value must be a
-    # refusal, not a 500.
-    if not hmac.compare_digest(attempt.state.encode(), state.encode()):
+    # refusal, not a 500. The attempt is only adopted once it matches, so a
+    # value that failed the CSRF check never lends its destination either.
+    if not hmac.compare_digest(opened.state.encode(), state.encode()):
         return await refuse("state_mismatch")
+    attempt = opened
+
+    if error:
+        return await refuse("provider_error")
+    if not code:
+        return await refuse("missing_code")
 
     try:
         claims = await selected.exchange(

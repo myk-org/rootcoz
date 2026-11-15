@@ -12,8 +12,8 @@ Two rules keep this safe:
   the flow lets a caller point discovery elsewhere; issuing identities from an
   attacker's server would require an admin to set that server as the issuer.
 * The ID token is verified against the issuer's JWKS — signature pinned to
-  RS256, then ``iss``, ``aud``, ``exp``/``nbf``/``iat`` with a small clock skew —
-  before any claim is trusted. The userinfo endpoint is only a fallback for
+  RS256, then ``iss``, ``aud``, ``exp``/``nbf``/``iat`` (each required to be a
+  finite number) with a small clock skew — before any claim is trusted. The userinfo endpoint is only a fallback for
   providers that return no ``id_token``.
 * The OAuth ``state`` binds the *redirect* to this browser attempt; the OIDC
   ``nonce`` binds the *token* to it. A token that does not echo the attempt's
@@ -24,6 +24,7 @@ Two rules keep this safe:
 from __future__ import annotations
 
 import hmac
+import math
 import time
 from typing import Any, ClassVar
 
@@ -68,6 +69,39 @@ CLOCK_SKEW_SECONDS = 60
 #: none`` or HMAC-confusion token a refusal rather than a decision left to the
 #: token's own header.
 ID_TOKEN_ALGORITHMS = ("RS256",)
+
+
+def _date_claim(claims: dict[str, Any], name: str) -> float | None:
+    """Read a numeric date claim, refusing one no comparison can bound.
+
+    ``bool`` is an ``int``, and ``NaN``/``inf`` compare unequal to every bound,
+    so an ``isinstance`` check alone lets ``exp: NaN`` or ``exp: true`` through
+    the expiry test unchanged.
+
+    Args:
+        claims: The token's claims.
+        name: The claim to read (``exp``, ``nbf`` or ``iat``).
+
+    Returns:
+        The claim in seconds, or ``None`` when it is absent.
+
+    Raises:
+        AuthError: When the claim is present but is not a finite number.
+    """
+    value = claims.get(name)
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, int | float):
+        raise AuthError("id_token_invalid", f"ID token has a malformed {name}")
+    try:
+        finite = math.isfinite(value)
+    except OverflowError:
+        # An integer too large for a float is a date no clock can reach: it is
+        # the far-future bound it stands for, not a crash out of a refusal.
+        return math.inf
+    if not finite:
+        raise AuthError("id_token_invalid", f"ID token has a malformed {name}")
+    return float(value)
 
 
 class OIDCProvider(SSOProvider):
@@ -333,8 +367,8 @@ class OIDCProvider(SSOProvider):
             The verified claims.
 
         Raises:
-            AuthError: When the signature, issuer, audience, expiry or issue
-                time is wrong.
+            AuthError: When the signature, issuer, audience, expiry, issue time
+                or the shape of a date claim is wrong.
         """
         from joserfc import jwt as jose_jwt
         from joserfc.errors import JoseError
@@ -363,17 +397,14 @@ class OIDCProvider(SSOProvider):
         # joserfc verifies the signature only; the claims are checked here, and
         # each one is a refusal the caller cannot argue with.
         now = time.time()
-        expires = claims.get("exp")
-        if not isinstance(expires, int | float) or expires + CLOCK_SKEW_SECONDS < now:
+        expires = _date_claim(claims, "exp")
+        if expires is None or expires + CLOCK_SKEW_SECONDS < now:
             raise AuthError("id_token_invalid", "ID token is expired or has no exp")
-        not_before = claims.get("nbf")
-        if (
-            isinstance(not_before, int | float)
-            and not_before - CLOCK_SKEW_SECONDS > now
-        ):
+        not_before = _date_claim(claims, "nbf")
+        if not_before is not None and not_before - CLOCK_SKEW_SECONDS > now:
             raise AuthError("id_token_invalid", "ID token is not valid yet")
-        issued_at = claims.get("iat")
-        if not isinstance(issued_at, int | float):
+        issued_at = _date_claim(claims, "iat")
+        if issued_at is None:
             raise AuthError("id_token_invalid", "ID token has no iat")
         if issued_at - CLOCK_SKEW_SECONDS > now:
             raise AuthError("id_token_invalid", "ID token was issued in the future")

@@ -10394,6 +10394,8 @@ async def add_user_identity(
     """Link an external identity to a local account.
 
     ``created_via`` on the account is left untouched: linking is not creation.
+    Re-linking the identity this account already holds is a no-op that returns
+    the stored row, so a retried link does not fail on what it already did.
 
     Args:
         username: The account to link to.
@@ -10412,8 +10414,8 @@ async def add_user_identity(
     Raises:
         ValueError: When the provider is unknown, the account does not exist,
             the subject is already linked to another account, the account
-            already has an identity for this provider, or the ticket was no
-            longer live.
+            already has a different subject for this provider, or the ticket was
+            no longer live.
     """
     _validate_sso_provider(provider)
     _validate_identity_subject(subject)
@@ -10437,6 +10439,17 @@ async def add_user_identity(
                 linked = await _select_identities(
                     db, "i.provider = ? AND i.subject = ?", (provider, subject)
                 )
+                if linked and linked[0]["username"] == username:
+                    # A repeat link (a double submit, a refresh after the
+                    # redirect) re-states what is already stored, so it is a
+                    # no-op rather than a conflict. The (user_id, provider) and
+                    # (provider, subject) unique constraints mean this account's
+                    # row for this provider *is* this subject. The ticket is
+                    # still spent: one left live could re-attach this identity
+                    # to another account after an unlink.
+                    await _consume_ticket_in_tx(db, ticket)
+                    await db.commit()
+                    return {"user_id": user["id"]}
                 if linked:
                     # The owner stays out of the message: this text can reach the
                     # caller, and naming the other account would disclose it.
