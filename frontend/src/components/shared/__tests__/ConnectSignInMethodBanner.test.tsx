@@ -13,9 +13,13 @@ vi.mock('@/lib/api', async (importActual) => ({
 const auth = { authenticated: true, role: 'reviewer' }
 vi.mock('@/lib/auth', () => ({ useAuth: () => auth }))
 
-function mockApi(identities: unknown[], providers: unknown[]) {
+function mockApi(identities: unknown[], providers: unknown[], browserLogin = true) {
   get.mockImplementation((path: string) =>
-    Promise.resolve(path === '/api/user/identities' ? { identities } : { providers }),
+    Promise.resolve(
+      path === '/api/user/identities'
+        ? { identities }
+        : { providers, browser_login: browserLogin },
+    ),
   )
 }
 
@@ -91,6 +95,17 @@ it('stays dismissed for the session', async () => {
   // asserts the stored dismissal rather than a request that never settled.
   get.mockClear()
   renderBanner()
+  await waitFor(() => expect(get).toHaveBeenCalled())
+  expect(screen.queryByText(/Connect Google in/i)).toBeNull()
+})
+
+it('stays quiet when the server has no browser sign-in', async () => {
+  // The providers are configured, but the deployment has no public origin: the
+  // link from here would reach a login start that refuses. The Settings card is
+  // where that state is explained, so the dashboard prompts nothing.
+  mockApi([], PROVIDERS, false)
+  renderBanner()
+
   await waitFor(() => expect(get).toHaveBeenCalled())
   expect(screen.queryByText(/Connect Google in/i)).toBeNull()
 })

@@ -210,6 +210,7 @@ def identity_from_session(
         role="admin" if is_admin else str(session.get("role", "reviewer")),
         is_ai_session=bool(session.get("is_ai_session", False)),
         session_token=token,
+        auth_provider=session.get("auth_provider") or None,
     )
 
 
@@ -245,6 +246,12 @@ class AuthIdentity:
         session_token: The raw session token the caller presented, or ``""``
             for a key or proxy identity. Long-lived admin streams revalidate
             it (#605).
+        auth_provider: The IdP that issued the credential, when one did
+            (a session, including a session token presented as a Bearer
+            credential): what the session it mints records, and what an IdP
+            logout can end later. ``None`` for an API key, the bootstrap
+            administrator and a trusted proxy header, because nobody signed in
+            through an IdP.
     """
 
     username: str
@@ -254,6 +261,7 @@ class AuthIdentity:
     user: dict[str, Any] | None = None
     is_ai_session: bool = False
     session_token: str = ""
+    auth_provider: str | None = None
 
 
 class AuthStrategy(ABC):

@@ -4558,6 +4558,27 @@ async def _record_proxy_provision_refused(
     )
 
 
+async def _record_proxy_provision_outcome(request: Request) -> None:
+    """Write the trail rows for what the proxy strategy decided on this request.
+
+    The auth package owns no auditing, so the strategy announces a provisioning
+    or a refusal on ``request.state`` and this reads it. Two places ask: the
+    ``/login`` redirect, where a refused name is never authenticated, and the
+    main path, where a provisioning happened.
+
+    Args:
+        request: The request the strategy ran for.
+    """
+    provisioned = getattr(request.state, auth_proxy.PROVISIONED_ATTR, None)
+    if provisioned:
+        await _record_proxy_provisioning(provisioned, request=request)
+    refused = getattr(request.state, auth_proxy.PROVISION_REFUSED_ATTR, None)
+    if refused:
+        # A proxy identity the deployment will not create an account for is
+        # not authenticated at all, so this row is the only trace of it.
+        await _record_proxy_provision_refused(refused, request=request)
+
+
 async def _record_account_blocked(
     *, username: str, reason: str, role: str | None, request: Request
 ) -> None:
@@ -4778,11 +4799,15 @@ class AuthMiddleware(BaseHTTPMiddleware):
 
         settings = get_settings()
 
-        # A proxy-authenticated visitor on /login goes straight to the dashboard.
+        # A proxy-authenticated visitor on /login goes straight to the dashboard,
+        # or to the pending page while approval holds their account.
         if path.startswith("/login"):
             redirect = await auth_proxy.proxy_login_redirect(
                 AuthContext(request=request, settings=settings)
             )
+            # /login is public, so it returns before the block below: a name the
+            # redirect refuses is audited here or nowhere.
+            await _record_proxy_provision_outcome(request)
             return redirect if redirect is not None else await call_next(request)
 
         # The credential chain (session cookie, Bearer token, trusted proxy
@@ -4793,6 +4818,12 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # attach (Bearer) needs the strategy, not the headers, because a request
         # may carry both and the chain decides which one won.
         request.state.auth_strategy = identity.strategy_name if identity else ""
+        # The provider the winning credential was issued by. A handler that must
+        # record it (a device approval stamps the session it will mint) asks this
+        # rather than re-reading an ambient cookie: the cookie may belong to
+        # somebody else, or be expired, while the credential that authenticated
+        # the request was a Bearer key.
+        request.state.auth_provider = identity.auth_provider if identity else None
 
         is_admin = identity.is_admin if identity else False
         is_ai_session = identity.is_ai_session if identity else False
@@ -4823,14 +4854,7 @@ class AuthMiddleware(BaseHTTPMiddleware):
             # A proxy-vouched account that had no row is provisioned while resolving;
             # the strategy records what it did on the request, and the trail is written
             # here because the auth package owns no auditing.
-            provisioned = getattr(request.state, auth_proxy.PROVISIONED_ATTR, None)
-            if provisioned:
-                await _record_proxy_provisioning(provisioned, request=request)
-            refused = getattr(request.state, auth_proxy.PROVISION_REFUSED_ATTR, None)
-            if refused:
-                # A proxy identity the deployment will not create an account for is
-                # not authenticated at all, so this row is the only trace of it.
-                await _record_proxy_provision_refused(refused, request=request)
+            await _record_proxy_provision_outcome(request)
 
             # Refuse a disabled account on every path (#379): a key, a session and a
             # proxy identity are all only as good as the row they name. A locked one
@@ -20626,10 +20650,11 @@ async def sso_device_approve(request: Request) -> JSONResponse:
     Returns:
         ``{"ok": true, "user_code", "provider"}``. ``provider`` is the approver's
         own issuer — what the redeemed session will record, and what an IdP
-        logout can end later. It is ``null`` when they signed in with a username
-        and key, even for a code opened for a specific provider: the code was
-        opened *for* that provider, which is why approving it was allowed, but
-        nobody signed in through it.
+        logout can end later. It is ``null`` when the credential that
+        authenticated this request names no IdP (a username and key, the
+        bootstrap ``ADMIN_KEY``, a trusted proxy header), even for a code opened
+        for a specific provider: the code was opened *for* that provider, which
+        is why approving it was allowed, but nobody signed in through it.
 
     Raises:
         HTTPException: 403 when the request proves no same-origin origin, 404 when
@@ -20642,11 +20667,12 @@ async def sso_device_approve(request: Request) -> JSONResponse:
     record = await _device_code_or_404(request)
     user_code = record["user_code"]
     username = request.state.username
-    session_token = read_cookie(request, SESSION_COOKIE)
-    session = (
-        await storage.get_session_identity(session_token) if session_token else None
-    )
-    provider = session["auth_provider"] if session else None
+    # The provider the middleware authenticated this request with, never a
+    # re-read of the session cookie: a Bearer key may arrive beside somebody
+    # else's — or an expired — cookie, and stamping the code with that session's
+    # Issuer would hand the CLI a provenance it never had. A key, the bootstrap
+    # admin and a proxy header record ``None``.
+    provider = getattr(request.state, "auth_provider", None)
     if record["authorized"]:
         await _audit_device_approve_refusal(
             request, "already_approved", provider=provider

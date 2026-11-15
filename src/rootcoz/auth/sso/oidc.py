@@ -55,7 +55,13 @@ _JWKS_CACHE: dict[str, tuple[float, dict[str, Any]]] = {}
 
 
 def _reset_discovery_cache() -> None:
-    """Clear the process-wide discovery/JWKS cache (tests, and after a reset)."""
+    """Clear the process-wide discovery/JWKS cache.
+
+    For tests only: the cache is keyed by issuer and the discovery tests reuse
+    ``https://idp.example``, so one test's fake document (and its key set) would
+    answer the next one's. Production never resets it — a TTL is what expires a
+    document there.
+    """
     _METADATA_CACHE.clear()
     _JWKS_CACHE.clear()
 

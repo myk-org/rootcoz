@@ -3,6 +3,11 @@ import { Link } from 'react-router-dom'
 import { api } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 import { useSessionState } from '@/lib/useSessionState'
+import {
+  browserSignIn,
+  type SsoProvider,
+  type SsoProvidersResponse,
+} from '@/lib/ssoProviders'
 import { Button } from '@/components/ui/button'
 
 /** Session-scoped dismissal: the prompt is a nudge, not a notification. */
@@ -12,22 +17,20 @@ interface IdentitiesResponse {
   identities: { provider: string }[]
 }
 
-interface ProvidersResponse {
-  providers: { name: string; display_name: string }[]
-}
-
 /**
  * A one-line prompt for an account that could connect a provider but has not.
  *
- * Shown only when the deployment offers SSO **and** the signed-in account has
- * none linked, and only to someone who may act on it (a viewer cannot connect
- * one, so telling them would be noise). Dismissing hides it for the session —
- * a permanent dismissal would nag once and then never help anyone who changes
- * their mind; a per-session one is forgotten when the browser is.
+ * Shown only when the deployment offers **browser** SSO **and** the signed-in
+ * account has none linked, and only to someone who may act on it (a viewer
+ * cannot connect one, so telling them would be noise). A server with no public
+ * origin can only be reached through the CLI device flow, so there is no prompt
+ * to make there. Dismissing hides it for the session — a permanent dismissal
+ * would nag once and then never help anyone who changes their mind; a
+ * per-session one is forgotten when the browser is.
  */
 export function ConnectSignInMethodBanner() {
   const { authenticated, role, username } = useAuth()
-  const [providers, setProviders] = useState<ProvidersResponse['providers']>([])
+  const [providers, setProviders] = useState<SsoProvider[]>([])
   const [unlinked, setUnlinked] = useState(false)
   const [dismissed, setDismissed] = useSessionState<boolean>(DISMISS_KEY, false)
 
@@ -39,11 +42,11 @@ export function ConnectSignInMethodBanner() {
     async function load() {
       try {
         const [offered, mine] = await Promise.all([
-          api.get<ProvidersResponse>('/api/auth/sso/providers'),
+          api.get<SsoProvidersResponse>('/api/auth/sso/providers'),
           api.get<IdentitiesResponse>('/api/user/identities'),
         ])
         if (cancelled) return
-        setProviders(offered.providers)
+        setProviders(browserSignIn(offered).providers)
         setUnlinked(mine.identities.length === 0)
       } catch {
         // A deployment without SSO, or a failed probe, is not worth a banner.

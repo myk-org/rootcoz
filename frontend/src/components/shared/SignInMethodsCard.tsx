@@ -2,6 +2,11 @@ import { useCallback, useEffect, useState } from 'react'
 import { api, extractApiDetail } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
 import { SSO_LINK_ERROR_FALLBACK, ssoErrorMessage } from '@/lib/ssoErrors'
+import {
+  browserSignIn,
+  type BrowserSignIn,
+  type SsoProvidersResponse,
+} from '@/lib/ssoProviders'
 import { stripQueryParams } from '@/lib/navigation'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -16,11 +21,6 @@ interface LinkedIdentity {
 interface IdentitiesResponse {
   identities: LinkedIdentity[]
   unlinkable: boolean
-}
-
-interface SsoProvider {
-  name: string
-  display_name: string
 }
 
 const PROVIDER_LABELS: Record<string, string> = {
@@ -55,7 +55,7 @@ export function SignInMethodsCard() {
   const canManage = role !== 'viewer' && username !== 'admin'
   const [identities, setIdentities] = useState<LinkedIdentity[] | null>(null)
   const [unlinkable, setUnlinkable] = useState(true)
-  const [providers, setProviders] = useState<SsoProvider[]>([])
+  const [sso, setSso] = useState<BrowserSignIn>({ providers: [], cliOnly: false })
   const [error, setError] = useState('')
   const [busy, setBusy] = useState('')
   const [notice, setNotice] = useState('')
@@ -69,13 +69,11 @@ export function SignInMethodsCard() {
       setError(extractApiDetail(err) ?? 'Could not load your sign-in methods.')
     }
     try {
-      const offered = await api.get<{ providers: SsoProvider[] }>(
-        '/api/auth/sso/providers',
-      )
-      setProviders(offered.providers)
+      const offered = await api.get<SsoProvidersResponse>('/api/auth/sso/providers')
+      setSso(browserSignIn(offered))
     } catch {
       // No SSO on this deployment is not an error worth showing.
-      setProviders([])
+      setSso({ providers: [], cliOnly: false })
     }
   }, [])
 
@@ -110,7 +108,7 @@ export function SignInMethodsCard() {
   }
 
   const connected = new Set((identities ?? []).map((identity) => identity.provider))
-  const available = providers.filter((provider) => !connected.has(provider.name))
+  const available = sso.providers.filter((provider) => !connected.has(provider.name))
 
   return (
     <Card className="mt-4">
@@ -177,6 +175,17 @@ export function SignInMethodsCard() {
           <p className="text-xs text-text-tertiary">
             This is your only sign-in method, so it cannot be removed. Connect
             another provider, or rotate your API key and keep the new one first.
+          </p>
+        )}
+
+        {/* A deployment with no public origin answers the browser flow with 400
+            after the click, so the button is not offered at all — the CLI device
+            flow is the one way in there, and it is named in the message. */}
+        {sso.cliOnly && canManage && (
+          <p className="text-xs text-text-tertiary">
+            Browser sign-in is turned off on this server, so a provider cannot be
+            connected from here. Sign in from a terminal instead:{' '}
+            <code className="font-mono text-text-secondary">rootcoz auth sso</code>
           </p>
         )}
 

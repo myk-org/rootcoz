@@ -17,12 +17,17 @@ vi.mock('@/lib/api', async (importActual) => ({
   },
 }))
 
-function mockState(identities: unknown[], unlinkable: boolean) {
+function mockState(
+  identities: unknown[],
+  unlinkable: boolean,
+  browserLogin = true,
+) {
   get.mockImplementation((path: string) => {
     if (path === '/api/user/identities') {
       return Promise.resolve({ identities, unlinkable })
     }
     return Promise.resolve({
+      browser_login: browserLogin,
       providers: [{ name: 'github', display_name: 'GitHub' }],
     })
   })
@@ -111,4 +116,28 @@ it('reports why a connect attempt came back refused', async () => {
   expect(
     await screen.findByText(/already connected to a different user/i),
   ).toBeTruthy()
+})
+
+it('offers no connect button when the server has no browser sign-in', async () => {
+  // `browser_login: false` means no public origin, so the link start answers 400
+  // after the click. The provider is still configured — it is just CLI-only.
+  mockState([], true, false)
+  render(<SignInMethodsCard />)
+
+  expect(
+    await screen.findByText(/browser sign-in is turned off/i),
+  ).toBeTruthy()
+  expect(screen.getByText('rootcoz auth sso')).toBeTruthy()
+  expect(screen.queryByRole('button', { name: /connect/i })).toBeNull()
+  expect(screen.queryByRole('link', { name: /connect/i })).toBeNull()
+})
+
+it('offers the connect button when the server allows browser sign-in', async () => {
+  mockState([], true, true)
+  render(<SignInMethodsCard />)
+
+  expect(
+    await screen.findByRole('button', { name: /connect github/i }),
+  ).toBeTruthy()
+  expect(screen.queryByText(/browser sign-in is turned off/i)).toBeNull()
 })
