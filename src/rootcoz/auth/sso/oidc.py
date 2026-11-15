@@ -200,9 +200,16 @@ class OIDCProvider(SSOProvider):
         # The document comes from *our* issuer's well-known URL, but it is trusted
         # for an hour afterwards: pin the issuer it claims and refuse endpoints
         # that are not https (loopback http is the documented dev exception), so a
-        # redirected or tampered document cannot move the login elsewhere.
+        # redirected or tampered document cannot move the login elsewhere. A
+        # document that states no issuer pins nothing, so it is refused rather
+        # than cached for that hour.
         claimed_issuer = str(document.get("issuer", "")).rstrip("/")
-        if claimed_issuer and claimed_issuer != self.issuer.rstrip("/"):
+        if not claimed_issuer:
+            raise AuthError(
+                "discovery_failed",
+                "discovery document states no issuer, so it cannot be pinned",
+            )
+        if claimed_issuer != self.issuer.rstrip("/"):
             raise AuthError(
                 "discovery_failed",
                 f"discovery document claims issuer {claimed_issuer!r}",

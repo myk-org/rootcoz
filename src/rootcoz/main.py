@@ -96,6 +96,7 @@ from rootcoz.ai_client import (
     update_model_catalog,
 )
 from rootcoz.attribution import AiProvenance, apply_ai_attribution
+from rootcoz.auth import api_key as auth_api_key
 from rootcoz.auth import approval as auth_approval
 from rootcoz.auth import identity as auth_identity
 from rootcoz.auth import password as auth_password
@@ -4787,6 +4788,11 @@ class AuthMiddleware(BaseHTTPMiddleware):
         # The credential chain (session cookie, Bearer token, trusted proxy
         # header) lives in rootcoz.auth; the registry owns its precedence.
         identity = await auth_registry.resolve_identity(request, settings)
+        # Which credential actually established the identity. A handler that must
+        # tell an ambient credential (cookie, proxy header) from one a page cannot
+        # attach (Bearer) needs the strategy, not the headers, because a request
+        # may carry both and the chain decides which one won.
+        request.state.auth_strategy = identity.strategy_name if identity else ""
 
         is_admin = identity.is_admin if identity else False
         is_ai_session = identity.is_ai_session if identity else False
@@ -19134,7 +19140,8 @@ async def _audit_device_approve_refusal(
     Args:
         request: The request that carried the refusal (authenticated: both
             approval routes require a session).
-        reason: ``already_approved`` / ``provider_mismatch`` / ``code_not_found``.
+        reason: ``already_approved`` / ``provider_mismatch`` / ``code_not_found``
+            / ``expired`` / ``cross_origin``.
         provider: The code's provider where one was read, else the caller's.
     """
     await record_audit(
@@ -19177,8 +19184,8 @@ async def sso_providers() -> JSONResponse:
     )
 
 
-def _link_request_is_same_origin(request: Request) -> bool:
-    """Whether a link POST proves it came from this deployment's own page.
+def _request_is_same_origin(request: Request) -> bool:
+    """Whether a POST proves it came from this deployment's own page.
 
     ``Sec-Fetch-Site`` is what current browsers send and is decisive when present;
     the ``Origin`` header (falling back to ``Referer``) covers a client that omits
@@ -19187,7 +19194,7 @@ def _link_request_is_same_origin(request: Request) -> bool:
     same branch.
 
     Args:
-        request: The request that wants to start a link.
+        request: The request that wants to act on the caller's account.
 
     Returns:
         True only when one of the three says the request is same-origin.
@@ -19294,7 +19301,7 @@ async def _sso_start(request: Request, provider: str, mode: str) -> RedirectResp
                 request, provider, "link_requires_post", subject=caller
             )
             return _sso_error_redirect("link_requires_post")
-        if not _link_request_is_same_origin(request):
+        if not _request_is_same_origin(request):
             await _audit_sso_refusal(
                 request, provider, "link_cross_site", subject=caller
             )
@@ -19966,7 +19973,8 @@ async def sso_link_account(request: Request) -> Response:
 
     Raises:
         HTTPException: 404 for a dead ticket, 401 for bad credentials, 403 when
-            the account may not act, 409 when the link conflicts.
+            the account may not act (including a viewer, who may not add a
+            sign-in method), 409 when the link conflicts.
     """
     body = await _read_json_object(request)
     ticket = str(body.get("ticket", ""))
@@ -20015,6 +20023,18 @@ async def sso_link_account(request: Request) -> Response:
             request, record["provider"], f"account_{block_reason}", subject=username
         )
         raise HTTPException(status_code=403, detail="Account cannot be used to sign in")
+    # Linking is the mirror of unlinking, which needs a reviewer: a viewer who may
+    # not remove a method must not be able to add one. Same rule as the link-start
+    # route and the callback, applied to the account this credential proves.
+    role, _is_admin = role_and_admin(verified.account)
+    if role not in _REVIEWER_ROLES:
+        await _audit_sso_refusal(
+            request, record["provider"], "link_forbidden_role", subject=username
+        )
+        raise HTTPException(
+            status_code=403,
+            detail="Reviewer access required. Viewers cannot perform this action.",
+        )
     allowed = settings.allowed_users_set
     if allowed and username not in allowed:
         # Linking writes a credential to the account, so it is a write: the same
@@ -20416,7 +20436,9 @@ async def sso_device_poll(request: Request) -> JSONResponse:
     username = redeemed["username"]
     provider = redeemed["approved_provider"]
     user = await storage.get_user_by_username(username)
-    if user is None:
+    # The bootstrap admin is reserved (``auth.base``) and has no row; anybody else
+    # without one lost their account between approval and redemption.
+    if user is None and username != RESERVED_ADMIN_USERNAME:
         await _audit_sso_refusal(request, provider, "account_missing", subject=username)
         return JSONResponse(content={"status": "denied"})
     # The shared decision is auth_approval.account_block_reason, exactly as the
@@ -20429,7 +20451,13 @@ async def sso_device_poll(request: Request) -> JSONResponse:
         )
         return JSONResponse(content={"status": "denied"})
 
-    role, is_admin = role_and_admin(user, settings.default_user_role)
+    # A row-less bootstrap admin is an administrator by construction, exactly as
+    # ``/api/auth/login`` resolves it; everybody else is resolved from their row.
+    role, is_admin = (
+        ("admin", True)
+        if user is None
+        else role_and_admin(user, settings.default_user_role)
+    )
     # The login route's approval gate, on the account the approval named: an
     # admin may have moved it back to pending since, and an approval is not a
     # standing exemption from `REQUIRE_APPROVAL`. Same condition and same
@@ -20485,11 +20513,36 @@ async def sso_device_poll(request: Request) -> JSONResponse:
     return response
 
 
+def _device_code_request_is_forgeable(request: Request) -> bool:
+    """Whether this approval request could have been forged by another origin.
+
+    Both routes act on the signed-in account, and the page that calls them is
+    same-origin — so a request with no origin proof is refused. The proof is
+    required only where a forgery is *possible*: a credential the browser sends by
+    itself (the session cookie, a proxy header) is exactly what a same-site sibling
+    origin can borrow for a preflight-free form POST, while a Bearer value cannot
+    be attached by a page at all. ``rootcoz auth sso-approve`` approves with one,
+    and it must keep working (CLI parity).
+
+    Args:
+        request: The request that wants to read or approve a code.
+
+    Returns:
+        True when the request carries an ambient credential and no same-origin
+        proof.
+    """
+    if getattr(request.state, "auth_strategy", "") == auth_api_key.ApiKeyStrategy.name:
+        return False
+    return not _request_is_same_origin(request)
+
+
 async def _device_code_or_404(request: Request) -> dict[str, Any]:
     """Read the user code from the body and return its live record.
 
     Shared by the describe and the approve routes so an unknown code answers
-    identically in both, and any future guard on a code has one place to live.
+    identically in both, and any future guard on a code has one place to live —
+    including the origin proof, which comes first so a cross-origin caller learns
+    nothing about a code and costs the approval table no row.
 
     Args:
         request: The request; body ``{"user_code": str}``.
@@ -20498,11 +20551,20 @@ async def _device_code_or_404(request: Request) -> dict[str, Any]:
         The device-code view for a live code.
 
     Raises:
-        HTTPException: 404 when the body carries no code, or the code is
-            unknown, expired or already redeemed. The refusal is audited here —
-            one row for both routes, and the volume guard on that action is what
-            keeps a code-guessing run from filling the trail.
+        HTTPException: 403 when the request proves no same-origin origin, 404 when
+            the body carries no code, or the code is unknown, expired or already
+            redeemed. The refusal is audited here — one row for both routes, and
+            the volume guard on that action is what keeps a code-guessing run from
+            filling the trail.
     """
+    if _device_code_request_is_forgeable(request):
+        # Before the body is read: an approval is a write on the caller's account,
+        # and a sibling origin must not be able to make one with their cookies.
+        await _audit_device_approve_refusal(request, "cross_origin", provider=None)
+        raise HTTPException(
+            status_code=403,
+            detail="Approval must come from this server's own approval page",
+        )
     body = await _read_json_object(request)
     user_code = str(body.get("user_code") or "").strip()
     record = (
@@ -20570,10 +20632,12 @@ async def sso_device_approve(request: Request) -> JSONResponse:
         nobody signed in through it.
 
     Raises:
-        HTTPException: 404 when the code is unknown or expired, 409 when it was
-            already approved, 400 when it was opened for a different provider
-            than the one this person signed in with. Every one of them is
-            audited as ``auth.sso_device_approve_refused`` before it is raised.
+        HTTPException: 403 when the request proves no same-origin origin, 404 when
+            the code is unknown or expired, 409 when it was already approved, 400
+            when it was opened for a different provider than the one this person
+            signed in with, 410 when it stopped being approvable in the meantime.
+            Every one of them is audited as ``auth.sso_device_approve_refused``
+            before it is raised.
     """
     record = await _device_code_or_404(request)
     user_code = record["user_code"]
@@ -20600,15 +20664,26 @@ async def sso_device_approve(request: Request) -> JSONResponse:
             status_code=400,
             detail="That code was opened for a different provider",
         )
-    if not await storage.authorize_device_code(
+    refusal = await storage.authorize_device_code(
         user_code, username=username, provider=provider
-    ):
-        # Lost the race to another approver: the code was taken between the read
-        # above and the write, so this is the same refusal as the pre-check.
-        await _audit_device_approve_refusal(
-            request, "already_approved", provider=provider
+    )
+    if refusal != "approved":
+        # The write re-reads the row in its own transaction, so a lost race is
+        # named as what it actually became: 409 stays the genuine "somebody else
+        # approved it", and anything else says the code is gone rather than
+        # blaming a race that did not happen.
+        await _audit_device_approve_refusal(request, refusal, provider=provider)
+        if refusal == "already_approved":
+            raise HTTPException(
+                status_code=409, detail="That code was already approved"
+            )
+        raise HTTPException(
+            status_code=410,
+            detail=(
+                "That code is no longer valid; start a new sign-in from your"
+                " terminal to get a fresh one"
+            ),
         )
-        raise HTTPException(status_code=409, detail="That code was already approved")
     await record_audit(
         action="auth.sso_device_approved",
         actor=username,

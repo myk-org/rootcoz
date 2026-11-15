@@ -28,7 +28,7 @@ from rootcoz.auth.sso import state as sso_state
 from rootcoz.auth.sso.google import GoogleProvider
 from rootcoz.config import clear_settings_cache, get_settings, normalize_domain_list
 from rootcoz.encryption import encrypt_value
-from tests.conftest import build_test_env, make_app_client
+from tests.conftest import admin_login, build_test_env, make_app_client
 
 _SSO_ENV = {
     "SSO_GOOGLE_CLIENT_ID": "test-client-id",
@@ -2734,6 +2734,49 @@ async def test_a_viewer_cannot_start_a_link(temp_db_path: Path) -> None:
         assert response.headers["location"] == ("/login?sso_error=link_forbidden_role")
 
 
+async def test_a_viewer_cannot_finish_a_link_but_a_reviewer_can(
+    temp_db_path: Path,
+) -> None:
+    """The same role rule at the tail: a proven credential does not skip it.
+
+    A viewer who may not remove a sign-in method must not be able to attach one,
+    and the two halves of the flow must not disagree about it — while a reviewer
+    claiming with their own credential still gets through, on the very ticket the
+    viewer's refusal left unspent.
+    """
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("vicky", role="viewer")
+        viewer_key = await storage.rotate_own_key("vicky")
+        await storage.create_user("rita", role="reviewer")
+        reviewer_key = await storage.rotate_own_key("rita")
+        ticket = await _ticket(client)
+
+        refused = client.post(
+            "/api/auth/sso/link",
+            json={"ticket": ticket, "username": "vicky", "api_key": viewer_key},
+        )
+
+        assert refused.status_code == 403
+        # The same refusal the link-start route and the callback give.
+        assert refused.json()["detail"] == (
+            "Reviewer access required. Viewers cannot perform this action."
+        )
+        assert await storage.list_user_identities("vicky") == []
+        refusal = await _last_sso_refusal(temp_db_path)
+        assert refusal["details"]["reason"] == "link_forbidden_role"
+        assert refusal["actor"] == "vicky"
+        # The refusal costs nothing: the ticket is still there for the next try.
+        assert await storage.peek_sso_ticket(ticket) is not None
+
+        linked = client.post(
+            "/api/auth/sso/link",
+            json={"ticket": ticket, "username": "rita", "api_key": reviewer_key},
+        )
+        assert linked.status_code == 200, linked.text
+        identities = await storage.list_user_identities("rita")
+        assert [identity["provider"] for identity in identities] == ["google"]
+
+
 async def test_link_mode_needs_a_session_before_it_starts(temp_db_path: Path) -> None:
     """Starting a link anonymously is refused rather than turned into a login."""
     for client in make_app_client(temp_db_path, _SSO_ENV):
@@ -3412,7 +3455,9 @@ async def test_a_failed_session_leaves_the_device_code_redeemable(
         started = _start_device(client)
         client.cookies.set("rootcoz_session", session)
         client.post(
-            "/api/auth/sso/device/approve", json={"user_code": started["user_code"]}
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers=_SAME_ORIGIN,
         )
         client.cookies.clear()
 
@@ -3523,10 +3568,13 @@ async def test_the_approved_code_hands_out_one_working_session(
         info = client.post(
             "/api/auth/sso/device/approve/lookup",
             json={"user_code": started["user_code"]},
+            headers=_SAME_ORIGIN,
         )
         assert info.json()["client_name"] == "laptop"
         approved = client.post(
-            "/api/auth/sso/device/approve", json={"user_code": started["user_code"]}
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers=_SAME_ORIGIN,
         )
         assert approved.status_code == 200
         assert approved.json()["provider"] == "google"
@@ -3563,7 +3611,9 @@ async def test_the_token_from_the_device_flow_works_as_a_bearer(
         started = _start_device(client)
         client.cookies.set("rootcoz_session", session)
         client.post(
-            "/api/auth/sso/device/approve", json={"user_code": started["user_code"]}
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers=_SAME_ORIGIN,
         )
         client.cookies.clear()
         token = client.post(
@@ -3585,7 +3635,9 @@ async def test_an_account_that_became_unusable_is_denied_at_redemption(
         started = _start_device(client)
         client.cookies.set("rootcoz_session", session)
         client.post(
-            "/api/auth/sso/device/approve", json={"user_code": started["user_code"]}
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers=_SAME_ORIGIN,
         )
         client.cookies.clear()
         async with storage._connect_db() as db:
@@ -3611,7 +3663,9 @@ async def test_an_approval_cannot_stamp_a_provider_the_code_was_not_opened_for(
         client.cookies.set("rootcoz_session", session)
 
         response = client.post(
-            "/api/auth/sso/device/approve", json={"user_code": started["user_code"]}
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers=_SAME_ORIGIN,
         )
         assert response.status_code == 400
 
@@ -3623,7 +3677,9 @@ async def test_an_unknown_user_code_is_not_approvable(temp_db_path: Path) -> Non
         session = await storage.create_session("alice", is_admin=False, role="reviewer")
         client.cookies.set("rootcoz_session", session)
         response = client.post(
-            "/api/auth/sso/device/approve", json={"user_code": "ZZZZ-ZZZZ"}
+            "/api/auth/sso/device/approve",
+            json={"user_code": "ZZZZ-ZZZZ"},
+            headers=_SAME_ORIGIN,
         )
         assert response.status_code == 404
 
@@ -3640,22 +3696,28 @@ async def test_every_refused_approval_leaves_a_row(temp_db_path: Path) -> None:
         client.cookies.set("rootcoz_session", session)
 
         unknown = client.post(
-            "/api/auth/sso/device/approve", json={"user_code": "ZZZZ-ZZZZ"}
+            "/api/auth/sso/device/approve",
+            json={"user_code": "ZZZZ-ZZZZ"},
+            headers=_SAME_ORIGIN,
         )
         assert unknown.status_code == 404
         # Opened for google, approved from a github session.
         mismatch = client.post(
-            "/api/auth/sso/device/approve", json={"user_code": pinned["user_code"]}
+            "/api/auth/sso/device/approve",
+            json={"user_code": pinned["user_code"]},
+            headers=_SAME_ORIGIN,
         )
         assert mismatch.status_code == 400
         approved = client.post(
             "/api/auth/sso/device/approve",
             json={"user_code": open_code["user_code"]},
+            headers=_SAME_ORIGIN,
         )
         assert approved.status_code == 200
         again = client.post(
             "/api/auth/sso/device/approve",
             json={"user_code": open_code["user_code"]},
+            headers=_SAME_ORIGIN,
         )
         assert again.status_code == 409
 
@@ -3696,7 +3758,9 @@ async def test_a_pending_or_rejected_account_is_denied_at_redemption(
         started = _start_device(client)
         client.cookies.set("rootcoz_session", session)
         approved = client.post(
-            "/api/auth/sso/device/approve", json={"user_code": started["user_code"]}
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers=_SAME_ORIGIN,
         )
         assert approved.status_code == 200
         client.cookies.clear()
@@ -3739,7 +3803,9 @@ async def test_a_key_approval_does_not_stamp_the_requested_provider(
         started = _start_device(client, provider="google")
         client.cookies.set("rootcoz_session", key_session)
         approved = client.post(
-            "/api/auth/sso/device/approve", json={"user_code": started["user_code"]}
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers=_SAME_ORIGIN,
         )
         assert approved.status_code == 200
         # The pin is what allowed the approval, and it is not what signed in.
@@ -3776,7 +3842,9 @@ async def test_the_device_flow_is_audited_where_it_changes_anything(
         started = _start_device(client, client_name="laptop")
         client.cookies.set("rootcoz_session", session)
         client.post(
-            "/api/auth/sso/device/approve", json={"user_code": started["user_code"]}
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers=_SAME_ORIGIN,
         )
         client.cookies.clear()
         client.post(
@@ -3798,6 +3866,168 @@ async def test_the_device_flow_is_audited_where_it_changes_anything(
         # which client, never the code itself (#379).
         for action, _actor, details in rows:
             assert "user_code" not in json.loads(details or "{}"), action
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [
+        # Nothing proves the origin, so it is treated as cross-site.
+        {},
+        # A sibling page posts with the browser's own cookies and no preflight.
+        {"origin": "https://evil.example"},
+        {"sec-fetch-site": "same-site"},
+    ],
+)
+async def test_an_approval_without_an_origin_proof_is_refused(
+    temp_db_path: Path, headers: dict[str, str]
+) -> None:
+    """A sibling origin could borrow the cookie for a preflight-free form POST.
+
+    Nothing proves the request came from this deployment's own approval page, so
+    the code is not touched — and the lookup half of the page is refused by the
+    same guard, so the pair cannot be split.
+    """
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        session = await storage.create_session("alice", is_admin=False, role="reviewer")
+        started = _start_device(client)
+        client.cookies.set("rootcoz_session", session)
+
+        refused = client.post(
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers=headers,
+        )
+        assert refused.status_code == 403
+        looked_up = client.post(
+            "/api/auth/sso/device/approve/lookup",
+            json={"user_code": started["user_code"]},
+            headers=headers,
+        )
+        assert looked_up.status_code == 403
+
+        # The code is still unapproved, so no terminal was bound to this account.
+        record = await storage.get_device_code_by_user_code(started["user_code"])
+        assert record is not None and record["authorized"] is False
+
+        # The page's own request is the one that approves it, and it is audited as
+        # an approval rather than a refusal.
+        approved = client.post(
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers=_SAME_ORIGIN,
+        )
+        assert approved.status_code == 200, approved.text
+        record = await storage.get_device_code_by_user_code(started["user_code"])
+        assert record is not None and record["authorized"] is True
+
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT details FROM audit_events"
+                " WHERE action = 'auth.sso_device_approve_refused' ORDER BY id"
+            )
+            reasons = [
+                json.loads(row["details"])["reason"] for row in await cursor.fetchall()
+            ]
+        assert reasons == ["cross_origin", "cross_origin"]
+        assert (
+            len(
+                [
+                    row
+                    for row in await _audit_actions(temp_db_path)
+                    if row["action"] == "auth.sso_device_approved"
+                ]
+            )
+            == 1
+        )
+
+
+async def test_the_cli_approves_with_its_key_and_no_origin_proof(
+    temp_db_path: Path,
+) -> None:
+    """A Bearer credential cannot be attached by a page, so it needs no proof.
+
+    ``rootcoz auth sso-approve`` approves exactly here, and it must keep working.
+    """
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("alice")
+        raw_key = await storage.rotate_own_key("alice")
+        started = _start_device(client)
+
+        approved = client.post(
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers={"Authorization": f"Bearer {raw_key}"},
+        )
+
+        assert approved.status_code == 200, approved.text
+        assert approved.json()["ok"] is True
+
+
+async def test_the_bootstrap_admin_can_approve_and_redeem(
+    temp_db_path: Path,
+) -> None:
+    """The reserved admin has no users row and is still a legitimate approver.
+
+    Reading the users table for the approver used to make the write fail, and the
+    route blamed a race — 409 "already approved" for a code nobody had approved.
+    The genuine second attempt is still 409, and each outcome is audited as what
+    it actually was.
+    """
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        started = _start_device(client, client_name="laptop")
+        client.cookies.set("rootcoz_session", admin_login(client)["rootcoz_session"])
+
+        approve = {"user_code": started["user_code"]}
+        approved = client.post(
+            "/api/auth/sso/device/approve", json=approve, headers=_SAME_ORIGIN
+        )
+        assert approved.status_code == 200, approved.text
+
+        # The approval records the *account*: a name, with no row behind it.
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT user_id, approved_username FROM sso_device_codes"
+                " WHERE user_code = ?",
+                (started["user_code"],),
+            )
+            row = await cursor.fetchone()
+        assert row["approved_username"] == "admin"
+        assert row["user_id"] is None
+
+        # A real second approval is the race the 409 is for — and only that.
+        again = client.post(
+            "/api/auth/sso/device/approve", json=approve, headers=_SAME_ORIGIN
+        )
+        assert again.status_code == 409
+        assert again.json()["detail"] == "That code was already approved"
+
+        # Nothing was pre-issued: the session is minted at redemption.
+        client.cookies.clear()
+        polled = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": started["device_code"]}
+        ).json()
+        assert polled["status"] == "approved"
+        assert polled["username"] == "admin"
+        session = await storage.get_session(polled["token"])
+        assert session is not None
+        assert session["username"] == "admin"
+        assert session["role"] == "admin"
+        assert bool(session["is_admin"]) is True
+
+        rows = await _audit_actions(temp_db_path)
+        assert [
+            row["actor"] for row in rows if row["action"] == "auth.sso_device_approved"
+        ] == ["admin"]
+        assert [
+            row["details"]["reason"]
+            for row in rows
+            if row["action"] == "auth.sso_device_approve_refused"
+        ] == ["already_approved"]
+        redeemed = [row for row in rows if row["action"] == "auth.sso_device_redeemed"]
+        assert [(row["actor"], row["details"]["role"]) for row in redeemed] == [
+            ("admin", "admin")
+        ]
 
 
 async def test_oidc_discovery_must_claim_the_configured_issuer(
@@ -3828,6 +4058,74 @@ async def test_oidc_discovery_must_claim_the_configured_issuer(
     with pytest.raises(AuthError) as excinfo:
         await provider.metadata()
     assert excinfo.value.reason == "discovery_failed"
+
+
+async def test_oidc_discovery_rejects_a_document_with_no_issuer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A document that pins nothing would be trusted for an hour anyway."""
+    from rootcoz.auth.sso import oidc as oidc_module
+    from rootcoz.auth.sso.redhat import RedHatSSOProvider
+
+    oidc_module._METADATA_CACHE.clear()
+    provider = RedHatSSOProvider(
+        client_id="cid",
+        client_secret="secret",  # pragma: allowlist secret
+        issuer="https://idp.example",
+    )
+    monkeypatch.setattr(
+        oidc_module,
+        "request_json",
+        _returning(
+            {
+                "authorization_endpoint": "https://idp.example/auth",
+                "token_endpoint": "https://idp.example/token",
+                "jwks_uri": "https://idp.example/jwks",
+            }
+        ),
+    )
+    with pytest.raises(AuthError) as excinfo:
+        await provider.metadata()
+    assert excinfo.value.reason == "discovery_failed"
+    # The message names the cause, so the login page's log is enough to fix it.
+    assert "issuer" in str(excinfo.value)
+    assert provider.issuer not in oidc_module._METADATA_CACHE
+
+
+async def test_oidc_discovery_accepts_and_caches_a_matching_issuer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The pin must admit the real document, and then trust it for the hour."""
+    from rootcoz.auth.sso import oidc as oidc_module
+    from rootcoz.auth.sso.redhat import RedHatSSOProvider
+
+    oidc_module._METADATA_CACHE.clear()
+    # Same issuer, as an IdP is allowed to spell it: a trailing slash is not a
+    # different issuer, so the pin must not refuse the deployment's own document.
+    provider = RedHatSSOProvider(
+        client_id="cid",
+        client_secret="secret",  # pragma: allowlist secret
+        issuer="https://idp.example",
+    )
+    document = {
+        "issuer": "https://idp.example/",
+        "authorization_endpoint": "https://idp.example/auth",
+        "token_endpoint": "https://idp.example/token",
+        "jwks_uri": "https://idp.example/jwks",
+    }
+    fetches = 0
+
+    async def _counted(*args: object, **kwargs: object) -> dict:
+        nonlocal fetches
+        fetches += 1
+        return document
+
+    monkeypatch.setattr(oidc_module, "request_json", _counted)
+
+    assert await provider.metadata() is document
+    # Accepted is cached: the second call is served without another fetch.
+    assert await provider.metadata() is document
+    assert fetches == 1
 
 
 async def test_oidc_discovery_rejects_a_plaintext_userinfo_endpoint(

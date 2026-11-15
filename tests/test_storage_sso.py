@@ -97,6 +97,47 @@ async def test_linking_an_identity_does_not_change_provenance(
             assert (await cursor.fetchone())["created_via"] == "github"
 
 
+async def test_the_approver_column_migration_backfills_existing_codes(
+    setup_test_db: Path,
+) -> None:
+    """A code approved before ``approved_username`` existed stays redeemable.
+
+    Dropping the column reproduces the old shape on a real database: the row is
+    approved (``user_id`` set) and the account is named nowhere else, so without
+    the backfill it would read as unapproved and the terminal would wait forever.
+    """
+    with patch.object(storage, "DB_PATH", setup_test_db):
+        await storage.create_user("alice")
+        code = await storage.create_device_code(ttl_seconds=600, interval_seconds=5)
+        async with storage._connect_db() as db:
+            await db.execute(
+                "ALTER TABLE sso_device_codes DROP COLUMN approved_username"
+            )
+            await db.execute(
+                "UPDATE sso_device_codes SET user_id ="
+                " (SELECT id FROM users WHERE username = 'alice')"
+                " WHERE user_code = ?",
+                (code["user_code"],),
+            )
+            await db.commit()
+
+        await storage.init_db()
+
+        approved = await storage.get_device_code_by_user_code(code["user_code"])
+        assert approved is not None and approved["authorized"] is True
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT approved_username FROM sso_device_codes WHERE user_code = ?",
+                (code["user_code"],),
+            )
+            assert (await cursor.fetchone())["approved_username"] == "alice"
+        # The backfilled name is what redemption names, so the flow completes.
+        assert await storage.redeem_device_code(code["device_code"]) == {
+            "username": "alice",
+            "approved_provider": None,
+        }
+
+
 async def test_the_schema_migration_is_idempotent(setup_test_db: Path) -> None:
     """Re-opening an existing database must not fail or rewrite its rows."""
     with patch.object(storage, "DB_PATH", setup_test_db):
@@ -414,8 +455,11 @@ async def test_approval_records_the_approver_not_the_requested_provider(
         open_code = await storage.create_device_code(
             ttl_seconds=600, interval_seconds=5
         )
-        assert await storage.authorize_device_code(
-            open_code["user_code"], username="alice", provider="google"
+        assert (
+            await storage.authorize_device_code(
+                open_code["user_code"], username="alice", provider="google"
+            )
+            == "approved"
         )
         assert await storage.redeem_device_code(open_code["device_code"]) == {
             "username": "alice",
@@ -426,10 +470,16 @@ async def test_approval_records_the_approver_not_the_requested_provider(
             ttl_seconds=600, interval_seconds=5, provider="github"
         )
         # Approving a github flow from a google session must not relabel it.
-        assert not await storage.authorize_device_code(
-            fixed["user_code"], username="alice", provider="google"
+        assert (
+            await storage.authorize_device_code(
+                fixed["user_code"], username="alice", provider="google"
+            )
+            == "provider_mismatch"
         )
-        assert await storage.authorize_device_code(fixed["user_code"], username="alice")
+        assert (
+            await storage.authorize_device_code(fixed["user_code"], username="alice")
+            == "approved"
+        )
         requested = await storage.get_device_code_by_user_code(fixed["user_code"])
         assert requested is not None and requested["provider"] == "github"
         assert await storage.redeem_device_code(fixed["device_code"]) == {
@@ -531,7 +581,7 @@ async def test_a_device_code_is_approved_then_redeemed_exactly_once(
 
         assert (
             await storage.authorize_device_code(code["user_code"], username="alice")
-            is True
+            == "approved"
         )
 
         # The approval page reads by the code a human typed, in any case.
@@ -608,9 +658,14 @@ async def test_an_authorized_code_cannot_be_approved_for_someone_else(
         await storage.create_user("bob")
         code = await storage.create_device_code(ttl_seconds=600, interval_seconds=5)
 
-        assert await storage.authorize_device_code(code["user_code"], username="alice")
-        assert not await storage.authorize_device_code(
-            code["user_code"], username="bob"
+        assert (
+            await storage.authorize_device_code(code["user_code"], username="alice")
+            == "approved"
+        )
+        # A second approval is named as what it is, not as a lost race.
+        assert (
+            await storage.authorize_device_code(code["user_code"], username="bob")
+            == "already_approved"
         )
         assert await storage.redeem_device_code(code["device_code"]) == {
             "username": "alice",
@@ -630,8 +685,9 @@ async def test_expired_device_codes_cannot_be_approved_or_redeemed(
 
         assert await storage.get_device_code(code["device_code"]) is None
         assert await storage.get_device_code_by_user_code(code["user_code"]) is None
-        assert not await storage.authorize_device_code(
-            code["user_code"], username="alice"
+        assert (
+            await storage.authorize_device_code(code["user_code"], username="alice")
+            == "expired"
         )
         assert await storage.redeem_device_code(code["device_code"]) is None
 
