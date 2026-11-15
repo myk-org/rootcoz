@@ -1179,20 +1179,39 @@ class TestHealthEndpoint:
         real_async_client = httpx.AsyncClient
 
         async def _run() -> None:
+            gate = asyncio.Event()
+            entered = asyncio.Event()
+
+            async def _gated_failure(*args: Any, **kwargs: Any) -> None:
+                # Hold the first upstream call open so the overlapping callers
+                # really contend for the lock instead of racing a finished fetch.
+                entered.set()
+                await gate.wait()
+                raise httpx.ConnectError("boom")
+
             with (
                 patch.dict(main._release_cache, {}, clear=True),
                 patch("rootcoz.main.httpx.AsyncClient") as MockClient,
             ):
-                mock_client_instance = _mock_async_client(
-                    MockClient, error=httpx.ConnectError("boom")
-                )
+                mock_client_instance = _mock_async_client(MockClient)
+                mock_client_instance.get.side_effect = _gated_failure
                 transport = httpx.ASGITransport(app=main.app)
                 async with real_async_client(
                     transport=transport, base_url="http://test"
                 ) as client:
-                    responses = await asyncio.gather(
-                        *[client.get("/api/releases/latest") for _ in range(5)]
-                    )
+                    tasks = [
+                        asyncio.create_task(client.get("/api/releases/latest"))
+                        for _ in range(5)
+                    ]
+                    # One caller is parked inside the upstream fetch...
+                    await asyncio.wait_for(entered.wait(), 5)
+                    # ...while the fetch is still pending, no other caller may
+                    # finish or fire an upstream attempt of its own.
+                    done, _pending = await asyncio.wait(tasks, timeout=0.2)
+                    assert done == set()
+                    assert mock_client_instance.get.call_count == 1
+                    gate.set()
+                    responses = await asyncio.gather(*tasks)
                 for response in responses:
                     assert response.status_code == 200
                     assert response.json()["version"] == ""
