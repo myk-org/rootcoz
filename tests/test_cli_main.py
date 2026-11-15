@@ -9910,6 +9910,36 @@ class TestIssueAttachmentsCLI:
         assert refused.exit_code == 1
         assert "bad.svg" in refused.output
 
+        mock_client.create_jira_bug.side_effect = RootCozError(
+            status_code=0,
+            detail=(
+                "Request timed out: https://rootcoz.example.com/results/job-1/create-jira-bug "
+                "— the issue may already have been filed; check the tracker before retrying "
+                "to avoid creating a duplicate."
+            ),
+        )
+        timed_out = runner.invoke(
+            app,
+            [
+                "create-issue",
+                "job-1",
+                "--test",
+                "suite.test_a",
+                "--type",
+                "jira",
+                "--title",
+                "T",
+                "--body",
+                "B",
+                "--attach",
+                "/tmp/a.log",
+            ],
+        )
+        assert timed_out.exit_code == 1
+        assert "Warning: Tracker write outcome is uncertain" in timed_out.output
+        assert "may already have been filed" in timed_out.output
+        assert "check the tracker before retrying" in timed_out.output
+
     def test_download_attachment_command_stdout_file_json_and_error(self, tmp_path):
         raw_bytes = b"\x89PNG\r\n\x1a\n\x00\x01\xfe\xff"
 

@@ -1025,6 +1025,122 @@ class TestCapabilitiesAndOrchestration:
         assert dl.status_code == 200
         assert dl.content == b"maybe-filed"
 
+    async def test_jira_upload_deadlines_bound_per_file_and_total_loop_wall_clock(
+        self, integration_env, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        assert main._JIRA_ATTACHMENT_PER_FILE_TIMEOUT_SECONDS == 30.0
+        assert main._JIRA_ATTACHMENTS_TOTAL_TIMEOUT_SECONDS == 65.0
+
+        client, _ = integration_env
+        _, _, headers = await _create_reviewer("jira-deadlines")
+        job_id = await _seed_completed_job()
+        seen_bodies: list[str] = []
+
+        async def fake_create_jira_bug(**kwargs):
+            seen_bodies.append(kwargs["body"])
+            return {
+                "url": "https://jira.example.com/browse/PROJ-99",
+                "key": "PROJ-99",
+                "title": kwargs["title"],
+            }
+
+        # 1) Total loop deadline interrupts a multi-file stall and marks remaining
+        #    files native_outcome_unknown while returning 201 cleanly.
+        attempted: list[str] = []
+
+        async def stalling_multi_file_upload(conn, key, filename, data, media_type):
+            attempted.append(filename)
+            if filename == "one.log":
+                await asyncio.sleep(0.02)
+                return "native_attached"
+            await asyncio.sleep(1.0)
+            return "native_attached"
+
+        monkeypatch.setattr(main, "_JIRA_ATTACHMENT_PER_FILE_TIMEOUT_SECONDS", 0.30)
+        monkeypatch.setattr(main, "_JIRA_ATTACHMENTS_TOTAL_TIMEOUT_SECONDS", 0.10)
+        with (
+            patch("rootcoz.main.create_jira_bug", side_effect=fake_create_jira_bug),
+            patch(
+                "rootcoz.main.add_jira_attachment",
+                side_effect=stalling_multi_file_upload,
+            ),
+        ):
+            resp = client.post(
+                f"/results/{job_id}/create-jira-bug",
+                headers=headers,
+                json={
+                    "test_name": "test_example",
+                    "title": "Total deadline bug",
+                    "body": "Body",
+                    "attachments": [
+                        _upload_payload("one.log", b"111"),
+                        _upload_payload("two.png", _MIN_PNG),
+                        _upload_payload("three.txt", b"333"),
+                    ],
+                },
+            )
+        assert resp.status_code == 201, resp.text
+        assert attempted == ["one.log", "two.png"]
+        summary = resp.json()["attachments"]
+        assert summary["count"] == 3
+        assert summary["native_attached"] == 1
+        assert summary["linked"] == 3
+        assert summary["failed_count"] == 2
+        assert [f["delivery"] for f in summary["files"]] == [
+            "native_and_hosted",
+            "native_outcome_unknown",
+            "native_outcome_unknown",
+        ]
+        assert [f["reason"] for f in summary["files"]] == [
+            "native_attached",
+            "native_outcome_unknown",
+            "native_outcome_unknown",
+        ]
+        for f in summary["files"]:
+            assert (
+                f"https://rootcoz.example.com/api/issue-attachments/{f['id']}"
+                in seen_bodies[0]
+            )
+            assert (
+                client.get(
+                    f"/api/issue-attachments/{f['id']}", headers=headers
+                ).status_code
+                == 200
+            )
+
+        # 2) Per-file deadline interrupts a single stalled file while allowing
+        #    subsequent files within the total loop budget to attach natively.
+        async def single_file_stall(conn, key, filename, data, media_type):
+            if filename == "slow.log":
+                await asyncio.sleep(1.0)
+            return "native_attached"
+
+        monkeypatch.setattr(main, "_JIRA_ATTACHMENT_PER_FILE_TIMEOUT_SECONDS", 0.05)
+        monkeypatch.setattr(main, "_JIRA_ATTACHMENTS_TOTAL_TIMEOUT_SECONDS", 0.50)
+        with (
+            patch("rootcoz.main.create_jira_bug", side_effect=fake_create_jira_bug),
+            patch("rootcoz.main.add_jira_attachment", side_effect=single_file_stall),
+        ):
+            resp2 = client.post(
+                f"/results/{job_id}/create-jira-bug",
+                headers=headers,
+                json={
+                    "test_name": "test_example",
+                    "title": "Per-file deadline bug",
+                    "body": "Body",
+                    "attachments": [
+                        _upload_payload("slow.log", b"slow"),
+                        _upload_payload("fast.txt", b"fast"),
+                    ],
+                },
+            )
+        assert resp2.status_code == 201, resp2.text
+        files2 = resp2.json()["attachments"]["files"]
+        assert [f["delivery"] for f in files2] == [
+            "native_outcome_unknown",
+            "native_and_hosted",
+        ]
+
 
 class TestDirectChatManifestAndModelRefusal:
     """Item 4: direct chat draft manifest binding and model tool explicit refusal."""

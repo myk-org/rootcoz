@@ -23,8 +23,8 @@ _ERROR_BODY_PREVIEW_LEN = 500
 _MAX_ATTACHMENT_FILES = 3
 _MAX_ATTACHMENT_FILE_BYTES = 5 * 1024 * 1024
 _MAX_ATTACHMENT_TOTAL_BYTES = 10 * 1024 * 1024
-# Outlives server issue creation plus up to 3 x 30s native attachment uploads.
-_ISSUE_ATTACHMENT_REQUEST_TIMEOUT = 120.0
+# Outlives server issue creation plus the 65s native attachment upload deadline.
+_ISSUE_ATTACHMENT_REQUEST_TIMEOUT = 150.0
 
 _TERMINAL_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
 _SYMLINK_ERRNOS = frozenset(
@@ -219,6 +219,7 @@ class RootCozClient:
         headers: dict[str, str] | None = None,
         accept_statuses: tuple[int, ...] = (200,),
         timeout: float | None = None,
+        may_have_filed_issue: bool = False,
     ) -> Any:
         """Send an HTTP request and return parsed JSON.
 
@@ -230,6 +231,7 @@ class RootCozClient:
             headers: Extra request headers.
             accept_statuses: HTTP status codes treated as success.
             timeout: Optional per-request timeout override in seconds.
+            may_have_filed_issue: Append duplicate-filing warning when request times out.
 
         Returns:
             Parsed JSON response.
@@ -251,9 +253,20 @@ class RootCozClient:
                 timeout=httpx.USE_CLIENT_DEFAULT if timeout is None else timeout,
             )
         except httpx.TimeoutException as exc:
+            detail = f"Request timed out: {exc}"
+            if may_have_filed_issue:
+                logger.warning(
+                    "Issue creation request timed out (%s %s); issue may already have been filed",
+                    method,
+                    path,
+                )
+                detail += (
+                    " — the issue may already have been filed; check the tracker "
+                    "before retrying to avoid creating a duplicate."
+                )
             raise RootCozError(
                 status_code=0,
-                detail=f"Request timed out: {exc}",
+                detail=detail,
             ) from exc
         except httpx.RequestError as exc:
             raise RootCozError(
@@ -1580,6 +1593,7 @@ class RootCozClient:
             json=payload,
             accept_statuses=(201,),
             timeout=self._attachment_request_timeout(attachments),
+            may_have_filed_issue=bool(attachments),
         )
 
     def create_jira_bug(
@@ -1615,6 +1629,7 @@ class RootCozClient:
             json=payload,
             accept_statuses=(201,),
             timeout=self._attachment_request_timeout(attachments),
+            may_have_filed_issue=bool(attachments),
         )
 
     @staticmethod
@@ -1735,6 +1750,7 @@ class RootCozClient:
             json=payload,
             accept_statuses=(201,),
             timeout=self._attachment_request_timeout(attachments),
+            may_have_filed_issue=bool(attachments),
         )
 
     def feedback_create(
@@ -1763,6 +1779,7 @@ class RootCozClient:
             json=payload,
             accept_statuses=(201,),
             timeout=self._attachment_request_timeout(attachments),
+            may_have_filed_issue=bool(attachments),
         )
 
     def download_issue_attachment(self, attachment_id: str, output: str) -> int:

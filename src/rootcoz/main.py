@@ -13012,6 +13012,10 @@ async def _reject_model_chat_tool_attachments(
         raise HTTPException(status_code=400, detail=_CHAT_TOOL_ATTACHMENT_REFUSAL)
 
 
+_JIRA_ATTACHMENT_PER_FILE_TIMEOUT_SECONDS = 30.0
+_JIRA_ATTACHMENTS_TOTAL_TIMEOUT_SECONDS = 65.0
+
+
 async def _create_issue_from_text(
     target: Literal["github", "jira"],
     title: str,
@@ -13315,40 +13319,70 @@ async def _create_issue_from_text(
     else:
         assert jira_conn is not None
         issue_key = str(result.get("key", ""))
-        for row, item in zip(reserved_rows, validated, strict=True):
-            try:
-                outcome = await add_jira_attachment(
-                    jira_conn,
-                    issue_key,
-                    item.display_name,
-                    item.data,
-                    item.media_type,
-                )
-            except Exception:
+        try:
+            async with asyncio.timeout(_JIRA_ATTACHMENTS_TOTAL_TIMEOUT_SECONDS):
+                for row, item in zip(reserved_rows, validated, strict=True):
+                    try:
+                        async with asyncio.timeout(
+                            _JIRA_ATTACHMENT_PER_FILE_TIMEOUT_SECONDS
+                        ):
+                            outcome = await add_jira_attachment(
+                                jira_conn,
+                                issue_key,
+                                item.display_name,
+                                item.data,
+                                item.media_type,
+                            )
+                    except TimeoutError:
+                        logger.warning(
+                            "Jira attachment upload exceeded %.1fs per-file deadline for %s; marking outcome unknown",
+                            _JIRA_ATTACHMENT_PER_FILE_TIMEOUT_SECONDS,
+                            issue_key,
+                        )
+                        outcome = "native_outcome_unknown"
+                    except Exception:
+                        logger.warning(
+                            "Unexpected error during Jira attachment upload; marking outcome unknown",
+                            exc_info=True,
+                        )
+                        outcome = "native_outcome_unknown"
+                    if outcome == "native_attached":
+                        delivery: Literal[
+                            "hosted",
+                            "native_and_hosted",
+                            "fallback_only",
+                            "native_outcome_unknown",
+                        ] = "native_and_hosted"
+                    elif outcome == "native_outcome_unknown":
+                        delivery = "native_outcome_unknown"
+                    else:
+                        delivery = "fallback_only"
+                    file_summaries.append(
+                        IssueAttachmentFileSummary(
+                            filename=row["display_name"],
+                            id=row["id"],
+                            delivery=delivery,
+                            reason=outcome,
+                        )
+                    )
+        except TimeoutError:
+            remaining_rows = reserved_rows[len(file_summaries) :]
+            if remaining_rows:
                 logger.warning(
-                    "Unexpected error during Jira attachment upload; marking outcome unknown",
-                    exc_info=True,
+                    "Jira attachment upload loop exceeded %.1fs total deadline for %s; marking %d remaining file(s) outcome unknown",
+                    _JIRA_ATTACHMENTS_TOTAL_TIMEOUT_SECONDS,
+                    issue_key,
+                    len(remaining_rows),
                 )
-                outcome = "native_outcome_unknown"
-            if outcome == "native_attached":
-                delivery: Literal[
-                    "hosted",
-                    "native_and_hosted",
-                    "fallback_only",
-                    "native_outcome_unknown",
-                ] = "native_and_hosted"
-            elif outcome == "native_outcome_unknown":
-                delivery = "native_outcome_unknown"
-            else:
-                delivery = "fallback_only"
-            file_summaries.append(
-                IssueAttachmentFileSummary(
-                    filename=row["display_name"],
-                    id=row["id"],
-                    delivery=delivery,
-                    reason=outcome,
-                )
-            )
+                for row in remaining_rows:
+                    file_summaries.append(
+                        IssueAttachmentFileSummary(
+                            filename=row["display_name"],
+                            id=row["id"],
+                            delivery="native_outcome_unknown",
+                            reason="native_outcome_unknown",
+                        )
+                    )
 
     summary = IssueAttachmentSummary(
         count=len(reserved_rows),

@@ -4165,7 +4165,7 @@ class TestIssueAttachmentsClient:
             ("feedback_create", ("Title", "Body")),
         ],
     )
-    def test_attachment_calls_enforce_120s_minimum_timeout_and_preserve_larger_timeout(
+    def test_attachment_calls_enforce_150s_minimum_timeout_and_preserve_larger_timeout(
         self, tmp_path, method, args
     ):
         att_file = tmp_path / "evidence.log"
@@ -4192,13 +4192,13 @@ class TestIssueAttachmentsClient:
             )
             return client
 
-        # 1) Default 30s client: text-only stays 30s, attachments bump to 120s.
+        # 1) Default 30s client: text-only stays 30s, attachments bump to 150s.
         default_client = _client_with_timeout(30.0)
         getattr(default_client, method)(*args)
         getattr(default_client, method)(*args, attachments=[])
         getattr(default_client, method)(*args, attachments=[str(att_file)])
 
-        # 2) Smaller custom timeout (15s): attachments still enforce >= 120s.
+        # 2) Smaller custom timeout (15s): attachments still enforce >= 150s.
         short_client = _client_with_timeout(15.0)
         getattr(short_client, method)(*args, attachments=[str(att_file)])
 
@@ -4209,12 +4209,51 @@ class TestIssueAttachmentsClient:
         assert [t["read"] for t in seen_timeouts] == [
             30.0,
             30.0,
-            120.0,
-            120.0,
+            150.0,
+            150.0,
             180.0,
         ]
         assert all(
             seen_timeouts[idx][phase] == expected
-            for idx, expected in ((2, 120.0), (3, 120.0), (4, 180.0))
+            for idx, expected in ((2, 150.0), (3, 150.0), (4, 180.0))
             for phase in ("connect", "read", "write", "pool")
         )
+
+    @pytest.mark.parametrize(
+        ("method", "args", "creates_issue"),
+        [
+            ("create_github_issue", ("job-1", "test_case", "Title", "Body"), True),
+            ("create_jira_bug", ("job-1", "test_case", "Title", "Body"), True),
+            (
+                "create_chat_issue",
+                ("jira", "Title", "Body", "draft-1", "CODE12"),
+                True,
+            ),
+            ("feedback_create", ("Title", "Body"), True),
+            ("propose_chat_issue", ("jira", "Title", "Body"), False),
+        ],
+    )
+    def test_attachment_timeout_warns_duplicate_for_creates_only(
+        self, tmp_path, method, args, creates_issue
+    ):
+        att_file = tmp_path / "evidence.log"
+        att_file.write_bytes(b"timeout-duplicate-check\n")
+
+        def raise_timeout(request: httpx.Request) -> httpx.Response:
+            raise httpx.ReadTimeout("Read timed out", request=request)
+
+        client = _make_client(raise_timeout)
+        with pytest.raises(RootCozError) as exc_info:
+            getattr(client, method)(*args, attachments=[str(att_file)])
+
+        err = exc_info.value
+        assert err.status_code == 0
+        detail_lower = err.detail.lower()
+        assert "timed out" in detail_lower
+        if creates_issue:
+            assert "may already have been filed" in detail_lower
+            assert "check the tracker before retrying" in detail_lower
+            assert "duplicate" in detail_lower
+        else:
+            assert "filed" not in detail_lower
+            assert "duplicate" not in detail_lower

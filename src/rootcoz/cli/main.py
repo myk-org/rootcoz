@@ -3176,8 +3176,10 @@ def _print_proposal_manifest(data: dict[str, Any]) -> None:
 def _handle_issue_create_error(err: RootCozError) -> None:
     """Emit duplicate-filing warnings on known-created or ambiguous errors, then exit 1."""
     detail_lower = (err.detail or "").lower()
-    if ("https://" in detail_lower or "http://" in detail_lower) and (
-        "already" in detail_lower or "created" in detail_lower
+    if (
+        err.status_code != 0
+        and ("https://" in detail_lower or "http://" in detail_lower)
+        and ("already" in detail_lower or "created" in detail_lower)
     ):
         typer.echo(
             "Warning: Issue was already created on the tracker — do not retry create.",
@@ -3187,6 +3189,7 @@ def _handle_issue_create_error(err: RootCozError) -> None:
         (err.status_code in {502, 504} and "unreachable" not in detail_lower)
         or "timed out" in detail_lower
         or "may have been filed" in detail_lower
+        or "may already have been filed" in detail_lower
     ):
         typer.echo(
             "Warning: Tracker write outcome is uncertain — check the tracker before retrying "
