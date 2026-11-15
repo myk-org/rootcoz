@@ -317,10 +317,11 @@ results retention, proven-not-filed submission rollback, `DELETE /api/issue-atta
 and account deletion all unlink their attachment blobs and `issue_attachments` rows inline and
 synchronously on the request or policy path. Startup only retries explicit interrupted deletion records
 left behind if the process crashed mid-delete, recording its completed retries as `issue_attachments` in
-`startup.workspace_reclaim` even when no temp-root directory changed. Startup retries
-pending `reserved` or `cleanup_pending` database rows, `issue_attachments` rows whose `job_id` is no
-longer in `results`, and explicit `.{owner_id}.rootcoz-deleting` account-deletion markers under `users/`
-whose `users` row was already removed, deleting any remaining `job_id == ''` SQL rows before removing
+`startup.workspace_reclaim` even when no temp-root directory changed. Startup retries pending
+`reserved` or `cleanup_pending` database rows, and it retries `.job-<job_id>.rootcoz-deleting` markers
+under `jobs/` when the job row is absent from `results`. RootCoz writes
+`.job-<job_id>.rootcoz-deleting` only when inline run cleanup fails or is interrupted. Startup also
+retries explicit `.{owner_id}.rootcoz-deleting` account-deletion markers under `users/` whose `users` row was already removed, deleting any remaining `job_id == ''` SQL rows before removing
 the marker and keeping the marker on disk if row deletion fails. Startup never scans arbitrary
 directories under `jobs/` or `users/` as orphans without an explicit pending row or deletion marker.
 

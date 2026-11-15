@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shlex
 from typing import ClassVar, Self
 from unittest.mock import MagicMock, patch
@@ -9436,7 +9437,8 @@ class TestIssueAttachmentsCLI:
     def test_help_exposes_expected_flags_and_zero_token_flags(self, subcmd):
         result = runner.invoke(app, subcmd)
         assert result.exit_code == 0
-        normalized = " ".join(result.output.split())
+        plain = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", result.output)
+        normalized = " ".join(plain.split())
         for forbidden in (
             "--github-token",
             "--jira-token",
