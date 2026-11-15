@@ -55,6 +55,8 @@ rootcoz reports issues --team alpha --review-status reviewed
 
 > **Tip:** The `Reports` page keeps its active tab and filters in the URL, so you can refresh, bookmark, or share the same filtered view.
 
+Saved report presets appear directly under `Reports` in the sidebar, grouped into `Server` and `User` when those groups have entries; both `Reports` and its shortcuts are shown only when your account has reports access (admins always do). Clicking `Reports` opens the page, while its chevron and the `Server`/`User` headers toggle the shortcut lists and remember your open or closed choices per signed-in user in browser storage. Creating, updating, renaming, and deleting presets stays in the `Presets` menu on the filter bar — see [Tracking Analysis Progress](track-analysis-progress.html) for full preset and sidebar disclosure details.
+
 See [CLI Command Reference](cli-reference.html) for all flags, or see [API Endpoint Reference](api-reference.html) if you want to script the same lookups.
 
 ## Troubleshooting

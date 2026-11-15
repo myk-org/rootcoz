@@ -22,6 +22,7 @@ import { Separator } from '@/components/ui/separator'
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from '@/components/ui/tooltip'
 import { api } from '@/lib/api'
 import { useAuth } from '@/lib/auth'
+import { useSidebarSavedFilters } from '@/lib/useSidebarSavedFilters'
 import { cn } from '@/lib/utils'
 
 // ─── Constants ──────────────────────────────────────────────────────
@@ -81,6 +82,11 @@ interface SidebarProps {
 export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
   const location = useLocation()
   const { isAdmin, canViewReports, role, username, loading, authenticated } = useAuth()
+  const {
+    groups: savedFilterGroups,
+    expanded: savedFilterExpanded,
+    toggle: toggleSavedFilter,
+  } = useSidebarSavedFilters()
 
   // ─── Width / collapse state ─────────────────────────────────────
   const [collapsed, setCollapsed] = useState(() => {
@@ -210,7 +216,7 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
 
   const effectiveWidth = collapsed ? MIN_WIDTH : width
 
-  const renderItem = (item: NavItem) => {
+  const renderItem = (item: NavItem, presentationCollapsed: boolean) => {
     const active = isActive(item.to)
     const Icon = item.icon
     const badge = getBadge(item.to, badges)
@@ -218,21 +224,22 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
     const link = (
       <Link
         to={item.to}
+        aria-label={presentationCollapsed ? item.label : undefined}
         className={cn(
-          'relative flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors duration-150',
-          collapsed && 'justify-center px-0',
+          'relative flex items-center gap-3 rounded-md px-3 py-2 text-sm font-medium transition-colors duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-border-accent',
+          presentationCollapsed && 'justify-center px-0',
           active
             ? 'bg-surface-elevated text-text-primary'
             : 'text-text-secondary hover:bg-surface-hover hover:text-text-primary',
         )}
       >
-        <Icon className="h-4 w-4 shrink-0" />
-        {!collapsed && <span className="truncate">{item.label}</span>}
+        <Icon aria-hidden="true" className="h-4 w-4 shrink-0" />
+        {!presentationCollapsed && <span className="truncate">{item.label}</span>}
         {badge}
       </Link>
     )
 
-    if (collapsed) {
+    if (presentationCollapsed) {
       return (
         <Tooltip key={item.to}>
           <TooltipTrigger asChild>{link}</TooltipTrigger>
@@ -244,19 +251,38 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
     return <div key={item.to}>{link}</div>
   }
 
-  const sidebarContent = (
+  const renderContent = (presentationCollapsed: boolean) => (
     <nav className="flex flex-1 flex-col gap-1 overflow-y-auto px-2 py-3">
-      {userItems.map(renderItem)}
-
-      {!loading && authenticated && (
-        <SavedFiltersSection collapsed={collapsed} onNavigate={onMobileClose} />
+      {userItems.map((item) =>
+        item.to === '/' ? (
+          <SavedFiltersSection
+            key={item.to}
+            page="dashboard"
+            navLink={renderItem(item, presentationCollapsed)}
+            groups={savedFilterGroups.dashboard}
+            expanded={savedFilterExpanded}
+            onToggle={toggleSavedFilter}
+            collapsed={presentationCollapsed}
+            onNavigate={onMobileClose}
+          />
+        ) : (
+          renderItem(item, presentationCollapsed)
+        ),
       )}
 
       {!loading && (canViewReports || isAdmin) && (
         <>
           <Separator className="my-2" />
-          {(canViewReports || isAdmin) && renderItem(REPORTS_ITEM)}
-          {isAdmin && ADMIN_NAV_ITEMS.map(renderItem)}
+          <SavedFiltersSection
+            page="reports"
+            navLink={renderItem(REPORTS_ITEM, presentationCollapsed)}
+            groups={savedFilterGroups.reports}
+            expanded={savedFilterExpanded}
+            onToggle={toggleSavedFilter}
+            collapsed={presentationCollapsed}
+            onNavigate={onMobileClose}
+          />
+          {isAdmin && ADMIN_NAV_ITEMS.map((item) => renderItem(item, presentationCollapsed))}
         </>
       )}
     </nav>
@@ -314,7 +340,7 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
         className="relative hidden shrink-0 flex-col border-r border-border-default bg-surface-card md:flex"
         style={{ width: effectiveWidth }}
       >
-        {sidebarContent}
+        {renderContent(collapsed)}
         {versionFooter}
 
         {/* Drag handle */}
@@ -339,7 +365,7 @@ export function Sidebar({ badges, mobileOpen, onMobileClose }: SidebarProps) {
             data-testid="mobile-sidebar"
             className="fixed inset-y-0 left-0 z-50 flex w-64 flex-col border-r border-border-default bg-surface-card pt-16 md:hidden"
           >
-            {sidebarContent}
+            {renderContent(false)}
             {versionFooter}
           </aside>
         </>
