@@ -181,6 +181,7 @@ def test_exemptions_are_not_stale() -> None:
         # A filed issue, and (from #502) the credential-policy denial that
         # refuses one — same action, ``outcome: denied``, no issue content.
         "issue.create",
+        "issue_attachment.download",
         "provider.models_refresh",
         "admin.settings_export",
         "audit.export",

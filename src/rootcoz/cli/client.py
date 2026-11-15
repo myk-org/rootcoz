@@ -1,16 +1,46 @@
 """HTTP client for the rootcoz REST API."""
 
+import base64
 import contextlib
+import errno
+import logging
 import os
 import re
+import stat
 import sys
 from typing import Any
 from urllib.parse import quote
 
 import httpx
 
+logger = logging.getLogger(__name__)
+
 # Approximate response body preview length for error messages (log readability, not data truncation)
 _ERROR_BODY_PREVIEW_LEN = 500
+
+# Client-side preflight hints matching server limits in rootcoz.issue_attachments;
+# the server remains authoritative for validation and enforcement.
+_MAX_ATTACHMENT_FILES = 3
+_MAX_ATTACHMENT_FILE_BYTES = 5 * 1024 * 1024
+_MAX_ATTACHMENT_TOTAL_BYTES = 10 * 1024 * 1024
+
+_TERMINAL_CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
+_SYMLINK_ERRNOS = frozenset(
+    code
+    for code in (
+        errno.ELOOP,
+        getattr(errno, "EMLINK", -1),
+        getattr(errno, "EFTYPE", -1),
+    )
+    if code >= 0
+)
+
+
+def sanitize_terminal_text(value: object) -> str:
+    """Escape C0/DEL/C1 control characters so untrusted text cannot inject terminal sequences."""
+    return _TERMINAL_CONTROL_RE.sub(
+        lambda match: f"\\x{ord(match.group(0)):02x}", str(value)
+    )
 
 
 class RootCozError(Exception):
@@ -23,6 +53,97 @@ class RootCozError(Exception):
         if detail:
             msg += f": {detail}"
         super().__init__(msg)
+
+
+def _attachment_os_error_reason(exc: OSError) -> str:
+    """Map an OSError while opening/reading a local attachment to a safe reason."""
+    if exc.errno in _SYMLINK_ERRNOS:
+        return "symlinks are not allowed"
+    if isinstance(exc, FileNotFoundError) or exc.errno == errno.ENOENT:
+        return "file does not exist"
+    if isinstance(exc, IsADirectoryError) or exc.errno in {
+        errno.EISDIR,
+        errno.ENOTDIR,
+    }:
+        return "path is a directory, expected a regular file"
+    if isinstance(exc, PermissionError) or exc.errno in {errno.EACCES, errno.EPERM}:
+        return "file is not readable (permission denied)"
+    return "cannot read regular non-symlink file"
+
+
+def _read_attachment_file(path: str) -> tuple[str, bytes]:
+    """Atomically open and read one bounded regular non-symlink file."""
+    if not path:
+        raise ValueError("path must not be empty")
+    filename = os.path.basename(path)
+    if filename in {"", ".", ".."}:
+        raise ValueError("path is a directory, expected a regular file")
+    nofollow = getattr(os, "O_NOFOLLOW", 0)
+    if not nofollow and stat.S_ISLNK(os.lstat(path).st_mode):
+        raise OSError(errno.ELOOP, "Symlinks are not allowed", path)
+    flags = os.O_RDONLY | nofollow | getattr(os, "O_NONBLOCK", 0)
+    fd = os.open(path, flags)
+    try:
+        info = os.fstat(fd)
+        if stat.S_ISDIR(info.st_mode):
+            raise IsADirectoryError(errno.EISDIR, "Is a directory", path)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError("not a regular file")
+        if info.st_size <= 0:
+            raise ValueError("file is empty")
+        if info.st_size > _MAX_ATTACHMENT_FILE_BYTES:
+            raise ValueError("exceeds 5 MiB per-file limit")
+        if hasattr(os, "set_blocking"):
+            os.set_blocking(fd, True)
+        with os.fdopen(fd, "rb") as handle:
+            fd = -1
+            data = handle.read(_MAX_ATTACHMENT_FILE_BYTES + 1)
+    finally:
+        if fd >= 0:
+            os.close(fd)
+    if not data:
+        raise ValueError("file is empty")
+    if len(data) > _MAX_ATTACHMENT_FILE_BYTES:
+        raise ValueError("exceeds 5 MiB per-file limit")
+    return filename, data
+
+
+def _encode_attachments(paths: list[str] | None) -> list[dict[str, str]]:
+    """Read and base64-encode bounded regular non-symlink files before HTTP."""
+    if not paths:
+        return []
+    if len(paths) > _MAX_ATTACHMENT_FILES:
+        offending = sanitize_terminal_text(paths[_MAX_ATTACHMENT_FILES])
+        raise RootCozError(
+            detail=(
+                f"Attachment '{offending}': maximum {_MAX_ATTACHMENT_FILES} "
+                f"attachments allowed (got {len(paths)})"
+            )
+        )
+    result: list[dict[str, str]] = []
+    total = 0
+    for path in paths:
+        safe_path = sanitize_terminal_text(path)
+        try:
+            filename, data = _read_attachment_file(path)
+        except OSError as exc:
+            reason = _attachment_os_error_reason(exc)
+            raise RootCozError(detail=f"Attachment '{safe_path}': {reason}") from exc
+        except ValueError as exc:
+            raise RootCozError(detail=f"Attachment '{safe_path}': {exc}") from exc
+        total += len(data)
+        if total > _MAX_ATTACHMENT_TOTAL_BYTES:
+            raise RootCozError(
+                detail=f"Attachment '{safe_path}': attachments exceed 10 MiB total limit"
+            )
+        result.append(
+            {
+                "filename": filename,
+                "data_b64": base64.b64encode(data).decode("ascii"),
+            }
+        )
+    logger.info("Encoded %d issue attachment(s) (%d bytes total)", len(result), total)
+    return result
 
 
 def _copy_stream(response: httpx.Response, sink: Any) -> int:
@@ -568,16 +689,30 @@ class RootCozClient:
                         ) from exc
                 else:
                     partial = f"{path}.part"
+                    created_partial = False
                     try:
-                        with open(partial, "wb") as handle:
+                        if os.path.islink(path):
+                            raise OSError(errno.ELOOP, "destination is a symlink", path)
+                        fd = os.open(
+                            partial,
+                            os.O_WRONLY
+                            | os.O_CREAT
+                            | os.O_TRUNC
+                            | getattr(os, "O_NOFOLLOW", 0),
+                            0o600,
+                        )
+                        created_partial = True
+                        with os.fdopen(fd, "wb") as handle:
                             written = _copy_stream(response, handle)
                         os.replace(partial, path)
                     except BaseException as exc:
-                        with contextlib.suppress(OSError):
-                            os.unlink(partial)
+                        if created_partial:
+                            with contextlib.suppress(OSError):
+                                os.unlink(partial)
                         if isinstance(exc, OSError):
                             raise RootCozError(
-                                status_code=0, detail=f"Cannot write {path}: {exc}"
+                                status_code=0,
+                                detail=f"Cannot write {sanitize_terminal_text(path)}: {exc}",
                             ) from exc
                         raise
             return written
@@ -1303,6 +1438,7 @@ class RootCozClient:
         include_github: bool = True,
         include_jira: bool = True,
         issue_prompt: str = "",
+        attachments: list[str] | None = None,
     ) -> dict[str, Any]:
         """Build the common payload for tracker preview/create endpoints.
 
@@ -1328,6 +1464,8 @@ class RootCozClient:
             payload["jira_project_key"] = jira_project_key
         if include_jira and jira_security_level:
             payload["jira_security_level"] = jira_security_level
+        if attachments:
+            payload["attachments"] = _encode_attachments(attachments)
         return self._with_child_scope(payload, child_job_name, child_build_number)
 
     def get_issue_prompt(self, job_id: str) -> dict[str, Any]:
@@ -1399,6 +1537,7 @@ class RootCozClient:
         child_job_name: str = "",
         child_build_number: int = 0,
         github_repo_url: str = "",
+        attachments: list[str] | None = None,
     ) -> dict[str, Any]:
         """Create a GitHub issue. POST /results/{job_id}/create-github-issue"""
         payload = self._build_tracker_body(
@@ -1409,6 +1548,7 @@ class RootCozClient:
             body_text=body,
             github_repo_url=github_repo_url,
             include_jira=False,
+            attachments=attachments,
         )
         return self._request(
             "POST",
@@ -1428,6 +1568,7 @@ class RootCozClient:
         jira_project_key: str = "",
         jira_security_level: str = "",
         jira_issue_type: str = "Bug",
+        attachments: list[str] | None = None,
     ) -> dict[str, Any]:
         """Create a Jira bug. POST /results/{job_id}/create-jira-bug"""
         payload = self._build_tracker_body(
@@ -1439,6 +1580,7 @@ class RootCozClient:
             jira_project_key=jira_project_key,
             jira_security_level=jira_security_level,
             include_github=False,
+            attachments=attachments,
         )
         if jira_issue_type and jira_issue_type != "Bug":
             payload["jira_issue_type"] = jira_issue_type
@@ -1448,6 +1590,40 @@ class RootCozClient:
             json=payload,
             accept_statuses=(201,),
         )
+
+    @staticmethod
+    def _build_chat_issue_body(
+        target: str,
+        title: str,
+        body: str,
+        *,
+        repo: str = "",
+        job_id: str = "",
+        jira_project_key: str = "",
+        jira_security_level: str = "",
+        jira_issue_type: str = "Bug",
+        confirmation_id: str = "",
+        confirmation_code: str = "",
+        attachments: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Build the request body shared by direct chat-issue propose and create."""
+        payload: dict[str, Any] = {"target": target, "title": title, "body": body}
+        if confirmation_id or confirmation_code:
+            payload["confirmation_id"] = confirmation_id
+            payload["confirmation_code"] = confirmation_code
+        if repo:
+            payload["repo"] = repo
+        if job_id:
+            payload["job_id"] = job_id
+        if jira_project_key:
+            payload["jira_project_key"] = jira_project_key
+        if jira_security_level:
+            payload["jira_security_level"] = jira_security_level
+        if jira_issue_type and jira_issue_type != "Bug":
+            payload["jira_issue_type"] = jira_issue_type
+        if attachments:
+            payload["attachments"] = _encode_attachments(attachments)
+        return payload
 
     def propose_chat_issue(
         self,
@@ -1459,6 +1635,7 @@ class RootCozClient:
         jira_project_key: str = "",
         jira_security_level: str = "",
         jira_issue_type: str = "Bug",
+        attachments: list[str] | None = None,
     ) -> dict[str, Any]:
         """Draft an issue from chat text. POST /api/chat-issue/propose
 
@@ -1467,20 +1644,21 @@ class RootCozClient:
         title and body it would file. Drafts are single-use and expire, so
         propose again after any edit.
 
-        The destination (``repo``, ``job_id``, the Jira overrides) is part of
-        the draft, so ``create_chat_issue`` must be given the same one.
+        The destination (``repo``, ``job_id``, the Jira overrides) and any
+        ordered attachment manifest are bound into the draft, so
+        ``create_chat_issue`` must be given the identical arguments and files.
         """
-        payload: dict[str, Any] = {"target": target, "title": title, "body": body}
-        if repo:
-            payload["repo"] = repo
-        if job_id:
-            payload["job_id"] = job_id
-        if jira_project_key:
-            payload["jira_project_key"] = jira_project_key
-        if jira_security_level:
-            payload["jira_security_level"] = jira_security_level
-        if jira_issue_type and jira_issue_type != "Bug":
-            payload["jira_issue_type"] = jira_issue_type
+        payload = self._build_chat_issue_body(
+            target,
+            title,
+            body,
+            repo=repo,
+            job_id=job_id,
+            jira_project_key=jira_project_key,
+            jira_security_level=jira_security_level,
+            jira_issue_type=jira_issue_type,
+            attachments=attachments,
+        )
         return self._request(
             "POST", "/api/chat-issue/propose", json=payload, accept_statuses=(201,)
         )
@@ -1497,35 +1675,72 @@ class RootCozClient:
         jira_project_key: str = "",
         jira_security_level: str = "",
         jira_issue_type: str = "Bug",
+        attachments: list[str] | None = None,
     ) -> dict[str, Any]:
         """Create an issue from chat text. POST /api/chat-issue
 
         No token parameter on purpose: the server files the issue with the
         credentials saved in the caller's account, and a deployment token is
         never a fallback. ``confirmation_id`` and ``confirmation_code`` must
-        come from ``propose_chat_issue`` for the same title, body and
-        destination — a code the user did not read in the preview files nothing.
+        come from ``propose_chat_issue`` for the same title, body, destination
+        and unchanged attachment bytes — a code the user did not read in the
+        preview files nothing.
         """
-        payload: dict[str, Any] = {
-            "target": target,
-            "title": title,
-            "body": body,
-            "confirmation_id": confirmation_id,
-            "confirmation_code": confirmation_code,
-        }
-        if repo:
-            payload["repo"] = repo
-        if job_id:
-            payload["job_id"] = job_id
-        if jira_project_key:
-            payload["jira_project_key"] = jira_project_key
-        if jira_security_level:
-            payload["jira_security_level"] = jira_security_level
-        if jira_issue_type and jira_issue_type != "Bug":
-            payload["jira_issue_type"] = jira_issue_type
+        payload = self._build_chat_issue_body(
+            target,
+            title,
+            body,
+            repo=repo,
+            job_id=job_id,
+            jira_project_key=jira_project_key,
+            jira_security_level=jira_security_level,
+            jira_issue_type=jira_issue_type,
+            confirmation_id=confirmation_id,
+            confirmation_code=confirmation_code,
+            attachments=attachments,
+        )
         return self._request(
             "POST", "/api/chat-issue", json=payload, accept_statuses=(201,)
         )
+
+    def feedback_create(
+        self,
+        title: str,
+        body: str,
+        labels: list[str] | None = None,
+        attachments: list[str] | None = None,
+    ) -> dict[str, Any]:
+        """Create a feedback GitHub issue. POST /api/feedback/create
+
+        Direct text carries no preview token, so the server attributes it with
+        ``ai_used=False``; an unmodified preview body retains its signed
+        provenance comment. Uses the caller's saved GitHub credential.
+        """
+        payload: dict[str, Any] = {
+            "title": title,
+            "body": body,
+            "labels": list(labels) if labels else [],
+        }
+        if attachments:
+            payload["attachments"] = _encode_attachments(attachments)
+        return self._request(
+            "POST", "/api/feedback/create", json=payload, accept_statuses=(201,)
+        )
+
+    def download_issue_attachment(self, attachment_id: str, output: str) -> int:
+        """Stream an authorised attachment atomically to *output*, or ``-`` for binary stdout."""
+        stripped_id = attachment_id.strip()
+        if not stripped_id:
+            raise RootCozError(detail="Attachment ID must not be empty")
+        written = self._stream_to_file(
+            f"/api/issue-attachments/{quote(stripped_id, safe='')}", output
+        )
+        logger.debug(
+            "Downloaded issue attachment %s (%d bytes)",
+            sanitize_terminal_text(stripped_id),
+            written,
+        )
+        return written
 
     # -- User Tokens ----------------------------------------------------------
 

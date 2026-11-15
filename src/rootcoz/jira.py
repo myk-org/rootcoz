@@ -7,10 +7,11 @@ filing duplicate bug reports.
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
-from typing import Any, Self
+from typing import Any, Literal, Self
 from urllib.parse import urlparse
 
 import httpx
@@ -628,6 +629,97 @@ async def complete_jira_connection(
             headers={**result.headers, "Authorization": f"Bearer {access_token}"},
         )
     return result
+
+
+_JIRA_ISSUE_KEY_RE = re.compile(r"^[A-Z][A-Z0-9_]*-[0-9]+$")
+_JIRA_ATTACHMENT_TIMEOUT_SECONDS = 30.0
+JiraAttachmentOutcome = Literal[
+    "native_attached",
+    "invalid_issue_key",
+    "native_refused",
+    "native_unreachable",
+    "native_outcome_unknown",
+]
+
+
+async def add_jira_attachment(
+    connection: JiraConnection,
+    issue_key: str,
+    filename: str,
+    content_bytes: bytes,
+    media_type: str,
+) -> JiraAttachmentOutcome:
+    """Upload one attachment to Jira using the caller's resolved connection.
+
+    Guards against deployment credentials and invalid issue keys before any
+    network activity, disables redirects so caller credentials never cross
+    origins, and maps transport/HTTP outcomes to fixed reason codes.
+    """
+    require_caller_connection(connection)
+    if not isinstance(issue_key, str) or not _JIRA_ISSUE_KEY_RE.fullmatch(issue_key):
+        logger.warning("Skipping Jira attachment upload: invalid issue key shape")
+        return "invalid_issue_key"
+    try:
+        completed = await complete_jira_connection(connection)
+    except JiraOAuthMintError:
+        logger.warning("Jira attachment upload refused: OAuth token mint failed")
+        return "native_refused"
+    if not completed.api_base:
+        logger.warning("Jira attachment upload refused: unresolved API base")
+        return "native_refused"
+
+    api_path = completed.api_path if completed.mode in ("sa", "atst") else "/rest/api/2"
+    url = f"{completed.api_base.rstrip('/')}{api_path}/issue/{issue_key}/attachments"
+    headers = {
+        k: v for k, v in completed.headers.items() if k.lower() != "content-type"
+    }
+    headers["X-Atlassian-Token"] = "no-check"
+
+    try:
+        async with httpx.AsyncClient(
+            verify=completed.ssl_verify,
+            timeout=_JIRA_ATTACHMENT_TIMEOUT_SECONDS,
+            follow_redirects=False,
+        ) as client:
+            resp = await client.post(
+                url,
+                headers=headers,
+                auth=(
+                    completed.auth
+                    if completed.auth is not None
+                    else httpx.USE_CLIENT_DEFAULT
+                ),
+                files={"file": (filename, content_bytes, media_type)},
+            )
+    except (httpx.ConnectError, httpx.ConnectTimeout) as exc:
+        logger.warning(
+            "Jira attachment upload unreachable for %s (%s)",
+            issue_key,
+            type(exc).__name__,
+        )
+        return "native_unreachable"
+    except (httpx.TimeoutException, httpx.RequestError) as exc:
+        logger.warning(
+            "Jira attachment upload outcome unknown for %s (%s)",
+            issue_key,
+            type(exc).__name__,
+        )
+        return "native_outcome_unknown"
+
+    if 200 <= resp.status_code < 300:
+        logger.info(
+            "Jira native attachment uploaded: issue=%s media_type=%s size_bytes=%d",
+            issue_key,
+            media_type,
+            len(content_bytes),
+        )
+        return "native_attached"
+    logger.warning(
+        "Jira refused native attachment upload: issue=%s status=%d",
+        issue_key,
+        resp.status_code,
+    )
+    return "native_refused"
 
 
 def _sanitize_jql_keyword(keyword: str) -> str:

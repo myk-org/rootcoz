@@ -130,6 +130,22 @@ def _seed_children(db_path: Path, job_id: str) -> None:
             "INSERT INTO tracked_in_links (job_id, test_name, url) VALUES (?, ?, ?)",
             (job_id, "t1", "https://tracker.example.com/1"),
         )
+        conn.execute(
+            "INSERT INTO issue_attachments"
+            " (id, submission_id, job_id, owner_id, media_type, display_name, size_bytes, tracker, state)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                f"att-{job_id}",
+                f"sub-{job_id}",
+                job_id,
+                1,
+                "text/plain",
+                "evidence.log",
+                12,
+                "github",
+                "stored",
+            ),
+        )
 
 
 def _count_scoped(db_path: Path, table: str, predicate: str, job_id: str) -> int:
@@ -1234,3 +1250,26 @@ def test_a_cancelled_refusal_still_releases_the_reanalysis_reservation(
 
     refused.assert_awaited_once()
     assert not main._failure_reanalysis_jobs.get("leaky")
+
+
+async def test_blank_job_id_bulk_delete_and_retention_preserve_runless_attachments(
+    db: Path,
+) -> None:
+    """job_id != '' predicate ensures run-less attachments survive job bulk/retention deletes."""
+    _seed_job(db, "old-job", days_ago=90)
+    _seed_children(db, "old-job")
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "INSERT INTO issue_attachments"
+            " (id, submission_id, job_id, owner_id, media_type, display_name, size_bytes, tracker, state)"
+            " VALUES (?, ?, '', ?, 'text/plain', 'feedback.log', 10, 'github', 'stored')",
+            ("att-runless", "sub-runless", 1),
+        )
+
+    await storage.delete_jobs_bulk(["", "old-job"])
+    with sqlite3.connect(db) as conn:
+        remaining = [
+            row[0]
+            for row in conn.execute("SELECT id FROM issue_attachments").fetchall()
+        ]
+    assert remaining == ["att-runless"]

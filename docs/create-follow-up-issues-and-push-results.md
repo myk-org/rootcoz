@@ -6,6 +6,7 @@ Turn a reviewed failure into real follow-up work: file a GitHub issue or Jira ti
 
 - A completed analysis result, ideally with its failures reviewed. See [Reviewing and Classifying Failures](review-and-classify-failures.html) for details.
 - A `GitHub Token` or Jira credentials on your own profile. Issue creation always uses your token, never a stored server credential. See [Managing Your Account and Notifications](manage-account-and-notifications.html) for details.
+- `PUBLIC_BASE_URL` configured on the server and an active registered user profile row whenever you attach files to a GitHub, Jira, direct-chat, or feedback issue. Text-only issue creation works without `PUBLIC_BASE_URL`. See [Configuration Reference](configuration-reference.html) for details.
 - `reviewer` or above to link an existing issue with `Track`.
 - `operator` or `admin` to push results to an exporter. Push is rejected for reviewers.
 - Report Portal enabled on the server (`ENABLE_REPORTPORTAL`, with `REPORTPORTAL_URL`, `REPORTPORTAL_API_TOKEN`, and `REPORTPORTAL_PROJECT`) if you want to push classifications. See [Configuration Reference](configuration-reference.html) for details.
@@ -54,7 +55,13 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
    Creation uses the tracker token saved on your own account (`Settings` → `Tracker Tokens`), which the server reads when it handles the call; nothing is sent from the browser. A missing or expired token returns an error that points back to your profile settings — when the server itself can file — and so does a token that turns out to be the server's own deployment credential: that one can only read, so filing needs a personal token.
 
-   If creation fails, the dialog stays on the preview with the generated `Title` and `Body` — and the repository, Jira project, issue type, and security level you chose — still filled in and editable. The primary action becomes `Retry`, which resubmits that same content; the model is not called again, so a retry neither costs AI tokens nor rewrites the draft. Retrying is the whole fix for a transient failure. A credential problem is refused again with the same message until the token is corrected, and any message mentioning a token gets a link to `Profile Settings` next to it.
+   Every created issue appends a reporter footer before any attachments and final AI attribution: `_Reported by: <username> via rootcoz_` on GitHub and `Reported by: <username> via rootcoz` on Jira, with `rootcoz chat` or `rootcoz feedback` on those entry points.
+
+   Use `Attach files` in the preview step to include up to 3 text or image files up to 5 MiB each and 10 MiB total. Supported suffixes are `.log`, `.txt`, `.json`, `.xml`, `.csv`, `.yaml`, `.yml`, `.md`, `.png`, `.jpg`, `.jpeg`, `.gif`, and `.webp`, validated on the server by content rather than client MIME type. The picker reads its limits and availability from `GET /api/capabilities`, lists each chosen file's name, size, and remove button, and disables with the server's reason when `PUBLIC_BASE_URL` is unset, the tracker is disabled, or capabilities could not be loaded. Closing or resetting the dialog clears the selection, and reloading starts empty because file bytes are never stored in browser storage.
+
+   GitHub has no supported issue binary upload API, so RootCoz stores the files and appends absolute `/api/issue-attachments/{id}` links to the issue body with `delivery: "hosted"`. For Jira tickets, RootCoz pre-stores all files and includes those hosted `/api/issue-attachments/{id}` fallback links in the initial issue description, then uploads each file once as a native Jira attachment using your Jira credential. Hosted links remain in the Jira body even when native upload succeeds as `native_and_hosted`, avoiding a second issue-edit write and leaving fallback links ready if Jira refuses an upload as `fallback_only` or times out as `native_outcome_unknown`. When native upload fails or times out after the ticket is created, creation still succeeds with a per-file delivery summary and warns never to rerun create, since retrying would file a duplicate ticket. Hosted links require RootCoz sign-in: report and job-bound chat files follow job-read access and expire when the job is deleted or pruned by retention, whereas feedback and unbound chat files allow only the immutable uploader account or an `admin` and expire when that account is deleted. Native copies uploaded to Jira follow Jira's own permissions and retention.
+
+   If creation fails, the dialog stays on the preview with the generated `Title` and `Body` — and the repository, Jira project, issue type, and security level you chose — still filled in and editable. When the failure provably happened before filing, such as a `400`, `401`, `403`, `429`, `5xx`, or connection refusal, the dialog retains your selected files and `Retry` resubmits the same draft and files without calling the AI model again. When the tracker outcome is uncertain after a timeout, dropped connection, or unreadable response, the dialog warns not to resubmit blindly so you do not create a duplicate issue, while keeping your selected files on screen for inspection and retaining any hosted blobs on the server. A credential problem is refused again with the same message until the token is corrected, and any message mentioning a token gets a link to `Profile Settings` next to it.
 
    A failure is refused with a fixed detail instead of a generic string, and the dialog shows that wording verbatim. GitHub uses one shared set of refusals for both entry points — `Create GitHub Issue` on a failure and the `Feedback` form — and only the word changes: your *bug report* was not filed on a failure, your *feedback* was not filed on the feedback form. The one exception is a `404`: only the `Feedback` form blames your token, because only it files into a repository your token is supposed to already see — a failure's issue always goes to the deployment's `TESTS_REPO_URL`.
 
@@ -91,14 +98,18 @@ This generates and reviews issue content, creates the issue, confirms which expo
 
 ```
 rootcoz propose-chat-issue --target github --job-id JOB_ID \
-  --title "Login fails after token refresh" --body "$(cat issue-body.md)"
+  --title "Login fails after token refresh" --body "$(cat issue-body.md)" \
+  --attach failure.log --attach screenshot.png
 # review the preview, then run the create command it printed, for example:
 rootcoz create-chat-issue --target github --job-id JOB_ID \
   --confirmation-id CONFIRMATION_ID --confirmation-code CONFIRMATION_CODE \
-  --title "Login fails after token refresh" --body "$(cat issue-body.md)"
+  --title "Login fails after token refresh" --body "$(cat issue-body.md)" \
+  --attach failure.log --attach screenshot.png
 ```
 
-   The code is printed by `propose-chat-issue` and shown in the preview: typing it here is the confirmation. (A draft proposed from a chat is redeemable only after you reply in that chat with the code — a terminal run of `create-chat-issue` cannot confirm it.)
+   The code is printed by `propose-chat-issue` and shown in the preview: typing it here is the confirmation. A draft proposed from a browser chat is redeemable only after you reply in that chat with the code; a terminal run of `create-chat-issue` cannot confirm it.
+
+   Browser chat in both job chat and admin Server Chat displays `Attach files` disabled with a tooltip, and AI chat model tools explicitly refuse attachment payloads and local file paths, because browser chat has no user-controlled local byte-approval flow. To attach files to a chat-drafted issue, pass repeatable `--attach PATH` to `rootcoz propose-chat-issue` and `rootcoz create-chat-issue` in the terminal, or file from the report or feedback dialogs. `propose-chat-issue` validates the files without storing blobs and binds an ordered manifest of filename, media type, byte size, and SHA-256 into the draft. `create-chat-issue` rereads each local file before sending, and the server refuses with `400` without spending the draft if any file's bytes, name, order, or count changed since you approved the preview; run `propose-chat-issue` again to approve updated files.
 
    `--job-id` is required for a GitHub issue from a non-admin account: only that run's repositories (its test repo and additional repos) may receive it, and `--repo owner/name` narrows the choice. Admins may name any repository. The run and repo named at `propose-chat-issue` must be the ones named at `create-chat-issue` — a confirmation id approves one destination, and a different one is refused. Chat-created issues carry no comment and no tracked-in link: there is no failure to attach them to.
 
@@ -195,17 +206,21 @@ rootcoz get-issue-prompt JOB_ID
 rootcoz preview-issue JOB_ID --test "TEST_NAME" --type jira --jira-project-key PROJ
 rootcoz create-issue JOB_ID --test "TEST_NAME" --type jira \
   --title "Short summary" --body "What failed, and where it was reproduced." \
-  --jira-project-key PROJ --jira-issue-type Bug --jira-security-level "Internal"
+  --jira-project-key PROJ --jira-issue-type Bug --jira-security-level "Internal" \
+  --attach build.log --attach failure.png
 rootcoz create-issue JOB_ID --test "TEST_NAME" --type github \
   --title "Short summary" --body "What failed, and where it was reproduced." \
-  --child-job "CHILD_JOB" --child-build 12345
+  --child-job "CHILD_JOB" --child-build 12345 --attach build.log
+rootcoz feedback-create --title "Search filter resets on reload" \
+  --body "Steps to reproduce..." --label bug --attach console.log
+rootcoz download-attachment ATTACHMENT_ID -o ./downloaded-build.log
 rootcoz push-reportportal JOB_ID --child-job-name "CHILD_JOB" --child-build-number 12345
 rootcoz push JOB_ID --plugin reportportal --json
 ```
 
 The *destination* flags (`--jira-project-key`, `--jira-security-level`, `--github-repo-url`) fall back to the values in your CLI server profile, so pass them explicitly only when you need to override. A tracker credential is always the account token saved in `Settings` → `Tracker Tokens` — never a CLI flag and never a `~/.config/rootcoz/config.toml` key, so a credential key left in an older profile is ignored. See [CLI Command Reference](cli-reference.html) for details.
 
-Send feedback about RootCoz itself through the `Feedback` button in the application header. You describe the problem, RootCoz collects browser context and recent console and API errors automatically, then drafts a GitHub issue you can edit before it is created. This flow is separate from failure issues and requires feedback to be enabled on the server. A failed submission keeps the draft on screen with `Retry` as the primary action, and reports the server's own reason — the same error classes as in step 4.
+Send feedback about RootCoz itself through the `Feedback` button in the application header or from the terminal with `rootcoz feedback-create`. In the browser you describe the problem, RootCoz collects browser context and recent console and API errors automatically, and drafts a GitHub issue targeted at `FEEDBACK_REPO_URL`, which defaults to `https://github.com/myk-org/rootcoz`. You can edit the draft and use the shared `Attach files` picker to include up to 3 text or image files when `PUBLIC_BASE_URL` is configured; feedback attachments publish hosted `/api/issue-attachments/{id}` links readable only by your immutable account or an `admin` until your account is deleted. A provably unfiled submission keeps the draft and selected files on screen with `Retry`, while an uncertain timeout or dropped connection warns you to check GitHub before resubmitting, using the same error classes as step 4. In the terminal, `rootcoz feedback-create` submits direct text with `ai_used=false` or preserves signed AI provenance when given an unmodified preview body.
 
 There is no analysed job behind feedback, so its `AI for issue generation` picker starts on the server default. The pair you pick is remembered for your account and reused by later feedback and issue drafts, and `Server default` stores that choice explicitly, so it survives a reload instead of quietly reverting.
 
@@ -219,8 +234,11 @@ For raw endpoints, see [API Endpoint Reference](api-reference.html) for details.
 - Creation fails with `GitHub token is required` or `Jira token is required`.  
   Issue creation uses only your own credentials and is refused with `400` before anything is filed when you have none — and only when the server itself can file. When the server cannot (no usable tracker configuration), the `400` names an administrator and Server Settings instead, because adding a token cannot fix it. A server-configured `GITHUB_TOKEN` or Jira credential is never used on your behalf — that includes the bootstrap `admin` account, which has no profile tokens of its own. Add the token on your profile settings page and try again. The bootstrap `admin` has no profile to save a token into, so that account is instead told to sign in with its own registered account — the `400` it gets never points at a page it cannot use.
 
-- The preview has no `Include links` effect.  
-  The server has no public base URL configured. Set `PUBLIC_BASE_URL` so report links can be absolute.
+- The preview has no `Include links` effect, or `Attach files` is disabled.
+  Report and feedback attachments require `PUBLIC_BASE_URL` on the server, and an active registered user profile row when submitting files; text-only issue creation still works without `PUBLIC_BASE_URL`. In browser job chat and Server Chat, `Attach files` is always disabled because browser chat has no local byte-approval flow; use the report or feedback dialogs or `rootcoz propose-chat-issue` and `rootcoz create-chat-issue` with `--attach`.
+
+- An `/api/issue-attachments/{id}` link returns `404`.
+  Sign in to RootCoz first, as attachment URLs never allow anonymous access. Run-scoped links return `404` once the job is deleted or pruned by retention; run-less feedback and unbound chat links return `404` to everyone except the immutable uploader account and `admin`, and after that uploader account is deleted.
 
 - No `Matching Jira Issues` or `Matching GitHub Issues` appear on a product bug.  
   Read `result.tracker_search.<tracker>.searched` and `.reason` in `GET /results/{job_id}` to tell the two cases apart. `searched: true` with `candidates: 0` means the lookup ran and found nothing; `searched: false` with a reason means it could not run — no credential, no repository or project in scope, the tracker disabled, or every search failing. Failures are logged and ignored, so the analysis result itself is still valid.

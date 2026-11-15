@@ -1,9 +1,14 @@
 import { useState, useRef, useEffect } from 'react'
-import { api } from '@/lib/api'
-import { createIssueFailureMessage } from '@/lib/issueCreateError'
-import { getRecentFailedCalls } from '@/lib/api'
+import { api, getRecentFailedCalls } from '@/lib/api'
+import { createIssueFailureMessage, createOutcomeUnknown } from '@/lib/issueCreateError'
 import { getRecentErrors } from '@/lib/errorCapture'
 import { IssueCreateError } from '@/components/shared/IssueCreateError'
+import { AttachmentPicker, IssueAttachmentDeliverySummary } from '@/components/shared/AttachmentPicker'
+import {
+  attachmentPickerPropsFromCapability,
+  filesToAttachmentPayload,
+  useCapabilities,
+} from '@/lib/attachments'
 import { useSubmitGuard } from '@/lib/useSubmitGuard'
 import { useUserTokenPresence } from '@/lib/useUserTokens'
 import {
@@ -24,10 +29,13 @@ import { CheckCircle2, ExternalLink } from 'lucide-react'
 import { completeAiPairOverride } from '@/lib/analysisAi'
 import { useAiSelection } from '@/lib/useAiSelection'
 import type {
+  Capabilities,
   FeedbackRequest,
   FeedbackPreviewResponse,
   FeedbackCreateRequest,
   FeedbackCreateResponse,
+  IssueAttachmentSummary,
+  IssueAttachmentUpload,
 } from '@/types'
 
 type Phase = 'form' | 'previewing' | 'preview' | 'creating' | 'success' | 'error' | 'ai-not-configured'
@@ -35,18 +43,22 @@ type Phase = 'form' | 'previewing' | 'preview' | 'creating' | 'success' | 'error
 interface FeedbackDialogProps {
   open: boolean
   onOpenChange: (open: boolean) => void
+  capabilities?: Capabilities | null
 }
 
-export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
+export function FeedbackDialog({ open, onOpenChange, capabilities }: FeedbackDialogProps) {
   const [description, setDescription] = useState('')
   // Empty = server default (resolved server-side). Shared with the other AI surfaces.
   const { aiProvider, aiModel, setAiPair } = useAiSelection()
   const [phase, setPhase] = useState<Phase>('form')
   const [issueUrl, setIssueUrl] = useState('')
+  const [attachments, setAttachments] = useState<File[]>([])
+  const [attachmentSummary, setAttachmentSummary] = useState<IssueAttachmentSummary | null>(null)
   const [errorMsg, setErrorMsg] = useState('')
   // A failed create keeps the generated issue in the preview so it can be retried
   // as-is; only a failed preview sends the user back to the form.
   const [createError, setCreateError] = useState('')
+  const [createMaybeFiled, setCreateMaybeFiled] = useState(false)
   const guardSubmit = useSubmitGuard()
   const generationRef = useRef(0)
   const resetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -65,14 +77,28 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
   // flight the row is unknown, so no false warning and no blocked Create — the
   // create call's own refusal names the fix.
   const tokenMissing = tokenPresence.loaded && !hasGithubToken
+  const capabilityState = useCapabilities(
+    open,
+    capabilities !== undefined ? { loaded: true, capabilities } : undefined,
+  )
+  const pickerProps = attachmentPickerPropsFromCapability(
+    capabilityState.capabilities,
+    capabilityState.loaded,
+    'feedback',
+  )
+  const uncertainAttachmentLock = createMaybeFiled && attachments.length > 0
 
-  // Track dialog open/close to guard async setState
+  // Track dialog open/close to guard async setState and clear session attachments
   useEffect(() => {
     if (open) {
       generationRef.current += 1
       if (resetTimerRef.current) {
         clearTimeout(resetTimerRef.current)
         resetTimerRef.current = null
+      }
+      return () => {
+        setAttachments((prev) => (prev.length > 0 ? [] : prev))
+        setAttachmentSummary(null)
       }
     } else {
       generationRef.current += 1
@@ -111,6 +137,7 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
     // A create error belongs to the issue it failed on; a new preview must not
     // show it (or label its own button "Retry").
     setCreateError('')
+    setCreateMaybeFiled(false)
     setPhase('previewing')
     try {
       const failedCalls = getRecentFailedCalls()
@@ -151,21 +178,41 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
     await guardSubmit(async () => {
       const gen = generationRef.current
       setCreateError('')
+      setCreateMaybeFiled(false)
       setPhase('creating')
+
+      let encodedAttachments: IssueAttachmentUpload[] = []
+      if (attachments.length > 0) {
+        try {
+          encodedAttachments = await filesToAttachmentPayload(attachments)
+        } catch (err) {
+          if (gen !== generationRef.current) return
+          setCreateError(err instanceof Error ? err.message : 'Failed to read selected attachment.')
+          setCreateMaybeFiled(false)
+          setPhase('preview')
+          return
+        }
+        if (gen !== generationRef.current) return
+      }
+
       try {
         const payload: FeedbackCreateRequest = {
           title: previewTitle,
           body: previewBody,
           labels: previewLabels,
+          ...(encodedAttachments.length > 0 ? { attachments: encodedAttachments } : {}),
         }
 
         const res = await api.post<FeedbackCreateResponse>('/api/feedback/create', payload)
         if (gen !== generationRef.current) return
         setIssueUrl(res.issue_url)
+        setAttachmentSummary(res.attachments ?? null)
+        setAttachments([])
         setPhase('success')
       } catch (err) {
         if (gen !== generationRef.current) return
         setCreateError(createIssueFailureMessage(err))
+        setCreateMaybeFiled(createOutcomeUnknown(err))
         setPhase('preview')
       }
     })
@@ -186,8 +233,11 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
       setPhase('form')
       setDescription('')
       setIssueUrl('')
+      setAttachments([])
+      setAttachmentSummary(null)
       setErrorMsg('')
       setCreateError('')
+      setCreateMaybeFiled(false)
       setPreviewTitle('')
       setPreviewBody('')
       setPreviewLabels([])
@@ -284,6 +334,14 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
         {phase === 'preview' && (
           <div className="space-y-4">
             {createError && <IssueCreateError message={createError} />}
+            {createError && createMaybeFiled && (
+              <p role="status" className="text-xs text-signal-amber">
+                The server could not confirm this attempt, so the issue may already
+                have been filed. Check GitHub before you retry — never resubmit blindly,
+                as submitting it again could create a duplicate.
+                {attachments.length > 0 && ' Selected files remain listed below for inspection.'}
+              </p>
+            )}
             <div className="rounded-md border border-border-muted bg-surface-elevated px-3 py-2 text-xs text-text-secondary">
               {previewAi.generated
                 ? `Generated using AI with ${previewAi.provider}/${previewAi.model}`
@@ -308,6 +366,21 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
                 value={previewBody}
                 onChange={(e) => setPreviewBody(e.target.value)}
                 rows={10}
+              />
+            </div>
+            <div className="space-y-2">
+              <span className="text-xs font-display uppercase tracking-widest text-text-tertiary">
+                Attachments
+              </span>
+              <AttachmentPicker
+                files={attachments}
+                onChange={setAttachments}
+                disabledReason={
+                  uncertainAttachmentLock
+                    ? 'Issue creation outcome is uncertain — check GitHub instead of resubmitting.'
+                    : pickerProps.disabledReason
+                }
+                hint={uncertainAttachmentLock ? undefined : pickerProps.hint}
               />
             </div>
           </div>
@@ -338,6 +411,7 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
                 View issue <ExternalLink className="h-3.5 w-3.5" />
               </a>
             )}
+            {attachmentSummary && <IssueAttachmentDeliverySummary summary={attachmentSummary} />}
           </div>
         )}
 
@@ -383,7 +457,7 @@ export function FeedbackDialog({ open, onOpenChange }: FeedbackDialogProps) {
               <Button variant="outline" onClick={() => handleClose(false)}>Cancel</Button>
               <Button
                 onClick={handleCreate}
-                disabled={!previewTitle.trim() || !previewBody.trim() || tokenMissing}
+                disabled={!previewTitle.trim() || !previewBody.trim() || tokenMissing || uncertainAttachmentLock}
               >{createError ? 'Retry' : 'Create Issue'}</Button>
             </div>
           )}

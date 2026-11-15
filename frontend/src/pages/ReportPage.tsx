@@ -142,6 +142,7 @@ function ReportContent() {
   // refetches (not just the initial load) keeps the push-button gates in
   // sync when an admin flips an escape hatch while the report is open.
   const applyCapabilities = useCallback((caps: ResultResponse['capabilities']) => {
+    dispatch({ type: 'SET_CAPABILITIES', payload: caps ?? null })
     if (!caps) return
     dispatch({ type: 'SET_GITHUB_ISSUES_ENABLED', payload: caps.github_issues_enabled ?? false })
     dispatch({ type: 'SET_JIRA_ISSUES_ENABLED', payload: caps.jira_issues_enabled ?? false })

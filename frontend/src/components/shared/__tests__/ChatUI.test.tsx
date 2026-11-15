@@ -71,6 +71,16 @@ afterEach(() => {
   cleanup(); grant = true; currentRole = 'reviewer'; act(() => resetProviderCatalogCache()); get.mockReset(); post.mockReset(); remove.mockReset()
 })
 
+it.each(['/api/chat/job', '/api/admin/chat'])('shows the disabled shared attachment control for %s', async path => {
+  setup()
+  const user = userEvent.setup()
+  render(<ChatUI apiBasePath={path} sseTopic="chat:job" header={<h1>Chat</h1>} />)
+  const attach = screen.getByRole('button', { name: 'Attach files' })
+  expect(attach).toBeDisabled()
+  await user.hover(attach.parentElement!)
+  expect(await screen.findByRole('tooltip')).toHaveTextContent(/report.*feedback.*terminal/i)
+})
+
 it('loads history without POST init and starts only with a valid catalog pair', async () => {
   setup()
   const user = userEvent.setup()

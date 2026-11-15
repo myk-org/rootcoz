@@ -262,6 +262,13 @@ class Settings(BaseSettings):
     # Optional defaults (can be overridden per-request in webhook)
     tests_repo_url: str | None = None
     tests_repo_token: SecretStr | None = None  # NEW
+    feedback_repo_url: str = Field(
+        default="https://github.com/myk-org/rootcoz",
+        description=(
+            "GitHub repository URL for user feedback issues "
+            "(blank falls back to https://github.com/myk-org/rootcoz)."
+        ),
+    )
     # Jira integration (optional). Each auth method is a fully
     # self-contained definition — its own URL and TLS verification. The
     # ONLY settings shared across methods: jira_project_key,
@@ -1162,6 +1169,12 @@ class Settings(BaseSettings):
             value = getattr(self, field_name)
             if isinstance(value, str):
                 object.__setattr__(self, field_name, value.strip())
+        object.__setattr__(
+            self,
+            "feedback_repo_url",
+            (self.feedback_repo_url or "").strip()
+            or "https://github.com/myk-org/rootcoz",
+        )
         # Normalize ai_provider (lowercase + legacy *-cli → canonical)
         if self.ai_provider:
             object.__setattr__(
@@ -1234,7 +1247,8 @@ class Settings(BaseSettings):
         Requires ENABLE_GITHUB_ISSUES to not be explicitly False.
         Unlike github_issues_enabled, does not require TESTS_REPO_URL
         or a server-level GITHUB_TOKEN since feedback uses user-scoped
-        tokens and issues go to the hardcoded project repo.
+        tokens and issues go to feedback_repo_url (defaulting to the
+        upstream project repository).
         """
         return self.enable_github_issues is not False
 

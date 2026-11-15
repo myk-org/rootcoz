@@ -262,8 +262,10 @@ no-floor pod, or let a namespace `LimitRange` default the request.
 
 **Persistent storage.** Database growth is ~83 KB per stored result, and it is unbounded unless
 `results_retention_days` / `results_max_rows` are set (both default `0` = keep everything, which is why
-the figure is still 83 KB per result). The PVC size is not part of the production profile, because
-applying it over a live release either no-ops or triggers a PVC resize.
+the figure is still 83 KB per result). Hosted issue attachments live on the same volume under
+`<data dir>/issue-attachments/{jobs,users}`, bounded at 200 MiB per run and 500 MiB per uploader
+account and removed by job deletion, results retention, or account deletion. The PVC size is not part
+of the production profile, because applying it over a live release either no-ops or triggers a PVC resize.
 
 **Ephemeral storage and `/tmp`.** Repo clones and code-graph indexes live under `/tmp`, and the chart
 caps it **by default**: defaults set `ephemeral-storage: 12Gi` on both `requests` and `limits`, and the
@@ -308,6 +310,20 @@ Watch `Startup reclaim: deleted … / survived … / cannot …` for the summary
 two warnings are the only explanation you get for a chat tree that will never be reclaimed:
 `Startup reclaim: <name> contains a top-level symlink, leaving it on disk` and
 `Startup reclaim: <name> does not resolve to its chat workspace path, leaving it on disk`.
+
+The same startup pass also sweeps `<data dir>/issue-attachments/{jobs,users}` against startup snapshots
+of live job IDs and active immutable `users.id` integers, recording its reclaimed count as
+`issue_attachments` in `startup.workspace_reclaim` even when no temp-root directory changed. If either
+snapshot is `None` or empty, startup makes no directory-reclaim decision for that half so an empty or
+unreadable table never wipes stored files; entries newer than process start and unsafe or non-UUID or
+non-numeric names are skipped with per-candidate error isolation. Dead `jobs/<job-uuid>` directories
+whose `job_id` is absent from the job snapshot are removed. Under `users/`, an `<owner_id>` directory
+is removed only when both `.{owner_id}.rootcoz-deleting` exists and `owner_id` is absent from `users`,
+and pending rolled-back `reserved` or `cleanup_pending` rows on live owners unlink only their recorded
+attachment IDs without touching the rest of the owner directory. If a crash left a dangling
+`.{owner_id}.rootcoz-deleting` marker whose directory was already unlinked, startup deletes any
+remaining `job_id == ''` SQL rows before removing the marker, and keeps the marker on disk if row
+deletion fails.
 
 **Single replica consequence.** One replica on a ReadWriteOnce PVC, `Recreate` strategy, no HA: any
 restart — eviction, upgrade, node drain — interrupts running analyses. Track them on the dashboard
@@ -425,6 +441,14 @@ rootcoz admin settings set log_max_bytes 2000000
 rootcoz admin settings history --key log_max_bytes
 rootcoz admin settings reset log_max_bytes   # back to the derived value
 ```
+
+### Issue attachment storage and permissions
+
+Hosted issue attachments live on the data volume next to `results.db` under `<data dir>/issue-attachments/jobs/<job-uuid>/<attachment-uuid>` for run-scoped report and job-bound chat issues, and `<data dir>/issue-attachments/users/<owner-id>/<attachment-uuid>` for run-less feedback and unbound chat issues, alongside `.{owner_id}.rootcoz-deleting` markers under `users/`.
+
+- **Permissions and `O_NOFOLLOW` descriptor opens.** Newly created directories use mode `0770` while leaving pre-existing operator modes untouched, and blobs and delete markers are created through trusted directory descriptors with `O_CREAT | O_EXCL | O_NOFOLLOW` and `fchmod` `0660` before writing, matching the group-write model above for OpenShift arbitrary UIDs, Docker volumes, and bind mounts. Every directory component from the store root down opens with `O_DIRECTORY | O_NOFOLLOW`, downloads open `O_RDONLY | O_NOFOLLOW` with regular-file and expected-size `fstat` checks and stream from that exact descriptor without reopening a pathname, and cleanup refuses symlinks instead of following them.
+- **Deletion markers and rows-before-marker recovery.** Account deletion writes `.{owner_id}.rootcoz-deleting` before deleting the `users` row; if the account delete fails while the owner still exists, only this attempt's marker is cleared and the files stay intact. Once the account row is gone, RootCoz unlinks `users/<owner_id>`, deletes `job_id == ''` rows in `issue_attachments`, and removes `.{owner_id}.rootcoz-deleting` last so a crash or SQL failure keeps the marker for startup recovery, while run-scoped `job_id != ''` files remain with their jobs. Because `users.id` auto-increments and is never reused, recreating the same username never blocks old-id cleanup or grants access to old files.
+- **Retention coverage.** Interactive job delete, bulk job delete, and `results_retention_days` / `results_max_rows` all execute the same run-scoped cleanup for `issue_attachments` rows and `jobs/<job-uuid>`, independent of whether chat workspace cleanup succeeded, and any survivor is retried by retention and startup reclaim.
 
 ### The chart health-alert CronJob (the alternative for deployments without Prometheus)
 

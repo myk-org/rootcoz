@@ -13,6 +13,7 @@ import { formatDuration, parseApiTimestamp, INVALID_DATE_FALLBACK } from '@/lib/
 import { Tooltip, TooltipTrigger, TooltipContent } from '@/components/ui/tooltip'
 import { TooltipProvider } from '@/components/ui/tooltip'
 import { Textarea } from '@/components/ui/textarea'
+import { AttachmentPicker } from '@/components/shared/AttachmentPicker'
 import { LinkedText } from '@/components/shared/LinkedText'
 import { ChatMarkdown } from '@/components/shared/ChatMarkdown'
 import type { RepoUrl } from '@/lib/autoLink'
@@ -928,7 +929,8 @@ export function ChatUI({
 
         {/* Input area */}
         <div className="border-t border-border-muted px-6 py-3 shrink-0">
-          <form onSubmit={handleSend} className="flex gap-2">
+          <AttachmentPicker files={[]} onChange={() => {}} disabledReason="Browser chat cannot attach files. Use the report or feedback dialog, or the terminal with --attach." />
+          <form onSubmit={handleSend} className="flex gap-2 mt-2">
             <Textarea
               ref={inputRef}
               value={input}

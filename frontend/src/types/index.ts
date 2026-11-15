@@ -345,12 +345,71 @@ export interface PreviewIssueResponse {
   similar_issues: SimilarIssue[]
 }
 
+export interface IssueAttachmentUpload {
+  filename: string
+  data_b64: string
+}
+
+export type IssueAttachmentAvailabilityReason =
+  | 'available'
+  | 'public_base_url_required'
+  | 'tracker_disabled'
+  | 'browser_chat_unsupported'
+
+export interface IssueAttachmentSurfaceCapability {
+  available: boolean
+  reason: IssueAttachmentAvailabilityReason
+}
+
+export interface IssueAttachmentsCapability {
+  max_files: number
+  max_file_bytes: number
+  max_total_bytes: number
+  types: string[]
+  report_github: IssueAttachmentSurfaceCapability
+  report_jira: IssueAttachmentSurfaceCapability
+  feedback: IssueAttachmentSurfaceCapability
+  chat_ui: IssueAttachmentSurfaceCapability
+  direct_chat: IssueAttachmentSurfaceCapability
+}
+
+export type IssueAttachmentDelivery =
+  | 'hosted'
+  | 'native_and_hosted'
+  | 'fallback_only'
+  | 'native_outcome_unknown'
+
+export type IssueAttachmentDeliveryReason =
+  | 'hosted'
+  | 'native_attached'
+  | 'native_refused'
+  | 'native_unreachable'
+  | 'native_outcome_unknown'
+  | 'invalid_issue_key'
+
+export interface IssueAttachmentFileSummary {
+  filename: string
+  id: string
+  delivery: IssueAttachmentDelivery
+  reason: IssueAttachmentDeliveryReason
+}
+
+export interface IssueAttachmentSummary {
+  count: number
+  types: string[]
+  native_attached: number
+  linked: number
+  failed_count: number
+  files: IssueAttachmentFileSummary[]
+}
+
 export interface CreateIssueResponse {
   url: string
   key: string
   number?: number | null
   title: string
   comment_id: number
+  attachments?: IssueAttachmentSummary | null
 }
 
 // -- History --------------------------------------------------------
@@ -489,6 +548,7 @@ export interface ResultResponse {
   capabilities?: {
     github_issues_enabled: boolean
     jira_issues_enabled: boolean
+    issue_attachments: IssueAttachmentsCapability
     server_github_token?: boolean
     server_jira_token?: boolean
     server_jira_email?: boolean
@@ -501,6 +561,8 @@ export interface ResultResponse {
     feedback_enabled?: boolean
   }
 }
+
+export type Capabilities = NonNullable<ResultResponse['capabilities']>
 
 /** Entry of `GET /api/exporters` — also embedded in result `capabilities.exporters`. */
 export interface ExporterInfo {
@@ -668,12 +730,14 @@ export interface FeedbackCreateRequest {
   title: string
   body: string
   labels: string[]
+  attachments?: IssueAttachmentUpload[]
 }
 
 export interface FeedbackCreateResponse {
   issue_url: string
   issue_number: number
   title: string
+  attachments?: IssueAttachmentSummary | null
 }
 
 /** Non-sensitive server settings returned by GET /api/default-server-settings. */

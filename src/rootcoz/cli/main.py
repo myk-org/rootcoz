@@ -17,7 +17,7 @@ import typer
 import yaml
 from click.core import ParameterSource
 
-from rootcoz.cli.client import RootCozClient, RootCozError
+from rootcoz.cli.client import RootCozClient, RootCozError, sanitize_terminal_text
 from rootcoz.cli.config import (
     CONFIG_FILE,
     ServerConfig,
@@ -2990,6 +2990,207 @@ def get_issue_prompt(
             typer.echo("No issue prompt found.")
 
 
+_ATTACH_OPTION = typer.Option(
+    None,
+    "--attach",
+    help=(
+        "Local file path to attach (repeatable; max 3 files, 5 MiB each, 10 MiB total). "
+        "Browser chat cannot upload files because chat has no local byte-approval flow; "
+        "use this terminal command instead."
+    ),
+)
+_FEEDBACK_TITLE_OPTION = typer.Option(..., "--title", help="Feedback issue title.")
+_FEEDBACK_BODY_OPTION = typer.Option(
+    ...,
+    "--body",
+    help=(
+        "Feedback issue body (markdown). Direct text uses ai_used=false without a preview token; "
+        "an unmodified preview body preserves its signed AI provenance."
+    ),
+)
+_FEEDBACK_LABEL_OPTION = typer.Option(
+    None,
+    "--label",
+    help="Feedback issue label, e.g. bug or enhancement (repeatable).",
+)
+_DOWNLOAD_ATTACHMENT_ID_ARGUMENT = typer.Argument(help="Attachment ID (UUID).")
+_DOWNLOAD_ATTACHMENT_OUTPUT_OPTION = typer.Option(
+    ...,
+    "--output",
+    "-o",
+    help="Destination file path, or - for raw binary stdout.",
+)
+
+
+def _print_attachment_summary(data: dict[str, Any]) -> None:
+    """Print per-file delivery states and safe guidance without inviting duplicate creates."""
+    summary = data.get("attachments")
+    if not isinstance(summary, dict):
+        return
+    raw_types = summary.get("types", [])
+    types_display = (
+        ", ".join(sanitize_terminal_text(t) for t in raw_types)
+        if isinstance(raw_types, list) and raw_types
+        else "none"
+    )
+    typer.echo(
+        f"Attachments: {summary.get('count', 0)} "
+        f"(types: {types_display}; native: {summary.get('native_attached', 0)}; "
+        f"linked: {summary.get('linked', 0)}; failed: {summary.get('failed_count', 0)})"
+    )
+    has_fallback_only = False
+    has_native_unknown = False
+    files = summary.get("files", [])
+    if isinstance(files, list):
+        for item in files:
+            if not isinstance(item, dict):
+                continue
+            filename = sanitize_terminal_text(item.get("filename", ""))
+            att_id = sanitize_terminal_text(item.get("id", ""))
+            delivery = sanitize_terminal_text(item.get("delivery", ""))
+            reason = sanitize_terminal_text(item.get("reason", ""))
+            if delivery == "hosted":
+                detail = "hosted link in issue body"
+            elif delivery == "native_and_hosted":
+                detail = "native_and_hosted (Jira native attachment + hosted link)"
+            elif delivery == "fallback_only":
+                has_fallback_only = True
+                reason_suffix = f" ({reason})" if reason else ""
+                detail = (
+                    f"fallback_only{reason_suffix} — hosted link included in issue body"
+                )
+            elif delivery == "native_outcome_unknown":
+                has_native_unknown = True
+                reason_suffix = f" ({reason})" if reason else ""
+                detail = (
+                    f"native_outcome_unknown{reason_suffix} — "
+                    "Jira native outcome unknown; hosted link included in issue body"
+                )
+            else:
+                detail = f"{delivery} ({reason})" if reason else delivery
+            typer.echo(f"  - {filename} [{att_id}]: {detail}")
+    if has_fallback_only:
+        typer.echo(
+            "Warning: One or more Jira native uploads were unavailable; "
+            "the issue was created with hosted fallback links. Do not re-run create."
+        )
+    if has_native_unknown:
+        typer.echo(
+            "Warning: Jira native attachment outcome is unknown (timed out or ambiguous); "
+            "the issue is already created with hosted fallback links. "
+            "Never retry create, or you will file a duplicate issue."
+        )
+
+
+def _print_proposal_manifest(data: dict[str, Any]) -> None:
+    """Print ordered attachment manifest items returned by propose-chat-issue."""
+    raw_manifest = (
+        data.get("attachment_manifest")
+        or data.get("attachments")
+        or data.get("manifest")
+    )
+    if not isinstance(raw_manifest, list) or not raw_manifest:
+        return
+    typer.echo(f"Attachments ({len(raw_manifest)}):")
+    for item in raw_manifest:
+        if not isinstance(item, dict):
+            continue
+        name = sanitize_terminal_text(
+            item.get("filename") or item.get("display_name") or item.get("name") or ""
+        )
+        media_type = sanitize_terminal_text(
+            item.get("media_type") or item.get("type") or ""
+        )
+        size_bytes = item.get("size_bytes", item.get("size", 0))
+        typer.echo(f"  - {name} ({media_type}, {size_bytes} bytes)")
+
+
+def _handle_issue_create_error(err: RootCozError) -> None:
+    """Emit duplicate-filing warnings on known-created or ambiguous errors, then exit 1."""
+    detail_lower = (err.detail or "").lower()
+    if ("https://" in detail_lower or "http://" in detail_lower) and (
+        "already" in detail_lower or "created" in detail_lower
+    ):
+        typer.echo(
+            "Warning: Issue was already created on the tracker — do not retry create.",
+            err=True,
+        )
+    elif (
+        (err.status_code in {502, 504} and "unreachable" not in detail_lower)
+        or "timed out" in detail_lower
+        or "may have been filed" in detail_lower
+    ):
+        typer.echo(
+            "Warning: Tracker write outcome is uncertain — check the tracker before retrying "
+            "so you do not create a duplicate issue.",
+            err=True,
+        )
+    _handle_error(err)
+
+
+@app.command("feedback-create")
+def feedback_create(
+    title: str = _FEEDBACK_TITLE_OPTION,
+    body: str = _FEEDBACK_BODY_OPTION,
+    label: list[str] | None = _FEEDBACK_LABEL_OPTION,
+    attach: list[str] | None = _ATTACH_OPTION,
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Create a feedback GitHub issue from direct or previewed text.
+
+    Uses the GitHub token saved in your account profile (never a CLI token flag).
+    Direct text carries no preview token, so the server attributes it with
+    ai_used=false; an unmodified preview body retains its signed AI provenance.
+    """
+    _set_json(json_output)
+    try:
+        data = _get_client().feedback_create(
+            title,
+            body,
+            labels=label,
+            **({"attachments": attach} if attach else {}),
+        )
+    except RootCozError as err:
+        _handle_issue_create_error(err)
+    logging.getLogger(__name__).info("Submitted feedback issue via CLI")
+    if _state.get("json", False):
+        print_output(data, columns=[], as_json=True)
+    else:
+        issue_num = data.get("issue_number") or data.get("number")
+        if issue_num:
+            typer.echo(f"Created: #{issue_num}")
+        typer.echo(f"URL: {data.get('issue_url', data.get('url', ''))}")
+        _print_attachment_summary(data)
+
+
+@app.command("download-attachment")
+def download_attachment(
+    attachment_id: str = _DOWNLOAD_ATTACHMENT_ID_ARGUMENT,
+    output: str = _DOWNLOAD_ATTACHMENT_OUTPUT_OPTION,
+    json_output: bool = _JSON_OPTION,
+) -> None:
+    """Download an authorised issue attachment to a file or raw binary stdout (-)."""
+    _set_json(json_output)
+    try:
+        written = _get_client().download_issue_attachment(attachment_id, output)
+    except RootCozError as err:
+        _handle_error(err)
+    if output == "-":
+        return
+    if _state.get("json", False):
+        print_output(
+            {
+                "attachment_id": attachment_id,
+                "output": output,
+                "bytes_written": written,
+            },
+            columns=[],
+            as_json=True,
+        )
+    else:
+        typer.echo(f"Downloaded {written} bytes to {sanitize_terminal_text(output)}")
+
+
 @app.command("create-issue")
 def create_issue(
     job_id: str = typer.Argument(help="Job ID."),
@@ -3019,12 +3220,14 @@ def create_issue(
         "--jira-issue-type",
         help="Jira issue type name (e.g. Bug, Story, Task). Default: Bug.",
     ),
+    attach: list[str] | None = _ATTACH_OPTION,
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Create a GitHub issue or Jira bug from a failure analysis.
 
     The tracker credential is the account token saved in Profile Settings; this
-    command sends none.
+    command sends none. Browser chat cannot attach local files; pass repeatable
+    --attach PATH here to include evidence.
     """
     _validate_child_scope(child_job_name, child_build_number)
     _set_json(json_output)
@@ -3049,6 +3252,7 @@ def create_issue(
                 child_job_name=child_job_name,
                 child_build_number=child_build_number,
                 github_repo_url=_github_repo_url,
+                **({"attachments": attach} if attach else {}),
             )
         else:
             data = client.create_jira_bug(
@@ -3061,9 +3265,10 @@ def create_issue(
                 jira_project_key=_jira_project_key,
                 jira_security_level=_jira_security_level,
                 jira_issue_type=jira_issue_type,
+                **({"attachments": attach} if attach else {}),
             )
     except RootCozError as err:
-        _handle_error(err)
+        _handle_issue_create_error(err)
 
     if _state.get("json", False):
         print_output(data, columns=[], as_json=True)
@@ -3073,6 +3278,7 @@ def create_issue(
         typer.echo(f"URL: {data.get('url', '')}")
         if data.get("comment_id"):
             typer.echo(f"Comment added (id: {data['comment_id']})")
+        _print_attachment_summary(data)
 
 
 @app.command("propose-chat-issue")
@@ -3105,13 +3311,15 @@ def propose_chat_issue(
         "--jira-issue-type",
         help="Jira issue type name (e.g. Bug, Story, Task). Default: Bug.",
     ),
+    attach: list[str] | None = _ATTACH_OPTION,
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """Draft an issue from chat text and print the confirmation id and code.
 
-    Files nothing. Print the returned title and body, review them, then pass the
-    id and code to `create-chat-issue` — the server files only a draft that was
-    proposed and whose code you read in the preview, and it works once.
+    Files nothing. Browser chat and AI chat tools refuse attachments because
+    chat has no local byte-approval flow; direct terminal proposals bind an
+    ordered attachment manifest that `create-chat-issue` verifies against the
+    reread files before filing.
     """
     _set_json(json_output)
     normalized_target = _validate_issue_type(target, option="--target")
@@ -3126,6 +3334,7 @@ def propose_chat_issue(
             jira_project_key=jira_project_key,
             jira_security_level=jira_security_level,
             jira_issue_type=jira_issue_type,
+            **({"attachments": attach} if attach else {}),
         )
     except RootCozError as err:
         _handle_error(err)
@@ -3138,6 +3347,7 @@ def propose_chat_issue(
         typer.echo(f"Title: {data.get('title', '')}")
         typer.echo("Body:")
         typer.echo(data.get("body", ""))
+        _print_proposal_manifest(data)
         # Every option the create command needs to redeem this draft, so the
         # command printed here can be copied and run as-is.
         suggested = [
@@ -3166,6 +3376,8 @@ def propose_chat_issue(
             )
         if jira_issue_type != "Bug":
             suggested.extend(["--jira-issue-type", shlex.quote(jira_issue_type)])
+        for path in attach or []:
+            suggested.extend(["--attach", shlex.quote(path)])
         typer.echo("\nReview it, then file it with: " + " ".join(suggested))
 
 
@@ -3209,14 +3421,15 @@ def create_chat_issue(
         "--jira-issue-type",
         help="Jira issue type name (e.g. Bug, Story, Task). Default: Bug.",
     ),
+    attach: list[str] | None = _ATTACH_OPTION,
     json_output: bool = _JSON_OPTION,
 ) -> None:
     """File an issue drafted with `propose-chat-issue`.
 
     Tracker credentials are the ones saved in your account: this command
     deliberately has no token options, so it can never file an issue under a
-    server token. The id and code authorise one draft, once, so propose again
-    after editing the title, body or destination.
+    server token. Browser chat cannot attach files; here `--attach` rereads the
+    approved local files, and any byte or order change requires a new proposal.
     """
     _set_json(json_output)
     normalized_target = _validate_issue_type(target, option="--target")
@@ -3233,9 +3446,10 @@ def create_chat_issue(
             jira_project_key=jira_project_key,
             jira_security_level=jira_security_level,
             jira_issue_type=jira_issue_type,
+            **({"attachments": attach} if attach else {}),
         )
     except RootCozError as err:
-        _handle_error(err)
+        _handle_issue_create_error(err)
 
     if _state.get("json", False):
         print_output(data, columns=[], as_json=True)
@@ -3243,6 +3457,7 @@ def create_chat_issue(
         key_or_number = data.get("key") or f"#{data.get('number', '')}"
         typer.echo(f"Created: {key_or_number}")
         typer.echo(f"URL: {data.get('url', '')}")
+        _print_attachment_summary(data)
 
 
 @app.command("validate-token")

@@ -1159,3 +1159,39 @@ def test_boolean_is_refused_for_any_integer_setting(client):
     clear_settings_cache()
     merged = get_settings()
     assert (merged.chat_clone_depth, merged.results_retention_days) == (2, 45)
+
+
+def test_feedback_repo_url_is_a_github_setting_with_blank_coercion_and_userinfo_strip(
+    client, monkeypatch
+):
+    """Registered under GitHub, defaults to upstream repo, blank coerces, userinfo stripped."""
+    assert "feedback_repo_url" in main._SETTINGS_CATEGORIES["GitHub"]
+    by_key = {
+        item["key"]: item
+        for item in client.get("/api/admin/settings", headers=_admin_headers()).json()
+    }
+    row = by_key["feedback_repo_url"]
+    assert (row["category"], row["default"], row["env_var"]) == (
+        "GitHub",
+        "https://github.com/myk-org/rootcoz",
+        "FEEDBACK_REPO_URL",
+    )
+    assert (row["restart_required"], row["sensitive"], row["server_only"]) == (
+        False,
+        False,
+        False,
+    )
+
+    monkeypatch.setenv("FEEDBACK_REPO_URL", "   ")
+    clear_settings_cache()
+    assert get_settings().feedback_repo_url == "https://github.com/myk-org/rootcoz"
+
+    monkeypatch.setenv(
+        "FEEDBACK_REPO_URL",
+        "https://user:secret_tok@github.com/acme/feedback",  # pragma: allowlist secret
+    )
+    clear_settings_cache()
+    defaults = client.get("/api/default-server-settings", headers=_admin_headers())
+    assert defaults.status_code == 200
+    assert defaults.json()["feedback_repo_url"] == "https://github.com/acme/feedback"
+    assert "secret_tok" not in defaults.text

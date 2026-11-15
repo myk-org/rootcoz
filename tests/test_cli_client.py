@@ -3782,3 +3782,348 @@ class TestRootCozClientFilterPresets:
 
         client = _make_client(handler)
         assert client.delete_filter_preset(7) is None
+
+
+class TestIssueAttachmentsClient:
+    """Tests for issue #505 CLI client attachment encoding, feedback, and downloads."""
+
+    @pytest.mark.parametrize(
+        ("method", "args", "expected_path"),
+        [
+            (
+                "create_github_issue",
+                ("job-1", "test_case", "Title", "Body"),
+                "/results/job-1/create-github-issue",
+            ),
+            (
+                "create_jira_bug",
+                ("job-1", "test_case", "Title", "Body"),
+                "/results/job-1/create-jira-bug",
+            ),
+            (
+                "propose_chat_issue",
+                ("github", "Title", "Body"),
+                "/api/chat-issue/propose",
+            ),
+            (
+                "create_chat_issue",
+                ("github", "Title", "Body", "draft-1", "CODE12"),
+                "/api/chat-issue",
+            ),
+            (
+                "feedback_create",
+                ("Title", "Body"),
+                "/api/feedback/create",
+            ),
+        ],
+    )
+    def test_attachment_payload_uses_basename_and_base64_in_order(
+        self, tmp_path, method, args, expected_path
+    ):
+        nested = tmp_path / "nested"
+        nested.mkdir()
+        first = nested / "evidence.log"
+        first.write_bytes(b"evidence")
+        second = nested / "shot.png"
+        second.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+        def handler(request):
+            assert request.method == "POST"
+            assert request.url.path == expected_path
+            payload = json.loads(request.content)
+            assert _CREDENTIAL_KEYS.isdisjoint(payload)
+            assert payload["attachments"] == [
+                {"filename": "evidence.log", "data_b64": "ZXZpZGVuY2U="},
+                {"filename": "shot.png", "data_b64": "iVBORw0KGgo="},
+            ]
+            return httpx.Response(
+                201,
+                json={
+                    "url": "https://example.com/1",
+                    "issue_url": "https://example.com/1",
+                },
+            )
+
+        getattr(_make_client(handler), method)(
+            *args, attachments=[str(first), str(second)]
+        )
+
+    @pytest.mark.parametrize(
+        ("method", "args"),
+        [
+            ("create_github_issue", ("job-1", "test_case", "Title", "Body")),
+            ("create_jira_bug", ("job-1", "test_case", "Title", "Body")),
+            ("propose_chat_issue", ("github", "Title", "Body")),
+            ("create_chat_issue", ("github", "Title", "Body", "draft-1", "CODE12")),
+            ("feedback_create", ("Title", "Body")),
+        ],
+    )
+    def test_no_attachments_omits_attachments_key(self, method, args):
+        def handler(request):
+            payload = json.loads(request.content)
+            assert "attachments" not in payload
+            return httpx.Response(201, json={"url": "https://example.com/1"})
+
+        getattr(_make_client(handler), method)(*args)
+        getattr(_make_client(handler), method)(*args, attachments=[])
+
+    def test_feedback_create_direct_and_signed_preview_body_shape(self):
+        """feedback_create sends only FeedbackCreateRequest fields (no ai_used/token wire keys)."""
+        seen_payloads: list[dict[str, object]] = []
+
+        def handler(request):
+            assert request.method == "POST"
+            assert request.url.path == "/api/feedback/create"
+            payload = json.loads(request.content)
+            seen_payloads.append(payload)
+            return httpx.Response(
+                201,
+                json={
+                    "issue_url": "https://github.com/myk-org/rootcoz/issues/505",
+                    "issue_number": 505,
+                    "title": payload["title"],
+                },
+            )
+
+        client = _make_client(handler)
+        client.feedback_create("Direct title", "Plain user feedback", labels=["bug"])
+        preview_body = "Formatted body\n<!--rootcoz-ai:signed-token-->"
+        client.feedback_create("Preview title", preview_body)
+
+        assert seen_payloads == [
+            {
+                "title": "Direct title",
+                "body": "Plain user feedback",
+                "labels": ["bug"],
+            },
+            {
+                "title": "Preview title",
+                "body": preview_body,
+                "labels": [],
+            },
+        ]
+
+    @pytest.mark.parametrize(
+        "kind", ["missing", "symlink", "directory", "empty", "too_large", "fifo"]
+    )
+    def test_local_file_errors_name_path_never_send_http_or_leak_bytes(
+        self, tmp_path, kind
+    ):
+        import os
+
+        secret_bytes = b"SUPER_SECRET_SENTINEL_BYTES_505"
+        path = tmp_path / "offending-evidence.log"
+        if kind == "symlink":
+            target = tmp_path / "secret-target.log"
+            target.write_bytes(secret_bytes)
+            path.symlink_to(target)
+        elif kind == "directory":
+            path.mkdir()
+        elif kind == "empty":
+            path.touch()
+        elif kind == "too_large":
+            path.write_bytes(b"a" * (5 * 1024 * 1024 + 1))
+        elif kind == "fifo":
+            if not hasattr(os, "mkfifo"):
+                pytest.skip("mkfifo unavailable on this platform")
+            os.mkfifo(path)
+
+        def handler(request):
+            pytest.fail("HTTP request must never be sent for invalid local attachment")
+
+        with pytest.raises(RootCozError) as exc_info:
+            _make_client(handler).propose_chat_issue(
+                "github", "t", "b", attachments=[str(path)]
+            )
+        assert "offending-evidence.log" in str(exc_info.value)
+        assert "SUPER_SECRET_SENTINEL_BYTES_505" not in str(exc_info.value)
+
+    def test_unreadable_file_names_path_and_sends_no_http(self, tmp_path):
+        import os
+
+        if hasattr(os, "geteuid") and os.geteuid() == 0:
+            pytest.skip("root bypasses 0000 mode check")
+        path = tmp_path / "unreadable.log"
+        path.write_text("cannot read me")
+        path.chmod(0)
+        try:
+            with pytest.raises(RootCozError, match="unreadable.log"):
+                _make_client(
+                    lambda request: pytest.fail("HTTP must not be sent")
+                ).feedback_create("t", "b", attachments=[str(path)])
+        finally:
+            path.chmod(0o600)
+
+    def test_count_and_total_limits_name_exact_offending_path(self, tmp_path):
+        files = []
+        for idx in range(4):
+            item = tmp_path / f"item-{idx}.log"
+            item.write_bytes(b"ok")
+            files.append(str(item))
+
+        with pytest.raises(RootCozError) as count_exc:
+            _make_client(
+                lambda request: pytest.fail("HTTP must not be sent")
+            ).create_github_issue("job-1", "test_a", "t", "b", attachments=files)
+        assert "item-3.log" in str(count_exc.value)
+        assert "maximum 3" in str(count_exc.value)
+
+        chunk_5m = b"z" * (5 * 1024 * 1024)
+        f1 = tmp_path / "first-5m.log"
+        f2 = tmp_path / "second-5m.log"
+        f3 = tmp_path / "third-overflow.log"
+        f1.write_bytes(chunk_5m)
+        f2.write_bytes(chunk_5m)
+        f3.write_bytes(b"!")
+
+        # Exact 10 MiB across two 5 MiB files succeeds locally.
+        seen_lengths: list[int] = []
+
+        def ok_handler(request):
+            payload = json.loads(request.content)
+            seen_lengths.append(len(payload["attachments"]))
+            return httpx.Response(201, json={"url": "https://example.com/1"})
+
+        _make_client(ok_handler).create_jira_bug(
+            "job-1", "test_a", "t", "b", attachments=[str(f1), str(f2)]
+        )
+        assert seen_lengths == [2]
+
+        # 10 MiB + 1 byte names the 3rd offending file and sends zero HTTP.
+        with pytest.raises(RootCozError) as total_exc:
+            _make_client(
+                lambda request: pytest.fail("HTTP must not be sent")
+            ).create_jira_bug(
+                "job-1",
+                "test_a",
+                "t",
+                "b",
+                attachments=[str(f1), str(f2), str(f3)],
+            )
+        assert "third-overflow.log" in str(total_exc.value)
+        assert "10 MiB" in str(total_exc.value)
+
+    def test_create_chat_issue_rereads_file_bytes_and_never_auto_reproposes(
+        self, tmp_path
+    ):
+        path = tmp_path / "trace.log"
+        path.write_bytes(b"v1")
+        requests_seen: list[tuple[str, str]] = []
+
+        def handler(request):
+            payload = json.loads(request.content)
+            requests_seen.append(
+                (request.url.path, payload["attachments"][0]["data_b64"])
+            )
+            if request.url.path == "/api/chat-issue/propose":
+                return httpx.Response(
+                    201,
+                    json={
+                        "confirmation_id": "cid-1",
+                        "confirmation_code": "ABCDEF",
+                        "title": "t",
+                        "body": "b",
+                    },
+                )
+            return httpx.Response(
+                400,
+                json={
+                    "detail": "No issue was filed: attachments do not match the approved draft."
+                },
+            )
+
+        client = _make_client(handler)
+        client.propose_chat_issue("github", "t", "b", attachments=[str(path)])
+        path.write_bytes(b"v2-modified")
+        with pytest.raises(RootCozError) as exc_info:
+            client.create_chat_issue(
+                "github", "t", "b", "cid-1", "ABCDEF", attachments=[str(path)]
+            )
+        assert exc_info.value.status_code == 400
+        assert requests_seen == [
+            ("/api/chat-issue/propose", "djE="),
+            ("/api/chat-issue", "djItbW9kaWZpZWQ="),
+        ]
+
+    def test_attachment_encoding_escapes_terminal_controls_and_never_logs_names_or_bytes(
+        self, tmp_path, caplog
+    ):
+        import logging
+
+        valid = tmp_path / "sensitive-name.log"
+        valid.write_bytes(b"SECRET_PAYLOAD_VALUE")
+        with caplog.at_level(logging.DEBUG, logger="rootcoz.cli.client"):
+            _make_client(
+                lambda request: httpx.Response(
+                    201, json={"url": "https://example.com/1"}
+                )
+            ).feedback_create("t", "b", attachments=[str(valid)])
+
+        log_text = "\n".join(record.getMessage() for record in caplog.records)
+        assert "Encoded 1 issue attachment(s)" in log_text
+        assert "sensitive-name.log" not in log_text
+        assert "SECRET_PAYLOAD_VALUE" not in log_text
+        assert "U0VDUkVUX1BBWUxPQURfVkFMVUU=" not in log_text
+
+        evil_path = str(tmp_path / "bad\x1b]52;c;evil\x07name.log")
+        with pytest.raises(RootCozError) as exc_info:
+            _make_client(
+                lambda request: pytest.fail("HTTP must not be sent")
+            ).feedback_create("t", "b", attachments=[evil_path])
+        assert "\x1b" not in exc_info.value.detail
+        assert "\\x1b" in exc_info.value.detail
+
+    def test_download_issue_attachment_file_stdout_and_atomic_part_cleanup(
+        self, tmp_path, capsysbinary
+    ):
+        binary = b"\x00\x89PNG\r\n\x1a\n\xff"
+
+        def ok_handler(request):
+            assert request.method == "GET"
+            assert request.url.raw_path == b"/api/issue-attachments/att%2Fid"
+            return httpx.Response(200, content=binary)
+
+        dest = tmp_path / "evidence.bin"
+        client = _make_client(ok_handler)
+        assert client.download_issue_attachment("att/id", str(dest)) == len(binary)
+        assert dest.read_bytes() == binary
+        assert not (tmp_path / "evidence.bin.part").exists()
+
+        # '-' streams raw binary straight to stdout buffer with zero noise.
+        assert client.download_issue_attachment("att/id", "-") == len(binary)
+        captured = capsysbinary.readouterr()
+        assert captured.out == binary
+        assert captured.err == b""
+
+        # Interrupted stream leaves destination untouched and removes .part.
+        existing = tmp_path / "keep.bin"
+        existing.write_bytes(b"original")
+
+        def drop_handler(request):
+            def broken_chunks():
+                yield b"partial"
+                raise httpx.ReadError("dropped")
+
+            return httpx.Response(200, content=broken_chunks())
+
+        with pytest.raises(RootCozError):
+            _make_client(drop_handler).download_issue_attachment("att-1", str(existing))
+        assert existing.read_bytes() == b"original"
+        assert not (tmp_path / "keep.bin.part").exists()
+
+        # Symlink destination and planted .part symlink are refused safely.
+        sentinel = tmp_path / "sentinel.txt"
+        sentinel.write_bytes(b"keep-safe")
+        link_dest = tmp_path / "link-dest.bin"
+        link_dest.symlink_to(sentinel)
+        with pytest.raises(RootCozError, match="Cannot write"):
+            client.download_issue_attachment("att/id", str(link_dest))
+        assert sentinel.read_bytes() == b"keep-safe"
+
+        real_dest = tmp_path / "real-dest.bin"
+        planted_part = tmp_path / "real-dest.bin.part"
+        planted_part.symlink_to(sentinel)
+        with pytest.raises(RootCozError, match="Cannot write"):
+            client.download_issue_attachment("att/id", str(real_dest))
+        assert planted_part.is_symlink()
+        assert sentinel.read_bytes() == b"keep-safe"

@@ -1167,12 +1167,43 @@ IssueTitle = Annotated[str, AfterValidator(_require_issue_title)]
 IssueTypeName = Annotated[str, AfterValidator(_default_issue_type)]
 
 
+class IssueAttachmentUpload(BaseModel):
+    """Evidence supplied explicitly by the caller."""
+
+    model_config = {"extra": "forbid"}
+    filename: str
+    data_b64: str
+
+
+class IssueAttachmentFileSummary(BaseModel):
+    """Delivery state with a fixed reason code."""
+
+    filename: str
+    id: str
+    delivery: Literal[
+        "hosted", "native_and_hosted", "fallback_only", "native_outcome_unknown"
+    ]
+    reason: str = ""
+
+
+class IssueAttachmentSummary(BaseModel):
+    """Counts and per-file delivery outcomes."""
+
+    count: int
+    types: list[str]
+    native_attached: int
+    linked: int
+    failed_count: int
+    files: list[IssueAttachmentFileSummary]
+
+
 class CreateIssueRequest(_ChildJobFieldsValidator, _TrackerChoiceMixin):
     """Request body for creating a GitHub issue or Jira bug."""
 
     test_name: str
     title: IssueTitle
     body: str
+    attachments: list[IssueAttachmentUpload] = Field(default_factory=list)
     jira_issue_type: IssueTypeName = Field(
         default="Bug", description="Jira issue type name (e.g. Bug, Story, Task)"
     )
@@ -1232,6 +1263,7 @@ class ChatIssueProposeRequest(BaseModel):
     body: str
     repo: str = ""
     job_id: str = ""
+    attachments: list[IssueAttachmentUpload] = Field(default_factory=list)
     conversation: str = ""
     jira_project_key: str = ""
     jira_security_level: str = ""
@@ -1268,6 +1300,7 @@ class ChatIssueRequest(BaseModel):
     body: str
     repo: str = ""
     job_id: str = ""
+    attachments: list[IssueAttachmentUpload] = Field(default_factory=list)
     confirmation_id: str = ""
     confirmation_code: str = ""
     jira_project_key: str = ""
@@ -1335,6 +1368,8 @@ class PreviewIssueResponse(BaseModel):
 
 class CreateIssueResponse(BaseModel):
     """Response from create-github-issue or create-jira-bug."""
+
+    attachments: IssueAttachmentSummary | None = None
 
     url: str = Field(description="URL to the created issue")
     key: str = Field(default="", description="Issue key (e.g., PROJ-123 for Jira)")
@@ -1637,6 +1672,8 @@ class FeedbackPreviewResponse(BaseModel):
 class FeedbackCreateRequest(BaseModel):
     """Request to create a GitHub issue from a previewed feedback."""
 
+    attachments: list[IssueAttachmentUpload] = Field(default_factory=list)
+
     title: str = Field(min_length=1, max_length=500, description="Issue title")
     body: str = Field(
         min_length=1, max_length=50000, description="Issue body (markdown)"
@@ -1646,6 +1683,8 @@ class FeedbackCreateRequest(BaseModel):
 
 class FeedbackResponse(BaseModel):
     """Response from feedback submission."""
+
+    attachments: IssueAttachmentSummary | None = None
 
     issue_url: str = Field(description="URL to the created GitHub issue")
     issue_number: int = Field(description="GitHub issue number")

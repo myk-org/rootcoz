@@ -67,15 +67,17 @@ This confirms the CLI is using an admin identity, then asks a server-wide questi
 
    > **Tip:** Use the web UI when you want the clearest live experience. It shows the busy state from the moment you send, tells you how long the turn has been running, and gives you a `Stop` button while the assistant is still working.
 
-   > **From an answer to a ticket:** ask the assistant to file it — "create a GitHub issue for this" or "open a Jira ticket" — and it drafts the title and body from the conversation. The server posts the preview to the chat itself, and nothing is filed until you reply there with the six-character code it shows. Server Chat itself resolves no tracker credential — the issue is filed with the token saved in *your* account, so add one in Profile Settings first; the server itself then posts the line naming who must act when the cause is its own configuration (an administrator, in Server Settings) rather than the account's. A `400` naming the server's own Jira credential is relayed verbatim too, so a token that is really the deployment's is answered with what to change. The same gate from the CLI, in the same two steps and with no token flags (the proposal files nothing and prints the code to confirm with):
+   > **From an answer to a ticket:** ask the assistant to file it, such as "create a GitHub issue for this" or "open a Jira ticket", and it drafts the title and body from the conversation. The server posts the preview to the chat itself, and nothing is filed until you reply there with the six-character code it shows. Server Chat itself resolves no tracker credential: the issue is filed with the token saved in *your* account, so add one in Profile Settings first; the server posts the line naming who must act when the cause is its own configuration in Server Settings rather than the account's, and relays a `400` naming the server's own Jira credential verbatim. Browser Server Chat renders `Attach files` disabled with a tooltip, and the chat model's issue tools explicitly refuse attachment payloads and local file paths, because browser chat has no user-controlled local byte-approval flow. Direct terminal consent supports attachments with repeatable `--attach PATH` and no token flags: `propose-chat-issue` files nothing, prints the code, and binds an ordered manifest of filename, media type, byte size, and SHA-256, and `create-chat-issue` rereads the local files so any byte, name, order, or count change since approval fails with `400` until you propose again:
 
    ```bash
    rootcoz propose-chat-issue --target jira \
-     --title "Dashboard filters drop the team" --body "$(cat ticket-body.md)"
+     --title "Dashboard filters drop the team" --body "$(cat ticket-body.md)" \
+     --attach summary.txt
    # review the preview, then run the create command it printed, for example:
    rootcoz create-chat-issue --target jira \
      --confirmation-id CONFIRMATION_ID --confirmation-code CONFIRMATION_CODE \
-     --title "Dashboard filters drop the team" --body "$(cat ticket-body.md)"
+     --title "Dashboard filters drop the team" --body "$(cat ticket-body.md)" \
+     --attach summary.txt
    ```
 
 4. Stop the current reply or start over.
