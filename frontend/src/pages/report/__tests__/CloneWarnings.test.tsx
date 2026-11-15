@@ -127,6 +127,8 @@ it('routes clone-failure reason from /status/:jobId to /results/:jobId in App an
   const repoLine = (await screen.findByText('extra')).closest('li')
   expect(repoLine).toHaveClass('text-signal-red')
   expect(repoLine).toHaveTextContent('Commit or ref not found')
+  // Positive control: StatusPage content is on screen, so its absence below is meaningful.
+  expect(screen.getByText('JOB ID')).toBeInTheDocument()
 
   current = {
     ...base,
@@ -139,14 +141,20 @@ it('routes clone-failure reason from /status/:jobId to /results/:jobId in App an
   expect(alert).toHaveTextContent(
     'Repository clone failed: extra — Commit or ref not found. Analysis results remain available below.',
   )
+  // Positive control: ReportPage content is on screen, so its absence below is meaningful.
+  expect(screen.getByText('Key Takeaway')).toBeInTheDocument()
 
   cleanup()
   window.history.pushState({}, '', '/report/job-1')
   const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
   try {
     await act(async () => { render(<App />) })
+    expect(window.location.pathname).toBe('/report/job-1')
+    expect(screen.queryByText('Key Takeaway')).toBeNull() // ReportPage content
+    expect(screen.queryByText('JOB ID')).toBeNull() // StatusPage content
     expect(screen.queryByRole('alert')).toBeNull()
     expect(screen.queryByText('Analysis succeeded')).toBeNull()
+    // Dev-only warning, wording from react-router 7.13.1 (frontend/package.json / lockfile).
     expect(warnSpy.mock.calls.flat().join(' ')).toMatch(/No routes matched location "\/report\/job-1"/)
   } finally {
     warnSpy.mockRestore()
