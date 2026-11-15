@@ -18,6 +18,8 @@ export const SSO_ERROR_MESSAGES: Record<string, string> = {
     'Could not complete the sign-in with the provider. Please try again.',
   id_token_invalid:
     'The provider returned an identity we could not verify. Please try again.',
+  no_id_token:
+    'The provider did not confirm your identity in a way this server can verify. Please try again.',
   userinfo_failed:
     'Could not read your profile from the provider. Please try again.',
   no_subject: 'The provider returned no account identity. Please try again.',

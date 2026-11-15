@@ -1747,6 +1747,12 @@ _AUDIT_THROTTLED_ACTIONS: frozenset[str] = frozenset(
         # row is written in the shared code-lookup helper, so the budget is the
         # one place a flood is stopped.
         "auth.sso_device_approve_refused",
+        # A proxy name outside ALLOWED_USERS is refused on /login and again on
+        # every request the middleware resolves, so an unlisted visitor writes a
+        # row per request/retry. The same per-minute budget as the other auth
+        # refusals applies; a dropped row never changes the refusal itself, which
+        # is a decision of the auth strategy, not of this audit row.
+        "auth.proxy_provision_refused",
     }
 )
 
@@ -18755,6 +18761,11 @@ _SSO_PUBLIC_REASONS = frozenset(
         "provider_error",
         "exchange_failed",
         "id_token_invalid",
+        # An OIDC provider that answers without an id_token: the identity would be
+        # unsigned and not bound to this attempt, so it is refused (see
+        # ``auth/sso/oidc.py``). Named like the other step failures — it says
+        # nothing about any account.
+        "no_id_token",
         "userinfo_failed",
         "no_subject",
         "callback_misconfigured",
@@ -18859,6 +18870,35 @@ async def _audit_sso_refusal(
         details={"provider": provider, "reason": reason},
         request=request,
     )
+
+
+async def _sso_link_allow_list_refused(
+    request: Request, *, provider: str, username: str, settings: Settings
+) -> bool:
+    """Whether ``ALLOWED_USERS`` forbids attaching a provider to this account.
+
+    Linking writes a credential onto an account, so it is a write: the list that
+    bounds account creation bounds this too (#33 — the list bounds writes and
+    never grants anything). Both link paths ask this one function, so the
+    credential-verified ticket path and a live browser flow cannot disagree about
+    who may add a sign-in method.
+
+    Args:
+        request: The request that carried the attempt.
+        provider: Provider that authenticated the identity.
+        username: The account the identity would be attached to.
+        settings: Application settings (``ALLOWED_USERS``).
+
+    Returns:
+        True when the account is outside a non-empty list; the refusal itself is
+        already audited, and the caller answers in its own shape (a redirect on
+        the callback, a 403 on the ticket route).
+    """
+    allowed = settings.allowed_users_set
+    if not allowed or username in allowed:
+        return False
+    await _audit_sso_refusal(request, provider, "not_allowed", subject=username)
+    return True
 
 
 async def _audit_device_approve_refusal(
@@ -19222,6 +19262,12 @@ async def _sso_finish_link(
             request, provider, "identity_conflict", subject=username
         )
         return _link_error_redirect(destination, "identity_conflict")
+
+    if await _sso_link_allow_list_refused(
+        request, provider=provider, username=username, settings=get_settings()
+    ):
+        # Same write rule as the ticket path, applied where the write happens.
+        return _link_error_redirect(destination, "not_allowed")
 
     try:
         # ``link_existing`` is the one place that writes a link: it turns
@@ -19769,13 +19815,9 @@ async def sso_link_account(request: Request) -> Response:
             status_code=403,
             detail="Reviewer access required. Viewers cannot perform this action.",
         )
-    allowed = settings.allowed_users_set
-    if allowed and username not in allowed:
-        # Linking writes a credential to the account, so it is a write: the same
-        # list that bounds `create` bounds this.
-        await _audit_sso_refusal(
-            request, record["provider"], "not_allowed", subject=username
-        )
+    if await _sso_link_allow_list_refused(
+        request, provider=record["provider"], username=username, settings=settings
+    ):
         raise HTTPException(status_code=403, detail="User not allowed")
 
     try:
@@ -20207,12 +20249,12 @@ async def sso_device_poll(request: Request) -> JSONResponse:
     try:
         # One transaction: the session is written and the code spent together, so
         # a failure cannot leave a token the terminal never saw behind a code no
-        # later poll can redeem.
-        token = await storage.exchange_device_code_for_session(
+        # later poll can redeem. The rights are re-read from the account inside
+        # that transaction, so a downgrade that committed while the code was
+        # pending wins over the role this poll read above.
+        minted = await storage.exchange_device_code_for_session(
             device_code,
             username=username,
-            is_admin=is_admin,
-            role=role,
             approved_provider=provider,
         )
     except Exception:
@@ -20220,10 +20262,15 @@ async def sso_device_poll(request: Request) -> JSONResponse:
         # exchanged for a credential must not read as spent.
         await storage.release_device_code(device_code)
         raise
-    if token is None:
+    if minted is None:
         # The claim was released by a failed exchange that another poll has
-        # already re-taken, or the code expired meanwhile: nothing to hand over.
+        # already re-taken, the code expired meanwhile, or the account lost its
+        # row: nothing to hand over.
         return JSONResponse(content={"status": "expired"})
+    token = minted["token"]
+    # The audit row names the rights the session actually carries, not the ones
+    # read before the exchange.
+    role, is_admin = minted["role"], bool(minted["is_admin"])
     await record_audit(
         action="auth.sso_device_redeemed",
         actor=username,

@@ -9,6 +9,22 @@ SSO** (a Keycloak realm). A provider is offered only when *every* one of its
 settings is present, so a half-configured provider never renders a button that
 cannot work.
 
+Two of them are OpenID Connect — **Google** and **Red Hat SSO** — and two are
+plain OAuth 2.0 — **GitHub** and **OpenShift**. That split is deliberate, not an
+unfinished migration:
+
+- Google and Red Hat SSO publish discovery metadata with a JWKS and answer the
+  code exchange with an **ID token**, so the sign-in is verified end to end
+  (signature, issuer, audience, `azp`, expiry, and the nonce that binds the token
+  to this attempt).
+- GitHub has no ID token at all: the access token is spent against `/user` and
+  `/user/emails`, which is the only place a GitHub account exists.
+- An OpenShift cluster's built-in OAuth server is **not** an OIDC provider. It
+  publishes OAuth 2.0 metadata (no JWKS, no ID token, no `userinfo_endpoint`) and
+  issues **opaque** tokens; the account — its name, its identities and its email —
+  lives on the cluster API server, reachable with that token and nowhere else.
+  Demanding OIDC of it would not harden the login, it would remove the provider.
+
 ## Before you start
 
 `PUBLIC_BASE_URL` must be set. The OAuth callback and the post-logout redirect are
@@ -79,6 +95,14 @@ stolen token from a sibling client, an unverified address, a nonce from another
 attempt), and the discovery document is pinned to the configured issuer with every
 endpoint required to be https. Authlib was dropped from the dependencies because
 nothing used it.
+
+An OIDC provider that answers the code exchange **without** an ID token is
+refused (`no_id_token`), not quietly downgraded. The `userinfo` endpoint is
+authenticated by the access token alone: it carries no signature and no nonce, so
+it cannot tell a fresh sign-in from a token replayed out of an earlier attempt.
+Both OIDC providers here always return an ID token, so nothing loses anything — a
+provider that genuinely cannot mint one is supported by its own module (as
+OpenShift is), never by a weaker path through the OIDC one.
 
 ## How a sign-in works
 

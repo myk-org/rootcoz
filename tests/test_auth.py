@@ -77,6 +77,20 @@ def _wait_for_user_tracked(client, username, timeout=2.0):
     raise TimeoutError(f"User '{username}' not tracked within {timeout}s")
 
 
+def _assert_spa_page(response):
+    """A SPA route answers with the shell, or says the shell was never built.
+
+    ``frontend/dist`` is gitignored and tox's ``backend`` env runs before the
+    ``frontend`` build, so CI has no shell to serve. Any other 404 — the gate's
+    JSON refusal included — is a failure.
+    """
+    if response.status_code == 404:
+        assert response.json()["detail"] == "Frontend not built", response.text
+        return
+    assert response.status_code == 200, response.text
+    assert response.headers["content-type"].startswith("text/html")
+
+
 class TestOptionsPreflightBypassesAuth:
     """OPTIONS preflight requests must pass through without authentication."""
 
@@ -1383,6 +1397,69 @@ class TestProxyHeaders:
                     assert json.loads(found[0][2])["reason"] == "not_allowed"
             clear_settings_cache()
 
+    def test_a_refused_proxy_name_cannot_flood_the_trail(self, _init_db, temp_db_path):
+        """The refusal runs per request, so its rows carry the same budget.
+
+        A forwarded name outside ALLOWED_USERS is asked again on ``/login`` and
+        on every request the middleware resolves. Without the throttle each
+        retry wrote a row, and a visitor who never gets in could push real events
+        out of the window. The refusal itself is unaffected: the same 401 comes
+        back whether or not the row is stored.
+        """
+        with patch.dict(
+            os.environ,
+            {
+                "ADMIN_KEY": "test-admin-key-16chars",  # pragma: allowlist secret
+                "ROOTCOZ_ENCRYPTION_KEY": "test-encryption-key-for-hmac",  # pragma: allowlist secret
+                "SECURE_COOKIES": "false",
+                "DB_PATH": str(temp_db_path),
+                "TRUST_PROXY_HEADERS": "true",
+                "REQUIRE_APPROVAL": "false",
+                "ALLOWED_USERS": "alice",
+                # One row per minute for this name: the second and later retries
+                # are dropped, exactly like the other refusal actions.
+                "AUDIT_AUTH_FAILURE_MAX_PER_MINUTE": "1",
+            },
+        ):
+            clear_settings_cache()
+            with patch.object(storage, "DB_PATH", temp_db_path):
+                from rootcoz.main import app
+
+                with TestClient(app) as c:
+                    for _ in range(4):
+                        assert (
+                            c.get(
+                                "/api/auth/me", headers={"X-Forwarded-User": "mallory"}
+                            ).status_code
+                            == 401
+                        )
+                    # The refusal is the strategy's decision, not the audit row's:
+                    # the visitor is still served the login page (no bounce to a
+                    # dashboard they may not see) and still gets no account.
+                    login = c.get(
+                        "/login",
+                        headers={
+                            "X-Forwarded-User": "mallory",
+                            "Accept": "text/html",
+                        },
+                        follow_redirects=False,
+                    )
+                    assert login.status_code == 200
+                    assert login.cookies.get("rootcoz_username") is None
+                    assert login.cookies.get("rootcoz_session") is None
+
+                    async def rows():
+                        async with storage._connect_db() as db:
+                            cursor = await db.execute(
+                                "SELECT COUNT(*) AS n FROM audit_events"
+                                " WHERE action = 'auth.proxy_provision_refused'"
+                            )
+                            return (await cursor.fetchone())["n"]
+
+                    assert asyncio.run(rows()) == 1
+                    assert self._user_row("mallory") is None
+            clear_settings_cache()
+
     def test_an_existing_proxy_account_is_not_reprovisioned(self, proxy_client):
         """A second request must not reset status, role or provenance."""
         proxy_client.post(
@@ -1524,8 +1601,8 @@ class TestProxyHeaders:
             "/login",
             follow_redirects=False,
         )
-        # Should NOT redirect — either 200 (SPA served) or 404 (no frontend build)
-        assert resp.status_code != 303
+        # Should NOT redirect — the SPA page, or no frontend build at all
+        _assert_spa_page(resp)
 
     def test_login_sends_a_pending_visitor_to_the_pending_page(self, approval_client):
         """Provisioning would create a pending account, so /pending is the answer.
@@ -1543,8 +1620,7 @@ class TestProxyHeaders:
         landed = approval_client.get(
             resp.headers["location"], headers=headers, follow_redirects=False
         )
-        assert landed.status_code == 200
-        assert landed.headers["content-type"].startswith("text/html")
+        _assert_spa_page(landed)
         assert "awaiting admin approval" not in landed.text
 
         async def count():

@@ -1458,7 +1458,8 @@ class Settings(BaseSettings):
         description=(
             "How many rows from the unauthenticated, per-request audit "
             "actions (failed or blocked logins, SSO refusals, an anonymous "
-            "device-flow start) may be recorded per minute — "
+            "device-flow start, a refused proxy provisioning) may be recorded "
+            "per minute — "
             "per username N, N×10 server-wide, plus at most "
             "N rescued rows per window for attempts against existing accounts. "
             "Cycling names does not reset the budget, no flood of junk "

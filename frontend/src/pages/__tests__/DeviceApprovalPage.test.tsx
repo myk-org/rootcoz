@@ -1,4 +1,4 @@
-import { render, screen, waitFor } from '@testing-library/react'
+import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
 import { beforeEach, expect, it, vi } from 'vitest'
@@ -124,6 +124,56 @@ it('never offers to approve a code that was already approved', async () => {
 
   expect(await screen.findByText(/already approved/i)).toBeTruthy()
   expect(screen.queryByRole('button', { name: /approve sign-in/i })).toBeNull()
+})
+
+it('keeps the last submitted code when lookups answer out of order', async () => {
+  // Two lookups can overlap; the earlier one answering last must not describe
+  // (and let the person approve) a code they have already replaced.
+  const pending: Array<(value: unknown) => void> = []
+  post.mockImplementation((url: string) =>
+    url === '/api/auth/sso/device/approve'
+      ? Promise.resolve({})
+      : new Promise((resolve) => {
+          pending.push(resolve)
+        }),
+  )
+  renderPage()
+
+  await typeCode('AAAA-AAAA')
+  await userEvent.click(screen.getByRole('button', { name: /look up/i }))
+  await userEvent.clear(screen.getByLabelText(/device code/i))
+  await typeCode('BBBB-BBBB')
+  await userEvent.click(screen.getByRole('button', { name: /look up/i }))
+
+  await act(async () => {
+    pending[1]({
+      user_code: 'BBBB-BBBB',
+      provider: null,
+      client_name: 'later-laptop',
+      expires_at: '2030-01-01 00:00:00',
+      authorized: false,
+    })
+  })
+  expect(screen.getByText(/later-laptop/)).toBeTruthy()
+
+  await act(async () => {
+    pending[0]({
+      user_code: 'AAAA-AAAA',
+      provider: null,
+      client_name: 'earlier-laptop',
+      expires_at: '2030-01-01 00:00:00',
+      authorized: false,
+    })
+  })
+  expect(screen.queryByText(/earlier-laptop/)).toBeNull()
+  expect(screen.getByText(/BBBB-BBBB/)).toBeTruthy()
+
+  await userEvent.click(screen.getByRole('button', { name: /approve sign-in/i }))
+  await waitFor(() =>
+    expect(post).toHaveBeenCalledWith('/api/auth/sso/device/approve', {
+      user_code: 'BBBB-BBBB',
+    }),
+  )
 })
 
 it('reports a code the server does not know', async () => {
