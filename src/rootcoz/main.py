@@ -16113,6 +16113,7 @@ async def prometheus_metrics() -> Response:
 # Module-level cache for GitHub release data (raw filtered release list)
 _release_cache: dict[str, Any] = {}
 _RELEASE_CACHE_TTL = 3600  # 1 hour
+_RELEASE_FAILURE_TTL = 60
 _release_cache_lock = asyncio.Lock()
 
 # The release list endpoint and payload shaping constants (#341)
@@ -16150,6 +16151,8 @@ def _parse_version(version: str) -> ParsedVersion | None:
     Post-releases (``.post1``) and local/build labels (``+local``) are not
     prereleases — a server running them is not older than the release.
     """
+    if len(version) > 128:
+        return None
     match = _VERSION_RE.match(version.strip().lstrip("vV"))
     if not match:
         return None
@@ -16332,29 +16335,53 @@ async def get_latest_release(since: str | None = None) -> JSONResponse:
     version. Falls back gracefully if GitHub is unreachable.
     """
 
-    def _cached_response(now: float) -> JSONResponse | None:
+    def _current_token() -> tuple[str, str]:
+        secret = get_settings().github_token
+        token = secret.get_secret_value().strip() if secret else ""
+        digest = hashlib.sha256(
+            token.encode("utf-8", errors="surrogatepass")
+        ).hexdigest()
+        return token, digest
+
+    def _cached_response(now: float, token_digest: str) -> JSONResponse | None:
         cached = _release_cache.get("releases")
         if cached is not None and (
             now - _release_cache.get("fetched_at", 0) < _RELEASE_CACHE_TTL
         ):
             return JSONResponse(content=_release_payload(cached, since))
+        failed_at = _release_cache.get("failed_at")
+        if (
+            failed_at is not None
+            and _release_cache.get("failed_token_digest") == token_digest
+            and now - failed_at < _RELEASE_FAILURE_TTL
+        ):
+            logger.debug("Serving fallback GitHub releases during failure cooldown")
+            return JSONResponse(
+                content=_release_payload(cached if cached is not None else [], since)
+            )
         return None
 
+    token, token_digest = _current_token()
     now = _time.monotonic()
-    if (hit := _cached_response(now)) is not None:
+    if (hit := _cached_response(now, token_digest)) is not None:
         return hit
 
     async with _release_cache_lock:
-        # Re-check after acquiring lock (another request may have refreshed)
+        token, token_digest = _current_token()
         now = _time.monotonic()
-        if (hit := _cached_response(now)) is not None:
+        if (hit := _cached_response(now, token_digest)) is not None:
             return hit
 
+        result_releases: list[dict[str, Any]] = []
         try:
+            headers: dict[str, str] = {"Accept": "application/vnd.github.v3+json"}
+            if token:
+                if not all(0x21 <= ord(ch) <= 0x7E for ch in token):
+                    raise ValueError(
+                        "Configured GitHub token contains invalid HTTP header characters"
+                    )
+                headers["Authorization"] = f"Bearer {token}"
             async with httpx.AsyncClient(timeout=10) as client:
-                # Walk pages until enough ELIGIBLE (non-draft, non-prerelease)
-                # releases are collected: a page full of drafts/prereleases
-                # must not starve the stable list (#341)
                 releases: list[dict[str, Any]] = []
                 for page in range(1, _RELEASES_MAX_PAGES + 1):
                     resp = await client.get(
@@ -16363,10 +16390,28 @@ async def get_latest_release(since: str | None = None) -> JSONResponse:
                             "per_page": _RELEASES_PER_PAGE,
                             "page": page,
                         },
-                        headers={"Accept": "application/vnd.github.v3+json"},
+                        headers=headers,
                     )
                     resp.raise_for_status()
                     batch = resp.json()
+                    if not isinstance(batch, list):
+                        raise TypeError(
+                            "Unexpected GitHub releases payload: expected list"
+                        )
+                    for r in batch:
+                        if r.get("draft") or r.get("prerelease"):
+                            continue
+                        if (
+                            not isinstance(r.get("tag_name"), str)
+                            or not r["tag_name"].strip()
+                        ):
+                            raise ValueError("Unexpected GitHub release entry shape")
+                        for k in ("name", "body", "published_at", "html_url"):
+                            v = r.get(k)
+                            if v is not None and not isinstance(v, str):
+                                raise ValueError(
+                                    "Unexpected GitHub release entry shape"
+                                )
                     releases.extend(
                         r
                         for r in batch
@@ -16379,15 +16424,20 @@ async def get_latest_release(since: str | None = None) -> JSONResponse:
                         break
             _release_cache["releases"] = releases
             _release_cache["fetched_at"] = now
+            _release_cache.pop("failed_at", None)
+            _release_cache.pop("failed_token_digest", None)
             logger.info("Fetched %d GitHub releases", len(releases))
-            return JSONResponse(content=_release_payload(releases, since))
+            result_releases = releases
         except Exception:
-            logger.debug("Failed to fetch GitHub releases", exc_info=True)
-            if _release_cache.get("releases") is not None:
-                return JSONResponse(
-                    content=_release_payload(_release_cache["releases"], since)
-                )
-            return JSONResponse(content=_release_payload([]))
+            _release_cache["failed_at"] = _time.monotonic()
+            _release_cache["failed_token_digest"] = token_digest
+            logger.debug(
+                "Failed to fetch GitHub releases (cooldown=%ds)",
+                _RELEASE_FAILURE_TTL,
+                exc_info=True,
+            )
+            result_releases = _release_cache.get("releases", [])
+        return JSONResponse(content=_release_payload(result_releases, since))
 
 
 @app.get("/favicon.ico", include_in_schema=False)

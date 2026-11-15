@@ -266,6 +266,14 @@ async def _tracker_user(name: str, **tokens: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {api_key}"}
 
 
+def _mock_releases_response(releases):
+    from rootcoz import main
+
+    return httpx.Response(
+        200, json=releases, request=httpx.Request("GET", main._RELEASES_LIST_URL)
+    )
+
+
 def _gh_release(version: str, name: str = "", body: str = "body") -> dict[str, Any]:
     """A GitHub API release dict (tag_name keeps or drops the v prefix)."""
     return {
@@ -862,6 +870,315 @@ class TestHealthEndpoint:
         data = response.json()
         assert data["version"] == ""
         assert data["releases"] == []
+
+    def test_releases_latest_sends_bearer_token_when_configured(
+        self, test_client
+    ) -> None:
+        from rootcoz import main
+
+        mock_response = _mock_releases_response([_gh_release("v4.7.2")])
+        with (
+            patch.dict(main._release_cache, {}, clear=True),
+            patch.object(main, "_get_app_version", return_value="4.7.0"),
+            patch("rootcoz.main.httpx.AsyncClient") as MockClient,
+            patch("rootcoz.main.get_settings") as mock_settings,
+        ):
+            mock_settings.return_value.github_token = __import__("pydantic").SecretStr(
+                "  ghp_srv_tok  "
+            )
+            mock_client_instance = __import__(
+                "unittest.mock", fromlist=["AsyncMock"]
+            ).AsyncMock()
+            MockClient.return_value.__aenter__ = __import__(
+                "unittest.mock", fromlist=["AsyncMock"]
+            ).AsyncMock(return_value=mock_client_instance)
+            MockClient.return_value.__aexit__ = __import__(
+                "unittest.mock", fromlist=["AsyncMock"]
+            ).AsyncMock(return_value=False)
+            mock_client_instance.get.return_value = mock_response
+            response = test_client.get("/api/releases/latest")
+        assert response.status_code == 200
+        hdrs = mock_client_instance.get.call_args.kwargs["headers"]
+        assert hdrs["Authorization"] == "Bearer ghp_srv_tok"
+        assert "ghp_srv_tok" not in response.text
+
+    def test_releases_latest_omits_auth_header_when_token_unset_or_blank(
+        self, test_client
+    ) -> None:
+        from rootcoz import main
+
+        for tok in (None, "   "):
+            mock_response = _mock_releases_response([_gh_release("v4.7.2")])
+            with (
+                patch.dict(main._release_cache, {}, clear=True),
+                patch.object(main, "_get_app_version", return_value="4.7.0"),
+                patch("rootcoz.main.httpx.AsyncClient") as MockClient,
+                patch("rootcoz.main.get_settings") as mock_settings,
+            ):
+                if tok is None:
+                    mock_settings.return_value.github_token = None
+                else:
+                    mock_settings.return_value.github_token = __import__(
+                        "pydantic"
+                    ).SecretStr(tok)
+                mock_client_instance = __import__(
+                    "unittest.mock", fromlist=["AsyncMock"]
+                ).AsyncMock()
+                MockClient.return_value.__aenter__ = __import__(
+                    "unittest.mock", fromlist=["AsyncMock"]
+                ).AsyncMock(return_value=mock_client_instance)
+                MockClient.return_value.__aexit__ = __import__(
+                    "unittest.mock", fromlist=["AsyncMock"]
+                ).AsyncMock(return_value=False)
+                mock_client_instance.get.return_value = mock_response
+                test_client.get("/api/releases/latest")
+            assert (
+                "Authorization"
+                not in mock_client_instance.get.call_args.kwargs["headers"]
+            )
+
+    def test_releases_latest_cold_failure_caches_for_short_ttl_then_retries(
+        self, test_client
+    ) -> None:
+        from rootcoz import main
+
+        with (
+            patch.dict(main._release_cache, {}, clear=True),
+            patch.object(main, "_get_app_version", return_value="4.7.0"),
+            patch("rootcoz.main.httpx.AsyncClient") as MockClient,
+            patch("rootcoz.main._time") as mock_time,
+        ):
+            mock_client_instance = __import__(
+                "unittest.mock", fromlist=["AsyncMock"]
+            ).AsyncMock()
+            MockClient.return_value.__aenter__ = __import__(
+                "unittest.mock", fromlist=["AsyncMock"]
+            ).AsyncMock(return_value=mock_client_instance)
+            MockClient.return_value.__aexit__ = __import__(
+                "unittest.mock", fromlist=["AsyncMock"]
+            ).AsyncMock(return_value=False)
+            mock_client_instance.get.side_effect = httpx.ConnectError("boom")
+            mock_time.monotonic.return_value = 100.0
+            r1 = test_client.get("/api/releases/latest")
+            assert r1.json()["version"] == ""
+            assert "failed_at" in main._release_cache
+            mock_time.monotonic.return_value = 130.0
+            test_client.get("/api/releases/latest")
+            assert mock_client_instance.get.call_count == 1
+            mock_client_instance.get.side_effect = None
+            mock_client_instance.get.return_value = _mock_releases_response(
+                [_gh_release("v4.7.2")]
+            )
+            mock_time.monotonic.return_value = 100.0 + main._RELEASE_FAILURE_TTL + 1.0
+            r3 = test_client.get("/api/releases/latest")
+            assert mock_client_instance.get.call_count == 2
+            assert r3.json()["version"] == "4.7.2"
+            assert "failed_at" not in main._release_cache
+
+    def test_releases_latest_stale_cache_failure_serves_stale_per_since_without_retrying(
+        self, test_client
+    ) -> None:
+        from rootcoz import main
+
+        with (
+            patch.dict(
+                main._release_cache,
+                {
+                    "releases": [_gh_release("v4.7.2"), _gh_release("v4.7.1")],
+                    "fetched_at": 100.0,
+                },
+                clear=True,
+            ),
+            patch.object(main, "_get_app_version", return_value="4.7.2"),
+            patch("rootcoz.main.httpx.AsyncClient") as MockClient,
+            patch("rootcoz.main._time") as mock_time,
+        ):
+            mock_client_instance = __import__(
+                "unittest.mock", fromlist=["AsyncMock"]
+            ).AsyncMock()
+            MockClient.return_value.__aenter__ = __import__(
+                "unittest.mock", fromlist=["AsyncMock"]
+            ).AsyncMock(return_value=mock_client_instance)
+            MockClient.return_value.__aexit__ = __import__(
+                "unittest.mock", fromlist=["AsyncMock"]
+            ).AsyncMock(return_value=False)
+            mock_client_instance.get.side_effect = httpx.ConnectError("boom")
+            mock_time.monotonic.return_value = 4000.0
+            r1 = test_client.get("/api/releases/latest?since=4.7.0")
+            assert [x["version"] for x in r1.json()["releases"]] == ["4.7.1", "4.7.2"]
+            mock_time.monotonic.return_value = 4010.0
+            r2 = test_client.get("/api/releases/latest?since=4.7.1")
+            assert [x["version"] for x in r2.json()["releases"]] == ["4.7.2"]
+            assert mock_client_instance.get.call_count == 1
+
+    def test_releases_latest_token_change_invalidates_failure_cooldown_immediately(
+        self, test_client
+    ) -> None:
+        from rootcoz import main
+
+        with (
+            patch.dict(main._release_cache, {}, clear=True),
+            patch("rootcoz.main.httpx.AsyncClient") as MockClient,
+            patch("rootcoz.main._time") as mock_time,
+            patch("rootcoz.main.get_settings") as mock_settings,
+        ):
+            mock_client_instance = __import__(
+                "unittest.mock", fromlist=["AsyncMock"]
+            ).AsyncMock()
+            MockClient.return_value.__aenter__ = __import__(
+                "unittest.mock", fromlist=["AsyncMock"]
+            ).AsyncMock(return_value=mock_client_instance)
+            MockClient.return_value.__aexit__ = __import__(
+                "unittest.mock", fromlist=["AsyncMock"]
+            ).AsyncMock(return_value=False)
+            mock_settings.return_value.github_token = None
+            mock_client_instance.get.side_effect = httpx.ConnectError("boom")
+            mock_time.monotonic.return_value = 100.0
+            test_client.get("/api/releases/latest")
+            assert mock_client_instance.get.call_count == 1
+            mock_settings.return_value.github_token = __import__("pydantic").SecretStr(
+                "ghp_rotated"
+            )
+            mock_client_instance.get.side_effect = None
+            mock_client_instance.get.return_value = _mock_releases_response(
+                [_gh_release("v4.7.2")]
+            )
+            mock_time.monotonic.return_value = 105.0
+            r2 = test_client.get("/api/releases/latest")
+            assert mock_client_instance.get.call_count == 2
+            assert r2.json()["version"] == "4.7.2"
+
+    def test_releases_latest_malformed_token_never_leaks_secret_to_logs_or_cache(
+        self, test_client, caplog
+    ) -> None:
+        import logging
+
+        from rootcoz import main
+
+        for bad_tok in ("ghp_part1\nghp_part2", "ghp_part1\udc80ghp_part2"):
+            with (
+                patch.dict(main._release_cache, {}, clear=True),
+                patch("rootcoz.main.httpx.AsyncClient") as MockClient,
+                patch("rootcoz.main.get_settings") as mock_settings,
+            ):
+                mock_settings.return_value.github_token = __import__(
+                    "pydantic"
+                ).SecretStr(bad_tok)
+                mock_client_instance = __import__(
+                    "unittest.mock", fromlist=["AsyncMock"]
+                ).AsyncMock()
+                MockClient.return_value.__aenter__ = __import__(
+                    "unittest.mock", fromlist=["AsyncMock"]
+                ).AsyncMock(return_value=mock_client_instance)
+                MockClient.return_value.__aexit__ = __import__(
+                    "unittest.mock", fromlist=["AsyncMock"]
+                ).AsyncMock(return_value=False)
+                with caplog.at_level(logging.DEBUG, logger="rootcoz.main"):
+                    caplog.clear()
+                    response = test_client.get("/api/releases/latest")
+                assert response.status_code == 200
+                assert response.json()["version"] == ""
+                assert mock_client_instance.get.call_count == 0
+                assert "ghp_part1" not in caplog.text
+                assert "ghp_part1" not in repr(main._release_cache)
+
+    def test_releases_latest_non_list_upstream_json_preserves_stale_cache(
+        self, test_client
+    ) -> None:
+        from rootcoz import main
+
+        for bad_payload in [
+            {},
+            [{"tag_name": 123}],
+            [{"tag_name": "v9.9.9", "body": 123}],
+        ]:
+            mock_response = httpx.Response(
+                200,
+                json=bad_payload,
+                request=httpx.Request("GET", main._RELEASES_LIST_URL),
+            )
+            with (
+                patch.dict(
+                    main._release_cache,
+                    {"releases": [_gh_release("v4.7.2")], "fetched_at": 0},
+                    clear=True,
+                ),
+                patch.object(main, "_get_app_version", return_value="4.7.0"),
+                patch("rootcoz.main.httpx.AsyncClient") as MockClient,
+                patch("rootcoz.main._time") as mock_time,
+            ):
+                mock_client_instance = __import__(
+                    "unittest.mock", fromlist=["AsyncMock"]
+                ).AsyncMock()
+                MockClient.return_value.__aenter__ = __import__(
+                    "unittest.mock", fromlist=["AsyncMock"]
+                ).AsyncMock(return_value=mock_client_instance)
+                MockClient.return_value.__aexit__ = __import__(
+                    "unittest.mock", fromlist=["AsyncMock"]
+                ).AsyncMock(return_value=False)
+                mock_client_instance.get.return_value = mock_response
+                mock_time.monotonic.return_value = 5000.0
+                r = test_client.get("/api/releases/latest")
+                assert r.json()["version"] == "4.7.2"
+                assert "failed_at" in main._release_cache
+        for hostile_since in ("9" * 5000, "1." * 50000 + "1"):
+            with (
+                patch.dict(main._release_cache, {}, clear=True),
+                patch("rootcoz.main.httpx.AsyncClient") as MockClient,
+                patch("rootcoz.main._time") as mock_time,
+            ):
+                mock_client_instance = __import__(
+                    "unittest.mock", fromlist=["AsyncMock"]
+                ).AsyncMock()
+                MockClient.return_value.__aenter__ = __import__(
+                    "unittest.mock", fromlist=["AsyncMock"]
+                ).AsyncMock(return_value=mock_client_instance)
+                MockClient.return_value.__aexit__ = __import__(
+                    "unittest.mock", fromlist=["AsyncMock"]
+                ).AsyncMock(return_value=False)
+                mock_client_instance.get.return_value = _mock_releases_response(
+                    [_gh_release("v4.7.2")]
+                )
+                mock_time.monotonic.return_value = 6000.0
+                r = test_client.get(f"/api/releases/latest?since={hostile_since}")
+                assert r.status_code == 200
+                assert "failed_at" not in main._release_cache
+
+    def test_releases_latest_concurrent_cold_failures_coalesce_under_lock(
+        self, test_client
+    ) -> None:
+        import asyncio
+
+        from rootcoz import main
+
+        async def _run():
+            with (
+                patch.dict(main._release_cache, {}, clear=True),
+                patch("rootcoz.main.httpx.AsyncClient") as MockClient,
+            ):
+                mock_client_instance = __import__(
+                    "unittest.mock", fromlist=["AsyncMock"]
+                ).AsyncMock()
+                MockClient.return_value.__aenter__ = __import__(
+                    "unittest.mock", fromlist=["AsyncMock"]
+                ).AsyncMock(return_value=mock_client_instance)
+                MockClient.return_value.__aexit__ = __import__(
+                    "unittest.mock", fromlist=["AsyncMock"]
+                ).AsyncMock(return_value=False)
+                mock_client_instance.get.side_effect = httpx.ConnectError("boom")
+                transport = httpx.ASGITransport(app=main.app)
+                async with httpx.AsyncClient(
+                    transport=transport, base_url="http://test"
+                ) as c:
+                    results = await asyncio.gather(
+                        *[c.get("/api/releases/latest") for _ in range(5)]
+                    )
+                for r in results:
+                    assert r.status_code == 200
+                    assert r.json()["version"] == ""
+                assert mock_client_instance.get.call_count == 1
+
+        asyncio.run(_run())
 
     @pytest.mark.parametrize(
         ("newer", "older"),
