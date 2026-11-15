@@ -13,6 +13,7 @@ a login automatically.
 
 import base64
 import contextlib
+import inspect
 import json
 import sqlite3
 import time
@@ -34,6 +35,12 @@ _SSO_ENV = {
     "SSO_GOOGLE_CLIENT_ID": "test-client-id",
     "SSO_GOOGLE_CLIENT_SECRET": "test-client-secret",  # pragma: allowlist secret
     "PUBLIC_BASE_URL": "https://rootcoz.example",
+}
+
+#: A second configured provider, so a mismatch has somewhere to come from.
+_GITHUB_ENV = {
+    "SSO_GITHUB_CLIENT_ID": "test-github-client-id",
+    "SSO_GITHUB_CLIENT_SECRET": "test-github-client-secret",  # pragma: allowlist secret
 }
 
 #: What the settings page's own POST carries — the proof a link start needs.
@@ -3670,6 +3677,147 @@ async def test_an_approval_cannot_stamp_a_provider_the_code_was_not_opened_for(
         assert response.status_code == 400
 
 
+async def test_a_bearer_approval_records_no_provider_from_a_cookie(
+    temp_db_path: Path,
+) -> None:
+    """The provider is the one the winning credential was issued by, not a cookie's.
+
+    A script (or a browser) can send a key and somebody else's live session
+    cookie together — or its own expired one. Reading the provider from that
+    cookie would stamp the code with an IdP the approver never signed in
+    through, the CLI's session would inherit it, and a provider-pinned code
+    could then be refused as a mismatch against its own approval.
+    """
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        _, alice_key = await storage.create_user("alice")
+        await storage.create_user("bob")
+        bob_session = await storage.create_session(
+            "bob", is_admin=False, role="reviewer", auth_provider="github"
+        )
+        # Opened for google, approved with alice's key while bob's github
+        # session rides along in the cookie jar.
+        started = _start_device(client, provider="google")
+        client.cookies.set("rootcoz_session", bob_session)
+
+        response = client.post(
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers={"Authorization": f"Bearer {alice_key}"},
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["provider"] is None
+
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT actor, details FROM audit_events"
+                " WHERE action = 'auth.sso_device_approved' ORDER BY id DESC LIMIT 1"
+            )
+            row = await cursor.fetchone()
+    assert row["actor"] == "alice"
+    assert json.loads(row["details"])["provider"] is None
+
+
+async def test_an_expired_session_cookie_records_no_provider(
+    temp_db_path: Path,
+) -> None:
+    """A cookie outlives its row's TTL, so it proves nothing about this request.
+
+    ``get_session_identity`` ignores expiry on purpose (logout must still find
+    the IdP session of a stale cookie), so reading the provider from the cookie
+    would stamp the code with an IdP the request no longer holds a session for.
+    """
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        _, alice_key = await storage.create_user("alice")
+        await storage.create_user("bob")
+        bob_session = await storage.create_session(
+            "bob", is_admin=False, role="reviewer", auth_provider="github"
+        )
+        async with storage._connect_db() as db:
+            await db.execute(
+                "UPDATE sessions SET expires_at = '2000-01-01 00:00:00' WHERE 1"
+            )
+            await db.commit()
+        # Opened for google, approved with a key while bob's dead github cookie
+        # rides along: read from that cookie the code would be refused as a
+        # mismatch against the approval that is in fact valid.
+        started = _start_device(client, provider="google")
+        client.cookies.set("rootcoz_session", bob_session)
+
+        response = client.post(
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers={"Authorization": f"Bearer {alice_key}"},
+        )
+
+        assert response.status_code == 200, response.text
+        assert response.json()["provider"] is None
+
+        async with storage._connect_db() as db:
+            cursor = await db.execute(
+                "SELECT actor, details FROM audit_events"
+                " WHERE action = 'auth.sso_device_approved' ORDER BY id DESC LIMIT 1"
+            )
+            row = await cursor.fetchone()
+    assert row["actor"] == "alice"
+    assert json.loads(row["details"])["provider"] is None
+
+
+async def test_a_session_carried_as_a_bearer_stamps_its_own_provider(
+    temp_db_path: Path,
+) -> None:
+    """A provider is provenance wherever its session is presented.
+
+    The CLI carries a session token as a Bearer credential, and that token names
+    the IdP the approval was signed in through — so a code opened for another
+    provider is a mismatch, not an anonymous approval with no provenance at all.
+    """
+    for client in make_app_client(temp_db_path, {**_SSO_ENV, **_GITHUB_ENV}):
+        await storage.create_user("alice")
+        alice_session = await storage.create_session(
+            "alice", is_admin=False, role="reviewer", auth_provider="google"
+        )
+        bearer = {"Authorization": f"Bearer {alice_session}"}
+
+        foreign = _start_device(client, provider="github")
+        mismatched = client.post(
+            "/api/auth/sso/device/approve",
+            json={"user_code": foreign["user_code"]},
+            headers=bearer,
+        )
+        assert mismatched.status_code == 400, mismatched.text
+
+        started = _start_device(client, provider="google")
+        approved = client.post(
+            "/api/auth/sso/device/approve",
+            json={"user_code": started["user_code"]},
+            headers=bearer,
+        )
+        assert approved.status_code == 200, approved.text
+        assert approved.json()["provider"] == "google"
+
+        redeemed = client.post(
+            "/api/auth/sso/device/poll", json={"device_code": started["device_code"]}
+        )
+        identity = await storage.get_session_identity(redeemed.json()["token"])
+    assert identity["auth_provider"] == "google"
+
+
+def test_the_approval_takes_its_provider_from_the_request_state() -> None:
+    """Structural guard: the ambient-cookie re-read must not come back.
+
+    The provider is the one the *winning* credential was issued by, which the
+    middleware already resolved onto ``request.state``. Re-reading a cookie or a
+    session row here is the bug this replaced, not a shortcut around it.
+    """
+    from rootcoz import main as app_module
+
+    source = inspect.getsource(app_module.sso_device_approve)
+    assert 'getattr(request.state, "auth_provider", None)' in source
+    assert "read_cookie" not in source
+    assert "get_session_identity" not in source
+
+
 async def test_an_unknown_user_code_is_not_approvable(temp_db_path: Path) -> None:
     """A mistyped code answers like an expired one, and never as a 500."""
     for client in make_app_client(temp_db_path, _SSO_ENV):
@@ -4030,6 +4178,21 @@ async def test_the_bootstrap_admin_can_approve_and_redeem(
         ]
 
 
+def test_one_reset_clears_the_discovery_and_key_set_caches() -> None:
+    """Both caches, one call: the discovery tests reuse one issuer.
+
+    Clearing only ``_METADATA_CACHE`` by hand left the JWKS cache leaking a
+    previous test's key set into the next one.
+    """
+    from rootcoz.auth.sso import oidc
+
+    oidc._METADATA_CACHE["https://idp.example"] = (0.0, {})
+    oidc._JWKS_CACHE["https://idp.example"] = (0.0, {})
+    oidc._reset_discovery_cache()
+    assert not oidc._METADATA_CACHE
+    assert not oidc._JWKS_CACHE
+
+
 async def test_oidc_discovery_must_claim_the_configured_issuer(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -4037,7 +4200,7 @@ async def test_oidc_discovery_must_claim_the_configured_issuer(
     from rootcoz.auth.sso import oidc as oidc_module
     from rootcoz.auth.sso.redhat import RedHatSSOProvider
 
-    oidc_module._METADATA_CACHE.clear()
+    oidc_module._reset_discovery_cache()
     provider = RedHatSSOProvider(
         client_id="cid",
         client_secret="secret",  # pragma: allowlist secret
@@ -4067,7 +4230,7 @@ async def test_oidc_discovery_rejects_a_document_with_no_issuer(
     from rootcoz.auth.sso import oidc as oidc_module
     from rootcoz.auth.sso.redhat import RedHatSSOProvider
 
-    oidc_module._METADATA_CACHE.clear()
+    oidc_module._reset_discovery_cache()
     provider = RedHatSSOProvider(
         client_id="cid",
         client_secret="secret",  # pragma: allowlist secret
@@ -4099,7 +4262,7 @@ async def test_oidc_discovery_accepts_and_caches_a_matching_issuer(
     from rootcoz.auth.sso import oidc as oidc_module
     from rootcoz.auth.sso.redhat import RedHatSSOProvider
 
-    oidc_module._METADATA_CACHE.clear()
+    oidc_module._reset_discovery_cache()
     # Same issuer, as an IdP is allowed to spell it: a trailing slash is not a
     # different issuer, so the pin must not refuse the deployment's own document.
     provider = RedHatSSOProvider(
@@ -4135,7 +4298,7 @@ async def test_oidc_discovery_rejects_a_plaintext_userinfo_endpoint(
     from rootcoz.auth.sso import oidc as oidc_module
     from rootcoz.auth.sso.redhat import RedHatSSOProvider
 
-    oidc_module._METADATA_CACHE.clear()
+    oidc_module._reset_discovery_cache()
     provider = RedHatSSOProvider(
         client_id="cid",
         client_secret="secret",  # pragma: allowlist secret
@@ -4166,7 +4329,7 @@ async def test_oidc_discovery_rejects_a_plaintext_endpoint(
     from rootcoz.auth.sso import oidc as oidc_module
     from rootcoz.auth.sso.redhat import RedHatSSOProvider
 
-    oidc_module._METADATA_CACHE.clear()
+    oidc_module._reset_discovery_cache()
     provider = RedHatSSOProvider(
         client_id="cid",
         client_secret="secret",  # pragma: allowlist secret

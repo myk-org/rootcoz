@@ -205,6 +205,7 @@ def identity_from_session(session: dict[str, Any], strategy_name: str) -> AuthId
         strategy_name=strategy_name,
         is_admin=is_admin,
         role="admin" if is_admin else str(session.get("role", "reviewer")),
+        auth_provider=session.get("auth_provider") or None,
     )
 
 
@@ -234,6 +235,12 @@ class AuthIdentity:
         user: The users row already loaded while resolving, reused downstream
             for ``can_view_reports`` and the provider grants so one request
             loads it once. ``None`` when the credential names no row.
+        auth_provider: The IdP that issued the credential, when one did
+            (a session, including a session token presented as a Bearer
+            credential): what the session it mints records, and what an IdP
+            logout can end later. ``None`` for an API key, the bootstrap
+            administrator and a trusted proxy header, because nobody signed in
+            through an IdP.
     """
 
     username: str
@@ -241,6 +248,7 @@ class AuthIdentity:
     is_admin: bool
     role: str
     user: dict[str, Any] | None = None
+    auth_provider: str | None = None
 
 
 class AuthStrategy(ABC):

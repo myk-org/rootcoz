@@ -5,6 +5,7 @@ import { api, ApiError, extractApiDetail } from '@/lib/api'
 import { SSO_LOGIN_ERROR_FALLBACK, ssoErrorMessage } from '@/lib/ssoErrors'
 import { persistTokensToServer } from '@/lib/tokens'
 import { clearUrlFragment, stripQueryParams } from '@/lib/navigation'
+import { browserSignIn, type SsoProvider, type SsoProvidersResponse } from '@/lib/ssoProviders'
 import { Card, CardContent } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import { TokenField } from '@/components/shared/TokenField'
@@ -16,11 +17,6 @@ import { UsernameField } from '@/components/shared/UsernameField'
 
 type Mode = 'login' | 'register' | 'key-reveal'
 type RegistrationStatus = 'active' | 'pending'
-
-interface SsoProvider {
-  name: string
-  display_name: string
-}
 
 interface SsoTicket {
   provider: string
@@ -384,11 +380,12 @@ export function RegisterPage() {
 
   useEffect(() => {
     let active = true
-    api.get<{ providers?: SsoProvider[]; browser_login?: boolean }>('/api/auth/sso/providers')
+    api.get<SsoProvidersResponse>('/api/auth/sso/providers')
       // No public origin means the callback cannot be built, so a button here
       // would only fail after the person clicked it. The CLI still works — it
-      // joins a relative verification URL itself.
-      .then((data) => { if (active) setSsoProviders(data.browser_login === false ? [] : data.providers ?? []) })
+      // joins a relative verification URL itself. Same rule as the Sign-in
+      // methods card and the dashboard prompt, in one place.
+      .then((data) => { if (active) setSsoProviders(browserSignIn(data).providers) })
       .catch(() => { /* SSO is optional — the password forms stay usable */ })
     return () => { active = false }
   }, [])

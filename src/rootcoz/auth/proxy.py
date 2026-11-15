@@ -8,7 +8,7 @@ from fastapi import Request, Response
 from fastapi.responses import RedirectResponse
 
 from rootcoz import get_child_logger, storage
-from rootcoz.auth.approval import account_block_reason
+from rootcoz.auth.approval import account_block_reason, is_approval_blocked
 from rootcoz.auth.base import (
     SESSION_COOKIE,
     SET_PROXY_COOKIE_ATTR,
@@ -63,6 +63,53 @@ def proxy_username(request: Request, settings: Settings) -> str:
     if is_reserved_username(username):
         return ""
     return username
+
+
+def _proxy_provision_refusal(username: str, settings: Settings) -> str | None:
+    """Whether an account can be created for a proxy-vouched name, and why not.
+
+    The one eligibility rule for this path: :meth:`ProxyStrategy._provision`
+    obeys it before creating a row, and the ``/login`` redirect obeys it before
+    sending a visitor to a page that would refuse them. A name the deployment
+    will not create must stay on the login page — sent to ``/`` the middleware
+    refuses it, sends the HTML request back here, and the two bounce forever.
+
+    Args:
+        username: The normalised name from the trusted header.
+        settings: Application settings (the ``ALLOWED_USERS`` write allow-list).
+
+    Returns:
+        ``"not_allowed"`` for a name outside ``ALLOWED_USERS``,
+        ``"unusable_name"`` for one the user store would refuse (malformed or
+        reserved), or ``None`` when an account may be created.
+    """
+    if settings.allowed_users_set and username not in settings.allowed_users_set:
+        # The write allow-list bounds *creation* on every other path
+        # (registration, SSO create); a proxy header is not an exemption from it.
+        return "not_allowed"
+    # A name the store would refuse is not an account either, and refusing here
+    # keeps the rule in one place instead of at the INSERT.
+    if not storage.is_creatable_username(username):
+        return "unusable_name"
+    return None
+
+
+def _record_refusal(request: Request, username: str, reason: str) -> None:
+    """Announce a refused name on the request, for the serving layer's audit row.
+
+    The auth package owns no auditing, so every refusal leaves the same record
+    here and :func:`rootcoz.main._record_proxy_provision_refused` writes it.
+
+    Args:
+        request: The request the refusal applies to.
+        username: The refused name.
+        reason: Why, as a fixed code (see :func:`_proxy_provision_refusal`).
+    """
+    setattr(
+        request.state,
+        PROVISION_REFUSED_ATTR,
+        {"username": username, "reason": reason},
+    )
 
 
 class ProxyStrategy(AuthStrategy):
@@ -146,26 +193,17 @@ class ProxyStrategy(AuthStrategy):
                 notify with its context.
 
         Returns:
-            The new users row, or ``None`` when the account could not be created
-            (a name the storage layer refuses). The caller then refuses the
+            The new users row, or ``None`` when provisioning refuses the name
+            (:func:`_proxy_provision_refusal`). The caller then refuses the
             request: a row-less identity would bypass the approval gate that
             every provisioned account now passes through.
         """
-        if settings.allowed_users_set and username not in settings.allowed_users_set:
-            # The write allow-list bounds *creation* on every other path
-            # (registration, SSO create); a proxy header is not an exemption from
-            # it. Writes would be blocked later anyway — refusing here keeps the
-            # rule in one place and leaves no orphan row behind.
-            logger.info(
-                "Refused proxy account '%s': not in the write allow-list", username
-            )
-            # Same answer as an unusable name: no row, no identity — and the
-            # serving layer writes the refusal to the trail.
-            setattr(
-                request.state,
-                PROVISION_REFUSED_ATTR,
-                {"username": username, "reason": "not_allowed"},
-            )
+        refusal = _proxy_provision_refusal(username, settings)
+        if refusal:
+            logger.info("Refused proxy account '%s': %s", username, refusal)
+            # No row, no identity — and the serving layer writes the refusal to
+            # the trail.
+            _record_refusal(request, username, refusal)
             return None
         status = "pending" if settings.require_approval else "active"
         try:
@@ -178,15 +216,11 @@ class ProxyStrategy(AuthStrategy):
             # very first load would answer 401 to some of its own requests.
             existing = await storage.get_user_by_username(username)
             if existing is None:
-                # No row: the name is malformed or reserved. That is not an
-                # identity, so the request is refused rather than given a
-                # row-less session.
+                # No row: the store refused the name, so there is no account to
+                # authenticate. That is not an identity, and the request is
+                # refused rather than given a row-less session.
                 logger.warning("Refused proxy account '%s': unusable name", username)
-                setattr(
-                    request.state,
-                    PROVISION_REFUSED_ATTR,
-                    {"username": username, "reason": "unusable_name"},
-                )
+                _record_refusal(request, username, "unusable_name")
                 return None
             return existing
         user = await storage.get_user_by_username(username)
@@ -207,6 +241,46 @@ class ProxyStrategy(AuthStrategy):
         return user
 
 
+async def _login_destination(username: str, ctx: AuthContext) -> str | None:
+    """Where a proxy-vouched visitor on the login page belongs.
+
+    One decision, taken from the status the account has (or would be created
+    with), so the login page, the dashboard and the pending page cannot
+    disagree: an account approval holds must be sent where the page that
+    explains it lives, and a name the deployment would refuse must stay here —
+    sent to ``/`` the middleware refuses it and sends the HTML request back, one
+    redirect per hop, forever.
+
+    Args:
+        username: The normalised name from the trusted header.
+        ctx: The request being authenticated, and the settings it runs under.
+
+    Returns:
+        ``/pending`` for an account ``REQUIRE_APPROVAL`` holds, ``/`` for one
+        that may act, or ``None`` when there is nowhere better to go: the name
+        cannot be provisioned (recorded on the request for the trail), or its
+        account is blocked.
+    """
+    refusal = _proxy_provision_refusal(username, ctx.settings)
+    if refusal:
+        _record_refusal(ctx.request, username, refusal)
+        return None
+    user = await storage.get_user_by_username(username)
+    if account_block_reason(user):
+        return None
+    status = await storage.get_user_status(username)
+    if status is None:
+        # No row: provisioning creates it, so what matters is the status it
+        # would be created with.
+        status = "pending" if ctx.settings.require_approval else "active"
+    # The same three conditions the middleware's approval gate applies, so this
+    # can never send a visitor to a page that gate would refuse.
+    _, is_admin = role_and_admin(user, ctx.settings.default_user_role)
+    if ctx.settings.require_approval and not is_admin and is_approval_blocked(status):
+        return "/pending" if status == "pending" else None
+    return "/"
+
+
 async def proxy_login_redirect(ctx: AuthContext) -> Response | None:
     """Redirect a proxy-authenticated visitor away from the login page.
 
@@ -214,10 +288,12 @@ async def proxy_login_redirect(ctx: AuthContext) -> Response | None:
         ctx: The request being authenticated.
 
     Returns:
-        A ``303`` to the dashboard when the proxy vouches for a usable user, or
-        ``None`` when the login page should be served (no proxy identity, an
-        existing session, or a blocked account — a blocked identity sent to
-        ``/`` would only bounce back here, one audit row per hop).
+        A ``303`` to the dashboard, or to the pending page while approval holds
+        the account, when the proxy vouches for a user the deployment will
+        create. ``None`` when the login page should be served (no proxy
+        identity, an existing session, a name provisioning would refuse, or a
+        blocked account — anything else would only bounce back here, one audit
+        row per hop).
     """
     username = proxy_username(ctx.request, ctx.settings)
     if not username:
@@ -225,9 +301,10 @@ async def proxy_login_redirect(ctx: AuthContext) -> Response | None:
     session_token = read_cookie(ctx.request, SESSION_COOKIE)
     if session_token and await storage.get_session(session_token):
         return None
-    if account_block_reason(await storage.get_user_by_username(username)):
+    destination = await _login_destination(username, ctx)
+    if destination is None:
         return None
-    response: Response = RedirectResponse(url="/", status_code=303)
+    response: Response = RedirectResponse(url=destination, status_code=303)
     if read_cookie(ctx.request, USERNAME_COOKIE) != username:
         set_username_cookie(response, username, secure=ctx.settings.secure_cookies)
     return response

@@ -211,3 +211,12 @@ The proxy proves *who* someone is, not that they may act. Each provisioning is
 audited as `auth.proxy_provisioned`, `ALLOWED_USERS` bounds it like any other
 creation, and reserved names (`admin`, `rootcoz*`) are never accepted from the
 header.
+
+A proxy-authenticated visitor on the login page is sent straight to where their
+account stands: `/` when it may act, `/pending` while approval holds it, and
+nowhere — the login page is served — when the resource is blocked (`disabled`,
+`locked`, `rejected`) or when the name is one provisioning would refuse
+(malformed, reserved, or outside `ALLOWED_USERS`). The redirect asks the same
+question provisioning does, so a name that will never get an account cannot be
+sent to a page that refuses it and bounced back here forever; the refusal is
+audited as `auth.proxy_provision_refused`.

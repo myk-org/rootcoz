@@ -12,6 +12,7 @@ from fastapi.testclient import TestClient
 
 from rootcoz import storage
 from rootcoz.config import clear_settings_cache
+from tests.conftest import build_test_env, make_app_client
 
 
 @pytest.fixture
@@ -1451,6 +1452,17 @@ class TestProxyHeaders:
                     )
                     assert resp.status_code == 401
 
+                    # The login page asks the same question before redirecting:
+                    # a name it would refuse must stay put (loop, one hop each).
+                    assert (
+                        c.get(
+                            "/login",
+                            headers={"X-Forwarded-User": "mallory"},
+                            follow_redirects=False,
+                        ).status_code
+                        != 303
+                    )
+
                     async def count():
                         async with storage._connect_db() as db:
                             cursor = await db.execute(
@@ -1514,6 +1526,159 @@ class TestProxyHeaders:
         )
         # Should NOT redirect — either 200 (SPA served) or 404 (no frontend build)
         assert resp.status_code != 303
+
+    def test_login_sends_a_pending_visitor_to_the_pending_page(self, approval_client):
+        """Provisioning would create a pending account, so /pending is the answer.
+
+        Sent to ``/`` the middleware answers the HTML request with a JSON 403
+        instead of the page that explains the wait, and `/login` is no help.
+        """
+        headers = {"accept": "text/html", "X-Forwarded-User": "sso-waiting"}
+        resp = approval_client.get("/login", headers=headers, follow_redirects=False)
+        assert resp.status_code == 303
+        assert resp.headers["location"] == "/pending"
+
+        # First page load ends on a page, not on the gate's JSON refusal: that
+        # body is what a pending account gets anywhere but here.
+        landed = approval_client.get(
+            resp.headers["location"], headers=headers, follow_redirects=False
+        )
+        assert landed.status_code == 200
+        assert landed.headers["content-type"].startswith("text/html")
+        assert "awaiting admin approval" not in landed.text
+
+        async def count():
+            async with storage._connect_db() as db:
+                cursor = await db.execute(
+                    "SELECT COUNT(*) AS n FROM users WHERE username = 'sso-waiting'"
+                )
+                return (await cursor.fetchone())["n"]
+
+        # A page load is not a request to create anything: the destination is
+        # decided from the status provisioning *would* use.
+        assert asyncio.run(count()) == 0
+
+    def test_the_login_redirect_and_provisioning_refuse_the_same_names(
+        self, temp_db_path
+    ):
+        """One eligibility rule: what provisioning refuses, the page refuses too.
+
+        ``alice@example.com`` is allow-listed but is not a username, and
+        ``sso-offlist`` is a fine name outside ``ALLOWED_USERS``: provisioning
+        refuses both, so ``/login`` must not send either to ``/`` — the
+        middleware refuses the HTML request and sends it straight back, one hop
+        per refresh, forever. ``sso-listed`` is the control: listed and usable,
+        so the redirect still works.
+        """
+        env = build_test_env(
+            DB_PATH=str(temp_db_path),
+            SECURE_COOKIES="false",
+            TRUST_PROXY_HEADERS="true",
+            ALLOWED_USERS="sso-listed,alice@example.com",
+        )
+        refused = {
+            "sso-offlist": "not_allowed",
+            "alice@example.com": "unusable_name",
+        }
+        for c in make_app_client(temp_db_path, env):
+            listed = {"X-Forwarded-User": "sso-listed"}
+            page = c.get("/login", headers=listed, follow_redirects=False)
+            assert (page.status_code, page.headers["location"]) == (303, "/")
+            assert c.get("/api/auth/me", headers=listed).status_code == 200
+
+            for name in refused:
+                html = {"accept": "text/html", "X-Forwarded-User": name}
+                # The dashboard can only refuse it and send the page back…
+                bounce = c.get("/", headers=html, follow_redirects=False)
+                assert (bounce.status_code, bounce.headers["location"]) == (
+                    303,
+                    "/login",
+                )
+                # …so the login page answers with itself: no redirect, no cookie.
+                stayed = c.get("/login", headers=html, follow_redirects=False)
+                assert stayed.status_code != 303
+                assert stayed.cookies.get("rootcoz_username") is None
+                # Provisioning refuses the same name, for the same reason.
+                assert (
+                    c.get(
+                        "/api/auth/me", headers={"X-Forwarded-User": name}
+                    ).status_code
+                    == 401
+                )
+
+            async def rows():
+                async with storage._connect_db() as db:
+                    cursor = await db.execute(
+                        "SELECT actor, details FROM audit_events"
+                        " WHERE action = 'auth.proxy_provision_refused'"
+                    )
+                    return [tuple(r) for r in await cursor.fetchall()]
+
+            # Both call sites report the same reason for the same name — the
+            # shared predicate holding — and the 401 above is what provisioning
+            # refusing it looks like: no row, so no identity.
+            assert {
+                (actor, json.loads(details)["reason"])
+                for actor, details in asyncio.run(rows())
+            } == set(refused.items())
+
+    def test_the_login_redirect_follows_the_status_it_finds(self, approval_client):
+        """Only a pending account waits: an active one acts, a rejected one is
+        not sent to the page that explains a wait it is not in."""
+        asyncio.run(storage.create_user("sso-approved", status="active"))
+        asyncio.run(storage.create_user("sso-refused", status="rejected"))
+
+        active = approval_client.get(
+            "/login",
+            headers={"X-Forwarded-User": "sso-approved"},
+            follow_redirects=False,
+        )
+        assert (active.status_code, active.headers["location"]) == (303, "/")
+
+        rejected = approval_client.get(
+            "/login",
+            headers={"X-Forwarded-User": "sso-refused"},
+            follow_redirects=False,
+        )
+        assert rejected.status_code != 303
+
+    def test_login_does_not_redirect_a_name_that_cannot_be_provisioned(
+        self, approval_client
+    ):
+        """The loop the issue names: /login -> / -> /login, one hop per refusal.
+
+        Provisioning refuses this name, so ``/`` can only refuse it and send the
+        HTML request back here; the redirect must ask the same question before
+        it sends anybody anywhere.
+        """
+        headers = {"accept": "text/html", "X-Forwarded-User": "alice@example.com"}
+        dashboard = approval_client.get("/", headers=headers, follow_redirects=False)
+        assert dashboard.status_code == 303
+        assert dashboard.headers["location"] == "/login"
+
+        page = approval_client.get("/login", headers=headers, follow_redirects=False)
+        assert page.status_code != 303
+        assert page.cookies.get("rootcoz_username") is None
+
+        async def rows():
+            async with storage._connect_db() as db:
+                cursor = await db.execute(
+                    "SELECT actor, outcome, details FROM audit_events"
+                    " WHERE action = 'auth.proxy_provision_refused' ORDER BY id"
+                )
+                return [tuple(r) for r in await cursor.fetchall()]
+
+        found = asyncio.run(rows())
+        # One row for the dashboard refusal, one for the page load that stayed
+        # put: a refusal the visitor never gets past is still a decision.
+        assert [(r[0], r[1]) for r in found] == [
+            ("alice@example.com", "denied"),
+            ("alice@example.com", "denied"),
+        ]
+        assert [json.loads(r[2])["reason"] for r in found] == [
+            "unusable_name",
+            "unusable_name",
+        ]
 
     def test_session_auth_takes_precedence_over_header(self, proxy_client):
         """Admin session takes precedence over X-Forwarded-User."""
