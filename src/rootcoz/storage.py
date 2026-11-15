@@ -2486,6 +2486,16 @@ async def init_db() -> None:
         # actually approved it — NULL for a key session. Stamping the second onto
         # the first made a key approval claim an IdP it never used.
         await _migrate_add_column(db, "sso_device_codes", "approved_provider", "TEXT")
+        # Approval records which *account* approved, and the bootstrap admin is a
+        # legitimate approver with no users row (``auth.base`` reserves the name),
+        # so the id cannot be the only record. The backfill keeps codes approved
+        # before this column existed redeemable.
+        await _migrate_add_column(db, "sso_device_codes", "approved_username", "TEXT")
+        await db.execute(
+            "UPDATE sso_device_codes SET approved_username = ("
+            " SELECT u.username FROM users u WHERE u.id = sso_device_codes.user_id"
+            ") WHERE user_id IS NOT NULL AND approved_username IS NULL"
+        )
 
         # One-time tickets for the first-login choice screen: after the IdP has
         # authenticated someone with no link, the browser holds this instead of a
@@ -10805,7 +10815,9 @@ def _device_code_row(row: Any) -> dict[str, Any]:
         # Who approved it, which is what the redeemed session names as its issuer.
         "approved_provider": row["approved_provider"],
         "client_name": row["client_name"],
-        "authorized": row["user_id"] is not None,
+        # The account name, not the users row: the bootstrap admin has no row and
+        # is still a legitimate approver.
+        "authorized": row["approved_username"] is not None,
         "expires_at": row["expires_at"],
         "interval_seconds": row["interval_seconds"],
         "last_polled_at": row["last_polled_at"],
@@ -10813,8 +10825,9 @@ def _device_code_row(row: Any) -> dict[str, Any]:
 
 
 _DEVICE_CODE_SELECT = (
-    "SELECT user_code, provider, approved_provider, user_id, client_name,"
-    " expires_at, interval_seconds, last_polled_at FROM sso_device_codes"
+    "SELECT user_code, provider, approved_provider, approved_username,"
+    " client_name, expires_at, interval_seconds, last_polled_at"
+    " FROM sso_device_codes"
 )
 
 
@@ -10873,7 +10886,7 @@ async def get_device_code_by_user_code(user_code: str) -> dict[str, Any] | None:
 
 async def authorize_device_code(
     user_code: str, *, username: str, provider: str | None = None
-) -> bool:
+) -> str:
     """Approve a pending device code for an account.
 
     Approval records the account only — no credential is stored. The CLI
@@ -10892,31 +10905,65 @@ async def authorize_device_code(
             contradicting the one fixed at creation is refused.
 
     Returns:
-        True when a pending, unexpired code was approved; False otherwise
-        (unknown, expired, or already authorized).
+        ``"approved"`` when a pending, unexpired code was approved; otherwise the
+        reason it was not — ``"already_approved"``, ``"expired"``,
+        ``"provider_mismatch"`` or ``"code_not_found"``. The reason is read
+        inside the same transaction as the failed write, so a lost race is
+        reported as what it actually became instead of as a guessed one.
     """
     if provider is not None:
         _validate_sso_provider(provider)
     normalized = _normalize_user_code(user_code)
+    approver = _normalize_username(username)
 
-    async def _attempt() -> bool:
+    async def _attempt() -> str:
         async with _connect_db() as db:
-            cursor = await db.execute(
-                "SELECT id FROM users WHERE username = ?",
-                (_normalize_username(username),),
-            )
-            user = await cursor.fetchone()
-            if user is None:
-                return False
-            updated = await db.execute(
-                "UPDATE sso_device_codes SET user_id = ?, approved_provider = ?"
-                " WHERE user_code = ? AND user_id IS NULL"
-                f" AND {_LIVE_ROW}"
-                " AND (provider IS NULL OR ? IS NULL OR provider = ?)",
-                (user["id"], provider, normalized, provider, provider),
-            )
-            await db.commit()
-            return updated.rowcount > 0
+            await db.execute("BEGIN IMMEDIATE")
+            try:
+                cursor = await db.execute(
+                    "SELECT id FROM users WHERE username = ?", (approver,)
+                )
+                user = await cursor.fetchone()
+                # A name with no row is still a real identity: the bootstrap admin
+                # is reserved (``auth.base``) and never has one. Which *account*
+                # approved is what the code records, so the row is an extra, not a
+                # requirement.
+                updated = await db.execute(
+                    "UPDATE sso_device_codes SET user_id = ?, approved_username = ?,"
+                    " approved_provider = ?"
+                    " WHERE user_code = ? AND approved_username IS NULL"
+                    f" AND {_LIVE_ROW}"
+                    " AND (provider IS NULL OR ? IS NULL OR provider = ?)",
+                    (
+                        user["id"] if user else None,
+                        approver,
+                        provider,
+                        normalized,
+                        provider,
+                        provider,
+                    ),
+                )
+                if updated.rowcount:
+                    await db.commit()
+                    return "approved"
+                cursor = await db.execute(
+                    "SELECT approved_username, provider,"
+                    f" ({_LIVE_ROW}) AS live FROM sso_device_codes"
+                    " WHERE user_code = ?",
+                    (normalized,),
+                )
+                row = await cursor.fetchone()
+                await db.commit()
+            except Exception:
+                await db.rollback()
+                raise
+            if row is None:
+                return "code_not_found"
+            if row["approved_username"] is not None:
+                return "already_approved"
+            if not row["live"]:
+                return "expired"
+            return "provider_mismatch"
 
     return await _retry_contended(_attempt)
 
@@ -11027,9 +11074,10 @@ async def redeem_device_code(device_code: str) -> dict[str, Any] | None:
             await db.execute("BEGIN IMMEDIATE")
             try:
                 cursor = await db.execute(
-                    "SELECT u.username, d.approved_provider"
-                    " FROM sso_device_codes d JOIN users u ON u.id = d.user_id"
-                    " WHERE d.device_code_hash = ? AND d.user_id IS NOT NULL"
+                    "SELECT d.approved_username, d.approved_provider"
+                    " FROM sso_device_codes d"
+                    " WHERE d.device_code_hash = ?"
+                    " AND d.approved_username IS NOT NULL"
                     " AND d.redeemed_at IS NULL"
                     f" AND d.{_LIVE_ROW}",
                     (device_hash,),
@@ -11054,7 +11102,7 @@ async def redeem_device_code(device_code: str) -> dict[str, Any] | None:
                 await db.rollback()
                 raise
             return {
-                "username": row["username"],
+                "username": row["approved_username"],
                 "approved_provider": row["approved_provider"],
             }
 
@@ -11130,9 +11178,8 @@ async def exchange_device_code_for_session(
             try:
                 cursor = await db.execute(
                     "SELECT 1 FROM sso_device_codes d"
-                    " JOIN users u ON u.id = d.user_id"
                     " WHERE d.device_code_hash = ? AND d.redeemed_at IS NOT NULL"
-                    " AND u.username = ?"
+                    " AND d.approved_username = ?"
                     f" AND d.{_LIVE_ROW}",
                     (device_hash, normalized),
                 )

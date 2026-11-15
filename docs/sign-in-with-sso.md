@@ -174,8 +174,13 @@ page, you approve it in a browser where you are already signed in, and the
 terminal receives a **session token** — bounded and individually revocable, not a
 replacement API key, so signing in on a second machine never invalidates the
 first. The code grants nothing until a person approves it, the approval page shows
-which client is asking, and the server refuses polls faster than the advertised
-interval.
+which client is asking, the server refuses polls faster than the advertised
+interval, and an approval only counts when it comes from this server's own page
+(a cookie-authenticated approval with no same-origin proof is refused, while
+`rootcoz auth sso-approve` sends a Bearer credential and needs none).
+
+The account that approves is the account the terminal becomes — the bootstrap
+`admin` included, which has no profile row and is still a legitimate approver.
 
 ```bash
 rootcoz auth sso --provider google
