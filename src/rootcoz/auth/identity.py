@@ -300,7 +300,8 @@ async def link_existing(
 
     The caller has already verified the account's credential — this only writes
     the link, so role, status, API key and history are untouched and
-    ``created_via`` is not rewritten.
+    ``created_via`` is not rewritten. A link the account already holds is a
+    no-op (a retried POST is not an error) and resolves the same way.
 
     Args:
         username: Account the owner authenticated as.
@@ -312,9 +313,10 @@ async def link_existing(
         The resolution for that account.
 
     Raises:
-        AuthError: ``identity_conflict`` when the subject is already linked
-            elsewhere or the account already holds an identity for this provider;
-            ``account_missing`` when the account no longer exists.
+        AuthError: ``identity_conflict`` when the subject is already linked to
+            a different account or the account already holds a different subject
+            for this provider; ``account_missing`` when the account no longer
+            exists; ``ticket_expired`` when the ticket is no longer live.
     """
     try:
         await storage.add_user_identity(

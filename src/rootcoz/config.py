@@ -1488,7 +1488,11 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _normalize_optional_strings(self) -> Settings:
-        """Strip whitespace from optional string fields; blank becomes None."""
+        """Strip whitespace from string and secret fields; a blank one is not set.
+
+        A ``str | None`` field becomes ``None`` and a ``str`` field becomes
+        ``""`` — the shape each field already uses for "not configured".
+        """
         for field_name in (
             "tests_repo_url",
             "jira_email",
@@ -1516,6 +1520,17 @@ class Settings(BaseSettings):
             "gcs_bucket",
             "jira_cloud_url",
             "jira_server_url",
+            # An SSO credential that is only whitespace is not configured: the
+            # provider would otherwise be offered as a button that cannot finish
+            # a login. Blank stays "" — these fields are plain strings, and a
+            # None here would fail the re-validation `_build_settings` performs.
+            "sso_google_client_id",
+            "sso_github_client_id",
+            "sso_openshift_client_id",
+            "sso_openshift_issuer",
+            "sso_openshift_api_url",
+            "sso_redhat_client_id",
+            "sso_redhat_issuer",
         ):
             value = getattr(self, field_name)
             if isinstance(value, str):
@@ -1541,6 +1556,10 @@ class Settings(BaseSettings):
             "reportportal_api_token",
             "datadog_api_key",
             "datadog_app_key",
+            "sso_google_client_secret",
+            "sso_github_client_secret",
+            "sso_openshift_client_secret",
+            "sso_redhat_client_secret",
         ):
             secret = getattr(self, field_name)
             if secret is not None:

@@ -1521,6 +1521,27 @@ async def test_linking_twice_reports_a_conflict_at_the_endpoint(
         assert await storage.list_user_identities("bob") == []
 
 
+async def test_a_second_identity_for_the_same_provider_is_still_refused(
+    temp_db_path: Path,
+) -> None:
+    """Only the identity the account already holds is a no-op, not another one."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("ruthn")
+        raw_key = await storage.rotate_own_key("ruthn")
+        await storage.add_user_identity("ruthn", "google", "sub-1")
+        ticket = await _ticket(client, subject="sub-2")
+
+        response = client.post(
+            "/api/auth/sso/link",
+            json={"ticket": ticket, "username": "ruthn", "api_key": raw_key},
+        )
+
+        assert response.status_code == 409
+        assert [i["subject"] for i in await storage.list_user_identities("ruthn")] == [
+            "sub-1"
+        ]
+
+
 async def test_a_stale_link_that_raced_a_delete_is_reported_as_missing(
     temp_db_path: Path,
 ) -> None:
@@ -2218,6 +2239,62 @@ def test_an_idp_error_parameter_is_refused_without_exchanging(
         assert response.status_code == 303
         assert response.headers["location"] == "/login?sso_error=provider_error"
         assert exchange.call_count == 0
+
+
+async def test_a_cancelled_link_returns_to_its_destination(
+    temp_db_path: Path,
+) -> None:
+    """The attempt is opened before ``error`` is handled, so a link keeps its page.
+
+    ``/login`` would bounce the still-signed-in person away before the banner
+    renders, so a cancelled link must land where the attempt was headed.
+    """
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("ruthn")
+        session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+        sealed, state = _sealed(
+            mode=sso_state.MODE_LINK, link_to="ruthn", next_path="/settings"
+        )
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+
+        response = client.get(
+            f"/api/auth/sso/google/callback?error=access_denied&state={state}",
+            follow_redirects=False,
+        )
+
+        assert response.status_code == 303
+        assert response.headers["location"] == "/settings?sso_error=provider_error"
+        assert await storage.list_user_identities("ruthn") == []
+
+
+async def test_a_cancelled_link_without_a_valid_attempt_keeps_login(
+    temp_db_path: Path,
+) -> None:
+    """No destination comes from an attempt that did not validate."""
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("ruthn")
+        session = await storage.create_session("ruthn", is_admin=False, role="reviewer")
+        client.cookies.set("rootcoz_session", session)
+        sealed, state = _sealed(
+            mode=sso_state.MODE_LINK, link_to="ruthn", next_path="/settings"
+        )
+
+        # The sealed cookie never arrived: nothing can be opened, so the
+        # destination it would have carried is not trusted.
+        no_cookie = client.get(
+            f"/api/auth/sso/google/callback?error=access_denied&state={state}",
+            follow_redirects=False,
+        )
+        assert no_cookie.headers["location"] == "/login?sso_error=state_invalid"
+
+        # The cookie arrived, but the state is not the one it sealed.
+        client.cookies.set(sso_state.STATE_COOKIE, sealed)
+        mismatched = client.get(
+            "/api/auth/sso/google/callback?error=access_denied&state=not-the-state",
+            follow_redirects=False,
+        )
+        assert mismatched.headers["location"] == "/login?sso_error=state_mismatch"
 
 
 async def test_the_first_login_choice_is_audited(temp_db_path: Path) -> None:
@@ -3899,6 +3976,34 @@ async def test_linking_spends_the_ticket(temp_db_path: Path) -> None:
         assert [i["provider"] for i in await storage.list_user_identities("ruthn")] == [
             "google"
         ]
+
+
+async def test_a_repeat_link_is_a_no_op_and_still_spends_its_ticket(
+    temp_db_path: Path,
+) -> None:
+    """Re-linking what the account already holds succeeds and inserts nothing.
+
+    A retried POST (double submit, a re-run IdP flow) must not answer 409 for the
+    row it wrote itself — and the fresh ticket must still die, or a later unlink
+    would leave it able to re-attach this identity to another account.
+    """
+    for client in make_app_client(temp_db_path, _SSO_ENV):
+        await storage.create_user("ruthn")
+        raw_key = await storage.rotate_own_key("ruthn")
+        await storage.add_user_identity(
+            "ruthn", "google", "sub-1", email="ruthn@example.com"
+        )
+        ticket = await _ticket(client, email="ruthn@example.com")
+
+        again = client.post(
+            "/api/auth/sso/link",
+            json={"ticket": ticket, "username": "ruthn", "api_key": raw_key},
+        )
+
+        assert again.status_code == 200, again.text
+        assert again.json()["username"] == "ruthn"
+        assert len(await storage.list_user_identities("ruthn")) == 1
+        assert await storage.peek_sso_ticket(ticket) is None
 
 
 async def test_a_link_whose_ticket_died_before_the_write_writes_no_identity(
