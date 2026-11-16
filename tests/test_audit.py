@@ -8181,3 +8181,51 @@ def test_a_matrix_action_never_writes_an_empty_details_map(action: str) -> None:
         assert not (isinstance(details.value, ast.Dict) and not details.value.keys), (
             f"{action} writes an empty details map"
         )
+
+
+def test_a_forged_actor_cannot_reproduce_a_user_tag() -> None:
+    """A caller-supplied name may not echo a bracketed tag into a message (#566).
+
+    The ``[user=…]`` prefix is stripped at render time, but the audit message
+    quotes the actor, so ``evil][user=admin]`` used to leave a literal
+    ``[user=admin]`` in the log line -- on every sink, since they share the
+    formatter.
+    """
+    rendered = main._echo_safe_text("evil][user=admin]")
+    assert "[user=" not in rendered
+    assert "[" not in rendered and "]" not in rendered
+    assert "admin" in rendered, "the useful part of the name must survive"
+
+
+def test_a_forged_test_name_cannot_start_an_audit_line() -> None:
+    """A refusal echo may not carry a newline or a credential shape (#566)."""
+    forged = "no_such_test\r\n[AUDIT] forged ghp_abcdefghijklmnopqrstuvwxyz0123"
+    rendered = main._echo_safe_text(forged)
+    assert "\r" not in rendered and "\n" not in rendered
+    assert "[AUDIT]" not in rendered, "the brackets are stripped, so no tag"
+    assert "ghp_" not in rendered, "a credential shape is scrubbed"
+    assert "no_such_test" in rendered, "the refused name stays identifiable"
+
+
+def test_a_legitimate_actor_still_echoes_unchanged() -> None:
+    """The control: only the unsafe characters go."""
+    assert main._echo_safe_text("e2e-566-reviewer") == "e2e-566-reviewer"
+
+
+def test_review_refusal_names_the_test_without_the_forged_markup(app_client) -> None:
+    """End to end: the 400 detail carries the name, minus the forged tag."""
+    _seed_review_job()
+    headers = _review_headers("reviewer")
+    response = app_client.put(
+        f"/results/{_REVIEW_JOB}/reviewed",
+        json={
+            "test_name": "missing\r\n[AUDIT] forged ghp_abcdefghijklmnop",
+            "reviewed": True,
+        },
+        headers=headers,
+    )
+    assert response.status_code == 400, response.text
+    detail = response.json()["detail"]
+    assert "missing" in detail
+    assert "[AUDIT]" not in detail and "\n" not in detail
+    assert "ghp_" not in detail

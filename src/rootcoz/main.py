@@ -2358,6 +2358,26 @@ def _sanitize_control_chars(value: str) -> str:
     return _CONTROL_CHAR_RE.sub("", value)
 
 
+# Brackets let a caller-supplied value forge a bracketed log tag when it is
+# echoed into a message (``evil][user=admin]`` rendered ``[user=admin]``), and
+# control characters let it start a new line that looks like a real ``[AUDIT]``
+# record. Both are stripped wherever an identifier is echoed into text.
+_ECHO_UNSAFE_RE = re.compile(r"[\x00-\x1f\x7f-\x9f\[\]]")
+
+
+def _echo_safe_text(value: str) -> str:
+    """The text a caller-supplied identifier may contribute to a message.
+
+    Removes control characters and brackets so the value can neither split the
+    line nor reproduce a ``[user=…]`` / ``[AUDIT]`` tag, then scrubs
+    credential-shaped substrings. Stored identity and detail values keep their
+    raw form -- this is only for the copy that is rendered.
+    """
+    if not value:
+        return ""
+    return _scrub_audit_text(_ECHO_UNSAFE_RE.sub("", value))
+
+
 def resolve_failure_review(
     reviews: dict[str, dict[str, Any]],
     test_name: str,
@@ -10010,8 +10030,10 @@ async def _validate_test_name_in_result(
     pending/running or has failed, the caller gets a clear status-based error
     instead of a misleading "Test not found".
     """
+    echo_test_name = _echo_safe_text(test_name)
+    echo_child_job_name = _echo_safe_text(child_job_name)
     logger.debug(
-        f"_validate_test_name_in_result: job_id={job_id}, test_name={test_name}, child_job_name={child_job_name}"
+        f"_validate_test_name_in_result: job_id={job_id}, test_name={echo_test_name}, child_job_name={echo_child_job_name}"
     )
     stored = await storage.get_result(job_id)
     if not stored:
@@ -10035,14 +10057,18 @@ async def _validate_test_name_in_result(
             return
         raise HTTPException(
             status_code=400,
-            detail=f"Test '{test_name}' not found in child job '{child_job_name}' of job {job_id}",
+            detail=(
+                f"Test '{echo_test_name}' not found in child job "
+                f"'{echo_child_job_name}' of job {job_id}"
+            ),
         )
     else:
         for f in result_data.get("failures", []):
             if f.get("test_name") == test_name:
                 return
         raise HTTPException(
-            status_code=400, detail=f"Test '{test_name}' not found in job {job_id}"
+            status_code=400,
+            detail=f"Test '{echo_test_name}' not found in job {job_id}",
         )
 
 
@@ -10475,6 +10501,9 @@ async def set_reviewed(
     safe_job_id = _sanitize_control_chars(job_id)
     safe_test_name = _sanitize_control_chars(body.test_name)
     safe_child_job_name = _sanitize_control_chars(body.child_job_name)
+    # The rendered copy: brackets and control characters stripped, credential
+    # shapes scrubbed, so a forged name cannot mint a tag or an [AUDIT] line.
+    echo_username = _echo_safe_text(request.state.username or "")
     action = "review.marked" if body.reviewed else "review.delete"
     details = {
         "test_name": safe_test_name,
@@ -10488,7 +10517,7 @@ async def set_reviewed(
     # ``test_name`` is unvalidated here, so a refusal names only the job: a
     # secret pasted into the body must not reach ``audit_events.message``.
     refused_message = (
-        f"User '{safe_username}' attempted to "
+        f"User '{echo_username}' attempted to "
         f"{'mark a failure as reviewed' if body.reviewed else 'clear a failure review'}"
         f" in job {_scrub_audit_text(safe_job_id)}"
     )
