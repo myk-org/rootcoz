@@ -9,6 +9,7 @@ import signal
 import subprocess
 import time
 import uuid
+from collections.abc import Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Self
 from urllib.parse import quote, urlparse, urlunparse
@@ -295,36 +296,27 @@ def _kill_clone_tree(proc: subprocess.Popen[bytes]) -> None:
         proc.kill()
 
 
-def _git_clone(
-    repo_url: str,
-    clone_dir: Path,
+def _run_git_in_group(
+    args: Sequence[str],
     *,
+    cwd: Path,
     kill_after_timeout: float,
-    depth: int | None = None,
-    branch: str = "",
     env: dict[str, str] | None = None,
 ) -> None:
-    """``git clone`` in its own process group, killed **as a group** on timeout.
+    """Run one git subcommand in its own process group, killed **as a group** on timeout.
 
-    GitPython is not used here: its watchdog SIGKILLs the ``git`` parent only.
-    ``git-remote-https`` inherits the stdout/stderr pipes, so ``communicate()``
-    never sees EOF -- measured, ``git.clone(..., kill_after_timeout=3)`` against
-    a listener that accepts and never answers was still blocked past 25 s on
-    ``https://`` while ``git://`` returned at 3.06 s, with the helper surviving.
-    ``start_new_session`` makes the clone its own group leader, so the timeout
-    has a group to kill and the call returns in seconds.
+    GitPython is not used here: its watchdog SIGKILLs the ``git`` parent only,
+    leaving transport helpers (such as ``git-remote-https``) holding inherited
+    pipes open so ``communicate()`` never sees EOF. ``start_new_session`` makes
+    ``git`` its own group leader, so the timeout has a group to kill and the
+    call returns in seconds.
 
     Raises:
-        GitCommandError: git failed, or the clone outlived *kill_after_timeout*
+        GitCommandError: git failed, or the command outlived *kill_after_timeout*
             (its stderr says "did not complete in", which labels it
             "Clone timed out" in ``_LABELS``).
     """
-    cmd = [Git.GIT_PYTHON_GIT_EXECUTABLE or "git", "clone"]
-    if depth is not None:
-        cmd += ["--depth", str(depth)]
-    if branch:
-        cmd += ["--branch", branch]
-    cmd += ["--", str(repo_url), str(clone_dir)]
+    cmd = [Git.GIT_PYTHON_GIT_EXECUTABLE or "git", *args]
     # LC_ALL/LANGUAGE as GitPython set them: ``_LABELS`` matches English phrases.
     full_env = {
         **os.environ,
@@ -334,11 +326,12 @@ def _git_clone(
     }
     proc = subprocess.Popen(
         cmd,
-        cwd=str(clone_dir.parent),
+        cwd=str(cwd),
         env=full_env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.PIPE,
+        close_fds=True,
         start_new_session=True,
     )
     try:
@@ -346,6 +339,12 @@ def _git_clone(
     except subprocess.TimeoutExpired:
         _kill_clone_tree(proc)
         proc.communicate()  # pipes close with the group; collect what was written
+        logger.debug(
+            "Git %s timed out after %.0fs; killed process group in %s",
+            args[0],
+            kill_after_timeout,
+            cwd,
+        )
         raise GitCommandError(
             cmd,
             proc.returncode,
@@ -356,6 +355,49 @@ def _git_clone(
         raise GitCommandError(
             cmd, proc.returncode, stderr=raw_stderr.decode(errors="replace")
         )
+
+
+def _git_clone(
+    repo_url: str,
+    clone_dir: Path,
+    *,
+    kill_after_timeout: float,
+    depth: int | None = None,
+    branch: str = "",
+    env: dict[str, str] | None = None,
+) -> None:
+    """``git clone`` in its own process group, killed **as a group** on timeout."""
+    cmd_args = ["clone"]
+    if depth is not None:
+        cmd_args += ["--depth", str(depth)]
+    if branch:
+        cmd_args += ["--branch", branch]
+    cmd_args += ["--", str(repo_url), str(clone_dir)]
+    _run_git_in_group(
+        cmd_args,
+        cwd=clone_dir.parent,
+        kill_after_timeout=kill_after_timeout,
+        env=env,
+    )
+
+
+def _git_fetch(
+    target_dir: Path,
+    sha: str,
+    *,
+    kill_after_timeout: float,
+    depth: int | None = None,
+) -> None:
+    """``git fetch`` one object id in its own process group, killed as a group on timeout."""
+    cmd_args = ["fetch"]
+    if depth:
+        cmd_args += ["--depth", str(depth)]
+    cmd_args += ["--", "origin", sha]
+    _run_git_in_group(
+        cmd_args,
+        cwd=target_dir,
+        kill_after_timeout=kill_after_timeout,
+    )
 
 
 def _reset_target(target_dir: Path) -> None:
@@ -516,8 +558,12 @@ def _fetch_commit_by_id(
     try:
         repo = Repo.init(target_dir)
         repo.create_remote("origin", str(repo_url))
-        args = ([f"--depth={depth}"] if depth else []) + ["origin", sha]
-        repo.git.fetch(*args, kill_after_timeout=_remaining(deadline))
+        _git_fetch(
+            target_dir,
+            sha,
+            depth=depth,
+            kill_after_timeout=_remaining(deadline),
+        )
         repo.git.checkout(
             "--detach", "FETCH_HEAD", kill_after_timeout=_remaining(deadline)
         )

@@ -1059,6 +1059,8 @@ def test_repo_clone_timeout_is_a_server_setting(client):
         "REPO_CLONE_TIMEOUT_SECONDS",
     )
     assert (row["restart_required"], row["sensitive"]) == (False, False)
+    assert "Known limit" not in row["description"]
+    assert "by-id fetch and clone run in their own process group" in row["description"]
 
     rejected = client.put(
         "/api/admin/settings",
