@@ -327,3 +327,41 @@ class TestAnalyzeCommentIntentJobFallback:
         # env vars are gemini/gemini-2.5-flash (from _mock_settings)
         assert call_kwargs.kwargs["ai_provider"] == "gemini"
         assert call_kwargs.kwargs["ai_model"] == "gemini-2.5-flash"
+
+
+class TestCommentIntentTurnUsability:
+    """#569: the ninth `call_ai_once` site names its own ``accept_turn``."""
+
+    def test_error_bearing_narration_is_not_a_usable_turn(self, client) -> None:
+        ai_response = AIResult(
+            success=False,
+            text="Let me look at the comment...",
+            error="503 Service Unavailable",
+            status_code=503,
+        )
+        with patch("rootcoz.main.call_ai_once", return_value=ai_response) as mock_ai:
+            response = client.post(
+                "/api/analyze-comment-intent",
+                json={"comment": "filed"},
+            )
+        assert response.status_code == 200
+        assert response.json()["suggests_reviewed"] is False
+        assert "accept_turn" in mock_ai.call_args.kwargs
+        accept_turn = mock_ai.call_args.kwargs["accept_turn"]
+        # The validator is exactly the endpoint's own parser.
+        assert accept_turn('{"suggests_reviewed": true}') is True
+        assert accept_turn("Let me look at the comment...") is False
+
+    def test_completed_json_turn_still_answers(self, client) -> None:
+        ai_response = AIResult(
+            success=True,
+            text='{"suggests_reviewed": true, "reason": "linked"}',
+            error="503 Service Unavailable",
+        )
+        with patch("rootcoz.main.call_ai_once", return_value=ai_response):
+            response = client.post(
+                "/api/analyze-comment-intent",
+                json={"comment": "JIRA-1"},
+            )
+        assert response.status_code == 200
+        assert response.json()["suggests_reviewed"] is True

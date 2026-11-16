@@ -397,6 +397,34 @@ Example: [{{"key": "PROJ-123", "relevant": true, "score": 0.9}}, {{"key": "PROJ-
 Respond with ONLY the JSON array, no other text."""
 
 
+def _parse_issue_evaluations(text: str) -> list[Any] | None:
+    """Parse the AI relevance filter's JSON array, or None when it is not one.
+
+    The one parser: `accept_turn` and the post-call body both call it, so a turn
+    the validator rejected can never be parsed differently afterwards.
+    """
+    stripped = text.strip()
+    # Strip markdown code block if present
+    if "```json" in stripped:
+        start = stripped.index("```json") + len("```json")
+        end = stripped.index("```", start)
+        stripped = stripped[start:end].strip()
+    elif "```" in stripped:
+        start = stripped.index("```") + len("```")
+        end = stripped.index("```", start)
+        stripped = stripped[start:end].strip()
+
+    json_start = stripped.find("[")
+    json_end = stripped.rfind("]")
+    if json_start != -1 and json_end != -1:
+        stripped = stripped[json_start : json_end + 1]
+    try:
+        evaluations = json.loads(stripped)
+    except json.JSONDecodeError, ValueError:
+        return None
+    return evaluations if isinstance(evaluations, list) else None
+
+
 async def filter_issue_matches_with_ai(
     bug_title: str,
     bug_description: str,
@@ -461,6 +489,7 @@ async def filter_issue_matches_with_ai(
         ai_model=ai_model,
         ai_call_timeout=ai_call_timeout,
         tools=[],
+        accept_turn=lambda text: _parse_issue_evaluations(text) is not None,
     )
 
     if job_id:
@@ -476,26 +505,8 @@ async def filter_issue_matches_with_ai(
         logger.warning("AI relevance filtering failed: %s", result.text)
         return None
 
-    # Parse AI response
-    try:
-        text = result.text.strip()
-        # Strip markdown code block if present
-        if "```json" in text:
-            start = text.index("```json") + len("```json")
-            end = text.index("```", start)
-            text = text[start:end].strip()
-        elif "```" in text:
-            start = text.index("```") + len("```")
-            end = text.index("```", start)
-            text = text[start:end].strip()
-
-        json_start = text.find("[")
-        json_end = text.rfind("]")
-        if json_start != -1 and json_end != -1:
-            text = text[json_start : json_end + 1]
-
-        evaluations = json.loads(text)
-    except json.JSONDecodeError, ValueError:
+    evaluations = _parse_issue_evaluations(result.text)
+    if evaluations is None:
         logger.warning("Failed to parse AI relevance response")
         return None
 

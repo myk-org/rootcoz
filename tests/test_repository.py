@@ -24,6 +24,7 @@ from rootcoz.repository import (
     _git_fetch,
     _is_commit_sha,
     _is_full_commit_sha,
+    _ref_message,
     clone_failure_reason,
     repo_name_from_url,
 )
@@ -1777,3 +1778,31 @@ class TestCloneIntoWithToken:
             depth=1,
             kill_after_timeout=ANY,
         )
+
+
+class TestSharedPrintableDiagnostic:
+    """#569: one printable helper, no private copy in this module.
+
+    ``clone_failure_reason`` answers a closed-set label; the message it feeds is
+    built by ``_ref_message`` (the second former ``_printable`` call site).
+    """
+
+    def test_clone_failure_reason_keeps_its_label(self) -> None:
+        exc = GitCommandError(
+            ["git", "clone"], 128, stderr="fatal: couldn't find remote ref main"
+        )
+        assert clone_failure_reason(exc) == "Commit or ref not found"
+
+    @pytest.mark.parametrize("ref", ["main", "0" * 40])
+    def test_ref_message_is_one_printable_line(self, ref: str) -> None:
+        exc = GitCommandError(
+            ["git", "checkout"], 128, stderr="\x1b[31mremote: nope\x1b[0m\r\n"
+        )
+        message = _ref_message("https://example.invalid/repo.git", ref, exc)
+        assert message.startswith("Cannot clone https://example.invalid/repo.git")
+        assert "\n" not in message
+        assert "\r" not in message
+        assert "\x1b" not in message
+        assert all(ch.isprintable() for ch in message)
+        # The ANSI sequence collapses to a space, not to the literal "[31m".
+        assert "[31m" not in message

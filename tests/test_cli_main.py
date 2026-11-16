@@ -4640,6 +4640,88 @@ class TestFailureCommands:
         parsed = json.loads(result.output)
         assert parsed["job_id"] == "job-1"
 
+    def test_failure_show_renders_peer_debate_diagnostics(self, mock_client):
+        """#569: peer failure causes and turn warnings reach the CLI, one line each."""
+        mock_client.get_failure.return_value = {
+            "job_id": "job-1",
+            "failure": {
+                "id": "uuid-1",
+                "test_name": "tests.TestFoo.test_bar",
+                "error": "AssertionError",
+                "analysis": {
+                    "classification": "CODE ISSUE",
+                    "details": "Missing import",
+                },
+                "peer_debate": {
+                    "consensus_reached": False,
+                    "rounds_used": 1,
+                    "max_rounds": 2,
+                    "rounds": [
+                        {
+                            "round": 1,
+                            "role": "peer",
+                            "ai_provider": "gemini",
+                            "ai_model": "pro",
+                            "classification": "CODE ISSUE",
+                            "agrees_with_orchestrator": True,
+                            "warning": "503 Service Unavailable\x1b[0m",
+                            "error": None,
+                            "details": "looks right",
+                        },
+                        {
+                            "round": 1,
+                            "role": "peer",
+                            "ai_provider": "claude",
+                            "ai_model": "opus",
+                            "classification": "",
+                            "agrees_with_orchestrator": None,
+                            "warning": None,
+                            "error": "HTTP 503: upstream refused\nsecond line",
+                            "details": "",
+                        },
+                    ],
+                },
+            },
+        }
+        result = runner.invoke(app, ["failure", "show", "uuid-1"])
+        assert result.exit_code == 0
+        assert "Peer Debate:" in result.output
+        assert "Agrees" in result.output
+        assert "Turn warning" in result.output
+        assert "Warning: 503 Service Unavailable" in result.output
+        assert "Failed" in result.output
+        assert "Error: HTTP 503: upstream refused second line" in result.output
+        assert "\x1b" not in result.output
+
+    def test_failure_show_json_exposes_peer_diagnostics(self, mock_client):
+        peer_debate = {
+            "consensus_reached": True,
+            "rounds_used": 1,
+            "max_rounds": 1,
+            "rounds": [
+                {
+                    "round": 1,
+                    "role": "peer",
+                    "ai_provider": "gemini",
+                    "ai_model": "pro",
+                    "classification": "CODE ISSUE",
+                    "agrees_with_orchestrator": True,
+                    "error": None,
+                    "warning": "503 Service Unavailable",
+                }
+            ],
+        }
+        mock_client.get_failure.return_value = {
+            "job_id": "job-1",
+            "failure": {"id": "uuid-1", "test_name": "t", "peer_debate": peer_debate},
+        }
+        result = runner.invoke(app, ["--json", "failure", "show", "uuid-1"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        rounds = parsed["failure"]["peer_debate"]["rounds"]
+        assert rounds[0]["warning"] == "503 Service Unavailable"
+        assert rounds[0]["error"] is None
+
     def test_failure_show_not_found(self, mock_client):
         mock_client.get_failure.side_effect = RootCozError(
             status_code=404, detail="Failure not found"

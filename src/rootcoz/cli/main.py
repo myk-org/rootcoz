@@ -35,6 +35,7 @@ from rootcoz.config import (
     parse_peer_configs,
 )
 from rootcoz.storage import MAX_INCOMPLETE_LIST_LIMIT, TEST_NAME_MODES, VALID_ROLES
+from rootcoz.utils import single_line_diagnostic
 
 # -- App and sub-command groups -----------------------------------------------
 
@@ -2238,6 +2239,32 @@ def re_analyze_cmd(
 # -- Failure ------------------------------------------------------------------
 
 
+def _echo_peer_debate(peer_debate: dict[str, Any]) -> None:
+    """Print the peer debate trail, with per-peer causes kept control-safe."""
+    consensus = "reached" if peer_debate.get("consensus_reached") else "not reached"
+    typer.echo(
+        f"\nPeer Debate: consensus {consensus}, "
+        f"rounds {peer_debate.get('rounds_used', 0)}/{peer_debate.get('max_rounds', 0)}"
+    )
+    for entry in peer_debate.get("rounds") or []:
+        agrees = entry.get("agrees_with_orchestrator")
+        outcome = (
+            "Agrees" if agrees is True else "Disagrees" if agrees is False else "Failed"
+        )
+        line = (
+            f"  Round {entry.get('round', '')} {entry.get('role', '')}"
+            f" {entry.get('ai_provider', '')}/{entry.get('ai_model', '')}"
+            f" [{entry.get('classification', '')}] {outcome}"
+        )
+        if entry.get("warning"):
+            line += " Turn warning"
+        typer.echo(single_line_diagnostic(line))
+        if entry.get("error"):
+            typer.echo(f"    Error: {single_line_diagnostic(str(entry['error']))}")
+        if entry.get("warning"):
+            typer.echo(f"    Warning: {single_line_diagnostic(str(entry['warning']))}")
+
+
 @failure_app.command("show")
 def failure_show(
     failure_uuid: str = typer.Argument(help="UUID of the failure to look up."),
@@ -2259,6 +2286,8 @@ def failure_show(
             typer.echo(f"Classification: {analysis['classification']}")
         if analysis.get("details"):
             typer.echo(f"\nDetails:\n{analysis['details']}")
+        if failure.get("peer_debate"):
+            _echo_peer_debate(failure["peer_debate"])
 
 
 @failure_app.command("re-analyze")

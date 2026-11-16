@@ -3971,3 +3971,211 @@ async def test_peer_analysis_refuses_no_workspace() -> None:
             main_ai_model="claude-sonnet-4-20250514",
             peer_ai_configs=_peer_configs(),
         )
+
+
+# ---------------------------------------------------------------------------
+# #569: peer rounds keep a completed review, surface sanitized causes and
+# warnings, and derive usability from the ladder's own helpers.
+# ---------------------------------------------------------------------------
+
+
+def _peer_key() -> str:
+    return "sk-proj-" + "q7w8e9r0" * 3
+
+
+class TestPeerTurnDiagnostics:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("agrees", [True, False])
+    async def test_completed_review_with_recorded_error_becomes_a_warning(
+        self, monkeypatch, tmp_path: Path, agrees: bool
+    ) -> None:
+        """A usable peer review survives the sidecar error as a turn warning."""
+        orchestrator_json = _make_ai_json_response(classification="CODE ISSUE")
+        peer_json = _make_peer_json_response(
+            agrees=agrees,
+            classification="CODE ISSUE" if agrees else "PRODUCT BUG",
+        )
+        call_count = 0
+
+        async def cli_side_effect(prompt, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return AIResult(success=True, text=orchestrator_json)
+            return AIResult(
+                success=True,
+                text=peer_json,
+                error=f"503 Service Unavailable: {_peer_key()}",
+            )
+
+        results = await _run_peer_analysis(
+            monkeypatch,
+            tmp_path=tmp_path,
+            cli_side_effect=cli_side_effect,
+            peer_configs=[AiConfigEntry(ai_provider="gemini", ai_model="pro")],
+            max_rounds=1,
+        )
+        debate = results[0].peer_debate
+        assert debate is not None
+        peer_round = next(r for r in debate.rounds if r.role == "peer")
+        assert peer_round.agrees_with_orchestrator is agrees
+        assert peer_round.error is None
+        assert peer_round.warning is not None
+        assert "503 Service Unavailable" in peer_round.warning
+        assert _peer_key() not in peer_round.warning
+        assert peer_round.details
+
+    @pytest.mark.asyncio
+    async def test_failed_peer_round_carries_a_sanitized_cause(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        """A peer with no usable answer reports the cause, scrubbed and bounded."""
+        orchestrator_json = _make_ai_json_response(classification="CODE ISSUE")
+        call_count = 0
+        long_cause = (
+            "\x1b[31m503 Service Unavailable\x1b[0m: Incorrect API key provided: "
+            f"{_peer_key()} see https://api.example.test/v1?key={_peer_key()}"
+        )
+
+        async def cli_side_effect(prompt, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return AIResult(success=True, text=orchestrator_json)
+            return AIResult(success=False, text="", error=long_cause, status_code=503)
+
+        results = await _run_peer_analysis(
+            monkeypatch,
+            tmp_path=tmp_path,
+            cli_side_effect=cli_side_effect,
+            peer_configs=[AiConfigEntry(ai_provider="gemini", ai_model="pro")],
+            max_rounds=1,
+        )
+        debate = results[0].peer_debate
+        assert debate is not None
+        peer_round = next(r for r in debate.rounds if r.role == "peer")
+        assert peer_round.agrees_with_orchestrator is None
+        assert peer_round.classification == ""
+        assert peer_round.details == ""
+        assert peer_round.warning is None
+        assert peer_round.error is not None
+        assert "503 Service Unavailable" in peer_round.error
+        assert _peer_key() not in peer_round.error
+        assert "\x1b" not in peer_round.error
+        assert len(peer_round.error) <= 2048
+
+    @pytest.mark.asyncio
+    async def test_unparseable_answer_is_kept_whole_but_the_cause_is_bounded(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        """A >2048-char unparseable answer survives whole in ``details``."""
+        orchestrator_json = _make_ai_json_response(classification="CODE ISSUE")
+        long_narration = "I looked at the logs. " * 400
+        assert len(long_narration) > 2048
+        call_count = 0
+
+        async def cli_side_effect(prompt, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return AIResult(success=True, text=orchestrator_json)
+            return AIResult(
+                success=True,
+                text=long_narration,
+                error="x" * 5000,
+            )
+
+        results = await _run_peer_analysis(
+            monkeypatch,
+            tmp_path=tmp_path,
+            cli_side_effect=cli_side_effect,
+            peer_configs=[AiConfigEntry(ai_provider="gemini", ai_model="pro")],
+            max_rounds=1,
+        )
+        peer_round = next(r for r in results[0].peer_debate.rounds if r.role == "peer")
+        assert peer_round.agrees_with_orchestrator is None
+        assert len(peer_round.details) > 2048
+        assert peer_round.details.startswith("I looked at the logs.")
+        assert peer_round.error == (
+            "Returned unparseable response (not valid peer review JSON)"
+        )
+        assert peer_round.warning is not None
+        assert len(peer_round.warning) <= 2048
+
+    @pytest.mark.asyncio
+    async def test_unsupported_classification_is_bounded_and_scrubbed(
+        self, monkeypatch, tmp_path: Path
+    ) -> None:
+        orchestrator_json = _make_ai_json_response(classification="CODE ISSUE")
+        unsupported = f"MAYBE {_peer_key()} " + "z" * 200
+        peer_json = json.dumps(
+            {
+                "agrees": True,
+                "classification": unsupported,
+                "reasoning": "because",
+            }
+        )
+        call_count = 0
+
+        async def cli_side_effect(prompt, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return AIResult(success=True, text=orchestrator_json)
+            return AIResult(success=True, text=peer_json)
+
+        results = await _run_peer_analysis(
+            monkeypatch,
+            tmp_path=tmp_path,
+            cli_side_effect=cli_side_effect,
+            peer_configs=[AiConfigEntry(ai_provider="gemini", ai_model="pro")],
+            max_rounds=1,
+        )
+        peer_round = next(r for r in results[0].peer_debate.rounds if r.role == "peer")
+        assert peer_round.agrees_with_orchestrator is None
+        assert len(peer_round.classification) <= 120
+        assert _peer_key() not in peer_round.classification
+        assert peer_round.error is not None
+        assert peer_round.error.startswith("Returned unsupported classification:")
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "peer_answer",
+        [
+            _make_peer_json_response(agrees=True, classification="CODE ISSUE"),
+            json.dumps(
+                {
+                    "agrees": True,
+                    "classification": "maybe",
+                    "reasoning": "x",
+                }
+            ),
+            "total narration with no JSON at all",
+        ],
+    )
+    async def test_one_usability_rule(
+        self, monkeypatch, tmp_path: Path, peer_answer: str
+    ) -> None:
+        """``_peer_turn_usable`` is True exactly when the ladder produced a review."""
+        from rootcoz.peer_analysis import _peer_turn_usable
+
+        orchestrator_json = _make_ai_json_response(classification="CODE ISSUE")
+        call_count = 0
+
+        async def cli_side_effect(prompt, **kwargs):
+            nonlocal call_count
+            call_count += 1
+            if call_count == 1:
+                return AIResult(success=True, text=orchestrator_json)
+            return AIResult(success=True, text=peer_answer)
+
+        results = await _run_peer_analysis(
+            monkeypatch,
+            tmp_path=tmp_path,
+            cli_side_effect=cli_side_effect,
+            peer_configs=[AiConfigEntry(ai_provider="gemini", ai_model="pro")],
+            max_rounds=1,
+        )
+        peer_round = next(r for r in results[0].peer_debate.rounds if r.role == "peer")
+        ladder_usable = peer_round.agrees_with_orchestrator is not None
+        assert _peer_turn_usable(peer_answer) is ladder_usable

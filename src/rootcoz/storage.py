@@ -2453,6 +2453,12 @@ async def init_db() -> None:
         await _migrate_add_column(
             db, "ai_session_sources", "credential_generation", "INTEGER"
         )
+        # The server-key generation a server session was created under (#569).
+        # NULL = untracked (every pre-change row and every ambient session), so
+        # no backfill exists and a legacy row resumes exactly as before.
+        await _migrate_add_column(
+            db, "ai_session_sources", "server_credential_generation", "INTEGER"
+        )
         await _migrate_add_column(db, "ai_session_sources", "claim_token", "TEXT")
         await _migrate_add_column(
             db, "ai_session_sources", "claim_expires_at", "INTEGER"
@@ -9230,16 +9236,29 @@ async def get_server_ai_credential(provider: str) -> str | None:
     cannot be decrypted — a corrupt store must never silently fall back to
     a stale key.
     """
+    key, _generation = await get_server_ai_credential_with_generation(provider)
+    return key
+
+
+async def get_server_ai_credential_with_generation(
+    provider: str,
+) -> tuple[str | None, int | None]:
+    """Read one server provider key and its generation from the same row.
+
+    One read, so a session's key and the generation it is bound to can never come
+    from two different credential states (mirrors
+    :func:`get_user_ai_credential_with_generation`).
+    """
     async with _connect_db() as db:
         row = await (
             await db.execute(
-                "SELECT api_key_enc FROM server_ai_providers"
+                "SELECT api_key_enc, generation FROM server_ai_providers"
                 " WHERE lower(provider) = lower(?)",
                 (provider,),
             )
         ).fetchone()
     if row is None:
-        return None
+        return None, None
     try:
         key = decrypt_value_or_none(row[0])
     except (RuntimeError, OSError, UnicodeDecodeError, ValueError) as exc:
@@ -9259,7 +9278,7 @@ async def get_server_ai_credential(provider: str) -> str | None:
         raise UnreadableAiCredentialsError(
             "Stored server AI credentials are unreadable"
         )
-    return key or None
+    return (key or None), row[1]
 
 
 async def list_server_ai_providers() -> list[dict[str, Any]]:
@@ -10668,13 +10687,38 @@ async def create_ai_session_with_source(
                     )
                 ):
                     raise ValueError("AI credential changed during session creation")
+            if source == "server":
+                server_row = await (
+                    await db.execute(
+                        "SELECT generation FROM server_ai_providers"
+                        " WHERE lower(provider) = lower(?)",
+                        (provider,),
+                    )
+                ).fetchone()
+                current_server_generation = (
+                    None if server_row is None else server_row[0]
+                )
+                # NULL-safe: None == None means "no admin-stored key at creation
+                # time", which is a valid untracked server session. A rotation
+                # during creation is a mismatch and deletes the session below.
+                if current_server_generation != expected_generation:
+                    raise ValueError("AI credential changed during session creation")
             cursor = await db.execute(
                 "INSERT INTO ai_session_sources "
-                "(session_id, username, provider, credential_source, credential_generation) "
+                "(session_id, username, provider, credential_source, credential_generation, "
+                "server_credential_generation) "
                 "VALUES (?, ?, ?, ?, (SELECT COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(?)), 0) "
-                "FROM users WHERE username = ?)) "
+                "FROM users WHERE username = ?), ?) "
                 "ON CONFLICT(session_id) DO NOTHING",
-                (session_id, username, provider, source, provider, username),
+                (
+                    session_id,
+                    username,
+                    provider,
+                    source,
+                    provider,
+                    username,
+                    expected_generation if source == "server" else None,
+                ),
             )
             if not cursor.rowcount:
                 # An active session already owns this ID; deleting it could kill that session.
@@ -10711,8 +10755,16 @@ async def save_ai_session_source(
     expected_account_id: int | None = None,
     *,
     bootstrap_admin: bool = False,
+    expected_generation: int | None = None,
 ) -> None:
-    """Remember the source of a sidecar session, never its key."""
+    """Remember the source of a sidecar session, never its key.
+
+    For ``source == "server"``, ``expected_generation`` is the
+    ``server_ai_providers.generation`` the caller snapshotted before creating the
+    session. ``None`` means "no admin-stored key at creation time" and is stored
+    as ``NULL`` (untracked, never enforced). A caller that forgets the snapshot
+    fails loudly: a provider with a stored key never matches ``None``.
+    """
     if bootstrap_admin and (username != "admin" or expected_account_id is not None):
         raise ValueError("Invalid bootstrap admin session owner")
 
@@ -10745,13 +10797,35 @@ async def save_ai_session_source(
                     raise LookupError(
                         "AI session owner account changed during session creation"
                     )
+            if source == "server":
+                server_row = await (
+                    await db.execute(
+                        "SELECT generation FROM server_ai_providers"
+                        " WHERE lower(provider) = lower(?)",
+                        (provider,),
+                    )
+                ).fetchone()
+                current_server_generation = (
+                    None if server_row is None else server_row[0]
+                )
+                if current_server_generation != expected_generation:
+                    raise ValueError("AI credential changed during session creation")
             cursor = await db.execute(
                 "INSERT INTO ai_session_sources "
-                "(session_id, username, provider, credential_source, credential_generation) "
+                "(session_id, username, provider, credential_source, credential_generation, "
+                "server_credential_generation) "
                 "VALUES (?, ?, ?, ?, (SELECT COALESCE(json_extract(ai_credential_generations, '$.' || json_quote(?)), 0) "
-                "FROM users WHERE username = ?)) "
+                "FROM users WHERE username = ?), ?) "
                 "ON CONFLICT(session_id) DO NOTHING",
-                (session_id, username, provider, source, provider, username),
+                (
+                    session_id,
+                    username,
+                    provider,
+                    source,
+                    provider,
+                    username,
+                    expected_generation if source == "server" else None,
+                ),
             )
             if not cursor.rowcount:
                 raise AiSessionCollisionError("AI session ID already active")
@@ -10891,11 +10965,18 @@ async def get_ai_session_source(session_id: str, username: str, provider: str) -
     under the old spelling must stay usable with the catalog's current exact
     spelling. The credential-generation lookup uses the stored spelling — the
     JSON key the generation was recorded under at session creation.
+
+    A server session bound to an admin-stored key carries the
+    ``server_ai_providers.generation`` it was created under and is rejected once
+    that generation moves (rotation or deletion). A ``NULL`` generation is an
+    untracked session — every pre-change row and every ambient session — and is
+    never rejected by generation, so an upgrade cannot kill a live session.
     """
     async with _connect_db() as db:
         row = await (
             await db.execute(
-                "SELECT username, provider, credential_source, credential_generation "
+                "SELECT username, provider, credential_source, credential_generation, "
+                "server_credential_generation "
                 "FROM ai_session_sources WHERE session_id = ?",
                 (session_id,),
             )
@@ -10925,7 +11006,26 @@ async def get_ai_session_source(session_id: str, username: str, provider: str) -
         raise ValueError(
             "AI session belongs to another user or provider, or was revoked"
         )
-    return row[2] if row else "unknown"
+    if not row:
+        return "unknown"
+    if row[2] == "server":
+        if row[4] is None:
+            # Untracked by design: no backfill exists, so this stays the case for
+            # the row's whole life and the session resumes as it did before #569.
+            logger.debug(
+                "untracked server session (legacy or ambient): session_id=%s provider=%s",
+                session_id,
+                row[1],
+            )
+        elif row[4] != await get_server_credential_generation(row[1]):
+            logger.info(
+                "Server AI credential rotated since session creation: session_id=%s"
+                " provider=%s",
+                session_id,
+                row[1],
+            )
+            raise ValueError("AI session unavailable")
+    return row[2]
 
 
 # --- Job Metadata ---

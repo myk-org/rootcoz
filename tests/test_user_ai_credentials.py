@@ -15,6 +15,7 @@ from pi_sidecar_client import AIResult, SidecarClient
 from pi_sidecar_client import call_ai as sidecar_real_call_ai
 
 from rootcoz import ai_client, encryption, issue_matching, main, storage
+from rootcoz.ai_client import _call_ai as real_internal_call_ai
 from rootcoz.ai_client import call_ai as real_call_ai
 from rootcoz.ai_client import call_ai_once as real_call_ai_once
 from rootcoz.engine import chat
@@ -578,7 +579,10 @@ async def test_real_sidecar_http_error_never_logs_user_key(
     )
     monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
     monkeypatch.setattr(pi_sidecar_client, "get_sidecar_client", lambda: client)
-    monkeypatch.setattr(ai_client, "_call_ai", pi_sidecar_client.call_ai)
+    # Import-time capture of the production implementation: conftest rebinds
+    # this module attribute to its deny mock, so binding the library's
+    # ``call_ai`` here would silently skip rootcoz's server-keyed prompt path.
+    monkeypatch.setattr(ai_client, "_call_ai", real_internal_call_ai)
     monkeypatch.setattr(
         ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
     )
@@ -606,6 +610,72 @@ async def test_real_sidecar_http_error_never_logs_user_key(
             assert [r.method for r in requests] == ["POST"]
         else:
             assert [r.method for r in requests] == ["POST", "POST", "DELETE"]
+    finally:
+        ai_client.ai_username.reset(token)
+        await client.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("session_id", [None, "existing"])
+async def test_real_sidecar_http_error_never_logs_server_key(
+    monkeypatch, caplog, capsys, session_id
+):
+    """The server-keyed branch of the real ``_call_ai`` keeps the key out of logs.
+
+    It also keeps a sanitized cause instead of collapsing to "AI call failed":
+    a server failure is diagnosable, a user-keyed one is not echoed.
+    """
+    secret = "server-test-key-value"  # pragma: allowlist secret
+    requests = []
+
+    def handle(request):
+        requests.append(request)
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "created"})
+        if request.url.path.endswith("/prompt"):
+            return httpx.Response(400, json={"error": f"sidecar rejected {secret}"})
+        return httpx.Response(204)
+
+    client = SidecarClient(base_url="http://sidecar.invalid")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(
+        base_url="http://sidecar.invalid", transport=httpx.MockTransport(handle)
+    )
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+    monkeypatch.setattr(pi_sidecar_client, "get_sidecar_client", lambda: client)
+    monkeypatch.setattr(ai_client, "_call_ai", real_internal_call_ai)
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("p", "m"))
+    )
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        ai_client,
+        "server_provider_key_with_generation",
+        AsyncMock(return_value=(secret, None)),
+    )
+    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(
+        ai_client, "_collect_server_redact_keys", AsyncMock(return_value=(secret,))
+    )
+    token = ai_client.ai_username.set("alice")
+    try:
+        with capture_main_logs(caplog, logging.DEBUG, logger=_CREDENTIAL_LOGGERS):
+            result = await real_call_ai_once(
+                "prompt", ai_provider="p", ai_model="m", session_id=session_id
+            )
+            logging.getLogger(__name__).error(
+                "AI failure: %s / %s", result.text, result.error
+            )
+        assert "AI failure:" in caplog.text
+        assert not result.success
+        assert secret not in caplog.text + capsys.readouterr().err
+        assert secret not in result.text + (result.error or "")
+        # A server failure keeps its (sanitized) cause.
+        assert result.text != "AI call failed"
+        assert "sidecar rejected" in result.text
+        sessions = [r for r in requests if r.url.path == "/sessions"]
+        assert len(sessions) == (0 if session_id else 1)
+        assert [r.method for r in requests][:1] == ["POST"]
     finally:
         ai_client.ai_username.reset(token)
         await client.close()

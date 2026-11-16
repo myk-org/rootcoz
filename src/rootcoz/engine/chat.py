@@ -19,6 +19,7 @@ from rootcoz.ai_client import (
     SessionCreationRefused,
     call_ai,
     create_session_safely,
+    format_ai_diagnostic,
     resolve_catalog_pair,
 )
 from rootcoz.engine.http_mcp import (
@@ -42,6 +43,7 @@ from rootcoz.temp_paths import (
     reusable_path_lock,
     sanitize_path_part,
 )
+from rootcoz.utils import single_line_diagnostic
 
 logger = get_child_logger(__name__)
 
@@ -2065,7 +2067,9 @@ async def _chat_with_ai_impl(
         call_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
     if install_mcp:
         await install_http_tools_mcp_best_effort_async(repo_path, custom_tools or [])
-    result = await call_ai(prompt, **call_kwargs)
+    # `accept_turn=None`: a free-form chat turn with no stop reason counts as
+    # unusable, so a partial mid-turn fragment never reaches the chat history.
+    result = await call_ai(prompt, accept_turn=None, **call_kwargs)
 
     # A revoked or switched chat source must never be rebuilt under another identity.
     from rootcoz.ai_client import chat_session_source
@@ -2107,7 +2111,7 @@ async def _chat_with_ai_impl(
             await install_http_tools_mcp_best_effort_async(
                 repo_path, custom_tools or []
             )
-        result = await call_ai(prompt, **retry_kwargs)
+        result = await call_ai(prompt, accept_turn=None, **retry_kwargs)
 
     await result.record_usage(
         request_id=request_id,
@@ -2118,7 +2122,11 @@ async def _chat_with_ai_impl(
     )
 
     if not result.success:
-        logger.error("%s: AI call failed: %s", log_prefix, result.text)
+        logger.error(
+            "%s: AI call failed: %s",
+            log_prefix,
+            single_line_diagnostic(format_ai_diagnostic(result)),
+        )
         return False, result.text, None
 
     return True, result.text, result.session_id

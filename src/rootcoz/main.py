@@ -90,6 +90,7 @@ from rootcoz.ai_client import (
     build_friendly_catalog,
     call_ai_once,
     clear_cursor_auth_cache,
+    format_ai_diagnostic,
     format_chat_ai_user_error,
     is_cursor_provider,
     list_models,
@@ -411,6 +412,7 @@ from rootcoz.url_utils import (
 from rootcoz.utils import (
     is_sensitive_key,
     mask_sensitive_fields,
+    single_line_diagnostic,
 )
 from rootcoz.vapid import get_vapid_config
 from rootcoz.xml_enrichment import (
@@ -24877,6 +24879,9 @@ Respond with ONLY a JSON object:
             ai_model=ai_model,
             ai_call_timeout=None,
             tools=[],
+            # An error-bearing turn is usable only when it already is the JSON
+            # object this endpoint parses.
+            accept_turn=lambda text: extract_json_dict(text) is not None,
         )
     finally:
         ai_username.reset(token)
@@ -24890,7 +24895,10 @@ Respond with ONLY a JSON object:
     )
 
     if not result.success:
-        logger.debug("AI call failed for comment intent analysis: %s", result.text)
+        logger.debug(
+            "AI call failed for comment intent analysis: %s",
+            single_line_diagnostic(format_ai_diagnostic(result)),
+        )
         return AnalyzeCommentResponse(suggests_reviewed=False)
 
     parsed = extract_json_dict(result.text)
@@ -24900,7 +24908,10 @@ Respond with ONLY a JSON object:
             reason=str(parsed.get("reason", "")),
         )
 
-    logger.debug("Failed to parse AI response for comment intent: %s", result.text)
+    logger.debug(
+        "Failed to parse AI response for comment intent (text_length=%d)",
+        len(result.text),
+    )
     return AnalyzeCommentResponse(suggests_reviewed=False)
 
 

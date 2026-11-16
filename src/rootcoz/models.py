@@ -680,6 +680,12 @@ class PeerRound(BaseModel):
     agrees_with_orchestrator: bool | None = (
         None  # None = failed/excluded from consensus
     )
+    # Sanitized failure cause when this participant contributed no usable review
+    # (``agrees_with_orchestrator`` is None). Legacy rows deserialize as None.
+    error: str | None = None
+    # Sanitized transient mid-turn warning for a turn that still produced a usable
+    # review (the sidecar recorded an error alongside a completed answer).
+    warning: str | None = None
     token_usage: TokenUsageEntry | None = None
 
 

@@ -128,6 +128,10 @@ export interface PeerRound {
   pattern: string
   details: string
   agrees_with_orchestrator: boolean | null
+  /** Sanitized failure cause when this participant contributed no usable review. */
+  error?: string | null
+  /** Sanitized transient mid-turn warning on a turn that still produced a review. */
+  warning?: string | null
   token_usage?: TokenUsageEntry | null
 }
 

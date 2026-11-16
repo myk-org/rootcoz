@@ -169,7 +169,7 @@ Sparse field paths include `result.summary`, `result.failed_count`, `result.fail
 
 | Command | Purpose |
 | --- | --- |
-| `failure show FAILURE_UUID` | Job, test, error, classification, and details for one failure. |
+| `failure show FAILURE_UUID` | Job, test, error, classification, and details for one failure, plus the peer debate status, per-peer failure causes, and turn warnings when peer analysis ran. |
 | `failure re-analyze FAILURE_UUID` | Re-run analysis for just that failure. |
 
 10. **Manage job metadata.** `rootcoz metadata ...`
