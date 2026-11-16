@@ -2,7 +2,7 @@ import { createContext, useContext, type Dispatch } from 'react'
 import { reviewKey } from '@/lib/reviewKey'
 import type { SelectedGroup } from './failureUpdates'
 import { reconcileSelection, scopeKey } from './failureUpdates'
-import type { AnalysisResult, ChildJobAnalysis, FailureAnalysis, Comment, ReviewState, CommentsAndReviews, CommentEnrichment, AiModel, TrackedInEntry } from '@/types'
+import type { AnalysisResult, Capabilities, ChildJobAnalysis, FailureAnalysis, Comment, ReviewState, CommentsAndReviews, CommentEnrichment, AiModel, TrackedInEntry } from '@/types'
 
 export interface ReportState {
   result: AnalysisResult | null
@@ -19,6 +19,8 @@ export interface ReportState {
   /** Selected failure groups for bulk updates, keyed by `scopeKey(group, group.id)`
    *  — scope-qualified, because two scopes can hold the same group id. */
   selection: Record<string, SelectedGroup>
+  capabilities: Capabilities | null
+  capabilitiesLoaded: boolean
   githubIssuesEnabled: boolean
   jiraIssuesEnabled: boolean
   reportportalAvailable: boolean
@@ -52,6 +54,7 @@ export type ReportAction =
   | { type: 'ADD_COMMENT'; payload: Comment }
   | { type: 'REMOVE_COMMENT'; payload: number }
   | { type: 'SET_REVIEW'; payload: { key: string; state: ReviewState } }
+  | { type: 'SET_CAPABILITIES'; payload: Capabilities | null }
   | { type: 'SET_GITHUB_ISSUES_ENABLED'; payload: boolean }
   | { type: 'SET_JIRA_ISSUES_ENABLED'; payload: boolean }
   | { type: 'SET_REPORTPORTAL_AVAILABLE'; payload: boolean }
@@ -106,6 +109,8 @@ export const initialState: ReportState = {
   classifications: {},
   trackedIn: {},
   selection: {},
+  capabilities: null,
+  capabilitiesLoaded: false,
   githubIssuesEnabled: false,
   jiraIssuesEnabled: false,
   reportportalAvailable: false,
@@ -170,6 +175,8 @@ export function reportReducer(state: ReportState, action: ReportAction): ReportS
       return { ...state, comments: state.comments.filter((c) => c.id !== action.payload), localMutationRev: state.localMutationRev + 1 }
     case 'SET_REVIEW':
       return { ...state, reviews: { ...state.reviews, [action.payload.key]: action.payload.state }, localMutationRev: state.localMutationRev + 1 }
+    case 'SET_CAPABILITIES':
+      return { ...state, capabilities: action.payload, capabilitiesLoaded: true }
     case 'SET_GITHUB_ISSUES_ENABLED':
       return { ...state, githubIssuesEnabled: action.payload }
     case 'SET_JIRA_ISSUES_ENABLED':

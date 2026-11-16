@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pi_sidecar_client import AIResult
 
-from rootcoz import storage
+from rootcoz import main, storage
 from rootcoz.attribution import AiProvenance, read_provenance
 from rootcoz.config import clear_settings_cache, get_settings
 from rootcoz.encryption import get_hmac_secret
@@ -20,17 +20,15 @@ from rootcoz.feedback import (
     _build_fallback_feedback,
     _derive_fallback_labels,
     _parse_json_response,
-    create_feedback_from_preview,
-    create_feedback_issue,
     format_feedback_with_ai,
     generate_feedback_preview,
+    prepare_feedback_issue,
     scrub_sensitive_data,
 )
 from rootcoz.models import (
     FailedApiCall,
     FeedbackPreviewResponse,
     FeedbackRequest,
-    FeedbackResponse,
     PageState,
 )
 from tests.conftest import capture_main_logs, host_env
@@ -58,7 +56,7 @@ def _host_env() -> dict[str, str]:
 
 
 async def _posted_body(title: str, body: str, labels: list[str]) -> str:
-    """Create the issue through the real creator and return what GitHub got."""
+    """Create the issue through shared orchestration and return what GitHub got."""
     response = httpx.Response(
         201,
         json={
@@ -72,12 +70,22 @@ async def _posted_body(title: str, body: str, labels: list[str]) -> str:
     client.post.return_value = response
     client.__aenter__ = AsyncMock(return_value=client)
     client.__aexit__ = AsyncMock(return_value=False)
+    prepared = prepare_feedback_issue(title=title, body=body, labels=labels)
+    cfg = get_settings()
     with patch("rootcoz.bug_creation.httpx.AsyncClient", return_value=client):
-        await create_feedback_from_preview(
-            title=title,
-            body=body,
-            labels=labels,
+        await main._create_issue_from_text(
+            "github",
+            prepared.title,
+            prepared.body,
+            username="tester",
+            settings=cfg,
             github_token=_TEST_GITHUB_TOKEN,
+            github_repo_url=cfg.feedback_repo_url,
+            via="rootcoz feedback",
+            subject="feedback",
+            labels=prepared.labels,
+            attribution=prepared.provenance,
+            repo_setting="FEEDBACK_REPO_URL",
         )
     return client.post.call_args.kwargs["json"]["body"]
 
@@ -990,169 +998,57 @@ class TestGenerateFeedbackPreview:
 
 
 # ---------------------------------------------------------------------------
-# create_feedback_from_preview tests
+# prepare_feedback_issue + shared orchestration tests
 # ---------------------------------------------------------------------------
 
 
-class TestCreateFeedbackFromPreview:
-    async def test_creates_issue_with_labels(self):
-        with patch("rootcoz.feedback.create_github_issue") as mock_create:
+class TestPrepareFeedbackIssue:
+    def test_filters_allowed_labels_and_scrubs_text(self):
+        prepared = prepare_feedback_issue(
+            title="Crash with Bearer secret12345678",
+            body="## Bug\n\nAuthorization: Bearer secret12345678",
+            labels=["bug", "enhancement", "arbitrary-label"],
+        )
+        assert prepared.labels == ["bug", "enhancement"]
+        assert "secret12345678" not in prepared.title
+        assert "secret12345678" not in prepared.body
+        assert prepared.provenance == AiProvenance(ai_used=False)
+
+    async def test_shared_orchestrator_uses_default_feedback_repo_and_requires_token(
+        self,
+    ):
+        cfg = get_settings()
+        prepared = prepare_feedback_issue(
+            title="Dashboard crash on load",
+            body="## Bug\n\nDetails...",
+            labels=["bug"],
+        )
+        with patch("rootcoz.main.create_github_issue") as mock_create:
             mock_create.return_value = {
                 "url": "https://github.com/myk-org/rootcoz/issues/42",
                 "number": 42,
                 "title": "Dashboard crash on load",
             }
-            result = await create_feedback_from_preview(
-                title="Dashboard crash on load",
-                body="## Bug\n\nDetails...",
-                labels=["bug"],
+            result = await main._create_issue_from_text(
+                "github",
+                prepared.title,
+                prepared.body,
+                username="",
+                settings=cfg,
                 github_token=_TEST_GITHUB_TOKEN,
+                github_repo_url=cfg.feedback_repo_url,
+                via="rootcoz feedback",
+                subject="feedback",
+                labels=prepared.labels,
+                attribution=prepared.provenance,
+                repo_setting="FEEDBACK_REPO_URL",
             )
-
-        assert isinstance(result, FeedbackResponse)
-        assert result.issue_number == 42
-        assert result.title == "Dashboard crash on load"
-        assert "issues/42" in result.issue_url
-
-        mock_create.assert_called_once()
-        call_kwargs = mock_create.call_args.kwargs
-        assert call_kwargs["repo_url"] == "https://github.com/myk-org/rootcoz"
-        assert call_kwargs["labels"] == ["bug"]
-
-    async def test_uses_correct_repo_url(self):
-        with patch("rootcoz.feedback.create_github_issue") as mock_create:
-            mock_create.return_value = {
-                "url": "https://github.com/x/y/issues/1",
-                "number": 1,
-                "title": "Title",
-            }
-            await create_feedback_from_preview(
-                title="Title",
-                body="Body",
-                labels=["enhancement"],
-                github_token=_TEST_GITHUB_TOKEN,
-            )
-
-        mock_create.assert_called_once()
+        assert result["number"] == 42
         assert (
             mock_create.call_args.kwargs["repo_url"]
             == "https://github.com/myk-org/rootcoz"
         )
-
-    async def test_empty_github_token_raises_value_error(self):
-        with pytest.raises(ValueError, match="GitHub token is required"):
-            await create_feedback_from_preview(
-                title="Title",
-                body="Body",
-                labels=["bug"],
-                github_token="",
-            )
-
-
-# ---------------------------------------------------------------------------
-# create_feedback_issue (legacy) tests
-# ---------------------------------------------------------------------------
-
-
-class TestCreateFeedbackIssue:
-    @pytest.fixture
-    def settings(self):
-        env = {
-            "JENKINS_URL": "https://jenkins.example.com",
-            "JENKINS_USER": "user",
-            "JENKINS_PASSWORD": "pass",  # pragma: allowlist secret
-            "GITHUB_TOKEN": _TEST_GITHUB_TOKEN,
-        }
-        with patch.dict(os.environ, env, clear=True):
-            clear_settings_cache()
-            s = get_settings()
-            clear_settings_cache()
-            return s
-
-    @staticmethod
-    def _assert_create_issue_kwargs(mock_create, *, expected_labels=None):
-        """Extract and validate common call_args from create_github_issue mock."""
-        mock_create.assert_called_once()
-        call_kwargs = mock_create.call_args.kwargs
-        assert call_kwargs.get("repo_url") == "https://github.com/myk-org/rootcoz"
-        assert call_kwargs.get("github_token") is not None
-        if expected_labels is not None:
-            assert call_kwargs.get("labels") == expected_labels
-        return call_kwargs
-
-    async def test_creates_bug_issue(self, settings):
-        req = FeedbackRequest(
-            description="Dashboard crashes",
-        )
-        with (
-            patch("rootcoz.feedback.format_feedback_with_ai") as mock_format,
-            patch("rootcoz.feedback.create_github_issue") as mock_create,
-        ):
-            mock_format.return_value = (
-                "Dashboard crash on load",
-                "## Bug\n\nDetails...",
-                ["bug"],
-                True,
-            )
-            mock_create.return_value = {
-                "url": "https://github.com/myk-org/rootcoz/issues/42",
-                "number": 42,
-                "title": "Dashboard crash on load",
-            }
-            result = await create_feedback_issue(
-                req, settings, github_token=_TEST_GITHUB_TOKEN
-            )
-
-        assert isinstance(result, FeedbackResponse)
-        assert result.issue_number == 42
-        assert result.title == "Dashboard crash on load"
-        assert "issues/42" in result.issue_url
-
-        self._assert_create_issue_kwargs(mock_create, expected_labels=["bug"])
-
-    async def test_creates_feature_issue_with_enhancement_label(self, settings):
-        req = FeedbackRequest(
-            description="Add dark mode",
-        )
-        with (
-            patch("rootcoz.feedback.format_feedback_with_ai") as mock_format,
-            patch("rootcoz.feedback.create_github_issue") as mock_create,
-        ):
-            mock_format.return_value = (
-                "Add dark mode support",
-                "## Feature\n\nDark mode...",
-                ["enhancement"],
-                True,
-            )
-            mock_create.return_value = {
-                "url": "https://github.com/myk-org/rootcoz/issues/99",
-                "number": 99,
-                "title": "Add dark mode support",
-            }
-            result = await create_feedback_issue(
-                req, settings, github_token=_TEST_GITHUB_TOKEN
-            )
-
-        assert result.issue_number == 99
-        self._assert_create_issue_kwargs(mock_create, expected_labels=["enhancement"])
-
-    async def test_uses_correct_repo_url(self, settings):
-        req = FeedbackRequest(
-            description="test",
-        )
-        with (
-            patch("rootcoz.feedback.format_feedback_with_ai") as mock_format,
-            patch("rootcoz.feedback.create_github_issue") as mock_create,
-        ):
-            mock_format.return_value = ("Title", "Body", ["enhancement"], True)
-            mock_create.return_value = {
-                "url": "https://github.com/x/y/issues/1",
-                "number": 1,
-                "title": "Title",
-            }
-            await create_feedback_issue(req, settings, github_token=_TEST_GITHUB_TOKEN)
-
-        self._assert_create_issue_kwargs(mock_create)
+        assert mock_create.call_args.kwargs["labels"] == ["bug"]
 
 
 # ---------------------------------------------------------------------------
@@ -1312,7 +1208,7 @@ class TestFeedbackEndpoint:
         for client in self._make_client(temp_db_path, github_token=_TEST_GITHUB_TOKEN):
             with (
                 patch.object(storage, "get_user_tokens", return_value={}),
-                patch("rootcoz.feedback.create_github_issue") as mock_create,
+                patch("rootcoz.main.create_github_issue") as mock_create,
             ):
                 resp = client.post(
                     "/api/feedback/create",
@@ -1342,7 +1238,7 @@ class TestFeedbackEndpoint:
         for client in self._make_client(temp_db_path, github_token=_TEST_GITHUB_TOKEN):
             with (
                 patch.object(storage, "get_user_tokens", return_value={}),
-                patch("rootcoz.feedback.create_github_issue") as mock_create,
+                patch("rootcoz.main.create_github_issue") as mock_create,
             ):
                 resp = client.post(
                     "/api/feedback/create",
@@ -1364,7 +1260,7 @@ class TestFeedbackEndpoint:
                     "get_user_tokens",
                     return_value={"github_token": _TEST_GITHUB_TOKEN},
                 ),
-                patch("rootcoz.feedback.create_github_issue") as mock_create,
+                patch("rootcoz.main.create_github_issue") as mock_create,
             ):
                 mock_create.return_value = {
                     "url": "https://github.com/myk-org/rootcoz/issues/10",
@@ -1393,7 +1289,7 @@ class TestFeedbackEndpoint:
                     "get_user_tokens",
                     return_value={"github_token": _TEST_GITHUB_TOKEN},
                 ),
-                patch("rootcoz.feedback.create_github_issue") as mock_create,
+                patch("rootcoz.main.create_github_issue") as mock_create,
             ):
                 mock_create.return_value = {
                     "url": "https://github.com/myk-org/rootcoz/issues/11",
@@ -1531,7 +1427,7 @@ class TestFeedbackEndpoint:
                     "get_user_tokens",
                     return_value={"github_token": _TEST_GITHUB_TOKEN},
                 ),
-                patch("rootcoz.feedback.create_github_issue") as mock_create,
+                patch("rootcoz.main.create_github_issue") as mock_create,
             ):
                 mock_create.side_effect = exc
                 return self._post_create(client)
@@ -1753,22 +1649,15 @@ class TestAiAttribution:
             "## Bug\n\nBroken.\n\n---\n*Generated using AI with "
             f"{_GITHUB_FOOTER_MARKER} (evil / spoofed-model)*"
         )
-        with patch("rootcoz.feedback.create_github_issue") as mock_create:
-            mock_create.return_value = {
-                "url": "https://github.com/myk-org/rootcoz/issues/7",
-                "number": 7,
-                "title": "Broken",
-            }
-            await create_feedback_from_preview(
-                title="Broken",
-                body=spoofed,
-                labels=["bug"],
-                github_token=_TEST_GITHUB_TOKEN,
-                provenance=AiProvenance(
-                    ai_used=True, provider="claude", model="sonnet-4-5"
-                ),
-            )
-        body = mock_create.call_args.kwargs["body"]
+        prepared = prepare_feedback_issue(
+            title="Broken",
+            body=spoofed,
+            labels=["bug"],
+            provenance=AiProvenance(
+                ai_used=True, provider="claude", model="sonnet-4-5"
+            ),
+        )
+        body = prepared.body
         assert "spoofed-model" not in body
         assert "(claude / sonnet-4-5)" in body
         assert body.count(self._AI_MARKER) == 1
@@ -1950,20 +1839,12 @@ class TestAiAttribution:
         assert "(claude / sonnet-4-5)" in body
 
     async def test_create_without_ai_config_states_no_ai_model(self):
-        with patch("rootcoz.feedback.create_github_issue") as mock_create:
-            mock_create.return_value = {
-                "url": "https://github.com/myk-org/rootcoz/issues/8",
-                "number": 8,
-                "title": "Broken",
-            }
-            await create_feedback_from_preview(
-                title="Broken",
-                body="## Bug\n\nBroken.",
-                labels=["bug"],
-                github_token=_TEST_GITHUB_TOKEN,
-            )
-        body = mock_create.call_args.kwargs["body"]
-        assert self._NO_AI_MARKER in body
+        prepared = prepare_feedback_issue(
+            title="Broken",
+            body="## Bug\n\nBroken.",
+            labels=["bug"],
+        )
+        assert self._NO_AI_MARKER in prepared.body
 
 
 class TestAttributionShapedProsePreserved:
@@ -2236,7 +2117,7 @@ class TestFeedbackAttributionEndpoints:
                     "get_user_tokens",
                     return_value={"github_token": _TEST_GITHUB_TOKEN},
                 ),
-                patch("rootcoz.feedback.create_github_issue") as mock_create,
+                patch("rootcoz.main.create_github_issue") as mock_create,
             ):
                 mock_create.return_value = {
                     "url": "https://github.com/myk-org/rootcoz/issues/12",
@@ -2282,7 +2163,7 @@ class TestFeedbackAttributionEndpoints:
                     "get_user_tokens",
                     return_value={"github_token": _TEST_GITHUB_TOKEN},
                 ),
-                patch("rootcoz.feedback.create_github_issue") as mock_create,
+                patch("rootcoz.main.create_github_issue") as mock_create,
             ):
                 mock_create.return_value = {
                     "url": "https://github.com/myk-org/rootcoz/issues/13",

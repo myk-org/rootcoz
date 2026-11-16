@@ -23,12 +23,17 @@ from collections.abc import (
     Sequence,
 )
 from compression import zstd
-from contextlib import asynccontextmanager, suppress
+from contextlib import (
+    AbstractAsyncContextManager,
+    asynccontextmanager,
+    nullcontext,
+    suppress,
+)
 from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Literal, NoReturn, get_args
+from typing import TYPE_CHECKING, Any, Literal, NoReturn, get_args
 from urllib.parse import quote
 
 import aiosqlite
@@ -50,6 +55,9 @@ from rootcoz.models import (
     OverrideClassificationLiteral,
     PatternLiteral,
 )
+
+if TYPE_CHECKING:
+    from rootcoz.issue_attachments import ValidatedAttachment
 
 logger = get_child_logger(__name__)
 
@@ -2224,6 +2232,20 @@ async def init_db() -> None:
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 last_seen TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
+        """)
+
+        await db.executescript("""
+            CREATE TABLE IF NOT EXISTS issue_attachments (
+                id TEXT PRIMARY KEY, submission_id TEXT NOT NULL,
+                job_id TEXT NOT NULL DEFAULT '', owner_id INTEGER NOT NULL CHECK(owner_id > 0),
+                media_type TEXT NOT NULL, display_name TEXT NOT NULL,
+                size_bytes INTEGER NOT NULL CHECK(size_bytes > 0), tracker TEXT NOT NULL,
+                created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                state TEXT NOT NULL CHECK(state IN ('reserved','stored','cleanup_pending'))
+            );
+            CREATE INDEX IF NOT EXISTS issue_attachments_job ON issue_attachments(job_id);
+            CREATE INDEX IF NOT EXISTS issue_attachments_owner ON issue_attachments(owner_id);
+            CREATE INDEX IF NOT EXISTS issue_attachments_submission ON issue_attachments(submission_id);
         """)
 
         # Migration: add encrypted token columns to users table
@@ -7611,6 +7633,7 @@ _JOB_SCOPED_DELETES: tuple[tuple[str, str], ...] = (
     ("chat_messages", "job_id IN ({jobs})"),
     ("test_entries", "job_id IN ({jobs})"),
     ("tracked_in_links", "job_id IN ({jobs})"),
+    ("issue_attachments", "job_id != '' AND job_id IN ({jobs})"),
 )
 # ``results`` is deleted last, separately: its rowcount is the caller's "did this
 # job exist" answer.
@@ -8038,6 +8061,9 @@ async def prune_results(
     finish: (
         Callable[[list[str], list[str], Mapping[str, str]], Awaitable[list[str]]] | None
     ) = None,
+    around_chunk: (
+        Callable[[list[str]], AbstractAsyncContextManager[Any]] | None
+    ) = None,
     stats: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """Delete the jobs retention names, oldest first, in bounded batches.
@@ -8093,63 +8119,69 @@ async def prune_results(
         chunk_ids = [job_id for job_id, _ in chunk]
         created_at = dict(chunk)
         origins: Mapping[str, str] = {}
-        if prepare is not None:
+        async with (
+            around_chunk(chunk_ids) if around_chunk is not None else nullcontext()
+        ):
+            if prepare is not None:
+                try:
+                    origins = await prepare(chunk_ids)
+                except Exception:
+                    logger.warning(
+                        "Results retention: pre-delete hook failed for %d job(s)",
+                        len(chunk_ids),
+                        exc_info=True,
+                    )
+                    result["failed"].extend(
+                        {"job_id": job_id, "reason": "hook_failed"}
+                        for job_id in chunk_ids
+                    )
+                    continue
             try:
-                origins = await prepare(chunk_ids)
-            except Exception:
-                logger.warning(
-                    "Results retention: pre-delete hook failed for %d job(s)",
-                    len(chunk_ids),
-                    exc_info=True,
+                outcome = await delete_jobs_bulk(
+                    chunk_ids, require_ended=True, is_protected=is_protected
                 )
-                result["failed"].extend(
-                    {"job_id": job_id, "reason": "hook_failed"} for job_id in chunk_ids
-                )
-                continue
-        try:
-            outcome = await delete_jobs_bulk(
-                chunk_ids, require_ended=True, is_protected=is_protected
+            except sqlite3.Error, OSError:
+                logger.warning("Results retention: chunk delete failed", exc_info=True)
+                result["error"] = "commit_failed"
+                break
+            result["batches"] += 1
+            for item in outcome["failed"]:
+                reason = str(item.get("reason") or "")
+                if reason in _DELETE_SKIPPED_REASONS:
+                    result["skipped"] += 1
+                else:
+                    result["failed"].append(
+                        {"job_id": item["job_id"], "reason": reason}
+                    )
+            deleted = outcome["deleted"]
+            result["deleted_ids"].extend(deleted)
+            result["deleted"] += len(deleted)
+            stamps = sorted(
+                created_at[job_id] for job_id in deleted if created_at.get(job_id)
             )
-        except sqlite3.Error, OSError:
-            logger.warning("Results retention: chunk delete failed", exc_info=True)
-            result["error"] = "commit_failed"
-            break
-        result["batches"] += 1
-        for item in outcome["failed"]:
-            reason = str(item.get("reason") or "")
-            if reason in _DELETE_SKIPPED_REASONS:
-                result["skipped"] += 1
-            else:
-                result["failed"].append({"job_id": item["job_id"], "reason": reason})
-        deleted = outcome["deleted"]
-        result["deleted_ids"].extend(deleted)
-        result["deleted"] += len(deleted)
-        stamps = sorted(
-            created_at[job_id] for job_id in deleted if created_at.get(job_id)
-        )
-        if stamps:
-            oldest = result["oldest_deleted_at"]
-            newest = result["newest_deleted_at"]
-            result["oldest_deleted_at"] = (
-                min(oldest, stamps[0]) if oldest else stamps[0]
-            )
-            result["newest_deleted_at"] = (
-                max(newest, stamps[-1]) if newest else stamps[-1]
-            )
-        if finish is not None and deleted:
-            # After the commit: these jobs are gone, so a hook failure is a
-            # cleanup failure, never an undeleted job.
-            try:
-                result["cleanup_failed"].extend(
-                    await finish(chunk_ids, deleted, origins)
+            if stamps:
+                oldest = result["oldest_deleted_at"]
+                newest = result["newest_deleted_at"]
+                result["oldest_deleted_at"] = (
+                    min(oldest, stamps[0]) if oldest else stamps[0]
                 )
-            except Exception:
-                logger.warning(
-                    "Results retention: post-delete hook failed for %d job(s)",
-                    len(deleted),
-                    exc_info=True,
+                result["newest_deleted_at"] = (
+                    max(newest, stamps[-1]) if newest else stamps[-1]
                 )
-                result["cleanup_failed"].extend(deleted)
+            if finish is not None and deleted:
+                # After the commit: these jobs are gone, so a hook failure is a
+                # cleanup failure, never an undeleted job.
+                try:
+                    result["cleanup_failed"].extend(
+                        await finish(chunk_ids, deleted, origins)
+                    )
+                except Exception:
+                    logger.warning(
+                        "Results retention: post-delete hook failed for %d job(s)",
+                        len(deleted),
+                        exc_info=True,
+                    )
+                    result["cleanup_failed"].extend(deleted)
     return result
 
 
@@ -13551,6 +13583,168 @@ def _audit_target_job_ref(event: dict[str, Any]) -> str | None:
         job_id = (event.get("details") or {}).get("job_id")
         return str(job_id) if job_id else None
     return None
+
+
+async def reserve_issue_attachments(
+    attachments: list[ValidatedAttachment],
+    *,
+    owner_id: int,
+    job_id: str,
+    tracker: str,
+) -> list[dict[str, Any]]:
+    """Reserve all bytes atomically, including reserved and pending cleanup rows."""
+    if not attachments:
+        return []
+    if (
+        type(owner_id) is not int
+        or owner_id <= 0
+        or (job_id and (not _is_job_uuid(job_id) or str(uuid.UUID(job_id)) != job_id))
+    ):
+        raise ValueError("Attachments require an active account and valid run")
+    if tracker not in {"github", "jira"}:
+        raise ValueError("Invalid attachment tracker")
+    submission_id = str(uuid.uuid4())
+    rows: list[dict[str, Any]] = [
+        {
+            "id": str(uuid.uuid4()),
+            "submission_id": submission_id,
+            "job_id": job_id,
+            "owner_id": owner_id,
+            "media_type": a.media_type,
+            "display_name": a.display_name,
+            "size_bytes": len(a.data),
+            "tracker": tracker,
+            "state": "reserved",
+        }
+        for a in attachments
+    ]
+    size = sum(len(a.data) for a in attachments)
+    async with _connect_db() as db:
+        await db.execute("BEGIN IMMEDIATE")
+        cursor = await db.execute(
+            "SELECT id FROM users WHERE id=? AND status='active' AND disabled=0",
+            (owner_id,),
+        )
+        if not await cursor.fetchone():
+            raise ValueError("Attachments require an active account")
+        if job_id:
+            cursor = await db.execute(
+                "SELECT job_id FROM results WHERE job_id=?", (job_id,)
+            )
+            if not await cursor.fetchone():
+                raise ValueError("Attachment run no longer exists")
+        for column, value, ceiling, label in (
+            ("owner_id", owner_id, 500 * 1024 * 1024, "owner"),
+            ("job_id", job_id, 200 * 1024 * 1024, "run"),
+        ):
+            if column == "job_id" and not job_id:
+                continue
+            cursor = await db.execute(
+                f"SELECT COALESCE(SUM(size_bytes),0) FROM issue_attachments WHERE {column}=?",
+                (value,),
+            )
+            used = (await cursor.fetchone())[0]
+            if used + size > ceiling:
+                raise ValueError(
+                    f"Attachment {label} ceiling {ceiling // 1048576} MiB exceeded; "
+                    "delete old attachments with 'rootcoz delete-attachment <id>' "
+                    "(DELETE /api/issue-attachments/<id>) or delete the run first"
+                )
+        await db.executemany(
+            "INSERT INTO issue_attachments (id,submission_id,job_id,owner_id,media_type,display_name,size_bytes,tracker,state) VALUES (:id,:submission_id,:job_id,:owner_id,:media_type,:display_name,:size_bytes,:tracker,:state)",
+            rows,
+        )
+        await db.commit()
+    logger.info("Attachment reservation created: count=%d", len(rows))
+    return rows
+
+
+async def get_issue_attachment(attachment_id: str) -> dict[str, Any] | None:
+    """Return metadata only; callers must authorize before opening bytes."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT * FROM issue_attachments WHERE id=?", (attachment_id,)
+        )
+        row = await cursor.fetchone()
+        return dict(row) if row else None
+
+
+async def mark_issue_attachments_stored(
+    ids: list[str], *, cleanup_pending: bool = False
+) -> None:
+    """Persist stored or retryable cleanup state for exact ids."""
+    async with _connect_db() as db:
+        await db.executemany(
+            "UPDATE issue_attachments SET state=? WHERE id=?",
+            [
+                ("cleanup_pending" if cleanup_pending else "stored", ident)
+                for ident in ids
+            ],
+        )
+        await db.commit()
+
+
+async def delete_issue_attachment_rows(ids: list[str]) -> None:
+    """Remove exact rows only after their blobs have been removed."""
+    async with _connect_db() as db:
+        await db.executemany(
+            "DELETE FROM issue_attachments WHERE id=?", [(ident,) for ident in ids]
+        )
+        await db.commit()
+
+
+async def delete_issue_attachment_rows_for_user(owner_id: int) -> None:
+    """Remove run-less metadata only; run evidence survives account deletion."""
+    async with _connect_db() as db:
+        await db.execute(
+            "DELETE FROM issue_attachments WHERE owner_id=? AND job_id=''", (owner_id,)
+        )
+        await db.commit()
+
+
+async def delete_issue_attachment_rows_for_job(job_id: str) -> None:
+    """Remove run-scoped attachment metadata for a deleted job."""
+    if not job_id:
+        return
+    async with _connect_db() as db:
+        await db.execute(
+            "DELETE FROM issue_attachments WHERE job_id != '' AND job_id = ?",
+            (job_id,),
+        )
+        await db.commit()
+
+
+async def list_pending_issue_attachment_rows() -> list[dict[str, Any]]:
+    """Return interrupted reserved or cleanup_pending attachment rows."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT * FROM issue_attachments WHERE state IN ('reserved', 'cleanup_pending') ORDER BY created_at, id"
+        )
+        return [dict(row) for row in await cursor.fetchall()]
+
+
+async def user_id_exists(user_id: int) -> bool:
+    """Return True if *user_id* still exists in ``users``."""
+    async with _connect_db() as db:
+        cursor = await db.execute("SELECT 1 FROM users WHERE id = ?", (user_id,))
+        return (await cursor.fetchone()) is not None
+
+
+async def is_active_user_id(user_id: int) -> bool:
+    """Return True if *user_id* is an active, non-disabled ``users`` row."""
+    async with _connect_db() as db:
+        cursor = await db.execute(
+            "SELECT 1 FROM users WHERE id = ? AND status = 'active' AND disabled = 0",
+            (user_id,),
+        )
+        return (await cursor.fetchone()) is not None
+
+
+async def list_user_ids() -> set[int]:
+    """Snapshot all immutable ``users.id`` values currently in the database."""
+    async with _connect_db() as db:
+        cursor = await db.execute("SELECT id FROM users")
+        return {int(row[0]) for row in await cursor.fetchall()}
 
 
 def _is_job_uuid(ref: str) -> bool:

@@ -148,9 +148,10 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    | `GITHUB_TOKEN` | unset | string | yes | no | yes |
    | `TESTS_REPO_URL` | unset | string | no | no | yes |
    | `TESTS_REPO_TOKEN` | unset | string | yes | no | yes |
+   | `FEEDBACK_REPO_URL` | `https://github.com/myk-org/rootcoz` | string | no | no | yes |
    | `ENABLE_GITHUB_ISSUES` | unset | boolean | no | no | yes |
 
-   With `ENABLE_GITHUB_ISSUES` unset, GitHub issue creation auto-enables when both `TESTS_REPO_URL` and `GITHUB_TOKEN` are configured. The user-facing feedback dialog stays available whenever the toggle is not explicitly `false`.
+   With `ENABLE_GITHUB_ISSUES` unset, GitHub issue creation auto-enables when both `TESTS_REPO_URL` and `GITHUB_TOKEN` are configured. The user-facing feedback dialog stays available whenever the toggle is not explicitly `false`. `FEEDBACK_REPO_URL` sets the GitHub repository URL where user feedback issues from `POST /api/feedback/create` and `rootcoz feedback-create` are filed. A blank or whitespace-only value coerces back to `https://github.com/myk-org/rootcoz` and never falls through to `TESTS_REPO_URL`. Embedded URL userinfo is stripped in `GET /api/default-server-settings`, and an invalid URL fails feedback creation with `400` naming `FEEDBACK_REPO_URL` without echoing its value.
 
    The toggle also governs the read-only GitHub duplicate search that runs during analysis, and there it means only *creation*: an explicit `false` disables the duplicate search too, but leaving it unset keeps that search available on a deployment that cannot file issues (no `TESTS_REPO_URL`) as long as `GITHUB_TOKEN` is set and the run has a GitHub repository in scope. The search uses the deployment token only — never a user's.
 
@@ -256,7 +257,7 @@ The practical consequence is that `ANTHROPIC_API_KEY` alone does not authenticat
    **Chat sessions have a second, independent reason a graph can be skipped: a time limit.** Indexing a chat workspace is bounded (about three minutes), and repositories the clock did not reach get the same backoff marker — so raising `MAX_WORKSPACE_GRAPH_MB` cannot prevent it. The chat still starts: the model keeps `read`, `ls`, `find` and `grep` and simply has no code-graph tools for those repositories. This applies to chat only; an analysis workspace is indexed with no deadline.
 
 
-    `ADDITIONAL_REPOS` uses `name:url,name:url`, with an optional `:ref` and `@token` suffix per entry; names must be unique. `MAX_WAIT_MINUTES=0` means wait indefinitely. `PUBLIC_BASE_URL` is the only origin RootCoz will build absolute links from — request `Host` and `X-Forwarded-*` headers are never trusted, which is what blocks host-header injection in result and tracker links.
+    `ADDITIONAL_REPOS` uses `name:url,name:url`, with an optional `:ref` and `@token` suffix per entry; names must be unique. `MAX_WAIT_MINUTES=0` means wait indefinitely. `PUBLIC_BASE_URL` is the only origin RootCoz builds absolute links from; request `Host` and `X-Forwarded-*` headers are never trusted, which blocks host-header injection in result and tracker links. `PUBLIC_BASE_URL` must use `http://` or `https://` with a hostname and no userinfo, query string, or fragment, and any configured deployment path prefix is preserved. Setting `PUBLIC_BASE_URL` is required whenever attaching files to any GitHub, Jira, direct-chat, or feedback issue because RootCoz publishes absolute `/api/issue-attachments/{attachment_id}` links in the issue body, including pre-published fallback links on Jira. Without `PUBLIC_BASE_URL`, file-bearing creates fail with `400` before any tracker write and `GET /api/capabilities` reports `reason: "public_base_url_required"`, while text-only issue creation remains available. Hosted attachment links require RootCoz authentication with no anonymous exception or signed bearer URL: run-scoped attachments allow `viewer` and above while the job exists and expire when the job is deleted or pruned by retention, whereas run-less feedback and unbound chat attachments allow only the active immutable uploader account or an `admin` and expire when that account is deleted. Native copies uploaded to Jira follow Jira's own permissions and retention.
 
     `MAX_CONCURRENT_REPO_CLONES` is the clone width for **both** paths — analysis and chat clone through the same fan-out and compete for the same process-wide slots. It is the only clone limit: `max_concurrent_ai_calls` describes LLM call width and has no bearing on cloning, so raising the clone ceiling raises the observed concurrency (and lowering it lowers it) with no other setting to cap it. Extra clone slots are consumed by the prompt's resource section, `copy_rootcoz_pi_resources` and graph indexing before the first AI call, not wasted.
 
@@ -397,6 +398,7 @@ Every environment variable rootcoz or the sidecar consumes, in exactly one row. 
 | `GITHUB_TOKEN` | `github_token` | GitHub | runtime (sensitive) |
 | `TESTS_REPO_URL` | `tests_repo_url` | GitHub | runtime |
 | `TESTS_REPO_TOKEN` | `tests_repo_token` | GitHub | runtime (sensitive) |
+| `FEEDBACK_REPO_URL` | `feedback_repo_url` | GitHub | runtime |
 | `ENABLE_GITHUB_ISSUES` | `enable_github_issues` | GitHub | runtime |
 | `REPORTPORTAL_URL` | `reportportal_url` | Report Portal | runtime |
 | `REPORTPORTAL_API_TOKEN` | `reportportal_api_token` | Report Portal | runtime (sensitive) |

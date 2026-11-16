@@ -234,6 +234,14 @@ class ReportPortalConfig(NamedTuple):
     push_tracker_links: bool
 
 
+DEFAULT_FEEDBACK_REPO_URL = "https://github.com/myk-org/rootcoz"
+
+
+def normalize_feedback_repo_url(value: str | None) -> str:
+    """Normalize feedback_repo_url so blank/whitespace coerces to the upstream default."""
+    return (value or "").strip() or DEFAULT_FEEDBACK_REPO_URL
+
+
 class Settings(BaseSettings):
     """Application settings loaded from environment variables."""
 
@@ -262,6 +270,13 @@ class Settings(BaseSettings):
     # Optional defaults (can be overridden per-request in webhook)
     tests_repo_url: str | None = None
     tests_repo_token: SecretStr | None = None  # NEW
+    feedback_repo_url: str = Field(
+        default=DEFAULT_FEEDBACK_REPO_URL,
+        description=(
+            "GitHub repository URL for user feedback issues "
+            f"(blank falls back to {DEFAULT_FEEDBACK_REPO_URL})."
+        ),
+    )
     # Jira integration (optional). Each auth method is a fully
     # self-contained definition — its own URL and TLS verification. The
     # ONLY settings shared across methods: jira_project_key,
@@ -1162,6 +1177,11 @@ class Settings(BaseSettings):
             value = getattr(self, field_name)
             if isinstance(value, str):
                 object.__setattr__(self, field_name, value.strip())
+        object.__setattr__(
+            self,
+            "feedback_repo_url",
+            normalize_feedback_repo_url(self.feedback_repo_url),
+        )
         # Normalize ai_provider (lowercase + legacy *-cli → canonical)
         if self.ai_provider:
             object.__setattr__(
@@ -1234,7 +1254,8 @@ class Settings(BaseSettings):
         Requires ENABLE_GITHUB_ISSUES to not be explicitly False.
         Unlike github_issues_enabled, does not require TESTS_REPO_URL
         or a server-level GITHUB_TOKEN since feedback uses user-scoped
-        tokens and issues go to the hardcoded project repo.
+        tokens and issues go to feedback_repo_url (defaulting to the
+        upstream project repository).
         """
         return self.enable_github_issues is not False
 

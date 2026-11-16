@@ -7,22 +7,19 @@ from attached logs, and creates the issue in myk-org/rootcoz.
 
 import json
 import re
+from dataclasses import dataclass
 from typing import Any
 
 from rootcoz import get_child_logger
 from rootcoz.ai_client import call_ai_once, public_provider_name
 from rootcoz.attribution import AiProvenance, apply_ai_attribution, read_provenance
-from rootcoz.bug_creation import create_github_issue
 from rootcoz.config import Settings
 from rootcoz.models import (
     FeedbackPreviewResponse,
     FeedbackRequest,
-    FeedbackResponse,
 )
 
 logger = get_child_logger(__name__)
-
-_FEEDBACK_REPO_URL = "https://github.com/myk-org/rootcoz"
 
 # Issue attribution is owned by rootcoz.attribution: the footer, its regex and
 # the signed preview-time provenance all live there so feedback creation and
@@ -456,7 +453,7 @@ async def generate_feedback_preview(
         show who gets credit.  The body carries a server-owned attribution
         footer naming the provider/model that wrote it, or stating that no AI
         model did, plus the signed provenance that
-        :func:`create_feedback_from_preview` re-verifies so the credit cannot
+        :func:`prepare_feedback_issue` re-verifies so the credit cannot
         drift with later settings changes.
     """
     title, body, labels, ai_generated = await format_feedback_with_ai(
@@ -496,89 +493,41 @@ def _derive_fallback_labels(request: FeedbackRequest) -> list[str]:
     return ["enhancement"]
 
 
-async def create_feedback_from_preview(
+@dataclass(frozen=True, slots=True)
+class PreparedFeedbackIssue:
+    """Scrubbed feedback payload and verified preview-time AI provenance."""
+
+    title: str
+    body: str
+    labels: list[str]
+    provenance: AiProvenance
+
+
+def prepare_feedback_issue(
     title: str,
     body: str,
     labels: list[str],
-    github_token: str,
     *,
     provenance: AiProvenance | None = None,
-) -> FeedbackResponse:
-    """Create a GitHub issue from a previously previewed feedback.
+) -> PreparedFeedbackIssue:
+    """Prepare scrubbed feedback text, allowed labels, and verified provenance.
 
-    Args:
-        title: Issue title (from preview).
-        body: Issue body (from preview).
-        labels: Issue labels (from preview).
-        github_token: User's GitHub token for authentication.
-        provenance: Server-side preview-time AI provenance.  When omitted it
-            is read from the signed token in *body* (the create endpoint's
-            only source — it never accepts a provider/model from the browser).
-
-    Returns:
-        FeedbackResponse with the created issue details.
-
-    Raises:
-        ValueError: If github_token is empty.
+    Reads the signed preview provenance token before scrubbing so the content
+    digest verifies against the previewed text, strips any client-supplied or
+    spoofed rootcoz attribution lines, and restricts labels to ``_ALLOWED_LABELS``.
     """
-    github_token = github_token.strip()
-    if not github_token:
-        raise ValueError(
-            "GitHub token is required. Set up your token in Profile Settings."
-        )
-
-    title = scrub_sensitive_data(title)
-    # Re-apply the attribution the preview was granted: the body round-trips
-    # through the browser and may carry a stale, hand-edited or spoofed footer.
-    # Read provenance before scrubbing so the signed token is still intact, and
-    # hand the same verified provenance to the creator — attribution is decided
-    # by this one signal, never by the body text.
     resolved = provenance or read_provenance(body) or AiProvenance(ai_used=False)
-    body = apply_ai_attribution(scrub_sensitive_data(body), resolved)
-    labels = [lbl for lbl in labels if lbl in _ALLOWED_LABELS]
-
-    result = await create_github_issue(
-        title=title,
-        body=body,
-        repo_url=_FEEDBACK_REPO_URL,
-        github_token=github_token,
-        labels=labels,
-        attribution=resolved,
+    cleaned_title = scrub_sensitive_data(title)
+    cleaned_body = apply_ai_attribution(scrub_sensitive_data(body), resolved)
+    filtered_labels = [lbl for lbl in labels if lbl in _ALLOWED_LABELS]
+    logger.debug(
+        "Prepared feedback issue payload (ai_used=%s, labels=%s)",
+        resolved.ai_used,
+        filtered_labels,
     )
-
-    return FeedbackResponse(
-        issue_url=result["url"],
-        issue_number=result["number"],
-        title=result["title"],
-    )
-
-
-async def create_feedback_issue(
-    request: FeedbackRequest, settings: Settings, github_token: str = ""
-) -> FeedbackResponse:
-    """Orchestrate feedback submission: scrub, format with AI, create GitHub issue.
-
-    .. deprecated::
-        Use :func:`generate_feedback_preview` + :func:`create_feedback_from_preview`
-        for the two-step preview/create flow.
-
-    Args:
-        request: User feedback submission.
-        settings: Application settings.
-        github_token: User's GitHub token for authentication.
-
-    Returns:
-        FeedbackResponse with the created issue details.
-    """
-    preview = await generate_feedback_preview(
-        request,
-        settings,
-        ai_provider=settings.ai_provider,
-        ai_model=settings.ai_model,
-    )
-    return await create_feedback_from_preview(
-        title=preview.title,
-        body=preview.body,
-        labels=preview.labels,
-        github_token=github_token,
+    return PreparedFeedbackIssue(
+        title=cleaned_title,
+        body=cleaned_body,
+        labels=filtered_labels,
+        provenance=resolved,
     )

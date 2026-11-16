@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 import shlex
 from typing import ClassVar, Self
 from unittest.mock import MagicMock, patch
@@ -9417,3 +9418,659 @@ class TestAdminRetentionPreviewCommand:
         assert listed.exit_code == 0
         assert "RESULTS_RETENTION_DAYS" in listed.output
         assert "db" in listed.output
+
+
+class TestIssueAttachmentsCLI:
+    """Tests for issue #505 CLI commands, flags, summaries, and error semantics."""
+
+    @pytest.mark.parametrize(
+        "subcmd",
+        [
+            ["create-issue", "--help"],
+            ["propose-chat-issue", "--help"],
+            ["create-chat-issue", "--help"],
+            ["feedback-create", "--help"],
+            ["download-attachment", "--help"],
+            ["delete-attachment", "--help"],
+        ],
+    )
+    def test_help_exposes_expected_flags_and_zero_token_flags(self, subcmd):
+        result = runner.invoke(app, subcmd)
+        assert result.exit_code == 0
+        plain = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", result.output)
+        normalized = " ".join(plain.split())
+        for forbidden in (
+            "--github-token",
+            "--jira-token",
+            "--jira-email",
+            "--jira-sa-token",
+            "--provenance-token",
+            "--ai-used",
+        ):
+            assert forbidden not in normalized
+        if subcmd[0] == "download-attachment":
+            assert "--output" in normalized
+            assert "-o" in normalized
+        elif subcmd[0] == "delete-attachment":
+            assert "--force" in normalized
+            assert "-f" in normalized
+            assert "--json" in normalized
+        else:
+            assert "--attach" in normalized
+            assert "browser chat" in normalized.lower()
+
+    def test_repeatable_attach_forwarded_across_all_create_and_propose_commands(
+        self, mock_client
+    ):
+        mock_client.create_github_issue.return_value = {
+            "url": "https://github.com/org/repo/issues/10",
+            "number": 10,
+            "title": "Bug",
+        }
+        res_gh = runner.invoke(
+            app,
+            [
+                "create-issue",
+                "job-1",
+                "--test",
+                "suite.test_a",
+                "--type",
+                "github",
+                "--title",
+                "Bug",
+                "--body",
+                "Body",
+                "--attach",
+                "/tmp/a.log",
+                "--attach",
+                "/tmp/b.png",
+            ],
+        )
+        assert res_gh.exit_code == 0, res_gh.output
+        assert mock_client.create_github_issue.call_args.kwargs["attachments"] == [
+            "/tmp/a.log",
+            "/tmp/b.png",
+        ]
+
+        mock_client.create_jira_bug.return_value = {
+            "url": "https://jira.example.com/browse/PROJ-10",
+            "key": "PROJ-10",
+            "title": "Bug",
+        }
+        res_jira = runner.invoke(
+            app,
+            [
+                "create-issue",
+                "job-1",
+                "--test",
+                "suite.test_a",
+                "--type",
+                "jira",
+                "--title",
+                "Bug",
+                "--body",
+                "Body",
+                "--attach",
+                "/tmp/a.log",
+                "--attach",
+                "/tmp/b.png",
+            ],
+        )
+        assert res_jira.exit_code == 0, res_jira.output
+        assert mock_client.create_jira_bug.call_args.kwargs["attachments"] == [
+            "/tmp/a.log",
+            "/tmp/b.png",
+        ]
+
+        mock_client.create_chat_issue.return_value = {
+            "url": "https://github.com/org/repo/issues/11",
+            "number": 11,
+            "title": "Bug",
+        }
+        res_chat = runner.invoke(
+            app,
+            [
+                "create-chat-issue",
+                "--target",
+                "github",
+                "--confirmation-id",
+                "cid-1",
+                "--confirmation-code",
+                "CODE12",
+                "--title",
+                "Bug",
+                "--body",
+                "Body",
+                "--attach",
+                "/tmp/a.log",
+                "--attach",
+                "/tmp/b.png",
+            ],
+        )
+        assert res_chat.exit_code == 0, res_chat.output
+        assert mock_client.create_chat_issue.call_args.kwargs["attachments"] == [
+            "/tmp/a.log",
+            "/tmp/b.png",
+        ]
+
+    def test_propose_chat_issue_prints_manifest_and_shell_quoted_attach_flags(
+        self, mock_client
+    ):
+        tricky_a = "/tmp/dir with spaces/log's 1.txt"
+        tricky_b = "/tmp/shot.png"
+        mock_client.propose_chat_issue.return_value = {
+            "confirmation_id": "draft-505",
+            "confirmation_code": "XYZ789",
+            "title": "Crash report",
+            "body": "Stack trace attached.",
+            "attachments": [
+                {
+                    "display_name": "log's 1.txt",
+                    "media_type": "text/plain",
+                    "size_bytes": 128,
+                    "sha256": "deadbeef",
+                },
+                {
+                    "filename": "shot.png",
+                    "media_type": "image/png",
+                    "size_bytes": 4096,
+                    "sha256": "cafebabe",
+                },
+            ],
+        }
+        result = runner.invoke(
+            app,
+            [
+                "propose-chat-issue",
+                "--target",
+                "github",
+                "--title",
+                "Crash report",
+                "--body",
+                "Stack trace attached.",
+                "--attach",
+                tricky_a,
+                "--attach",
+                tricky_b,
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "Attachments (2):" in result.output
+        assert "log's 1.txt (text/plain, 128 bytes)" in result.output
+        assert "shot.png (image/png, 4096 bytes)" in result.output
+        command_str = result.output.split("file it with: ", 1)[1].strip()
+        tokens = shlex.split(command_str)
+        attach_values = [
+            tokens[i + 1] for i, tok in enumerate(tokens) if tok == "--attach"
+        ]
+        assert attach_values == [tricky_a, tricky_b]
+
+    def test_end_to_end_cli_local_errors_and_changed_bytes_never_auto_repropose(
+        self, tmp_path
+    ):
+        secret = tmp_path / "secret.txt"
+        secret.write_text("TOP_SECRET_TOKEN_VALUE")
+        symlink_path = tmp_path / "linked.log"
+        symlink_path.symlink_to(secret)
+
+        def fail_http(request):
+            pytest.fail("No HTTP call allowed on local file error")
+
+        with (
+            patch.dict(os.environ, {"ROOTCOZ_SERVER": _TEST_SERVER}, clear=True),
+            patch(
+                "rootcoz.cli.main.get_server_config",
+                return_value=ServerConfig(url=_TEST_SERVER),
+            ),
+            patch(
+                "rootcoz.cli.main._get_client",
+                side_effect=lambda *a, **kw: make_test_client(fail_http),
+            ),
+        ):
+            for bad in (tmp_path / "missing.log", symlink_path):
+                res = runner.invoke(
+                    app,
+                    [
+                        "feedback-create",
+                        "--title",
+                        "T",
+                        "--body",
+                        "B",
+                        "--attach",
+                        str(bad),
+                    ],
+                )
+                assert res.exit_code == 1
+                assert bad.name in res.output
+                assert "TOP_SECRET_TOKEN_VALUE" not in res.output
+
+        # Propose with v1 bytes, mutate file, then create-chat-issue: rereads v2,
+        # gets 400 from server, exits 1, and NEVER calls /api/chat-issue/propose again.
+        live_file = tmp_path / "evidence.log"
+        live_file.write_bytes(b"initial-bytes")
+        calls: list[tuple[str, str]] = []
+
+        def draft_handler(request):
+            payload = json.loads(request.content)
+            calls.append((request.url.path, payload["attachments"][0]["data_b64"]))
+            if request.url.path == "/api/chat-issue/propose":
+                return httpx.Response(
+                    201,
+                    json={
+                        "confirmation_id": "cid-505",
+                        "confirmation_code": "CODE55",
+                        "title": "T",
+                        "body": "B",
+                        "attachment_manifest": [
+                            {
+                                "filename": "evidence.log",
+                                "media_type": "text/plain",
+                                "size_bytes": 13,
+                            }
+                        ],
+                    },
+                )
+            return httpx.Response(
+                400,
+                json={
+                    "detail": "No issue was filed: attachment manifest does not match approved draft."
+                },
+            )
+
+        with (
+            patch.dict(os.environ, {"ROOTCOZ_SERVER": _TEST_SERVER}, clear=True),
+            patch(
+                "rootcoz.cli.main.get_server_config",
+                return_value=ServerConfig(url=_TEST_SERVER),
+            ),
+            patch(
+                "rootcoz.cli.main._get_client",
+                side_effect=lambda *a, **kw: make_test_client(draft_handler),
+            ),
+        ):
+            prop = runner.invoke(
+                app,
+                [
+                    "propose-chat-issue",
+                    "--target",
+                    "github",
+                    "--title",
+                    "T",
+                    "--body",
+                    "B",
+                    "--attach",
+                    str(live_file),
+                ],
+            )
+            assert prop.exit_code == 0, prop.output
+            live_file.write_bytes(b"tampered-bytes")
+            create = runner.invoke(
+                app,
+                [
+                    "create-chat-issue",
+                    "--target",
+                    "github",
+                    "--confirmation-id",
+                    "cid-505",
+                    "--confirmation-code",
+                    "CODE55",
+                    "--title",
+                    "T",
+                    "--body",
+                    "B",
+                    "--attach",
+                    str(live_file),
+                ],
+            )
+            assert create.exit_code == 1
+            assert "does not match approved draft" in create.output
+            assert [path for path, _ in calls] == [
+                "/api/chat-issue/propose",
+                "/api/chat-issue",
+            ]
+            assert calls[0][1] != calls[1][1]
+
+    def test_feedback_create_human_and_json_modes(self, mock_client):
+        response_payload = {
+            "issue_url": "https://github.com/myk-org/rootcoz/issues/505",
+            "issue_number": 505,
+            "title": "Attach logs",
+            "attachments": {
+                "count": 1,
+                "types": ["text/plain"],
+                "native_attached": 0,
+                "linked": 1,
+                "failed_count": 0,
+                "files": [
+                    {
+                        "filename": "run.log",
+                        "id": "att-uuid-1",
+                        "delivery": "hosted",
+                        "reason": "hosted",
+                    }
+                ],
+            },
+        }
+        mock_client.feedback_create.return_value = response_payload
+
+        human = runner.invoke(
+            app,
+            [
+                "feedback-create",
+                "--title",
+                "Attach logs",
+                "--body",
+                "Direct text",
+                "--label",
+                "bug",
+                "--label",
+                "enhancement",
+                "--attach",
+                "/tmp/run.log",
+            ],
+        )
+        assert human.exit_code == 0, human.output
+        assert "Created: #505" in human.output
+        assert "URL: https://github.com/myk-org/rootcoz/issues/505" in human.output
+        assert "hosted link in issue body" in human.output
+        assert "Warning:" not in human.output
+        mock_client.feedback_create.assert_called_once_with(
+            "Attach logs",
+            "Direct text",
+            labels=["bug", "enhancement"],
+            attachments=["/tmp/run.log"],
+        )
+
+        as_json = runner.invoke(
+            app,
+            [
+                "feedback-create",
+                "--title",
+                "Attach logs",
+                "--body",
+                "Direct text",
+                "--json",
+            ],
+        )
+        assert as_json.exit_code == 0, as_json.output
+        assert json.loads(as_json.output) == response_payload
+
+    @pytest.mark.parametrize(
+        ("delivery", "reason", "failed_count", "expect_warning", "expected_phrase"),
+        [
+            ("native_and_hosted", "native_attached", 0, False, "native_and_hosted"),
+            ("fallback_only", "native_refused", 1, True, "Do not re-run create"),
+            (
+                "native_outcome_unknown",
+                "native_outcome_unknown",
+                1,
+                True,
+                "Never retry create",
+            ),
+        ],
+    )
+    def test_attachment_summary_delivery_states_and_terminal_sanitization(
+        self,
+        mock_client,
+        delivery,
+        reason,
+        failed_count,
+        expect_warning,
+        expected_phrase,
+    ):
+        mock_client.create_jira_bug.return_value = {
+            "url": "https://jira.example.com/browse/PROJ-77",
+            "key": "PROJ-77",
+            "title": "Jira issue",
+            "attachments": {
+                "count": 1,
+                "types": ["text/plain"],
+                "native_attached": 1 if delivery == "native_and_hosted" else 0,
+                "linked": 1,
+                "failed_count": failed_count,
+                "files": [
+                    {
+                        "filename": "tricky\x1b[31m.log",
+                        "id": "uuid-77",
+                        "delivery": delivery,
+                        "reason": reason,
+                    }
+                ],
+            },
+        }
+        result = runner.invoke(
+            app,
+            [
+                "create-issue",
+                "job-1",
+                "--test",
+                "suite.test_a",
+                "--type",
+                "jira",
+                "--title",
+                "Jira issue",
+                "--body",
+                "Body",
+                "--attach",
+                "/tmp/tricky.log",
+            ],
+        )
+        assert result.exit_code == 0, result.output
+        assert "URL: https://jira.example.com/browse/PROJ-77" in result.output
+        assert expected_phrase in result.output
+        assert "\x1b" not in result.output
+        assert "\\x1b[31m.log" in result.output
+        if expect_warning:
+            assert "Warning:" in result.output
+        else:
+            assert "Warning:" not in result.output
+
+    def test_create_issue_api_errors_and_ambiguous_warning_exit_1(self, mock_client):
+        mock_client.create_github_issue.side_effect = RootCozError(
+            status_code=502,
+            detail="GitHub answered with something unreadable; your issue may have been filed.",
+        )
+        ambiguous = runner.invoke(
+            app,
+            [
+                "create-issue",
+                "job-1",
+                "--test",
+                "suite.test_a",
+                "--type",
+                "github",
+                "--title",
+                "T",
+                "--body",
+                "B",
+            ],
+        )
+        assert ambiguous.exit_code == 1
+        assert "Warning:" in ambiguous.output
+        assert "duplicate" in ambiguous.output.lower()
+
+        mock_client.create_github_issue.side_effect = RootCozError(
+            status_code=400, detail="Attachment 'bad.svg': unsupported file type"
+        )
+        refused = runner.invoke(
+            app,
+            [
+                "create-issue",
+                "job-1",
+                "--test",
+                "suite.test_a",
+                "--type",
+                "github",
+                "--title",
+                "T",
+                "--body",
+                "B",
+            ],
+        )
+        assert refused.exit_code == 1
+        assert "bad.svg" in refused.output
+
+        mock_client.create_jira_bug.side_effect = RootCozError(
+            status_code=0,
+            detail=(
+                "Request timed out: https://rootcoz.example.com/results/job-1/create-jira-bug "
+                "— the issue may already have been filed; check the tracker before retrying "
+                "to avoid creating a duplicate."
+            ),
+        )
+        timed_out = runner.invoke(
+            app,
+            [
+                "create-issue",
+                "job-1",
+                "--test",
+                "suite.test_a",
+                "--type",
+                "jira",
+                "--title",
+                "T",
+                "--body",
+                "B",
+                "--attach",
+                "/tmp/a.log",
+            ],
+        )
+        assert timed_out.exit_code == 1
+        assert "Warning: Tracker write outcome is uncertain" in timed_out.output
+        assert "may already have been filed" in timed_out.output
+        assert "check the tracker before retrying" in timed_out.output
+
+    def test_download_attachment_command_stdout_file_json_and_error(self, tmp_path):
+        raw_bytes = b"\x89PNG\r\n\x1a\n\x00\x01\xfe\xff"
+
+        def ok_handler(request):
+            assert request.url.path == "/api/issue-attachments/att-99"
+            return httpx.Response(200, content=raw_bytes)
+
+        with (
+            patch.dict(os.environ, {"ROOTCOZ_SERVER": _TEST_SERVER}, clear=True),
+            patch(
+                "rootcoz.cli.main.get_server_config",
+                return_value=ServerConfig(url=_TEST_SERVER),
+            ),
+            patch(
+                "rootcoz.cli.main._get_client",
+                side_effect=lambda *a, **kw: make_test_client(ok_handler),
+            ),
+        ):
+            # '-' writes ONLY raw binary bytes to stdout (zero status line).
+            stdout_res = runner.invoke(
+                app, ["download-attachment", "att-99", "-o", "-"]
+            )
+            assert stdout_res.exit_code == 0
+            assert stdout_res.stdout_bytes == raw_bytes
+
+            # File output writes atomically and prints byte count.
+            out_file = tmp_path / "saved.png"
+            file_res = runner.invoke(
+                app, ["download-attachment", "att-99", "--output", str(out_file)]
+            )
+            assert file_res.exit_code == 0
+            assert out_file.read_bytes() == raw_bytes
+            assert f"Downloaded {len(raw_bytes)} bytes" in file_res.output
+            assert not (tmp_path / "saved.png.part").exists()
+
+            # --json with file output emits structured JSON.
+            out_json = tmp_path / "saved2.png"
+            json_res = runner.invoke(
+                app,
+                ["download-attachment", "att-99", "-o", str(out_json), "--json"],
+            )
+            assert json_res.exit_code == 0
+            assert json.loads(json_res.output) == {
+                "attachment_id": "att-99",
+                "output": str(out_json),
+                "bytes_written": len(raw_bytes),
+            }
+
+        def not_found_handler(request):
+            return httpx.Response(404, json={"detail": "Not found"})
+
+        with (
+            patch.dict(os.environ, {"ROOTCOZ_SERVER": _TEST_SERVER}, clear=True),
+            patch(
+                "rootcoz.cli.main.get_server_config",
+                return_value=ServerConfig(url=_TEST_SERVER),
+            ),
+            patch(
+                "rootcoz.cli.main._get_client",
+                side_effect=lambda *a, **kw: make_test_client(not_found_handler),
+            ),
+        ):
+            missing_dest = tmp_path / "never-created.png"
+            err_res = runner.invoke(
+                app, ["download-attachment", "att-404", "-o", str(missing_dest)]
+            )
+            assert err_res.exit_code == 1
+            assert not missing_dest.exists()
+
+    def test_subcommand_help_works_without_server_config_while_value_arg_does_not_bypass(
+        self,
+    ):
+        env = host_env()
+        with (
+            patch("rootcoz.cli.main._state", {}),
+            patch.dict(os.environ, env, clear=True),
+            patch("rootcoz.cli.main.get_server_config", return_value=None),
+        ):
+            for cmd in (
+                ["create-issue", "--help"],
+                ["results", "delete", "--help"],
+                ["delete-attachment", "--help"],
+                ["results", "--help"],
+            ):
+                res = runner.invoke(app, cmd)
+                assert res.exit_code == 0, (cmd, res.output)
+            no_args = runner.invoke(app, ["results"])
+            assert "Usage:" in no_args.output
+            assert "No server specified" not in no_args.output
+            # Passing --help as the value of --body is NOT a help invocation!
+            not_help = runner.invoke(
+                app,
+                [
+                    "create-issue",
+                    "job-1",
+                    "--test",
+                    "t",
+                    "--type",
+                    "github",
+                    "--title",
+                    "T",
+                    "--body",
+                    "--help",
+                ],
+            )
+            assert not_help.exit_code == 1
+            assert "No server specified" in not_help.output
+
+    def test_delete_attachment_cli_confirmation_force_and_json(self, mock_client):
+        att_id = "ce8c8dc3-b6fd-486e-97cc-e461c0067119"
+        mock_client.delete_issue_attachment.return_value = {
+            "status": "deleted",
+            "attachment_id": att_id,
+            "freed_bytes": 1024,
+        }
+
+        aborted = runner.invoke(app, ["delete-attachment", att_id], input="n\n")
+        assert aborted.exit_code != 0
+        mock_client.delete_issue_attachment.assert_not_called()
+
+        confirmed = runner.invoke(app, ["delete-attachment", att_id], input="y\n")
+        assert confirmed.exit_code == 0, confirmed.output
+        assert f"Deleted attachment {att_id} (1024 bytes freed)" in confirmed.output
+        mock_client.delete_issue_attachment.assert_called_once_with(att_id)
+
+        mock_client.delete_issue_attachment.reset_mock()
+        forced = runner.invoke(app, ["delete-attachment", att_id, "-f", "--json"])
+        assert forced.exit_code == 0, forced.output
+        assert json.loads(forced.output) == {
+            "status": "deleted",
+            "attachment_id": att_id,
+            "freed_bytes": 1024,
+        }
+        mock_client.delete_issue_attachment.assert_called_once_with(att_id)

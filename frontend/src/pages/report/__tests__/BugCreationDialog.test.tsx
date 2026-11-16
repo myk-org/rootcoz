@@ -2,11 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { MemoryRouter } from 'react-router-dom'
+import { useEffect, type ReactNode } from 'react'
 import { ReportProvider } from '../ReportContext'
+import { useReportDispatch, useReportState } from '../reportState'
 import { BugCreationDialog } from '../BugCreationDialog'
 import { resetProviderCatalogCache } from '@/lib/useProviderOptions'
 import { ApiError } from '@/lib/api'
 import { SERVER_ACCESS_HELP } from '@/components/shared/CredentialSourceLabel'
+import type { Capabilities, IssueAttachmentSummary } from '@/types'
 
 HTMLElement.prototype.hasPointerCapture = () => false
 HTMLElement.prototype.setPointerCapture = () => {}
@@ -47,8 +50,16 @@ vi.mock('@/lib/api', () => {
     api: { get: (...args: unknown[]) => get(...args), post: (...args: unknown[]) => post(...args) },
     ApiError: _ApiError,
     extractApiDetail: (err: unknown): string | null => {
-      const detail = err instanceof _ApiError ? (err.body as { detail?: unknown })?.detail : null
-      return typeof detail === 'string' ? detail : null
+      if (!(err instanceof _ApiError)) return null
+      const detail = (err.body as { detail?: unknown } | null)?.detail
+      if (typeof detail === 'string') return detail
+      if (Array.isArray(detail)) {
+        const msgs = detail
+          .map((item) => (typeof item?.msg === 'string' ? item.msg.replace(/^Value error, /, '') : ''))
+          .filter(Boolean)
+        return msgs.length > 0 ? msgs.join('; ') : null
+      }
+      return null
     },
   }
 })
@@ -620,5 +631,403 @@ describe('BugCreationDialog tracker credential', () => {
     await openGeneratedPreview(user)
     expect(screen.getByRole('button', { name: /create github issue/i })).toBeEnabled()
     expect(screen.queryByRole('link', { name: /Open Profile Settings/ })).not.toBeInTheDocument()
+  })
+})
+
+function makeAttachmentCapabilities(
+  overrides?: Partial<Capabilities['issue_attachments']>,
+): Capabilities {
+  return {
+    github_issues_enabled: true,
+    jira_issues_enabled: true,
+    issue_attachments: {
+      max_files: 3,
+      max_file_bytes: 5242880,
+      max_total_bytes: 10485760,
+      max_run_bytes: 209715200,
+      max_owner_bytes: 524288000,
+      types: ['text/plain', 'image/png', 'image/jpeg', 'image/gif', 'image/webp'],
+      report_github: { available: true, reason: 'available' },
+      report_jira: { available: true, reason: 'available' },
+      feedback: { available: true, reason: 'available' },
+      chat_ui: { available: false, reason: 'browser_chat_unsupported' },
+      direct_chat: { available: true, reason: 'available' },
+      ...overrides,
+    },
+  }
+}
+
+async function openPreviewWithCapabilities(
+  user: ReturnType<typeof userEvent.setup>,
+  target: 'github' | 'jira',
+  capabilities?: Capabilities | null,
+) {
+  const view = render(
+    <MemoryRouter>
+      <ReportProvider>
+        <BugCreationDialog
+          open
+          onOpenChange={() => {}}
+          jobId="job-1"
+          testName="test-a"
+          target={target}
+          capabilities={capabilities}
+        />
+      </ReportProvider>
+    </MemoryRouter>,
+  )
+  await waitFor(() => expect(screen.getByLabelText('Issue Prompt')).toBeInTheDocument())
+  await user.click(screen.getByRole('button', { name: /continue/i }))
+  await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+  return view
+}
+
+describe('BugCreationDialog issue attachments', () => {
+  afterEach(() => vi.restoreAllMocks())
+
+  it('disables the picker while capabilities are pending or unavailable', async () => {
+    const user = userEvent.setup()
+    get.mockImplementation(withAccountRow((path) => {
+      if (path === '/api/capabilities') return new Promise(() => {})
+      if (path.startsWith('/api/ai-models')) return catalog
+      if (path.endsWith('/issue-prompt')) return { issue_prompt: 'Describe the bug' }
+      return {}
+    }))
+    await openGeneratedPreview(user, 'github')
+
+    expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled()
+    expect(screen.getByText('Checking attachment capabilities...')).toBeInTheDocument()
+  })
+
+  it('reads capabilities from ReportState without fetching /api/capabilities', async () => {
+    const user = userEvent.setup()
+    function WithLoadedReportCapabilities({ caps, children }: { caps: Capabilities | null; children: ReactNode }) {
+      const dispatch = useReportDispatch()
+      const { capabilitiesLoaded } = useReportState()
+      useEffect(() => {
+        dispatch({ type: 'SET_CAPABILITIES', payload: caps })
+      }, [caps, dispatch])
+      return capabilitiesLoaded ? <>{children}</> : null
+    }
+    render(
+      <MemoryRouter>
+        <ReportProvider>
+          <WithLoadedReportCapabilities caps={makeAttachmentCapabilities()}>
+            <BugCreationDialog open onOpenChange={() => {}} jobId="job-1" testName="test-a" target="jira" />
+          </WithLoadedReportCapabilities>
+        </ReportProvider>
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(screen.getByLabelText('Issue Prompt')).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /continue/i }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+
+    expect(screen.getByRole('button', { name: 'Attach files' })).toBeEnabled()
+    expect(screen.getByText('Up to 3 files (5 MiB each, 10 MiB total).')).toBeInTheDocument()
+    expect(get.mock.calls.filter(([path]) => path === '/api/capabilities')).toHaveLength(0)
+  })
+
+  it('disables the picker with mapped reasons per target tracker and shows limits when available', async () => {
+    const user = userEvent.setup()
+    const caps = makeAttachmentCapabilities({
+      report_github: { available: false, reason: 'public_base_url_required' },
+      report_jira: { available: false, reason: 'tracker_disabled' },
+    })
+
+    await openPreviewWithCapabilities(user, 'github', caps)
+    expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled()
+    expect(screen.getByText(/PUBLIC_BASE_URL/)).toBeInTheDocument()
+    // Preloaded capabilities skip /api/capabilities network fetch
+    expect(get.mock.calls.filter(([path]) => path === '/api/capabilities')).toHaveLength(0)
+    cleanup()
+
+    await openPreviewWithCapabilities(user, 'jira', caps)
+    expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled()
+    expect(screen.getByText(/issue tracker is disabled/i)).toBeInTheDocument()
+    cleanup()
+
+    await openPreviewWithCapabilities(user, 'github', makeAttachmentCapabilities())
+    expect(screen.getByRole('button', { name: 'Attach files' })).toBeEnabled()
+    expect(screen.getByText('Up to 3 files (5 MiB each, 10 MiB total).')).toBeInTheDocument()
+  })
+
+  it('omits attachments when none are selected and encodes selected files inside guarded create', async () => {
+    const user = userEvent.setup()
+    const summary: IssueAttachmentSummary = {
+      count: 1,
+      types: ['text/plain'],
+      native_attached: 0,
+      linked: 1,
+      failed_count: 0,
+      files: [{ filename: 'keep.log', id: 'att-1', delivery: 'hosted', reason: 'hosted' }],
+    }
+    post.mockImplementation(async (path: string) => {
+      if (path === previewPathFor('github')) return { title: 'Issue title', body: 'Issue body', similar_issues: [] }
+      if (path === createPathFor('github')) {
+        return { url: 'https://github.com/org/repo/issues/10', key: '', number: 10, title: 'Issue title', comment_id: 1, attachments: summary }
+      }
+      return {}
+    })
+
+    await openPreviewWithCapabilities(user, 'github', makeAttachmentCapabilities())
+    const fileInput = screen.getByLabelText('Issue attachments')
+    fireEvent.change(fileInput, {
+      target: {
+        files: [
+          new File(['drop-me'], 'drop.log'),
+          new File(['hello'], 'keep.log'),
+        ],
+      },
+    })
+    expect(screen.getByText('drop.log')).toBeInTheDocument()
+    expect(screen.getByText('keep.log')).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Remove drop.log' }))
+    expect(screen.queryByText('drop.log')).not.toBeInTheDocument()
+
+    // Double-click Create: submit guard prevents concurrent FileReader + POST execution
+    const createBtn = screen.getByRole('button', { name: /create github issue/i })
+    fireEvent.click(createBtn)
+    fireEvent.click(createBtn)
+
+    await waitFor(() => expect(screen.getByText('GitHub Issue created successfully.')).toBeInTheDocument())
+
+    const previewCalls = post.mock.calls.filter(([path]) => path === previewPathFor('github'))
+    expect(previewCalls[0][1]).not.toHaveProperty('attachments')
+
+    const createCalls = post.mock.calls.filter(([path]) => path === createPathFor('github'))
+    expect(createCalls).toHaveLength(1)
+    expect(createCalls[0][1]).toMatchObject({
+      title: 'Issue title',
+      body: 'Issue body',
+      attachments: [{ filename: 'keep.log', data_b64: btoa('hello') }],
+    })
+
+    // Hosted summary rendered without fallback/unknown warning
+    const summaryBox = screen.getByTestId('attachment-delivery-summary')
+    expect(summaryBox).toHaveTextContent('Attachments (1)')
+    expect(summaryBox).toHaveTextContent('text/plain')
+    expect(summaryBox).toHaveTextContent('keep.log')
+    expect(summaryBox).toHaveTextContent('Hosted link in issue body')
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('surfaces FileReader failure without POST or uncertain warning and retains files for retry', async () => {
+    const user = userEvent.setup()
+    post.mockImplementation(async (path: string) => {
+      if (path === previewPathFor('github')) return { title: 'Issue title', body: 'Issue body', similar_issues: [] }
+      if (path === createPathFor('github')) {
+        return { url: 'https://github.com/org/repo/issues/11', key: '', number: 11, title: 'Issue title', comment_id: 1 }
+      }
+      return {}
+    })
+    await openPreviewWithCapabilities(user, 'github', makeAttachmentCapabilities())
+
+    const fileInput = screen.getByLabelText('Issue attachments')
+    fireEvent.change(fileInput, { target: { files: [new File(['bad'], 'unreadable.log')] } })
+
+    const spy = vi.spyOn(FileReader.prototype, 'readAsDataURL').mockImplementationOnce(function (this: FileReader) {
+      this.dispatchEvent(new ProgressEvent('error'))
+    })
+
+    await user.click(screen.getByRole('button', { name: /create github issue/i }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not read unreadable.log')
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(post.mock.calls.filter(([path]) => path === createPathFor('github'))).toHaveLength(0)
+    expect(screen.getByText('unreadable.log')).toBeInTheDocument()
+
+    spy.mockRestore()
+    await user.click(screen.getByRole('button', { name: /retry/i }))
+    await waitFor(() => expect(screen.getByText('GitHub Issue created successfully.')).toBeInTheDocument())
+    expect(post.mock.calls.filter(([path]) => path === createPathFor('github'))).toHaveLength(1)
+  })
+
+  it.each([
+    [400, 'Bad Request', { detail: 'Unsupported attachment extension .svg on diagram.svg.' }, 'Unsupported attachment extension .svg'],
+    [413, 'Payload Too Large', { detail: 'Request body exceeds 15 MiB attachment limit.' }, 'exceeds 15 MiB attachment limit'],
+    [422, 'Unprocessable Entity', { detail: [{ msg: 'Invalid attachment payload schema' }] }, 'Invalid attachment payload schema'],
+  ])('surfaces %i refusal visibly while retaining selected files for safe retry', async (status, statusText, body, expectedText) => {
+    const user = userEvent.setup()
+    mockCreateFlow('github', new ApiError(status, statusText, body))
+    await openPreviewWithCapabilities(user, 'github', makeAttachmentCapabilities())
+
+    fireEvent.change(screen.getByLabelText('Issue attachments'), {
+      target: { files: [new File(['log-bytes'], 'trace.log')] },
+    })
+
+    await user.click(screen.getByRole('button', { name: /create github issue/i }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent(expectedText)
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.getByText('trace.log')).toBeInTheDocument()
+    const retryBtn = screen.getByRole('button', { name: /retry/i })
+    expect(retryBtn).toBeEnabled()
+
+    await user.click(retryBtn)
+    await waitFor(() => expect(screen.getByText('GitHub Issue created successfully.')).toBeInTheDocument())
+  })
+
+  it('warns never to resubmit on uncertain create while retaining files for inspection and blocking blind retry', async () => {
+    const user = userEvent.setup()
+    mockCreateFlow('github', new ApiError(502, 'Bad Gateway', { detail: 'GitHub did not answer.' }))
+    await openPreviewWithCapabilities(user, 'github', makeAttachmentCapabilities())
+
+    fireEvent.change(screen.getByLabelText('Issue attachments'), {
+      target: { files: [new File(['evidence'], 'evidence.log')] },
+    })
+
+    await user.click(screen.getByRole('button', { name: /create github issue/i }))
+
+    const warning = await screen.findByRole('status')
+    expect(warning).toHaveTextContent(/may already have been filed.*never resubmit blindly/i)
+    expect(warning).toHaveTextContent(/Selected files remain listed below for inspection/i)
+    expect(screen.getByText('evidence.log')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /retry/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Remove evidence.log' })).toBeDisabled()
+  })
+
+  it('clears selected files when the dialog closes and reopens', async () => {
+    const user = userEvent.setup()
+    const caps = makeAttachmentCapabilities()
+    const { rerender } = render(
+      <MemoryRouter>
+        <ReportProvider>
+          <BugCreationDialog open onOpenChange={() => {}} jobId="job-1" testName="test-a" target="github" capabilities={caps} />
+        </ReportProvider>
+      </MemoryRouter>,
+    )
+    await waitFor(() => expect(screen.getByLabelText('Issue Prompt')).toBeInTheDocument())
+    await user.click(screen.getByRole('button', { name: /continue/i }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+
+    fireEvent.change(screen.getByLabelText('Issue attachments'), {
+      target: { files: [new File(['abc'], 'session1.log')] },
+    })
+    expect(screen.getByText('session1.log')).toBeInTheDocument()
+
+    rerender(
+      <MemoryRouter>
+        <ReportProvider>
+          <BugCreationDialog open={false} onOpenChange={() => {}} jobId="job-1" testName="test-a" target="github" capabilities={caps} />
+        </ReportProvider>
+      </MemoryRouter>,
+    )
+    rerender(
+      <MemoryRouter>
+        <ReportProvider>
+          <BugCreationDialog open onOpenChange={() => {}} jobId="job-1" testName="test-a" target="github" capabilities={caps} />
+        </ReportProvider>
+      </MemoryRouter>,
+    )
+
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+    expect(screen.queryByText('session1.log')).not.toBeInTheDocument()
+  })
+
+  it('renders Jira fallback_only and native_outcome_unknown delivery summaries with duplicate-create warnings', async () => {
+    const user = userEvent.setup()
+    const jiraSummary: IssueAttachmentSummary = {
+      count: 3,
+      types: ['image/png', 'text/plain'],
+      native_attached: 1,
+      linked: 3,
+      failed_count: 2,
+      files: [
+        { filename: 'ok.png', id: 'id-1', delivery: 'native_and_hosted', reason: 'native_attached' },
+        { filename: 'denied.log', id: 'id-2', delivery: 'fallback_only', reason: 'native_refused' },
+        { filename: 'slow.log', id: 'id-3', delivery: 'native_outcome_unknown', reason: 'native_outcome_unknown' },
+      ],
+    }
+    post.mockImplementation(async (path: string) => {
+      if (path === previewPathFor('jira')) return { title: 'Jira bug', body: 'Bug details', similar_issues: [] }
+      if (path === createPathFor('jira')) {
+        return { url: 'https://jira.example.com/browse/MTV-9', key: 'MTV-9', title: 'Jira bug', comment_id: 2, attachments: jiraSummary }
+      }
+      return {}
+    })
+
+    await openPreviewWithCapabilities(user, 'jira', makeAttachmentCapabilities())
+    fireEvent.change(screen.getByLabelText('Issue attachments'), {
+      target: { files: [new File(['1'], 'ok.png'), new File(['2'], 'denied.log'), new File(['3'], 'slow.log')] },
+    })
+
+    await user.click(screen.getByRole('button', { name: /create jira ticket/i }))
+    await waitFor(() => expect(screen.getByText('Jira Ticket created successfully.')).toBeInTheDocument())
+
+    const summaryBox = screen.getByTestId('attachment-delivery-summary')
+    expect(summaryBox).toHaveTextContent('Attachments (3)')
+    expect(summaryBox).toHaveTextContent('ok.png')
+    expect(summaryBox).toHaveTextContent('Attached in Jira + hosted link')
+    expect(summaryBox).toHaveTextContent('denied.log')
+    expect(summaryBox).toHaveTextContent('Hosted fallback link only (Jira refused native upload)')
+    expect(summaryBox).toHaveTextContent('slow.log')
+    expect(summaryBox).toHaveTextContent('Jira native outcome unknown; hosted link in issue body')
+
+    const statusBox = screen.getByRole('status')
+    expect(statusBox).toHaveTextContent(/One or more Jira native uploads were unavailable.*Do not resubmit/i)
+    expect(statusBox).toHaveTextContent(/Jira native upload outcome is unknown.*Never resubmit/i)
+  })
+
+  it('enforces capability count, per-file, and cumulative limits in the picker and before create encoding', async () => {
+    const user = userEvent.setup()
+    const readSpy = vi.spyOn(FileReader.prototype, 'readAsDataURL')
+    const caps = makeAttachmentCapabilities({
+      max_files: 2,
+      max_file_bytes: 10,
+      max_total_bytes: 15,
+    })
+    const { rerender } = await openPreviewWithCapabilities(user, 'github', caps)
+    const fileInput = screen.getByLabelText('Issue attachments')
+
+    // Count rejection (> 2 files)
+    fireEvent.change(fileInput, {
+      target: { files: [new File(['a'], '1.log'), new File(['b'], '2.log'), new File(['c'], '3.log')] },
+    })
+    expect(screen.getByRole('alert')).toHaveTextContent('Cannot attach more than 2 files (3 selected).')
+    expect(screen.queryByText('1.log')).not.toBeInTheDocument()
+
+    // Per-file size rejection (> 10 bytes)
+    fireEvent.change(fileInput, {
+      target: { files: [new File(['0123456789A'], 'oversize.log')] },
+    })
+    expect(screen.getByRole('alert')).toHaveTextContent('oversize.log (11 bytes) exceeds the 10 bytes per-file limit.')
+    expect(screen.queryByText('oversize.log')).not.toBeInTheDocument()
+
+    // Valid selection clears picker alert, then cumulative rejection (> 15 bytes) preserves valid file
+    fireEvent.change(fileInput, { target: { files: [new File(['0123456789'], 'ten.log')] } })
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByText('ten.log')).toBeInTheDocument()
+
+    fireEvent.change(fileInput, { target: { files: [new File(['012345'], 'six.log')] } })
+    expect(screen.getByRole('alert')).toHaveTextContent('Selected files total 16 bytes, exceeding the 15 bytes total limit.')
+    expect(screen.getByText('ten.log')).toBeInTheDocument()
+    expect(screen.queryByText('six.log')).not.toBeInTheDocument()
+
+    // Tighten server capability limits before submit so encoder defense triggers before FileReader
+    const tighterCaps = makeAttachmentCapabilities({
+      max_files: 2,
+      max_file_bytes: 8,
+      max_total_bytes: 15,
+    })
+    rerender(
+      <MemoryRouter>
+        <ReportProvider>
+          <BugCreationDialog
+            open
+            onOpenChange={() => {}}
+            jobId="job-1"
+            testName="test-a"
+            target="github"
+            capabilities={tighterCaps}
+          />
+        </ReportProvider>
+      </MemoryRouter>,
+    )
+    readSpy.mockClear()
+    await user.click(screen.getByRole('button', { name: /create github issue/i }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('ten.log (10 bytes) exceeds the 8 bytes per-file limit.')
+    expect(readSpy).not.toHaveBeenCalled()
+    expect(post.mock.calls.filter(([path]) => path === createPathFor('github'))).toHaveLength(0)
   })
 })

@@ -2666,18 +2666,18 @@ def test_tracked_in_delete_of_an_unknown_link_is_audited(app_client) -> None:
 
 def test_feedback_create_is_audited_without_the_body(app_client) -> None:
     admin_login(app_client)
-    created = SimpleNamespace(
-        issue_url="https://github.com/o/r/issues/7", issue_number=7, title="A title"
-    )
+    created = {
+        "url": "https://github.com/o/r/issues/7",
+        "number": 7,
+        "title": "A title",
+    }
     with (
         patch.object(
             storage,
             "get_user_tokens",
             AsyncMock(return_value={"github_token": "gh-token-0123456789"}),
         ),
-        patch.object(
-            main, "create_feedback_from_preview", AsyncMock(return_value=created)
-        ),
+        patch.object(main, "create_github_issue", AsyncMock(return_value=created)),
     ):
         response = app_client.post(
             "/api/feedback/create",
@@ -2737,7 +2737,7 @@ def test_feedback_create_upstream_failure_is_audited_with_its_status(
             "get_user_tokens",
             AsyncMock(return_value={"github_token": "gh-token-0123456789"}),
         ),
-        patch.object(main, "create_feedback_from_preview", AsyncMock(side_effect=exc)),
+        patch.object(main, "create_github_issue", AsyncMock(side_effect=exc)),
     ):
         refused = app_client.post(
             "/api/feedback/create",

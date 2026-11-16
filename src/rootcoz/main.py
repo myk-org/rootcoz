@@ -16,11 +16,12 @@ import os
 import re
 import secrets
 import sqlite3
+import stat
 import string
 import threading
 import time as _time
 import uuid
-from collections import Counter, defaultdict, deque
+from collections import Counter, OrderedDict, defaultdict, deque
 from collections.abc import (
     AsyncIterator,
     Awaitable,
@@ -41,7 +42,7 @@ from dataclasses import field as dataclass_field
 from datetime import UTC, datetime, timedelta
 from functools import partial
 from pathlib import Path
-from typing import Annotated, Any, Literal, get_args
+from typing import Annotated, Any, BinaryIO, Literal, NoReturn, get_args
 from urllib.parse import quote as _urlquote
 from urllib.parse import urlparse
 
@@ -65,12 +66,14 @@ from pi_sidecar_client import (
     run_parallel_with_limit,
 )
 from pydantic import BaseModel, Field, SecretStr, ValidationError
+from starlette.background import BackgroundTask
 from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 
 from rootcoz import (
     analysis_slots,
     get_child_logger,
+    issue_attachments,
     issue_matching,
     server_status,
     storage,
@@ -100,7 +103,7 @@ from rootcoz.ai_client import (
     supported_key_providers,
     update_model_catalog,
 )
-from rootcoz.attribution import AiProvenance
+from rootcoz.attribution import AiProvenance, apply_ai_attribution
 from rootcoz.bug_creation import (
     create_github_issue,
     create_jira_bug,
@@ -131,6 +134,7 @@ from rootcoz.config import (
     jira_availability,
     jira_site_url_error,
     jira_unavailable_reason,
+    normalize_feedback_repo_url,
     normalize_jira_auth_mode,
     parse_additional_repos,
     parse_peer_configs,
@@ -145,6 +149,10 @@ from rootcoz.encryption import (
     encrypt_sensitive_fields,
     get_hmac_secret,
     strip_sensitive_from_response,
+)
+from rootcoz.engine.chat import (
+    CHAT_TOOL_REJECTED_FIELDS,
+    CHAT_TOOL_REJECTED_TEMPLATE,
 )
 from rootcoz.engine.core import (
     ROOTCOZ_ISSUE_PROMPT_FILENAME,
@@ -188,8 +196,8 @@ from rootcoz.exporters.reportportal import (
     format_rp_error,
 )
 from rootcoz.feedback import (
-    create_feedback_from_preview,
     generate_feedback_preview,
+    prepare_feedback_issue,
     scrub_sensitive_data,
 )
 from rootcoz.github_issues import (
@@ -206,11 +214,13 @@ from rootcoz.jira import (
     JiraConnection,
     JiraDeploymentCredentialRefused,
     JiraOAuthMintError,
+    add_jira_attachment,
     classify_jira_secret,
     complete_jira_connection,
     enrich_with_jira_matches,
     filter_matches_with_ai,
     jira_method_url,
+    require_caller_connection,
     resolve_jira_connection,
     resolve_jira_connection_from_params,
 )
@@ -251,6 +261,9 @@ from rootcoz.models import (
     FeedbackRequest,
     FeedbackResponse,
     FilterPresetResponse,
+    IssueAttachmentFileSummary,
+    IssueAttachmentSummary,
+    IssueAttachmentUpload,
     JobMetadataInput,
     OverrideClassificationRequest,
     OverridePatternRequest,
@@ -648,6 +661,7 @@ _SETTINGS_CATEGORIES: dict[str, list[str]] = {
         "github_token",
         "tests_repo_url",
         "tests_repo_token",
+        "feedback_repo_url",
         "enable_github_issues",
     ],
     "Report Portal": [
@@ -784,6 +798,7 @@ _SETTING_LABEL_OVERRIDES: dict[str, str] = {
     "prow_url": "Prow Deck URL",
     "gcs_bucket": "GCS bucket",
     "tests_repo_url": "Tests repository URL",
+    "feedback_repo_url": "Feedback repository URL",
     "allowed_users": "Allowed users (write allow-list)",
     "default_user_role": "Default role for new users",
     "trust_proxy_headers": "Trust proxy identity headers",
@@ -1875,6 +1890,7 @@ _AUDIT_REASON_BY_STATUS = {
     403: "forbidden",
     404: "not_found",
     409: "conflict",
+    413: "payload_too_large",
     422: "invalid_payload",
     502: "upstream_failure",
 }
@@ -2184,7 +2200,7 @@ async def prune_results_periodically() -> int:
     # Ahead of every gate: these jobs are already deleted and only their cleanup
     # is left, so the retry is not a second prune.
     for pending_id in list(_results_retention_cleanup_pending):
-        if await _cleanup_deleted_job_chat_workspaces(pending_id):
+        if await _cleanup_deleted_job_disk_state(pending_id):
             _results_retention_cleanup_pending.discard(pending_id)
     if not _daily_prune_slot_open(_last_results_prune_at) or _results_prune_in_flight:
         return 0
@@ -2200,6 +2216,7 @@ async def prune_results_periodically() -> int:
             is_protected=_retention_is_protected,
             prepare=_retention_prepare,
             finish=_finish_job_deletion,
+            around_chunk=_hold_attachment_run_locks,
             stats=stats,
         )
     except asyncio.CancelledError:
@@ -3393,47 +3410,391 @@ async def _reclaim_artifact_extracts(
     return (total_reclaimed, total_considered)
 
 
-async def _reclaim_abandoned_workspaces(job_ids: set[str] | None = None) -> int:
-    """Delete the trees a previous process abandoned; return the count reclaimed.
+async def _startup_owner_ids() -> set[int] | None:
+    """Snapshot immutable ``users.id`` values for startup reclaim; ``None`` when unreadable."""
+    try:
+        return await storage.list_user_ids()
+    except Exception as exc:  # noqa: BLE001 - a degraded sweep must not abort startup
+        logger.warning(
+            "Startup reclaim: cannot read the users table (%s), user attachments "
+            "stay on disk",
+            type(exc).__name__,
+        )
+        return None
 
-    One pass, three phases over the two temp roots: the analysis workspaces and
-    the marked children of the base, then the chat workspaces whose ``results``
-    row is gone, then the leftover CI artifact extracts. Composed here rather than
-    spawned as separate tasks on purpose — two tasks listing the same root would
-    delete the same trees twice, log two ``cleanup`` lines per tree, and walk a
-    tree the other is deleting.
 
-    ``job_ids`` is the snapshot ``lifespan`` took *before* spawning this task.
-    ``None`` means "no decision available" and is never re-read here: a read taken
-    while uvicorn already serves requests would turn "could not decide" into
-    "every pre-existing chat is an orphan".
+_OWNER_MARKER_NAME_RE = re.compile(r"\A\.([1-9][0-9]*)\.rootcoz-deleting\Z")
+_JOB_MARKER_NAME_RE = re.compile(
+    r"\A\.job-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.rootcoz-deleting\Z"
+)
+_POSITIVE_INT_NAME_RE = re.compile(r"\A[1-9][0-9]*\Z")
+_attachment_scope_locks: dict[str, asyncio.Lock] = {}
+_attachment_scope_lock_refs: dict[str, int] = {}
+_held_attachment_scope_locks: contextvars.ContextVar[frozenset[str]] = (
+    contextvars.ContextVar("_held_attachment_scope_locks", default=frozenset())
+)
+_in_flight_attachment_submissions: set[str] = set()
 
-    Why the leftovers exist: a ``finally`` that meets a live graph build returns
-    ``ABANDON``, which stops ``repo_manager.cleanup``; an extract dir is deleted at
-    the end of its use and a survivor is therefore a leftover by construction; and
-    a chat workspace is reachable only through chat init, which 404s when the job
-    has no stored result. Process start is the one moment no builder can hold any
-    of those trees, so they are reaped here, off the loop, through the same reaper
-    as every other delete.
 
-    Never touched: a live job's chat workspace (sessions, clones and graph — reuse
-    is the feature), the admin chat, anything created after this process started,
-    a tree with a fresh delete marker, and an extract dir a kept chat still links
-    to. Each is a falsifier in ``tests/test_main.py::TestStartupWorkspaceReclaim``,
-    because a wrong stale rule deletes a user's work.
+@asynccontextmanager
+async def _hold_attachment_scope_locks(*keys: str) -> AsyncIterator[None]:
+    """Acquire owner-then-run attachment scope locks with refcounted cleanup."""
+    already_held = _held_attachment_scope_locks.get()
+    ordered = sorted(
+        {k for k in keys if k and k not in already_held},
+        key=lambda item: (0 if item.startswith("owner:") else 1, item),
+    )
+    if not ordered:
+        yield
+        return
+    acquired_locks: list[tuple[str, asyncio.Lock]] = []
+    for key in ordered:
+        lock = _attachment_scope_locks.get(key)
+        if lock is None:
+            lock = asyncio.Lock()
+            _attachment_scope_locks[key] = lock
+        _attachment_scope_lock_refs[key] = _attachment_scope_lock_refs.get(key, 0) + 1
+        acquired_locks.append((key, lock))
+    entered: list[asyncio.Lock] = []
+    token = _held_attachment_scope_locks.set(already_held | frozenset(ordered))
+    try:
+        for _key, lock in acquired_locks:
+            await lock.acquire()
+            entered.append(lock)
+        yield
+    finally:
+        _held_attachment_scope_locks.reset(token)
+        for lock in reversed(entered):
+            lock.release()
+        for key, lock in reversed(acquired_locks):
+            refs = _attachment_scope_lock_refs.get(key, 1) - 1
+            if refs > 0:
+                _attachment_scope_lock_refs[key] = refs
+            else:
+                _attachment_scope_lock_refs.pop(key, None)
+                if _attachment_scope_locks.get(key) is lock and not lock.locked():
+                    _attachment_scope_locks.pop(key, None)
+
+
+def _canonical_uuid(value: str) -> bool:
+    try:
+        return str(uuid.UUID(value)) == value
+    except ValueError:
+        return False
+
+
+@asynccontextmanager
+async def _hold_attachment_run_locks(job_ids: Sequence[str]) -> AsyncIterator[None]:
+    """Hold attachment run locks for every canonical UUID in *job_ids*."""
+    canonical_ids = [jid for jid in job_ids if _canonical_uuid(jid)]
+    keys = [f"job:{jid}" for jid in canonical_ids]
+    async with _hold_attachment_scope_locks(*keys):
+        try:
+            yield
+        except BaseException:
+            for jid in canonical_ids:
+                with contextlib.suppress(Exception):
+                    if await asyncio.shield(storage.get_result(jid)) is None:
+                        await asyncio.shield(
+                            issue_attachments.write_job_delete_marker(
+                                jid, only_if_dir_exists=True
+                            )
+                        )
+            raise
+
+
+async def _record_interrupted_job_delete_marker(job_id: str) -> None:
+    """Persist ``.job-<job_id>.rootcoz-deleting`` only when inline run cleanup failed."""
+    try:
+        await issue_attachments.write_job_delete_marker(job_id)
+    except OSError as exc:
+        logger.warning(
+            "Failed to record delete marker for job %s (errno=%s)",
+            job_id,
+            exc.errno,
+        )
+
+
+async def _cleanup_deleted_job_attachments(job_id: str) -> bool:
+    """Remove ``issue-attachments/jobs/<job_id>`` synchronously under the run lock.
+
+    Writes ``.job-<job_id>.rootcoz-deleting`` only if inline cleanup fails so an
+    interrupted run-deletion request can be retried explicitly without scanning
+    arbitrary directories for orphans.
+    """
+    from rootcoz.temp_paths import CleanupOutcome, cleanup_off_loop
+
+    if not _canonical_uuid(job_id):
+        return True
+    async with _hold_attachment_scope_locks(f"job:{job_id}"):
+        try:
+            outcome = await cleanup_off_loop(
+                f"attachments-{job_id}",
+                partial(issue_attachments.delete_job_attachments_dir, job_id),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to cleanup job attachments for %s", job_id, exc_info=True
+            )
+            await _record_interrupted_job_delete_marker(job_id)
+            return False
+        if outcome is not CleanupOutcome.CLEAN:
+            await _record_interrupted_job_delete_marker(job_id)
+            return False
+        try:
+            await storage.delete_issue_attachment_rows_for_job(job_id)
+        except Exception:
+            logger.warning(
+                "Failed to delete attachment rows for deleted job %s; "
+                "recording delete marker for explicit retry",
+                job_id,
+                exc_info=True,
+            )
+            await _record_interrupted_job_delete_marker(job_id)
+            return False
+        try:
+            await issue_attachments.remove_job_delete_marker(job_id)
+        except OSError as exc:
+            logger.warning(
+                "Failed to remove delete marker for job %s (errno=%s)",
+                job_id,
+                exc.errno,
+            )
+            return False
+    return True
+
+
+async def _cleanup_deleted_job_disk_state(job_id: str) -> bool:
+    """Run chat workspace cleanup and attachment cleanup independently."""
+    chat_clean = await _cleanup_deleted_job_chat_workspaces(job_id)
+    att_clean = await _cleanup_deleted_job_attachments(job_id)
+    return chat_clean and att_clean
+
+
+async def _cleanup_deleted_owner_attachments(owner_id: int) -> bool:
+    """Unlink ``users/<owner_id>``, delete run-less rows, then remove marker."""
+    from rootcoz.temp_paths import CleanupOutcome, cleanup_off_loop
+
+    async with _hold_attachment_scope_locks(f"owner:{owner_id}"):
+        try:
+            outcome = await cleanup_off_loop(
+                f"owner-attachments-{owner_id}",
+                partial(issue_attachments.delete_owner_attachments_dir, owner_id),
+            )
+        except Exception:
+            logger.warning(
+                "Failed to unlink attachments for deleted owner %d",
+                owner_id,
+                exc_info=True,
+            )
+            return False
+        if outcome is not CleanupOutcome.CLEAN:
+            return False
+        try:
+            await storage.delete_issue_attachment_rows_for_user(owner_id)
+        except Exception:
+            logger.warning(
+                "Failed to delete run-less attachment rows for deleted owner %d; "
+                "retaining delete marker for startup recovery",
+                owner_id,
+                exc_info=True,
+            )
+            return False
+        try:
+            await issue_attachments.remove_owner_delete_marker(owner_id)
+        except OSError as exc:
+            logger.warning(
+                "Failed to remove delete marker for owner %d (errno=%s)",
+                owner_id,
+                exc.errno,
+            )
+            return False
+        logger.info("Cleaned up run-less attachments for deleted owner %d", owner_id)
+        return True
+
+
+async def _reclaim_issue_attachments(
+    job_ids: set[str] | None, owner_ids: set[int] | None
+) -> tuple[int, int]:
+    """Retry explicit interrupted attachment deletion markers and pending submission rows.
+
+    Attachment blobs and rows are deleted synchronously inline on run deletion,
+    retention chunks, submission rollback, attachment deletion, and account
+    deletion. This pass never scans unmarked directories for orphans; it only
+    retries explicit ``.job-<job_id>.rootcoz-deleting`` markers,
+    ``.<owner_id>.rootcoz-deleting`` markers, and ``reserved``/``cleanup_pending``
+    submission rows left behind when a specific deletion or create request was
+    interrupted.
+    """
+    reclaimed = 0
+    considered = 0
+
+    # 1. Explicit interrupted run-deletion markers (.job-<job_id>.rootcoz-deleting) only.
+    if job_ids is not None:
+        job_entries = await asyncio.to_thread(
+            issue_attachments.list_scope_entries, "jobs"
+        )
+        if job_entries is not None:
+            by_job_name = dict(job_entries)
+            candidate_jobs: list[str] = []
+            seen_jobs: set[str] = set()
+            for name, st in job_entries:
+                marker_match = _JOB_MARKER_NAME_RE.fullmatch(name)
+                if not marker_match:
+                    continue
+                jid = marker_match.group(1)
+                if (
+                    not _canonical_uuid(jid)
+                    or jid in job_ids
+                    or jid in seen_jobs
+                    or stat.S_ISLNK(st.st_mode)
+                    or st.st_mtime >= _PROCESS_STARTED_AT
+                ):
+                    continue
+                dir_st = by_job_name.get(jid)
+                if dir_st is not None and (
+                    stat.S_ISLNK(dir_st.st_mode)
+                    or not stat.S_ISDIR(dir_st.st_mode)
+                    or dir_st.st_mtime >= _PROCESS_STARTED_AT
+                ):
+                    continue
+                seen_jobs.add(jid)
+                candidate_jobs.append(jid)
+            for jid in candidate_jobs:
+                considered += 1
+                try:
+                    if await storage.get_result(jid) is not None:
+                        continue
+                    if await _cleanup_deleted_job_attachments(jid):
+                        reclaimed += 1
+                except Exception:
+                    logger.warning(
+                        "Startup recovery: failed to retry interrupted job attachment delete for %r",
+                        jid,
+                        exc_info=True,
+                    )
+
+    # 2. Explicit interrupted owner-deletion markers (.<owner_id>.rootcoz-deleting) only.
+    if owner_ids:
+        user_entries = await asyncio.to_thread(
+            issue_attachments.list_scope_entries, "users"
+        )
+        if user_entries is not None:
+            by_name = dict(user_entries)
+            candidate_owners: list[int] = []
+            seen_owners: set[int] = set()
+            for name, st in user_entries:
+                marker_match = _OWNER_MARKER_NAME_RE.fullmatch(name)
+                if marker_match:
+                    oid = int(marker_match.group(1))
+                    if (
+                        oid in owner_ids
+                        or oid in seen_owners
+                        or stat.S_ISLNK(st.st_mode)
+                        or st.st_mtime >= _PROCESS_STARTED_AT
+                    ):
+                        continue
+                    dir_st = by_name.get(str(oid))
+                    if dir_st is not None and (
+                        stat.S_ISLNK(dir_st.st_mode)
+                        or not stat.S_ISDIR(dir_st.st_mode)
+                        or dir_st.st_mtime >= _PROCESS_STARTED_AT
+                    ):
+                        continue
+                    seen_owners.add(oid)
+                    candidate_owners.append(oid)
+                elif not _POSITIVE_INT_NAME_RE.fullmatch(name):
+                    logger.debug(
+                        "Startup recovery: attachment user entry %r ignored (non-marker)",
+                        name,
+                    )
+            for oid in candidate_owners:
+                considered += 1
+                try:
+                    if await storage.user_id_exists(oid):
+                        continue
+                    if await _cleanup_deleted_owner_attachments(oid):
+                        reclaimed += 1
+                except Exception:
+                    logger.warning(
+                        "Startup recovery: failed to retry attachments for deleted owner %d",
+                        oid,
+                        exc_info=True,
+                    )
+
+    # 3. Interrupted reserved or cleanup_pending submissions (exact recorded ids only).
+    try:
+        pending_rows = await storage.list_pending_issue_attachment_rows()
+    except Exception:
+        logger.warning(
+            "Startup recovery: cannot read pending issue attachment rows",
+            exc_info=True,
+        )
+        pending_rows = []
+    by_submission: dict[str, list[dict[str, Any]]] = defaultdict(list)
+    for row in pending_rows:
+        sub_id = str(row.get("submission_id") or "")
+        if sub_id and sub_id not in _in_flight_attachment_submissions:
+            by_submission[sub_id].append(row)
+    for sub_id, sub_rows in by_submission.items():
+        if sub_id in _in_flight_attachment_submissions:
+            continue
+        considered += 1
+        try:
+            scope_keys = {f"owner:{int(r['owner_id'])}" for r in sub_rows}
+            scope_keys.update(
+                f"job:{r['job_id']}"
+                for r in sub_rows
+                if r.get("job_id") and _canonical_uuid(str(r["job_id"]))
+            )
+            async with _hold_attachment_scope_locks(*scope_keys):
+                if sub_id in _in_flight_attachment_submissions:
+                    considered -= 1
+                    continue
+                all_clean = True
+                for row in sub_rows:
+                    if not await issue_attachments.unlink_attachment_row(row):
+                        all_clean = False
+                if all_clean:
+                    reclaimed += 1
+        except Exception:
+            logger.warning(
+                "Startup recovery: failed to recover pending attachment submission %s",
+                sub_id,
+                exc_info=True,
+            )
+
+    if reclaimed:
+        logger.info(
+            "Startup recovery: completed %d interrupted attachment deletion/submission item(s)",
+            reclaimed,
+        )
+    if survivors := considered - reclaimed:
+        logger.warning(
+            "Startup recovery: %d interrupted attachment cleanup item(s) survived and remain retryable",
+            survivors,
+        )
+    return (reclaimed, considered)
+
+
+async def _reclaim_abandoned_workspaces(
+    job_ids: set[str] | None = None,
+    owner_ids: set[int] | None = None,
+) -> int:
+    """Delete leftover temp workspaces and retry interrupted attachment deletion markers.
+
+    One pass across the process temp roots and explicit interrupted deletion
+    markers in ``issue-attachments``: analysis workspaces and marked children of
+    the temp base, chat workspaces whose ``results`` row is gone, leftover CI
+    artifact extracts, and explicit ``.rootcoz-deleting`` / ``cleanup_pending``
+    attachment retry records (never an unmarked attachment orphan scan).
+
+    ``job_ids`` and ``owner_ids`` are snapshots ``lifespan`` took *before* spawning
+    this task. ``None`` or empty means "no decision available" for that half.
 
     Returned count is what was really deleted: a step that abandons or leaves
-    paths behind reclaims nothing, and reporting it as deleted would hide a tree
-    that stays until the next restart. One ``startup.workspace_reclaim`` audit row
-    per boot that changed something records the four counts.
-
-    Ownership is *single-process*: newest mtime versus this process's start, with
-    no cross-process check, so a second live server sharing the temp dir would
-    lose its workspaces. That is sound only because the product forbids a second
-    replica (``chart/templates/deployment.yaml`` ``replicas: 1``,
-    ``chart/templates/NOTES.txt`` "Do not scale replicas above 1",
-    ``docs/deploy-rootcoz.md``). Deliberately no lock protocol: it would guard a
-    deployment the chart and docs rule out.
+    paths/rows behind reclaims nothing. One ``startup.workspace_reclaim`` audit row
+    per boot that changed something records the counts across temp and data dirs.
     """
     from rootcoz.temp_paths import rootcoz_temp_base
 
@@ -3441,21 +3802,28 @@ async def _reclaim_abandoned_workspaces(job_ids: set[str] | None = None) -> int:
     trees, trees_seen = await _reclaim_workspace_trees(base)
     chats, chats_seen, kept = await _reclaim_chat_workspaces(job_ids)
     extracts, extracts_seen = await _reclaim_artifact_extracts(base, kept)
-    reclaimed = trees + chats + extracts
-    survivors = (trees_seen - trees) + (chats_seen - chats) + (extracts_seen - extracts)
+    attachments, attachments_seen = await _reclaim_issue_attachments(job_ids, owner_ids)
+    reclaimed = trees + chats + extracts + attachments
+    survivors = (
+        (trees_seen - trees)
+        + (chats_seen - chats)
+        + (extracts_seen - extracts)
+        + (attachments_seen - attachments)
+    )
     if reclaimed or survivors:
         await record_audit(
             action="startup.workspace_reclaim",
             actor="system",
             message=(
-                f"Startup reclaim reclaimed {reclaimed} leftover tree(s) under the "
-                "process temp root"
+                f"Startup reclaim reclaimed {reclaimed} leftover item(s) across "
+                "process temp roots and data directory"
             ),
             outcome="failure" if survivors else "success",
             details={
                 "workspace_trees": trees,
                 "chat_workspaces": chats,
                 "artifact_extracts": extracts,
+                "issue_attachments": attachments,
                 "survived": survivors,
             },
         )
@@ -3665,7 +4033,8 @@ async def lifespan(_app: FastAPI) -> AsyncIterator[None]:
         # moment no request can change the job table, and the sweep must never
         # re-read it (§460). ``None`` means "no decision" and deletes nothing.
         job_ids = await _startup_job_ids()
-        _spawn_background(_reclaim_abandoned_workspaces(job_ids))
+        owner_ids = await _startup_owner_ids()
+        _spawn_background(_reclaim_abandoned_workspaces(job_ids, owner_ids))
         # One sampler for the event-loop lag the admin status page reports.
         server_status.start_loop_lag_watchdog()
 
@@ -4355,6 +4724,194 @@ class AuthMiddleware(BaseHTTPMiddleware):
         return response
 
 
+_REPORT_CREATE_ISSUE_PATH_RE = re.compile(
+    r"\A/results/([^/]+)/create-(github-issue|jira-bug)\Z"
+)
+_ATTACHMENT_ENVELOPE_EXACT_PATHS = frozenset(
+    {
+        "/api/feedback/create",
+        "/api/chat-issue/propose",
+        "/api/chat-issue",
+    }
+)
+
+
+def _normalize_request_path(path: str) -> str:
+    """Normalize HTTP request path consistently across middleware and 422 redaction."""
+    return path.rstrip("/") or "/"
+
+
+def _is_report_create_issue_path(path: str) -> bool:
+    return (
+        _REPORT_CREATE_ISSUE_PATH_RE.fullmatch(_normalize_request_path(path))
+        is not None
+    )
+
+
+def _is_audit_safe_job_id(job_id: str) -> bool:
+    return (
+        bool(job_id)
+        and len(job_id) <= 64
+        and _SAFE_NAME.fullmatch(job_id) is not None
+        and _AUDIT_SECRET_RE.search(job_id) is None
+        and (_canonical_uuid(job_id) or not _looks_like_secret_run(job_id))
+    )
+
+
+async def _audit_envelope_refusal(
+    request: Request, normalized_path: str, status_code: int
+) -> None:
+    """Record one actor-attributed refusal row when envelope middleware rejects early."""
+    username = getattr(request.state, "username", "")
+    exc = HTTPException(status_code=status_code, detail="Envelope rejected")
+    if normalized_path == "/api/feedback/create":
+        await _record_refused_attempt(
+            action="feedback.create",
+            request=request,
+            message=f"User '{username}' created a feedback issue",
+            target_type="feedback",
+            exc=exc,
+            details={"kind": "github_issue"},
+        )
+        return
+    if normalized_path in {"/api/chat-issue", "/api/chat-issue/propose"}:
+        step = "propose" if normalized_path.endswith("propose") else "create"
+        await _record_refused_attempt(
+            action="issue.create",
+            request=request,
+            message=f"User '{username}' {step}d an issue from chat",
+            target_type="chat",
+            exc=exc,
+            details={"result": "refused", "step": step},
+        )
+        return
+    match = _REPORT_CREATE_ISSUE_PATH_RE.fullmatch(normalized_path)
+    if match:
+        raw_job_id, suffix = match.groups()
+        tracker = "github" if suffix == "github-issue" else "jira"
+        safe_job = raw_job_id if _is_audit_safe_job_id(raw_job_id) else ""
+        msg = (
+            f"User '{username}' created {tracker} issue for job {safe_job}"
+            if safe_job
+            else f"User '{username}' created {tracker} issue"
+        )
+        await _record_refused_attempt(
+            action="issue.create",
+            request=request,
+            message=msg,
+            target_type="job",
+            target_id=safe_job,
+            exc=exc,
+            details={"tracker": tracker},
+        )
+
+
+class AttachmentEnvelopeBoundMiddleware:
+    """Inner authenticated ASGI middleware enforcing a 15 MiB actual-body limit."""
+
+    def __init__(self, app: Any) -> None:
+        self.app = app
+
+    async def __call__(
+        self,
+        scope: dict[str, Any],
+        receive: Callable[[], Awaitable[dict[str, Any]]],
+        send: Callable[[dict[str, Any]], Awaitable[None]],
+    ) -> None:
+        if scope.get("type") != "http" or scope.get("method") != "POST":
+            await self.app(scope, receive, send)
+            return
+        normalized = _normalize_request_path(scope.get("path") or "")
+        if (
+            normalized not in _ATTACHMENT_ENVELOPE_EXACT_PATHS
+            and _REPORT_CREATE_ISSUE_PATH_RE.fullmatch(normalized) is None
+        ):
+            await self.app(scope, receive, send)
+            return
+
+        req = Request(scope)
+        limit = issue_attachments.MAX_ENVELOPE_BYTES
+        content_encoding = req.headers.get("content-encoding", "").strip().lower()
+        if content_encoding and content_encoding != "identity":
+            await _audit_envelope_refusal(req, normalized, 400)
+            resp = JSONResponse(
+                status_code=400,
+                content={
+                    "detail": "Compressed request bodies are not supported on attachment endpoints."
+                },
+            )
+            await resp(scope, receive, send)
+            return
+
+        declared = req.headers.get("content-length")
+        if declared is not None:
+            try:
+                declared_bytes = int(declared)
+            except ValueError:
+                declared_bytes = -1
+            if declared_bytes < 0:
+                await _audit_envelope_refusal(req, normalized, 400)
+                resp = JSONResponse(
+                    status_code=400,
+                    content={"detail": "Invalid Content-Length header."},
+                )
+                await resp(scope, receive, send)
+                return
+            if declared_bytes > limit:
+                await _audit_envelope_refusal(req, normalized, 413)
+                resp = JSONResponse(
+                    status_code=413,
+                    content={
+                        "detail": (
+                            f"Request body exceeds the {limit // (1024 * 1024)} MiB "
+                            "attachment envelope limit."
+                        )
+                    },
+                )
+                await resp(scope, receive, send)
+                return
+
+        chunks: list[bytes] = []
+        total = 0
+        while True:
+            message = await receive()
+            msg_type = message.get("type")
+            if msg_type == "http.disconnect":
+                return
+            chunk = message.get("body", b"")
+            if chunk:
+                total += len(chunk)
+                if total > limit:
+                    await _audit_envelope_refusal(req, normalized, 413)
+                    resp = JSONResponse(
+                        status_code=413,
+                        content={
+                            "detail": (
+                                f"Request body exceeds the {limit // (1024 * 1024)} MiB "
+                                "attachment envelope limit."
+                            )
+                        },
+                    )
+                    await resp(scope, receive, send)
+                    return
+                chunks.append(chunk)
+            if not message.get("more_body", False):
+                break
+
+        full_body = b"".join(chunks)
+        replayed = False
+
+        async def replay_receive() -> dict[str, Any]:
+            nonlocal replayed
+            if not replayed:
+                replayed = True
+                return {"type": "http.request", "body": full_body, "more_body": False}
+            return await receive()
+
+        await self.app(scope, replay_receive, send)
+
+
+app.add_middleware(AttachmentEnvelopeBoundMiddleware)
 app.add_middleware(AuthMiddleware)
 app.add_middleware(ErrorTrackingMiddleware)
 
@@ -4378,8 +4935,12 @@ class RequestBodyLoggingMiddleware(BaseHTTPMiddleware):
     async def dispatch(
         self, request: Request, call_next: Callable[[Request], Awaitable[Response]]
     ) -> Response:
-        if request.url.path in _BODY_LOGGING_SKIP_PATHS or request.url.path.startswith(
-            ("/api/chat/", "/api/user/ai-credentials")
+        normalized_path = _normalize_request_path(request.url.path)
+        if (
+            normalized_path in _BODY_LOGGING_SKIP_PATHS
+            or _is_report_create_issue_path(normalized_path)
+            or normalized_path == "/api/chat"
+            or normalized_path.startswith(("/api/chat/", "/api/user/ai-credentials"))
         ):
             return await call_next(request)
         if logger.isEnabledFor(logging.DEBUG) and request.method in (
@@ -4474,8 +5035,12 @@ async def _validation_error_handler(
         "invalid_request",
         {"fields": _invalid_field_names(exc)},
     )
-    if request.url.path in _BODY_LOGGING_SKIP_PATHS or request.url.path.startswith(
-        "/api/chat/"
+    normalized_path = _normalize_request_path(request.url.path)
+    if (
+        normalized_path in _BODY_LOGGING_SKIP_PATHS
+        or _is_report_create_issue_path(normalized_path)
+        or normalized_path == "/api/chat"
+        or normalized_path.startswith("/api/chat/")
     ):
         raw_errors = jsonable_encoder(exc.errors())
         masked_errors = [_mask_pydantic_error(e) for e in raw_errors]
@@ -5830,7 +6395,7 @@ async def _finish_job_deletion(
     await _cleanup_revoked_ai_sessions()
     cleanup_failed: list[str] = []
     for job_id in deleted_ids:
-        if not await _cleanup_deleted_job_chat_workspaces(job_id):
+        if not await _cleanup_deleted_job_disk_state(job_id):
             cleanup_failed.append(job_id)
     notify_active_count_changed()
     notify_dashboard_changed()
@@ -10661,11 +11226,62 @@ def _available_exporters(settings: Settings) -> list[ExporterInfo]:
     ]
 
 
+def _attachment_public_base_url(settings: Settings) -> str | None:
+    """Return validated settings-only ``PUBLIC_BASE_URL`` without trailing slash, or ``None``."""
+    raw = (settings.public_base_url or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = urlparse(raw)
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        return None
+    if (
+        parsed.username is not None
+        or parsed.password is not None
+        or "@" in parsed.netloc
+        or parsed.params
+        or parsed.query
+        or parsed.fragment
+    ):
+        return None
+    return raw.rstrip("/")
+
+
+def _require_attachment_base_url(settings: Settings) -> str:
+    """Require a valid settings-only ``PUBLIC_BASE_URL`` for file-bearing creates."""
+    base = _attachment_public_base_url(settings)
+    if not base:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "PUBLIC_BASE_URL must be configured on the server as a valid "
+                "http(s) URL without credentials, query, or fragment before "
+                "creating issues with attachments."
+            ),
+        )
+    return base
+
+
+def _attachment_capability_entry(
+    tracker_enabled: bool, has_base_url: bool
+) -> dict[str, Any]:
+    if not tracker_enabled:
+        return {"available": False, "reason": "tracker_disabled"}
+    if not has_base_url:
+        return {"available": False, "reason": "public_base_url_required"}
+    return {"available": True, "reason": "available"}
+
+
 def _build_capabilities(settings: Settings) -> dict[str, Any]:
     """Build the capabilities dict for API responses."""
+    github_on = settings.enable_github_issues is not False
+    jira_on = _jira_issue_creation_enabled(settings)
+    has_base_url = _attachment_public_base_url(settings) is not None
     return {
-        "github_issues_enabled": settings.enable_github_issues is not False,
-        "jira_issues_enabled": _jira_issue_creation_enabled(settings),
+        "github_issues_enabled": github_on,
+        "jira_issues_enabled": jira_on,
         "server_github_token": bool(
             settings.github_token and settings.github_token.get_secret_value()
         ),
@@ -10689,6 +11305,29 @@ def _build_capabilities(settings: Settings) -> dict[str, Any]:
         "feedback_enabled": settings.feedback_enabled
         and bool(settings.ai_provider)
         and bool(settings.ai_model),
+        "issue_attachments": {
+            "max_files": issue_attachments.MAX_FILES,
+            "max_file_bytes": issue_attachments.MAX_FILE_BYTES,
+            "max_total_bytes": issue_attachments.MAX_TOTAL_BYTES,
+            "max_run_bytes": issue_attachments.MAX_RUN_BYTES,
+            "max_owner_bytes": issue_attachments.MAX_OWNER_BYTES,
+            "types": [
+                "text/plain",
+                "image/png",
+                "image/jpeg",
+                "image/gif",
+                "image/webp",
+            ],
+            "report_github": _attachment_capability_entry(github_on, has_base_url),
+            "report_jira": _attachment_capability_entry(jira_on, has_base_url),
+            "feedback": _attachment_capability_entry(
+                settings.feedback_enabled, has_base_url
+            ),
+            "chat_ui": {"available": False, "reason": "browser_chat_unsupported"},
+            "direct_chat": _attachment_capability_entry(
+                github_on or jira_on, has_base_url
+            ),
+        },
     }
 
 
@@ -11037,22 +11676,9 @@ def _map_create_refusal(
     *,
     subject: str = "bug report",
     repo: str = "",
+    repo_setting: str = "TESTS_REPO_URL",
 ) -> HTTPException:
-    """The refusal a failed tracker create answers with.
-
-    A configuration error is a 400 (an unresolvable repo URL, an OAuth
-    credential that cannot mint), and a tracker answer that cannot be parsed is
-    a 502 saying the issue may exist — the tracker already answered, so nothing
-    proves it filed nothing. Everything else a tracker or the transport raises
-    goes to that tracker's own refusal helper, so the feedback form, a report's
-    bug report and chat cannot describe the same outage differently.
-    ``JiraOAuthMintError`` is caught by none of those branches — it subclasses
-    ``RuntimeError`` — so dropping it would turn the likeliest chat-path
-    failure into a 500. ``subject`` names what the caller submitted, which is
-    what the vocabulary of the refusal helpers turns on; ``repo`` is the
-    repository the call actually used, ``""`` when it is the deployment's own
-    ``TESTS_REPO_URL``.
-    """
+    """The refusal a failed tracker create answers with."""
     github = target == "github"
     label = "GitHub" if github else "Jira"
     if isinstance(exc, JiraOAuthMintError):
@@ -11069,9 +11695,17 @@ def _map_create_refusal(
             ),
         )
     if isinstance(exc, ValueError):
+        if github and repo_setting == "FEEDBACK_REPO_URL":
+            return HTTPException(
+                status_code=400,
+                detail=(
+                    "Invalid FEEDBACK_REPO_URL: must be a valid GitHub "
+                    "repository URL (https://github.com/owner/repo)."
+                ),
+            )
         return HTTPException(
             status_code=400,
-            detail=f"Invalid TESTS_REPO_URL: {exc}" if github else str(exc),
+            detail=f"Invalid {repo_setting}: {exc}" if github else str(exc),
         )
     if github and isinstance(exc, (httpx.HTTPStatusError, httpx.RequestError)):
         return _github_issue_refusal(exc, subject=subject, repo=repo)
@@ -11997,6 +12631,7 @@ async def _store_issue_draft(
     body: str,
     destination: dict[str, str],
     conversation: str = "",
+    attachment_manifest: list[dict[str, Any]] | None = None,
 ) -> tuple[str, str, str]:
     """Store a scrubbed draft and return ``(confirmation_id, code, preview)``.
 
@@ -12045,6 +12680,7 @@ async def _store_issue_draft(
         _chat_issue_drafts.pop(draft_id, None)
     code = _new_issue_code(conversation=conversation)
     draft_id = uuid.uuid4().hex
+    manifest = list(attachment_manifest or [])
     draft: dict[str, Any] = {
         "username": username,
         "target": target,
@@ -12052,6 +12688,7 @@ async def _store_issue_draft(
         "body": body,
         "destination": destination,
         "conversation": conversation,
+        "attachment_manifest": manifest,
         "code": code,
         "watermark": watermark,
         "expires_at": now + _ISSUE_DRAFT_TTL_SECONDS,
@@ -12068,9 +12705,16 @@ async def _store_issue_draft(
         if destination.get("jira_security_level"):
             where += f", security level {destination['jira_security_level']}"
     minutes = _ISSUE_DRAFT_TTL_SECONDS // 60
+    manifest_block = ""
+    if manifest:
+        manifest_lines = "\n".join(
+            f"- {m['filename']} ({m['media_type']}, {m['size_bytes']} bytes, sha256:{m['sha256']})"
+            for m in manifest
+        )
+        manifest_block = f"\n\nAttachments:\n{manifest_lines}"
     shown = (
-        f"Tracker: {kind}\n{where}\nTitle: {title}\n\nBody:\n{body}\n\n"
-        f"Confirmation code: {code}"
+        f"Tracker: {kind}\n{where}\nTitle: {title}\n\nBody:\n{body}"
+        f"{manifest_block}\n\nConfirmation code: {code}"
     )
     preview = (
         f"Proposed {kind} issue — nothing has been filed yet.\n\n"
@@ -12141,6 +12785,7 @@ async def _consume_issue_draft(
     title: str,
     body: str,
     destination: dict[str, str],
+    attachment_manifest: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     """Claim a draft for this caller, once, or refuse with the next step.
 
@@ -12193,6 +12838,7 @@ async def _consume_issue_draft(
             body=body,
             destination=destination,
             propose=propose,
+            attachment_manifest=attachment_manifest,
         )
         if draft["conversation"] and not await _user_replied_with_code(
             conversation=draft["conversation"],
@@ -12232,6 +12878,7 @@ def _require_draft_matches(
     body: str,
     destination: dict[str, str],
     propose: str,
+    attachment_manifest: list[dict[str, Any]] | None = None,
 ) -> None:
     """Refuse a claim whose caller, code, text or destination is not the draft's.
 
@@ -12275,6 +12922,98 @@ def _require_draft_matches(
                 "the new preview."
             ),
         )
+    if draft.get("attachment_manifest", []) != list(attachment_manifest or []):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "No issue was filed: the attachments (count, order, names or "
+                "byte contents) differ from the approved draft. Propose the "
+                "issue again to change attachments."
+            ),
+        )
+
+
+def _build_attachment_manifest(
+    validated: list[issue_attachments.ValidatedAttachment],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "filename": item.display_name,
+            "media_type": item.media_type,
+            "size_bytes": len(item.data),
+            "sha256": item.sha256,
+        }
+        for item in validated
+    ]
+
+
+async def _resolve_attachment_owner_id(username: str) -> int:
+    """Resolve active immutable ``users.id`` for file-bearing creates (R1/R5)."""
+    user_row = await storage.get_user_by_username(username) if username else None
+    owner_id = user_row.get("id") if user_row else None
+    if (
+        not user_row
+        or type(owner_id) is not int
+        or owner_id <= 0
+        or user_row.get("disabled")
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "Issue attachments require an active user profile; bootstrap or "
+                "unregistered identities may only submit text issues."
+            ),
+        )
+    return owner_id
+
+
+_CHAT_TOOL_ATTACHMENT_REFUSAL = (
+    "Chat model tools cannot attach files or read local paths; use the report "
+    "dialog, feedback dialog, or rootcoz CLI --attach instead."
+)
+_CHAT_TOOL_REJECTED_FIELD_SET = frozenset(CHAT_TOOL_REJECTED_FIELDS)
+_CHAT_TOOL_BODY_ONLY_REJECTED_FIELDS = _CHAT_TOOL_REJECTED_FIELD_SET - {"attachments"}
+
+
+async def _reject_model_chat_tool_attachments(
+    request: Request,
+    attachments: Sequence[IssueAttachmentUpload],
+    *,
+    conversation: str = "",
+) -> None:
+    is_chat_tool = request.headers.get("x-rootcoz-chat-tool") == "1"
+    if not is_chat_tool and not conversation:
+        return
+    raw_body: Any = None
+    with contextlib.suppress(Exception):
+        raw_body = await request.json()
+    raw_keys = set(raw_body.keys()) if isinstance(raw_body, dict) else set()
+    if is_chat_tool:
+        rejected_hdr = request.headers.get(
+            "x-rootcoz-chat-tool-rejected", CHAT_TOOL_REJECTED_TEMPLATE
+        )
+        if (
+            attachments
+            or rejected_hdr != CHAT_TOOL_REJECTED_TEMPLATE
+            or bool(raw_keys & _CHAT_TOOL_REJECTED_FIELD_SET)
+        ):
+            logger.info(
+                "Rejected chat tool attachment/path parameter on %s",
+                request.url.path,
+            )
+            raise HTTPException(status_code=400, detail=_CHAT_TOOL_ATTACHMENT_REFUSAL)
+    if conversation and (
+        attachments or bool(raw_keys & _CHAT_TOOL_BODY_ONLY_REJECTED_FIELDS)
+    ):
+        logger.info(
+            "Rejected conversation-bound attachment/path parameter on %s",
+            request.url.path,
+        )
+        raise HTTPException(status_code=400, detail=_CHAT_TOOL_ATTACHMENT_REFUSAL)
+
+
+_JIRA_ATTACHMENT_PER_FILE_TIMEOUT_SECONDS = 30.0
+_JIRA_ATTACHMENTS_TOTAL_TIMEOUT_SECONDS = 65.0
 
 
 async def _create_issue_from_text(
@@ -12295,6 +13034,11 @@ async def _create_issue_from_text(
     via: str = "rootcoz",
     subject: str = "bug report",
     pre_check: Callable[[], Awaitable[Any]] | None = None,
+    attachments: list[IssueAttachmentUpload] | None = None,
+    job_id: str = "",
+    labels: list[str] | None = None,
+    attribution: AiProvenance | None = None,
+    repo_setting: str = "TESTS_REPO_URL",
 ) -> dict[str, Any]:
     """File one tracker issue from an already-written title and body.
 
@@ -12361,13 +13105,9 @@ async def _create_issue_from_text(
     if pre_check is not None:
         await pre_check()
 
-    issue_body = body
-    if username:
-        issue_body += (
-            f"\n\n---\n_Reported by: {username} via {via}_"
-            if github
-            else f"\n\n----\nReported by: {username} via {via}"
-        )
+    effective_attribution = (
+        attribution if attribution is not None else AiProvenance(ai_used=True)
+    )
 
     tests_repo_url = ""
     if github:
@@ -12381,64 +13121,341 @@ async def _create_issue_from_text(
                     "tests_repo_url, so there is nowhere to file the issue."
                 ),
             )
-    # The repository a 404 names: the one the caller picked, or "" when the
-    # deployment's TESTS_REPO_URL is the one in play (a bug report always is;
-    # a chat issue when neither the run nor the caller named a repo).
+    else:
+        if not effective_jira_settings.jira_project_key:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "Jira project key is required. Provide it in the"
+                    " request or configure JIRA_PROJECT_KEY on the server."
+                ),
+            )
     named_repo = _github_repo_slug(github_repo_url)
 
+    def _build_body(attachment_rows: list[dict[str, Any]], base_url: str = "") -> str:
+        text = body
+        if username:
+            text += (
+                f"\n\n---\n_Reported by: {username} via {via}_"
+                if github
+                else f"\n\n----\nReported by: {username} via {via}"
+            )
+        if attachment_rows:
+            text += issue_attachments.attachments_section(
+                attachment_rows, base_url, tracker=target
+            )
+        if github:
+            text = apply_ai_attribution(text, effective_attribution)
+        return text
+
+    if not attachments:
+        issue_body = _build_body([])
+        try:
+            if github:
+                result = await create_github_issue(
+                    title=title,
+                    body=issue_body,
+                    repo_url=tests_repo_url,
+                    github_token=github_token.strip(),
+                    labels=labels,
+                    attribution=effective_attribution,
+                )
+            else:
+                result = await create_jira_bug(
+                    title=title,
+                    body=issue_body,
+                    connection=resolve_jira_connection(effective_jira_settings),
+                    project_key=jira_project_key
+                    or effective_jira_settings.jira_project_key
+                    or "",
+                    security_level=jira_security_level,
+                    issue_type=jira_issue_type,
+                )
+        except _ISSUE_CREATE_REFUSALS as exc:
+            raise _map_create_refusal(
+                target,
+                exc,
+                subject=subject,
+                repo=named_repo,
+                repo_setting=repo_setting,
+            ) from exc
+
+        issue_url = _require_tracker_url(result, label)
+        if github:
+            return {
+                "url": issue_url,
+                "number": result.get("number", 0),
+                "key": "",
+                "repo": _github_repo_slug(tests_repo_url),
+                "title": title,
+            }
+        return {
+            "url": issue_url,
+            "key": result.get("key", ""),
+            "jira_project": jira_project_key
+            or effective_jira_settings.jira_project_key,
+            "title": title,
+        }
+
+    # File-bearing create orchestration (shared across report, chat, feedback).
+    base_url = _require_attachment_base_url(settings)
+    try:
+        validated = issue_attachments.validate_attachments(attachments)
+    except issue_attachments.IssueAttachmentRejected as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+    owner_id = await _resolve_attachment_owner_id(username)
+    if job_id and not _canonical_uuid(job_id):
+        raise HTTPException(
+            status_code=400,
+            detail="Attachments on a run require a valid canonical job UUID.",
+        )
+
+    jira_conn: JiraConnection | None = None
     try:
         if github:
-            # The server states the attribution explicitly; a model-specific
-            # line in a client-supplied body is stripped upstream and never
-            # decides the footer.
-            result = await create_github_issue(
-                title=title,
-                body=issue_body,
-                repo_url=tests_repo_url,
-                github_token=github_token.strip(),
-                attribution=AiProvenance(ai_used=True),
-            )
+            parse_github_repo_url(tests_repo_url)
         else:
-            if not effective_jira_settings.jira_project_key:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        "Jira project key is required. Provide it in the"
-                        " request or configure JIRA_PROJECT_KEY on the server."
-                    ),
-                )
-            result = await create_jira_bug(
-                title=title,
-                body=issue_body,
-                connection=resolve_jira_connection(effective_jira_settings),
-                project_key=jira_project_key
-                or effective_jira_settings.jira_project_key
-                or "",
-                security_level=jira_security_level,
-                issue_type=jira_issue_type,
-            )
+            jira_conn = resolve_jira_connection(effective_jira_settings)
+            require_caller_connection(jira_conn)
     except _ISSUE_CREATE_REFUSALS as exc:
         raise _map_create_refusal(
-            target, exc, subject=subject, repo=named_repo
+            target,
+            exc,
+            subject=subject,
+            repo=named_repo,
+            repo_setting=repo_setting,
         ) from exc
 
-    issue_url = _require_tracker_url(result, label)
+    scope_keys = [f"owner:{owner_id}", *([f"job:{job_id}"] if job_id else [])]
+    async with _hold_attachment_scope_locks(*scope_keys):
+        try:
+            reserved_rows = await storage.reserve_issue_attachments(
+                validated,
+                owner_id=owner_id,
+                job_id=job_id,
+                tracker=target,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+        submission_id = str(reserved_rows[0]["submission_id"])
+        _in_flight_attachment_submissions.add(submission_id)
+        try:
+            await issue_attachments.store(reserved_rows, validated)
+        finally:
+            _in_flight_attachment_submissions.discard(submission_id)
+
+        if not await storage.is_active_user_id(owner_id) or (
+            job_id and await storage.get_result(job_id) is None
+        ):
+            await issue_attachments.delete_stored(reserved_rows)
+            raise HTTPException(
+                status_code=400,
+                detail="Attachment owner or analysis run was removed before issue creation.",
+            )
+
+        issue_body = _build_body(reserved_rows, base_url)
+
+    # Release attachment scope locks before calling the external tracker so a slow
+    # GitHub/Jira response cannot block job deletion, retention chunks, user
+    # deletion, or other file-bearing creates on the same scope.
+    try:
+        try:
+            if github:
+                result = await create_github_issue(
+                    title=title,
+                    body=issue_body,
+                    repo_url=tests_repo_url,
+                    github_token=github_token.strip(),
+                    labels=labels,
+                    attribution=effective_attribution,
+                )
+            else:
+                assert jira_conn is not None
+                result = await create_jira_bug(
+                    title=title,
+                    body=issue_body,
+                    connection=jira_conn,
+                    project_key=jira_project_key
+                    or effective_jira_settings.jira_project_key
+                    or "",
+                    security_level=jira_security_level,
+                    issue_type=jira_issue_type,
+                )
+        except _ISSUE_CREATE_REFUSALS as exc:
+            raise _map_create_refusal(
+                target,
+                exc,
+                subject=subject,
+                repo=named_repo,
+                repo_setting=repo_setting,
+            ) from exc
+        issue_url = _require_tracker_url(result, label)
+    except BaseException as exc:
+        if not _create_may_have_filed(exc):
+            async with _hold_attachment_scope_locks(*scope_keys):
+                await issue_attachments.delete_stored(reserved_rows)
+        else:
+            logger.warning(
+                "Retaining %d hosted attachment(s) after ambiguous %s create outcome",
+                len(reserved_rows),
+                target,
+            )
+        raise
+
+    # Issue is now known-created; native Jira upload failures never undo or fail the 201.
+    file_summaries: list[IssueAttachmentFileSummary] = []
+    if github:
+        file_summaries = [
+            IssueAttachmentFileSummary(
+                filename=row["display_name"],
+                id=row["id"],
+                delivery="hosted",
+                reason="hosted",
+            )
+            for row in reserved_rows
+        ]
+    else:
+        assert jira_conn is not None
+        issue_key = str(result.get("key", ""))
+        try:
+            async with asyncio.timeout(_JIRA_ATTACHMENTS_TOTAL_TIMEOUT_SECONDS):
+                for row, item in zip(reserved_rows, validated, strict=True):
+                    try:
+                        async with asyncio.timeout(
+                            _JIRA_ATTACHMENT_PER_FILE_TIMEOUT_SECONDS
+                        ):
+                            outcome = await add_jira_attachment(
+                                jira_conn,
+                                issue_key,
+                                item.display_name,
+                                item.data,
+                                item.media_type,
+                            )
+                    except TimeoutError:
+                        logger.warning(
+                            "Jira attachment upload exceeded %.1fs per-file deadline for %s; marking outcome unknown",
+                            _JIRA_ATTACHMENT_PER_FILE_TIMEOUT_SECONDS,
+                            issue_key,
+                        )
+                        outcome = "native_outcome_unknown"
+                    except Exception:
+                        logger.warning(
+                            "Unexpected error during Jira attachment upload; marking outcome unknown",
+                            exc_info=True,
+                        )
+                        outcome = "native_outcome_unknown"
+                    if outcome == "native_attached":
+                        delivery: Literal[
+                            "hosted",
+                            "native_and_hosted",
+                            "fallback_only",
+                            "native_outcome_unknown",
+                        ] = "native_and_hosted"
+                    elif outcome == "native_outcome_unknown":
+                        delivery = "native_outcome_unknown"
+                    else:
+                        delivery = "fallback_only"
+                    file_summaries.append(
+                        IssueAttachmentFileSummary(
+                            filename=row["display_name"],
+                            id=row["id"],
+                            delivery=delivery,
+                            reason=outcome,
+                        )
+                    )
+        except TimeoutError:
+            remaining_rows = reserved_rows[len(file_summaries) :]
+            if remaining_rows:
+                logger.warning(
+                    "Jira attachment upload loop exceeded %.1fs total deadline for %s; marking %d remaining file(s) outcome unknown",
+                    _JIRA_ATTACHMENTS_TOTAL_TIMEOUT_SECONDS,
+                    issue_key,
+                    len(remaining_rows),
+                )
+                for row in remaining_rows:
+                    file_summaries.append(
+                        IssueAttachmentFileSummary(
+                            filename=row["display_name"],
+                            id=row["id"],
+                            delivery="native_outcome_unknown",
+                            reason="native_outcome_unknown",
+                        )
+                    )
+
+    summary = IssueAttachmentSummary(
+        count=len(reserved_rows),
+        types=sorted({item.media_type for item in validated}),
+        native_attached=sum(
+            1 for f in file_summaries if f.delivery == "native_and_hosted"
+        ),
+        linked=len(reserved_rows),
+        failed_count=(
+            0
+            if github
+            else sum(1 for f in file_summaries if f.delivery != "native_and_hosted")
+        ),
+        files=file_summaries,
+    )
+    logger.info(
+        "Created %s issue with attachments: count=%d native=%d linked=%d failed=%d",
+        target,
+        summary.count,
+        summary.native_attached,
+        summary.linked,
+        summary.failed_count,
+    )
     if github:
         return {
             "url": issue_url,
             "number": result.get("number", 0),
             "key": "",
-            # The destination the create call actually used, for the audit row:
-            # a repo name can be credential-shaped, so the row must name it.
             "repo": _github_repo_slug(tests_repo_url),
             "title": title,
+            "attachments": summary.model_dump(mode="json"),
         }
     return {
         "url": issue_url,
         "key": result.get("key", ""),
         "jira_project": jira_project_key or effective_jira_settings.jira_project_key,
         "title": title,
+        "attachments": summary.model_dump(mode="json"),
     }
+
+
+def _known_created_bookkeeping_error(
+    label: str, issue_url: str, exc: Exception
+) -> HTTPException:
+    """Preserve a known-created issue URL if post-create bookkeeping fails."""
+    logger.warning(
+        "Post-create bookkeeping failed after %s issue %s was created",
+        label,
+        issue_url,
+        exc_info=exc,
+    )
+    err = HTTPException(
+        status_code=502,
+        detail=(
+            f"{label} issue was already created at {issue_url}, so do not "
+            "submit it again (post-create bookkeeping failed)."
+        ),
+    )
+    err.issue_may_exist = True
+    return err
+
+
+def _attachment_refusal_audit_details(
+    attachments: Sequence[IssueAttachmentUpload],
+) -> dict[str, Any]:
+    """Safe count/type-only attachment audit fields for refused/failed attempts."""
+    if not attachments:
+        return {}
+    details: dict[str, Any] = {"attachment_count": len(attachments)}
+    with contextlib.suppress(issue_attachments.IssueAttachmentRejected):
+        validated = issue_attachments.validate_attachments(list(attachments))
+        details["attachment_types"] = sorted({item.media_type for item in validated})
+    return details
 
 
 @app.post(
@@ -12454,29 +13471,70 @@ async def create_github_issue_endpoint(
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
     """Create a GitHub issue from a failure analysis."""
-    _require_reviewer(request)
-    _check_allow_list(request)
-    logger.debug(
-        f"POST /results/{job_id}/create-github-issue: test_name={body.test_name}"
+    username = getattr(request.state, "username", "")
+    safe_job = job_id if _is_audit_safe_job_id(job_id) else ""
+    refusal_msg = (
+        f"User '{username}' was refused a GitHub issue for job {safe_job}"
+        if safe_job
+        else f"User '{username}' was refused a GitHub issue"
     )
-    username = request.state.username
-    user_tokens = await storage.get_user_tokens(username)
-    github_token = user_tokens.get("github_token", "") or ""
-    _debug_credential_source("github", bool(github_token))
-    result = await _create_issue_from_text(
-        "github",
-        body.title,
-        body.body,
-        username=username,
-        settings=settings,
-        github_token=github_token,
-        # Reject an unknown test name before an issue is filed for it.
-        pre_check=lambda: _load_effective_failure(
-            job_id, body.test_name, body.child_job_name, body.child_build_number
-        ),
-    )
-    issue_url = result["url"]
+    try:
+        _require_reviewer(request)
+        _check_allow_list(request)
+        logger.debug(
+            "POST /results/%s/create-github-issue: test_name=%s",
+            safe_job or "<invalid>",
+            body.test_name,
+        )
+        user_tokens = await storage.get_user_tokens(username)
+        github_token = user_tokens.get("github_token", "") or ""
+        _debug_credential_source("github", bool(github_token))
+        result = await _create_issue_from_text(
+            "github",
+            body.title,
+            body.body,
+            username=username,
+            settings=settings,
+            github_token=github_token,
+            pre_check=lambda: _load_effective_failure(
+                job_id, body.test_name, body.child_job_name, body.child_build_number
+            ),
+            attachments=body.attachments,
+            job_id=job_id,
+        )
+    except HTTPException as exc:
+        ref_details: dict[str, Any] = {
+            "tracker": "github",
+            **_attachment_refusal_audit_details(body.attachments),
+        }
+        upstream_status = _upstream_status(exc)
+        if upstream_status is not None:
+            ref_details["upstream_status"] = upstream_status
+        await _record_refused_attempt(
+            action="issue.create",
+            request=request,
+            exc=exc,
+            message=refusal_msg,
+            target_type="job",
+            target_id=safe_job,
+            details=ref_details,
+        )
+        raise
+    except Exception:
+        await _record_failed_attempt(
+            action="issue.create",
+            request=request,
+            message=refusal_msg,
+            target_type="job",
+            target_id=safe_job,
+            details={
+                "tracker": "github",
+                **_attachment_refusal_audit_details(body.attachments),
+            },
+        )
+        raise
 
+    issue_url = result["url"]
     comment_id = await _add_tracker_comment(
         "GitHub Issue", job_id, body, result, username, tracked_type="github"
     )
@@ -12484,14 +13542,18 @@ async def create_github_issue_endpoint(
     await record_audit(
         action="issue.create",
         actor=username,
-        message=f"User '{username}' created GitHub issue {issue_url} for job {job_id}",
+        message=(
+            f"User '{username}' created GitHub issue {issue_url} for job {safe_job}"
+            if safe_job
+            else f"User '{username}' created GitHub issue {issue_url}"
+        ),
         target_type="job",
-        target_id=job_id,
+        target_id=safe_job or None,
         details=_filed_issue_details("github", result, test_name=body.test_name),
         request=request,
     )
 
-    return {**result, "comment_id": comment_id}
+    return strip_sensitive_from_response({**result, "comment_id": comment_id})
 
 
 @app.post(
@@ -12507,16 +13569,25 @@ async def create_jira_bug_endpoint(
     _: None = Depends(_bind_job_id),
 ) -> dict[str, Any]:
     """Create a Jira bug from a failure analysis."""
-    _require_reviewer(request)
-    _check_allow_list(request)
-    logger.debug(f"POST /results/{job_id}/create-jira-bug: test_name={body.test_name}")
-
-    username = request.state.username
-    user_tokens = await storage.get_user_tokens(username)
-    jira_token = user_tokens.get("jira_token", "") or ""
-    jira_sa_token = user_tokens.get("jira_sa_token", "") or ""
-    _debug_credential_source("jira", bool(jira_token or jira_sa_token))
+    username = getattr(request.state, "username", "")
+    safe_job = job_id if _is_audit_safe_job_id(job_id) else ""
+    refusal_msg = (
+        f"User '{username}' was refused a Jira issue for job {safe_job}"
+        if safe_job
+        else f"User '{username}' was refused a Jira issue"
+    )
     try:
+        _require_reviewer(request)
+        _check_allow_list(request)
+        logger.debug(
+            "POST /results/%s/create-jira-bug: test_name=%s",
+            safe_job or "<invalid>",
+            body.test_name,
+        )
+        user_tokens = await storage.get_user_tokens(username)
+        jira_token = user_tokens.get("jira_token", "") or ""
+        jira_sa_token = user_tokens.get("jira_sa_token", "") or ""
+        _debug_credential_source("jira", bool(jira_token or jira_sa_token))
         result = await _create_issue_from_text(
             "jira",
             body.title,
@@ -12529,28 +13600,50 @@ async def create_jira_bug_endpoint(
             jira_project_key=body.jira_project_key,
             jira_security_level=body.jira_security_level,
             jira_issue_type=body.jira_issue_type,
-            # Reject an unknown test name before an issue is filed for it.
             pre_check=lambda: _load_effective_failure(
                 job_id, body.test_name, body.child_job_name, body.child_build_number
             ),
+            attachments=body.attachments,
+            job_id=job_id,
         )
     except HTTPException as exc:
-        # A credential-policy denial is a security event, so unlike a tracker
-        # refusal it leaves a row — naming the job and the reason, never the
-        # submitted title or body (nothing reached the tracker).
-        if isinstance(exc.__cause__, JiraDeploymentCredentialRefused):
-            await _record_refused_attempt(
-                action="issue.create",
-                request=request,
-                denied=True,
-                exc=exc,
-                message=f"User '{username}' was refused a Jira issue for job {job_id}",
-                target_type="job",
-                target_id=job_id,
-            )
+        is_deployment_denial = isinstance(
+            exc.__cause__, JiraDeploymentCredentialRefused
+        )
+        att_details = _attachment_refusal_audit_details(body.attachments)
+        if is_deployment_denial and not att_details:
+            ref_details: dict[str, Any] | None = None
+        else:
+            ref_details = {"tracker": "jira", **att_details}
+            upstream_status = _upstream_status(exc)
+            if upstream_status is not None and not is_deployment_denial:
+                ref_details["upstream_status"] = upstream_status
+        await _record_refused_attempt(
+            action="issue.create",
+            request=request,
+            denied=is_deployment_denial,
+            exc=exc,
+            message=refusal_msg,
+            target_type="job",
+            target_id=safe_job,
+            details=ref_details,
+        )
         raise
-    issue_url = result["url"]
+    except Exception:
+        await _record_failed_attempt(
+            action="issue.create",
+            request=request,
+            message=refusal_msg,
+            target_type="job",
+            target_id=safe_job,
+            details={
+                "tracker": "jira",
+                **_attachment_refusal_audit_details(body.attachments),
+            },
+        )
+        raise
 
+    issue_url = result["url"]
     comment_id = await _add_tracker_comment(
         "Jira Bug", job_id, body, result, username, tracked_type="jira"
     )
@@ -12558,14 +13651,18 @@ async def create_jira_bug_endpoint(
     await record_audit(
         action="issue.create",
         actor=username,
-        message=f"User '{username}' created Jira issue {issue_url} for job {job_id}",
+        message=(
+            f"User '{username}' created Jira issue {issue_url} for job {safe_job}"
+            if safe_job
+            else f"User '{username}' created Jira issue {issue_url}"
+        ),
         target_type="job",
-        target_id=job_id,
+        target_id=safe_job or None,
         details=_filed_issue_details("jira", result, test_name=body.test_name),
         request=request,
     )
 
-    return {**result, "comment_id": comment_id}
+    return strip_sensitive_from_response({**result, "comment_id": comment_id})
 
 
 def _filed_issue_details(
@@ -12599,6 +13696,12 @@ def _filed_issue_details(
         filed["jira_project"] = result.get("jira_project", "")
         # The site the link points at; userinfo never reaches the trail.
         filed["site"] = _audit_url_host(url)
+    summary = result.get("attachments")
+    if isinstance(summary, dict):
+        filed["attachment_count"] = summary.get("count", 0)
+        filed["attachment_types"] = list(summary.get("types") or [])
+    if "job_id" in details and not _is_audit_safe_job_id(str(details["job_id"])):
+        details["job_id"] = ""
     return {**details, **filed}
 
 
@@ -12640,7 +13743,7 @@ def _refused_issue_details(
         "tracker": tracker,
         "result": "refused",
         "step": step,
-        "job_id": body.job_id,
+        "job_id": body.job_id if _is_audit_safe_job_id(body.job_id) else "",
         "repo": (
             body.repo
             if tracker == "github" and _REPO_SLUG_RE.fullmatch(body.repo)
@@ -12654,6 +13757,7 @@ def _refused_issue_details(
             and _JIRA_PROJECT_KEY_RE.fullmatch(body.jira_project_key)
             else ""
         ),
+        **_attachment_refusal_audit_details(body.attachments),
     }
 
 
@@ -12766,12 +13870,29 @@ async def propose_chat_issue(
         # half of the gate a chat model reaches most often.
         _require_reviewer(request)
         _check_allow_list(request)
+        await _reject_model_chat_tool_attachments(
+            request, body.attachments, conversation=body.conversation
+        )
         if tracker == "github":
             _require_repo_slug(body.repo)
         user_tokens = await _chat_issue_tracker_tokens(username, tracker, settings)
         destination, _repo_url = await _chat_issue_resolved_destination(
             request, body, settings, user_tokens
         )
+        manifest: list[dict[str, Any]] = []
+        if body.attachments:
+            _require_attachment_base_url(settings)
+            await _resolve_attachment_owner_id(username)
+            if body.job_id and not _canonical_uuid(body.job_id):
+                raise HTTPException(
+                    status_code=400,
+                    detail="Attachments on a run require a valid canonical job UUID.",
+                )
+            try:
+                validated_att = issue_attachments.validate_attachments(body.attachments)
+            except issue_attachments.IssueAttachmentRejected as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            manifest = _build_attachment_manifest(validated_att)
         # Also inside: a full draft store (503) or a storage failure is an
         # attempt too, and the trail promises a row for every one of them.
         title = scrub_sensitive_data(body.title)
@@ -12783,6 +13904,7 @@ async def propose_chat_issue(
             body=issue_body,
             destination=destination,
             conversation=body.conversation,
+            attachment_manifest=manifest,
         )
     except HTTPException as exc:
         logger.info("Chat issue draft refused for %s: %s", username, exc.detail)
@@ -12817,17 +13939,20 @@ async def propose_chat_issue(
         destination,
         len(issue_body),
     )
-    return {
-        "confirmation_id": confirmation_id,
-        "confirmation_code": code,
-        "target": tracker,
-        "repo": destination.get("repo", ""),
-        "destination": destination,
-        "title": title,
-        "body": issue_body,
-        "preview": preview,
-        "expires_in_seconds": _ISSUE_DRAFT_TTL_SECONDS,
-    }
+    return strip_sensitive_from_response(
+        {
+            "confirmation_id": confirmation_id,
+            "confirmation_code": code,
+            "target": tracker,
+            "repo": destination.get("repo", ""),
+            "destination": destination,
+            "title": title,
+            "body": issue_body,
+            "preview": preview,
+            "attachment_manifest": manifest,
+            "expires_in_seconds": _ISSUE_DRAFT_TTL_SECONDS,
+        }
+    )
 
 
 @app.post("/api/chat-issue", status_code=201, operation_id="createChatIssue")
@@ -12855,6 +13980,7 @@ async def create_chat_issue(
         # the docs promise a row for, and this endpoint has no other refusal path.
         _require_reviewer(request)
         _check_allow_list(request)
+        await _reject_model_chat_tool_attachments(request, body.attachments)
         user_tokens = await _chat_issue_tracker_tokens(username, tracker, settings)
         title = scrub_sensitive_data(body.title)
         issue_body = scrub_sensitive_data(body.body)
@@ -12863,6 +13989,13 @@ async def create_chat_issue(
         destination, github_repo_url = await _chat_issue_resolved_destination(
             request, body, settings, user_tokens
         )
+        manifest: list[dict[str, Any]] = []
+        if body.attachments:
+            try:
+                validated_att = issue_attachments.validate_attachments(body.attachments)
+            except issue_attachments.IssueAttachmentRejected as exc:
+                raise HTTPException(status_code=400, detail=str(exc)) from exc
+            manifest = _build_attachment_manifest(validated_att)
         # The consent gate: without a live draft of its own and the user's reply,
         # nothing is filed.
         draft = await _consume_issue_draft(
@@ -12873,6 +14006,7 @@ async def create_chat_issue(
             title=title,
             body=issue_body,
             destination=destination,
+            attachment_manifest=manifest,
         )
         try:
             result = await _create_issue_from_text(
@@ -12891,6 +14025,8 @@ async def create_chat_issue(
                 github_repo_url=github_repo_url,
                 via="rootcoz chat",
                 subject="issue",
+                attachments=body.attachments,
+                job_id=body.job_id,
             )
         except Exception as exc:
             # An outage or a refusal is not a decision: the confirmation survives
@@ -12944,7 +14080,286 @@ async def create_chat_issue(
         ),
         request=request,
     )
-    return result
+    return strip_sensitive_from_response(result)
+
+
+_DOWNLOAD_AUDIT_DEDUPE_MAX = 4096
+_download_audit_dedupe: OrderedDict[tuple[int | str, str, str], None] = OrderedDict()
+
+
+def _should_record_download_audit(
+    caller_key: int | str,
+    attachment_id: str,
+    outcome: str,
+    row: Mapping[str, Any] | None = None,
+) -> bool:
+    """Bounded 4096-entry LRU dedupe keyed by (immutable caller id, issue submission, outcome)."""
+    scope_id = (
+        str(row.get("submission_id") or attachment_id)
+        if row is not None
+        else attachment_id
+    )
+    key = (caller_key, scope_id, outcome)
+    if key in _download_audit_dedupe:
+        _download_audit_dedupe.move_to_end(key)
+        logger.debug(
+            "Attachment download audit deduplicated: submission_or_id=%s outcome=%s",
+            scope_id,
+            outcome,
+        )
+        return False
+    _download_audit_dedupe[key] = None
+    while len(_download_audit_dedupe) > _DOWNLOAD_AUDIT_DEDUPE_MAX:
+        _download_audit_dedupe.popitem(last=False)
+    return True
+
+
+async def _iter_attachment_stream(stream_file: BinaryIO) -> AsyncIterator[bytes]:
+    """Stream chunks from *stream_file* and guarantee fd closure on completion or disconnect."""
+    try:
+        while True:
+            chunk = await asyncio.to_thread(stream_file.read, 65536)
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        with contextlib.suppress(OSError):
+            await asyncio.to_thread(stream_file.close)
+
+
+@app.get(
+    "/api/issue-attachments/{attachment_id}",
+    operation_id="downloadIssueAttachment",
+)
+async def download_issue_attachment(
+    attachment_id: str,
+    request: Request,
+) -> StreamingResponse:
+    """Stream an authorised issue attachment from its checked regular-file fd."""
+    if not _canonical_uuid(attachment_id):
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    row = await storage.get_issue_attachment(attachment_id)
+    if row is None or row.get("state") != "stored":
+        raise HTTPException(status_code=404, detail="Attachment not found")
+
+    username = getattr(request.state, "username", "")
+    is_admin = bool(getattr(request.state, "is_admin", False))
+    role = getattr(request.state, "role", "")
+    caller_row = await storage.get_user_by_username(username) if username else None
+    caller_key: int | str = (
+        int(caller_row["id"]) if caller_row is not None else f"bootstrap:{username}"
+    )
+
+    base_audit_details = {
+        "attachment_id": str(row["id"]),
+        "media_type": str(row["media_type"]),
+        "size_bytes": int(row["size_bytes"]),
+        "tracker": str(row["tracker"]),
+    }
+
+    async def _deny(refused_kind: str) -> NoReturn:
+        if _should_record_download_audit(caller_key, row["id"], "denied", row):
+            await record_audit(
+                action="issue_attachment.download",
+                actor=username,
+                message=(
+                    f"User '{username}' was denied attachment {row['id']} "
+                    f"({refused_kind})"
+                ),
+                target_type="issue_attachment",
+                target_id=str(row["id"]),
+                outcome="denied",
+                details={**base_audit_details, "refused_kind": refused_kind},
+                request=request,
+            )
+        raise HTTPException(status_code=404, detail="Attachment not found")
+
+    if not username or role not in ("viewer", "reviewer", "operator", "admin"):
+        await _deny("forbidden")
+    if caller_row is not None and caller_row.get("disabled"):
+        await _deny("account_disabled")
+
+    job_id = str(row.get("job_id") or "")
+    owner_id = int(row["owner_id"])
+    if job_id:
+        if await storage.get_result(job_id) is None:
+            raise HTTPException(status_code=404, detail="Attachment not found")
+    else:
+        if not await storage.is_active_user_id(owner_id):
+            raise HTTPException(status_code=404, detail="Attachment not found")
+        if not is_admin and (caller_row is None or int(caller_row["id"]) != owner_id):
+            await _deny("not_owner")
+
+    try:
+        stream_file = await asyncio.to_thread(issue_attachments.open_attachment, row)
+    except (OSError, ValueError) as exc:
+        logger.warning(
+            "Attachment blob unavailable on download: attachment_id=%s errno=%s",
+            row["id"],
+            getattr(exc, "errno", None),
+        )
+        raise HTTPException(status_code=404, detail="Attachment not found") from None
+
+    try:
+        headers = {
+            "Content-Disposition": issue_attachments.content_disposition(
+                str(row["display_name"]), str(row["id"])
+            ),
+            "X-Content-Type-Options": "nosniff",
+            "Cache-Control": "private, no-store",
+            "Content-Length": str(row["size_bytes"]),
+        }
+        if _should_record_download_audit(caller_key, row["id"], "success", row):
+            await record_audit(
+                action="issue_attachment.download",
+                actor=username,
+                message=f"User '{username}' downloaded attachment {row['id']}",
+                target_type="issue_attachment",
+                target_id=str(row["id"]),
+                outcome="success",
+                details=base_audit_details,
+                request=request,
+            )
+        return StreamingResponse(
+            _iter_attachment_stream(stream_file),
+            media_type=str(row["media_type"]),
+            headers=headers,
+            background=BackgroundTask(stream_file.close),
+        )
+    except BaseException:
+        with contextlib.suppress(OSError):
+            stream_file.close()
+        raise
+
+
+@app.delete(
+    "/api/issue-attachments/{attachment_id}",
+    operation_id="deleteIssueAttachment",
+)
+async def delete_issue_attachment(
+    attachment_id: str,
+    request: Request,
+) -> dict[str, Any]:
+    """Delete an issue attachment (uploader or admin) to free quota immediately."""
+    username = getattr(request.state, "username", "")
+    safe_id = attachment_id if _canonical_uuid(attachment_id) else ""
+    try:
+        _check_allow_list(request)
+    except HTTPException as exc:
+        logger.debug(
+            "DELETE /api/issue-attachments/%s refused by allow list for user=%s",
+            safe_id or "<invalid>",
+            username,
+        )
+        refusal_msg = (
+            f"User '{username}' deleted attachment {safe_id}"
+            if safe_id
+            else f"User '{username}' deleted attachment"
+        )
+        await _record_refused_attempt(
+            action="issue_attachment.delete",
+            request=request,
+            message=refusal_msg,
+            target_type="issue_attachment",
+            target_id=safe_id,
+            exc=exc,
+            details={"attachment_id": safe_id} if safe_id else None,
+        )
+        raise
+
+    if not safe_id:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+    row = await storage.get_issue_attachment(attachment_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="Attachment not found")
+
+    is_admin = bool(getattr(request.state, "is_admin", False))
+    role = getattr(request.state, "role", "")
+    caller_row = await storage.get_user_by_username(username) if username else None
+
+    job_id = str(row.get("job_id") or "")
+    owner_id = int(row["owner_id"])
+    base_audit_details: dict[str, Any] = {
+        "attachment_id": str(row["id"]),
+        "media_type": str(row["media_type"]),
+        "size_bytes": int(row["size_bytes"]),
+        "tracker": str(row["tracker"]),
+        **({"job_id": job_id} if job_id else {}),
+    }
+
+    async def _deny_delete(refused_kind: str) -> NoReturn:
+        await record_audit(
+            action="issue_attachment.delete",
+            actor=username,
+            message=(
+                f"User '{username}' was denied deleting attachment {row['id']} "
+                f"({refused_kind})"
+            ),
+            target_type="issue_attachment",
+            target_id=str(row["id"]),
+            outcome="denied",
+            details={**base_audit_details, "refused_kind": refused_kind},
+            request=request,
+        )
+        raise HTTPException(status_code=404, detail="Attachment not found")
+
+    if not username or role not in ("viewer", "reviewer", "operator", "admin"):
+        await _deny_delete("forbidden")
+    if caller_row is not None and caller_row.get("disabled"):
+        await _deny_delete("account_disabled")
+    if not is_admin:
+        if caller_row is None or int(caller_row["id"]) != owner_id:
+            await _deny_delete("not_owner")
+        if not await storage.is_active_user_id(owner_id):
+            await _deny_delete("inactive_owner")
+
+    scope_keys = [
+        f"owner:{owner_id}",
+        *([f"job:{job_id}"] if job_id and _canonical_uuid(job_id) else []),
+    ]
+    async with _hold_attachment_scope_locks(*scope_keys):
+        current_row = await storage.get_issue_attachment(attachment_id)
+        if current_row is None:
+            raise HTTPException(status_code=404, detail="Attachment not found")
+        await storage.mark_issue_attachments_stored(
+            [attachment_id], cleanup_pending=True
+        )
+        cleaned = await issue_attachments.unlink_attachment_row(current_row)
+        if not cleaned:
+            await record_audit(
+                action="issue_attachment.delete",
+                actor=username,
+                message=f"Failed to delete attachment {current_row['id']}",
+                target_type="issue_attachment",
+                target_id=str(current_row["id"]),
+                outcome="failure",
+                details=base_audit_details,
+                request=request,
+            )
+            raise HTTPException(status_code=500, detail="Failed to delete attachment")
+
+    freed_bytes = int(current_row["size_bytes"])
+    logger.info(
+        "Deleted issue attachment %s (owner_id=%d, size_bytes=%d)",
+        current_row["id"],
+        owner_id,
+        freed_bytes,
+    )
+    await record_audit(
+        action="issue_attachment.delete",
+        actor=username,
+        message=f"User '{username}' deleted attachment {current_row['id']}",
+        target_type="issue_attachment",
+        target_id=str(current_row["id"]),
+        outcome="success",
+        details=base_audit_details,
+        request=request,
+    )
+    return {
+        "status": "deleted",
+        "attachment_id": str(current_row["id"]),
+        "freed_bytes": freed_bytes,
+    }
 
 
 def _detect_tracker_type(url: str) -> str:
@@ -14396,8 +15811,9 @@ async def bulk_delete_jobs_endpoint(
         unauthorized_ids = [jid for jid in body.job_ids if jid not in job_ids]
 
     origins = await _reanalysis_origins(job_ids)
-    result = await storage.delete_jobs_bulk(job_ids)
-    await _finish_job_deletion(job_ids, result["deleted"], origins)
+    async with _hold_attachment_run_locks(job_ids):
+        result = await storage.delete_jobs_bulk(job_ids)
+        await _finish_job_deletion(job_ids, result["deleted"], origins)
     result["unauthorized"] = unauthorized_ids
 
     # Audit log each deletion individually
@@ -14442,8 +15858,9 @@ async def delete_job_endpoint(
         )
 
     origins = await _reanalysis_origins([job_id])
-    deleted_ids = [job_id] if await storage.delete_job(job_id) else []
-    await _finish_job_deletion([job_id], deleted_ids, origins)
+    async with _hold_attachment_run_locks([job_id]):
+        deleted_ids = [job_id] if await storage.delete_job(job_id) else []
+        await _finish_job_deletion([job_id], deleted_ids, origins)
     await record_audit(
         action="admin.job_delete" if request.state.is_admin else "user.job_delete",
         actor=request.state.username,
@@ -15157,6 +16574,8 @@ async def get_default_server_settings(
     tests_url, tests_ref = parse_repo_ref(settings.tests_repo_url or "")
     result["tests_repo_url"] = _strip_url_userinfo(tests_url)
     result["tests_repo_ref"] = tests_ref
+    feedback_url, _ = parse_repo_ref(settings.feedback_repo_url or "")
+    result["feedback_repo_url"] = _strip_url_userinfo(feedback_url)
 
     # Coerce None → "" only for optional string fields; keep None for booleans/others
     _OPTIONAL_STRING_FIELDS = frozenset(
@@ -18601,15 +20020,35 @@ async def delete_user_endpoint(request: Request, username: str) -> dict[str, Any
     if username == request.state.username:
         raise HTTPException(status_code=400, detail="Cannot delete your own account")
 
-    # Read the account before it is gone: the row has to say what that account
-    # had, or a permission that disappears with it can never be explained.
-    snapshot = await storage.get_user_audit_snapshot(username)
-    try:
-        deleted = await storage.delete_user(username)
-    except ValueError as exc:
-        raise HTTPException(status_code=400, detail=str(exc)) from exc
-    if not deleted:
+    user_row = await storage.get_user_by_username(username)
+    if user_row is None:
         raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+    owner_id = int(user_row["id"])
+
+    async with _hold_attachment_scope_locks(f"owner:{owner_id}"):
+        # Read the account before it is gone: the row has to say what that account
+        # had, or a permission that disappears with it can never be explained.
+        snapshot = await storage.get_user_audit_snapshot(username)
+        marker_written = await issue_attachments.write_owner_delete_marker(owner_id)
+        try:
+            deleted = await storage.delete_user(username)
+        except ValueError as exc:
+            if marker_written and await storage.user_id_exists(owner_id):
+                await issue_attachments.remove_owner_delete_marker(owner_id)
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        except BaseException:
+            if marker_written and await storage.user_id_exists(owner_id):
+                await issue_attachments.remove_owner_delete_marker(owner_id)
+            raise
+
+        if not deleted:
+            if not await storage.user_id_exists(owner_id):
+                await _cleanup_deleted_owner_attachments(owner_id)
+            elif marker_written:
+                await issue_attachments.remove_owner_delete_marker(owner_id)
+            raise HTTPException(status_code=404, detail=f"User '{username}' not found")
+
+        await _cleanup_deleted_owner_attachments(owner_id)
 
     notify_pending_count_changed()
     await _cleanup_revoked_ai_sessions()
@@ -18622,7 +20061,7 @@ async def delete_user_endpoint(request: Request, username: str) -> dict[str, Any
         details=snapshot,
         request=request,
     )
-    return {"deleted": username}
+    return strip_sensitive_from_response({"deleted": username})
 
 
 @app.put("/api/admin/users/{username}/role", operation_id="changeUserRoleEndpoint")
@@ -20608,7 +22047,7 @@ async def get_admin_settings(
                     logger.debug(
                         "Failed to decrypt settings value for %s: %s", key, exc
                     )
-            item["value"] = db_value
+            item["value"] = _normalize_setting_override(key, db_value)
             item["updated_by"] = override.get("updated_by", "")
             item["updated_at"] = override.get("updated_at", "")
             # Flag if an OS env var also exists (from configmap/container),
@@ -21365,7 +22804,10 @@ async def import_server_settings(request: Request) -> JSONResponse:
     raw_settings = body.get("settings")
     if not isinstance(raw_settings, dict) or not raw_settings:
         raise HTTPException(status_code=422, detail="No settings in export document")
-    updates = {str(k): "" if v is None else str(v) for k, v in raw_settings.items()}
+    updates = {
+        str(k): _normalize_setting_override(str(k), "" if v is None else str(v))
+        for k, v in raw_settings.items()
+    }
 
     # Validate the whole batch before anything is applied — the same
     # rules the per-setting PUT enforces, plus the empty-override gates
@@ -21486,6 +22928,13 @@ def _empty_override_error(key: str) -> str | None:
     return None
 
 
+def _normalize_setting_override(key: str, value: str) -> str:
+    """Normalize persisted setting overrides whose blank values coerce to a fixed default."""
+    if key == "feedback_repo_url":
+        return normalize_feedback_repo_url(value)
+    return value
+
+
 async def _save_settings_to_db(
     settings_updates: dict[str, Any], username: str
 ) -> list[str]:
@@ -21508,9 +22957,12 @@ async def _save_settings_to_db(
             if error:
                 raise HTTPException(status_code=400, detail=error)
 
+    normalized_updates = {
+        key: _normalize_setting_override(key, str(value) if value is not None else "")
+        for key, value in settings_updates.items()
+    }
     db_values: dict[str, str] = {}
-    for key, value in settings_updates.items():
-        str_value = str(value) if value is not None else ""
+    for key, str_value in normalized_updates.items():
         # Upsert (empty allowed — an explicit empty override beats env).
         # Sensitive values are encrypted only when non-empty; the empty
         # override stays a plain empty string (nothing to protect).
@@ -21538,9 +22990,7 @@ async def _save_settings_to_db(
     # Update in-memory cache so get_settings() picks up changes. Saved
     # values — empty included — are explicit overrides that beat env;
     # falling back to env/default is the reset endpoint's job (DELETE).
-    update_db_settings_cache(
-        {k: str(v) if v is not None else "" for k, v in settings_updates.items()}
-    )
+    update_db_settings_cache(normalized_updates)
 
     # The log-file budget and floor apply to the running handler, not the next
     # boot: rebuilding it here covers the PUT, the import and the env→DB persist.
@@ -23558,59 +25008,65 @@ def _jira_bug_refusal(exc: httpx.HTTPStatusError) -> HTTPException:
     "/api/feedback/create",
     status_code=201,
     response_model=FeedbackResponse,
+    response_model_exclude_none=True,
     operation_id="createFeedback",
 )
 async def create_feedback(
     request: Request, body: FeedbackCreateRequest
 ) -> FeedbackResponse:
-    """Create a GitHub issue from a previewed feedback.
-
-    Takes a title, body, and labels (typically from the preview endpoint)
-    and creates the GitHub issue using the authenticated user's GitHub token.
-    """
-    _check_allow_list(request)
+    """Create a GitHub issue from a previewed feedback via shared orchestration."""
     settings = get_settings()
-    message = f"User '{request.state.username}' created a feedback issue"
+    username = getattr(request.state, "username", "")
+    message = f"User '{username}' created a feedback issue"
     try:
+        _check_allow_list(request)
         if not settings.feedback_enabled:
             raise HTTPException(
                 status_code=503, detail="Feedback submission is disabled on this server"
             )
 
-        username = request.state.username
         user_tokens = await storage.get_user_tokens(username)
-        github_token = user_tokens.get("github_token", "")
-
-        if not github_token:
-            # This is the one issue-creation path that reads the token from the
-            # user's row instead of the request, so the no-profile wording that
-            # helper owns (#400) is the one the bootstrap `admin` gets here.
-            raise HTTPException(
-                status_code=400,
-                detail=await _require_user_tracker_credential(username, "GitHub"),
-            )
-
+        github_token = user_tokens.get("github_token", "") or ""
+        prepared = prepare_feedback_issue(
+            title=body.title,
+            body=body.body,
+            labels=body.labels,
+        )
+        result = await _create_issue_from_text(
+            "github",
+            prepared.title,
+            prepared.body,
+            username=username,
+            settings=settings,
+            github_token=github_token,
+            github_repo_url=settings.feedback_repo_url,
+            via="rootcoz feedback",
+            subject="feedback",
+            attachments=body.attachments,
+            labels=prepared.labels,
+            attribution=prepared.provenance,
+            repo_setting="FEEDBACK_REPO_URL",
+        )
         try:
-            # Attribution comes from the signed provenance the preview embedded
-            # in its body — never from the request (which carries no
-            # provider/model) and never re-resolved here, so a settings change
-            # between preview and create cannot miscredit the model that wrote
-            # the body.
-            issue = await create_feedback_from_preview(
-                title=body.title,
-                body=body.body,
-                labels=body.labels,
-                github_token=github_token,
+            issue = FeedbackResponse(
+                issue_url=result["url"],
+                issue_number=result["number"],
+                title=result["title"],
+                attachments=(
+                    IssueAttachmentSummary.model_validate(result["attachments"])
+                    if "attachments" in result
+                    else None
+                ),
             )
-        except Exception as exc:  # GitHub API failure or anything else
-            # The caller-facing refusal, with the upstream error chained so the
-            # audit row can still name its status.
-            raise _github_issue_refusal(exc) from exc
+        except Exception as exc:
+            raise _known_created_bookkeeping_error(
+                "GitHub", str(result["url"]), exc
+            ) from exc
     except HTTPException as exc:
-        details: dict[str, Any] = {"kind": "github_issue"}
-        # The number that tells an outage from a lost token; never the upstream
-        # message, which can echo the request. 401/403/429 are the credential's
-        # own answer here and the reason code already names them.
+        details: dict[str, Any] = {
+            "kind": "github_issue",
+            **_attachment_refusal_audit_details(body.attachments),
+        }
         upstream_status = _upstream_status(exc)
         if upstream_status is not None and upstream_status not in (401, 403, 429):
             details["upstream_status"] = upstream_status
@@ -23623,22 +25079,39 @@ async def create_feedback(
             details=details,
         )
         raise
+    except Exception:
+        await _record_failed_attempt(
+            action="feedback.create",
+            request=request,
+            message=message,
+            target_type="feedback",
+            details={
+                "kind": "github_issue",
+                **_attachment_refusal_audit_details(body.attachments),
+            },
+        )
+        raise
 
-    # The kind and the issue the run produced — never the body the user wrote.
+    success_details: dict[str, Any] = {
+        "kind": "github_issue",
+        "issue_number": issue.issue_number,
+        "issue_url": issue.issue_url,
+    }
+    if issue.attachments is not None:
+        success_details["attachment_count"] = issue.attachments.count
+        success_details["attachment_types"] = list(issue.attachments.types)
     await record_audit(
         action="feedback.create",
-        actor=request.state.username,
+        actor=username,
         message=f"{message} (#{issue.issue_number})",
         target_type="feedback",
         target_id=str(issue.issue_number),
-        details={
-            "kind": "github_issue",
-            "issue_number": issue.issue_number,
-            "issue_url": issue.issue_url,
-        },
+        details=success_details,
         request=request,
     )
-    return issue
+    return FeedbackResponse.model_validate(
+        strip_sensitive_from_response(issue.model_dump(exclude_none=True))
+    )
 
 
 # -- Chat helpers --

@@ -60,7 +60,7 @@ This asks the job's assistant for a cross-failure answer and leaves the evidence
 
    > **Tip:** Because the assistant can read the cloned test code, questions like `Why does test_login assert on the old token format?` are often answered faster than asking for a re-analysis with a different model.
 
-   A good answer can become the issue itself: ask the assistant to file it and it drafts the title and body from the conversation. The issue uses the token saved in your account (add one in Profile Settings if it says you have none) — see [Creating Follow-Up Issues and Pushing Results](create-follow-up-issues-and-push-results.html) for the whole flow.
+   A good answer can become the issue itself: ask the assistant to file it and it drafts the title and body from the conversation. The issue uses the token saved in your account, so add one in Profile Settings if it says you have none. Browser job chat renders `Attach files` disabled with a tooltip, and the assistant's issue-creation tools explicitly refuse file attachments and local paths, because browser chat has no user-controlled local byte-approval flow. To attach log or screenshot files, file from the report page's `GitHub Issue` or `Jira Ticket` dialog, the header `Feedback` dialog, or the terminal CLI workflow using repeatable `--attach PATH` on `rootcoz propose-chat-issue` and `rootcoz create-chat-issue`; see [Creating Follow-Up Issues and Pushing Results](create-follow-up-issues-and-push-results.html) and [CLI Command Reference](cli-reference.html).
 
 4. Comment on the failure, not just in the chat.
 

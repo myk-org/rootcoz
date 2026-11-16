@@ -19,10 +19,25 @@ import { Select, SelectTrigger, SelectValue, SelectContent, SelectItem } from '@
 import { Popover, PopoverAnchor, PopoverContent } from '@/components/ui/popover'
 import { LoadingSpinner } from '@/components/shared/LoadingSpinner'
 import { TokenRequiredBanner } from '@/components/shared/TokenRequiredBanner'
+import { AttachmentPicker, IssueAttachmentDeliverySummary } from '@/components/shared/AttachmentPicker'
+import {
+  attachmentPickerPropsFromCapability,
+  filesToAttachmentPayload,
+  useCapabilities,
+} from '@/lib/attachments'
 import { CheckCircle2, ExternalLink, AlertTriangle } from 'lucide-react'
-import type { PreviewIssueResponse, CreateIssueResponse, SimilarIssue, CommentsAndReviews, TrackedInEntry } from '@/types'
+import type {
+  Capabilities,
+  PreviewIssueResponse,
+  CreateIssueResponse,
+  IssueAttachmentSummary,
+  IssueAttachmentUpload,
+  SimilarIssue,
+  CommentsAndReviews,
+  TrackedInEntry,
+} from '@/types'
 import { useUserTokenPresence } from '@/lib/useUserTokens'
-import { useReportDispatch, useRefreshEnrichments } from '@/pages/report/reportState'
+import { useReportDispatch, useRefreshEnrichments, useReportState } from '@/pages/report/reportState'
 import { useAiSelection } from '@/lib/useAiSelection'
 import { AnalysisProviderSelect, AnalysisModelSelect } from '@/components/shared/AnalysisAiPicker'
 import { IssueMatchList } from './IssueMatchList'
@@ -55,6 +70,7 @@ interface BugCreationDialogProps {
   includeLinks?: boolean
   availableRepos?: Array<{ name: string; url: string }>
   defaultProjectKey?: string
+  capabilities?: Capabilities | null
   /** Called after a bug issue is successfully created (with the issue URL). */
   onIssueCreated?: (url: string) => void
 }
@@ -72,10 +88,12 @@ export function BugCreationDialog({
   defaultAiModel = '',
   availableRepos,
   defaultProjectKey,
+  capabilities,
   onIssueCreated,
 }: BugCreationDialogProps) {
   const dispatch = useReportDispatch()
   const refreshEnrichments = useRefreshEnrichments()
+  const { capabilities: reportCapabilities, capabilitiesLoaded } = useReportState()
   const { username, canUseServerProviders, canUseFreeProviders } = useAuth()
   const { aiProvider, aiModel, setAiPair } = useAiSelection(defaultAiProvider, defaultAiModel)
   const { providers, providerStatus } = useProviderCatalog()
@@ -93,6 +111,8 @@ export function BugCreationDialog({
   const [body, setBody] = useState('')
   const [similar, setSimilar] = useState<SimilarIssue[]>([])
   const [createdUrl, setCreatedUrl] = useState('')
+  const [attachments, setAttachments] = useState<File[]>([])
+  const [attachmentSummary, setAttachmentSummary] = useState<IssueAttachmentSummary | null>(null)
   const [errorMsg, setErrorMsg] = useState('')
   // A failed create returns to the preview with the generated issue intact, so the
   // same title/body/type can be retried without regenerating it.
@@ -131,6 +151,26 @@ export function BugCreationDialog({
   const tokenPresence = useUserTokenPresence(open)
   const hasToken = target === 'github' ? tokenPresence.github : tokenPresence.jira
   const tokenMissing = tokenPresence.loaded && !hasToken
+  const capabilityState = useCapabilities(
+    open,
+    capabilities !== undefined
+      ? { loaded: true, capabilities }
+      : { loaded: capabilitiesLoaded, capabilities: reportCapabilities },
+  )
+  const pickerProps = attachmentPickerPropsFromCapability(
+    capabilityState.capabilities,
+    capabilityState.loaded,
+    target === 'github' ? 'report_github' : 'report_jira',
+  )
+  const uncertainAttachmentLock = createMaybeFiled && attachments.length > 0
+
+  useEffect(() => {
+    if (!open) return
+    return () => {
+      setAttachments((prev) => (prev.length > 0 ? [] : prev))
+      setAttachmentSummary(null)
+    }
+  }, [open])
 
   function getTrackerChoices() {
     return {
@@ -221,6 +261,19 @@ export function BugCreationDialog({
       setCreateError('')
       setCreateMaybeFiled(false)
       setPhase('creating')
+
+      let encodedAttachments: IssueAttachmentUpload[] = []
+      if (attachments.length > 0) {
+        try {
+          encodedAttachments = await filesToAttachmentPayload(attachments, pickerProps)
+        } catch (err) {
+          setCreateError(err instanceof Error ? err.message : 'Failed to read selected attachment.')
+          setCreateMaybeFiled(false)
+          setPhase('preview')
+          return
+        }
+      }
+
       // Snapshot the tracker links that already exist so a failure can be told
       // apart from "nothing was filed" before the retry button offers a resubmit.
       const linksBefore = await trackerLinkIds()
@@ -232,8 +285,9 @@ export function BugCreationDialog({
           child_job_name: childJobName ?? '',
           child_build_number: childBuildNumber ?? 0,
           ...getTrackerChoices(),
+          ...(encodedAttachments.length > 0 ? { attachments: encodedAttachments } : {}),
         })
-        markCreated(res.url)
+        markCreated(res.url, res.attachments ?? null)
       } catch (err) {
         // A lost response or an intermediary error is not proof that nothing was
         // filed: the server writes the tracked-in link in the same request. Adopt
@@ -242,7 +296,7 @@ export function BugCreationDialog({
         // retry stays available.
         const filedUrl = linksBefore ? await newTrackerLinkUrl(linksBefore) : null
         if (filedUrl) {
-          markCreated(filedUrl)
+          markCreated(filedUrl, null)
           return
         }
         setCreateError(createIssueFailureMessage(err))
@@ -254,8 +308,10 @@ export function BugCreationDialog({
     })
   }
 
-  function markCreated(url: string) {
+  function markCreated(url: string, summary: IssueAttachmentSummary | null) {
     setCreatedUrl(url)
+    setAttachmentSummary(summary)
+    setAttachments([])
     setPhase('success')
     onIssueCreated?.(url)
 
@@ -307,6 +363,8 @@ export function BugCreationDialog({
       setBody('')
       setSimilar([])
       setCreatedUrl('')
+      setAttachments([])
+      setAttachmentSummary(null)
       setErrorMsg('')
       setCreateError('')
       setCreateMaybeFiled(false)
@@ -408,8 +466,9 @@ export function BugCreationDialog({
             {createError && createMaybeFiled && (
               <p role="status" className="text-xs text-signal-amber">
                 The server could not confirm this attempt, so the issue may already
-                have been filed. Check {label} before you retry — submitting it again could
-                create a duplicate.
+                have been filed. Check {label} before you retry — never resubmit blindly,
+                as submitting it again could create a duplicate.
+                {attachments.length > 0 && ' Selected files remain listed below for inspection.'}
               </p>
             )}
             {target === 'github' && availableRepos && availableRepos.length > 1 && (
@@ -568,6 +627,22 @@ export function BugCreationDialog({
               <label htmlFor="bug-body" className="text-xs font-display uppercase tracking-widest text-text-tertiary">Body</label>
               <Textarea id="bug-body" value={body} onChange={(e) => setBody(e.target.value)} rows={20} className="font-mono text-xs" />
             </div>
+            <div className="space-y-2">
+              <span className="text-xs font-display uppercase tracking-widest text-text-tertiary">Attachments</span>
+              <AttachmentPicker
+                files={attachments}
+                onChange={setAttachments}
+                maxFiles={pickerProps.maxFiles}
+                maxFileBytes={pickerProps.maxFileBytes}
+                maxTotalBytes={pickerProps.maxTotalBytes}
+                disabledReason={
+                  uncertainAttachmentLock
+                    ? 'Issue creation outcome is uncertain — check the tracker instead of resubmitting.'
+                    : pickerProps.disabledReason
+                }
+                hint={uncertainAttachmentLock ? undefined : pickerProps.hint}
+              />
+            </div>
           </div>
         )}
 
@@ -594,6 +669,7 @@ export function BugCreationDialog({
             >
               Open {label} <ExternalLink className="h-3.5 w-3.5" />
             </a>
+            {attachmentSummary && <IssueAttachmentDeliverySummary summary={attachmentSummary} />}
           </div>
         )}
 
@@ -615,7 +691,17 @@ export function BugCreationDialog({
           {promptPhase === 'preview' && (
             <div className="flex gap-2 sm:ml-auto">
               <Button variant="outline" onClick={() => handleCancel()}>Cancel</Button>
-              <Button onClick={handleCreate} disabled={!title.trim() || tokenMissing || (target === 'jira' && jiraIssueType === '__custom__' && !customIssueType.trim())}>{createError ? 'Retry' : `Create ${label}`}</Button>
+              <Button
+                onClick={handleCreate}
+                disabled={
+                  !title.trim()
+                  || tokenMissing
+                  || uncertainAttachmentLock
+                  || (target === 'jira' && jiraIssueType === '__custom__' && !customIssueType.trim())
+                }
+              >
+                {createError ? 'Retry' : `Create ${label}`}
+              </Button>
             </div>
           )}
           {promptPhase === 'prompt' && (

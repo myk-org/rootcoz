@@ -547,6 +547,30 @@ def analysis_http_tools(
     return tools
 
 
+CHAT_TOOL_REJECTED_FIELDS = (
+    "attachments",
+    "attachment",
+    "attach",
+    "files",
+    "file",
+    "file_path",
+    "file_paths",
+    "attachment_path",
+    "attachment_paths",
+    "path",
+    "paths",
+    "data_b64",
+)
+CHAT_TOOL_REJECTED_TEMPLATE = "|".join(
+    f"{{{field}}}" for field in CHAT_TOOL_REJECTED_FIELDS
+)
+_CHAT_TOOL_ATTACHMENT_NOTE = (
+    " File attachments and local file paths are not supported in chat model "
+    "tools; direct the user to the report dialog, feedback dialog, or rootcoz "
+    "CLI --attach."
+)
+
+
 def _tracker_issue_tools(
     *,
     server_url: str,
@@ -596,9 +620,11 @@ def _tracker_issue_tools(
                 "them to reply in this chat with the code. Nothing is filed "
                 "until they do, and only they can confirm it. Call this again "
                 "for any edit — an id and code authorise one specific draft."
+                + _CHAT_TOOL_ATTACHMENT_NOTE
             ),
             "parameters": {
                 "type": "object",
+                "additionalProperties": False,
                 "properties": {
                     "target": {
                         "type": "string",
@@ -620,7 +646,12 @@ def _tracker_issue_tools(
             "http": {
                 "method": "POST",
                 "url": f"{server_url}/api/chat-issue/propose",
-                "headers": {**auth_headers, "Content-Type": "application/json"},
+                "headers": {
+                    **auth_headers,
+                    "Content-Type": "application/json",
+                    "X-RootCoz-Chat-Tool": "1",
+                    "X-RootCoz-Chat-Tool-Rejected": CHAT_TOOL_REJECTED_TEMPLATE,
+                },
                 "body_template": {
                     "target": "{target}",
                     "title": "{title}",
@@ -663,10 +694,11 @@ def _tracker_issue_tools(
                     "single-use and expire, so propose again for any change. "
                     f"{repo_rule}"
                     "Returns the created issue URL and number/key; a refusal "
-                    "must be relayed to the user verbatim."
+                    "must be relayed to the user verbatim." + _CHAT_TOOL_ATTACHMENT_NOTE
                 ),
                 "parameters": {
                     "type": "object",
+                    "additionalProperties": False,
                     "properties": {
                         "title": {
                             "type": "string",
@@ -702,7 +734,12 @@ def _tracker_issue_tools(
                 "http": {
                     "method": "POST",
                     "url": f"{server_url}/api/chat-issue",
-                    "headers": {**auth_headers, "Content-Type": "application/json"},
+                    "headers": {
+                        **auth_headers,
+                        "Content-Type": "application/json",
+                        "X-RootCoz-Chat-Tool": "1",
+                        "X-RootCoz-Chat-Tool-Rejected": CHAT_TOOL_REJECTED_TEMPLATE,
+                    },
                     "body_template": {
                         "target": target,
                         "title": "{title}",
@@ -1652,6 +1689,7 @@ def _issue_create_rules(
 - Step 3: only after the user's reply contains that code, call `create_github_issue` / `create_jira_issue` with that `confirmation_id`, that `confirmation_code` and the same title and body — copy them from the preview the server posted, never from memory. A create without them files nothing, a create the user has not confirmed fails with the step you skipped, and a paraphrased body is refused. The id and code are single-use and expire after 10 minutes, so propose again after any edit.
 - Never send the code on the user's behalf and never ask for it anywhere but this chat: the server only accepts a code that arrived in a message from the user. Do not claim a draft is confirmed until such a reply exists.
 - If the user declines, do not call the create tool — acknowledge and stop.
+- Chat model tools cannot attach files or read local file paths; never pass attachment or path arguments. If the user wants to attach files, direct them to the report dialog, the feedback dialog, or the `rootcoz` CLI `--attach` option.
 {repo_rule}
 - A tracker with no tool in your tool list cannot be used. Say you cannot open that issue there and name the reason and the fix:
 {absent}

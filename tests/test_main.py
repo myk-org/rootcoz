@@ -5847,9 +5847,16 @@ class TestCreateGithubIssueApiErrors:
         assert "Server Error" in caplog.text
         assert _REPORT_GITHUB_TOKEN not in caplog.text
         assert _REPORT_BODY not in caplog.text
-        # This endpoint records no row for a refusal, so nothing there can echo
-        # the submitted body either.
-        assert (await storage.list_audit_events(action="issue.create"))["events"] == []
+        # Report refusals record one refusal row without the submitted body.
+        events = (await storage.list_audit_events(action="issue.create"))["events"]
+        assert len(events) == 1
+        assert events[0]["outcome"] == "failure"
+        assert events[0]["details"] == {
+            "reason": "upstream_failure",
+            "tracker": "github",
+            "upstream_status": 503,
+        }
+        assert _REPORT_BODY not in json.dumps(events[0])
 
     @pytest.mark.asyncio
     async def test_github_404_points_at_the_configured_repository(
@@ -10295,6 +10302,7 @@ class TestStartupWorkspaceReclaim:
             "workspace_trees": 0,
             "chat_workspaces": 0,
             "artifact_extracts": 1,
+            "issue_attachments": 0,
             "survived": 0,
         }
 

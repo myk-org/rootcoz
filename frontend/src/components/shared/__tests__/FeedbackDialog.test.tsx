@@ -3,6 +3,7 @@ import { render, screen, waitFor, fireEvent, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { useState } from 'react'
 import { FeedbackDialog } from '../FeedbackDialog'
+import type { Capabilities, IssueAttachmentSummary } from '@/types'
 
 // The account row is the dialog's only credential source.
 const mockUserTokens = vi.fn(() => ({
@@ -41,8 +42,14 @@ vi.mock('@/lib/api', () => {
     ApiError: _ApiError,
     extractApiDetail: (err: unknown): string | null => {
       if (err instanceof _ApiError) {
-        const detail = (err.body as { detail?: string })?.detail
-        if (detail) return detail
+        const detail = (err.body as { detail?: unknown })?.detail
+        if (typeof detail === 'string' && detail) return detail
+        if (Array.isArray(detail)) {
+          const msgs = detail
+            .map((item) => (typeof item?.msg === 'string' ? item.msg.replace(/^Value error, /, '') : ''))
+            .filter(Boolean)
+          return msgs.length > 0 ? msgs.join('; ') : null
+        }
       }
       return null
     },
@@ -657,5 +664,316 @@ describe('FeedbackDialog', () => {
     const payload = mockPost.mock.calls[0][1] as Record<string, unknown>
     expect(payload.ai_provider).toBe('claude')
     expect(payload.ai_model).toBe('sonnet')
+  })
+})
+
+function makeFeedbackCapabilities(
+  feedbackOverride?: Capabilities['issue_attachments']['feedback'],
+  attachmentOverrides?: Partial<Capabilities['issue_attachments']>,
+): Capabilities {
+  return {
+    github_issues_enabled: true,
+    jira_issues_enabled: true,
+    issue_attachments: {
+      max_files: 3,
+      max_file_bytes: 5242880,
+      max_total_bytes: 10485760,
+      max_run_bytes: 209715200,
+      max_owner_bytes: 524288000,
+      types: ['text/plain', 'image/png', 'image/jpeg', 'image/gif', 'image/webp'],
+      report_github: { available: true, reason: 'available' },
+      report_jira: { available: true, reason: 'available' },
+      feedback: feedbackOverride ?? { available: true, reason: 'available' },
+      chat_ui: { available: false, reason: 'browser_chat_unsupported' },
+      direct_chat: { available: true, reason: 'available' },
+      ...attachmentOverrides,
+    },
+  }
+}
+
+describe('FeedbackDialog issue attachments', () => {
+  const onOpenChange = vi.fn()
+
+  beforeEach(() => {
+    vi.clearAllMocks()
+    mockGet.mockImplementation((path?: string) => {
+      if (path === '/api/capabilities') return Promise.resolve(makeFeedbackCapabilities())
+      return defaultGet(path)
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+    localStorage.clear()
+  })
+
+  it('fetches /api/capabilities on open and disables picker when pending, failed, or unavailable', async () => {
+    const user = userEvent.setup()
+    mockPost.mockResolvedValue({ title: 'Preview T', body: 'Preview B', labels: ['bug'] })
+
+    // Pending capability fetch disables picker
+    mockGet.mockImplementation((path?: string) => {
+      if (path === '/api/capabilities') return new Promise(() => {})
+      return defaultGet(path)
+    })
+    const { unmount } = render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
+    await user.type(screen.getByLabelText('Description'), 'Desc')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+    expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled()
+    expect(screen.getByText('Checking attachment capabilities...')).toBeInTheDocument()
+    unmount()
+
+    // PUBLIC_BASE_URL missing disables picker with explicit setting name
+    mockGet.mockImplementation((path?: string) => {
+      if (path === '/api/capabilities') {
+        return Promise.resolve(makeFeedbackCapabilities({ available: false, reason: 'public_base_url_required' }))
+      }
+      return defaultGet(path)
+    })
+    const second = render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
+    await user.type(screen.getByLabelText('Description'), 'Desc')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+    expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled()
+    expect(screen.getByText(/PUBLIC_BASE_URL/)).toBeInTheDocument()
+    second.unmount()
+
+    // Tracker disabled reason
+    mockGet.mockImplementation((path?: string) => {
+      if (path === '/api/capabilities') {
+        return Promise.resolve(makeFeedbackCapabilities({ available: false, reason: 'tracker_disabled' }))
+      }
+      return defaultGet(path)
+    })
+    render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
+    await user.type(screen.getByLabelText('Description'), 'Desc')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+    expect(screen.getByRole('button', { name: 'Attach files' })).toBeDisabled()
+    expect(screen.getByText(/issue tracker is disabled/i)).toBeInTheDocument()
+  })
+
+  it('sends no attachments on preview, encodes inside guarded create, and renders delivery summary on success', async () => {
+    const user = userEvent.setup()
+    const summary: IssueAttachmentSummary = {
+      count: 1,
+      types: ['text/plain'],
+      native_attached: 0,
+      linked: 1,
+      failed_count: 0,
+      files: [{ filename: 'console.log', id: 'fb-att-1', delivery: 'hosted', reason: 'hosted' }],
+    }
+    mockPost.mockImplementation(async (path: string) => {
+      if (path === '/api/feedback/preview') return { title: 'Preview T', body: 'Preview B', labels: ['bug'] }
+      if (path === '/api/feedback/create') {
+        return { issue_url: 'https://github.com/org/repo/issues/55', issue_number: 55, title: 'Preview T', attachments: summary }
+      }
+      return {}
+    })
+
+    render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
+    await user.type(screen.getByLabelText('Description'), 'UI issue')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+
+    expect(screen.getByRole('button', { name: 'Attach files' })).toBeEnabled()
+    expect(screen.getByText('Up to 3 files (5 MiB each, 10 MiB total).')).toBeInTheDocument()
+
+    fireEvent.change(screen.getByLabelText('Issue attachments'), {
+      target: { files: [new File(['remove'], 'skip.txt'), new File(['stacktrace'], 'console.log')] },
+    })
+    await user.click(screen.getByRole('button', { name: 'Remove skip.txt' }))
+
+    const createBtn = screen.getByRole('button', { name: /create issue/i })
+    fireEvent.click(createBtn)
+    fireEvent.click(createBtn)
+
+    await waitFor(() => expect(screen.getByText('Thank you for your feedback!')).toBeInTheDocument())
+
+    const previewPayload = mockPost.mock.calls.find(([p]) => p === '/api/feedback/preview')?.[1] as Record<string, unknown>
+    expect(previewPayload).not.toHaveProperty('attachments')
+
+    const createCalls = mockPost.mock.calls.filter(([p]) => p === '/api/feedback/create')
+    expect(createCalls).toHaveLength(1)
+    expect(createCalls[0][1]).toEqual({
+      title: 'Preview T',
+      body: 'Preview B',
+      labels: ['bug'],
+      attachments: [{ filename: 'console.log', data_b64: btoa('stacktrace') }],
+    })
+
+    const summaryBox = screen.getByTestId('attachment-delivery-summary')
+    expect(summaryBox).toHaveTextContent('Attachments (1)')
+    expect(summaryBox).toHaveTextContent('console.log')
+    expect(summaryBox).toHaveTextContent('Hosted link in issue body')
+  })
+
+  it('retains selected files on FileReader error and 400/413/422 refusals for safe retry', async () => {
+    const user = userEvent.setup()
+    const { ApiError } = await import('@/lib/api')
+    mockPost
+      .mockResolvedValueOnce({ title: 'Preview T', body: 'Preview B', labels: ['bug'] })
+      .mockRejectedValueOnce(new ApiError(400, 'Bad Request', { detail: 'SVG attachments are not permitted.' }))
+      .mockRejectedValueOnce(new ApiError(413, 'Payload Too Large', { detail: 'Request body exceeds 15 MiB.' }))
+      .mockRejectedValueOnce(new ApiError(422, 'Unprocessable Entity', { detail: [{ msg: 'Malformed attachment item' }] }))
+      .mockResolvedValueOnce({ issue_url: 'https://github.com/org/repo/issues/60', issue_number: 60, title: 'Preview T' })
+
+    render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
+    await user.type(screen.getByLabelText('Description'), 'Feedback with file')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+
+    fireEvent.change(screen.getByLabelText('Issue attachments'), {
+      target: { files: [new File(['data'], 'report.log')] },
+    })
+
+    // 1) FileReader error: no POST sent, no uncertain warning, file retained
+    const readSpy = vi.spyOn(FileReader.prototype, 'readAsDataURL').mockImplementationOnce(function (this: FileReader) {
+      this.dispatchEvent(new ProgressEvent('error'))
+    })
+    await user.click(screen.getByRole('button', { name: /create issue/i }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Could not read report.log')
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(mockPost.mock.calls.filter(([p]) => p === '/api/feedback/create')).toHaveLength(0)
+    expect(screen.getByText('report.log')).toBeInTheDocument()
+    readSpy.mockRestore()
+
+    // 2) 400 refusal: file retained, Retry enabled
+    await user.click(screen.getByRole('button', { name: /retry/i }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('SVG attachments are not permitted.')
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.getByText('report.log')).toBeInTheDocument()
+
+    // 3) 413 refusal: file retained, Retry enabled
+    await user.click(screen.getByRole('button', { name: /retry/i }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Request body exceeds 15 MiB.')
+    expect(screen.getByText('report.log')).toBeInTheDocument()
+
+    // 4) 422 refusal: file retained, Retry enabled
+    await user.click(screen.getByRole('button', { name: /retry/i }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Malformed attachment item')
+    expect(screen.getByText('report.log')).toBeInTheDocument()
+
+    // 5) Retry succeeds
+    await user.click(screen.getByRole('button', { name: /retry/i }))
+    await waitFor(() => expect(screen.getByText('Thank you for your feedback!')).toBeInTheDocument())
+  })
+
+  it('warns against blind resubmit on uncertain create while retaining files, and clears stale warning on new preview', async () => {
+    const user = userEvent.setup()
+    const { ApiError } = await import('@/lib/api')
+    mockPost
+      .mockResolvedValueOnce({ title: 'First T', body: 'First B', labels: ['bug'] })
+      .mockRejectedValueOnce(new ApiError(502, 'Bad Gateway', { detail: 'Upstream gateway timed out.' }))
+      .mockResolvedValueOnce({ title: 'Fresh T', body: 'Fresh B', labels: ['bug'] })
+
+    render(<FeedbackDialog open={true} onOpenChange={onOpenChange} />)
+    await user.type(screen.getByLabelText('Description'), 'Ambiguous feedback')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+
+    fireEvent.change(screen.getByLabelText('Issue attachments'), {
+      target: { files: [new File(['important'], 'evidence.log')] },
+    })
+
+    await user.click(screen.getByRole('button', { name: /create issue/i }))
+
+    const warning = await screen.findByRole('status')
+    expect(warning).toHaveTextContent(/may already have been filed.*never resubmit blindly/i)
+    expect(warning).toHaveTextContent(/Selected files remain listed below for inspection/i)
+    expect(screen.getByText('evidence.log')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /retry/i })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Remove evidence.log' })).toBeDisabled()
+
+    // Going Back and generating a fresh preview clears both createError and createMaybeFiled
+    await user.click(screen.getByRole('button', { name: /back/i }))
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toHaveValue('Fresh T'))
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: /create issue/i })).toBeEnabled()
+  })
+
+  it('clears selected files on close and reopen', async () => {
+    const user = userEvent.setup()
+    mockPost.mockResolvedValue({ title: 'T', body: 'B', labels: ['bug'] })
+    render(<ReopenableFeedbackDialog />)
+
+    await user.type(screen.getByLabelText('Description'), 'First session')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+
+    fireEvent.change(screen.getByLabelText('Issue attachments'), {
+      target: { files: [new File(['bytes'], 'temp.log')] },
+    })
+    expect(screen.getByText('temp.log')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: /cancel/i }))
+    await act(async () => { await new Promise((r) => setTimeout(r, 250)) })
+    fireEvent.click(screen.getByTestId('reopen'))
+
+    await user.type(screen.getByLabelText('Description'), 'Second session')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+    expect(screen.queryByText('temp.log')).not.toBeInTheDocument()
+  })
+
+  it('enforces capability count, per-file, and cumulative limits in the picker and before create encoding', async () => {
+    const user = userEvent.setup()
+    const readSpy = vi.spyOn(FileReader.prototype, 'readAsDataURL')
+    mockPost.mockResolvedValue({ title: 'Preview T', body: 'Preview B', labels: ['bug'] })
+
+    const initialCaps = makeFeedbackCapabilities(undefined, {
+      max_files: 2,
+      max_file_bytes: 10,
+      max_total_bytes: 15,
+    })
+    const { rerender } = render(
+      <FeedbackDialog open={true} onOpenChange={onOpenChange} capabilities={initialCaps} />,
+    )
+    await user.type(screen.getByLabelText('Description'), 'Oversized feedback selection')
+    await user.click(screen.getByRole('button', { name: /preview/i }))
+    await waitFor(() => expect(screen.getByLabelText('Title')).toBeInTheDocument())
+
+    const fileInput = screen.getByLabelText('Issue attachments')
+
+    // Count rejection (> 2 files)
+    fireEvent.change(fileInput, {
+      target: { files: [new File(['a'], '1.log'), new File(['b'], '2.log'), new File(['c'], '3.log')] },
+    })
+    expect(screen.getByRole('alert')).toHaveTextContent('Cannot attach more than 2 files (3 selected).')
+    expect(screen.queryByText('1.log')).not.toBeInTheDocument()
+
+    // Per-file size rejection (> 10 bytes)
+    fireEvent.change(fileInput, {
+      target: { files: [new File(['0123456789A'], 'big.log')] },
+    })
+    expect(screen.getByRole('alert')).toHaveTextContent('big.log (11 bytes) exceeds the 10 bytes per-file limit.')
+    expect(screen.queryByText('big.log')).not.toBeInTheDocument()
+
+    // Valid selection clears alert; cumulative rejection (> 15 bytes) preserves valid file
+    fireEvent.change(fileInput, { target: { files: [new File(['0123456789'], 'ten.log')] } })
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByText('ten.log')).toBeInTheDocument()
+
+    fireEvent.change(fileInput, { target: { files: [new File(['012345'], 'six.log')] } })
+    expect(screen.getByRole('alert')).toHaveTextContent('Selected files total 16 bytes, exceeding the 15 bytes total limit.')
+    expect(screen.getByText('ten.log')).toBeInTheDocument()
+    expect(screen.queryByText('six.log')).not.toBeInTheDocument()
+
+    // Tighten capability limit before submit so encoder rejects before starting FileReader or POST
+    const tighterCaps = makeFeedbackCapabilities(undefined, {
+      max_files: 2,
+      max_file_bytes: 8,
+      max_total_bytes: 15,
+    })
+    rerender(<FeedbackDialog open={true} onOpenChange={onOpenChange} capabilities={tighterCaps} />)
+    readSpy.mockClear()
+
+    await user.click(screen.getByRole('button', { name: /create issue/i }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('ten.log (10 bytes) exceeds the 8 bytes per-file limit.')
+    expect(readSpy).not.toHaveBeenCalled()
+    expect(mockPost.mock.calls.filter(([p]) => p === '/api/feedback/create')).toHaveLength(0)
   })
 })
