@@ -2154,14 +2154,25 @@ def _redact_key_echoes(text: str | None, keys: Sequence[str]) -> str | None:
 def _redact_pipeline(text: str, redact_keys: Sequence[str]) -> str:
     """The one ordered redaction sequence behind every printable AI diagnostic.
 
-    ``_scrub_answer`` (a stored answer, never cut) and ``_sanitize_diagnostic``
-    (an error or warning, bounded to ``MAX_ERROR_DETAIL_LENGTH``) differ only in
-    the bound they apply before calling this — never in the sequence itself.
+    ``_scrub_answer`` (a stored answer, never cut, line breaks kept) and
+    ``_sanitize_diagnostic`` (an error or warning, bounded to
+    ``MAX_ERROR_DETAIL_LENGTH`` and flattened to one line) differ only in what
+    they do around this — never in the sequence itself.
     """
     text = _ANSI_SEQUENCE_RE.sub(" ", text)
     text = _LINE_BREAK_RE.sub("\n", text)
-    # Keep the answer's own line breaks; drop every other non-printable character.
-    text = "".join(ch for ch in text if ch == "\n" or ch.isprintable())
+    # A separator stays a separator: a whitespace-ish character that is not
+    # printable (tab, vertical tab, NBSP, \x1c…) becomes one space, so a tabbed
+    # log excerpt never reads as one glued word. ``\n`` and printable text —
+    # indentation included — are kept as written, and a non-printable that is not
+    # whitespace (a zero-width mark) is still dropped, not turned into a space.
+    kept: list[str] = []
+    for char in text:
+        if char == "\n" or char.isprintable():
+            kept.append(char)
+        elif char.isspace() and (not kept or kept[-1] != " "):
+            kept.append(" ")
+    text = "".join(kept)
     for key in redact_keys:
         text = _redact_api_key(text, key)
     text = _redact_key_echoes(text, redact_keys) or ""
@@ -2178,11 +2189,13 @@ def _redact_pipeline(text: str, redact_keys: Sequence[str]) -> str:
 def _scrub_answer(text: str | None) -> str:
     """Redact a stored answer and keep it whole — a cut answer hides the failure.
 
-    The whole answer is bounded only by ``single_line_diagnostic``'s single line;
-    it is never sliced and never replaced by ``"[error detail omitted]"``, so a
-    long narrated peer answer survives intact.
+    The answer keeps its own line breaks (the report renders ``details`` with
+    ``whitespace-pre-wrap``) and is never sliced and never replaced by
+    ``"[error detail omitted]"``, so a long narrated peer answer survives intact.
+    ``_redact_pipeline`` drops ANSI sequences and non-printables (a separator
+    becomes a space); nothing is cut here.
     """
-    return single_line_diagnostic(_redact_pipeline(text or "", ()))
+    return _redact_pipeline(text or "", ())
 
 
 def _sanitize_diagnostic(

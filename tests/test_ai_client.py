@@ -1455,15 +1455,36 @@ async def test_collect_server_redact_keys_cold_catalog_and_manifest(
     assert referenced in await ai_client._collect_server_redact_keys("mygateway")
 
 
+def test_scrub_answer_keeps_a_separator_that_was_a_separator() -> None:
+    """Non-printable whitespace separates tokens; it is not deleted (#569)."""
+    # A tab, a vertical tab and a unit separator all separate words; deleting
+    # them joins tokens into a word the model never wrote.
+    assert ai_client._scrub_answer("step\tone") == "step one"
+    assert ai_client._scrub_answer("a\t\tb\x0bc\x1fd") == "a b c d"
+    # Runs collapse to one separator, and a line break stays a line break with
+    # its own indentation untouched (the report renders the answer pre-wrapped).
+    assert ai_client._scrub_answer("log:\n    expected 1") == "log:\n    expected 1"
+    # A non-printable that is not whitespace is still dropped, not turned into a
+    # separator: a zero-width mark must not split a word.
+    assert ai_client._scrub_answer("a\x00b\u200bc") == "abc"
+    assert ai_client._sanitize_diagnostic("said:\texpected\t1", ()) == (
+        "said: expected 1"
+    )
+
+
 def test_scrub_answer_and_sanitize_diagnostic_share_one_pipeline() -> None:
-    """One ordered redaction sequence, two bounds (R1)."""
+    """One ordered redaction sequence, two line shapes (R1)."""
     payload = (
         f"\x1b[31mfailed\x1b[0m with {_runtime_openai_key()} "
         "at https://api.example.test/v1?key=abc\t\nnext"
     )
     answer = ai_client._scrub_answer(payload)
     diagnostic = ai_client._sanitize_diagnostic(payload, ())
-    assert answer == diagnostic
+    assert diagnostic is not None
+    # The two shapes a reader gets: the answer keeps its own line breaks (the
+    # report renders it pre-wrapped), the diagnostic is flattened for a log line.
+    assert "\n" in answer
+    assert "\n" not in diagnostic
     assert _runtime_openai_key() not in answer
     assert "\x1b" not in answer
 

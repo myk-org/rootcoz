@@ -7737,6 +7737,38 @@ class TestChatCommands:
         )
         assert "The test failed because of a null pointer." in result.output
 
+    def test_chat_send_prints_the_turn_warning_under_the_reply(self, mock_client):
+        """A partial reply is announced where the reader actually reads it."""
+        mock_client.send_chat_message.return_value = {
+            "user_message": {
+                "id": 1,
+                "role": "user",
+                "content": "q",
+                "status": "completed",
+            },
+        }
+        mock_client.get_chat_history.return_value = {
+            "messages": [
+                {
+                    "id": 2,
+                    "role": "assistant",
+                    "content": "partial answer",
+                    "status": "completed",
+                },
+                {
+                    "id": 3,
+                    "role": "system",
+                    "content": "This reply may be incomplete — the AI provider reported: 503",
+                },
+            ],
+            "total": 2,
+        }
+        with patch("time.sleep"):
+            result = runner.invoke(app, ["chat", "send", "job-1", "q"])
+        assert result.exit_code == 0
+        assert "partial answer" in result.output
+        assert "Note: This reply may be incomplete" in result.output
+
     def test_chat_send_with_ai_config(self, mock_client):
         mock_client.send_chat_message.return_value = {
             "user_message": {
@@ -7809,7 +7841,9 @@ class TestChatCommands:
             ],
             "total": 1,
         }
-        mock_client.get_chat_history.side_effect = [pending] * 130 + [answered]
+        # The trailing element is the transcript re-read `send` makes to show a
+        # turn warning written after the answer row.
+        mock_client.get_chat_history.side_effect = [pending] * 130 + [answered] * 2
         with patch("time.sleep"):
             result = runner.invoke(app, ["chat", "send", "job-1", "q"])
         assert result.exit_code == 0
@@ -7962,6 +7996,38 @@ class TestAdminChatCommands:
             "Server status?", ai_provider="", ai_model=""
         )
         assert "All systems operational." in result.output
+
+    def test_admin_chat_send_prints_the_turn_warning_under_the_reply(self, mock_client):
+        """Admin chat announces a partial reply the same way job chat does."""
+        mock_client.send_admin_chat_message.return_value = {
+            "user_message": {
+                "id": 1,
+                "role": "user",
+                "content": "q",
+                "status": "completed",
+            },
+        }
+        mock_client.get_admin_chat_history.return_value = {
+            "messages": [
+                {
+                    "id": 2,
+                    "role": "assistant",
+                    "content": "partial answer",
+                    "status": "completed",
+                },
+                {
+                    "id": 3,
+                    "role": "system",
+                    "content": "This reply may be incomplete — the AI provider reported: 503",
+                },
+            ],
+            "total": 2,
+        }
+        with patch("time.sleep"):
+            result = runner.invoke(app, ["admin-chat", "send", "q"])
+        assert result.exit_code == 0
+        assert "partial answer" in result.output
+        assert "Note: This reply may be incomplete" in result.output
 
     def test_admin_chat_send_with_ai_config(self, mock_client):
         mock_client.init_admin_chat.return_value = {"ready": True}

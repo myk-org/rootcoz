@@ -26514,6 +26514,33 @@ async def _fail_chat_assistant_placeholder(
         )
 
 
+async def _store_chat_turn_warning(
+    job_id: str, username: str, warnings: Sequence[str]
+) -> None:
+    """Best-effort: record an accepted-but-incomplete turn as a visible notice.
+
+    The answer is already stored whole; this server-authored ``system`` row renders
+    under it, so a partial reply never reads as a finished one (#569). The notice
+    goes through :func:`_post_server_notice` — there is one writer of ``system``
+    rows — and it names the detail as the provider's own sanitized error, so the
+    row never reads as a server verdict on the answer. The caller announces the
+    change; one ``notify_chat_changed`` per change, not one per writer.
+    """
+    if not warnings:
+        return
+    try:
+        await _post_server_notice(
+            conversation=job_id,
+            username=username,
+            content=(
+                "This reply may be incomplete — the AI provider reported: "
+                + "; ".join(warnings)
+            ),
+        )
+    except Exception:
+        logger.exception("Failed to store the turn warning for %s", job_id)
+
+
 async def _cleanup_deleted_job_chat_workspaces(job_id: str) -> bool:
     """Remove chat MCP state after a job delete, serialized with in-flight chat.
 
@@ -27037,6 +27064,7 @@ async def _process_chat_message(
                         )
                         return
 
+                    turn_warnings: list[str] = []
                     success, response_text, new_session_id = await chat_with_ai(
                         job_id=job_id,
                         job_name=result_data.get("job_name", "unknown"),
@@ -27058,6 +27086,7 @@ async def _process_chat_message(
                         on_delta=_chat_delta_publisher(
                             job_id, username, assistant_msg_id
                         ),
+                        on_warning=turn_warnings.append,
                     )
 
                     if abort_signal.is_set():
@@ -27158,6 +27187,7 @@ async def _process_chat_message(
                         job_id,
                         new_session_id,
                     )
+                    await _store_chat_turn_warning(job_id, username, turn_warnings)
                     # The answer is stored and pushed; the graph is built from
                     # here on, off the turn. Nothing the user waits for queues
                     # behind it, and the next turn finds the tools. Scheduled
@@ -27878,6 +27908,7 @@ async def _process_admin_chat_message(
                 logger.info("Admin chat: aborted before AI call, user %s", username)
                 return
 
+            turn_warnings: list[str] = []
             success, response_text, new_session_id = await admin_chat_with_ai(
                 message=message,
                 history=history,
@@ -27891,6 +27922,7 @@ async def _process_admin_chat_message(
                 on_delta=_chat_delta_publisher(
                     ADMIN_CHAT_JOB_ID, username, assistant_msg_id
                 ),
+                on_warning=turn_warnings.append,
             )
 
             if abort_signal.is_set():
@@ -27992,6 +28024,7 @@ async def _process_admin_chat_message(
                 assistant_msg_id,
                 new_session_id,
             )
+            await _store_chat_turn_warning(ADMIN_CHAT_JOB_ID, username, turn_warnings)
             notify_chat_changed(ADMIN_CHAT_JOB_ID, username=username)
 
         except Exception:

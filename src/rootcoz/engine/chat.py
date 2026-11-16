@@ -17,6 +17,7 @@ from rootcoz import get_child_logger
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
     SessionCreationRefused,
+    _sanitize_diagnostic,
     call_ai,
     create_session_safely,
     format_ai_diagnostic,
@@ -2037,8 +2038,15 @@ async def _chat_with_ai_impl(
     call_type: str = "chat",
     install_mcp: bool = True,
     on_delta: Callable[[str], None] | None = None,
+    on_warning: Callable[[str], None] | None = None,
 ) -> tuple[bool, str, str | None]:
-    """Shared AI chat implementation used by both job and admin chat."""
+    """Shared AI chat implementation used by both job and admin chat.
+
+    ``on_warning`` receives the sanitized mid-turn warning: free-form chat accepts
+    a turn whose answer survived a recorded error (dropping it would lose the
+    reply), and this is how that accepted-but-unproven turn reaches the user as a
+    warning instead of being presented as a complete answer.
+    """
     logger.info(
         "%s: %s session (provider=%s, model=%s)",
         log_prefix,
@@ -2141,11 +2149,16 @@ async def _chat_with_ai_impl(
         )
         return False, result.text, None
     if result.error:
+        # One log line for the operator, one warning for the user: the turn was
+        # accepted without a normal stop reason, so it may be incomplete.
+        warning = _sanitize_diagnostic(result.error, ()) or ""
         logger.warning(
             "%s: AI turn completed with a warning: %s",
             log_prefix,
-            single_line_diagnostic(result.error),
+            warning,
         )
+        if warning and on_warning is not None:
+            on_warning(warning)
 
     return True, result.text, result.session_id
 
@@ -2169,6 +2182,7 @@ async def chat_with_ai(
     tracker_unavailable: dict[str, str] | None = None,
     issue_repos: tuple[str, ...] = (),
     on_delta: Callable[[str], None] | None = None,
+    on_warning: Callable[[str], None] | None = None,
 ) -> tuple[bool, str, str | None]:
     """Send a chat message and get an AI response via the sidecar."""
 
@@ -2200,6 +2214,7 @@ async def chat_with_ai(
         call_type="chat",
         install_mcp=install_mcp,
         on_delta=on_delta,
+        on_warning=on_warning,
     )
 
 
@@ -2215,6 +2230,7 @@ async def admin_chat_with_ai(
     custom_tools: list[dict[str, Any]] | None = None,
     tracker_unavailable: dict[str, str] | None = None,
     on_delta: Callable[[str], None] | None = None,
+    on_warning: Callable[[str], None] | None = None,
 ) -> tuple[bool, str, str | None]:
     """Send an admin chat message and get an AI response."""
 
@@ -2238,4 +2254,5 @@ async def admin_chat_with_ai(
         request_id="__admin_chat__",
         call_type="admin_chat",
         on_delta=on_delta,
+        on_warning=on_warning,
     )

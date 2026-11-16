@@ -1857,7 +1857,13 @@ class ChatMessageResponse(BaseModel):
 
     id: int
     job_id: str
-    role: str  # 'user' or 'assistant'
+    role: str = Field(
+        description=(
+            "Writer of the row: `user`, `assistant`, or `system` — server-authored "
+            "notices (an issue preview, a repository the chat could not clone, a "
+            "preparation failure, and a `This reply may be incomplete` turn warning)"
+        )
+    )
     content: str
     username: str = ""
     ai_provider: str = ""

@@ -88,6 +88,18 @@ class PeerResponseSummary(TypedDict):
     reasoning: str
 
 
+def _quote_lines(text: str) -> str:
+    """Indent a peer's own lines so they cannot pose as prompt structure.
+
+    A peer answer keeps its line breaks (the report renders it as written), and
+    it is re-embedded into line-structured prompts — ``Agrees:``, ``Classification:``,
+    ``Reasoning:``. Without the indent an answer can write its own ``Peer (...)``
+    block and forge another peer's verdict.
+    """
+    first, *rest = text.split("\n")
+    return "\n".join([first, *(f"    {line}" for line in rest)])
+
+
 # Derive valid classifications from the canonical type so peer analysis
 # stays in sync with the model definition (includes INFRASTRUCTURE).
 _VALID_CLASSIFICATIONS: frozenset[str] = frozenset(
@@ -385,7 +397,7 @@ def _build_peer_review_prompt(
             lines.append(
                 f"PEER ({resp['ai_provider']}/{resp['ai_model']}):\n"
                 f"  Classification: {resp['classification']}\n"
-                f"  Response: {resp['reasoning']}"
+                f"  Response: {_quote_lines(resp['reasoning'])}"
             )
         other_peers_section = (
             "\n\nOTHER PEER RESPONSES FROM PREVIOUS ROUND:\n"
@@ -1000,7 +1012,7 @@ async def analyze_failure_group_with_peers(
                             f"Peer ({entry.ai_provider}/{entry.ai_model}):\n"
                             f"  Agrees: {entry.agrees_with_orchestrator}\n"
                             f"  Classification: {entry.classification}\n"
-                            f"  Reasoning: {entry.details}"
+                            f"  Reasoning: {_quote_lines(entry.details)}"
                         )
                 peer_feedback = "\n\n".join(feedback_parts)
 

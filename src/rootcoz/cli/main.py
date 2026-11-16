@@ -5862,6 +5862,19 @@ def _echo_chat_reply(message: dict[str, Any]) -> None:
         typer.echo(f"\n{message.get('content', '')}")
 
 
+def _echo_turn_warning(history: dict[str, Any], reply: dict[str, Any]) -> None:
+    """Print the server notice the reply's turn added under the answer.
+
+    A turn the server accepted with a recorded error keeps its whole answer and
+    gains one ``system`` row, written just after the answer row completes; a
+    reader who sees only the answer would read a partial reply as finished.
+    """
+    reply_id = reply.get("id", 0)
+    for message in history.get("messages", []):
+        if message.get("role") == "system" and message.get("id", 0) > reply_id:
+            typer.echo(f"\nNote: {message.get('content', '')}")
+
+
 @chat_app.command("init")
 def chat_init(
     job_id: str = typer.Argument(help="Job ID to initialize chat for."),
@@ -5973,6 +5986,10 @@ def chat_send(
         )
         if reply is not None:
             _echo_chat_reply(reply)
+            # shortcut: one re-read of the transcript, so a notice written a
+            # moment after the answer row can be missed; upgrade to a short
+            # retry if a warned turn ever prints without its notice.
+            _echo_turn_warning(client.get_chat_history(job_id), reply)
 
 
 @chat_app.command("abort")
@@ -6084,6 +6101,8 @@ def admin_chat_send(
         )
         if reply is not None:
             _echo_chat_reply(reply)
+            # shortcut: one re-read, as in ``chat send``.
+            _echo_turn_warning(client.get_admin_chat_history(), reply)
 
 
 @admin_chat_app.command("history")
