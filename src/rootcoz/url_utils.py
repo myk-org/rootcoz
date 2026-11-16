@@ -3,12 +3,63 @@
 from __future__ import annotations
 
 import re
-from urllib.parse import urlparse, urlunparse
+from urllib.parse import ParseResult, urlparse, urlunparse
 
 # Fallback for values urlparse rejects (e.g. an unmatched "[" in the
 # netloc): the userinfo-shaped prefix before the path is dropped/masked —
 # failing closed beats raising from a settings export (#361 Qodo r2).
 _USERINFO_PREFIX = re.compile(r"(?<=//)[^/?#\s]+@")
+
+
+def _parse_valid_url(
+    raw: str, *, allowed_schemes: tuple[str, ...]
+) -> ParseResult | None:
+    """Parse an already-stripped, non-empty *raw* URL, or ``None`` if invalid.
+
+    The one implementation of the five shared URL checks: no internal
+    whitespace **and** no non-printable character (``isprintable()`` is True
+    for a plain space, so ``isspace()`` is needed too — and ``isspace()``
+    alone lets ``\\x00``/``\\x1b``/``\\x7f``/Unicode ``Cc``/``Cf`` through), an
+    authority ``urlparse`` accepts, a port it accepts, an allowed scheme, and
+    a non-empty hostname.
+    """
+    if any(ch.isspace() or not ch.isprintable() for ch in raw):
+        return None
+    try:
+        parsed = urlparse(raw)
+        _ = parsed.port  # Reject a malformed port (:badport) before use.
+    except ValueError:  # Malformed authority, e.g. an unmatched IPv6 bracket.
+        return None
+    if parsed.scheme not in allowed_schemes or not parsed.hostname:
+        return None
+    return parsed
+
+
+def strip_nonprintable(text: str) -> str:
+    """Drop control and format characters — log- and message-forging bytes."""
+    return "".join(ch for ch in text if ch.isprintable())
+
+
+def validate_http_url(
+    value: str | None,
+    *,
+    field_name: str,
+    allowed_schemes: tuple[str, ...] = ("http", "https"),
+) -> str | None:
+    """Return the stripped *value*, or raise ``ValueError`` naming the field.
+
+    Empty (or ``None``) means "not configured" and passes through; the error
+    never echoes the value or ``urlparse`` internals.
+    """
+    if value is None:
+        return None
+    raw = value.strip()
+    if not raw:
+        return ""
+    if _parse_valid_url(raw, allowed_schemes=allowed_schemes) is None:
+        schemes = " or ".join(f"{scheme}://" for scheme in allowed_schemes)
+        raise ValueError(f"{field_name} must be a valid {schemes} URL")
+    return raw
 
 
 def strip_url_userinfo(url: str) -> str:
@@ -31,27 +82,20 @@ def sanitize_http_href(url: str) -> str:
     if not url:
         return ""
     cleaned = strip_url_userinfo(url.strip())
-    parsed = urlparse(cleaned)
-    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+    if _parse_valid_url(cleaned, allowed_schemes=("http", "https")) is None:
         return ""
     return cleaned
 
 
 def sanitize_clone_url(url: str) -> str:
     """Return a credential-free HTTP(S) or git clone URL without query or fragment."""
-    try:
-        cleaned = strip_url_userinfo(url.strip())
-        parsed = urlparse(cleaned)
-        if (
-            parsed.scheme not in ("http", "https", "git")
-            or not parsed.hostname
-            or any(char.isspace() for char in parsed.netloc)
-        ):
-            return ""
-        _ = parsed.port  # Reject malformed ports before persisting the URL.
-        return urlunparse(parsed._replace(query="", fragment=""))
-    except ValueError:  # Malformed authority, e.g. an unmatched IPv6 bracket or port.
+    if not url:
         return ""
+    cleaned = strip_url_userinfo(url.strip())
+    parsed = _parse_valid_url(cleaned, allowed_schemes=("http", "https", "git"))
+    if parsed is None:
+        return ""
+    return urlunparse(parsed._replace(query="", fragment=""))
 
 
 def _query_start(url: str) -> int:
@@ -135,3 +179,43 @@ def redact_urls_in_text(text: str) -> str:
     if not text:
         return text
     return _URL_IN_TEXT.sub(lambda match: strip_url_credentials(match.group(0)), text)
+
+
+_SCHEME = re.compile(r"[a-zA-Z][a-zA-Z0-9+.-]*://")
+_AT_TOKEN_SUFFIX = re.compile(
+    r"@[^@/?#\s]+$"
+)  # anchored at the end of the pre-?/# head
+
+
+def mask_url_value(text: str) -> str:
+    """Mask the credentials of a whole URL *value* (display only).
+
+    Unlike :func:`mask_url_credentials_in_text` this has no "stop at the first
+    whitespace" failure mode: it masks the whole value, so an uppercase or
+    arbitrary scheme, an internal space, and the RootCoz ``@<token>`` repo-spec
+    suffix are all covered. String-splitting, never ``urlparse``, so a
+    malformed authority (unmatched IPv6 bracket) is masked too.
+
+    ``shortcut:`` text that is not URL-shaped is returned unchanged — a masker
+    is not a sanitizer; upgrade if a schemeless credential carrier ever reaches
+    a log or a ``422`` body.
+    """
+    if not text or _SCHEME.search(text) is None:
+        return text
+    text = strip_nonprintable(text)
+    scheme_end = _SCHEME.search(text).end()  # type: ignore[union-attr]
+    head_end = _query_start(text)
+    head = text[:head_end]
+    # Mask userinfo inside the authority only (up to the first ``/``).
+    path_start = head.find("/", scheme_end)
+    authority_end = len(head) if path_start == -1 else path_start
+    authority = head[scheme_end:authority_end]
+    if "@" in authority:
+        authority = "***@" + authority.rsplit("@", 1)[1]
+        head = text[:scheme_end] + authority + text[authority_end:head_end]
+    # The ``@token`` suffix is masked on the pre-cut head: after the query cut
+    # the ``$`` anchor would see ``?foo=1`` and keep the token verbatim.
+    slash = head.find("/", scheme_end)
+    if slash != -1 and _AT_TOKEN_SUFFIX.search(head[slash:]):
+        head = head[:slash] + _AT_TOKEN_SUFFIX.sub("@***", head[slash:])
+    return head if head_end == len(text) else f"{head}?***"

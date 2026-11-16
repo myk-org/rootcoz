@@ -2056,6 +2056,11 @@ def analyze(
         max_concurrent=max_concurrent,
     )
 
+    # An explicitly passed empty --tests-repo-url clears the server default;
+    # the option's "" default keeps its "unset" meaning (#562).
+    if ctx.get_parameter_source("tests_repo_url") == ParameterSource.COMMANDLINE:
+        extras["tests_repo_url"] = tests_repo_url
+
     _apply_peer_and_repos(
         extras,
         peers=peers,

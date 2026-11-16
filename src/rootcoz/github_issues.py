@@ -38,7 +38,7 @@ from rootcoz.models import (
     ProductBugReport,
     SimilarIssue,
 )
-from rootcoz.url_utils import strip_url_credentials
+from rootcoz.url_utils import mask_url_value, strip_url_credentials
 
 logger = get_child_logger(__name__)
 
@@ -161,13 +161,16 @@ def run_repo_urls(
     urls: list[str] = []
     skipped = 0
     for raw in raw_urls:
-        without_ref, _ = parse_repo_ref(str(raw).strip())
-        clean = strip_url_credentials(without_ref)
         try:
+            without_ref, _ = parse_repo_ref(str(raw).strip())
+            clean = strip_url_credentials(without_ref)
             owner, repo_name = parse_github_repo_url(clean)
         except ValueError:
+            # A stored URL ``urlsplit`` rejects is one skipped repo, not a failed
+            # duplicate search (#562 Rule 2). Masked: it may carry a credential.
             logger.debug(
-                "Not a GitHub repository, skipping duplicate search: %s", clean
+                "Not a GitHub repository, skipping duplicate search: %s",
+                mask_url_value(str(raw).strip()),
             )
             skipped += 1
             continue

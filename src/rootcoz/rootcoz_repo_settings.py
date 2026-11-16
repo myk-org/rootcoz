@@ -27,12 +27,18 @@ from pydantic import (
 
 from rootcoz import get_child_logger
 from rootcoz.ai_client import normalize_provider
-from rootcoz.config import Settings, parse_additional_repos, parse_peer_configs
+from rootcoz.config import (
+    Settings,
+    parse_additional_repos,
+    parse_peer_configs,
+    safe_parse_repo_ref,
+)
 from rootcoz.models import (
     AdditionalRepo,
     AiConfigEntry,
     BaseAnalysisRequest,
     NormalizedAiProvider,
+    coerce_stored_additional_repos,
 )
 
 logger = get_child_logger(__name__)
@@ -447,8 +453,15 @@ def apply_rootcoz_repo_settings(
     elif additional_repos is not None:
         resolved_additional = list(additional_repos)
     else:
-        parsed = parse_additional_repos(settings.additional_repos)
-        resolved_additional = [AdditionalRepo(**r) for r in parsed] if parsed else []
+        # A stored setting written before the write path validated it must not
+        # crash the background task (Rule 2 of #562); a caller-supplied value is
+        # still a 422 at the boundary.
+        try:
+            parsed = parse_additional_repos(settings.additional_repos)
+        except ValueError:
+            logger.warning("Ignoring malformed stored additional_repos setting")
+            parsed = None
+        resolved_additional = coerce_stored_additional_repos(parsed) if parsed else []
 
     merged = settings
     if overrides:
@@ -573,8 +586,9 @@ def resolve_tests_repo_url(body: BaseAnalysisRequest, settings: Settings) -> str
 
 
 def tests_repo_available(body: BaseAnalysisRequest, settings: Settings) -> bool:
-    """True when a tests repo URL is available (request or server)."""
-    return bool(resolve_tests_repo_url(body, settings))
+    """True when a parseable tests repo URL is available (request or server)."""
+    # A stored malformed URL must not falsely defer AI config (Rule 2 of #562).
+    return bool(safe_parse_repo_ref(resolve_tests_repo_url(body, settings))[0])
 
 
 async def resolve_repo_analysis_settings(

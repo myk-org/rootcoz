@@ -21436,3 +21436,265 @@ async def test_tracker_search_and_github_matches_reach_nested_child_failures(
         "product_bug_report"
     ]
     assert nested["github_matches"][0]["number"] == 42
+
+
+# ---------------------------------------------------------------------------
+# #562 — request-boundary URL validation (Rule 1) and stored-value degradation
+# ---------------------------------------------------------------------------
+
+
+def _raw_body(**extra: Any) -> dict[str, Any]:
+    """A minimal valid type=file payload, so only the field under test fails."""
+    return {
+        "type": "file",
+        "raw_xml": "<testsuite/>",
+        "job_name": "j",
+        "ai_provider": "claude",
+        "ai_model": "test-model",
+        **extra,
+    }
+
+
+_MALFORMED_BY_FIELD = {
+    "tests_repo_url": "https://[bad/repo",
+    "jenkins_url": "https://jenkins.example.com:badport",
+    "jira_site_url": "https://site.atlassian.net\x00",
+    "prow_url": "https://prow.example.com:badport",
+    "additional_repos": [{"name": "extra", "url": "https://[bad/repo"}],
+}
+
+
+class TestRequestBoundaryUrlValidation:
+    @pytest.mark.parametrize("field", list(_MALFORMED_BY_FIELD))
+    def test_analyze_answers_422_naming_the_field(
+        self, test_client, field: str
+    ) -> None:
+        before = len(test_client.get("/results").json())
+        response = test_client.post(
+            "/analyze", json=_raw_body(**{field: _MALFORMED_BY_FIELD[field]})
+        )
+        assert response.status_code == 422, response.text
+        assert field in response.text
+        assert "Traceback" not in response.text
+        assert "src/rootcoz" not in response.text
+        assert "Invalid IPv6 URL" not in response.text
+        after = len(test_client.get("/results").json())
+        assert after == before, "a rejected payload created a job row"
+
+    @pytest.mark.parametrize("field", list(_MALFORMED_BY_FIELD))
+    def test_submit_answers_422_naming_the_field(self, test_client, field: str) -> None:
+        response = test_client.post(
+            "/submit", json=_raw_body(**{field: _MALFORMED_BY_FIELD[field]})
+        )
+        assert response.status_code == 422, response.text
+        assert field in response.text
+
+    @pytest.mark.parametrize(
+        "field", ["tests_repo_url", "jenkins_url", "jira_site_url", "additional_repos"]
+    )
+    def test_re_analyze_and_analyze_in_place_answer_422(
+        self, test_client, field: str
+    ) -> None:
+        for path in ("/re-analyze/job-562", "/results/job-562/analyze"):
+            response = test_client.post(path, json={field: _MALFORMED_BY_FIELD[field]})
+            assert response.status_code == 422, (path, response.text)
+            assert field in response.text, (path, response.text)
+
+    @pytest.mark.asyncio
+    async def test_failure_re_analyze_answers_422_and_audits(self, test_client) -> None:
+        from rootcoz import storage
+
+        fa = FailureAnalysis(
+            test_name="tests.Test562.test_one",
+            error="ValueError",
+            analysis=AnalysisDetail(classification="CODE ISSUE"),
+        )
+        await storage.save_result(
+            "job-562-f",
+            "",
+            "completed",
+            {
+                "summary": "1 failure",
+                "failures": [fa.model_dump(mode="json")],
+                "request_params": encrypt_sensitive_fields(
+                    {"ai_provider": "claude", "ai_model": "opus"}
+                ),
+            },
+        )
+        for field in ("tests_repo_url", "additional_repos"):
+            response = test_client.post(
+                f"/api/failures/{fa.id}/re-analyze",
+                json={field: _MALFORMED_BY_FIELD[field]},
+            )
+            assert response.status_code == 422, response.text
+            assert field in response.text
+        audits = await storage.list_audit_events(action="analysis.rerun", limit=10)
+        assert any(
+            row.get("outcome") == "failure"
+            and row.get("details", {}).get("reason") == "invalid_payload"
+            for row in audits["events"]
+        )
+        stored = await storage.get_result("job-562-f")
+        assert "reanalysis_status" not in (stored["result"]["failures"][0])
+
+
+class TestStoredUrlDegradation:
+    def test_default_server_settings_and_analyze_survive_a_malformed_setting(
+        self, mock_settings, temp_db_path: Path
+    ) -> None:
+        """Rule 2: a stored malformed setting degrades, it does not 500 anything."""
+        from starlette.testclient import TestClient
+
+        from rootcoz.main import app
+
+        with (
+            patch.object(storage, "DB_PATH", temp_db_path),
+            TestClient(app, headers=_ADMIN_AUTH_HEADERS) as client,
+        ):
+            saved = client.put(
+                "/api/admin/settings",
+                json={
+                    "tests_repo_url": "https://user:pass@[broken"  # pragma: allowlist secret
+                },
+            )
+            assert saved.status_code in (200, 400), saved.text
+            defaults = client.get("/api/default-server-settings")
+            assert defaults.status_code == 200
+            assert defaults.json()["tests_repo_url"] == ""
+            response = client.post("/analyze", json=_raw_body())
+            assert response.status_code == 202, response.text
+
+    @pytest.mark.asyncio
+    async def test_re_analyze_replays_a_malformed_stored_url(self, test_client) -> None:
+        await storage.save_result(
+            "job-562-replay",
+            "",
+            "completed",
+            {
+                "summary": "",
+                "failures": [],
+                "request_params": encrypt_sensitive_fields(
+                    {
+                        "analysis_type": "file",
+                        "job_name": "j",
+                        "build_number": 1,
+                        "raw_xml": "<testsuite/>",
+                        "ai_provider": "claude",
+                        "ai_model": "test-model",
+                        "tests_repo_url": "https://[bad/x",
+                    }
+                ),
+            },
+        )
+        response = test_client.post("/re-analyze/job-562-replay", json={})
+        assert response.status_code == 202, response.text
+
+    def test_tests_repo_token_is_not_borrowed_when_both_urls_are_empty(
+        self, mock_settings
+    ) -> None:
+        from rootcoz.config import get_settings
+        from rootcoz.main import _resolve_analyzed_repo
+
+        settings = get_settings().model_copy(
+            update={
+                "tests_repo_url": "https://[bad/x",
+                "tests_repo_token": SecretStr("server-token"),
+            }
+        )
+        url, _ref, token = _resolve_analyzed_repo(settings, {})
+        assert url == ""
+        assert token == ""
+
+    @pytest.mark.asyncio
+    async def test_failure_reanalyze_background_settings_step_survives_bad_db_value(
+        self, test_client, mock_settings, caplog
+    ) -> None:
+        """The stored DB setting is guarded where all three callers inherit it.
+
+        This is the settings step ``_reanalyze_failure_background`` runs with no
+        cloned repo, i.e. the path that used to raise ``ValueError`` out of the
+        background task after the route had answered 202.
+        """
+        from rootcoz.config import get_settings
+        from rootcoz.main import resolve_repo_analysis_settings
+        from rootcoz.models import BaseAnalysisRequest
+
+        shim = BaseAnalysisRequest.model_validate(
+            {"tests_repo_url": "https://[bad/x"}, context={"stored_replay": True}
+        )
+        loggers = ["rootcoz.rootcoz_repo_settings", "rootcoz.models"]
+        # A structurally malformed stored setting: the parse refuses it.
+        settings = get_settings().model_copy(update={"additional_repos": "bad"})
+        with capture_main_logs(caplog, logging.WARNING, loggers):
+            effective = await resolve_repo_analysis_settings(
+                "job-562-bg", None, shim, settings
+            )
+        assert effective.additional_repos == []
+        assert "Ignoring malformed stored additional_repos setting" in caplog.text
+
+        # A stored entry whose URL ``AdditionalRepo`` refuses: skipped, masked.
+        caplog.clear()
+        settings = get_settings().model_copy(
+            update={
+                "additional_repos": (
+                    "extra:ftp://user:secret@host/repo"  # pragma: allowlist secret
+                )
+            }
+        )
+        with capture_main_logs(caplog, logging.WARNING, loggers):
+            effective = await resolve_repo_analysis_settings(
+                "job-562-bg", None, shim, settings
+            )
+        assert effective.additional_repos == []
+        assert "Ignoring malformed stored additional repo extra" in caplog.text
+        assert "secret" not in caplog.text
+        assert not [
+            record for record in caplog.records if record.levelno >= logging.ERROR
+        ]
+
+
+class TestCoerceStoredAdditionalRepos:
+    def test_labels_are_path_safe_and_printable(self) -> None:
+        from rootcoz.models import coerce_stored_additional_repos
+
+        failed: list[str] = []
+        repos = coerce_stored_additional_repos(
+            [
+                {"name": "../outside", "url": "https://[bad/y"},
+                {"name": "/etc/hosts", "url": "https://[bad/z"},
+                {"name": "", "url": "https://[bad/w"},
+                {"name": "tests\u200b-repo", "url": "https://[bad/v"},
+                {"name": "build-artifacts", "url": "https://[bad/u"},
+                {"name": "ok", "url": "https://github.com/org/repo"},
+                {"name": "ok", "url": "https://github.com/org/second"},
+            ],
+            failed=failed,
+        )
+        assert [repo.name for repo in repos] == ["ok"]
+        assert failed == [
+            "additional-repo-1",
+            "additional-repo-2",
+            "additional-repo-3",
+            "additional-repo-4",
+            "build-artifacts",
+            "ok",
+        ]
+        for label in failed:
+            assert "/" not in label
+            assert ".." not in label
+            assert label.isprintable()
+
+    def test_valid_entries_are_kept_verbatim(self) -> None:
+        from rootcoz.models import coerce_stored_additional_repos
+
+        repos = coerce_stored_additional_repos(
+            [
+                {
+                    "name": "keep",
+                    "url": "https://github.com/org/repo",
+                    "ref": "main",
+                    "token": "tok",  # pragma: allowlist secret
+                }
+            ]
+        )
+        assert [(r.name, r.ref, r.token) for r in repos] == [("keep", "main", "tok")]

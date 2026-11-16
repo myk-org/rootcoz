@@ -20,8 +20,10 @@ from pydantic import HttpUrl
 from rootcoz import get_child_logger
 from rootcoz.temp_paths import DeleteResult, delete_tree, rootcoz_temp_base
 from rootcoz.url_utils import (
+    mask_url_value,
     redact_urls_in_text,
     sanitize_clone_url,
+    strip_nonprintable,
     strip_url_credentials,
 )
 
@@ -137,17 +139,18 @@ def _printable(text: str) -> str:
     Measured: ``sanitize_clone_url`` eats a newline and concatenates the words
     around it, and leaves ``\\x00`` in place.
     """
-    return "".join(ch for ch in text if ch.isprintable())
+    return strip_nonprintable(text)
 
 
 def redact_url(url: str) -> str:
     """Remove userinfo (credentials) from a URL for safe logging."""
-    parsed = urlparse(url)
+    try:
+        parsed = urlparse(url)
+        port = f":{parsed.port}" if parsed.port else ""
+    except ValueError:  # Malformed authority or port — mask the whole value.
+        return mask_url_value(url)
     if parsed.username or parsed.password:
-        redacted = parsed._replace(
-            netloc=f"***@{parsed.hostname}" + (f":{parsed.port}" if parsed.port else "")
-        )
-        return urlunparse(redacted)
+        return urlunparse(parsed._replace(netloc=f"***@{parsed.hostname}{port}"))
     return url
 
 

@@ -140,6 +140,7 @@ from rootcoz.config import (
     parse_peer_configs,
     parse_repo_ref,
     remove_from_db_settings_cache,
+    safe_parse_repo_ref,
     update_db_settings_cache,
 )
 from rootcoz.encryption import (
@@ -290,6 +291,7 @@ from rootcoz.models import (
     UpdateFilterPresetRequest,
     _JenkinsParamsMixin,
     _validate_repo_slug,
+    coerce_stored_additional_repos,
     is_failed_analysis,
 )
 from rootcoz.monitoring import (
@@ -398,8 +400,11 @@ from rootcoz.transcripts import (
     write_sidecar_env_bridge,
 )
 from rootcoz.url_utils import (
+    _parse_valid_url,
     mask_url_credentials_in_text,
+    mask_url_value,
     redact_urls_in_text,
+    strip_nonprintable,
     strip_url_credentials,
     strip_url_userinfo,
 )
@@ -2530,7 +2535,9 @@ def _copy_analysis_settings(
         "additional_repos" in decrypted_params
         and decrypted_params["additional_repos"] is not None
     ):
-        unified_fields["additional_repos"] = decrypted_params["additional_repos"]
+        unified_fields["additional_repos"] = coerce_stored_additional_repos(
+            decrypted_params["additional_repos"]
+        )
 
     # Legacy fallback: old stored params may use metadata_labels instead of labels
     if "labels" not in unified_fields and "metadata_labels" in decrypted_params:
@@ -2590,7 +2597,11 @@ def _reconstruct_from_params(
         or None,
         "peer_ai_configs": params.get("peer_ai_configs", []),
         "peer_analysis_max_rounds": params.get("peer_analysis_max_rounds", 3),
-        "additional_repos": params.get("additional_repos", None),
+        "additional_repos": (
+            coerce_stored_additional_repos(params["additional_repos"])
+            if params.get("additional_repos") is not None
+            else None
+        ),
         "tests_repo_token": params.get("tests_repo_token", None),
         "labels": params.get("labels", params.get("metadata_labels", [])),
     }
@@ -2623,7 +2634,10 @@ def _reconstruct_from_params(
         if type_field in params:
             unified_fields[type_field] = params[type_field]
 
-    body = UnifiedAnalyzeRequest(**unified_fields)
+    # Rule 2 of #562: a stored malformed URL must degrade, never raise here.
+    body = UnifiedAnalyzeRequest.model_validate(
+        unified_fields, context={"stored_replay": True}
+    )
 
     # Build Settings from env defaults, then layer stored overrides
     base_settings = get_settings()
@@ -2961,7 +2975,7 @@ async def _resume_waiting_jobs(waiting_jobs: list[dict[str, Any]]) -> None:
             finally:
                 ai_username.reset(token)
         tests_repo_url_raw = resolve_tests_repo_url(body, merged)
-        tests_repo_url, tests_repo_ref = parse_repo_ref(tests_repo_url_raw)
+        tests_repo_url, tests_repo_ref = safe_parse_repo_ref(tests_repo_url_raw)
         resolved_tests_repo_token = (
             resolve_tests_repo_token(body, merged) if tests_repo_url else ""
         )
@@ -5931,7 +5945,7 @@ async def _enrich_result_with_tests_repo_matches(
         if tests_repo_url is not None
         else str(settings.tests_repo_url or "")
     )
-    effective_url, _ = parse_repo_ref(effective_url)
+    effective_url, _ = safe_parse_repo_ref(effective_url)
     if not effective_url:
         return
 
@@ -6512,8 +6526,11 @@ def _resolve_additional_repos_validated(
     """
     try:
         return resolve_additional_repos(request, settings)
+    except ValidationError as exc:
+        # No ``input_value``: it can be a credential.
+        raise HTTPException(status_code=422, detail=_replay_shortfall(exc)) from exc
     except ValueError as exc:
-        raise HTTPException(status_code=422, detail=str(exc)) from exc
+        raise HTTPException(status_code=422, detail=mask_url_value(str(exc))) from exc
 
 
 async def _enqueue_ci_source_analysis(
@@ -6571,7 +6588,7 @@ async def _enqueue_ci_source_analysis(
 
     # Resolve repos
     tests_repo_url_raw = resolve_tests_repo_url(body, persist_merged)
-    tests_repo_url, tests_repo_ref = parse_repo_ref(tests_repo_url_raw)
+    tests_repo_url, tests_repo_ref = safe_parse_repo_ref(tests_repo_url_raw)
     resolved_tests_repo_token = (
         resolve_tests_repo_token(body, persist_merged) if tests_repo_url else ""
     )
@@ -8341,7 +8358,12 @@ async def analyze_submitted_job(
             unified_fields[field_name] = getattr(body, field_name)
     if "get_job_artifacts" not in unified_fields:
         unified_fields["get_job_artifacts"] = True
-    unified_body = UnifiedAnalyzeRequest(**unified_fields)
+    try:
+        unified_body = UnifiedAnalyzeRequest.model_validate(
+            unified_fields, context={"stored_replay": True}
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=_replay_shortfall(exc)) from exc
     source_cls = CI_SOURCE_REGISTRY.get(analysis_type)
     if source_cls is None:
         raise HTTPException(
@@ -8496,7 +8518,12 @@ async def re_analyze(
     for field_name in body.model_fields_set:
         unified_fields[field_name] = getattr(body, field_name)
 
-    unified_body = UnifiedAnalyzeRequest(**unified_fields)
+    try:
+        unified_body = UnifiedAnalyzeRequest.model_validate(
+            unified_fields, context={"stored_replay": True}
+        )
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=_replay_shortfall(exc)) from exc
 
     # Tags: carry forward + auto-add re-analyze
     existing_tags = list(result_data.get("tags", []))
@@ -8514,7 +8541,10 @@ async def re_analyze(
     provider, model = await _resolve_ai_config_allow_defer(
         unified_body, get_settings(), request
     )
-    merged = _merge_settings(unified_body, get_settings())
+    try:
+        merged = _merge_settings(unified_body, get_settings())
+    except ValidationError as exc:
+        raise HTTPException(status_code=422, detail=_replay_shortfall(exc)) from exc
     resolved_peers = await _validate_peer_configs(unified_body, merged)
 
     # Resolve display name — prefer original name, then plugin fallback
@@ -9277,7 +9307,9 @@ async def _reanalyze_failure_background(
         # Preserve [] (explicit disable) vs None (unset / inherit settings.json)
         if additional_repos_list is not None:
             shim_data["additional_repos"] = additional_repos_list
-        shim = BaseAnalysisRequest(**shim_data)
+        shim = BaseAnalysisRequest.model_validate(
+            shim_data, context={"stored_replay": True}
+        )
         try:
             effective = await resolve_repo_analysis_settings(
                 job_id,
@@ -9616,7 +9648,10 @@ async def re_analyze_failure(
                 raise HTTPException(
                     status_code=400, detail="Request body must be a JSON object"
                 )
-        overrides = ReAnalyzeFailureRequest(**body_data)
+        try:
+            overrides = ReAnalyzeFailureRequest(**body_data)
+        except ValidationError as exc:
+            raise HTTPException(status_code=422, detail=_replay_shortfall(exc)) from exc
 
         # Find the failure across all stored results
         match = await storage.find_failure_by_uuid(failure_uuid)
@@ -9679,8 +9714,12 @@ async def re_analyze_failure(
         if overrides.peer_analysis_max_rounds is not None:
             peer_analysis_max_rounds = overrides.peer_analysis_max_rounds
 
-        tests_repo_url = decrypted_params.get("tests_repo_url", "")
-        tests_repo_ref = decrypted_params.get("tests_repo_ref", "")
+        # A stored malformed URL degrades to "no repo" (one warning); the
+        # override is already validated at the boundary, so it cannot raise.
+        tests_repo_url, suffix_ref = safe_parse_repo_ref(
+            str(decrypted_params.get("tests_repo_url") or "")
+        )
+        tests_repo_ref = decrypted_params.get("tests_repo_ref", "") or suffix_ref
         tests_repo_token = decrypted_params.get("tests_repo_token", "")
         if overrides.tests_repo_url is not None:
             tests_repo_url, tests_repo_ref = parse_repo_ref(overrides.tests_repo_url)
@@ -9691,10 +9730,13 @@ async def re_analyze_failure(
         token = ai_username.set(request.state.username)
         try:
             ai_provider, ai_model = await _resolve_ai_config_allow_defer(
-                BaseAnalysisRequest(
-                    ai_provider=ai_provider or None,
-                    ai_model=ai_model or None,
-                    tests_repo_url=tests_repo_url or None,
+                BaseAnalysisRequest.model_validate(
+                    {
+                        "ai_provider": ai_provider or None,
+                        "ai_model": ai_model or None,
+                        "tests_repo_url": tests_repo_url or None,
+                    },
+                    context={"stored_replay": True},
                 ),
                 settings,
                 request=request,
@@ -9711,15 +9753,11 @@ async def re_analyze_failure(
             if additional_repos_list_raw is None:
                 additional_repos_list = None
             else:
-                additional_repos_list = [
-                    AdditionalRepo(**r) if isinstance(r, dict) else r
-                    for r in additional_repos_list_raw
-                ]
+                additional_repos_list = coerce_stored_additional_repos(
+                    additional_repos_list_raw
+                )
         if overrides.additional_repos is not None:
-            additional_repos_list = [
-                AdditionalRepo(**r) if isinstance(r, dict) else r
-                for r in overrides.additional_repos
-            ]
+            additional_repos_list = list(overrides.additional_repos)
 
         max_concurrent_ai_calls = decrypted_params.get("max_concurrent_ai_calls", 3)
 
@@ -10691,7 +10729,7 @@ def _resolve_analyzed_repo(
     repo_spec = str(request_params.get("tests_repo_url", ""))
     if not repo_spec:
         repo_spec = str(settings.tests_repo_url or "")
-    url, parsed_ref = parse_repo_ref(repo_spec)
+    url, parsed_ref = safe_parse_repo_ref(repo_spec)
 
     # Ref: prefer explicit stored ref, then parsed from URL suffix
     ref = str(request_params.get("tests_repo_ref", ""))
@@ -10716,8 +10754,11 @@ def _resolve_analyzed_repo(
         if not _is_encrypted_value(stored_token):
             token = stored_token
     if not token and settings.tests_repo_token:
-        server_url_normalized, _ = parse_repo_ref(str(settings.tests_repo_url or ""))
-        if url == server_url_normalized:
+        server_url_normalized, _ = safe_parse_repo_ref(
+            str(settings.tests_repo_url or "")
+        )
+        # Both may normalize to "" — an absent repo must not borrow the token.
+        if url and url == server_url_normalized:
             token = settings.tests_repo_token.get_secret_value()
         else:
             logger.debug(
@@ -10741,7 +10782,7 @@ def _resolve_github_repo_url(settings: Settings) -> str:
     Returns:
         The resolved repo URL, or an empty string when unavailable.
     """
-    url, _ref = parse_repo_ref(str(getattr(settings, "tests_repo_url", "") or ""))
+    url, _ref = safe_parse_repo_ref(str(getattr(settings, "tests_repo_url", "") or ""))
     return url
 
 
@@ -11231,11 +11272,10 @@ def _attachment_public_base_url(settings: Settings) -> str | None:
     raw = (settings.public_base_url or "").strip()
     if not raw:
         return None
-    try:
-        parsed = urlparse(raw)
-    except ValueError:
-        return None
-    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+    # The shared predicate subsumes upstream's scheme/hostname checks and is
+    # the single definition of "a usable URL" (#562).
+    parsed = _parse_valid_url(raw, allowed_schemes=("http", "https"))
+    if parsed is None:
         return None
     if (
         parsed.username is not None
@@ -12141,10 +12181,10 @@ def _github_repo_slug(repo_url: Any) -> str:
     this server calls actually serves. So a GitLab URL can never contribute a
     slug that would point at some unrelated GitHub repository.
     """
-    url, _ref = parse_repo_ref(str(repo_url or ""))
     try:
+        url, _ref = parse_repo_ref(str(repo_url or ""))
         owner, name = parse_github_repo_url(url)
-    except ValueError:
+    except ValueError:  # Malformed authority: no slug, never a raise (Rule 2).
         return ""
     return f"{owner}/{name}"
 
@@ -12180,7 +12220,7 @@ def _replay_shortfall(exc: Exception) -> str:
 
 
 def _job_issue_repo_slugs(
-    params: dict[str, Any],
+    params: dict[str, Any], *, refuse_invalid_repos: bool = False
 ) -> tuple[str, frozenset[str]]:
     """``(the run's test repo slug, every slug a job chat may file into)``.
 
@@ -12212,7 +12252,19 @@ def _job_issue_repo_slugs(
     slugs: set[str] = set()
     if default:
         slugs.add(default)
-    for repo in _resolve_additional_repos_validated(body, merged):
+    try:
+        resolved = _resolve_additional_repos_validated(body, merged)
+    except HTTPException:
+        if refuse_invalid_repos:
+            raise
+        # Chat must still start: a malformed stored setting is one repo fewer,
+        # logged without the value (Rule 2 of #562).
+        logger.warning(
+            "Chat issue: ignoring the run's malformed additional_repos for the "
+            "repo allow-list"
+        )
+        return default, frozenset(slugs)
+    for repo in resolved:
         slug = _github_repo_slug(repo.url)
         if slug:
             slugs.add(slug)
@@ -12231,7 +12283,7 @@ async def _chat_issue_repo_slugs(job_id: str) -> tuple[str, frozenset[str]]:
                 "repositories from."
             ),
         )
-    return _job_issue_repo_slugs(params)
+    return _job_issue_repo_slugs(params, refuse_invalid_repos=True)
 
 
 def _chat_issue_is_admin(request: Request) -> bool:
@@ -13709,12 +13761,11 @@ def _audit_url_host(url: str) -> str:
     """Host of ``url`` for an audit row; ``""`` when it cannot be parsed.
 
     A malformed site setting must not turn a filed issue into a failed request:
-    the audit row is decoration on a create that already happened.
+    the audit row is decoration on a create that already happened — hence the
+    shared predicate, which answers ``None`` instead of raising.
     """
-    try:
-        return urlparse(url).hostname or ""
-    except ValueError:
-        return ""
+    parsed = _parse_valid_url(url, allowed_schemes=("http", "https"))
+    return (parsed.hostname or "") if parsed is not None else ""
 
 
 #: Shape a caller-typed value must have before a refusal row may store it as a
@@ -16571,7 +16622,7 @@ async def get_default_server_settings(
         result["additional_repos"] = []
 
     # Split tests_repo_url into URL and ref, strip userinfo
-    tests_url, tests_ref = parse_repo_ref(settings.tests_repo_url or "")
+    tests_url, tests_ref = safe_parse_repo_ref(settings.tests_repo_url or "")
     result["tests_repo_url"] = _strip_url_userinfo(tests_url)
     result["tests_repo_ref"] = tests_ref
     feedback_url, _ = parse_repo_ref(settings.feedback_repo_url or "")
@@ -22393,12 +22444,21 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
         if value is None or value == "":
             continue
         try:
-            validated = Settings.model_validate({key: value})
-            settings_updates[key] = getattr(validated, key)
+            if key == "prow_url":
+                # Rule 1 of #562: the ``Settings`` validator degrades a *stored*
+                # value, so a caller-supplied one is refused here instead.
+                from rootcoz.prow_validation import normalize_prow_url
+
+                settings_updates[key] = normalize_prow_url(value)
+            else:
+                validated = Settings.model_validate({key: value})
+                settings_updates[key] = getattr(validated, key)
         except ValidationError as exc:
             for err in exc.errors():
                 ctx_err = err.get("ctx", {}).get("error")
                 errors.append(str(ctx_err) if ctx_err else err.get("msg", str(err)))
+        except (TypeError, ValueError) as exc:
+            errors.append(str(exc))
 
     # ``additional_repos`` is one "name:url,name:url" string and the name is
     # the clone directory, so a repeated name silently loses a repo at analysis
@@ -25917,11 +25977,16 @@ def _settle_chat_preparation(
 
 def _redacted_error(exc: BaseException) -> str:
     """Class, errno and a credential-free message — never a raw traceback."""
-    from rootcoz.url_utils import strip_url_userinfo_in_text
-
     errno_value = getattr(exc, "errno", None)
     suffix = f" (errno {errno_value})" if errno_value else ""
-    return f"{type(exc).__name__}{suffix}: {strip_url_userinfo_in_text(str(exc))}"
+    # Free text with possibly several URLs, so the all-occurrence helper (not
+    # ``mask_url_value``), pre-stripped like every other masked site.
+    # shortcut: the free-text regex is lowercase-scheme-only, upgrade if git or
+    # httpx ever echo an uppercase scheme.
+    return (
+        f"{type(exc).__name__}{suffix}: "
+        f"{mask_url_credentials_in_text(strip_nonprintable(str(exc)))}"
+    )
 
 
 async def _chat_prep_failure_row(job_id: str, username: str, sentence: str) -> None:

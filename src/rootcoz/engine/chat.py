@@ -160,17 +160,14 @@ async def clone_chat_repos(
         prepare_workspace_repos,
         tests_repo_target,
     )
-    from rootcoz.models import AdditionalRepo
+    from rootcoz.models import coerce_stored_additional_repos
     from rootcoz.repository import RepositoryManager, clone_failure_reason
-    from rootcoz.url_utils import strip_url_userinfo_in_text
+    from rootcoz.url_utils import mask_url_credentials_in_text, strip_nonprintable
 
     tests_repo_url = request_params.get("tests_repo_url", "")
-    additional_repos = request_params.get("additional_repos") or []
-    additional_repos = [
-        AdditionalRepo(**ar) if isinstance(ar, dict) else ar for ar in additional_repos
-    ]
+    raw_additional_repos = request_params.get("additional_repos") or []
 
-    if not tests_repo_url and not additional_repos:
+    if not tests_repo_url and not raw_additional_repos:
         return False
 
     purge_chat_staging(workspace)
@@ -186,6 +183,11 @@ async def clone_chat_repos(
     # Chat's own labels for a repo it could not even name. Merged into ``failed``
     # below only if the workspace does not hold a repository of that name.
     missing: list[str] = []
+    # A malformed stored entry is one missing repo, not a failed preparation
+    # (#562 Rule 2); its label has to be path-safe and printable.
+    additional_repos = coerce_stored_additional_repos(
+        raw_additional_repos, failed=missing
+    )
     if tests_repo_url:
         try:
             clean_url, ref = parse_repo_ref(str(tests_repo_url))
@@ -272,7 +274,13 @@ async def clone_chat_repos(
             "Chat: failed to clone repo %s for %s: %s",
             "workspace",
             workspace,
-            strip_url_userinfo_in_text(f"{type(exc).__name__}: {exc}"),
+            # Free text (git stderr, possibly several URLs), so the
+            # all-occurrence helper — not ``mask_url_value``.
+            # shortcut: the free-text regex is lowercase-scheme-only, upgrade if
+            # git ever echoes an uppercase scheme.
+            mask_url_credentials_in_text(
+                strip_nonprintable(f"{type(exc).__name__}: {exc}")
+            ),
         )
         missing.append("workspace")
 

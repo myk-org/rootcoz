@@ -15,13 +15,20 @@ from pydantic import (
     SecretStr,
     Strict,
     StringConstraints,
+    ValidationError,
+    ValidationInfo,
     field_validator,
     model_serializer,
     model_validator,
 )
 from pydantic_core.core_schema import SerializerFunctionWrapHandler
 
-from rootcoz.config import atlassian_cloud_id_error
+from rootcoz import get_child_logger
+from rootcoz.config import (
+    atlassian_cloud_id_error,
+    jira_site_url_error,
+    validate_tests_repo_url,
+)
 from rootcoz.prow_validation import (
     normalize_gcs_bucket,
     normalize_gcs_prefix,
@@ -31,6 +38,9 @@ from rootcoz.prow_validation import (
     validate_prow_job_name,
 )
 from rootcoz.repository import RESERVED_REPO_NAMES
+from rootcoz.url_utils import mask_url_value, validate_http_url
+
+logger = get_child_logger(__name__)
 
 _SYSTEM_TAGS: frozenset[str] = frozenset({"re-analyze"})
 
@@ -123,6 +133,91 @@ class AiConfigEntry(BaseModel):
         if not v:
             raise ValueError("ai_model must not be blank")
         return v
+
+
+def _is_stored_replay(info: ValidationInfo) -> bool:
+    """True when the model is built from stored params, not a caller's body.
+
+    Rule 2 of #562: a value already persisted must degrade, never turn into a
+    validation error, so every URL validator is bypassed under this context.
+    """
+    return bool(isinstance(info.context, dict) and info.context.get("stored_replay"))
+
+
+def _validate_unique_additional_repos(
+    v: list[AdditionalRepo] | None,
+) -> list[AdditionalRepo] | None:
+    """Reject a repeated repository ``name`` (the clone directory)."""
+    if v is None:
+        return v
+    names = [ar.name for ar in v]
+    dupes = [n for n in names if names.count(n) > 1]
+    if dupes:
+        raise ValueError(
+            f"Duplicate additional repo names: {', '.join(sorted(set(dupes)))}"
+        )
+    return v
+
+
+def _stored_repo_label(item: Any, index: int) -> str:
+    """One path-component-safe, printable label for a skipped stored repo.
+
+    The label is what the chat's ``Not in this workspace: …`` notice shows and
+    what ``(workspace / label).exists()`` probes, so it may never escape the
+    workspace or forge a log line. ``RESERVED_REPO_NAMES`` is deliberately not
+    part of this rule — a reserved *name* is a single, safe path component.
+    """
+    name = item.get("name") if isinstance(item, dict) else None
+    label = str(name or "").strip()
+    safe = (
+        bool(label)
+        and label.isprintable()
+        and "/" not in label
+        and "\\" not in label
+        and ".." not in label
+        and not label.startswith(".")
+    )
+    return label if safe else f"additional-repo-{index + 1}"
+
+
+def coerce_stored_additional_repos(
+    raw: Any, *, failed: list[str] | None = None
+) -> list[AdditionalRepo]:
+    """Stored ``additional_repos`` → the entries that are still usable.
+
+    Rule 2 of #562: a malformed stored entry is skipped with one
+    credential-free warning (and, when *failed* is given, its label collected)
+    instead of raising out of a background task, chat preparation, or replay.
+    """
+    repos: list[AdditionalRepo] = []
+    names: set[str] = set()
+    for i, item in enumerate(raw or ()):
+        repo: AdditionalRepo | None = item if isinstance(item, AdditionalRepo) else None
+        if repo is None and isinstance(item, dict):
+            try:
+                repo = AdditionalRepo(**item)
+            except ValidationError:
+                repo = None
+        if repo is not None and (repo.name in names or not repo.name.isprintable()):
+            repo = None
+        if repo is None:
+            label = _stored_repo_label(item, i)
+            url = (
+                item.get("url", "")
+                if isinstance(item, dict)
+                else getattr(item, "url", "")
+            )
+            logger.warning(
+                "Ignoring malformed stored additional repo %s: %s",
+                label,
+                mask_url_value(str(url)),
+            )
+            if failed is not None:
+                failed.append(label)
+            continue
+        names.add(repo.name)
+        repos.append(repo)
+    return repos
 
 
 class AdditionalRepo(BaseModel):
@@ -295,14 +390,24 @@ class BaseAnalysisRequest(BaseModel):
         cls,
         v: list[AdditionalRepo] | None,
     ) -> list[AdditionalRepo] | None:
-        if v is None:
+        return _validate_unique_additional_repos(v)
+
+    @field_validator("tests_repo_url", mode="after")
+    @classmethod
+    def _validate_tests_repo_url_field(
+        cls, v: str | None, info: ValidationInfo
+    ) -> str | None:
+        return v if _is_stored_replay(info) else validate_tests_repo_url(v)
+
+    @field_validator("jira_site_url", mode="after")
+    @classmethod
+    def _validate_jira_site_url_field(
+        cls, v: str | None, info: ValidationInfo
+    ) -> str | None:
+        if _is_stored_replay(info):
             return v
-        names = [ar.name for ar in v]
-        dupes = [n for n in names if names.count(n) > 1]
-        if dupes:
-            raise ValueError(
-                f"Duplicate additional repo names: {', '.join(sorted(set(dupes)))}"
-            )
+        if (error := jira_site_url_error(v)) is not None:
+            raise ValueError(error)
         return v
 
 
@@ -359,6 +464,15 @@ class _JenkinsParamsMixin(BaseModel):
         default=None,
         description="Download all build artifacts for AI context (default: true, overrides GET_JOB_ARTIFACTS env var)",
     )
+
+    @field_validator("jenkins_url", mode="after")
+    @classmethod
+    def _validate_jenkins_url_field(
+        cls, v: str | None, info: ValidationInfo
+    ) -> str | None:
+        if _is_stored_replay(info):
+            return v
+        return validate_http_url(v, field_name="jenkins_url")
 
 
 class _NameTagsMixin(BaseModel):
@@ -932,7 +1046,9 @@ class UnifiedAnalyzeRequest(_JenkinsParamsMixin, _NameTagsMixin, BaseAnalysisReq
 
     @field_validator("prow_url", mode="before")
     @classmethod
-    def _validate_prow_url(cls, v: object) -> str:
+    def _validate_prow_url(cls, v: object, info: ValidationInfo) -> str:
+        if _is_stored_replay(info):
+            return str(v or "").strip()
         return normalize_prow_url(v)
 
     @model_validator(mode="after")
@@ -1402,16 +1518,10 @@ class SetTrackedInRequest(_ChildJobFieldsValidator):
     @field_validator("url")
     @classmethod
     def validate_url(cls, v: str) -> str:
-        v = v.strip()
-        if v:
-            from urllib.parse import urlparse
-
-            parsed = urlparse(v)
-            if parsed.scheme not in ("http", "https", ""):
-                raise ValueError("URL must use http or https scheme")
-            if not parsed.scheme:
-                raise ValueError("URL must include http:// or https://")
-        return v
+        return (
+            validate_http_url(v, field_name="url", allowed_schemes=("http", "https"))
+            or ""
+        )
 
 
 class ClassifyTestRequest(BaseModel):
@@ -1460,7 +1570,19 @@ class ReAnalyzeFailureRequest(BaseModel):
     tests_repo_url: str | None = None
     enable_jira: bool | None = None
     jira_project_key: str | None = None
-    additional_repos: list[dict[str, Any]] | None = None
+    additional_repos: list[AdditionalRepo] | None = None
+
+    @field_validator("tests_repo_url", mode="after")
+    @classmethod
+    def _validate_tests_repo_url_field(cls, v: str | None) -> str | None:
+        return validate_tests_repo_url(v)
+
+    @field_validator("additional_repos")
+    @classmethod
+    def _unique_additional_repo_names(
+        cls, v: list[AdditionalRepo] | None
+    ) -> list[AdditionalRepo] | None:
+        return _validate_unique_additional_repos(v)
 
 
 class ReportPortalPushResult(BaseModel):

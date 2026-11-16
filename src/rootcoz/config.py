@@ -17,6 +17,7 @@ from pydantic_settings import (
 from rootcoz import get_child_logger
 from rootcoz.ai_client import normalize_provider
 from rootcoz.metadata_rules import load_metadata_rules
+from rootcoz.url_utils import _parse_valid_url, mask_url_value, validate_http_url
 from rootcoz.vapid import get_vapid_config
 
 logger = get_child_logger(__name__)
@@ -134,11 +135,17 @@ def parse_additional_repos(raw: str) -> list[dict[str, Any]]:
         if not url_raw:
             raise ValueError(f"Empty URL at position {i + 1}")
         # Extract token: look for @token after the path (not in the netloc)
-        token = _extract_token_from_url_spec(url_raw)
-        if token:
-            # Remove the @token suffix from url_raw
-            url_raw = url_raw[: url_raw.rfind("@" + token)]
-        url, ref = parse_repo_ref(url_raw)
+        try:
+            token = _extract_token_from_url_spec(url_raw)
+            if token:
+                # Remove the @token suffix from url_raw
+                url_raw = url_raw[: url_raw.rfind("@" + token)]
+            url, ref = parse_repo_ref(url_raw)
+        except ValueError as exc:
+            # Position and name only — the URL itself may carry a credential.
+            raise ValueError(
+                f"Invalid additional repo URL at position {i + 1} for '{name}'"
+            ) from exc
         entry_dict: dict[str, Any] = {"name": name, "url": url, "ref": ref}
         if token:
             entry_dict["token"] = token
@@ -214,6 +221,52 @@ def parse_repo_ref(raw: str) -> tuple[str, str]:
         )
         return (clean_url, ref)
     return (raw, "")
+
+
+def safe_parse_repo_ref(raw: str) -> tuple[str, str]:
+    """``parse_repo_ref`` for a stored value: a malformed URL never raises.
+
+    Rule 2 of #562: a value already persisted in the DB degrades per
+    repository (logged once, credential-free, treated as absent) instead of
+    breaking startup, re-analysis, or chat.
+    """
+    if not raw or not str(raw).strip():
+        return ("", "")
+    try:
+        return parse_repo_ref(raw)
+    except ValueError:
+        logger.warning(
+            "Ignoring malformed repository URL: %s", mask_url_value(str(raw))
+        )
+        return ("", "")
+
+
+def validate_tests_repo_url(value: str | None) -> str | None:
+    """Validate a caller-supplied ``tests_repo_url`` at the request boundary.
+
+    ``None``/``""`` mean "not set" / "clear the server default". Otherwise the
+    value must be an ``https://`` or ``git://`` repository URL, optionally with
+    a ``:ref`` suffix. Every failure mode gets one message that names the field
+    and never echoes the input.
+    """
+    if value is None:
+        return None
+    raw = value.strip()
+    if not raw:
+        return ""
+    try:
+        clean_url, _ref = parse_repo_ref(raw)
+        if not clean_url:
+            raise ValueError("empty repository URL")
+        validate_http_url(
+            clean_url, field_name="tests_repo_url", allowed_schemes=("https", "git")
+        )
+    except ValueError as exc:
+        raise ValueError(
+            "tests_repo_url must be a valid https:// or git:// repository URL "
+            "(optionally with :ref)"
+        ) from exc
+    return raw
 
 
 class ReportPortalConfig(NamedTuple):
@@ -626,7 +679,16 @@ class Settings(BaseSettings):
     def _validate_prow_url(cls, v: object) -> str:
         from rootcoz.prow_validation import normalize_prow_url
 
-        return normalize_prow_url(v)
+        try:
+            return normalize_prow_url(v)
+        except ValueError, TypeError:
+            # Rule 2 of #562: a stored value degrades (one credential-free
+            # line) instead of invalidating startup, settings import, or every
+            # ``get_settings()`` refresh.
+            logger.warning(
+                "Ignoring malformed stored PROW_URL: %s", mask_url_value(str(v))
+            )
+            return ""
 
     @field_validator("gcs_bucket", mode="before")
     @classmethod
@@ -1408,16 +1470,12 @@ def jira_site_url_error(value: str | None) -> str | None:
         "(e.g. https://<site>.atlassian.net) — Jira browse links are built "
         "from it"
     )
-    try:
-        parts = urlsplit(site)
-        # A trailing dot is the same DNS name, so the gateway is the gateway
-        # either way.
-        hostname = (parts.hostname or "").lower().rstrip(".")
-    except ValueError:
-        # urlsplit itself rejects a malformed authority (``https://[::1``).
+    parts = _parse_valid_url(site, allowed_schemes=("http", "https"))
+    if parts is None:
         return invalid
-    if parts.scheme not in ("http", "https") or not hostname:
-        return invalid
+    # A trailing dot is the same DNS name, so the gateway is the gateway
+    # either way.
+    hostname = (parts.hostname or "").lower().rstrip(".")
     if hostname == "api.atlassian.com":
         return (
             "jira_site_url is the Atlassian API gateway, not a site URL — "

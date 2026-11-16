@@ -931,7 +931,36 @@ async def test_chat_caller_without_the_failed_carrier_still_returns_a_bool(
 async def test_chat_caller_turns_a_preparation_refusal_into_the_workspace_sentinel(
     tmp_path, clone_settings
 ) -> None:
-    """A duplicate declaration refuses before any clone; chat still starts."""
+    """A preparation refusal refuses before any clone; chat still starts.
+
+    The old trigger was a duplicate declaration. #562 skips a duplicate stored
+    entry *before* the shared clone path (``coerce_stored_additional_repos``),
+    so the refusal is injected here and the assertions stay as they were.
+    """
+    from rootcoz.engine.chat import clone_chat_repos
+
+    manager = RecordingManager()
+    failed: list[str] = []
+    params = {"additional_repos": [{"name": "dup", "url": "https://example.com/a"}]}
+
+    with (
+        patch("rootcoz.repository.RepositoryManager", return_value=manager),
+        patch(
+            "rootcoz.engine.core.prepare_workspace_repos",
+            side_effect=ValueError("Duplicate additional repo names: dup"),
+        ),
+    ):
+        cloned = await clone_chat_repos(tmp_path, params, failed=failed)
+
+    assert cloned is False
+    assert manager.calls == []
+    assert failed == ["workspace"]
+
+
+async def test_chat_skips_a_duplicate_stored_entry_and_still_starts(
+    tmp_path, clone_settings
+) -> None:
+    """#562: a duplicate stored name is one skipped repo, never a refused chat."""
     from rootcoz.engine.chat import clone_chat_repos
 
     manager = RecordingManager()
@@ -946,9 +975,9 @@ async def test_chat_caller_turns_a_preparation_refusal_into_the_workspace_sentin
     with patch("rootcoz.repository.RepositoryManager", return_value=manager):
         cloned = await clone_chat_repos(tmp_path, params, failed=failed)
 
-    assert cloned is False
-    assert manager.calls == []
-    assert failed == ["workspace"]
+    assert cloned is True
+    assert [call[0] for call in manager.calls] == ["https://example.com/a"]
+    assert failed == []
 
 
 async def test_reanalysis_caller_keeps_its_token_depth_and_warn_only_policy(

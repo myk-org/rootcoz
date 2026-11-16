@@ -447,6 +447,22 @@ class TestPrepareFeedbackAndSettings:
         assert "evil.example.com" not in detail
 
 
+def test_public_base_url_goes_through_the_shared_url_predicate() -> None:
+    """#562: internal whitespace is refused — the predicate is the one definition."""
+    assert (
+        main._attachment_public_base_url(
+            main.Settings(public_base_url="https://rootcoz.example.com/a b")
+        )
+        is None
+    )
+    assert (
+        main._attachment_public_base_url(
+            main.Settings(public_base_url="https://rootcoz.example.com/sub/")
+        )
+        == "https://rootcoz.example.com/sub"
+    )
+
+
 class TestCapabilitiesAndOrchestration:
     """Item 4 + R1 + R5: capabilities contract, PUBLIC_BASE_URL, budgets, Jira fallback, rollback."""
 

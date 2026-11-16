@@ -9,6 +9,7 @@ import jenkins
 import requests.exceptions
 
 from rootcoz.encryption import SENSITIVE_KEYS
+from rootcoz.url_utils import mask_url_value, strip_nonprintable
 
 #: Combined tuple of exception types that indicate a transient Jenkins
 #: connectivity problem (network outage, DNS failure, timeout, etc.).
@@ -48,7 +49,9 @@ def mask_sensitive_fields(data: Any) -> Any:
     or when the key contains ``password``, ``token``, ``secret``, or ``key``
     (case-insensitive).
 
-    Non-dict/list values are returned unchanged.
+    Non-dict/list values are returned unchanged, except that a string is
+    stripped of non-printable characters and has the credentials of a
+    URL-shaped value masked (#562).
     """
     if isinstance(data, dict):
         masked: dict[str, Any] = {}
@@ -60,6 +63,10 @@ def mask_sensitive_fields(data: Any) -> Any:
         return masked
     if isinstance(data, list):
         return [mask_sensitive_fields(item) for item in data]
+    if isinstance(data, str):
+        # Unconditional: ``mask_url_value`` leaves non-URL text alone, so a
+        # scheme-less control-bearing value would otherwise reach a 422 body.
+        return strip_nonprintable(mask_url_value(data))
     return data
 
 

@@ -24,10 +24,21 @@ from rootcoz.models import (
     PreviewIssueRequest,
     PreviewIssueResponse,
     ProductBugReport,
+    ReAnalyzeFailureRequest,
     ReAnalyzeRequest,
+    SetTrackedInRequest,
     SimilarIssue,
     UnifiedAnalyzeRequest,
 )
+
+
+def _required_fields(model) -> dict:
+    """The fields each request model needs besides ``tests_repo_url``."""
+    if model is AnalyzeRequest:
+        return {"job_name": "j", "build_number": 1}
+    if model is UnifiedAnalyzeRequest:
+        return {"type": "raw", "failures": [{"test_name": "t"}]}
+    return {}
 
 
 class TestAnalyzeRequest:
@@ -54,22 +65,142 @@ class TestAnalyzeRequest:
         assert request.build_number == 123
         assert request.tests_repo_url is None
 
-    def test_analyze_request_accepts_any_tests_repo_url_string(self) -> None:
-        """Test that tests_repo_url accepts any string (no URL validation)."""
-        request = AnalyzeRequest(
-            job_name="test",
-            build_number=123,
-            tests_repo_url="https://github.com/org/repo:develop",
-        )
-        assert request.tests_repo_url == "https://github.com/org/repo:develop"
+    @pytest.mark.parametrize(
+        "tests_repo_url",
+        [
+            "https://github.com/org/repo:develop",
+            "https://gitlab.internal:8443/org/repo:v1.0.0",
+            "git://host/repo",
+            "",
+            None,
+        ],
+    )
+    @pytest.mark.parametrize(
+        "model", [AnalyzeRequest, ReAnalyzeRequest, UnifiedAnalyzeRequest]
+    )
+    def test_tests_repo_url_accepts_valid_urls(self, model, tests_repo_url) -> None:
+        request = model(tests_repo_url=tests_repo_url, **_required_fields(model))
+        assert request.tests_repo_url == tests_repo_url
 
-        # Also verify a non-URL string is accepted
-        request2 = AnalyzeRequest(
-            job_name="test",
-            build_number=123,
-            tests_repo_url="not-a-valid-url",
+    @pytest.mark.parametrize(
+        "tests_repo_url",
+        [
+            "not-a-valid-url",
+            "https://[bad/repo",
+            ":orphan-ref",
+            "http://github.com/org/repo",
+            "https://github.com:badport/org/repo",
+            "https://github.com/org/repo with space",
+            "https://github.com/org/repo\x00z",
+            "https://github.com/org/repo\x1b[31m",
+            "https://github.com/org\x07/repo",
+            "https://github.com/org/repo\x7f",
+            "https://github.com/org/\u200brepo",
+        ],
+    )
+    @pytest.mark.parametrize(
+        "model", [AnalyzeRequest, ReAnalyzeRequest, UnifiedAnalyzeRequest]
+    )
+    def test_tests_repo_url_rejects_malformed_urls(self, model, tests_repo_url) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            model(tests_repo_url=tests_repo_url, **_required_fields(model))
+        assert "tests_repo_url" in str(excinfo.value)
+
+    def test_failure_reanalysis_request_validates_urls(self) -> None:
+        """The failure re-analysis body is validated at the boundary, not in the handler."""
+        assert (
+            ReAnalyzeFailureRequest(
+                tests_repo_url="https://github.com/org/repo:dev"
+            ).tests_repo_url
+            == "https://github.com/org/repo:dev"
         )
-        assert request2.tests_repo_url == "not-a-valid-url"
+        with pytest.raises(ValidationError) as excinfo:
+            ReAnalyzeFailureRequest(tests_repo_url="https://[bad/x")
+        assert "tests_repo_url" in str(excinfo.value)
+        with pytest.raises(ValidationError) as excinfo:
+            ReAnalyzeFailureRequest(
+                additional_repos=[{"name": "a", "url": "https://[bad/y"}]
+            )
+        assert "additional_repos" in str(excinfo.value)
+
+    @pytest.mark.parametrize("stored", ["https://[bad/x", "https://h/repo\x00z"])
+    def test_stored_replay_preserves_malformed_tests_repo_url(self, stored) -> None:
+        """A stored value degrades later; it must never raise on replay."""
+        request = UnifiedAnalyzeRequest.model_validate(
+            {
+                "type": "raw",
+                "failures": [{"test_name": "t"}],
+                "tests_repo_url": stored,
+            },
+            context={"stored_replay": True},
+        )
+        assert request.tests_repo_url == stored
+
+    def test_jenkins_url_validation(self) -> None:
+        assert (
+            UnifiedAnalyzeRequest(
+                type="raw", failures=[{"test_name": "t"}], jenkins_url="http://j"
+            ).jenkins_url
+            == "http://j"
+        )
+        assert (
+            UnifiedAnalyzeRequest(
+                type="raw",
+                failures=[{"test_name": "t"}],
+                jenkins_url="https://jenkins.example.com:8443",
+            ).jenkins_url
+            == "https://jenkins.example.com:8443"
+        )
+        for bad in (
+            "http://j\x00",
+            "https://jenkins.example.com:badport",
+            "https://[bad/jenkins",
+        ):
+            with pytest.raises(ValidationError) as excinfo:
+                UnifiedAnalyzeRequest(
+                    type="raw", failures=[{"test_name": "t"}], jenkins_url=bad
+                )
+            assert "jenkins_url" in str(excinfo.value)
+
+    def test_jira_site_url_validation(self) -> None:
+        assert (
+            UnifiedAnalyzeRequest(
+                type="raw",
+                failures=[{"test_name": "t"}],
+                jira_site_url="https://site.atlassian.net",
+            ).jira_site_url
+            == "https://site.atlassian.net"
+        )
+        for bad in (
+            "https://site.atlassian.net:badport",
+            "https://site.atlassian.net\x00",
+            "https://[bad/site",
+            "https://api.atlassian.com/ex/jira/123",
+        ):
+            with pytest.raises(ValidationError) as excinfo:
+                UnifiedAnalyzeRequest(
+                    type="raw", failures=[{"test_name": "t"}], jira_site_url=bad
+                )
+            assert "jira_site_url" in str(excinfo.value)
+
+    def test_set_tracked_in_url_uses_the_shared_validator(self) -> None:
+        assert SetTrackedInRequest(test_name="t", url="").url == ""
+        assert (
+            SetTrackedInRequest(test_name="t", url="https://x/1").url == "https://x/1"
+        )
+        for bad in (
+            "https://x/1\x00",
+            "https://x/1\x1b",
+            # The plan wrote ``https://x/1:badport``, but there the bad port
+            # sits in the *path* and ``urlparse`` reports ``port None``, so the
+            # shared predicate correctly accepts it; the authority form is the
+            # one a port check can reject.
+            "https://x:badport/1",
+            "../relative",
+        ):
+            with pytest.raises(ValidationError) as excinfo:
+                SetTrackedInRequest(test_name="t", url=bad)
+            assert "url" in str(excinfo.value)
 
     def test_wait_for_completion_defaults(self) -> None:
         """Test wait_for_completion fields have correct defaults."""

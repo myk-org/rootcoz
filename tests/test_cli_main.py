@@ -10074,3 +10074,93 @@ class TestIssueAttachmentsCLI:
             "freed_bytes": 1024,
         }
         mock_client.delete_issue_attachment.assert_called_once_with(att_id)
+
+
+# ---------------------------------------------------------------------------
+# #562 — explicit `--tests-repo-url ""` clear, malformed list, `--server` flag
+# ---------------------------------------------------------------------------
+
+
+class TestTestsRepoUrlClearFlag:
+    """An explicitly passed empty value must reach the wire (#562 Change 9)."""
+
+    _RESPONSE: ClassVar[dict] = {"status": "queued", "job_id": "j1"}
+
+    def test_explicit_empty_clears_the_field(self, mock_client):
+        mock_client.analyze.return_value = self._RESPONSE
+        with patch.dict(os.environ, _env_without_analyze_bindings(), clear=True):
+            result = runner.invoke(
+                app,
+                [
+                    "analyze",
+                    "--job-name",
+                    "my-job",
+                    "--build-number",
+                    "1",
+                    "--tests-repo-url",
+                    "",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        kwargs = mock_client.analyze.call_args[1]
+        assert kwargs["tests_repo_url"] == ""
+
+    def test_omitted_flag_leaves_the_default_alone(self, mock_client):
+        mock_client.analyze.return_value = self._RESPONSE
+        with patch.dict(os.environ, _env_without_analyze_bindings(), clear=True):
+            result = runner.invoke(
+                app, ["analyze", "--job-name", "my-job", "--build-number", "1"]
+            )
+        assert result.exit_code == 0, result.output
+        assert "tests_repo_url" not in mock_client.analyze.call_args[1]
+
+    def test_submit_clears_the_same_way(self, mock_client, tmp_path):
+        xml_file = tmp_path / "results.xml"
+        xml_file.write_text("<testsuites/>")
+        mock_client.submit_file.return_value = self._RESPONSE
+        with patch.dict(os.environ, _env_without_analyze_bindings(), clear=True):
+            result = runner.invoke(
+                app,
+                [
+                    "submit",
+                    "--source",
+                    "file",
+                    "--file",
+                    str(xml_file),
+                    "--tests-repo-url",
+                    "",
+                ],
+            )
+        assert result.exit_code == 0, result.output
+        assert mock_client.submit_file.call_args[1]["tests_repo_url"] == ""
+
+
+class TestMalformedAdditionalReposPosition:
+    def test_position_and_name_message_without_the_url(self, mock_client):
+        result = runner.invoke(
+            app,
+            [
+                "analyze",
+                "--job-name",
+                "my-job",
+                "--build-number",
+                "1",
+                "--additional-repos",
+                "extra:https://[bad/repo",
+            ],
+        )
+        assert result.exit_code == 1
+        assert "Invalid additional repo URL at position 1 for 'extra'" in result.output
+        assert "[bad" not in result.output
+        mock_client.analyze.assert_not_called()
+
+
+class TestServerIsTheGlobalOption:
+    def test_server_is_accepted(self, mock_client):
+        result = runner.invoke(app, ["--server", _TEST_SERVER, "results", "list"])
+        assert "No such option" not in result.output
+
+    def test_server_url_does_not_exist(self, mock_client):
+        result = runner.invoke(app, ["--server-url", _TEST_SERVER, "results", "list"])
+        assert result.exit_code == 2
+        assert "No such option" in result.output
