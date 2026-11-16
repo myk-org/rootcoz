@@ -251,3 +251,17 @@ class TestAtTokenNotAtTheEnd:
 
     def test_an_email_shaped_value_is_left_alone(self) -> None:
         assert mask_stored_url("user@example.com") == "user@example.com"
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [
+            ("repo@ghp_aaaaaaaaaaaaaaaaaaaaaaaaaaaa trailing", "repo@*** trailing"),
+            ("not-a-url@SECRETTOKEN and more", "not-a-url@*** and more"),
+            ("git.internal@SECRET token here", "git.internal@*** token here"),
+        ],
+    )
+    def test_a_schemeless_value_with_prose_masks_its_token(
+        self, value: str, expected: str
+    ) -> None:
+        """No path, but words around it: a token, not a host (#562)."""
+        assert mask_stored_url(value) == expected

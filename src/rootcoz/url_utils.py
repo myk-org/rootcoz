@@ -285,4 +285,11 @@ def mask_stored_url(text: str) -> str:
     if "/" in head:
         tail_start = head.rfind("/") + 1
         head = head[:tail_start] + _AT_TOKEN_SUFFIX.sub("@***", head[tail_start:])
+    elif any(char.isspace() for char in text):
+        # No path, but prose around it: a value carrying words is not an
+        # address, so an ``@<run>`` in it is a token, not a domain. This closes
+        # the last leak Qodo found -- ``repo@ghp_… trailing`` was left whole
+        # because the path branch never ran. ``user@example.com`` has no
+        # whitespace, so it still survives untouched.
+        head = _AT_TOKEN_SUFFIX.sub("@***", head)
     return mask_url_value(head if head_end == len(text) else f"{head}?***")
