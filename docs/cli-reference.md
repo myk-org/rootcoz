@@ -169,7 +169,7 @@ Sparse field paths include `result.summary`, `result.failed_count`, `result.fail
 
 | Command | Purpose |
 | --- | --- |
-| `failure show FAILURE_UUID` | Job, test, error, classification, and details for one failure. |
+| `failure show FAILURE_UUID` | Job, test, error, classification, and details for one failure, plus the peer debate status, per-peer failure causes, and turn warnings when peer analysis ran. |
 | `failure re-analyze FAILURE_UUID` | Re-run analysis for just that failure. |
 
 10. **Manage job metadata.** `rootcoz metadata ...`
@@ -221,13 +221,13 @@ Repeatable `--attach PATH` reads regular non-symlink local files up to 3 files, 
 | Command | Flags | Purpose |
 | --- | --- | --- |
 | `rootcoz chat init JOB_ID` | `--provider`/`-p`, `--model`/`-m` (both required), `--server-credentials` | Start a job-scoped chat and wait up to ten minutes for its workspace and session to be ready. |
-| `rootcoz chat send JOB_ID MESSAGE` | `--provider`/`-p`, `--model`/`-m`, `--server-credentials` | Send a message and wait up to ten minutes for the reply; a message sent while the workspace is being prepared answers `425` naming the phase. |
+| `rootcoz chat send JOB_ID MESSAGE` | `--provider`/`-p`, `--model`/`-m`, `--server-credentials` | Send a message and wait up to ten minutes for the reply; a message sent while the workspace is being prepared answers `425` naming the phase. A turn the server accepted with a recorded error prints its reply followed by a `Note: This reply may be incomplete — the AI provider reported: …` line, the same notice `rootcoz chat history` shows as a `[SYSTEM]` row. |
 | `rootcoz chat history JOB_ID` | `--limit`/`-l` (200) | Full transcript. |
 | `rootcoz chat abort JOB_ID` | — | Stop the message being processed. |
 | `rootcoz chat clear JOB_ID` | — | Delete job chat history; refused with `425` while the workspace is being prepared. |
 | `rootcoz chat close JOB_ID` | — | Signal you left the chat view. |
 | `rootcoz admin-chat init` | `--provider`/`-p`, `--model`/`-m` (both required), `--server-credentials` | Start a server-wide admin chat. |
-| `rootcoz admin-chat send MESSAGE` | `--provider`/`-p`, `--model`/`-m`, `--server-credentials` | Ask a cross-job question. |
+| `rootcoz admin-chat send MESSAGE` | `--provider`/`-p`, `--model`/`-m`, `--server-credentials` | Ask a cross-job question; a warned turn prints the same `Note:` line as `chat send`. |
 | `rootcoz admin-chat history` | `--limit`/`-l` (200) | Admin transcript. |
 | `rootcoz admin-chat clear` | — | Clear admin history and saved artifacts. |
 | `rootcoz admin-chat save-artifact HTML_FILE` | `--filename`/`-f` | Upload a local HTML report. |

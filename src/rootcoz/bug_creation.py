@@ -258,6 +258,7 @@ async def _generate_issue_content_via_ai(
             ai_model=ai_model,
             ai_call_timeout=ai_call_timeout,
             tools=[],
+            accept_turn=lambda text: _parse_ai_issue_response(text) is not None,
         )
     except (
         httpx.HTTPError,

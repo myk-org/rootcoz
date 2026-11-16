@@ -93,7 +93,7 @@ This asks the job's assistant for a cross-failure answer and leaves the evidence
    rootcoz comments delete JOB_ID 42
    ```
 
-   `chat send` waits for the assistant reply and prints it; `chat close` tells the server you left the page, while `chat clear` removes the conversation.
+   `chat send` waits for the assistant reply and prints it; when the server accepted the turn with a recorded error it also prints the whole answer followed by a `Note: This reply may be incomplete — the AI provider reported: …` line, so a partial reply never reads as a finished one (the same notice is a `[SYSTEM]` row in `rootcoz chat history`). `chat close` tells the server you left the page, while `chat clear` removes the conversation.
 
 ## Advanced Usage
 

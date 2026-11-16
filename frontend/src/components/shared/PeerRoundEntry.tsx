@@ -32,7 +32,9 @@ export function PeerRoundEntry({ entry, repoUrls, compact = false, primaryUsage 
         <span className="font-mono text-[10px] text-text-tertiary">
           {entry.ai_provider}/{entry.ai_model}
         </span>
-        <ClassificationBadge classification={entry.classification} className="text-[10px]" />
+        {entry.classification && (
+          <ClassificationBadge classification={entry.classification} className="text-[10px]" />
+        )}
         {isOrchestrator && entry.round === 1 && primaryUsage ? (
           <span className="inline-flex items-center gap-1 text-[10px] text-text-tertiary">
             Primary (shared) <TokenUsageBadge usage={primaryUsage} />
@@ -57,8 +59,28 @@ export function PeerRoundEntry({ entry, repoUrls, compact = false, primaryUsage 
             {entry.agrees_with_orchestrator ? 'Agrees' : 'Disagrees'}
           </Badge>
         )}
+        {!isOrchestrator && entry.agrees_with_orchestrator === null && (
+          <Badge variant="destructive" className="text-[10px]">
+            Failed
+          </Badge>
+        )}
+        {entry.warning && (
+          <Badge variant="warning" className="text-[10px]">
+            Turn warning
+          </Badge>
+        )}
       </div>
-      {entry.details && (
+      {entry.warning && (
+        <p className="rounded border border-signal-orange/20 bg-glow-orange px-2.5 py-1.5 text-xs text-signal-orange whitespace-pre-wrap">
+          {entry.warning}
+        </p>
+      )}
+      {entry.error && (
+        <p className="rounded border border-signal-red/20 bg-glow-red px-2.5 py-1.5 text-xs text-signal-red whitespace-pre-wrap">
+          {entry.error}
+        </p>
+      )}
+      {entry.details && entry.details !== entry.error && (
         <div>
           <p className="text-xs text-text-secondary whitespace-pre-wrap">
             <LinkedText text={displayDetails} repoUrls={repoUrls} />

@@ -17,7 +17,15 @@ from pi_sidecar_client import (
 )
 
 from rootcoz import get_child_logger
-from rootcoz.ai_client import ANALYSIS_BUILTIN_TOOLS, AIResult, call_ai, call_ai_once
+from rootcoz.ai_client import (
+    ANALYSIS_BUILTIN_TOOLS,
+    AIResult,
+    _sanitize_diagnostic,
+    _scrub_answer,
+    call_ai,
+    call_ai_once,
+    format_ai_diagnostic,
+)
 from rootcoz.engine.chat import analysis_http_tools
 from rootcoz.engine.core import (
     JSON_RESPONSE_SCHEMA,
@@ -45,6 +53,7 @@ from rootcoz.models import (
     PeerRound,
     TokenUsageEntry,
 )
+from rootcoz.utils import single_line_diagnostic
 
 logger = get_child_logger(__name__)
 
@@ -79,6 +88,18 @@ class PeerResponseSummary(TypedDict):
     reasoning: str
 
 
+def _quote_lines(text: str) -> str:
+    """Indent a peer's own lines so they cannot pose as prompt structure.
+
+    A peer answer keeps its line breaks (the report renders it as written), and
+    it is re-embedded into line-structured prompts — ``Agrees:``, ``Classification:``,
+    ``Reasoning:``. Without the indent an answer can write its own ``Peer (...)``
+    block and forge another peer's verdict.
+    """
+    first, *rest = text.split("\n")
+    return "\n".join([first, *(f"    {line}" for line in rest)])
+
+
 # Derive valid classifications from the canonical type so peer analysis
 # stays in sync with the model definition (includes INFRASTRUCTURE).
 _VALID_CLASSIFICATIONS: frozenset[str] = frozenset(
@@ -101,6 +122,11 @@ _PEER_RESPONSE_SCHEMA = (
     "}"
 )
 _PEER_RESPONSE_KEYS = frozenset({"agrees", "classification", "reasoning"})
+
+# A rejected classification is stored and shown in the report's classification
+# column, so it is bounded like a field rather than a diagnostic. The rejected
+# value is kept whole in the round's error and in the log.
+MAX_PEER_CLASSIFICATION_LENGTH = 120
 
 
 def _is_peer_response_dict(data: object) -> bool:
@@ -130,6 +156,32 @@ def _normalize_classification(cls: str) -> str:
     if not isinstance(cls, str):
         return ""
     return re.sub(r"\s+", " ", cls).strip().upper()
+
+
+def _peer_classification(data: dict[str, Any]) -> str:
+    """Read a peer response's classification as a string, never raising."""
+    raw = data.get("classification", "")
+    return raw if isinstance(raw, str) else ""
+
+
+def _peer_turn_usable(raw: str) -> bool:
+    """Whether a peer answer carries a usable review.
+
+    Composed ONLY from the helpers the response ladder below uses, so the
+    validator and the ladder cannot drift into two rules.
+    """
+    data = _parse_peer_response(raw)
+    return not data.get("_failed") and bool(
+        _coerce_supported_classification(_peer_classification(data))
+    )
+
+
+def _is_usable_revision_turn(text: str) -> bool:
+    """Whether an orchestrator revision turn carries a usable classification."""
+    parsed = parse_json_response(text)
+    return parsed is not None and bool(
+        _coerce_supported_classification(parsed.classification)
+    )
 
 
 def _coerce_supported_classification(value: str) -> str:
@@ -345,7 +397,7 @@ def _build_peer_review_prompt(
             lines.append(
                 f"PEER ({resp['ai_provider']}/{resp['ai_model']}):\n"
                 f"  Classification: {resp['classification']}\n"
-                f"  Response: {resp['reasoning']}"
+                f"  Response: {_quote_lines(resp['reasoning'])}"
             )
         other_peers_section = (
             "\n\nOTHER PEER RESPONSES FROM PREVIOUS ROUND:\n"
@@ -737,7 +789,9 @@ async def analyze_failure_group_with_peers(
                     peer_kwargs["tools"] = list(ANALYSIS_BUILTIN_TOOLS)
                     if peer_custom_tools:
                         peer_kwargs["custom_tools"] = peer_custom_tools
-                ai_result = await call_ai(prompt, **peer_kwargs)
+                ai_result = await call_ai(
+                    prompt, accept_turn=_peer_turn_usable, **peer_kwargs
+                )
                 logger.debug(
                     "Peer %d (%s/%s) AI result: success=%s, text_length=%d",
                     idx,
@@ -746,12 +800,6 @@ async def analyze_failure_group_with_peers(
                     ai_result.success,
                     len(ai_result.text),
                 )
-                if not ai_result.success:
-                    logger.error(
-                        "Peer %d AI call failed (text_length=%d)",
-                        idx,
-                        len(ai_result.text),
-                    )
                 await ai_result.record_usage(
                     request_id=job_id,
                     call_type="peer",
@@ -789,8 +837,12 @@ async def analyze_failure_group_with_peers(
                 if isinstance(result, Exception):
                     exc_config = peer_ai_configs[i]
                     logger.error(
-                        f"Peer {exc_config.ai_provider}/{exc_config.ai_model} "
-                        f"raised exception: {type(result).__name__}"
+                        "Peer %d (%s/%s) round %d raised %s",
+                        i,
+                        exc_config.ai_provider,
+                        exc_config.ai_model,
+                        round_num,
+                        type(result).__name__,
                     )
                     entry = PeerRound(
                         round=round_num,
@@ -798,7 +850,8 @@ async def analyze_failure_group_with_peers(
                         ai_model=exc_config.ai_model,
                         role="peer",
                         classification="",
-                        details=f"AI call raised {type(result).__name__}",
+                        details="",
+                        error=f"AI call raised {type(result).__name__}",
                         agrees_with_orchestrator=None,
                     )
                     round_peer_entries.append(entry)
@@ -807,8 +860,15 @@ async def analyze_failure_group_with_peers(
                 config, ai_result = result
                 if not ai_result.success:
                     logger.error(
-                        f"Peer {config.ai_provider}/{config.ai_model} call failed "
-                        f"(text_length={len(ai_result.text)})"
+                        "Peer %d (%s/%s) round %d AI call failed "
+                        "(status=%s, text_length=%d): %s",
+                        i,
+                        config.ai_provider,
+                        config.ai_model,
+                        round_num,
+                        ai_result.status_code,
+                        len(ai_result.text),
+                        single_line_diagnostic(format_ai_diagnostic(ai_result)),
                     )
                     entry = PeerRound(
                         round=round_num,
@@ -816,15 +876,32 @@ async def analyze_failure_group_with_peers(
                         ai_model=config.ai_model,
                         role="peer",
                         classification="",
-                        details=ai_result.text,
+                        details="",
+                        error=format_ai_diagnostic(ai_result),
                         agrees_with_orchestrator=None,
                     )
                 else:
+                    if ai_result.error:
+                        logger.warning(
+                            "Peer %d (%s/%s) round %d completed with turn warning "
+                            "(status=%s, text_length=%d): %s",
+                            i,
+                            config.ai_provider,
+                            config.ai_model,
+                            round_num,
+                            ai_result.status_code,
+                            len(ai_result.text),
+                            single_line_diagnostic(ai_result.error),
+                        )
                     peer_data = _parse_peer_response(ai_result.text)
+                    raw_peer_classification = _peer_classification(peer_data)
                     if peer_data.get("_failed"):
                         logger.warning(
-                            f"Peer {config.ai_provider}/{config.ai_model} returned "
-                            f"unparseable response"
+                            "Peer %d (%s/%s) round %d returned unparseable response",
+                            i,
+                            config.ai_provider,
+                            config.ai_model,
+                            round_num,
                         )
                         entry = PeerRound(
                             round=round_num,
@@ -832,16 +909,15 @@ async def analyze_failure_group_with_peers(
                             ai_model=config.ai_model,
                             role="peer",
                             classification="",
-                            details=ai_result.text,
+                            details=_scrub_answer(ai_result.text),
+                            error=(
+                                "Returned unparseable response "
+                                "(not valid peer review JSON)"
+                            ),
+                            warning=_sanitize_diagnostic(ai_result.error, ()),
                             agrees_with_orchestrator=None,
                         )
                     else:
-                        raw_peer_classification = peer_data.get("classification", "")
-                        peer_classification = (
-                            raw_peer_classification
-                            if isinstance(raw_peer_classification, str)
-                            else ""
-                        )
                         peer_reasoning = str(peer_data.get("reasoning", "") or "")
                         peer_suggested_changes = str(
                             peer_data.get("suggested_changes", "") or ""
@@ -853,20 +929,34 @@ async def analyze_failure_group_with_peers(
                                 if peer_reasoning
                                 else f"Suggested changes:\n{peer_suggested_changes}"
                             )
-                        normalized = _normalize_classification(peer_classification)
+                        normalized = _normalize_classification(raw_peer_classification)
                         if normalized not in _VALID_CLASSIFICATIONS:
                             # Invalid classification -- exclude from consensus
+                            rejected_cls = (
+                                _sanitize_diagnostic(raw_peer_classification) or ""
+                            )
+                            safe_cls = rejected_cls[:MAX_PEER_CLASSIFICATION_LENGTH]
                             logger.warning(
-                                f"Peer {config.ai_provider}/{config.ai_model} returned "
-                                f"invalid classification: {raw_peer_classification!r}"
+                                "Peer %d (%s/%s) round %d returned invalid "
+                                "classification: %r",
+                                i,
+                                config.ai_provider,
+                                config.ai_model,
+                                round_num,
+                                rejected_cls,
                             )
                             entry = PeerRound(
                                 round=round_num,
                                 ai_provider=config.ai_provider,
                                 ai_model=config.ai_model,
                                 role="peer",
-                                classification=peer_classification,
-                                details=peer_details,
+                                classification=safe_cls,
+                                details=_scrub_answer(peer_details),
+                                error=(
+                                    "Returned unsupported classification: "
+                                    f"{rejected_cls!r}"
+                                ),
+                                warning=_sanitize_diagnostic(ai_result.error, ()),
                                 agrees_with_orchestrator=None,
                             )
                         else:
@@ -881,6 +971,7 @@ async def analyze_failure_group_with_peers(
                                 role="peer",
                                 classification=normalized,
                                 details=peer_details,
+                                warning=_sanitize_diagnostic(ai_result.error, ()),
                                 agrees_with_orchestrator=agrees,
                             )
                 if ai_result.usage is not None:
@@ -921,7 +1012,7 @@ async def analyze_failure_group_with_peers(
                             f"Peer ({entry.ai_provider}/{entry.ai_model}):\n"
                             f"  Agrees: {entry.agrees_with_orchestrator}\n"
                             f"  Classification: {entry.classification}\n"
-                            f"  Reasoning: {entry.details}"
+                            f"  Reasoning: {_quote_lines(entry.details)}"
                         )
                 peer_feedback = "\n\n".join(feedback_parts)
 
@@ -956,6 +1047,7 @@ async def analyze_failure_group_with_peers(
                         rev_kwargs["custom_tools"] = peer_custom_tools
                     rev_result = await call_ai_once(
                         revision_prompt,
+                        accept_turn=_is_usable_revision_turn,
                         **rev_kwargs,
                     )
                     logger.debug(
@@ -968,9 +1060,18 @@ async def analyze_failure_group_with_peers(
                     )
                     if not rev_result.success:
                         logger.error(
-                            "Revision round %d AI call failed (text_length=%d)",
+                            "Revision round %d AI call failed "
+                            "(status=%s, text_length=%d): %s",
                             round_num,
+                            rev_result.status_code,
                             len(rev_result.text),
+                            single_line_diagnostic(format_ai_diagnostic(rev_result)),
+                        )
+                    elif rev_result.error:
+                        logger.warning(
+                            "Revision round %d completed with turn warning: %s",
+                            round_num,
+                            single_line_diagnostic(rev_result.error),
                         )
                     revision_usage = (
                         _round_usage(

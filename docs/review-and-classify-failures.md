@@ -42,7 +42,7 @@ Use this when you already know the job ID and test name and only need to confirm
 
    Start with `Analysis`, then read `Artifacts Evidence`. If the failure has been re-run before, open `Previous Analysis` to compare the earlier answer with the current one.
 
-   If peer analysis was enabled, expand `Peer Analysis` on the failure card to inspect each round and see whether the models agreed. This is the fastest way to decide whether the current answer looks solid or needs correction.
+   If peer analysis was enabled, expand `Peer Analysis` on the failure card to inspect each round and see whether the models agreed. A round that produced no usable review shows a `Failed` badge and the sanitized reason, while a round that finished its review despite a transient mid-turn error shows a `Turn warning` badge with the warning detail. A failed round's stored answer keeps the line breaks the model wrote: a log excerpt or a list of suspects reads as it was written, not as one run-on line. This is the fastest way to decide whether the current answer looks solid or needs correction.
 
 5. Mark the review complete.
 

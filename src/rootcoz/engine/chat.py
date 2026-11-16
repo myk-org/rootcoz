@@ -17,8 +17,10 @@ from rootcoz import get_child_logger
 from rootcoz.ai_client import (
     CHAT_BUILTIN_TOOLS,
     SessionCreationRefused,
+    _sanitize_diagnostic,
     call_ai,
     create_session_safely,
+    format_ai_diagnostic,
     resolve_catalog_pair,
 )
 from rootcoz.engine.http_mcp import (
@@ -42,6 +44,7 @@ from rootcoz.temp_paths import (
     reusable_path_lock,
     sanitize_path_part,
 )
+from rootcoz.utils import single_line_diagnostic
 
 logger = get_child_logger(__name__)
 
@@ -1921,17 +1924,22 @@ async def _create_chat_session(
         else:
             from rootcoz.ai_client import (
                 require_server_provider_grant,
-                server_provider_key,
+                server_provider_key_with_generation,
             )
 
             await require_server_provider_grant(sidecar_provider, sidecar_model)
             # A stored server provider key (#347) reaches chat sessions too:
             # pass it as the session apiKey while keeping the server
             # credential-source classification (create_session_safely records
-            # server_api_key sessions as server-owned).
-            server_key = await server_provider_key(sidecar_provider)
+            # server_api_key sessions as server-owned). The generation is read
+            # WITH the key, so the session row can only ever record the state
+            # that key came from (#569).
+            server_key, server_generation = await server_provider_key_with_generation(
+                sidecar_provider
+            )
             if server_key is not None:
                 create_kwargs["server_api_key"] = server_key
+                create_kwargs["server_generation"] = server_generation
         session_id = await create_session_safely(client, **create_kwargs)
         logger.info("%s: session created: %s", log_prefix, session_id)
         return session_id
@@ -2008,6 +2016,11 @@ async def init_admin_chat_session(
     )
 
 
+def _chat_turn_usable(text: str) -> bool:
+    """A free-form chat turn is usable when it produced any answer at all."""
+    return bool(text.strip())
+
+
 async def _chat_with_ai_impl(
     *,
     message: str,
@@ -2025,8 +2038,15 @@ async def _chat_with_ai_impl(
     call_type: str = "chat",
     install_mcp: bool = True,
     on_delta: Callable[[str], None] | None = None,
+    on_warning: Callable[[str], None] | None = None,
 ) -> tuple[bool, str, str | None]:
-    """Shared AI chat implementation used by both job and admin chat."""
+    """Shared AI chat implementation used by both job and admin chat.
+
+    ``on_warning`` receives the sanitized mid-turn warning: free-form chat accepts
+    a turn whose answer survived a recorded error (dropping it would lose the
+    reply), and this is how that accepted-but-unproven turn reaches the user as a
+    warning instead of being presented as a complete answer.
+    """
     logger.info(
         "%s: %s session (provider=%s, model=%s)",
         log_prefix,
@@ -2065,7 +2085,11 @@ async def _chat_with_ai_impl(
         call_kwargs["tools"] = list(CHAT_BUILTIN_TOOLS)
     if install_mcp:
         await install_http_tools_mcp_best_effort_async(repo_path, custom_tools or [])
-    result = await call_ai(prompt, **call_kwargs)
+    # Free-form chat has no schema to check, so its rule is "a non-empty
+    # answer": pi-config's prompt response carries no stop_reason, and dropping
+    # a finished reply because the turn also recorded an error loses work the
+    # user cannot recover (#569).
+    result = await call_ai(prompt, accept_turn=_chat_turn_usable, **call_kwargs)
 
     # A revoked or switched chat source must never be rebuilt under another identity.
     from rootcoz.ai_client import chat_session_source
@@ -2107,7 +2131,7 @@ async def _chat_with_ai_impl(
             await install_http_tools_mcp_best_effort_async(
                 repo_path, custom_tools or []
             )
-        result = await call_ai(prompt, **retry_kwargs)
+        result = await call_ai(prompt, accept_turn=_chat_turn_usable, **retry_kwargs)
 
     await result.record_usage(
         request_id=request_id,
@@ -2118,8 +2142,23 @@ async def _chat_with_ai_impl(
     )
 
     if not result.success:
-        logger.error("%s: AI call failed: %s", log_prefix, result.text)
+        logger.error(
+            "%s: AI call failed: %s",
+            log_prefix,
+            single_line_diagnostic(format_ai_diagnostic(result)),
+        )
         return False, result.text, None
+    if result.error:
+        # One log line for the operator, one warning for the user: the turn was
+        # accepted without a normal stop reason, so it may be incomplete.
+        warning = _sanitize_diagnostic(result.error, ()) or ""
+        logger.warning(
+            "%s: AI turn completed with a warning: %s",
+            log_prefix,
+            warning,
+        )
+        if warning and on_warning is not None:
+            on_warning(warning)
 
     return True, result.text, result.session_id
 
@@ -2143,6 +2182,7 @@ async def chat_with_ai(
     tracker_unavailable: dict[str, str] | None = None,
     issue_repos: tuple[str, ...] = (),
     on_delta: Callable[[str], None] | None = None,
+    on_warning: Callable[[str], None] | None = None,
 ) -> tuple[bool, str, str | None]:
     """Send a chat message and get an AI response via the sidecar."""
 
@@ -2174,6 +2214,7 @@ async def chat_with_ai(
         call_type="chat",
         install_mcp=install_mcp,
         on_delta=on_delta,
+        on_warning=on_warning,
     )
 
 
@@ -2189,6 +2230,7 @@ async def admin_chat_with_ai(
     custom_tools: list[dict[str, Any]] | None = None,
     tracker_unavailable: dict[str, str] | None = None,
     on_delta: Callable[[str], None] | None = None,
+    on_warning: Callable[[str], None] | None = None,
 ) -> tuple[bool, str, str | None]:
     """Send an admin chat message and get an AI response."""
 
@@ -2212,4 +2254,5 @@ async def admin_chat_with_ai(
         request_id="__admin_chat__",
         call_type="admin_chat",
         on_delta=on_delta,
+        on_warning=on_warning,
     )

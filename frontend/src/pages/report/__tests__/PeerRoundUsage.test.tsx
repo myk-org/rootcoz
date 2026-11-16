@@ -53,3 +53,53 @@ describe('peer round usage', () => {
     }
   })
 })
+
+const diagnosedRound = (overrides: Partial<PeerRound>): PeerRound => ({
+  round: 1, role: 'peer', ai_provider: 'gemini', ai_model: 'pro',
+  classification: '', pattern: '', details: '',
+  agrees_with_orchestrator: null, token_usage: null,
+  ...overrides,
+})
+
+const diagnosedDebate: PeerDebate = {
+  consensus_reached: false, rounds_used: 1, max_rounds: 1,
+  ai_configs: [{ ai_provider: 'gemini', ai_model: 'pro' }],
+  rounds: [
+    diagnosedRound({ role: 'orchestrator', classification: 'CODE ISSUE', agrees_with_orchestrator: true, details: 'orch' }),
+    diagnosedRound({ error: 'HTTP 503: upstream refused', details: '' }),
+    diagnosedRound({
+      classification: 'CODE ISSUE',
+      agrees_with_orchestrator: true,
+      warning: '503 Service Unavailable',
+      details: 'peer reasoning stays visible',
+    }),
+  ],
+}
+
+describe('peer round diagnostics (#569)', () => {
+  it.each(['section', 'summary'])('renders Failed, Turn warning and their callouts in %s', (view) => {
+    if (view === 'section') {
+      render(<TooltipProvider><PeerDebateSection debate={diagnosedDebate} repoUrls={[]} /></TooltipProvider>)
+      fireEvent.click(screen.getByRole('button', { name: /peer analysis/i }))
+    } else {
+      const failure = {
+        test_name: 'test_one', error_signature: 'sig', peer_debate: diagnosedDebate,
+      } as FailureAnalysis
+      render(<TooltipProvider><PeerAnalysisSummary failures={[failure]} repoUrls={[]} /></TooltipProvider>)
+      fireEvent.click(screen.getByRole('button', { name: /peer analysis/i }))
+      fireEvent.click(screen.getByRole('button', { name: /test_one/i }))
+    }
+    expect(screen.getByText('Failed')).toBeInTheDocument()
+    expect(screen.getByText('HTTP 503: upstream refused')).toBeInTheDocument()
+    expect(screen.getByText('Turn warning')).toBeInTheDocument()
+    expect(screen.getByText('503 Service Unavailable')).toBeInTheDocument()
+    expect(screen.getByText('Agrees')).toBeInTheDocument()
+    expect(screen.getByText(/peer reasoning stays visible/)).toBeInTheDocument()
+    // The failed peer has no classification, so its card carries no empty pill:
+    // only the role badge and the Failed badge.
+    const failedCard = screen.getByText('HTTP 503: upstream refused').closest('.rounded-md') as HTMLElement
+    expect(failedCard.querySelectorAll('.rounded-full')).toHaveLength(2)
+    expect(within(failedCard).queryByText('CODE ISSUE')).toBeNull()
+    expect(screen.getAllByText('CODE ISSUE')).toHaveLength(2)
+  })
+})

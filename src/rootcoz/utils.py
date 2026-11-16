@@ -38,6 +38,29 @@ def is_jenkins_connectivity_error(exc: Exception) -> bool:
 # regardless of whether they appear in SENSITIVE_KEYS.
 _GENERIC_SENSITIVE_RE = re.compile(r"(password|token|secret|key)", re.IGNORECASE)
 
+# A terminal escape sequence: CSI (``ESC [ ... final``) and OSC
+# (``ESC ] ... BEL|ST``). One definition, so every printable diagnostic in
+# rootcoz drops exactly the same sequences.
+_ANSI_SEQUENCE_RE = re.compile(
+    r"\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\))"
+)
+
+
+def single_line_diagnostic(text: str) -> str:
+    """One printable line of remote-controlled text, for a log or a terminal.
+
+    Strips ANSI CSI/OSC sequences, drops non-printable characters, and collapses
+    every run of whitespace (including ``\\r\\n``, ``\\x85``, ``\\u2028`` and
+    ``\\u2029``) into one space.
+    """
+    printable = "".join(
+        ch
+        for ch in _ANSI_SEQUENCE_RE.sub(" ", text)
+        if ch.isprintable() or ch.isspace()
+    )
+    return " ".join(printable.split())
+
+
 _MASK = "***"
 
 

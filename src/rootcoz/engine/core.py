@@ -32,6 +32,7 @@ from rootcoz.ai_client import (
     AIResult,
     _is_refusal_text,
     call_ai_once,
+    format_ai_diagnostic,
 )
 from rootcoz.config import Settings, get_settings, parse_additional_repos
 from rootcoz.engine.chat import analysis_http_tools
@@ -64,6 +65,7 @@ from rootcoz.storage import (
 from rootcoz.temp_paths import sanitize_path_part
 from rootcoz.token_tracking import failure_group_usage
 from rootcoz.url_utils import sanitize_clone_url, strip_url_credentials
+from rootcoz.utils import single_line_diagnostic
 
 logger = get_child_logger(__name__)
 
@@ -2390,6 +2392,10 @@ async def _call_ai_with_retry(
         call_kwargs["system_prompt"] = system_prompt
     if custom_tools:
         call_kwargs["custom_tools"] = custom_tools
+    if require_usable_analysis:
+        # An error-bearing turn counts only when it already parses into an analysis;
+        # without `accept_turn` a turn with no stop reason stays failed and retries.
+        call_kwargs["accept_turn"] = lambda text: parse_json_response(text) is not None
 
     max_attempts = 2
     result = AIResult(success=False, text="AI call failed unexpectedly")
@@ -2422,9 +2428,23 @@ async def _call_ai_with_retry(
 
         if not result.success:
             logger.error(
-                "AI call failed (text_length=%d, attempt=%d)",
+                "AI call failed (provider=%s, model=%s, status=%s, "
+                "text_length=%d, attempt=%d): %s",
+                ai_provider,
+                ai_model,
+                result.status_code,
                 len(result.text),
                 attempt,
+                single_line_diagnostic(format_ai_diagnostic(result)),
+            )
+        elif result.error:
+            logger.warning(
+                "AI call completed with turn warning (provider=%s, model=%s, "
+                "status=%s): %s",
+                ai_provider,
+                ai_model,
+                result.status_code,
+                single_line_diagnostic(result.error),
             )
 
         await result.record_usage(

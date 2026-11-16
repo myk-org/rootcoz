@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shlex
+from collections.abc import Callable
 from typing import ClassVar, Self
 from unittest.mock import MagicMock, patch
 
@@ -4759,6 +4760,88 @@ class TestFailureCommands:
         parsed = json.loads(result.output)
         assert parsed["job_id"] == "job-1"
 
+    def test_failure_show_renders_peer_debate_diagnostics(self, mock_client):
+        """#569: peer failure causes and turn warnings reach the CLI, one line each."""
+        mock_client.get_failure.return_value = {
+            "job_id": "job-1",
+            "failure": {
+                "id": "uuid-1",
+                "test_name": "tests.TestFoo.test_bar",
+                "error": "AssertionError",
+                "analysis": {
+                    "classification": "CODE ISSUE",
+                    "details": "Missing import",
+                },
+                "peer_debate": {
+                    "consensus_reached": False,
+                    "rounds_used": 1,
+                    "max_rounds": 2,
+                    "rounds": [
+                        {
+                            "round": 1,
+                            "role": "peer",
+                            "ai_provider": "gemini",
+                            "ai_model": "pro",
+                            "classification": "CODE ISSUE",
+                            "agrees_with_orchestrator": True,
+                            "warning": "503 Service Unavailable\x1b[0m",
+                            "error": None,
+                            "details": "looks right",
+                        },
+                        {
+                            "round": 1,
+                            "role": "peer",
+                            "ai_provider": "claude",
+                            "ai_model": "opus",
+                            "classification": "",
+                            "agrees_with_orchestrator": None,
+                            "warning": None,
+                            "error": "HTTP 503: upstream refused\nsecond line",
+                            "details": "",
+                        },
+                    ],
+                },
+            },
+        }
+        result = runner.invoke(app, ["failure", "show", "uuid-1"])
+        assert result.exit_code == 0
+        assert "Peer Debate:" in result.output
+        assert "Agrees" in result.output
+        assert "Turn warning" in result.output
+        assert "Warning: 503 Service Unavailable" in result.output
+        assert "Failed" in result.output
+        assert "Error: HTTP 503: upstream refused second line" in result.output
+        assert "\x1b" not in result.output
+
+    def test_failure_show_json_exposes_peer_diagnostics(self, mock_client):
+        peer_debate = {
+            "consensus_reached": True,
+            "rounds_used": 1,
+            "max_rounds": 1,
+            "rounds": [
+                {
+                    "round": 1,
+                    "role": "peer",
+                    "ai_provider": "gemini",
+                    "ai_model": "pro",
+                    "classification": "CODE ISSUE",
+                    "agrees_with_orchestrator": True,
+                    "error": None,
+                    "warning": "503 Service Unavailable",
+                }
+            ],
+        }
+        mock_client.get_failure.return_value = {
+            "job_id": "job-1",
+            "failure": {"id": "uuid-1", "test_name": "t", "peer_debate": peer_debate},
+        }
+        result = runner.invoke(app, ["--json", "failure", "show", "uuid-1"])
+        assert result.exit_code == 0
+        parsed = json.loads(result.output)
+        rounds = parsed["failure"]["peer_debate"]["rounds"]
+        assert rounds[0]["warning"] == "503 Service Unavailable"
+        assert rounds[0]["error"] is None
+
     def test_failure_show_not_found(self, mock_client):
         mock_client.get_failure.side_effect = RootCozError(
             status_code=404, detail="Failure not found"
@@ -7562,6 +7645,45 @@ def _ready(session: bool = True) -> dict:
     return {**_preparing(session=session), "preparing": None}
 
 
+def _long_transcript(reply_id: int = 249) -> Callable[..., dict]:
+    """A 250-row transcript whose turn's own rows sit on the last page only.
+
+    A single 200-row page cannot hold the newest rows, so a reader that always
+    asks for the first page never sees the reply or its notice.
+    """
+
+    def page(limit: int = 200, offset: int = 0) -> dict:
+        if offset:
+            messages = [
+                {
+                    "id": reply_id,
+                    "role": "assistant",
+                    "content": "partial answer",
+                    "status": "completed",
+                },
+                {
+                    "id": reply_id + 1,
+                    "role": "system",
+                    "content": (
+                        "This reply may be incomplete — the AI provider reported: 503"
+                    ),
+                },
+            ]
+        else:
+            messages = [
+                {
+                    "id": i,
+                    "role": "user",
+                    "content": f"older turn {i}",
+                    "status": "completed",
+                }
+                for i in range(1, 201)
+            ]
+        return {"messages": messages, "total": reply_id + 1}
+
+    return page
+
+
 class TestChatCommands:
     def test_chat_init_waits_for_session(self, mock_client):
         """A 202 is accepted, and readiness means no preparation *and* a session.
@@ -7774,6 +7896,85 @@ class TestChatCommands:
         )
         assert "The test failed because of a null pointer." in result.output
 
+    def test_chat_send_prints_the_turn_warning_under_the_reply(self, mock_client):
+        """A partial reply is announced where the reader actually reads it."""
+        mock_client.send_chat_message.return_value = {
+            "user_message": {
+                "id": 1,
+                "role": "user",
+                "content": "q",
+                "status": "completed",
+            },
+        }
+        mock_client.get_chat_history.return_value = {
+            "messages": [
+                {
+                    "id": 2,
+                    "role": "assistant",
+                    "content": "partial answer",
+                    "status": "completed",
+                },
+                {
+                    "id": 3,
+                    "role": "system",
+                    "content": "This reply may be incomplete — the AI provider reported: 503",
+                },
+            ],
+            "total": 2,
+        }
+        with patch("time.sleep"):
+            result = runner.invoke(app, ["chat", "send", "job-1", "q"])
+        assert result.exit_code == 0
+        assert "partial answer" in result.output
+        assert "Note: This reply may be incomplete" in result.output
+
+    def test_chat_send_prints_the_turn_warning_from_the_last_page(self, mock_client):
+        """A transcript longer than one page still shows the partial-reply note."""
+        mock_client.send_chat_message.return_value = {
+            "user_message": {
+                "id": 1,
+                "role": "user",
+                "content": "q",
+                "status": "completed",
+            },
+        }
+        mock_client.get_chat_history.side_effect = _long_transcript()
+        with patch("time.sleep"):
+            result = runner.invoke(app, ["chat", "send", "job-1", "q"])
+        assert result.exit_code == 0
+        assert "partial answer" in result.output
+        assert "Note: This reply may be incomplete" in result.output
+
+    def test_chat_send_keeps_the_reply_when_the_warning_read_fails(self, mock_client):
+        """The notice lookup is best effort: a lost page must not undo the answer."""
+        mock_client.send_chat_message.return_value = {
+            "user_message": {
+                "id": 1,
+                "role": "user",
+                "content": "q",
+                "status": "completed",
+            },
+        }
+        answered = {
+            "messages": [
+                {
+                    "id": 2,
+                    "role": "assistant",
+                    "content": "the answer",
+                    "status": "completed",
+                }
+            ],
+            "total": 1,
+        }
+        mock_client.get_chat_history.side_effect = [
+            answered,
+            RootCozError(detail="page lost"),
+        ]
+        with patch("time.sleep"):
+            result = runner.invoke(app, ["chat", "send", "job-1", "q"])
+        assert result.exit_code == 0
+        assert "the answer" in result.output
+
     def test_chat_send_with_ai_config(self, mock_client):
         mock_client.send_chat_message.return_value = {
             "user_message": {
@@ -7846,7 +8047,9 @@ class TestChatCommands:
             ],
             "total": 1,
         }
-        mock_client.get_chat_history.side_effect = [pending] * 130 + [answered]
+        # The trailing element is the transcript re-read `send` makes to show a
+        # turn warning written after the answer row.
+        mock_client.get_chat_history.side_effect = [pending] * 130 + [answered] * 2
         with patch("time.sleep"):
             result = runner.invoke(app, ["chat", "send", "job-1", "q"])
         assert result.exit_code == 0
@@ -7999,6 +8202,57 @@ class TestAdminChatCommands:
             "Server status?", ai_provider="", ai_model=""
         )
         assert "All systems operational." in result.output
+
+    def test_admin_chat_send_prints_the_turn_warning_under_the_reply(self, mock_client):
+        """Admin chat announces a partial reply the same way job chat does."""
+        mock_client.send_admin_chat_message.return_value = {
+            "user_message": {
+                "id": 1,
+                "role": "user",
+                "content": "q",
+                "status": "completed",
+            },
+        }
+        mock_client.get_admin_chat_history.return_value = {
+            "messages": [
+                {
+                    "id": 2,
+                    "role": "assistant",
+                    "content": "partial answer",
+                    "status": "completed",
+                },
+                {
+                    "id": 3,
+                    "role": "system",
+                    "content": "This reply may be incomplete — the AI provider reported: 503",
+                },
+            ],
+            "total": 2,
+        }
+        with patch("time.sleep"):
+            result = runner.invoke(app, ["admin-chat", "send", "q"])
+        assert result.exit_code == 0
+        assert "partial answer" in result.output
+        assert "Note: This reply may be incomplete" in result.output
+
+    def test_admin_chat_send_prints_the_turn_warning_from_the_last_page(
+        self, mock_client
+    ):
+        """A long admin transcript still shows the partial-reply note."""
+        mock_client.send_admin_chat_message.return_value = {
+            "user_message": {
+                "id": 1,
+                "role": "user",
+                "content": "q",
+                "status": "completed",
+            },
+        }
+        mock_client.get_admin_chat_history.side_effect = _long_transcript()
+        with patch("time.sleep"):
+            result = runner.invoke(app, ["admin-chat", "send", "q"])
+        assert result.exit_code == 0
+        assert "partial answer" in result.output
+        assert "Note: This reply may be incomplete" in result.output
 
     def test_admin_chat_send_with_ai_config(self, mock_client):
         mock_client.init_admin_chat.return_value = {"ready": True}

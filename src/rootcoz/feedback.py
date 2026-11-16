@@ -11,13 +11,18 @@ from dataclasses import dataclass
 from typing import Any
 
 from rootcoz import get_child_logger
-from rootcoz.ai_client import call_ai_once, public_provider_name
+from rootcoz.ai_client import (
+    call_ai_once,
+    format_ai_diagnostic,
+    public_provider_name,
+)
 from rootcoz.attribution import AiProvenance, apply_ai_attribution, read_provenance
 from rootcoz.config import Settings
 from rootcoz.models import (
     FeedbackPreviewResponse,
     FeedbackRequest,
 )
+from rootcoz.utils import single_line_diagnostic
 
 logger = get_child_logger(__name__)
 
@@ -205,6 +210,16 @@ _SENSITIVE_PATTERNS: list[tuple[re.Pattern[str], str]] = [
         ),
         "[REDACTED]@",
     ),
+    # Standalone AI provider key prefixes: a provider may echo an active or
+    # rotated key bare in an error body, with no assignment and no URL around
+    # it. Runs after the assignment/URL rules so those keep their own labels.
+    (
+        re.compile(
+            r"(?<![A-Za-z0-9_])(?:sk-(?:proj-|ant-)?|AIza|gsk_|xai-|csk[-_])"
+            r"[A-Za-z0-9_*.\u2026-]{2,}[A-Za-z0-9_*]"
+        ),
+        "[REDACTED_API_KEY]",
+    ),
     # Generic long hex/base64 secrets (40+ chars, likely tokens)
     (re.compile(r"\b[A-Fa-f0-9]{40,}\b"), "[REDACTED_HEX_TOKEN]"),
 ]
@@ -320,6 +335,7 @@ Do NOT include any sensitive data (tokens, passwords, etc.) in the output."""
             ai_model=ai_model,
             ai_call_timeout=ai_call_timeout,
             tools=[],
+            accept_turn=lambda text: _parse_json_response(text) is not None,
         )
     except (TimeoutError, OSError, RuntimeError, ValueError, TypeError) as exc:
         # feedback formatting should fall back
@@ -337,11 +353,16 @@ Do NOT include any sensitive data (tokens, passwords, etc.) in the output."""
             if not labels:
                 labels = ["enhancement"]
             return parsed["title"], parsed["body"], labels, True
+        # Never echo the answer: it is model-authored and may quote a log or a key.
         logger.debug(
-            "AI response JSON parsing failed, using fallback. Output: %s", result.text
+            "AI response JSON parsing failed, using fallback (text_length=%d)",
+            len(result.text),
         )
     else:
-        logger.debug("AI call failed for feedback formatting: %s", result.text)
+        logger.debug(
+            "AI call failed for feedback formatting: %s",
+            single_line_diagnostic(format_ai_diagnostic(result)),
+        )
 
     logger.warning("AI formatting failed for feedback, using fallback template")
     title, body = _build_fallback_feedback(request)

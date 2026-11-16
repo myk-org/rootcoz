@@ -12,36 +12,51 @@ import tempfile
 import threading
 import time
 from collections import OrderedDict
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from contextlib import AsyncExitStack, suppress
 from contextvars import ContextVar
 from dataclasses import replace
 from pathlib import Path
 from string import Template
-from typing import Any, cast
+from typing import Any, Literal, cast
 from urllib.parse import quote
 
 import httpx
 from pi_sidecar_client import (
     _STREAM_TERMINAL_EVENTS,
+    MAX_ERROR_DETAIL_LENGTH,
     AIResult,
     AITokenUsage,
     SidecarClient,
     _iter_sse_events,
+    _redact_api_key,
     _validate_api_key,
     get_sidecar_client,
     set_usage_recorder,
 )
-from pi_sidecar_client import call_ai as _call_ai
 from pi_sidecar_client import list_models as _list_models_raw
 
 from rootcoz import get_child_logger
+from rootcoz.url_utils import redact_urls_in_text
+from rootcoz.utils import _ANSI_SEQUENCE_RE, single_line_diagnostic
 
 logger = get_child_logger(__name__)
+
+# Stop reasons that mean the model finished its turn normally: only these (or an
+# explicit `accept_turn` verdict on a sidecar that reports no stop reason) let a
+# turn that also recorded an error count as usable.
+_NORMAL_STOP_REASONS = frozenset({"stop", "end_turn"})
+
+# The sidecar reports line separators as data; collapse them before a diagnostic
+# is scrubbed or logged so one remote-controlled string cannot forge log lines.
+_LINE_BREAK_RE = re.compile(r"\r\n|[\r\x85\u2028\u2029]")
 
 # Below this length a key cannot be safely replaced inside model output, so a
 # fragment could leak it: such a turn never streams (see `_redact_key_echo`).
 _MIN_SAFE_REDACT_KEY = 8
+# Marks "the caller did not supply a generation" in `create_session_safely`,
+# where a real `None` (no stored key) must never trigger a re-read.
+_GENERATION_UNREAD: Any = object()
 # How long to keep reading the events feed after the prompt answered. The feed's
 # keepalives reset httpx's per-read timeout, so without this bound a lost
 # `turn_end` frame would park the turn — and the per-user chat lock — forever.
@@ -555,21 +570,115 @@ async def server_provider_key(provider: str) -> str | None:
     The returned key is in-memory only: never logged, persisted, or returned
     by an API.
     """
-    from rootcoz.storage import UnreadableAiCredentialsError, get_server_ai_credential
+    key, _generation = await server_provider_key_with_generation(provider)
+    return key
+
+
+async def _server_credential_generation(provider: str) -> int | None:
+    """The row's generation without decrypting its key; None when unreadable.
+
+    A key that cannot be decrypted must still keep the generation the turn is
+    compared against, or the post-turn check would read a read failure as a
+    rotation (#569).
+    """
+    from rootcoz.storage import get_server_credential_generation
 
     try:
-        key = await get_server_ai_credential(provider)
+        return await get_server_credential_generation(provider)
+    except sqlite3.Error, OSError, RuntimeError:
+        logger.warning(
+            "Unable to read server AI credential generation for provider=%s", provider
+        )
+        return None
+
+
+async def server_provider_key_with_generation(
+    provider: str,
+) -> tuple[str | None, int | None]:
+    """The server key and the ``server_ai_providers`` generation it was read with.
+
+    One read, so a session's key and the generation it is bound to can never
+    come from two different credential states.
+    """
+    from rootcoz.storage import (
+        UnreadableAiCredentialsError,
+        get_server_ai_credential_with_generation,
+    )
+
+    try:
+        key, generation = await get_server_ai_credential_with_generation(provider)
     except UnreadableAiCredentialsError:
         logger.warning(
             "Server AI credential store unreadable for provider=%s; "
             "using deployment credentials",
             provider,
         )
-        return None
+        return (
+            _deployment_provider_key(provider),
+            await _server_credential_generation(provider),
+        )
     except sqlite3.Error, OSError, RuntimeError:
         logger.warning("Unable to read server AI credential for provider=%s", provider)
-        return None
-    return key if key is not None else _deployment_provider_key(provider)
+        return (
+            _deployment_provider_key(provider),
+            await _server_credential_generation(provider),
+        )
+    return (key if key is not None else _deployment_provider_key(provider)), generation
+
+
+async def _collect_server_redact_keys(
+    provider: str, primary_key: str | None = None
+) -> tuple[str, ...]:
+    """Every key a server turn's answer or diagnostic could echo, for redaction.
+
+    Output redaction only — it never grants authentication or listing eligibility
+    (``deployment_provider_credentials`` / ``server_provider_key`` do that). It is
+    deliberately *independent of* the model catalog cache and of the
+    ``trustKeyScopedListing`` flag, so a cold catalog or an unflagged manifest
+    entry can neither hide a secret from redaction nor leak one into it.
+    """
+    from rootcoz.storage import (
+        UnreadableAiCredentialsError,
+        get_server_ai_credential,
+    )
+
+    keys: list[str] = [primary_key or ""]
+    try:
+        stored = await get_server_ai_credential(provider)
+    except UnreadableAiCredentialsError, sqlite3.Error, OSError, RuntimeError:
+        stored = None
+    keys.append(stored or "")
+    for name in {
+        *_ambient_api_key_vars(provider),
+        *_ambient_api_key_vars(public_provider_name(provider)),
+    }:
+        keys.append(os.environ.get(name, "").strip())
+    if is_cursor_provider(normalize_provider(provider)):
+        keys.append(os.environ.get("CURSOR_API_KEY", "").strip())
+    providers = _agent_manifest()
+    if providers:
+        wanted = {
+            normalize_provider(provider),
+            normalize_provider(public_provider_name(provider)),
+        }
+        provider_vars = {
+            *_ambient_api_key_vars(provider),
+            *_ambient_api_key_vars(public_provider_name(provider)),
+        }
+        for name, config in providers.items():
+            if not isinstance(name, str) or not isinstance(config, dict):
+                continue
+            if (
+                normalize_provider(name) not in wanted
+                and ambient_api_key_var(name) not in provider_vars
+            ):
+                continue
+            api_key = config.get("apiKey")
+            if not isinstance(api_key, str) or not api_key:
+                continue
+            var = _env_reference_var(api_key)
+            keys.append(os.environ.get(var, "").strip() if var else api_key.strip())
+    return tuple(dict.fromkeys(key for key in keys if key))
 
 
 # Pi-sidecar's catalog is the provider/model contract.  These aliases only
@@ -2035,10 +2144,139 @@ def _redact_key_echo(text: str | None, key: str | None) -> str | None:
     return text
 
 
+def _redact_key_echoes(text: str | None, keys: Sequence[str]) -> str | None:
+    """Apply :func:`_redact_key_echo` for every candidate key."""
+    for key in keys:
+        text = _redact_key_echo(text, key)
+    return text
+
+
+def _redact_pipeline(text: str, redact_keys: Sequence[str]) -> str:
+    """The one ordered redaction sequence behind every printable AI diagnostic.
+
+    ``_scrub_answer`` (a stored answer, never cut, line breaks kept) and
+    ``_sanitize_diagnostic`` (an error or warning, bounded to
+    ``MAX_ERROR_DETAIL_LENGTH`` and flattened to one line) differ only in what
+    they do around this — never in the sequence itself.
+    """
+    text = _ANSI_SEQUENCE_RE.sub(" ", text)
+    text = _LINE_BREAK_RE.sub("\n", text)
+    # A separator stays a separator: a whitespace-ish character that is not
+    # printable (tab, vertical tab, NBSP, \x1c…) becomes one space, so a tabbed
+    # log excerpt never reads as one glued word. ``\n`` and printable text —
+    # indentation included — are kept as written, and a non-printable that is not
+    # whitespace (a zero-width mark) is still dropped, not turned into a space.
+    kept: list[str] = []
+    for char in text:
+        if char == "\n" or char.isprintable():
+            kept.append(char)
+        elif char.isspace() and (not kept or kept[-1] != " "):
+            kept.append(" ")
+    text = "".join(kept)
+    for key in redact_keys:
+        text = _redact_api_key(text, key)
+    text = _redact_key_echoes(text, redact_keys) or ""
+    text = redact_urls_in_text(text)
+    # Function-local on purpose: `rootcoz.feedback` imports `rootcoz.config`, which
+    # imports `normalize_provider` from THIS module at module scope (and feedback
+    # itself imports ai_client), so a module-scope import here is a cycle. This
+    # edge is the only ai_client -> feedback import, and it stays lazy.
+    from rootcoz.feedback import scrub_sensitive_data
+
+    return scrub_sensitive_data(text)
+
+
+def _scrub_answer(text: str | None) -> str:
+    """Redact a stored answer and keep it whole — a cut answer hides the failure.
+
+    The answer keeps its own line breaks (the report renders ``details`` with
+    ``whitespace-pre-wrap``) and is never sliced and never replaced by
+    ``"[error detail omitted]"``, so a long narrated peer answer survives intact.
+    ``_redact_pipeline`` drops ANSI sequences and non-printables (a separator
+    becomes a space); nothing is cut here.
+    """
+    return _redact_pipeline(text or "", ())
+
+
+def _sanitize_diagnostic(
+    text: str | None, redact_keys: Sequence[str] = ()
+) -> str | None:
+    """Bound, redact and flatten an ``error``/``warning`` detail; never an answer.
+
+    The bound is applied *before* scrubbing: with keys in hand an over-long
+    detail is replaced whole (it may hold a key suffix no redaction can see),
+    without keys it is cut to ``MAX_ERROR_DETAIL_LENGTH``.
+    """
+    if text is None:
+        return None
+    if len(text) > MAX_ERROR_DETAIL_LENGTH:
+        if redact_keys:
+            return "[error detail omitted]"
+        text = text[:MAX_ERROR_DETAIL_LENGTH]
+    return single_line_diagnostic(_redact_pipeline(text, redact_keys))
+
+
+# The three non-dataclass attributes every ``AIResult`` copy must carry over.
+_AI_RESULT_DYNAMIC_ATTRIBUTES = (
+    "transcript_session_id",
+    "credential_source",
+    "stop_reason",
+)
+
+
+def replace_ai_result(result: AIResult, **changes: Any) -> AIResult:
+    """Copy an ``AIResult`` keeping the dynamic attributes dataclasses drop."""
+    updated = replace(result, **changes)
+    for attribute in _AI_RESULT_DYNAMIC_ATTRIBUTES:
+        value = getattr(result, attribute, None)
+        if value is not None:
+            setattr(updated, attribute, value)
+    return updated
+
+
+def format_ai_diagnostic(result: AIResult) -> str:
+    """One credential-free, bounded, printable line describing a failed turn."""
+    detail = (
+        _sanitize_diagnostic((result.error or result.text or "").strip(), ())
+        or "AI call failed"
+    )
+    if (
+        result.status_code not in (None, 200)
+        and not _is_own_refusal_sentence(detail)
+        and str(result.status_code) not in detail
+    ):
+        detail = f"HTTP {result.status_code}: {detail}"
+    return detail
+
+
 async def _call_with_safe_error(
-    sidecar_call: Any, *args: Any, redact_key: str | None = None, **kwargs: Any
+    sidecar_call: Any,
+    *args: Any,
+    redact_key: str | None = None,
+    redact_keys: Sequence[str] = (),
+    credential_source: Literal["user", "server"] | None = None,
+    **kwargs: Any,
 ) -> AIResult:
-    """Keep sidecar credential-bearing errors out of caller logs and tracebacks."""
+    """Keep sidecar credential-bearing errors out of caller logs and tracebacks.
+
+    Four outcomes, one per credential source (see the outcome x source matrix):
+    a user-keyed failure keeps the fixed retry/auth signal, a server failure keeps
+    its sanitized cause, and a completed turn keeps its whole answer either way.
+    """
+    effective_source: Literal["user", "server"] = (
+        credential_source
+        if credential_source is not None
+        else "user"
+        if redact_key is not None
+        else "server"
+    )
+    all_keys = tuple(
+        dict.fromkeys(
+            key
+            for key in ((redact_key,) if effective_source == "user" else redact_keys)
+            if key
+        )
+    )
     try:
         result = await sidecar_call(*args, **kwargs)
         # Already our sentence (a refusal raised inside the call): re-deriving its
@@ -2046,12 +2284,8 @@ async def _call_with_safe_error(
         # answer "sidecar HTTP None".
         if not result.success and _is_own_refusal_sentence(result.text or ""):
             return result
-        # dataclasses.replace() drops non-field attributes — keep the
-        # transcript correlation id across every copy.
-        transcript_session_id = getattr(result, "transcript_session_id", None)
-        # A session refusal keeps its sentence: checked before the ``redact_key is
-        # None`` early return, which would otherwise leave the library's text and
-        # before the keyed branch, which would blank it to "AI call failed".
+        # A session refusal keeps its sentence: checked before the source
+        # branches, which would otherwise leave the library's text or blank it.
         if not result.success and _is_refusal_text(
             f"{result.text or ''} {result.error or ''}"
         ):
@@ -2062,46 +2296,64 @@ async def _call_with_safe_error(
                 str(kwargs.get("ai_provider") or ""),
                 str(kwargs.get("ai_model") or ""),
             )
-            result = replace(result, text=sentence, error=sentence)
-            if transcript_session_id is not None:
-                result.transcript_session_id = transcript_session_id
-            return result
-        if redact_key is None:
+            return replace_ai_result(result, text=sentence, error=sentence)
+        # A caller that declares neither a source nor a key has no redaction
+        # context to apply (direct/legacy callers): leave its wording untouched.
+        if credential_source is None and redact_key is None and not redact_keys:
             return result
         if result.success:
-            result = replace(
-                result,
-                text=_redact_key_echo(result.text, redact_key),
-                error=_redact_key_echo(result.error, redact_key),
-            )
-            if transcript_session_id is not None:
-                result.transcript_session_id = transcript_session_id
-            return result
-        # Encoded keys (URL, JSON, base64) and rotated keys cannot be safely
-        # removed by literal replacement. Keep only fixed retry/auth signals.
-        detail = f"{result.text} {result.error or ''}".lower()
-        text = (
-            "session not found"
-            if _is_lost_session_error(detail)
-            else "authentication required"
-            if any(
-                marker in detail
-                for marker in (
-                    "authentication required",
-                    "not authenticated",
-                    "not logged in",
+            if effective_source == "user":
+                # Never echo an untrusted user-key provider error body.
+                text = _redact_key_echo(result.text, redact_key)
+                error = (
+                    "Transient AI provider error during completed turn"
+                    if result.error
+                    else None
                 )
+            else:
+                # A server answer is kept whole; only the diagnostic is bounded.
+                text = _redact_key_echoes(result.text, all_keys)
+                error = (
+                    _sanitize_diagnostic(result.error, all_keys)
+                    if result.error
+                    else None
+                )
+            if text == result.text and error == result.error:
+                return result
+            return replace_ai_result(result, text=text, error=error)
+        if effective_source == "user":
+            if redact_key is None:
+                return result
+            # Encoded keys (URL, JSON, base64) and rotated keys cannot be safely
+            # removed by literal replacement. Keep only fixed retry/auth signals.
+            detail = f"{result.text} {result.error or ''}".lower()
+            text = (
+                "session not found"
+                if _is_lost_session_error(detail)
+                else "authentication required"
+                if any(
+                    marker in detail
+                    for marker in (
+                        "authentication required",
+                        "not authenticated",
+                        "not logged in",
+                    )
+                )
+                else "AI call failed"
             )
-            else "AI call failed"
-        )
-        result = replace(result, text=text, error=text if result.error else None)
-        # Failed one-shot calls have already had session_id cleared by
-        # cleanup — the transcript correlation id is the only link left.
-        if transcript_session_id is not None:
-            result.transcript_session_id = transcript_session_id
-        return result
+            return replace_ai_result(
+                result, text=text, error=text if result.error else None
+            )
+        # Server: keep the cause, bounded, redacted and printable.
+        text = _sanitize_diagnostic(result.text, all_keys) or "AI call failed"
+        error = _sanitize_diagnostic(result.error, all_keys) if result.error else None
+        if text == result.text and error == result.error:
+            return result
+        return replace_ai_result(result, text=text, error=error)
     except Exception as exc:
-        if redact_key is None:
+        if credential_source is None and redact_key is None:
+            raise
+        if effective_source == "user" and redact_key is None:
             raise
         # Raise outside the except block; __context__ would retain the raw error.
         safe_type = (
@@ -2109,8 +2361,65 @@ async def _call_with_safe_error(
             if type(exc) in (ValueError, RuntimeError, OSError, TimeoutError, TypeError)
             else RuntimeError
         )
+        # Server: keep the (bounded, redacted, printable) cause even when no key
+        # is known — sanitizing needs no key, and withholding it only hides why
+        # the call failed (#569).
+        safe_detail = (
+            _sanitize_diagnostic(str(exc), all_keys)
+            if effective_source == "server"
+            else None
+        )
         safe_text = f"{type(exc).__name__}: sidecar call failed"
+        if safe_detail:
+            safe_text = f"{type(exc).__name__}: {safe_detail}"
     raise safe_type(safe_text)
+
+
+async def _create_sidecar_session_raw(
+    client: SidecarClient,
+    *,
+    provider: str,
+    model: str,
+    system_prompt: str,
+    cwd: str | None = None,
+    api_key: str | None = None,
+    agent_dir: Any = None,
+    custom_tools: Any = None,
+    tools: Any = None,
+) -> str:
+    """Create one sidecar session; a keyed one never goes through the library.
+
+    ``pi_sidecar_client.SidecarClient.create_session`` logs raw (and base64-keyed)
+    error bodies on an HTTP failure, so every keyed session — user or server —
+    POSTs ``/sessions`` itself and maps refusals in ``_create_with_refusal_mapping``.
+    """
+    session_body: dict[str, Any] = {
+        "provider": provider,
+        "model": model,
+        "system_prompt": system_prompt,
+        "cwd": cwd or tempfile.gettempdir(),
+    }
+    for field, value in (
+        ("agent_dir", agent_dir),
+        ("custom_tools", custom_tools),
+        ("tools", tools),
+    ):
+        if value is not None:
+            session_body[field] = value
+    if api_key is None:
+        return await _create_with_refusal_mapping(
+            lambda: client.create_session(**session_body), provider, model
+        )
+    if error := _validate_api_key(api_key):
+        raise ValueError(error)
+    session_body["api_key"] = api_key
+
+    async def create() -> str:
+        response = await client._client.post("/sessions", json=session_body)
+        response.raise_for_status()
+        return response.json()["session_id"]
+
+    return await _create_with_refusal_mapping(create, provider, model)
 
 
 async def create_session_safely(client: SidecarClient, **kwargs: Any) -> str:
@@ -2120,75 +2429,67 @@ async def create_session_safely(client: SidecarClient, **kwargs: Any) -> str:
     ``server_api_key`` passes an admin-stored server provider key (#347)
     while keeping the session classified as server-owned — the chat flow
     uses it so stored provider keys reach chat sessions exactly like they
-    reach one-shot AI calls.
+    reach one-shot AI calls. ``server_generation`` is the generation of THAT
+    key, read with it in one go: re-reading here would let a rotation land
+    between the key's read and this write, tagging the session with a
+    generation its key never had (#569).
     """
     server_key = kwargs.pop("server_api_key", None)
+    server_generation = kwargs.pop("server_generation", _GENERATION_UNREAD)
     key = kwargs.get("api_key")
+    if server_key is not None and key is not None:
+        raise ValueError("Session cannot carry both user and server API keys")
+    create_kwargs: dict[str, Any] = {
+        "provider": kwargs["provider"],
+        "model": kwargs["model"],
+        "system_prompt": kwargs["system_prompt"],
+        "cwd": kwargs.get("cwd"),
+        "agent_dir": kwargs.get("agent_dir"),
+        "custom_tools": kwargs.get("custom_tools"),
+        "tools": kwargs.get("tools"),
+    }
+    from rootcoz.storage import (
+        create_ai_session_with_source,
+        get_server_credential_generation,
+    )
+
     if server_key is not None:
-        if key is not None:
-            raise ValueError("Session cannot carry both user and server API keys")
-        if error := _validate_api_key(server_key):
-            raise ValueError(error)
-        from rootcoz.storage import create_ai_session_with_source
-
-        body = {
-            "provider": kwargs["provider"],
-            "model": kwargs["model"],
-            "system_prompt": kwargs["system_prompt"],
-            "cwd": kwargs.get("cwd") or tempfile.gettempdir(),
-            "api_key": server_key,
-        }
-        for field in ("agent_dir", "custom_tools", "tools"):
-            if kwargs.get(field) is not None:
-                body[field] = kwargs[field]
-
-        async def create_server_keyed() -> str:
-            response = await client._client.post("/sessions", json=body)
-            response.raise_for_status()
-            return response.json()["session_id"]
-
+        # Snapshot the generation BEFORE the sidecar creates the session: a
+        # rotation during creation must not leave a row bound to the new key.
+        # The caller that read the key supplies it; the fallback read is for a
+        # caller that has no key of its own in hand.
+        if server_generation is _GENERATION_UNREAD:
+            server_generation = await get_server_credential_generation(
+                create_kwargs["provider"]
+            )
         return await create_ai_session_with_source(
-            lambda: _create_with_refusal_mapping(
-                create_server_keyed, kwargs["provider"], kwargs["model"]
+            lambda: _create_sidecar_session_raw(
+                client, api_key=server_key, **create_kwargs
             ),
             ai_username.get(),
-            kwargs["provider"],
+            create_kwargs["provider"],
             "server",
             client.delete_session,
+            server_generation,
         )
     if key is None:
-        from rootcoz.storage import create_ai_session_with_source
-
+        server_generation = await get_server_credential_generation(
+            create_kwargs["provider"]
+        )
         return await create_ai_session_with_source(
-            lambda: _create_with_refusal_mapping(
-                lambda: client.create_session(**kwargs),
-                kwargs["provider"],
-                kwargs["model"],
-            ),
+            lambda: _create_sidecar_session_raw(client, **create_kwargs),
             ai_username.get(),
-            kwargs["provider"],
+            create_kwargs["provider"],
             "server",
             client.delete_session,
+            server_generation,
         )
     if error := _validate_api_key(key):
         raise ValueError(error)
     # Keyed sessions use the exact registered provider, never a friendly alias
     # that could route the credential to a different endpoint.
-    provider, model = kwargs["provider"], kwargs["model"]
-    body = {
-        "provider": provider,
-        "model": model,
-        "system_prompt": kwargs["system_prompt"],
-        "cwd": kwargs.get("cwd") or tempfile.gettempdir(),
-        "api_key": key,
-    }
-    for field in ("agent_dir", "custom_tools", "tools"):
-        if kwargs.get(field) is not None:
-            body[field] = kwargs[field]
-    from rootcoz.storage import (
-        create_ai_session_with_source,
-        get_user_ai_credential_with_generation,
-    )
+    provider = create_kwargs["provider"]
+    from rootcoz.storage import get_user_ai_credential_with_generation
 
     username = ai_username.get()
     selected = _selected_key_generation.get()
@@ -2202,13 +2503,8 @@ async def create_session_safely(client: SidecarClient, **kwargs: Any) -> str:
             raise ValueError("AI credential changed during session creation")
         generation = current_generation
 
-    async def create() -> str:
-        response = await client._client.post("/sessions", json=body)
-        response.raise_for_status()
-        return response.json()["session_id"]
-
     return await create_ai_session_with_source(
-        lambda: _create_with_refusal_mapping(create, provider, model),
+        lambda: _create_sidecar_session_raw(client, api_key=key, **create_kwargs),
         username,
         provider,
         "user",
@@ -2218,7 +2514,10 @@ async def create_session_safely(client: SidecarClient, **kwargs: Any) -> str:
 
 
 async def _remember_session_source(
-    session_id: str, provider: str, account_id: int | None
+    session_id: str,
+    provider: str,
+    account_id: int | None,
+    expected_generation: int | None = None,
 ) -> None:
     """Persist server ownership or discard a session with no valid owner."""
     from rootcoz.storage import AiSessionCollisionError, save_ai_session_source
@@ -2231,6 +2530,7 @@ async def _remember_session_source(
             "server",
             account_id,
             bootstrap_admin=account_id is None,
+            expected_generation=expected_generation,
         )
     except AiSessionCollisionError:
         # The sidecar returned an ID already owned by another session.
@@ -2261,16 +2561,25 @@ async def _prompt_safely(
     timeout: float | None,
     on_delta: Callable[[str], None] | None = None,
     redact_key: str | None = None,
+    accept_turn: Callable[[str], bool] | None = None,
 ) -> AIResult:
     """Mirror the sidecar prompt result without logging untrusted response fields.
 
     The single prompt entry point: with ``on_delta`` it streams the turn through
     ``_stream_prompt_safely`` (which falls back here for the blocking prompt), without
     it the call is exactly today's POST.
+
+    ``accept_turn`` is the ONE turn-usability owner: an HTTP 200 that also records an
+    error is usable only when the answer is non-empty and the turn provably finished
+    (``stop_reason`` normal, or no stop reason and the caller's schema check accepts
+    the text). A lost-session error is never usable: its text is a fragment from
+    before the session vanished, and the caller rebuilds instead. Everything
+    downstream — session cleanup, source persistence, usage — therefore sees a
+    single verdict.
     """
     if on_delta is not None:
         return await _stream_prompt_safely(
-            client, session_id, message, timeout, on_delta, redact_key
+            client, session_id, message, timeout, on_delta, redact_key, accept_turn
         )
     response = await client._client.post(
         f"/sessions/{session_id}/prompt",
@@ -2302,18 +2611,64 @@ async def _prompt_safely(
         cost_partial=bool(usage_data.get("cost_partial", False)),
         duration_ms=usage_data.get("duration_ms"),
     )
-    error = data.get("error")
-    if error:
-        return AIResult(
-            success=False,
-            text=data.get("text") or error,
+    raw_text = data.get("text")
+    text = raw_text if isinstance(raw_text, str) else ""
+    raw_error = data.get("error")
+    error = str(raw_error) if raw_error else None
+    raw_stop_reason = data.get("stop_reason")
+    stop_reason = (
+        raw_stop_reason
+        if isinstance(raw_stop_reason, str) and raw_stop_reason
+        else None
+    )
+    if error is None:
+        result = AIResult(success=True, text=text, usage=usage, status_code=status_code)
+    elif not _is_lost_session_error(error.lower()) and _turn_usable(
+        text, stop_reason, accept_turn
+    ):
+        # A completed answer survives the mid-turn error; the error is kept as the
+        # (sanitized) turn warning the caller reports. A lost session never gets
+        # here: its text is a fragment from before the session vanished.
+        result = AIResult(
+            success=True,
+            text=text,
             usage=usage,
             error=error,
             status_code=status_code,
         )
-    return AIResult(
-        success=True, text=data.get("text", ""), usage=usage, status_code=status_code
-    )
+    else:
+        result = AIResult(
+            success=False,
+            text=error,
+            usage=usage,
+            error=error,
+            status_code=status_code,
+        )
+    if stop_reason is not None:
+        result.stop_reason = stop_reason
+    return result
+
+
+def _turn_usable(
+    text: str,
+    stop_reason: str | None,
+    accept_turn: Callable[[str], bool] | None,
+) -> bool:
+    """Whether an error-bearing turn still produced a usable answer.
+
+    A validator that raises rejects the turn: an unusable turn must fail closed.
+    """
+    if not text.strip():
+        return False
+    if stop_reason is not None:
+        return stop_reason in _NORMAL_STOP_REASONS
+    if accept_turn is None:
+        return False
+    try:
+        return accept_turn(text) is True
+    except Exception:  # noqa: BLE001 - a validator's bug must fail the turn closed
+        logger.warning("AI turn validator raised; treating the turn as unusable")
+        return False
 
 
 async def _stream_prompt_safely(
@@ -2323,6 +2678,7 @@ async def _stream_prompt_safely(
     timeout: float | None,
     on_delta: Callable[[str], None],
     redact_key: str | None,
+    accept_turn: Callable[[str], bool] | None = None,
 ) -> AIResult:
     """Answer one turn, forwarding `text_delta` frames to ``on_delta``.
 
@@ -2336,7 +2692,9 @@ async def _stream_prompt_safely(
     """
     if redact_key and len(redact_key) < _MIN_SAFE_REDACT_KEY:
         # Every fragment would be "[REDACTED]": do not stream this turn at all.
-        return await _prompt_safely(client, session_id, message, timeout)
+        return await _prompt_safely(
+            client, session_id, message, timeout, accept_turn=accept_turn
+        )
     async with AsyncExitStack() as stack:
         try:
             response = await stack.enter_async_context(
@@ -2354,9 +2712,13 @@ async def _stream_prompt_safely(
                 "Chat: sidecar events feed refused (%s), answering without fragments",
                 type(exc).__name__,
             )
-            return await _prompt_safely(client, session_id, message, timeout)
+            return await _prompt_safely(
+                client, session_id, message, timeout, accept_turn=accept_turn
+            )
         prompt_task = asyncio.ensure_future(
-            _prompt_safely(client, session_id, message, timeout)
+            _prompt_safely(
+                client, session_id, message, timeout, accept_turn=accept_turn
+            )
         )
         frames = _iter_sse_events(response).__aiter__()
         # ONE frame future in flight; it is replaced only after its frame is consumed.
@@ -2449,6 +2811,12 @@ async def _stream_prompt_safely(
         return result
     if terminal.get("type") == "error":
         detail = str(terminal.get("message") or "AI call failed")
+        if result.success and result.error:
+            # The prompt verdict already accepted this error-bearing turn (a
+            # completed answer the sidecar also flagged): the frame is a
+            # diagnostic, and dropping the answer here would undo that verdict
+            # (#569).
+            return result
         return AIResult(
             success=False,
             text=detail,
@@ -2468,51 +2836,41 @@ async def _stream_prompt_safely(
     return result
 
 
-async def _call_user_session(
+async def _run_session_prompt(
     prompt: str,
     *,
     ai_provider: str,
     ai_model: str,
-    api_key: str | None = None,
+    create: Callable[[SidecarClient], Awaitable[str]],
     session_id: str | None = None,
     once: bool = False,
     on_delta: Callable[[str], None] | None = None,
     stream_redact_key: str | None = None,
-    **kwargs: Any,
+    accept_turn: Callable[[str], bool] | None = None,
+    ai_call_timeout: float | None = None,
 ) -> AIResult:
-    """Avoid the sidecar convenience wrapper, which logs raw resumed-session errors.
+    """One prompt turn on a session, created here when the caller has none.
 
-    Also owns the delta seam: ``on_delta``/``stream_redact_key`` go to the one prompt
-    path, and every exit below keeps the correlation ids and the failure contract the
-    non-streaming call already had.
+    Both credential sources share this body, so the correlation ids, the
+    one-shot/lost-session cleanup and the failure contract can never drift
+    between a user-keyed and a server-keyed turn.
     """
     client = get_sidecar_client()
     created = False
     try:
         if not session_id:
-            session_id = await create_session_safely(
-                client,
-                provider=ai_provider,
-                model=ai_model,
-                system_prompt=kwargs.get("system_prompt")
-                or "You are a helpful assistant.",
-                cwd=kwargs.get("cwd") or tempfile.gettempdir(),
-                agent_dir=kwargs.get("agent_dir"),
-                custom_tools=kwargs.get("custom_tools"),
-                tools=kwargs.get("tools"),
-                api_key=api_key,
-            )
+            session_id = await create(client)
             created = True
         if not session_id:
             raise ValueError("Missing AI session ID")
-        timeout = kwargs.get("ai_call_timeout")
         result = await _prompt_safely(
             client,
             session_id,
             prompt,
-            timeout * 60.0 if timeout else None,
+            ai_call_timeout * 60.0 if ai_call_timeout else None,
             on_delta=on_delta,
             redact_key=stream_redact_key,
+            accept_turn=accept_turn,
         )
         result.session_id = session_id
         # Correlation handle for recorded transcripts (#328): the JSONL
@@ -2545,6 +2903,8 @@ async def _call_user_session(
             failed.transcript_session_id = failed_session_id
         return failed
     if once or (created and not result.success):
+        # An unusable turn on a session we just created leaves nothing to resume,
+        # so it is always cleaned up — before the source row would be written.
         try:
             await delete_ai_session(client, session_id)
             result.session_id = None
@@ -2553,21 +2913,167 @@ async def _call_user_session(
     return result
 
 
+async def _call_user_session(
+    prompt: str,
+    *,
+    ai_provider: str,
+    ai_model: str,
+    api_key: str | None = None,
+    session_id: str | None = None,
+    once: bool = False,
+    on_delta: Callable[[str], None] | None = None,
+    stream_redact_key: str | None = None,
+    accept_turn: Callable[[str], bool] | None = None,
+    **kwargs: Any,
+) -> AIResult:
+    """Avoid the sidecar convenience wrapper, which logs raw resumed-session errors.
+
+    Also owns the delta seam: ``on_delta``/``stream_redact_key`` go to the one prompt
+    path, and every exit below keeps the correlation ids and the failure contract the
+    non-streaming call already had.
+    """
+
+    async def create(client: SidecarClient) -> str:
+        return await create_session_safely(
+            client,
+            provider=ai_provider,
+            model=ai_model,
+            system_prompt=kwargs.get("system_prompt") or "You are a helpful assistant.",
+            cwd=kwargs.get("cwd") or tempfile.gettempdir(),
+            agent_dir=kwargs.get("agent_dir"),
+            custom_tools=kwargs.get("custom_tools"),
+            tools=kwargs.get("tools"),
+            api_key=api_key,
+        )
+
+    return await _run_session_prompt(
+        prompt,
+        ai_provider=ai_provider,
+        ai_model=ai_model,
+        create=create,
+        session_id=session_id,
+        once=once,
+        on_delta=on_delta,
+        stream_redact_key=stream_redact_key,
+        accept_turn=accept_turn,
+        ai_call_timeout=kwargs.get("ai_call_timeout"),
+    )
+
+
+async def _call_ai(
+    prompt: str,
+    *,
+    ai_provider: str = "",
+    ai_model: str = "",
+    accept_turn: Callable[[str], bool] | None = None,
+    **kwargs: Any,
+) -> AIResult:
+    """Server-credential turn: the same prompt path, never the library wrapper.
+
+    ``pi_sidecar_client.call_ai`` overwrites a >2048-char completed answer with
+    ``"[error detail omitted]"`` and logs raw resumed-session exceptions, so the
+    server path runs rootcoz's own create + prompt body instead. ``ai_session_sources``
+    persistence stays with ``call_ai``'s ``_remember_session_source``.
+    """
+    once = bool(kwargs.pop("once", False))
+
+    async def create(client: SidecarClient) -> str:
+        return await _create_sidecar_session_raw(
+            client,
+            provider=ai_provider,
+            model=ai_model,
+            system_prompt=kwargs.get("system_prompt") or "You are a helpful assistant.",
+            cwd=kwargs.get("cwd") or tempfile.gettempdir(),
+            api_key=kwargs.get("api_key"),
+            agent_dir=kwargs.get("agent_dir"),
+            custom_tools=kwargs.get("custom_tools"),
+            tools=kwargs.get("tools"),
+        )
+
+    return await _run_session_prompt(
+        prompt,
+        ai_provider=ai_provider,
+        ai_model=ai_model,
+        create=create,
+        session_id=kwargs.get("session_id"),
+        once=once,
+        on_delta=kwargs.get("on_delta"),
+        stream_redact_key=kwargs.get("stream_redact_key"),
+        accept_turn=accept_turn,
+        ai_call_timeout=kwargs.get("ai_call_timeout"),
+    )
+
+
+async def _fail_closed_on_rotation(
+    result: AIResult,
+    client: SidecarClient,
+) -> AIResult:
+    """A server key rotated mid-turn: keep the answer, drop the cause and session.
+
+    The sidecar answered with the *old* key, so nothing about this turn may
+    survive: a completed turn keeps only its answer (its error becomes the fixed
+    transient phrase), a failed turn collapses to the same fixed signals a user
+    failure keeps, and the session is deleted so the rotated key cannot be
+    reused on the next turn.
+    """
+    if result.success:
+        collapsed = replace_ai_result(
+            result,
+            error="Transient AI provider error during completed turn"
+            if result.error
+            else None,
+        )
+    else:
+        detail = f"{result.text or ''} {result.error or ''}".lower()
+        text = (
+            "session not found"
+            if _is_lost_session_error(detail)
+            else "authentication required"
+            if any(
+                marker in detail
+                for marker in (
+                    "authentication required",
+                    "not authenticated",
+                    "not logged in",
+                )
+            )
+            else "AI call failed"
+        )
+        collapsed = replace_ai_result(
+            result, text=text, error=text if result.error else None
+        )
+    session_id = getattr(result, "session_id", None)
+    if session_id:
+        try:
+            await delete_ai_session(client, session_id)
+        except httpx.HTTPError, OSError, RuntimeError, ValueError:
+            logger.warning("Unable to clean up AI session after credential rotation")
+        collapsed.session_id = None
+    logger.warning("Server AI credential rotated mid-turn; failing closed")
+    return collapsed
+
+
 async def call_ai(
     *args: Any, ai_provider: str = "", ai_model: str = "", **kwargs: Any
 ) -> AIResult:
     """Call Pi-sidecar with a validated, unchanged catalog pair."""
     on_delta: Callable[[str], None] | None = kwargs.pop("on_delta", None)
+    accept_turn: Callable[[str], bool] | None = kwargs.pop("accept_turn", None)
     provider, model = await resolve_catalog_pair(ai_provider, ai_model)
     # user key drives the credential source; a server key (#347) only
     # replaces the deployment's env/ambient credentials inside the session.
     user_key = None
     server_key = None
+    # The generation the turn's key was read under, snapshotted with the key so a
+    # rotation during this turn is detectable (see `_fail_closed_on_rotation`).
+    pre_server_gen: int | None = None
     if not kwargs.get("session_id"):
         if _selected_credential_source.get() != "server":
             user_key = await session_key(provider)
         if user_key is None:
-            server_key = await server_provider_key(provider)
+            server_key, pre_server_gen = await server_provider_key_with_generation(
+                provider
+            )
         if (key := user_key or server_key) is not None:
             kwargs["api_key"] = key
     else:
@@ -2576,10 +3082,15 @@ async def call_ai(
     sidecar_call = _call_user_session if user_key is not None else _call_ai
     session_id = kwargs.get("session_id")
     if session_id:
-        from rootcoz.storage import get_ai_session_source
+        from rootcoz.storage import (
+            get_ai_session_source,
+            get_ai_session_source_with_generation,
+        )
 
         try:
-            source = await get_ai_session_source(session_id, username, provider)
+            source, pre_server_gen = await get_ai_session_source_with_generation(
+                session_id, username, provider
+            )
         except ValueError:
             return AIResult(
                 success=False,
@@ -2642,31 +3153,50 @@ async def call_ai(
         sidecar_call = _call_user_session
     if session_id and source == "server" and server_key is None:
         # A resumed server session keeps its creation-time key in the
-        # sidecar; fetch the stored one so error redaction can strip it.
-        server_key = await server_provider_key(provider)
+        # sidecar; fetch the stored one so error redaction can strip it. Its
+        # baseline generation is the one the session check above validated —
+        # never a later read, which a rotation could have moved on (#569).
+        server_key, _ = await server_provider_key_with_generation(provider)
         if key is None:
             key = server_key
-    # Computed once, here, where `key` is final (it is re-fetched for a resumed
-    # session above): the same local feeds the fragment seam and the finished text,
-    # so a fragment can never be redacted with a different key than the reply.
-    redact_key = key if key is not None else "" if session_id and username else None
+    # Computed once, here, where the credential is final: the same values feed the
+    # fragment seam and the finished text, so a fragment can never be redacted
+    # with a different key than the reply. A server turn redacts against every
+    # key the deployment could have echoed, not only the one this call used.
+    redact_key: str | None = None
+    server_redact_keys: tuple[str, ...] = ()
+    if source == "user":
+        redact_key = key
+    else:
+        server_redact_keys = await _collect_server_redact_keys(provider, server_key)
     if session_id and on_delta is not None:
-        # One prompt path for a resumed turn, whatever the credential source: the
-        # library `_call_ai` IS this POST for an existing session, and
+        # One prompt path for a resumed turn, whatever the credential source:
         # `_call_user_session` additionally owns the delta seam. Never resets
         # `sidecar_call` for a turn without `on_delta` — a resumed user session must
         # not fall back to the library wrapper `_call_user_session` exists to avoid.
         sidecar_call = _call_user_session
         kwargs["on_delta"] = on_delta
-        kwargs["stream_redact_key"] = redact_key
+        kwargs["stream_redact_key"] = redact_key if source == "user" else server_key
+    if accept_turn is not None:
+        kwargs["accept_turn"] = accept_turn
     result = await _call_with_safe_error(
         sidecar_call,
         *args,
         redact_key=redact_key,
+        redact_keys=server_redact_keys,
+        credential_source=cast("Literal['user', 'server']", source),
         ai_provider=provider,
         ai_model=model,
         **kwargs,
     )
+    if source == "server" and pre_server_gen is not None:
+        # None means this turn's key was not a stored credential (no row, or an
+        # unreadable store): there is no stored generation it could have rotated
+        # away from, so a read failure is never read as a rotation (#569).
+        from rootcoz.storage import get_server_credential_generation
+
+        if await get_server_credential_generation(provider) != pre_server_gen:
+            return await _fail_closed_on_rotation(result, get_sidecar_client())
     if session_id and source == "user" and result.success:
         try:
             await get_ai_session_source(session_id, username, provider)
@@ -2694,7 +3224,9 @@ async def call_ai(
             )
     result.credential_source = source
     if not session_id and result.session_id and user_key is None:
-        await _remember_session_source(result.session_id, provider, account_id)
+        await _remember_session_source(
+            result.session_id, provider, account_id, pre_server_gen
+        )
     return result
 
 
@@ -2702,17 +3234,25 @@ async def call_ai_once(
     *args: Any, ai_provider: str = "", ai_model: str = "", **kwargs: Any
 ) -> AIResult:
     """Call Pi-sidecar once with a validated, unchanged catalog pair."""
+    accept_turn: Callable[[str], bool] | None = kwargs.pop("accept_turn", None)
     provider, model = await resolve_catalog_pair(ai_provider, ai_model)
     user_key = None
+    pre_server_gen: int | None = None
     if _selected_credential_source.get() != "server":
         user_key = await session_key(provider)
-    server_key = None if user_key is not None else await server_provider_key(provider)
+    server_key = None
+    if user_key is None:
+        server_key, pre_server_gen = await server_provider_key_with_generation(provider)
     key = user_key if user_key is not None else server_key
+    redact_key: str | None = None
+    server_redact_keys: tuple[str, ...] = ()
     if user_key is not None:
+        redact_key = key
         kwargs["api_key"] = key
         kwargs["once"] = True
         sidecar_call = _call_user_session
     else:
+        server_redact_keys = await _collect_server_redact_keys(provider, server_key)
         if server_key is not None:
             kwargs["api_key"] = server_key
         await require_server_provider_grant(provider, model)
@@ -2720,10 +3260,14 @@ async def call_ai_once(
         # recording sees it; use the multi-turn call and clean up here so
         # the session id survives for transcript correlation (#328).
         sidecar_call = _call_ai
+    if accept_turn is not None:
+        kwargs["accept_turn"] = accept_turn
     result = await _call_with_safe_error(
         sidecar_call,
         *args,
-        redact_key=key,
+        redact_key=redact_key,
+        redact_keys=server_redact_keys,
+        credential_source="user" if user_key is not None else "server",
         ai_provider=provider,
         ai_model=model,
         **kwargs,
@@ -2735,6 +3279,12 @@ async def call_ai_once(
             result.session_id = None
         except httpx.HTTPError, OSError, RuntimeError, ValueError:
             logger.warning("Unable to clean up one-shot AI session")
+    if user_key is None and pre_server_gen is not None:
+        # Same rule as `call_ai`: an untracked baseline cannot rotate (#569).
+        from rootcoz.storage import get_server_credential_generation
+
+        if await get_server_credential_generation(provider) != pre_server_gen:
+            return await _fail_closed_on_rotation(result, get_sidecar_client())
     result.credential_source = "user" if user_key is not None else "server"
     return result
 

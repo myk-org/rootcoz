@@ -880,6 +880,38 @@ class TestPeerRound:
                 details="test",
             )
 
+    def test_diagnostics_default_to_none_on_legacy_rows(self) -> None:
+        """#569: a stored round written before these fields deserializes cleanly."""
+        legacy = {
+            "round": 1,
+            "ai_provider": "claude",
+            "ai_model": "opus",
+            "role": "peer",
+            "classification": "",
+            "details": "old row",
+            "agrees_with_orchestrator": None,
+        }
+        r = PeerRound.model_validate(legacy)
+        assert r.error is None
+        assert r.warning is None
+
+    def test_diagnostics_round_trip(self) -> None:
+        r = PeerRound(
+            round=1,
+            ai_provider="gemini",
+            ai_model="pro",
+            role="peer",
+            classification="CODE ISSUE",
+            details="reasoning",
+            agrees_with_orchestrator=True,
+            error=None,
+            warning="503 Service Unavailable",
+        )
+        dumped = r.model_dump()
+        assert dumped["warning"] == "503 Service Unavailable"
+        assert dumped["error"] is None
+        assert PeerRound.model_validate(dumped) == r
+
 
 class TestPeerDebate:
     """Tests for the PeerDebate model."""

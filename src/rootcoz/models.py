@@ -680,6 +680,12 @@ class PeerRound(BaseModel):
     agrees_with_orchestrator: bool | None = (
         None  # None = failed/excluded from consensus
     )
+    # Sanitized failure cause when this participant contributed no usable review
+    # (``agrees_with_orchestrator`` is None). Legacy rows deserialize as None.
+    error: str | None = None
+    # Sanitized transient mid-turn warning for a turn that still produced a usable
+    # review (the sidecar recorded an error alongside a completed answer).
+    warning: str | None = None
     token_usage: TokenUsageEntry | None = None
 
 
@@ -1853,7 +1859,13 @@ class ChatMessageResponse(BaseModel):
 
     id: int
     job_id: str
-    role: str  # 'user' or 'assistant'
+    role: str = Field(
+        description=(
+            "Writer of the row: `user`, `assistant`, or `system` — server-authored "
+            "notices (an issue preview, a repository the chat could not clone, a "
+            "preparation failure, and a `This reply may be incomplete` turn warning)"
+        )
+    )
     content: str
     username: str = ""
     ai_provider: str = ""

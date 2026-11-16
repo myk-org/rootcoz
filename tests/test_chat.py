@@ -14,6 +14,11 @@ import pytest
 from pi_sidecar_client import AIResult
 
 from rootcoz import storage
+
+# Import-time capture: conftest's autouse fixture rebinds
+# ``rootcoz.ai_client.call_ai`` to its deny mock, and these tests must drive the
+# real chat call through the real prompt path.
+from rootcoz.ai_client import call_ai as _real_call_ai_for_turns
 from rootcoz.config import Settings
 from rootcoz.engine.chat import (
     build_admin_custom_tools,
@@ -3800,6 +3805,123 @@ class TestChatEndpoints:
         assert assistant_msgs[-1]["content"] == "AI response here"
         assert assistant_msgs[-1]["status"] == "completed"
 
+    async def test_incomplete_turn_is_announced_beside_its_partial_answer(
+        self, test_client, temp_db_path: Path
+    ):
+        """A warned turn keeps its text and gains a visible notice (#569)."""
+        await _save_job(
+            temp_db_path,
+            "chat-warned-job",
+            {"ai_provider": "claude", "ai_model": "sonnet-4"},
+        )
+        await _start_chat(test_client, "chat-warned-job")
+
+        async def warned_chat(**kwargs):
+            kwargs["on_warning"]("Transient AI provider error during completed turn")
+            return True, "partial answer", None
+
+        with patch("rootcoz.engine.chat.chat_with_ai", warned_chat):
+            response = test_client.post(
+                "/api/chat/chat-warned-job",
+                json={
+                    "message": "what failed?",
+                    "ai_provider": "claude",
+                    "ai_model": "sonnet-4",
+                },
+            )
+        assert response.status_code == 202
+        messages = test_client.get("/api/chat/chat-warned-job").json()["messages"]
+        assistant = [m for m in messages if m["role"] == "assistant"][-1]
+        # The answer is never replaced by the cause — it is announced next to it.
+        assert assistant["content"] == "partial answer"
+        assert assistant["status"] == "completed"
+        notices = [m for m in messages if m["role"] == "system"]
+        # The row names its source: the detail below it is the provider's own
+        # sanitized error, never a server verdict on the answer.
+        assert [m["content"] for m in notices] == [
+            (
+                "This reply may be incomplete — the AI provider reported: "
+                "Transient AI provider error during completed turn"
+            )
+        ]
+        # The notice renders UNDER the answer it qualifies: rows are read by id.
+        assert notices[0]["id"] > assistant["id"]
+
+    async def test_a_failed_notice_never_loses_the_answer(
+        self, test_client, temp_db_path: Path, caplog
+    ):
+        """A storage fault on the notice costs the notice, never the answer."""
+        await _save_job(
+            temp_db_path,
+            "chat-unnoticeable-job",
+            {"ai_provider": "claude", "ai_model": "sonnet-4"},
+        )
+        await _start_chat(test_client, "chat-unnoticeable-job")
+
+        async def warned_chat(**kwargs):
+            kwargs["on_warning"]("Transient AI provider error during completed turn")
+            return True, "partial answer", None
+
+        real_add = storage.add_chat_message
+
+        async def fail_on_notice(*args, **kwargs):
+            if kwargs.get("role") == "system":
+                raise RuntimeError("chat_messages is unavailable")
+            return await real_add(*args, **kwargs)
+
+        with (
+            patch("rootcoz.engine.chat.chat_with_ai", warned_chat),
+            patch("rootcoz.main.storage.add_chat_message", fail_on_notice),
+            capture_main_logs(caplog, logging.ERROR),
+        ):
+            response = test_client.post(
+                "/api/chat/chat-unnoticeable-job",
+                json={
+                    "message": "what failed?",
+                    "ai_provider": "claude",
+                    "ai_model": "sonnet-4",
+                },
+            )
+        assert response.status_code == 202
+        messages = test_client.get("/api/chat/chat-unnoticeable-job").json()["messages"]
+        assistant = [m for m in messages if m["role"] == "assistant"][-1]
+        assert assistant["content"] == "partial answer"
+        assert assistant["status"] == "completed"
+        assert [m for m in messages if m["role"] == "system"] == []
+        assert "Failed to store the turn warning" in caplog.text
+
+    async def test_a_warned_turn_notifies_once_per_change(
+        self, test_client, temp_db_path: Path
+    ):
+        """One owner per event: the writer does not re-announce its own row."""
+        await _save_job(
+            temp_db_path,
+            "chat-notify-job",
+            {"ai_provider": "claude", "ai_model": "sonnet-4"},
+        )
+        await _start_chat(test_client, "chat-notify-job")
+
+        async def warned_chat(**kwargs):
+            kwargs["on_warning"]("Transient AI provider error during completed turn")
+            return True, "partial answer", None
+
+        with (
+            patch("rootcoz.engine.chat.chat_with_ai", warned_chat),
+            patch("rootcoz.main.notify_chat_changed") as notify,
+        ):
+            response = test_client.post(
+                "/api/chat/chat-notify-job",
+                json={
+                    "message": "what failed?",
+                    "ai_provider": "claude",
+                    "ai_model": "sonnet-4",
+                },
+            )
+        assert response.status_code == 202
+        # The request row and the completed turn — the notice rides the turn's
+        # own notification, it does not push a second one.
+        assert notify.call_count == 2
+
     async def test_send_chat_message_saves_history(
         self, test_client, temp_db_path: Path
     ):
@@ -6010,3 +6132,189 @@ async def test_text_admitted_by_no_shape_is_never_echoed():
     assert ai_client.format_chat_ai_user_error(
         wrapped, ai_provider="openai", ai_model="undeclared"
     ) == _generic_sentence(400)
+
+
+# ---------------------------------------------------------------------------
+# #569: a free-form chat turn with no stop reason is never accepted on an
+# error-bearing HTTP 200, and the unusable turn's session is cleaned up.
+# ---------------------------------------------------------------------------
+
+
+def _chat_sidecar(handler):
+    import httpx
+    from pi_sidecar_client import SidecarClient
+
+    requests: list[Any] = []
+
+    def _handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return handler(request)
+
+    client = SidecarClient(base_url="http://sidecar.invalid")
+    client._client = httpx.AsyncClient(
+        base_url="http://sidecar.invalid", transport=httpx.MockTransport(_handle)
+    )
+    return client, requests
+
+
+async def _chat_turn(monkeypatch, tmp_path, handler, session_id=None):
+    from rootcoz import ai_client
+    from rootcoz.engine import chat
+
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "chat569.db")
+    await storage.init_db()
+    await storage.create_admin_user("alice")
+    await storage.update_user_ai_credential("alice", "openai", "user-chat-key")
+    client, requests = _chat_sidecar(handler)
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("openai", "m"))
+    )
+    monkeypatch.setattr(
+        ai_client, "session_key", AsyncMock(return_value="user-chat-key")
+    )
+    monkeypatch.setattr(chat, "call_ai", _real_call_ai_for_turns)
+    monkeypatch.setattr(chat, "install_http_tools_mcp_best_effort_async", AsyncMock())
+    if session_id is not None:
+        await storage.save_ai_session_source(session_id, "alice", "openai", "user")
+    user = ai_client.ai_username.set("alice")
+    warnings: list[str] = []
+    try:
+        outcome = await chat._chat_with_ai_impl(
+            message="hi",
+            history=[],
+            ai_provider="openai",
+            ai_model="m",
+            build_prompt_fn=lambda: "prompt",
+            session_id=session_id,
+            install_mcp=False,
+            on_warning=warnings.append,
+        )
+    finally:
+        ai_client.ai_username.reset(user)
+        await client.close()
+    return outcome, requests, warnings
+
+
+@pytest.mark.asyncio
+async def test_chat_error_bearing_turn_keeps_its_answer(monkeypatch, tmp_path, caplog):
+    """A free-form answer survives a mid-turn error — as a warned, partial reply.
+
+    pi-config's prompt response carries no ``stop_reason``, so a chat turn that
+    recorded an error can never prove completion; dropping its answer loses a
+    finished reply, so free-form chat accepts any non-empty text. It is not
+    presented as complete: the cause comes back as a warning the caller stores
+    where the user sees it, and the log line stays.
+    """
+
+    def handle(request):
+        import httpx
+
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s-chat"})
+        if request.url.path.endswith("/prompt"):
+            return httpx.Response(
+                200,
+                json={"text": "complete reply", "error": "503 Service Unavailable"},
+            )
+        return httpx.Response(204)
+
+    with capture_main_logs(caplog, logging.WARNING, "rootcoz.engine.chat"):
+        (success, text, session_id), requests, warnings = await _chat_turn(
+            monkeypatch, tmp_path, handle
+        )
+    assert success is True
+    assert text == "complete reply"
+    assert session_id == "s-chat"
+    # The turn is accepted, but not sold as complete: the error is a warning.
+    # A user-keyed turn never echoes the provider body — the fixed cause does.
+    assert warnings == ["Transient AI provider error during completed turn"]
+    assert "AI turn completed with a warning" in caplog.text
+    assert [r.method for r in requests] == ["POST", "POST"]
+
+
+@pytest.mark.asyncio
+async def test_chat_turn_with_no_answer_still_fails_and_drops_the_session(
+    monkeypatch, tmp_path
+):
+    """An error-bearing turn with no text is a failure, not an empty reply."""
+
+    def handle(request):
+        import httpx
+
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s-chat-fail"})
+        if request.url.path.endswith("/prompt"):
+            return httpx.Response(
+                200, json={"text": "", "error": "Incorrect API key provided"}
+            )
+        return httpx.Response(204)
+
+    (success, text, session_id), requests, _warnings = await _chat_turn(
+        monkeypatch, tmp_path, handle
+    )
+    assert success is False
+    # A user-keyed failure never echoes the provider body: the fixed signal does.
+    assert text == "AI call failed"
+    assert session_id is None
+    # The freshly created session is deleted: nothing is left to resume.
+    assert [r.method for r in requests] == ["POST", "POST", "DELETE"]
+
+
+@pytest.mark.asyncio
+async def test_chat_completed_turn_with_stop_reason_is_accepted(monkeypatch, tmp_path):
+    """An explicit normal stop keeps the reply and its session."""
+
+    def handle(request):
+        import httpx
+
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s-chat-ok"})
+        if request.url.path.endswith("/prompt"):
+            return httpx.Response(
+                200,
+                json={
+                    "text": "complete reply",
+                    "error": "503 Service Unavailable",
+                    "stop_reason": "stop",
+                },
+            )
+        return httpx.Response(204)
+
+    (success, text, session_id), requests, _warnings = await _chat_turn(
+        monkeypatch, tmp_path, handle
+    )
+    assert success is True
+    assert text == "complete reply"
+    assert session_id == "s-chat-ok"
+    assert [r.method for r in requests] == ["POST", "POST"]
+
+
+@pytest.mark.asyncio
+async def test_chat_lost_session_still_rebuilds(monkeypatch, tmp_path):
+    """The lost-session signal survives the unusable-turn decision."""
+    prompts = 0
+
+    def handle(request):
+        import httpx
+
+        nonlocal prompts
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s-rebuilt"})
+        if request.url.path.endswith("/prompt"):
+            prompts += 1
+            if prompts == 1:
+                return httpx.Response(
+                    200, json={"text": "Checking...", "error": "Session abc not found"}
+                )
+            return httpx.Response(200, json={"text": "rebuilt reply"})
+        return httpx.Response(204)
+
+    (success, text, session_id), requests, _warnings = await _chat_turn(
+        monkeypatch, tmp_path, handle, session_id="lost-session"
+    )
+    assert success is True
+    assert text == "rebuilt reply"
+    assert session_id == "s-rebuilt"
+    # The rebuilt session was created after the lost one.
+    assert [r.url.path for r in requests if r.url.path == "/sessions"]

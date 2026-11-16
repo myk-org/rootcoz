@@ -35,6 +35,7 @@ from rootcoz.config import (
     parse_peer_configs,
 )
 from rootcoz.storage import MAX_INCOMPLETE_LIST_LIMIT, TEST_NAME_MODES, VALID_ROLES
+from rootcoz.utils import single_line_diagnostic
 
 # -- App and sub-command groups -----------------------------------------------
 
@@ -2244,6 +2245,32 @@ def re_analyze_cmd(
 # -- Failure ------------------------------------------------------------------
 
 
+def _echo_peer_debate(peer_debate: dict[str, Any]) -> None:
+    """Print the peer debate trail, with per-peer causes kept control-safe."""
+    consensus = "reached" if peer_debate.get("consensus_reached") else "not reached"
+    typer.echo(
+        f"\nPeer Debate: consensus {consensus}, "
+        f"rounds {peer_debate.get('rounds_used', 0)}/{peer_debate.get('max_rounds', 0)}"
+    )
+    for entry in peer_debate.get("rounds") or []:
+        agrees = entry.get("agrees_with_orchestrator")
+        outcome = (
+            "Agrees" if agrees is True else "Disagrees" if agrees is False else "Failed"
+        )
+        line = (
+            f"  Round {entry.get('round', '')} {entry.get('role', '')}"
+            f" {entry.get('ai_provider', '')}/{entry.get('ai_model', '')}"
+            f" [{entry.get('classification', '')}] {outcome}"
+        )
+        if entry.get("warning"):
+            line += " Turn warning"
+        typer.echo(single_line_diagnostic(line))
+        if entry.get("error"):
+            typer.echo(f"    Error: {single_line_diagnostic(str(entry['error']))}")
+        if entry.get("warning"):
+            typer.echo(f"    Warning: {single_line_diagnostic(str(entry['warning']))}")
+
+
 @failure_app.command("show")
 def failure_show(
     failure_uuid: str = typer.Argument(help="UUID of the failure to look up."),
@@ -2265,6 +2292,8 @@ def failure_show(
             typer.echo(f"Classification: {analysis['classification']}")
         if analysis.get("details"):
             typer.echo(f"\nDetails:\n{analysis['details']}")
+        if failure.get("peer_debate"):
+            _echo_peer_debate(failure["peer_debate"])
 
 
 @failure_app.command("re-analyze")
@@ -5839,6 +5868,30 @@ def _echo_chat_reply(message: dict[str, Any]) -> None:
         typer.echo(f"\n{message.get('content', '')}")
 
 
+def _echo_turn_warning(
+    fetch: Callable[[int], dict[str, Any]], reply: dict[str, Any]
+) -> None:
+    """Print the server notice the reply's turn added under the answer.
+
+    A turn the server accepted with a recorded error keeps its whole answer and
+    gains one ``system`` row, written just after the answer row completes; a
+    reader who sees only the answer would read a partial reply as finished.
+
+    The rows that matter are the newest ones, so the read takes the last page —
+    on a long transcript the notice is nowhere near the first page.
+    """
+    reply_id = reply.get("id", 0)
+    try:
+        history = _last_page(fetch, fetch(0))
+    except RootCozError:
+        # The answer is already on screen: a failed page read must not undo it.
+        logging.getLogger(__name__).debug("turn warning lookup failed", exc_info=True)
+        return
+    for message in history.get("messages", []):
+        if message.get("role") == "system" and message.get("id", 0) > reply_id:
+            typer.echo(f"\nNote: {message.get('content', '')}")
+
+
 @chat_app.command("init")
 def chat_init(
     job_id: str = typer.Argument(help="Job ID to initialize chat for."),
@@ -5950,6 +6003,12 @@ def chat_send(
         )
         if reply is not None:
             _echo_chat_reply(reply)
+            # shortcut: reads the newest page once, so a notice written after
+            # that read can be missed; upgrade to a short retry if a warned turn
+            # ever prints without its notice.
+            _echo_turn_warning(
+                lambda offset: client.get_chat_history(job_id, offset=offset), reply
+            )
 
 
 @chat_app.command("abort")
@@ -6061,6 +6120,10 @@ def admin_chat_send(
         )
         if reply is not None:
             _echo_chat_reply(reply)
+            # shortcut: one newest-page read, as in ``chat send``.
+            _echo_turn_warning(
+                lambda offset: client.get_admin_chat_history(offset=offset), reply
+            )
 
 
 @admin_chat_app.command("history")

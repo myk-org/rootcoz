@@ -24,9 +24,9 @@ from rootcoz.url_utils import (
     mask_url_value,
     redact_urls_in_text,
     sanitize_clone_url,
-    strip_nonprintable,
     strip_url_credentials,
 )
+from rootcoz.utils import single_line_diagnostic
 
 if TYPE_CHECKING:
     from rootcoz.models import AdditionalRepo
@@ -135,16 +135,7 @@ def clone_failure_detail(exc: BaseException) -> str:
     Capped at 200 characters: stderr is remote-controlled, so the bound is what
     keeps a verbose or hostile remote from writing an unbounded log line.
     """
-    return _printable(" ".join(redact_urls_in_text(str(exc)).split()))[:200]
-
-
-def _printable(text: str) -> str:
-    """Drop control and format characters: the URL and the ref come from the request.
-
-    Measured: ``sanitize_clone_url`` eats a newline and concatenates the words
-    around it, and leaves ``\\x00`` in place.
-    """
-    return strip_nonprintable(text)
+    return single_line_diagnostic(redact_urls_in_text(str(exc)))[:200]
 
 
 def redact_url(url: str) -> str:
@@ -532,7 +523,7 @@ def _ref_message(repo_url: str, ref: str, exc: BaseException) -> str:
         why = f"the clone failed ({label})"
     # 300 characters: a one-line message for a log or a CLI, and short enough
     # that a remote padding its own text cannot push the cause out of view.
-    return _printable(
+    return single_line_diagnostic(
         f"Cannot clone {sanitize_clone_url(str(repo_url))} at {ref}: {why}"
     )[:300]
 

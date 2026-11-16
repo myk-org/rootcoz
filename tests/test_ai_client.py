@@ -3,15 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
+import logging
+import sys
+from pathlib import Path
+from typing import Any
 from unittest.mock import AsyncMock
+from urllib.parse import quote
 
 import httpx
 import pytest
 
 from rootcoz import ai_client, storage
 from rootcoz.ai_client import AIResult, normalize_provider
+
+# Import-time capture, before conftest's autouse fixture rebinds the module
+# attribute to its deny mock: these tests must exercise the real internal call.
+from rootcoz.ai_client import _call_ai as real_internal_call_ai
 from rootcoz.ai_client import call_ai as call_ai_under_test
+from rootcoz.ai_client import call_ai_once as real_call_ai_once
+from tests.conftest import capture_main_logs
 
 
 @pytest.fixture(autouse=True)
@@ -1095,3 +1107,893 @@ async def test_prompt_safely_defaults_partial_flag_to_false() -> None:
     result = await ai_client._prompt_safely(client, "s-1", "hi", None)
     assert result.usage is not None
     assert result.usage.cost_partial is False
+
+
+# ---------------------------------------------------------------------------
+# #569: one turn-usability owner, server-credential diagnostics, session
+# generation tracking. Key-shaped tokens are assembled at runtime so gitleaks
+# and prek stay clean.
+# ---------------------------------------------------------------------------
+
+
+def _runtime_openai_key() -> str:
+    return "sk-proj-" + "a1b2c3d4" * 4
+
+
+def _runtime_google_key() -> str:
+    return "AIza" + "SyA1B2C3" * 4
+
+
+def _make_sidecar(handler) -> tuple[Any, list[httpx.Request]]:
+    """A SidecarClient bound to ``handler`` plus the list of requests it saw."""
+    from pi_sidecar_client import SidecarClient
+
+    requests: list[httpx.Request] = []
+
+    def _handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return handler(request)
+
+    client = SidecarClient(base_url="http://sidecar.invalid")
+    client._client = httpx.AsyncClient(
+        base_url="http://sidecar.invalid", transport=httpx.MockTransport(_handle)
+    )
+    return client, requests
+
+
+def _bind_internal_call_ai(monkeypatch: pytest.MonkeyPatch, client: Any) -> Any:
+    """Run the real internal ``_call_ai`` (conftest patches it to deny)."""
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+    monkeypatch.setattr(ai_client, "_call_ai", real_internal_call_ai)
+    return real_internal_call_ai
+
+
+async def _internal_call(client, monkeypatch, prompt="hello", **kwargs):
+    real_internal_call_ai = _bind_internal_call_ai(monkeypatch, client)
+    return await real_internal_call_ai(
+        prompt, ai_provider="openai", ai_model="model", **kwargs
+    )
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("stop_reason", "accept_turn", "expected_success"),
+    [
+        # An explicit normal stop proves the turn finished.
+        ("stop", None, True),
+        ("end_turn", None, True),
+        # No stop reason: only the caller's schema check can accept the turn.
+        (None, lambda _text: True, True),
+        (None, None, False),
+        (None, lambda _text: False, False),
+        # An explicit abnormal stop is never overridden by accept_turn.
+        ("error", lambda _text: True, False),
+        ("aborted", lambda _text: True, False),
+    ],
+)
+async def test_error_bearing_turn_usability(
+    monkeypatch: pytest.MonkeyPatch, stop_reason, accept_turn, expected_success
+) -> None:
+    """The single usability owner decides inside ``_prompt_safely``."""
+    payload = {"text": "a complete answer", "error": "503 Service Unavailable"}
+    if stop_reason is not None:
+        payload["stop_reason"] = stop_reason
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s-new"})
+        if request.url.path.endswith("/prompt"):
+            return httpx.Response(200, json=payload)
+        return httpx.Response(204)
+
+    client, requests = _make_sidecar(handle)
+    try:
+        result = await _internal_call(client, monkeypatch, accept_turn=accept_turn)
+    finally:
+        await client.close()
+    assert result.success is expected_success
+    if expected_success:
+        assert result.text == "a complete answer"
+        assert result.error == "503 Service Unavailable"
+        # A usable turn keeps its session: no DELETE was issued.
+        assert [r.method for r in requests] == ["POST", "POST"]
+        assert result.session_id == "s-new"
+        assert getattr(result, "stop_reason", None) == stop_reason
+    else:
+        assert result.text == "503 Service Unavailable"
+        # An unusable turn on a session we just created is always cleaned up.
+        assert [r.method for r in requests] == ["POST", "POST", "DELETE"]
+        assert result.session_id is None
+        assert result.transcript_session_id == "s-new"
+
+
+@pytest.mark.asyncio
+async def test_completed_turn_with_recorded_error_keeps_answer_over_2048_chars(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """>2048 chars survive whole: no truncation, no "[error detail omitted]"."""
+    long_answer = "x" * 5000
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s-long"})
+        if request.url.path.endswith("/prompt"):
+            return httpx.Response(
+                200,
+                json={
+                    "text": long_answer,
+                    "error": "503 Service Unavailable",
+                    "stop_reason": "stop",
+                },
+            )
+        return httpx.Response(204)
+
+    client, _requests = _make_sidecar(handle)
+    try:
+        result = await _internal_call(client, monkeypatch)
+    finally:
+        await client.close()
+    assert result.success is True
+    assert result.text == long_answer
+    assert len(result.text) == 5000
+    assert "omitted" not in result.text
+
+
+@pytest.mark.asyncio
+async def test_unusable_turn_on_new_session_writes_no_source_row(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Session cleanup happens before any ``ai_session_sources`` row exists."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "no-row.db")
+    await storage.init_db()
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s-unusable"})
+        if request.url.path.endswith("/prompt"):
+            return httpx.Response(200, json={"text": "", "error": "503 unavailable"})
+        return httpx.Response(204)
+
+    client, _requests = _make_sidecar(handle)
+    try:
+        result = await _internal_call(client, monkeypatch)
+    finally:
+        await client.close()
+    assert result.success is False
+    assert result.session_id is None
+    assert await storage.get_ai_session_source("s-unusable", "", "openai") == "unknown"
+
+
+@pytest.mark.asyncio
+async def test_http_503_prompt_fails_and_deletes_new_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s-503"})
+        if request.url.path.endswith("/prompt"):
+            return httpx.Response(503, json={"error": "upstream unavailable"})
+        return httpx.Response(204)
+
+    client, requests = _make_sidecar(handle)
+    try:
+        result = await _internal_call(client, monkeypatch)
+    finally:
+        await client.close()
+    assert result.success is False
+    assert result.status_code == 503
+    assert result.text == "upstream unavailable"
+    assert result.session_id is None
+    assert [r.method for r in requests] == ["POST", "POST", "DELETE"]
+
+
+def _scripted_result(monkeypatch: pytest.MonkeyPatch, result: AIResult) -> None:
+    monkeypatch.setattr(ai_client, "_call_ai", AsyncMock(return_value=result))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("detail", "expected"),
+    [
+        ("Session 6f2a not found", "session not found"),
+        ("not authenticated: review%2Fkey", "authentication required"),
+        ("upstream said no", "AI call failed"),
+    ],
+)
+async def test_user_credential_failure_tokens_survive_partial_narration(
+    monkeypatch: pytest.MonkeyPatch, detail, expected
+) -> None:
+    """User-keyed failures keep the exact retry/auth token, never the narration."""
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("openai", "model"))
+    )
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value="user-key-1"))
+    monkeypatch.setattr(
+        ai_client,
+        "_call_user_session",
+        AsyncMock(
+            return_value=AIResult(
+                success=False,
+                text="Let me look at the logs...",
+                error=detail,
+                session_id="s-user",
+            )
+        ),
+    )
+    result = await real_call_ai_once("prompt", ai_provider="openai", ai_model="model")
+    assert result.text == expected
+    assert result.error == expected
+
+
+@pytest.mark.asyncio
+async def test_server_turn_warning_keeps_answer_and_sanitizes_error(
+    initialized_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A completed server turn keeps its whole answer; the warning is sanitized."""
+    long_answer = "y" * 4000
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("openai", "model"))
+    )
+    monkeypatch.setattr(
+        ai_client,
+        "server_provider_key_with_generation",
+        AsyncMock(return_value=(None, None)),
+    )
+    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(
+        ai_client, "_collect_server_redact_keys", AsyncMock(return_value=())
+    )
+    _scripted_result(
+        monkeypatch,
+        AIResult(
+            success=True,
+            text=long_answer,
+            error=(
+                f"Incorrect API key provided: {_runtime_openai_key()}"
+                f" at https://api.example.test/v1?key={_runtime_google_key()}"
+            ),
+            session_id="s-warn",
+        ),
+    )
+    result = await real_call_ai_once("prompt", ai_provider="openai", ai_model="model")
+    assert result.success is True
+    assert result.text == long_answer
+    assert result.error is not None
+    assert "503" not in result.error
+    assert _runtime_openai_key() not in result.error
+    assert _runtime_google_key() not in result.error
+    assert "Incorrect API key provided" in result.error
+
+
+@pytest.mark.asyncio
+async def test_server_failure_keeps_sanitized_cause_not_ai_call_failed(
+    initialized_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Server failures keep a usable cause with no credential, URL query or ANSI."""
+    openai_key = _runtime_openai_key()
+    google_key = _runtime_google_key()
+    detail = (
+        f"\x1b[31m503 Service Unavailable\x1b[0m: Incorrect API key provided: "
+        f"{openai_key}, masked {openai_key[:11]}****{openai_key[-4:]}, "
+        f"gsk_{'z' * 20}, xai-{'q' * 20}, csk_{'w' * 20}, "
+        f"see https://api.example.test/v1?key={google_key}"
+    )
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("openai", "model"))
+    )
+    monkeypatch.setattr(
+        ai_client,
+        "server_provider_key_with_generation",
+        AsyncMock(return_value=(None, None)),
+    )
+    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(
+        ai_client, "_collect_server_redact_keys", AsyncMock(return_value=())
+    )
+    _scripted_result(
+        monkeypatch,
+        AIResult(success=False, text=detail, error=detail, status_code=503),
+    )
+    result = await real_call_ai_once("prompt", ai_provider="openai", ai_model="model")
+    assert result.success is False
+    assert result.text != "AI call failed"
+    assert "503 Service Unavailable" in result.text
+    for secret in (openai_key, google_key):
+        assert secret not in result.text
+    assert "\x1b" not in result.text
+    diagnostic = ai_client.format_ai_diagnostic(result)
+    assert "503 Service Unavailable" in diagnostic
+    for secret in (openai_key, google_key):
+        assert secret not in diagnostic
+    # A status the detail does not already carry is prefixed, once.
+    assert (
+        ai_client.format_ai_diagnostic(
+            AIResult(
+                success=False,
+                text="upstream refused",
+                error="upstream refused",
+                status_code=503,
+            )
+        )
+        == "HTTP 503: upstream refused"
+    )
+
+
+@pytest.mark.asyncio
+async def test_collect_server_redact_keys_cold_catalog_and_manifest(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every deployment key source is collected without a warm catalog or flag."""
+    monkeypatch.setattr(storage, "DB_PATH", tmp_path / "keys.db")
+    await storage.init_db()
+    ambient = "sk-" + "ambient" + "9" * 20
+    cursor = "cursor-key-" + "c" * 20
+    literal = "literal-manifest-" + "m" * 20
+    referenced = "referenced-manifest-" + "r" * 20
+    agent_dir = tmp_path / "agent"
+    agent_dir.mkdir()
+    (agent_dir / "models.json").write_text(
+        json.dumps(
+            {
+                "providers": {
+                    "openai": {"apiKey": literal},
+                    "mygateway": {"apiKey": "$CUSTOM_GATEWAY_KEY"},
+                }
+            }
+        )
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", ambient)
+    monkeypatch.setenv("CURSOR_API_KEY", cursor)
+    monkeypatch.setenv("CUSTOM_GATEWAY_KEY", referenced)
+    monkeypatch.setattr(ai_client, "_sidecar_agent_dir", lambda: agent_dir)
+    # Cold catalog: ambient eligibility is usually derived from this cache.
+    ai_client.update_model_catalog(None)
+
+    assert ambient in await ai_client._collect_server_redact_keys("openai")
+    assert cursor in await ai_client._collect_server_redact_keys("cli-cursor")
+    assert literal in await ai_client._collect_server_redact_keys("openai")
+    assert referenced in await ai_client._collect_server_redact_keys("mygateway")
+
+
+def test_scrub_answer_keeps_a_separator_that_was_a_separator() -> None:
+    """Non-printable whitespace separates tokens; it is not deleted (#569)."""
+    # A tab, a vertical tab and a unit separator all separate words; deleting
+    # them joins tokens into a word the model never wrote.
+    assert ai_client._scrub_answer("step\tone") == "step one"
+    assert ai_client._scrub_answer("a\t\tb\x0bc\x1fd") == "a b c d"
+    # Runs collapse to one separator, and a line break stays a line break with
+    # its own indentation untouched (the report renders the answer pre-wrapped).
+    assert ai_client._scrub_answer("log:\n    expected 1") == "log:\n    expected 1"
+    # A non-printable that is not whitespace is still dropped, not turned into a
+    # separator: a zero-width mark must not split a word.
+    assert ai_client._scrub_answer("a\x00b\u200bc") == "abc"
+    assert ai_client._sanitize_diagnostic("said:\texpected\t1", ()) == (
+        "said: expected 1"
+    )
+
+
+def test_scrub_answer_and_sanitize_diagnostic_share_one_pipeline() -> None:
+    """One ordered redaction sequence, two line shapes (R1)."""
+    payload = (
+        f"\x1b[31mfailed\x1b[0m with {_runtime_openai_key()} "
+        "at https://api.example.test/v1?key=abc\t\nnext"
+    )
+    answer = ai_client._scrub_answer(payload)
+    diagnostic = ai_client._sanitize_diagnostic(payload, ())
+    assert diagnostic is not None
+    # The two shapes a reader gets: the answer keeps its own line breaks (the
+    # report renders it pre-wrapped), the diagnostic is flattened for a log line.
+    assert "\n" in answer
+    assert "\n" not in diagnostic
+    assert _runtime_openai_key() not in answer
+    assert "\x1b" not in answer
+
+    # Both public functions route through the one private pipeline...
+    calls: list[str] = []
+    real_pipeline = ai_client._redact_pipeline
+    ai_client._redact_pipeline = lambda text, keys: (
+        calls.append(text) or real_pipeline(text, keys)
+    )
+    try:
+        ai_client._scrub_answer(payload)
+        ai_client._sanitize_diagnostic(payload, ())
+    finally:
+        ai_client._redact_pipeline = real_pipeline
+    assert calls == [payload, payload]
+
+    # ...and a mutation that empties it leaks the key and the escape sequence
+    # through BOTH entry points, so neither owns a private copy of the rules.
+    ai_client._redact_pipeline = lambda text, keys: text
+    try:
+        assert _runtime_openai_key() in ai_client._scrub_answer(payload)
+        mutated = ai_client._sanitize_diagnostic(payload, ())
+    finally:
+        ai_client._redact_pipeline = real_pipeline
+    assert mutated is not None
+    assert _runtime_openai_key() in mutated
+
+
+def test_sanitize_diagnostic_bounds_before_scrubbing() -> None:
+    keyed = "a" * 4000
+    assert ai_client._sanitize_diagnostic(keyed, ("some-key",)) == (
+        "[error detail omitted]"
+    )
+    bounded = ai_client._sanitize_diagnostic(keyed, ())
+    assert bounded is not None
+    assert len(bounded) <= ai_client.MAX_ERROR_DETAIL_LENGTH
+    assert ai_client._sanitize_diagnostic(None) is None
+
+
+@pytest.mark.asyncio
+async def test_server_source_exception_keeps_a_sanitized_cause_without_keys() -> None:
+    """A server call with no known key still reports its sanitized cause."""
+
+    async def _failing_call(**_kwargs: Any) -> AIResult:
+        raise RuntimeError(
+            "connect failed to https://user:hunter2@sidecar.test/v1"  # pragma: allowlist secret
+        )
+
+    with pytest.raises(RuntimeError) as raised:
+        await ai_client._call_with_safe_error(
+            _failing_call,
+            credential_source="server",
+            ai_provider="openai",
+            ai_model="model",
+        )
+    assert "connect failed to" in str(raised.value)
+    assert "hunter2" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "\x1b[31mred\x1b[0m",
+        "a\x00b",
+        "a\x85b",
+        "a\u2028b",
+        "a\u2029b",
+        "a\r\nb",
+        "\x1b]0;title\x07after",
+    ],
+)
+def test_sanitize_diagnostic_is_printable_single_line(raw: str) -> None:
+    cleaned = ai_client._sanitize_diagnostic(raw, ())
+    assert cleaned is not None
+    assert "\n" not in cleaned
+    assert all(ch.isprintable() or ch == " " for ch in cleaned)
+    assert "[31m" not in cleaned
+    assert "title" not in cleaned
+
+
+def test_ai_client_imports_without_a_cycle() -> None:
+    """R2: `import rootcoz.ai_client` is clean and feedback is importable after it."""
+    import subprocess
+
+    for statement in (
+        "import rootcoz.ai_client",
+        "import rootcoz.ai_client, rootcoz.feedback",
+        "import rootcoz.feedback, rootcoz.ai_client",
+    ):
+        completed = subprocess.run(
+            [sys.executable, "-c", statement],
+            capture_output=True,
+            text=True,
+            check=False,
+            cwd=str(Path(__file__).resolve().parents[1]),
+        )
+        assert completed.returncode == 0, completed.stderr
+
+
+async def _insert_server_session_row(
+    session_id: str, *, provider_generation: int | None, session_generation: int | None
+) -> None:
+    """Write the rows exactly as the named code version would have."""
+    async with storage._connect_db() as db:
+        await db.execute(
+            "INSERT INTO server_ai_providers (provider, api_key_enc, generation)"
+            " VALUES (?, ?, ?)",
+            ("openai", "not-a-real-ciphertext", provider_generation),
+        )
+        await db.execute(
+            "INSERT INTO ai_session_sources (session_id, username, provider,"
+            " credential_source, credential_generation, server_credential_generation)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (
+                session_id,
+                "admin",
+                "openai",
+                "server",
+                0,
+                session_generation,
+            ),
+        )
+        await db.commit()
+
+
+@pytest.mark.asyncio
+async def test_legacy_untracked_server_session_resumes(
+    initialized_db, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """A pre-change (NULL generation) server session resumes exactly as on main."""
+    await _insert_server_session_row(
+        "legacy-session", provider_generation=7, session_generation=None
+    )
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sessions/legacy-session/prompt":
+            return httpx.Response(200, json={"text": "the answer"})
+        return httpx.Response(204)
+
+    client, requests = _make_sidecar(handle)
+    token = ai_client.ai_username.set("admin")
+    try:
+        _bind_internal_call_ai(monkeypatch, client)
+        monkeypatch.setattr(
+            ai_client,
+            "resolve_catalog_pair",
+            AsyncMock(return_value=("openai", "model")),
+        )
+        monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+        with capture_main_logs(caplog, logging.DEBUG, logger="rootcoz.storage"):
+            result = await call_ai_under_test(
+                "next turn",
+                ai_provider="openai",
+                ai_model="model",
+                session_id="legacy-session",
+            )
+    finally:
+        ai_client.ai_username.reset(token)
+        await client.close()
+    assert result.success is True
+    assert result.text == "the answer"
+    assert [r.url.path for r in requests] == ["/sessions/legacy-session/prompt"]
+    assert "untracked server session (legacy or ambient)" in caplog.text
+    assert (
+        await storage.get_ai_session_source("legacy-session", "admin", "openai")
+        == "server"
+    )
+
+
+@pytest.mark.asyncio
+async def test_tracked_server_session_after_rotation_is_unavailable(
+    initialized_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Positive control: a tracked row on an older generation fails closed."""
+    await _insert_server_session_row(
+        "rotated-session", provider_generation=7, session_generation=3
+    )
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={"text": "should never be asked"})
+
+    client, requests = _make_sidecar(handle)
+    token = ai_client.ai_username.set("admin")
+    try:
+        _bind_internal_call_ai(monkeypatch, client)
+        monkeypatch.setattr(
+            ai_client,
+            "resolve_catalog_pair",
+            AsyncMock(return_value=("openai", "model")),
+        )
+        result = await call_ai_under_test(
+            "next turn",
+            ai_provider="openai",
+            ai_model="model",
+            session_id="rotated-session",
+        )
+    finally:
+        ai_client.ai_username.reset(token)
+        await client.close()
+    assert result.success is False
+    assert result.text == "AI session unavailable"
+    assert requests == []
+
+
+@pytest.mark.asyncio
+async def test_server_key_rotated_mid_turn_fails_closed(
+    initialized_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A mid-turn rotation keeps no old-keyed cause, session or text."""
+    old_key = "server-key-" + "o" * 20  # pragma: allowlist secret
+    await storage.set_server_ai_credential("openai", old_key, "admin")
+    delete = AsyncMock()
+
+    async def rotate_then_fail(*_args: Any, **_kwargs: Any) -> AIResult:
+        await storage.set_server_ai_credential("openai", "rotated-" + "n" * 20, "admin")
+        return AIResult(
+            success=False,
+            text=f"Incorrect API key provided: {old_key}",
+            error=f"Incorrect API key provided: {old_key}",
+            session_id="s-rot",
+        )
+
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("openai", "model"))
+    )
+    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(ai_client, "_call_ai", rotate_then_fail)
+    sidecar = AsyncMock(delete_session=delete)
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: sidecar)
+    result = await real_call_ai_once("prompt", ai_provider="openai", ai_model="model")
+    assert result.success is False
+    assert result.text == "AI call failed"
+    assert old_key not in result.text
+    assert old_key not in (result.error or "")
+    delete.assert_awaited_once_with("s-rot")
+
+
+@pytest.mark.asyncio
+async def test_create_session_safely_binds_the_callers_key_generation(
+    initialized_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The generation the caller read WITH the key is the insert-time baseline."""
+    old_key = "old-key-" + "o" * 20  # pragma: allowlist secret
+    await storage.set_server_ai_credential("openai", old_key, "admin")
+    old_generation = await storage.get_server_credential_generation("openai")
+    # The store moved on after the caller's read: its key is the previous generation.
+    await storage.set_server_ai_credential(
+        "openai",
+        "new-key-" + "n" * 20,
+        "admin",  # pragma: allowlist secret
+    )
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "created-under-old-key"})
+        return httpx.Response(204)
+
+    client, requests = _make_sidecar(handle)
+    token = ai_client.ai_username.set("admin")
+    try:
+        with pytest.raises(ValueError, match="AI credential changed"):
+            await ai_client.create_session_safely(
+                client,
+                provider="openai",
+                model="model",
+                system_prompt="sys",
+                server_api_key=old_key,
+                server_generation=old_generation,
+            )
+    finally:
+        ai_client.ai_username.reset(token)
+        await client.close()
+    assert [r.method for r in requests] == ["POST", "DELETE"]
+    assert (
+        await storage.get_ai_session_source("created-under-old-key", "admin", "openai")
+        == "unknown"
+    )
+
+
+@pytest.mark.asyncio
+async def test_server_session_rotated_during_creation_is_deleted(
+    initialized_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A generation snapshot taken before create() is enforced inside the write."""
+    await storage.set_server_ai_credential(
+        "openai",
+        "first-key-" + "f" * 20,
+        "admin",  # pragma: allowlist secret
+    )
+    delete = AsyncMock()
+
+    async def create_then_rotate() -> str:
+        await storage.set_server_ai_credential(
+            "openai",
+            "second-key-" + "s" * 20,
+            "admin",  # pragma: allowlist secret
+        )
+        return "created-under-old-key"
+
+    from pi_sidecar_client import SidecarClient
+
+    client = SidecarClient(base_url="http://sidecar.invalid")
+    client.delete_session = delete
+    token = ai_client.ai_username.set("admin")
+    try:
+        with pytest.raises(ValueError, match="AI credential changed"):
+            await ai_client.create_session_safely(
+                client,
+                provider="openai",
+                model="model",
+                system_prompt="sys",
+                api_key="first-key-" + "f" * 20,  # pragma: allowlist secret
+            )
+    finally:
+        ai_client.ai_username.reset(token)
+        await client.close()
+    assert (
+        await storage.get_ai_session_source("created-under-old-key", "admin", "openai")
+        == "unknown"
+    )
+
+
+@pytest.mark.asyncio
+async def test_unreadable_credential_store_does_not_fail_the_turn(
+    initialized_db, monkeypatch: pytest.MonkeyPatch, caplog
+) -> None:
+    """An undecryptable store is untracked, never a mid-turn rotation (#569)."""
+    await storage.set_server_ai_credential(
+        "openai",
+        "stored-key-" + "s" * 20,
+        "admin",  # pragma: allowlist secret
+    )
+    # Break the Fernet token: the store is unreadable, so the turn falls back to
+    # the deployment credential and can never be bound to the stored generation.
+    async with storage._connect_db() as db:
+        await db.execute(
+            "UPDATE server_ai_providers SET api_key_enc ="
+            " substr(api_key_enc, 1, 20)"
+            " || CASE substr(api_key_enc, 21, 1) WHEN 'X' THEN 'Y' ELSE 'X' END"
+            " || substr(api_key_enc, 22)"
+        )
+        await db.commit()
+    deployment_key = "deployment-key-" + "d" * 20  # pragma: allowlist secret
+    monkeypatch.setattr(
+        ai_client, "deployment_provider_credentials", lambda: {"openai": deployment_key}
+    )
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sessions":
+            return httpx.Response(200, json={"session_id": "s-unreadable"})
+        return httpx.Response(200, json={"text": "the answer"})
+
+    client, requests = _make_sidecar(handle)
+    try:
+        _bind_internal_call_ai(monkeypatch, client)
+        monkeypatch.setattr(
+            ai_client,
+            "resolve_catalog_pair",
+            AsyncMock(return_value=("openai", "model")),
+        )
+        monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+        token = ai_client.ai_username.set("admin")
+        try:
+            with capture_main_logs(
+                caplog,
+                logging.DEBUG,
+                logger="rootcoz.ai_client",
+                bypass_duplicate_filter=True,
+            ):
+                result = await call_ai_under_test(
+                    "prompt", ai_provider="openai", ai_model="model"
+                )
+        finally:
+            ai_client.ai_username.reset(token)
+    finally:
+        await client.close()
+    # The completed turn keeps its answer and its session: a read failure is not
+    # a rotation, so nothing is collapsed or deleted.
+    assert result.success is True
+    assert result.text == "the answer"
+    assert [r.method for r in requests] == ["POST", "POST"]
+    assert "rotated mid-turn" not in caplog.text
+    assert caplog.text.count("credential store unreadable") == 1
+    # The generation still rides along, so the session is tracked as usual.
+    assert (
+        await storage.get_ai_session_source("s-unreadable", "admin", "openai")
+        == "server"
+    )
+
+
+@pytest.mark.asyncio
+async def test_rotation_after_session_validation_fails_closed(
+    initialized_db, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The generation validated on resume is the baseline, not a later read."""
+    old_key = "server-key-" + "o" * 20  # pragma: allowlist secret
+    await storage.set_server_ai_credential("openai", old_key, "admin")
+    generation = await storage.get_server_credential_generation("openai")
+    await storage.save_ai_session_source(
+        "s-race", "admin", "openai", "server", expected_generation=generation
+    )
+    real_key_read = ai_client.server_provider_key_with_generation
+
+    async def rotate_while_reading_the_key(provider: str):
+        # The rotation lands between the session check and the prompt: the
+        # resumed sidecar session still answers with the pre-rotation key.
+        await storage.set_server_ai_credential(
+            provider,
+            "rotated-" + "n" * 20,
+            "admin",  # pragma: allowlist secret
+        )
+        return await real_key_read(provider)
+
+    monkeypatch.setattr(
+        ai_client, "server_provider_key_with_generation", rotate_while_reading_the_key
+    )
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/prompt"):
+            return httpx.Response(200, json={"text": "the old-key answer"})
+        return httpx.Response(204)
+
+    client, requests = _make_sidecar(handle)
+    token = ai_client.ai_username.set("admin")
+    try:
+        _bind_internal_call_ai(monkeypatch, client)
+        monkeypatch.setattr(
+            ai_client,
+            "resolve_catalog_pair",
+            AsyncMock(return_value=("openai", "model")),
+        )
+        monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+        result = await call_ai_under_test(
+            "next turn",
+            ai_provider="openai",
+            ai_model="model",
+            session_id="s-race",
+        )
+    finally:
+        ai_client.ai_username.reset(token)
+        await client.close()
+    # The old-keyed session is deleted and its id never reaches the caller.
+    assert [r.method for r in requests] == ["POST", "DELETE"]
+    assert result.session_id is None
+
+
+@pytest.mark.asyncio
+async def test_server_key_never_logged_when_sessions_creation_echoes_base64(
+    initialized_db, monkeypatch: pytest.MonkeyPatch, caplog, capsys
+) -> None:
+    """A 400 on ``/sessions`` echoing the key (base64 too) is never logged."""
+    secret = "server-session-key-" + "k" * 24  # pragma: allowlist secret
+    encoded = base64.b64encode(secret.encode()).decode()
+    requests: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/sessions":
+            return httpx.Response(
+                400,
+                json={"error": f"Incorrect API key provided: {secret} ({encoded})"},
+            )
+        return httpx.Response(204)
+
+    client, _ = _make_sidecar(handle)
+    monkeypatch.setattr(ai_client, "get_sidecar_client", lambda: client)
+    monkeypatch.setattr(ai_client, "_call_ai", real_internal_call_ai)
+    monkeypatch.setattr(
+        ai_client, "resolve_catalog_pair", AsyncMock(return_value=("openai", "model"))
+    )
+    monkeypatch.setattr(ai_client, "session_key", AsyncMock(return_value=None))
+    monkeypatch.setattr(
+        ai_client,
+        "server_provider_key_with_generation",
+        AsyncMock(return_value=(secret, None)),
+    )
+    monkeypatch.setattr(ai_client, "require_server_provider_grant", AsyncMock())
+    monkeypatch.setattr(
+        ai_client, "_collect_server_redact_keys", AsyncMock(return_value=(secret,))
+    )
+    token = ai_client.ai_username.set("admin")
+    try:
+        with capture_main_logs(
+            caplog, logging.DEBUG, logger=("rootcoz.ai_client", "pi_sidecar_client")
+        ):
+            result = await real_call_ai_once(
+                "prompt", ai_provider="openai", ai_model="model"
+            )
+        captured = caplog.text + capsys.readouterr().err
+    finally:
+        ai_client.ai_username.reset(token)
+        await client.close()
+    assert result.success is False
+    assert secret not in captured
+    assert encoded not in captured
+    assert [r.method for r in requests] == ["POST"]
+
+
+def test_encoded_key_renderings_are_redacted() -> None:
+    """Literal, JSON/Unicode, percent-escaped and base64 renderings all go."""
+    key = "srv\u00e9-key/with+special"
+    renderings = {
+        key,
+        json.dumps(key, ensure_ascii=True)[1:-1],
+        quote(key, safe=""),
+        base64.b64encode(key.encode()).decode(),
+    }
+    for rendering in renderings:
+        cleaned = ai_client._sanitize_diagnostic(f"upstream said {rendering}", (key,))
+        assert cleaned is not None
+        assert rendering not in cleaned
+        assert key not in cleaned
