@@ -22510,6 +22510,11 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
                 # the merged-settings build and drops *every* DB override.
                 if isinstance(value, bool):
                     raise TypeError("a boolean is not an integer")
+                if isinstance(value, float) and value.is_integer():
+                    # A whole JSON float (30.0) is the integer the admin
+                    # meant; its string form "30.0" reads as unusable, which
+                    # for the transcript budgets persists as 0 (disabled).
+                    value = settings_updates[key] = int(value)
                 int_val = int(value)
                 # Check constraints from Field metadata
                 metadata = field_info.metadata
@@ -22560,7 +22565,15 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
             # different value than ``int(value)`` (1.5 → 720 for
             # session_ttl_hours, → 587 for smtp_port), and persisting the raw
             # integer would undo the fallback the model just applied.
-            settings_updates[key] = str(getattr(validated, key))
+            validated_int = getattr(validated, key)
+            if validated_int == 0 and int_val != 0:
+                # A fractional float (1.5) truncates past the manual bounds
+                # check and lands on the before-validator's fallback, which
+                # persists as "0" — and 0 means no pruning, so the save would
+                # silently disable the transcript budget the admin just set.
+                errors.append(f"{key}: must be an integer")
+                continue
+            settings_updates[key] = str(validated_int)
 
     return errors
 

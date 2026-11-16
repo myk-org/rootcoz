@@ -1273,6 +1273,10 @@ def test_sidecar_transcript_retention_validation_bridge_and_audit(
         {"pi_sidecar_transcripts_max_size_mb": SIDECAR_TRANSCRIPTS_MAX_SIZE_MB + 1},
         {"pi_sidecar_transcripts_max_age_days": True},
         {"pi_sidecar_transcripts_max_age_days": "1.5"},
+        # A JSON float truncates past the manual bound check and lands on the
+        # validator fallback 0 — persisting that would disable pruning.
+        {"pi_sidecar_transcripts_max_age_days": 1.5},
+        {"pi_sidecar_transcripts_max_size_mb": 1500.5},
         {"pi_sidecar_transcripts_max_age_days": "abc"},
         {"pi_sidecar_transcripts_max_age_days": ""},
     ):
@@ -1307,6 +1311,16 @@ def test_sidecar_transcript_retention_validation_bridge_and_audit(
         "pi_sidecar_transcripts_max_size_mb",
     }
     assert update_event["details"]["redacted_keys"] == []
+
+    # A whole JSON float is the integer the admin meant, never the "30.0"
+    # string the validator cannot parse (which would read as 0 = disabled).
+    whole_float = client.put(
+        "/api/admin/settings",
+        headers=_admin_headers(),
+        json={"settings": {"pi_sidecar_transcripts_max_size_mb": 30.0}},
+    )
+    assert whole_float.status_code == 200, whole_float.text
+    assert "PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB=30" in bridge.read_text()
 
     # 0 is a real override (disabled), not "no override".
     zeroed = client.put(
