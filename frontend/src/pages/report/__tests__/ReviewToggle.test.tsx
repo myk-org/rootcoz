@@ -52,18 +52,18 @@ describe('ReviewToggle attribution', () => {
   it('shows who reviewed it and when it was first reviewed', async () => {
     show({ reviewed: true, username: 'alice', reviewed_at: REVIEWED_AT })
     expect(screen.getByText('Reviewed')).toBeTruthy()
-    expect(screen.getByText(`by alice on ${formatted(REVIEWED_AT)}`)).toBeTruthy()
+    expect(screen.getByText(`by alice · first reviewed ${formatted(REVIEWED_AT)}`)).toBeTruthy()
 
     await userEvent.hover(screen.getByRole('button', { name: /Reviewed/i }))
     expect(
-      (await screen.findAllByText(`Reviewed by alice on ${formatted(REVIEWED_AT)} — click to unmark`)).length,
+      (await screen.findAllByText(`Reviewed by alice · first reviewed ${formatted(REVIEWED_AT)} — click to unmark`)).length,
     ).toBeGreaterThan(0)
   })
 
   it('omits the timestamp for a review recorded before #566', () => {
     show({ reviewed: true, username: 'alice', reviewed_at: null })
     expect(screen.getByText('by alice')).toBeTruthy()
-    expect(screen.queryByText(/on \u2014/)).toBeNull()
+    expect(screen.queryByText(/first reviewed/)).toBeNull()
     expect(screen.queryByText(/ on /)).toBeNull()
   })
 
@@ -72,7 +72,9 @@ describe('ReviewToggle attribution', () => {
     show()
     await userEvent.click(screen.getByRole('button', { name: /^Review$/i }))
 
-    await waitFor(() => expect(screen.getByText(`by alice on ${formatted(REVIEWED_AT)}`)).toBeTruthy())
+    await waitFor(() =>
+      expect(screen.getByText(`by alice · first reviewed ${formatted(REVIEWED_AT)}`)).toBeTruthy(),
+    )
     expect(mockPut).toHaveBeenCalledWith('/results/job-1/reviewed', {
       test_name: 'test-a',
       reviewed: true,
@@ -88,9 +90,13 @@ describe('ReviewToggle attribution', () => {
     await userEvent.click(screen.getByRole('button', { name: /Reviewed/i }))
     await waitFor(() => expect(screen.getByText('Review')).toBeTruthy())
 
-    // The server never rewrites first_reviewed_at, so the re-mark returns it.
+    // The server never rewrites first_reviewed_at, so the re-mark returns it —
+    // labelled as the first review, not as bob's own moment.
     mockPut.mockResolvedValue({ status: 'ok', reviewed_by: 'bob', reviewed_at: REVIEWED_AT })
     await userEvent.click(screen.getByRole('button', { name: /^Review$/i }))
-    await waitFor(() => expect(screen.getByText(`by bob on ${formatted(REVIEWED_AT)}`)).toBeTruthy())
+    await waitFor(() =>
+      expect(screen.getByText(`by bob · first reviewed ${formatted(REVIEWED_AT)}`)).toBeTruthy(),
+    )
+    expect(screen.queryByText(`by bob on ${formatted(REVIEWED_AT)}`)).toBeNull()
   })
 })

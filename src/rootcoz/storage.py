@@ -1894,6 +1894,7 @@ async def init_db() -> None:
                 username TEXT NOT NULL DEFAULT '',
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
                 first_reviewed_at TEXT,
+                first_reviewed_unknown INTEGER NOT NULL DEFAULT 0,
                 PRIMARY KEY (job_id, test_name, child_job_name, child_build_number)
             )
         """)
@@ -1973,6 +1974,16 @@ async def init_db() -> None:
                 """)
                 await db.execute("DROP TABLE failure_reviews_old")
                 logger.info("Migration: failure_reviews table rebuilt successfully")
+
+        # Migration: a review recorded before the anchor existed whose moment is
+        # unknowable. The flag keeps that NULL honest across an unmark/re-mark
+        # (#566); a row born unreviewed stays 0 and stamps on its first mark.
+        await _migrate_add_column(
+            db,
+            "failure_reviews",
+            "first_reviewed_unknown",
+            "INTEGER NOT NULL DEFAULT 0",
+        )
 
         # Ensure test_classifications table exists before running migrations.
         # On a fresh DB the table may not exist yet, so CREATE TABLE must come
@@ -3358,13 +3369,19 @@ async def set_reviewed(
             " reviewed = excluded.reviewed,"
             " username = excluded.username,"
             " updated_at = CURRENT_TIMESTAMP,"
-            # Kept once set; a pre-existing reviewed row keeps its unknown
-            # moment instead of being stamped now.
+            # Kept once set; a pre-existing row whose moment is unknowable (a
+            # legacy review, flagged when it was unmarked) stays NULL instead of
+            # being stamped now. Only a row never marked before stamps.
             " first_reviewed_at = CASE"
             " WHEN failure_reviews.first_reviewed_at IS NOT NULL"
             " THEN failure_reviews.first_reviewed_at"
-            " WHEN failure_reviews.reviewed THEN NULL"
-            " ELSE excluded.first_reviewed_at END"
+            " WHEN failure_reviews.reviewed OR failure_reviews.first_reviewed_unknown"
+            " THEN NULL"
+            " ELSE excluded.first_reviewed_at END,"
+            " first_reviewed_unknown = CASE"
+            " WHEN failure_reviews.first_reviewed_at IS NULL"
+            " AND failure_reviews.reviewed"
+            " THEN 1 ELSE failure_reviews.first_reviewed_unknown END"
             " RETURNING first_reviewed_at",
             (
                 job_id,

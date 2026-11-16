@@ -203,6 +203,32 @@ class TestFirstReviewedAt:
             assert after["username"] == "bob"
             assert after["reviewed_at"] is None
 
+    async def test_legacy_null_anchor_survives_an_unmark_and_remark(
+        self, setup_test_db
+    ):
+        """Unmarking a legacy review must not let the re-mark invent a moment."""
+        with sqlite3.connect(setup_test_db) as conn:
+            conn.execute(
+                "INSERT INTO failure_reviews"
+                " (job_id, test_name, reviewed, username)"
+                " VALUES ('job-legacy', 'test_a', 1, 'alice')"
+            )
+
+        with patch.object(storage, "DB_PATH", setup_test_db):
+            await storage.set_reviewed(
+                "job-legacy", "test_a", reviewed=False, username="bob"
+            )
+            unmarked = (await storage.get_reviews_for_job("job-legacy"))["test_a"]
+            assert unmarked["reviewed"] is False
+            assert unmarked["reviewed_at"] is None
+
+            await storage.set_reviewed(
+                "job-legacy", "test_a", reviewed=True, username="bob"
+            )
+            remarked = (await storage.get_reviews_for_job("job-legacy"))["test_a"]
+            assert remarked["reviewed"] is True
+            assert remarked["reviewed_at"] is None
+
     async def test_born_unreviewed_row_stamps_on_first_mark(self, setup_test_db):
         with patch.object(storage, "DB_PATH", setup_test_db):
             await storage.set_reviewed("job-1", "test_a", reviewed=False, username="a")
@@ -255,9 +281,10 @@ class TestReviewIdentifierBounds:
     def test_review_body_bounds(self):
         from pydantic import ValidationError
 
-        SetReviewedRequest(test_name="t" * 2000, reviewed=True)
-        with pytest.raises(ValidationError):
-            SetReviewedRequest(test_name="t" * 2001, reviewed=True)
+        # A stored failure name has no length limit, so the review body must be
+        # able to address any of them (a 2000-character cap made longer names
+        # permanently unreviewable).
+        SetReviewedRequest(test_name="t" * 5000, reviewed=True)
         with pytest.raises(ValidationError):
             SetReviewedRequest(test_name="t", reviewed=True, child_job_name="c" * 501)
 

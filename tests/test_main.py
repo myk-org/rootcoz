@@ -3792,6 +3792,64 @@ class TestReviewAttribution:
         )
 
     @pytest.mark.asyncio
+    async def test_legacy_null_anchor_survives_unmark_and_remark(self, test_client):
+        """A pre-#566 row never gets a fabricated first-review moment (#566)."""
+        import sqlite3
+
+        from rootcoz import storage
+
+        await self._seed()
+        with sqlite3.connect(storage.DB_PATH) as conn:
+            conn.execute(
+                "INSERT INTO failure_reviews"
+                " (job_id, test_name, reviewed, username)"
+                " VALUES ('job-attr-1', 'test_alpha', 1, 'alice')"
+            )
+
+        unmarked = await self._put(test_client, "job-attr-1", False)
+        assert unmarked.status_code == 200
+        assert unmarked.json()["reviewed_at"] is None
+
+        remarked = await self._put(test_client, "job-attr-1", True)
+        assert remarked.status_code == 200
+        assert remarked.json()["reviewed_at"] is None
+        top = test_client.get("/results/job-attr-1").json()["result"]["failures"][0]
+        assert (top["reviewed"], top["reviewed_at"]) == (True, None)
+
+    @pytest.mark.asyncio
+    async def test_a_failure_with_an_overlong_name_is_still_reviewable(
+        self, test_client
+    ):
+        """Stored names are unbounded, so a review body must address them."""
+        from rootcoz import storage
+
+        long_name = "test_" + "x" * 3000
+        await storage.save_result(
+            "job-long-name",
+            "http://jenkins",
+            "completed",
+            {
+                "status": "completed",
+                "summary": "",
+                "failures": [
+                    {
+                        "test_name": long_name,
+                        "error": "err",
+                        "analysis": {"classification": "CODE ISSUE"},
+                    }
+                ],
+            },
+        )
+
+        response = await self._put(
+            test_client, "job-long-name", True, test_name=long_name
+        )
+        assert response.status_code == 200, response.text
+        assert response.json()["reviewed_at"]
+        reviews = test_client.get("/results/job-long-name/comments").json()["reviews"]
+        assert reviews[long_name]["reviewed"] is True
+
+    @pytest.mark.asyncio
     async def test_reviewed_at_is_selectable_via_sparse_fields(self, test_client):
         await self._seed()
         granted = await self._put(test_client, "job-attr-1", True)

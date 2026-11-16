@@ -1781,6 +1781,17 @@ def _audit_setting_details(key: str) -> dict[str, Any]:
     }
 
 
+def _is_port(text: str) -> bool:
+    """A bounded decimal port (1-65535).
+
+    ``str.isdigit()`` alone admits Unicode digits and text of any length; both
+    make ``int()`` raise on caller-supplied input.
+    """
+    return (
+        text.isascii() and text.isdigit() and len(text) <= 5 and 1 <= int(text) <= 65535
+    )
+
+
 def _parse_forwarded_ip(raw_hop: str) -> str | None:
     """The canonical address in one ``X-Forwarded-For`` hop, or ``None``.
 
@@ -1796,9 +1807,7 @@ def _parse_forwarded_ip(raw_hop: str) -> str | None:
         host, separator, remainder = candidate[1:].partition("]")
         if separator and remainder and not remainder.startswith(":"):
             return None
-        if remainder[1:] and not (
-            remainder[1:].isdigit() and 1 <= int(remainder[1:]) <= 65535
-        ):
+        if remainder[1:] and not _is_port(remainder[1:]):
             return None
         return _canonical_ip(host)
     address = _canonical_ip(candidate)
@@ -1807,7 +1816,7 @@ def _parse_forwarded_ip(raw_hop: str) -> str | None:
     # Only a single colon can be host:port — more would be a bare IPv6 literal.
     if candidate.count(":") == 1:
         host, _, port = candidate.partition(":")
-        if port.isdigit() and 1 <= int(port) <= 65535:
+        if _is_port(port):
             return _canonical_ip(host)
     return None
 
@@ -4988,7 +4997,6 @@ class AttachmentEnvelopeBoundMiddleware:
 
 
 app.add_middleware(AttachmentEnvelopeBoundMiddleware)
-app.add_middleware(ErrorTrackingMiddleware)
 
 
 _BODY_LOGGING_SKIP_PATHS = frozenset(
@@ -5048,10 +5056,14 @@ class RequestBodyLoggingMiddleware(BaseHTTPMiddleware):
 
 
 app.add_middleware(RequestBodyLoggingMiddleware)
-# After the body logger: in Starlette's LIFO stack this makes AuthMiddleware
-# the outer one, so a DEBUG body line is already authenticated (and tagged)
-# and an unauthenticated body is never parsed.
+# After the body logger: in Starlette's LIFO stack this makes AuthMiddleware the
+# outer one, so a DEBUG body line is already authenticated (and tagged) and an
+# unauthenticated body is never parsed.
 app.add_middleware(AuthMiddleware)
+# Added last, so it is the outermost: ErrorTrackingMiddleware must see the
+# refusals AuthMiddleware returns itself, or 401/403 traffic and auth-layer
+# errors vanish from the error-rate counters.
+app.add_middleware(ErrorTrackingMiddleware)
 
 
 class CacheControlMiddleware(BaseHTTPMiddleware):

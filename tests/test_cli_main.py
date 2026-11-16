@@ -1045,7 +1045,7 @@ class TestReviewAttributionCommand:
         )
         assert result.exit_code == 0
         assert (
-            "Marked as reviewed (by alice on 2026-01-02T03:04:05.000006Z)"
+            "Marked as reviewed (alice, first reviewed 2026-01-02T03:04:05.000006Z)"
             in result.output
         )
 
@@ -1099,7 +1099,7 @@ class TestReviewAttributionCommand:
         mock_client.get_full_result.return_value = job
         result = runner.invoke(app, ["results", "full", "a"])
         assert result.exit_code == 0
-        assert "by alice on 2026-01-02T03:04:05.000006Z" in result.output
+        assert "by alice, first reviewed 2026-01-02T03:04:05.000006Z" in result.output
 
         mock_client.get_full_results.return_value = {
             "jobs": [job, dict(job, job=dict(job["job"], job_id="b"))],
@@ -1108,7 +1108,10 @@ class TestReviewAttributionCommand:
         }
         batch = runner.invoke(app, ["results", "full", "a", "b"])
         assert batch.exit_code == 0
-        assert batch.output.count("by alice on 2026-01-02T03:04:05.000006Z") == 2
+        assert (
+            batch.output.count("by alice, first reviewed 2026-01-02T03:04:05.000006Z")
+            == 2
+        )
 
     def test_results_show_fields_passes_reviewed_at_through(self, mock_client):
         mock_client.get_result.return_value = {

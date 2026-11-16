@@ -1190,7 +1190,9 @@ class AddCommentRequest(_ChildJobFieldsValidator):
 class SetReviewedRequest(_ChildJobFieldsValidator):
     """Request body for toggling the reviewed state of a test failure."""
 
-    test_name: str = Field(max_length=2000)
+    # Unbounded like the stored failure name (``FailureAnalysis.test_name``): a
+    # cap here would make an already-stored name permanently unreviewable.
+    test_name: str
     reviewed: bool
 
 

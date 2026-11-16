@@ -390,6 +390,10 @@ def test_request_ip_ignores_forwarded_header_without_trusted_proxy() -> None:
         ("ghp_" + "a" * 30, "10.0.0.7"),
         ("fe80::1%eth0", "10.0.0.7"),
         ("[2001:db8::1]:99999", "10.0.0.7"),
+        # A digit-like Unicode character and an unbounded port both make
+        # ``int()`` raise, so both are rejected before the conversion.
+        ("203.0.113.9:\u00b2", "10.0.0.7"),
+        ("203.0.113.9:" + "9" * 5000, "10.0.0.7"),
     ],
 )
 def test_request_ip_validates_the_forwarded_address(
@@ -410,6 +414,32 @@ def test_request_ip_falls_back_to_client_host() -> None:
         main, "get_settings", return_value=SimpleNamespace(trust_proxy_headers=True)
     ):
         assert main._audit_request_ip(request) == "10.0.0.7"
+
+
+def test_an_overlong_forwarded_port_never_breaks_an_audited_request(
+    temp_db_path: Path,
+) -> None:
+    """A caller-supplied port is bounded before ``int()``: no 500 after a write.
+
+    ``str.isdigit()`` admits arbitrary-length decimal text, which ``int()``
+    rejects (``ValueError``) — the audit would fail *after* the review toggle
+    committed. The port is out of range, so the socket peer is recorded.
+    """
+    for client in make_app_client(temp_db_path, {"TRUST_PROXY_HEADERS": "true"}):
+        admin_login(client)
+        _seed_review_job()
+        headers = _review_headers("reviewer")
+        headers["x-forwarded-for"] = "203.0.113.9:" + "9" * 5000
+
+        response = client.put(
+            f"/results/{_REVIEW_JOB}/reviewed",
+            json={"test_name": "test_a", "reviewed": True},
+            headers=headers,
+        )
+
+        assert response.status_code == 200, response.text
+        event = _events(action="review.marked")[-1]
+        assert event["request_ip"] == "testclient"
 
 
 def test_request_ip_is_none_without_a_request_or_a_peer() -> None:
@@ -606,12 +636,6 @@ def test_review_refusals_before_the_handler_write_no_row(app_client) -> None:
         json={"test_name": "test_a", "reviewed": True},
     )
     assert anonymous.status_code == 401
-    too_long = app_client.put(
-        f"/results/{_REVIEW_JOB}/reviewed",
-        json={"test_name": "t" * 2001, "reviewed": True},
-        headers=headers,
-    )
-    assert too_long.status_code == 422
     child_too_long = app_client.put(
         f"/results/{_REVIEW_JOB}/reviewed",
         json={
