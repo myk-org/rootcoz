@@ -7,7 +7,7 @@ import time
 from typing import Any, NamedTuple
 from urllib.parse import urlsplit, urlunsplit
 
-from pydantic import Field, SecretStr, field_validator, model_validator
+from pydantic import Field, SecretStr, ValidationInfo, field_validator, model_validator
 from pydantic_settings import (
     BaseSettings,
     PydanticBaseSettingsSource,
@@ -919,7 +919,8 @@ class Settings(BaseSettings):
         description=(
             "Delete recorded pi-sidecar session transcripts older than this "
             "many days. 0 disables age-based pruning. Active sessions are "
-            "never deleted. Restart required."
+            "never deleted. A deployment env value that is not a whole number "
+            "in range is ignored with a warning and reads as 0. Restart required."
         ),
     )
     pi_sidecar_transcripts_max_size_mb: int = Field(
@@ -930,7 +931,8 @@ class Settings(BaseSettings):
             "Maximum total size in MB for the pi-sidecar transcripts "
             "directory; oldest files are deleted first when exceeded. "
             "0 disables size-based pruning. Active sessions are never "
-            "deleted. Restart required."
+            "deleted. A deployment env value that is not a whole number "
+            "in range is ignored with a warning and reads as 0. Restart required."
         ),
     )
 
@@ -940,14 +942,40 @@ class Settings(BaseSettings):
         mode="before",
     )
     @classmethod
-    def _blank_retention_budget_disables(cls, v: object) -> object:
-        """A blank env line means 0, exactly as the sidecar's ``Number("")``.
+    def _unusable_retention_budget_disables(
+        cls, v: object, info: ValidationInfo
+    ) -> object:
+        """A blank, fractional or out-of-range value means 0 (disabled).
 
-        A ``PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS=`` in a deployment env file
-        must not crash ``Settings()`` at boot; admin-typed empties are still
-        rejected by the write paths, which never reach this validator.
+        Both budgets were env-only before #570 and the sidecar reads them with
+        ``Number()``, so a deployment may already hold ``0.5``: a pre-existing
+        env value must never keep ``Settings()`` (and the app) from booting.
+        Anything that is not a whole number within the field's own bounds
+        disables that budget with one warning. The admin-typed write paths stay
+        strict — they check the same bounds first and answer 400, so a form
+        value never reaches this validator.
         """
-        return 0 if v == "" else v
+        if v == "":
+            return 0
+        try:
+            number = None if isinstance(v, bool) else int(str(v).strip())
+        except ValueError:
+            number = None
+        field = cls.model_fields[info.field_name]
+        low = next(
+            (m.ge for m in field.metadata if getattr(m, "ge", None) is not None), 0
+        )
+        high = next(
+            (m.le for m in field.metadata if getattr(m, "le", None) is not None), None
+        )
+        if number is None or number < low or (high is not None and number > high):
+            logger.warning(
+                "Ignoring unusable %s value %r; using 0 (disabled)",
+                info.field_name,
+                v,
+            )
+            return 0
+        return number
 
     # --- Notifications (#347) ---
     smtp_host: str = Field(default="", description="SMTP server host for email alerts.")

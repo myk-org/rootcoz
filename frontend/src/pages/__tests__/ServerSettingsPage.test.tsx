@@ -2905,6 +2905,39 @@ describe('ServerSettingsPage transcript retention (#570)', () => {
     await waitFor(() => expect(statusProbeCalls()).toBe(2))
   })
 
+  it('re-probes when the tab is reopened while an earlier probe is pending', async () => {
+    let resolveFirst: (value: unknown) => void = () => {}
+    const firstProbe = new Promise((resolve) => { resolveFirst = resolve })
+    let probes = 0
+    get.mockImplementation(async (url: unknown) => {
+      if (String(url) === '/api/admin/server-status') {
+        probes += 1
+        if (probes === 1) return firstProbe as never
+        return {
+          disk: { available: true, transcripts_bytes: 1024, transcripts_files: 1, transcripts_oldest_age_seconds: 60 },
+        } as never
+      }
+      return retentionSettings() as never
+    })
+    renderPage()
+    fireEvent.click(await screen.findByRole('tab', { name: 'Sidecar' }))
+    await waitForRow(AGE_KEY)
+    await waitFor(() => expect(statusProbeCalls()).toBe(1))
+
+    // Leave and come straight back before the first probe resolves: the card is
+    // visible again, so it must ask again instead of waiting for a manual refresh.
+    fireEvent.click(screen.getByRole('tab', { name: 'Jenkins' }))
+    fireEvent.click(screen.getByRole('tab', { name: 'Sidecar' }))
+    await waitFor(() => expect(statusProbeCalls()).toBe(2))
+    expect(await screen.findByText('1.0 KiB · 1 file · oldest: 1m 0s')).toBeInTheDocument()
+
+    // The abandoned request resolving late must not overwrite the fresh answer.
+    await act(async () => {
+      resolveFirst({ disk: { available: true, transcripts_bytes: 0, transcripts_files: 0 } })
+    })
+    expect(screen.getByText('1.0 KiB · 1 file · oldest: 1m 0s')).toBeInTheDocument()
+  })
+
   it('shows an empty transcripts directory as 0 B, 0 files and no oldest age', async () => {
     mockWithDisk({
       available: true,

@@ -443,7 +443,10 @@ rm -rf $D
   # as a quoted decimal string — the app's Settings() rejects anything else, and a
   # float64 render would come out as 1.048576e+06 on values >= 1e6. The `-f` row is
   # the YAML-integer case, which `--set` cannot produce. Negatives, values above the
-  # Settings ceilings and agent-dir collisions must fail before install.
+  # Settings ceilings must fail before install, and the env names are reserved only
+  # while their chart value is set: an empty value keeps a `sidecar.agentDir.env`
+  # entry (and the Secret value an upgrade preserved) working, a set value rejects
+  # the collision instead of silently dropping it.
   [
     "sh",
     "-c",
@@ -460,7 +463,8 @@ $T -f $V > $OUT && grep -A1 'name: PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB' $OUT | gr
 ! $T --set env.sidecarTranscriptsMaxAgeDays=-1 > $L 2>&1 && grep -q 'env.sidecarTranscriptsMaxAgeDays' $L || { echo "a negative age budget must fail validation"; exit 1; }
 ! $T --set env.sidecarTranscriptsMaxAgeDays=1000000 > $L 2>&1 && grep -q 'env.sidecarTranscriptsMaxAgeDays' $L || { echo "an age budget above the ceiling must fail validation"; exit 1; }
 ! $T --set env.sidecarTranscriptsMaxSizeMb=abc > $L 2>&1 && grep -q 'env.sidecarTranscriptsMaxSizeMb' $L || { echo "a non-numeric size budget must fail validation"; exit 1; }
-! $T --set-string sidecar.agentDir.env.PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS=7 > $L 2>&1 && grep -q 'collides with a chart-managed environment variable' $L || { echo "the retention env names must be reserved"; exit 1; }
+$T --set-string sidecar.agentDir.env.PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS=7 --set-string sidecar.agentDir.env.PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB=512 > $OUT && grep -q 'PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS: "Nw=="' $OUT && grep -q 'PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB: "NTEy"' $OUT && ! grep -q 'name: PI_SIDECAR_TRANSCRIPTS_MAX' $OUT || { echo "an empty chart value must leave the retention env names to sidecar.agentDir.env (the upgrade path)"; exit 1; }
+! $T --set env.sidecarTranscriptsMaxAgeDays=30 --set-string sidecar.agentDir.env.PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS=7 > $L 2>&1 && grep -q 'collides with a chart-managed environment variable' $L || { echo "a set retention budget must reserve its env name"; exit 1; }
 rm -f $OUT $V $L
 ''',  # pragma: allowlist secret
   ],

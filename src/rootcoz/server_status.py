@@ -194,7 +194,7 @@ def _walk_tree_stats(
             if os.path.islink(full):
                 continue
             try:
-                total += os.path.getsize(full)
+                size = os.path.getsize(full)
                 mtime = None
                 if count_top_jsonl and at_top and name.endswith(".jsonl"):
                     mtime = os.path.getmtime(full)
@@ -205,6 +205,9 @@ def _walk_tree_stats(
             except OSError as exc:
                 errors.append(exc)
                 continue
+            # Counted only once both stats landed, so a file pruned between
+            # them contributes neither bytes nor a file entry.
+            total += size
             if mtime is not None and files is not None:
                 files += 1
                 oldest_mtime = (

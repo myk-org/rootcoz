@@ -1334,3 +1334,29 @@ def test_sidecar_transcript_retention_validation_bridge_and_audit(
     metadata = client.get("/api/admin/settings", headers=_admin_headers()).json()
     by_key = {item["key"]: item for item in metadata}
     assert by_key["pi_sidecar_transcripts_max_age_days"]["source"] == "default"
+
+
+def test_retention_budget_env_values_the_sidecar_accepted_do_not_block_boot(
+    monkeypatch,
+) -> None:
+    """A pre-#570 deployment may hold ``0.5`` (the sidecar parses Number()).
+
+    ``_build_settings()`` builds ``Settings()`` with no fallback, so anything
+    that is not a whole number in range must read as 0 (disabled) instead of
+    keeping the container from starting.
+    """
+    monkeypatch.setenv("PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS", "0.5")
+    monkeypatch.setenv("PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB", "1500.5")
+    clear_settings_cache()
+    try:
+        settings = Settings()
+        assert settings.pi_sidecar_transcripts_max_age_days == 0
+        assert settings.pi_sidecar_transcripts_max_size_mb == 0
+        # Out of range is the same class of typo, and still boots.
+        monkeypatch.setenv("PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS", str(10**9))
+        clear_settings_cache()
+        assert Settings().pi_sidecar_transcripts_max_age_days == 0
+    finally:
+        monkeypatch.delenv("PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS")
+        monkeypatch.delenv("PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB")
+        clear_settings_cache()

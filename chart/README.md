@@ -508,7 +508,9 @@ The pi-sidecar prunes recorded session transcripts with two budgets it reads at 
 | `env.sidecarTranscriptsMaxAgeDays` | `PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS` | `""` | Delete transcripts older than this many days (`0`–`999999`); `0` disables age pruning |
 | `env.sidecarTranscriptsMaxSizeMb` | `PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB` | `""` | Keep the transcripts directory under this total size in MB (`0`–`999999999`); `0` disables size pruning |
 
-Both default to `""`, which **renders no env var at all** — so a chart upgrade never rolls the pod and never starts pruning files that already exist. An explicit `0` is a value, not a default: it disables that budget in the sidecar and renders `"0"`. Recording is the separate `env.recordTranscripts` toggle, and the directory is `env.sidecarTranscriptsDir`. The same budgets are editable in Server Settings → `Sidecar` after login (saved to `/data/pi-sidecar/env`, applied at the next restart); the chart values exist for a deployment that should bound its transcript disk from the first boot, before anyone signs in. Both env names are reserved, so `sidecar.agentDir.env` cannot redefine them. Background: [Configuration Reference — Transcript retention](https://myk-org.github.io/rootcoz/configuration-reference.html#transcript-retention).
+Both default to `""`, which **renders no env var at all** — so a chart upgrade never rolls the pod and never starts pruning files that already exist. An explicit `0` is a value, not a default: it disables that budget in the sidecar and renders `"0"`. Recording is the separate `env.recordTranscripts` toggle, and the directory is `env.sidecarTranscriptsDir`. The same budgets are editable in Server Settings → `Sidecar` after login (saved to `/data/pi-sidecar/env`, applied at the next restart); the chart values exist for a deployment that should bound its transcript disk from the first boot, before anyone signs in.
+
+The env names are reserved **only while their chart value is set**. With the default empty value a `sidecar.agentDir.env` entry may still carry the budget, and a value an earlier release preserved in the credentials Secret keeps reaching the pod — an upgrade never silently stops pruning. Setting the new chart value takes the name over (an `sidecar.agentDir.env` entry for it then fails validation with `collides with a chart-managed environment variable`), so migrating is: read the value from your `sidecar.agentDir.env` (or from the release Secret), set `env.sidecarTranscriptsMaxAgeDays`/`env.sidecarTranscriptsMaxSizeMb` instead, and drop the old entry in the same `helm upgrade`. Background: [Configuration Reference — Transcript retention](https://myk-org.github.io/rootcoz/configuration-reference.html#transcript-retention).
 
 ## Validation
 
@@ -557,8 +559,10 @@ The transcript retention values are covered end to end: the default render must 
 `PI_SIDECAR_TRANSCRIPTS_MAX_*` env var, an explicit value must render quoted (`"30"`, `"512"`, and
 `0` as `"0"` rather than being dropped as falsy), a `-f` values file carrying the YAML integer
 `1048576` must render `value: "1048576"` (proving `int64` formatting, not Go's `1.048576e+06`
-scientific notation), and a negative age, an above-ceiling age, a non-numeric size and a
-`sidecar.agentDir.env` override of either reserved name must fail validation.
+scientific notation), a negative age, an above-ceiling age and a non-numeric size must fail
+validation, and the reservation of the two env names follows their chart value: empty leaves them
+to `sidecar.agentDir.env` (the upgrade path, rendered into the credentials Secret), while a set
+value rejects that override as a collision.
 
 ## Limitations
 

@@ -1291,27 +1291,31 @@ export function ServerSettingsPage() {
   ) && (Boolean(state.search) || effectiveTab === 'Sidecar')
   const [transcriptsUsage, setTranscriptsUsage] = useState<ServerStatusDisk | null>(null)
   const [transcriptsUsageLoading, setTranscriptsUsageLoading] = useState(false)
-  const transcriptsUsageInFlight = useRef(false)
+  // Bumped whenever the card becomes visible: a request started before a
+  // leave-and-return no longer belongs to the visible card, so its (possibly
+  // failed) answer is dropped instead of being shown as the current one.
+  const transcriptsUsageGeneration = useRef(0)
 
-  const fetchTranscriptsUsage = useCallback(async () => {
-    if (transcriptsUsageInFlight.current) return
-    transcriptsUsageInFlight.current = true
+  const fetchTranscriptsUsage = useCallback(async (generation = transcriptsUsageGeneration.current) => {
     setTranscriptsUsageLoading(true)
     try {
       const res = await api.get<{ disk?: ServerStatusDisk }>('/api/admin/server-status')
+      if (generation !== transcriptsUsageGeneration.current) return
       if (!res || Array.isArray(res) || !res.disk) throw new Error('unexpected server-status payload')
       setTranscriptsUsage(res.disk)
     } catch {
       // A probe the server cannot read must render as "not visible", never 0 B.
-      setTranscriptsUsage(null)
+      if (generation === transcriptsUsageGeneration.current) setTranscriptsUsage(null)
     } finally {
-      transcriptsUsageInFlight.current = false
-      setTranscriptsUsageLoading(false)
+      if (generation === transcriptsUsageGeneration.current) setTranscriptsUsageLoading(false)
     }
   }, [])
 
   useEffect(() => {
-    if (transcriptsUsageVisible) void fetchTranscriptsUsage()
+    if (!transcriptsUsageVisible) return
+    // A fresh request on every return, even while an earlier one is pending.
+    transcriptsUsageGeneration.current += 1
+    void fetchTranscriptsUsage(transcriptsUsageGeneration.current)
   }, [transcriptsUsageVisible, fetchTranscriptsUsage])
 
   // A highlighted row has to be visible: drop a search that filters it out,

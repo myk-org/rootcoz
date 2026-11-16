@@ -80,9 +80,40 @@ variables — the credentials Secret is imported via envFrom after the ConfigMap
 so an unchecked entry would override chart-managed configuration. Shared by
 validation (rootcoz.validate) and the credentials Secret merge in
 rootcoz.credentialsSecretData.
+
+The transcript retention budgets are reserved only when their chart value
+renders an env var: with the default empty value the name stays available, so
+an upgrade that supplied a budget through sidecar.agentDir.env (and the
+credentials Secret preserved from it) keeps working instead of silently
+losing it — an explicitly set chart value wins and rejects the shadowing key.
 */}}
 {{- define "rootcoz.reservedEnvKeys" -}}
-ADMIN_KEY,GEMINI_API_KEY,ANTHROPIC_API_KEY,CURSOR_API_KEY,DATADOG_API_KEY,DATADOG_APP_KEY,ROOTCOZ_ENCRYPTION_KEY,AI_PROVIDER,AI_MODEL,PUBLIC_BASE_URL,SECURE_COOKIES,LOG_LEVEL,METADATA_RULES_FILE,XDG_CONFIG_HOME,XDG_DATA_HOME,CLAUDE_CODE_USE_VERTEX,CLOUD_ML_REGION,ANTHROPIC_VERTEX_PROJECT_ID,CLOUDSDK_CONFIG,GOOGLE_APPLICATION_CREDENTIALS,PI_SIDECAR_AGENT_DIR,SIDECAR_PORT,DEV_MODE,PORT,PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS,PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB
+ADMIN_KEY,GEMINI_API_KEY,ANTHROPIC_API_KEY,CURSOR_API_KEY,DATADOG_API_KEY,DATADOG_APP_KEY,ROOTCOZ_ENCRYPTION_KEY,AI_PROVIDER,AI_MODEL,PUBLIC_BASE_URL,SECURE_COOKIES,LOG_LEVEL,METADATA_RULES_FILE,XDG_CONFIG_HOME,XDG_DATA_HOME,CLAUDE_CODE_USE_VERTEX,CLOUD_ML_REGION,ANTHROPIC_VERTEX_PROJECT_ID,CLOUDSDK_CONFIG,GOOGLE_APPLICATION_CREDENTIALS,PI_SIDECAR_AGENT_DIR,SIDECAR_PORT,DEV_MODE,PORT{{ if include "rootcoz.retentionEnvRenders" .Values.env.sidecarTranscriptsMaxAgeDays }},PI_SIDECAR_TRANSCRIPTS_MAX_AGE_DAYS{{ end }}{{ if include "rootcoz.retentionEnvRenders" .Values.env.sidecarTranscriptsMaxSizeMb }},PI_SIDECAR_TRANSCRIPTS_MAX_SIZE_MB{{ end }}
+{{- end }}
+
+{{/*
+True ("true") when a transcript retention budget would render its env var:
+an absent/null value or an empty string renders nothing, everything else does
+(an explicit 0 is a value — it disables that budget).
+*/}}
+{{- define "rootcoz.retentionEnvRenders" -}}
+{{- if and (not (kindIs "invalid" .)) (or (not (kindIs "string" .)) (ne . "")) }}true{{ end -}}
+{{- end }}
+
+{{/*
+One sidecar transcript retention env entry, rendered at the container env
+indentation (12 spaces) with a leading newline so a call site can chain
+`{{- include ... }}` and an unset budget leaves no blank line. A string renders
+quoted; an integer renders as a quoted decimal — never Go's scientific notation
+for values >= 1e6.
+Call via: include "rootcoz.retentionEnv" (dict "name" <env> "value" <val>)
+*/}}
+{{- define "rootcoz.retentionEnv" -}}
+{{- $value := .value -}}
+{{- if include "rootcoz.retentionEnvRenders" $value }}
+            - name: {{ .name }}
+              value: {{ if kindIs "string" $value }}{{ $value | quote }}{{ else }}{{ printf "%d" (int64 $value) | quote }}{{ end }}
+{{- end }}
 {{- end }}
 
 {{- define "rootcoz.pvcName" -}}

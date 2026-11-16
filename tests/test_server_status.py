@@ -290,6 +290,27 @@ class TestDisk:
         # The vanished file is not counted as a file either.
         assert block["transcripts_files"] == 1
 
+    def test_a_file_pruned_between_size_and_mtime_counts_nothing(
+        self, tmp_path, monkeypatch
+    ) -> None:
+        """A transcript removed after its size read but before its mtime read
+        must contribute neither bytes nor a file entry: reporting its size
+        while excluding it from the count and oldest age inflated the card."""
+        transcripts = tmp_path / "transcripts"
+        _write(transcripts / "a.jsonl", "y" * 40)
+        _write(transcripts / "b.jsonl", "y" * 10)
+        real_getmtime = os.path.getmtime
+
+        def _getmtime(path):
+            if str(path).endswith("b.jsonl"):
+                raise FileNotFoundError(str(path))
+            return real_getmtime(path)
+
+        monkeypatch.setattr(server_status.os.path, "getmtime", _getmtime)
+        block = server_status.read_disk(tmp_path / "results.db", transcripts, None)
+        assert block["transcripts_bytes"] == 40
+        assert block["transcripts_files"] == 1
+
     def test_transcript_telemetry_counts_top_level_jsonl_only(self, tmp_path) -> None:
         """File count and oldest age mirror the sidecar's pruning scope."""
         transcripts = tmp_path / "transcripts"

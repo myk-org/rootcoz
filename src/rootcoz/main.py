@@ -22545,7 +22545,7 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
         # be persisted, and once get_settings() cannot validate the merged
         # overrides it silently falls back to the base env settings.
         try:
-            Settings.model_validate({key: value})
+            validated = Settings.model_validate({key: value})
         except ValidationError as exc:
             for err in exc.errors():
                 ctx_err = err.get("ctx", {}).get("error")
@@ -22554,9 +22554,13 @@ async def _validate_settings_updates(settings_updates: dict[str, Any]) -> list[s
                 )
             continue
         if is_int:
-            # Canonical decimal form: "+14" and " 14 " must persist as "14"
-            # in the DB and in the sidecar env bridge the entrypoint sources.
-            settings_updates[key] = str(int_val)
+            # Canonical decimal form: "+14" and " 14 " persist as "14" in the
+            # DB and in the sidecar env bridge the entrypoint sources. Read it
+            # back from the validated model — a before-validator may return a
+            # different value than ``int(value)`` (1.5 → 720 for
+            # session_ttl_hours, → 587 for smtp_port), and persisting the raw
+            # integer would undo the fallback the model just applied.
+            settings_updates[key] = str(getattr(validated, key))
 
     return errors
 
