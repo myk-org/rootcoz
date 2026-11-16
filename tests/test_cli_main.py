@@ -4,6 +4,7 @@ import json
 import os
 import re
 import shlex
+from collections.abc import Callable
 from typing import ClassVar, Self
 from unittest.mock import MagicMock, patch
 
@@ -7525,6 +7526,45 @@ def _ready(session: bool = True) -> dict:
     return {**_preparing(session=session), "preparing": None}
 
 
+def _long_transcript(reply_id: int = 249) -> Callable[..., dict]:
+    """A 250-row transcript whose turn's own rows sit on the last page only.
+
+    A single 200-row page cannot hold the newest rows, so a reader that always
+    asks for the first page never sees the reply or its notice.
+    """
+
+    def page(limit: int = 200, offset: int = 0) -> dict:
+        if offset:
+            messages = [
+                {
+                    "id": reply_id,
+                    "role": "assistant",
+                    "content": "partial answer",
+                    "status": "completed",
+                },
+                {
+                    "id": reply_id + 1,
+                    "role": "system",
+                    "content": (
+                        "This reply may be incomplete — the AI provider reported: 503"
+                    ),
+                },
+            ]
+        else:
+            messages = [
+                {
+                    "id": i,
+                    "role": "user",
+                    "content": f"older turn {i}",
+                    "status": "completed",
+                }
+                for i in range(1, 201)
+            ]
+        return {"messages": messages, "total": reply_id + 1}
+
+    return page
+
+
 class TestChatCommands:
     def test_chat_init_waits_for_session(self, mock_client):
         """A 202 is accepted, and readiness means no preparation *and* a session.
@@ -7768,6 +7808,53 @@ class TestChatCommands:
         assert result.exit_code == 0
         assert "partial answer" in result.output
         assert "Note: This reply may be incomplete" in result.output
+
+    def test_chat_send_prints_the_turn_warning_from_the_last_page(self, mock_client):
+        """A transcript longer than one page still shows the partial-reply note."""
+        mock_client.send_chat_message.return_value = {
+            "user_message": {
+                "id": 1,
+                "role": "user",
+                "content": "q",
+                "status": "completed",
+            },
+        }
+        mock_client.get_chat_history.side_effect = _long_transcript()
+        with patch("time.sleep"):
+            result = runner.invoke(app, ["chat", "send", "job-1", "q"])
+        assert result.exit_code == 0
+        assert "partial answer" in result.output
+        assert "Note: This reply may be incomplete" in result.output
+
+    def test_chat_send_keeps_the_reply_when_the_warning_read_fails(self, mock_client):
+        """The notice lookup is best effort: a lost page must not undo the answer."""
+        mock_client.send_chat_message.return_value = {
+            "user_message": {
+                "id": 1,
+                "role": "user",
+                "content": "q",
+                "status": "completed",
+            },
+        }
+        answered = {
+            "messages": [
+                {
+                    "id": 2,
+                    "role": "assistant",
+                    "content": "the answer",
+                    "status": "completed",
+                }
+            ],
+            "total": 1,
+        }
+        mock_client.get_chat_history.side_effect = [
+            answered,
+            RootCozError(detail="page lost"),
+        ]
+        with patch("time.sleep"):
+            result = runner.invoke(app, ["chat", "send", "job-1", "q"])
+        assert result.exit_code == 0
+        assert "the answer" in result.output
 
     def test_chat_send_with_ai_config(self, mock_client):
         mock_client.send_chat_message.return_value = {
@@ -8023,6 +8110,25 @@ class TestAdminChatCommands:
             ],
             "total": 2,
         }
+        with patch("time.sleep"):
+            result = runner.invoke(app, ["admin-chat", "send", "q"])
+        assert result.exit_code == 0
+        assert "partial answer" in result.output
+        assert "Note: This reply may be incomplete" in result.output
+
+    def test_admin_chat_send_prints_the_turn_warning_from_the_last_page(
+        self, mock_client
+    ):
+        """A long admin transcript still shows the partial-reply note."""
+        mock_client.send_admin_chat_message.return_value = {
+            "user_message": {
+                "id": 1,
+                "role": "user",
+                "content": "q",
+                "status": "completed",
+            },
+        }
+        mock_client.get_admin_chat_history.side_effect = _long_transcript()
         with patch("time.sleep"):
             result = runner.invoke(app, ["admin-chat", "send", "q"])
         assert result.exit_code == 0
