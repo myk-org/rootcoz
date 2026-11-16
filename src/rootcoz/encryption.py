@@ -318,12 +318,28 @@ def strip_sensitive_from_response(result_data: dict[str, Any]) -> dict[str, Any]
         A shallow copy with redacted ``request_params``, or the original dict
         unchanged when ``request_params`` is absent.
     """
-    if not result_data or "request_params" not in result_data:
+    if not result_data:
         return result_data
-    request_params = result_data.get("request_params")
-    if request_params is None:
+    has_params = "request_params" in result_data
+    params_value = result_data.get("request_params")
+    has_progress = "progress_log" in result_data
+    # Nothing to mask: return the caller's dict itself, which callers rely on.
+    if not has_progress and (not has_params or params_value is None):
+        return result_data
+    if not has_params and result_data.get("progress_log") is None:
         return result_data
     result = dict(result_data)
+    # ``progress_log`` is an independent carrier: a caller can hand us a payload
+    # that has it and no ``request_params`` (the two are written together by the
+    # enqueue path, but that is an assumption, not a guarantee -- a partial or
+    # legacy payload kept the token). Mask it before any early return.
+    if "progress_log" in result:
+        result["progress_log"] = _mask_progress_log(result["progress_log"])
+    if "request_params" not in result:
+        return result
+    request_params = result.get("request_params")
+    if request_params is None:
+        return result
     if not isinstance(request_params, dict):
         result.pop("request_params", None)
         return result
@@ -336,10 +352,6 @@ def strip_sensitive_from_response(result_data: dict[str, Any]) -> dict[str, Any]
     if isinstance(additional_repos, list):
         params["additional_repos"] = _strip_additional_repos_tokens(additional_repos)
     result["request_params"] = params
-    # A result that has progress logged always has request_params (both are
-    # written by the enqueue path), so one branch covers both carriers.
-    if "progress_log" in result:
-        result["progress_log"] = _mask_progress_log(result["progress_log"])
     return result
 
 

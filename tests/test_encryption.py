@@ -386,3 +386,27 @@ class TestAdditionalReposTokenEncryption:
         params = {"ai_provider": "claude"}
         encrypted = encrypt_sensitive_fields(params)
         assert "additional_repos" not in encrypted
+
+
+def test_progress_log_is_masked_even_without_request_params() -> None:
+    """A payload carrying only ``progress_log`` must not keep its token (#562).
+
+    The two carriers are written together by the enqueue path, but that is an
+    assumption; the early returns used to skip the masker for any payload
+    without ``request_params``.
+    """
+    tokenized = {"url": "https://host/org/repo@ghp_SECRET123"}
+    for payload in (
+        {"progress_log": [tokenized]},
+        {"progress_log": [tokenized], "status": "completed"},
+        {"request_params": None, "progress_log": [tokenized]},
+    ):
+        masked = strip_sensitive_from_response(dict(payload))
+        rendered = repr(masked)
+        assert "ghp_SECRET123" not in rendered, rendered
+        assert "***" in rendered, rendered
+
+
+def test_a_payload_without_any_carrier_is_returned_unchanged() -> None:
+    payload = {"status": "completed"}
+    assert strip_sensitive_from_response(payload) == payload
